@@ -140,7 +140,7 @@ impl DownloadSourceRegistry {
     /// counting only live candidates keeps the cap a measure of how many live
     /// sources we are tracking for this file rather than how many distinct peers
     /// were ever seen, so a long-lived transfer keeps accepting fresh sources.
-    /// The same per-file source state A4AF-lite reads to bias selection.
+    /// The same per-file source state full A4AF reads to order live file switches.
     pub(crate) fn candidate_count_for_file(&self, now: Instant, file_hash: &str) -> usize {
         self.peers
             .values()

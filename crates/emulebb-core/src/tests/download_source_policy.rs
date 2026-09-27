@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
-    // A4AF-lite leg 1: a peer registered for two of our files is engaged for
+    // A4AF source-set leg 1: a peer registered for two of our files is engaged for
     // exactly one file at a time; the second file defers the same peer
     // (one active relationship per peer, like eMule) rather than opening a
     // redundant second engagement.
@@ -247,7 +247,7 @@ async fn udp_fnf_dead_lists_the_sole_registered_source_by_ip() {
 
 #[tokio::test]
 async fn a4af_nnp_source_is_swapped_to_another_wanted_file() {
-    // A4AF-lite leg 2: a source with No Needed Parts for the current file but
+    // A4AF source-set leg 2: a source with No Needed Parts for the current file but
     // registered for another WANTED file is swapped to that file (its attempt
     // is queued) instead of being dropped (master SwapToAnotherFile).
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
@@ -290,7 +290,7 @@ async fn a4af_nnp_source_is_swapped_to_another_wanted_file() {
 
 #[tokio::test]
 async fn a4af_nnp_source_without_other_wanted_file_is_dropped() {
-    // A4AF-lite leg 2 negative: a source with No Needed Parts that serves no
+    // A4AF source-set leg 2 negative: a source with No Needed Parts that serves no
     // OTHER wanted file is not swapped (it stays dropped, as before).
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let current = Ed2kHash::from_bytes([0x75; 16]).to_string();

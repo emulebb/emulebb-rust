@@ -4,6 +4,20 @@
 # only contains current omissions and approved protocol drops.
 
 [[resolved_omissions]]
+id = "full-a4af-source-set-connection-hijacking"
+area = "ed2k"
+stock_behavior = "eMule keeps a peer-centric set of requested and no-needed files, selects the best other wanted file in CUpDownClient::SwapToAnotherFile, and reuses an already-connected peer socket for the next file request instead of opening a duplicate connection. NNP and FNF remain attributed to the relation that produced them."
+rust_behavior = "IMPLEMENTED: the peer registry maintains and orders every live cross-file relation; each leased outbound peer connection receives that ordered file plan and negotiates subsequent files on the same TCP transport after completion, NNP, or FNF. Pending LowID server/Kad callback intents are likewise claimed as one peer-centric set and traversed on the single inbound connect-back. The connection-scoped hello capability, secure-ident, UDP, LowID, and buddy profile survives each file reset, while availability, hashset, queue, and request-window state is recreated per file. The shared outbound scheduler returns per-file outcomes so core applies NNP holds and FNF dead-listing to the correct relation and re-drives completed or incomplete alternate manifests."
+reason = "The former A4AF-lite path only biased later source selection and re-queued another attempt. Carrying an ordered file plan through one live transport closes the deferred source-set/connection-hijacking boundary without duplicating peer connections."
+compatibility = "The reused transport sends the same capability-gated stock file-startup packets as an ordinary session. A wire-level test accepts exactly one TCP connection and observes two distinct requested hashes, while scheduler coverage proves alternate FNF attribution remains isolated from the primary file."
+disposition = "fixed"
+owner = "transfer-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: implemented full outbound and LowID connect-back A4AF connection reuse with connection-profile preservation, ordered source-set traversal, per-file outcomes, NNP/FNF lifecycle handling, and focused wire/core tests. No longer deferred."
+
+[[resolved_omissions]]
 id = "upload-throttle-focus-slot-distribution"
 area = "ed2k"
 stock_behavior = "The maintained eMuleBB fork distributes upload bandwidth equally across active slots and uses a 2600-byte socket-send granularity at or above 6 KiB/s and 536 bytes below 6 KiB/s (`UploadBandwidthThrottler.cpp`, `doubleSendSize`)."

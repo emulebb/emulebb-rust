@@ -54,6 +54,7 @@ mod state;
 use parts::{DownloadPartPacket, handle_download_part_packet};
 use reask_detach::incomplete_or_detached_queued_source;
 use startup::{DownloadStartupStep, HASHSET_STALL_UPLOAD_FALLBACK, advance_download_startup};
+pub(in crate::ed2k_tcp) use state::DownloadConnectionState;
 use state::DownloadSessionState;
 
 fn apply_emule_info_profile(
@@ -116,17 +117,17 @@ pub enum Ed2kPeerDownloadOutcome {
     QueuedDetachedForUdpReask,
     /// The peer reported No Needed Parts for this file (eMuleBB `OP_OUTOFPARTREQS`
     /// / `DS_NONEEDEDPARTS`): we already hold every part it offers, or it lacks the
-    /// parts we still need. The driver runs the A4AF-lite NNP swap
-    /// (`CUpDownClient::SwapToAnotherFile`): if the source serves another wanted
-    /// file in the registry it is swapped to that file instead of being dropped.
+    /// parts we still need. Full A4AF immediately switches this live connection
+    /// to the next wanted file, then the driver records the NNP hold on this
+    /// relation (`CUpDownClient::SwapToAnotherFile`).
     NoNeededParts,
     /// The peer answered our file request with `OP_FILEREQANSNOFIL` (it no longer
     /// has the file), or advertised an AICH root that conflicts with our trusted
     /// one — which the oracle treats exactly like an FNF answer
     /// (`DownloadClient.cpp:2971-3004`). The driver dead-lists the (source, file)
     /// pair for 45 minutes and drops the source (oracle `ListenSocket.cpp:645-661`:
-    /// `m_DeadSourceList.AddDeadSource` + swap-or-`RemoveSource`; rust maps
-    /// swap-or-remove to plain drop, A4AF being intentionally parked).
+    /// `m_DeadSourceList.AddDeadSource` + swap-or-`RemoveSource`). Full A4AF
+    /// continues on the best other wanted file over this connection when present.
     FileNotFound,
 }
 
@@ -145,6 +146,9 @@ pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
     pub(in crate::ed2k_tcp) initial_secure_ident_started: bool,
     pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
     pub(in crate::ed2k_tcp) peer_connect_options: Option<u8>,
+    /// Mutable connection-scoped profile reused across A4AF file sessions.
+    /// `None` retains the callback/test compatibility initialization above.
+    pub(in crate::ed2k_tcp) connection_state: Option<&'a mut DownloadConnectionState>,
     /// When set (UDP reask enabled), a queued + UDP-eligible source detaches its TCP
     /// socket onto UDP reask via this handle. `None` keeps the legacy TCP-only path.
     pub(in crate::ed2k_tcp) reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
@@ -169,6 +173,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         peer_user_hash,
         peer_connect_options,
         reask_register,
+        mut connection_state,
     } = options;
     const QUEUE_RANK_GRACE: Duration = Duration::from_secs(75);
     const PART_RESPONSE_GRACE: Duration = Duration::from_secs(75);
@@ -185,6 +190,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         source_exchange_allowed,
         peer_user_hash,
         peer_connect_options,
+        connection_state.as_deref(),
     );
 
     let session_result = async {
@@ -995,7 +1001,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         file_hash_hex,
                     );
                     // No Needed Parts (eMuleBB DS_NONEEDEDPARTS): the driver may swap
-                    // this source to another wanted file it serves (A4AF-lite
+                    // this source to another wanted file it serves (full A4AF
                     // SwapToAnotherFile) rather than drop it.
                     return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
                 }
@@ -1227,6 +1233,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         }
     }
     .await;
+
+    if let Some(connection_state) = connection_state.as_deref_mut() {
+        *connection_state = session_state.connection_state();
+    }
 
     if matches!(
         &session_result,

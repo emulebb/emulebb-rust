@@ -90,7 +90,10 @@ async fn direct_download_scheduler_retries_other_peer_after_failure() {
                     if source.tcp_port == 41001 {
                         anyhow::bail!("simulated first peer failure");
                     }
-                    Ok(Ed2kPeerDownloadOutcome::Completed)
+                    Ok(Ed2kPeerDownloadReport::single(
+                        source.file_hash,
+                        Ed2kPeerDownloadOutcome::Completed,
+                    ))
                 }
             }
         },
@@ -102,6 +105,58 @@ async fn direct_download_scheduler_retries_other_peer_after_failure() {
     assert_eq!(outcome.accepted_incomplete_peers, 0);
     assert!(outcome.last_error.is_some());
     assert_eq!(*attempts.lock().await, vec![41001, 41002]);
+}
+
+#[tokio::test]
+async fn direct_download_scheduler_attributes_a4af_results_to_the_switched_file() {
+    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+        completed_ed2k_transfer_runtime("emulebb-core-direct-download-a4af-attribution").await;
+    let primary_hash: Ed2kHash = file_hash_hex.parse().unwrap();
+    let alternate_hash = Ed2kHash::from_bytes([0xA4; 16]);
+    let source = direct_test_source(primary_hash, Ipv4Addr::new(192, 0, 2, 20), 41020);
+
+    let outcome = run_ed2k_direct_downloads(
+        direct_download_options(
+            transfer_runtime,
+            secure_ident,
+            file_hash_hex,
+            file_name,
+            file_size,
+            vec![source],
+        ),
+        move |_bind_ip,
+              source,
+              _hello_identity,
+              _secure_ident,
+              _transfer_runtime,
+              _file_name,
+              _file_size,
+              _connect_timeout| async move {
+            Ok(Ed2kPeerDownloadReport {
+                file_outcomes: vec![
+                    emulebb_ed2k::ed2k_tcp::Ed2kPeerFileDownloadOutcome {
+                        file_hash: source.file_hash,
+                        outcome: Ed2kPeerDownloadOutcome::Completed,
+                    },
+                    emulebb_ed2k::ed2k_tcp::Ed2kPeerFileDownloadOutcome {
+                        file_hash: alternate_hash,
+                        outcome: Ed2kPeerDownloadOutcome::FileNotFound,
+                    },
+                ],
+                terminal_error: None,
+            })
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.completed);
+    assert!(outcome.file_not_found_sources.is_empty());
+    assert_eq!(outcome.alternate_file_outcomes.len(), 1);
+    let alternate = &outcome.alternate_file_outcomes[0];
+    assert_eq!(alternate.file_hash, alternate_hash.to_string());
+    assert_eq!(alternate.source.file_hash, alternate_hash);
+    assert_eq!(alternate.outcome, Ed2kPeerDownloadOutcome::FileNotFound);
 }
 
 #[tokio::test]
@@ -167,7 +222,10 @@ async fn direct_download_scheduler_retries_loopback_peer_after_connection_refuse
                     transfer_runtime
                         .store_piece_data(&file_hash_hex, 0, payload.as_slice())
                         .await?;
-                    Ok(Ed2kPeerDownloadOutcome::Completed)
+                    Ok(Ed2kPeerDownloadReport::single(
+                        source.file_hash,
+                        Ed2kPeerDownloadOutcome::Completed,
+                    ))
                 }
             }
         },
@@ -213,9 +271,15 @@ async fn direct_download_scheduler_tracks_accepted_incomplete_peer() {
                 async move {
                     attempts.lock().await.push(source.tcp_port);
                     if source.tcp_port == 41001 {
-                        return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                        return Ok(Ed2kPeerDownloadReport::single(
+                            source.file_hash,
+                            Ed2kPeerDownloadOutcome::AcceptedButIncomplete,
+                        ));
                     }
-                    Ok(Ed2kPeerDownloadOutcome::Completed)
+                    Ok(Ed2kPeerDownloadReport::single(
+                        source.file_hash,
+                        Ed2kPeerDownloadOutcome::Completed,
+                    ))
                 }
             }
         },
@@ -269,7 +333,10 @@ async fn direct_download_scheduler_does_not_downgrade_failed_obfuscated_peer() {
                     if source.obfuscated {
                         anyhow::bail!("simulated obfuscated peer close");
                     }
-                    Ok(Ed2kPeerDownloadOutcome::Completed)
+                    Ok(Ed2kPeerDownloadReport::single(
+                        source.file_hash,
+                        Ed2kPeerDownloadOutcome::Completed,
+                    ))
                 }
             }
         },

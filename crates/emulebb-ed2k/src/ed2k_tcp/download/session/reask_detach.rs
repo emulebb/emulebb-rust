@@ -111,7 +111,8 @@ mod tests {
     use tokio::time::Instant;
 
     fn session_state(low_id: bool) -> DownloadSessionState {
-        let mut state = DownloadSessionState::new(false, false, false, Some([0x42; 16]), None);
+        let mut state =
+            DownloadSessionState::new(false, false, false, Some([0x42; 16]), None, None);
         state.queued_until = Some(Instant::now());
         state.peer_udp_port = 4672;
         state.peer_udp_version = 4;

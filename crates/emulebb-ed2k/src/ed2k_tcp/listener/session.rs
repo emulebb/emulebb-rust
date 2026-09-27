@@ -30,7 +30,8 @@ use super::super::codec::{
     encode_port_test_answer, encode_port_test_result, encode_public_ip_answer,
 };
 use super::super::download::{
-    DownloadSessionOptions, Ed2kPeerDownloadOutcome, drive_download_session,
+    DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
+    drive_download_session,
 };
 use super::super::dump::{
     dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_recv, dump_ed2k_tcp_listener_send,
@@ -471,52 +472,56 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
                     })?;
                 }
-                if let Some(callback_intent) = transfer_runtime
-                    .claim_callback_intent(hello_profile.identity.client_id)
-                    .await
-                {
-                    let file_hash =
-                        Ed2kHash::from_str(&callback_intent.file_hash).with_context(|| {
+                let callback_intents = transfer_runtime
+                    .claim_callback_intents(hello_profile.identity.client_id)
+                    .await;
+                if !callback_intents.is_empty() {
+                    let mut connection_state = DownloadConnectionState::from_inbound_hello(
+                        &hello_profile,
+                        &peer_secure_ident,
+                        hello_profile.supports_secure_ident,
+                    );
+                    for (file_index, callback_intent) in callback_intents.into_iter().enumerate() {
+                        let file_hash = Ed2kHash::from_str(&callback_intent.file_hash).with_context(|| {
                             format!(
                                 "invalid callback file hash {} for client_id={}",
                                 callback_intent.file_hash, callback_intent.client_id
                             )
                         })?;
-                    info!(
-                        "claimed inbound ED2K callback download file_hash={} client_id={} peer={peer_addr}",
-                        callback_intent.file_hash, callback_intent.client_id
-                    );
-                    match drive_download_session(DownloadSessionOptions {
-                        transport: &mut transport,
-                        peer_addr,
-                        hello_identity: response_identity,
-                        secure_ident: secure_ident.as_ref(),
-                        transfer_runtime,
-                        file_hash,
-                        file_hash_hex: &callback_intent.file_hash,
-                        timeout: ED2K_CONNECTION_IDLE_TIMEOUT,
-                        send_initial_requests: true,
-                        source_exchange_allowed: true,
-                        initial_hello_complete: true,
-                        initial_secure_ident_started: true,
-                        peer_user_hash: Some(hello_profile.identity.user_hash),
-                        peer_connect_options: Some(hello_profile.connect_options),
-                        // Inbound callback downloads stay on TCP; UDP-reask detach
-                        // is driven only from the outbound download driver.
-                        reask_register: None,
-                    })
-                    .await?
-                    {
-                        Ed2kPeerDownloadOutcome::Completed => break Ok(()),
-                        Ed2kPeerDownloadOutcome::AcceptedButIncomplete => break Ok(()),
-                        Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask => break Ok(()),
-                        // Inbound callback downloads have no cross-transfer driver to
-                        // run the A4AF-lite swap; treat NNP like accepted-incomplete.
-                        Ed2kPeerDownloadOutcome::NoNeededParts => break Ok(()),
-                        // Same for FNF: the session already ends here; dead-listing
-                        // is driven from the outbound download driver.
-                        Ed2kPeerDownloadOutcome::FileNotFound => break Ok(()),
+                        info!(
+                            "claimed inbound ED2K callback download file_hash={} client_id={} peer={peer_addr} a4af_file_index={file_index}",
+                            callback_intent.file_hash, callback_intent.client_id
+                        );
+                        let outcome = drive_download_session(DownloadSessionOptions {
+                            transport: &mut transport,
+                            peer_addr,
+                            hello_identity: response_identity,
+                            secure_ident: secure_ident.as_ref(),
+                            transfer_runtime,
+                            file_hash,
+                            file_hash_hex: &callback_intent.file_hash,
+                            timeout: ED2K_CONNECTION_IDLE_TIMEOUT,
+                            send_initial_requests: true,
+                            source_exchange_allowed: true,
+                            initial_hello_complete: false,
+                            initial_secure_ident_started: false,
+                            peer_user_hash: Some(hello_profile.identity.user_hash),
+                            peer_connect_options: Some(hello_profile.connect_options),
+                            connection_state: Some(&mut connection_state),
+                            // Inbound callback downloads stay on TCP; UDP-reask detach
+                            // is driven only from the outbound download driver.
+                            reask_register: None,
+                        })
+                        .await?;
+                        if matches!(
+                            outcome,
+                            Ed2kPeerDownloadOutcome::AcceptedButIncomplete
+                                | Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask
+                        ) {
+                            break;
+                        }
                     }
+                    break Ok(());
                 }
             }
             (OP_EDONKEYPROT, OP_HELLOANSWER) => {

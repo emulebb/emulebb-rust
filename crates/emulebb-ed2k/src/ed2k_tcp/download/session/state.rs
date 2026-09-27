@@ -1,8 +1,62 @@
 use tokio::time::Instant;
 
-use super::super::super::{ED2K_SOURCE_EXCHANGE2_VERSION, Ed2kPeerSecureIdentState};
+use super::super::super::{
+    ED2K_SOURCE_EXCHANGE2_VERSION, Ed2kPeerSecureIdentState, hello::DecodedHelloProfile,
+};
 use super::super::ActiveDownloadPiece;
 use super::super::stale_guard::StaleBlockPacketGuard;
+
+/// Connection-scoped peer state retained while full A4AF switches the requested
+/// file in place. File-specific startup, availability, and block state stay in
+/// [`DownloadSessionState`] and are reset for every file.
+#[derive(Debug, Clone, Default)]
+pub(in crate::ed2k_tcp) struct DownloadConnectionState {
+    peer_secure_ident: Ed2kPeerSecureIdentState,
+    hello_complete: bool,
+    secure_ident_started: bool,
+    remote_supports_aich: bool,
+    remote_supports_secure_ident: bool,
+    remote_supports_file_identifiers: bool,
+    remote_supports_multipacket: bool,
+    remote_supports_ext_multipacket: bool,
+    remote_source_exchange_version: u8,
+    remote_supports_source_exchange: bool,
+    remote_supports_source_exchange2: bool,
+    peer_user_hash: Option<[u8; 16]>,
+    peer_connect_options: Option<u8>,
+    peer_udp_port: u16,
+    peer_udp_version: u8,
+    peer_low_id: bool,
+    peer_buddy_endpoint: Option<(std::net::Ipv4Addr, u16)>,
+}
+
+impl DownloadConnectionState {
+    pub(in crate::ed2k_tcp) fn from_inbound_hello(
+        profile: &DecodedHelloProfile,
+        peer_secure_ident: &Ed2kPeerSecureIdentState,
+        secure_ident_started: bool,
+    ) -> Self {
+        Self {
+            peer_secure_ident: peer_secure_ident.clone(),
+            hello_complete: true,
+            secure_ident_started,
+            remote_supports_aich: profile.supports_aich,
+            remote_supports_secure_ident: profile.supports_secure_ident,
+            remote_supports_file_identifiers: profile.supports_file_identifiers,
+            remote_supports_multipacket: profile.supports_multipacket,
+            remote_supports_ext_multipacket: profile.supports_ext_multipacket,
+            remote_source_exchange_version: profile.source_exchange_version,
+            remote_supports_source_exchange: profile.supports_source_exchange,
+            remote_supports_source_exchange2: profile.supports_source_exchange2,
+            peer_user_hash: Some(profile.identity.user_hash),
+            peer_connect_options: Some(profile.connect_options),
+            peer_udp_port: profile.identity.udp_port,
+            peer_low_id: profile.identity.client_id < 0x0100_0000,
+            peer_buddy_endpoint: profile.buddy.map(|buddy| (buddy.ip, buddy.udp_port)),
+            ..Self::default()
+        }
+    }
+}
 
 pub(super) struct DownloadSessionState {
     pub(super) peer_secure_ident: Ed2kPeerSecureIdentState,
@@ -77,23 +131,41 @@ impl DownloadSessionState {
         source_exchange_allowed: bool,
         peer_user_hash: Option<[u8; 16]>,
         peer_connect_options: Option<u8>,
+        connection_state: Option<&DownloadConnectionState>,
     ) -> Self {
+        let connection_state =
+            connection_state
+                .cloned()
+                .unwrap_or_else(|| DownloadConnectionState {
+                    hello_complete: initial_hello_complete,
+                    secure_ident_started: initial_secure_ident_started,
+                    remote_supports_aich: initial_hello_complete,
+                    remote_supports_secure_ident: initial_hello_complete,
+                    remote_supports_multipacket: initial_hello_complete,
+                    remote_supports_ext_multipacket: initial_hello_complete,
+                    remote_source_exchange_version: if initial_hello_complete {
+                        ED2K_SOURCE_EXCHANGE2_VERSION
+                    } else {
+                        0
+                    },
+                    remote_supports_source_exchange: initial_hello_complete,
+                    remote_supports_source_exchange2: initial_hello_complete,
+                    peer_user_hash,
+                    peer_connect_options,
+                    ..DownloadConnectionState::default()
+                });
         Self {
-            peer_secure_ident: Ed2kPeerSecureIdentState::default(),
-            hello_complete: initial_hello_complete,
-            secure_ident_started: initial_secure_ident_started,
-            remote_supports_aich: initial_hello_complete,
-            remote_supports_secure_ident: initial_hello_complete,
-            remote_supports_file_identifiers: false,
-            remote_supports_multipacket: initial_hello_complete,
-            remote_supports_ext_multipacket: initial_hello_complete,
-            remote_source_exchange_version: if initial_hello_complete {
-                ED2K_SOURCE_EXCHANGE2_VERSION
-            } else {
-                0
-            },
-            remote_supports_source_exchange: initial_hello_complete,
-            remote_supports_source_exchange2: initial_hello_complete,
+            peer_secure_ident: connection_state.peer_secure_ident,
+            hello_complete: connection_state.hello_complete,
+            secure_ident_started: connection_state.secure_ident_started,
+            remote_supports_aich: connection_state.remote_supports_aich,
+            remote_supports_secure_ident: connection_state.remote_supports_secure_ident,
+            remote_supports_file_identifiers: connection_state.remote_supports_file_identifiers,
+            remote_supports_multipacket: connection_state.remote_supports_multipacket,
+            remote_supports_ext_multipacket: connection_state.remote_supports_ext_multipacket,
+            remote_source_exchange_version: connection_state.remote_source_exchange_version,
+            remote_supports_source_exchange: connection_state.remote_supports_source_exchange,
+            remote_supports_source_exchange2: connection_state.remote_supports_source_exchange2,
             source_exchange_allowed,
             startup_file_requests_sent: false,
             startup_file_response_received: false,
@@ -110,16 +182,38 @@ impl DownloadSessionState {
             active_piece_request: None,
             completed_block_count: 0,
             session_payload_down: 0,
-            peer_user_hash,
-            peer_connect_options,
-            peer_udp_port: 0,
-            peer_udp_version: 0,
-            peer_low_id: false,
-            peer_buddy_endpoint: None,
+            peer_user_hash: connection_state.peer_user_hash,
+            peer_connect_options: connection_state.peer_connect_options,
+            peer_udp_port: connection_state.peer_udp_port,
+            peer_udp_version: connection_state.peer_udp_version,
+            peer_low_id: connection_state.peer_low_id,
+            peer_buddy_endpoint: connection_state.peer_buddy_endpoint,
             peer_part_bitmap: None,
             pending_aich_recovery_parts: Vec::new(),
             aich_requests_inflight: Vec::new(),
             stale_block_guard: StaleBlockPacketGuard::default(),
+        }
+    }
+
+    pub(super) fn connection_state(&self) -> DownloadConnectionState {
+        DownloadConnectionState {
+            peer_secure_ident: self.peer_secure_ident.clone(),
+            hello_complete: self.hello_complete,
+            secure_ident_started: self.secure_ident_started,
+            remote_supports_aich: self.remote_supports_aich,
+            remote_supports_secure_ident: self.remote_supports_secure_ident,
+            remote_supports_file_identifiers: self.remote_supports_file_identifiers,
+            remote_supports_multipacket: self.remote_supports_multipacket,
+            remote_supports_ext_multipacket: self.remote_supports_ext_multipacket,
+            remote_source_exchange_version: self.remote_source_exchange_version,
+            remote_supports_source_exchange: self.remote_supports_source_exchange,
+            remote_supports_source_exchange2: self.remote_supports_source_exchange2,
+            peer_user_hash: self.peer_user_hash,
+            peer_connect_options: self.peer_connect_options,
+            peer_udp_port: self.peer_udp_port,
+            peer_udp_version: self.peer_udp_version,
+            peer_low_id: self.peer_low_id,
+            peer_buddy_endpoint: self.peer_buddy_endpoint,
         }
     }
 

@@ -91,6 +91,7 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
         initial_secure_ident_started: true,
         peer_user_hash: None,
         peer_connect_options: None,
+        connection_state: None,
         reask_register: None,
     })
     .await

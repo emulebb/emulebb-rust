@@ -32,9 +32,8 @@
 //! This module is I/O-free and unit-testable: it holds counters/timestamps and
 //! makes pure admit/deny decisions. The runtime owns one instance behind a
 //! `Mutex` (mirroring the download throttle) and the per-transfer driver / reask
-//! loop consult it. The per-file source state here is also the foundation A4AF
-//! (`A4AF-lite`) will later read to bias source selection across files, so it is
-//! kept as an explicit per-file map rather than a single aggregate.
+//! loop consult it. Full A4AF reads the same per-file state to order in-place
+//! connection switches, so it remains an explicit map rather than one aggregate.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

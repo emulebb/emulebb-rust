@@ -157,7 +157,7 @@ impl Ed2kSecureIdent {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct Ed2kPeerSecureIdentState {
     pub(super) peer_public_key: Option<Vec<u8>>,
     pub(super) peer_challenge_from: Option<u32>,

@@ -208,6 +208,129 @@ async fn nofile_answer_for_requested_file_is_file_not_found_not_error() {
 }
 
 #[tokio::test]
+async fn a4af_switch_requests_two_files_on_one_peer_connection() {
+    let root = unique_test_dir("ed2k-download-a4af-connection-switch");
+    let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let primary_hash = Ed2kHash::from_bytes([0x6C; 16]);
+    let alternate_hash = Ed2kHash::from_bytes([0x6D; 16]);
+    let primary_size = ED2K_PART_SIZE;
+    let alternate_size = ED2K_PART_SIZE * 2;
+
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        // A single accept is intentional: the second file must be negotiated on
+        // this same physical connection, without another TCP connect or hello.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let hello = read_packet(&mut stream).await;
+        assert_eq!(hello[0], OP_EDONKEYPROT);
+        assert_eq!(hello[5], OP_HELLO);
+        stream
+            .write_all(&legacy_hello_answer_without_aich(peer_addr))
+            .await
+            .unwrap();
+
+        let secure_ident_probe = read_packet(&mut stream).await;
+        assert_eq!(secure_ident_probe[0], OP_EMULEPROT);
+        assert_eq!(secure_ident_probe[5], OP_SECIDENTSTATE);
+
+        let primary_request =
+            read_until_opcode(&mut stream, OP_EMULEPROT, OP_MULTIPACKET_EXT).await;
+        assert_legacy_multipacket_omits_aich_request(
+            &primary_request,
+            &primary_hash,
+            primary_size,
+            false,
+        );
+        stream
+            .write_all(&encode_file_req_ans_nofil(&primary_hash))
+            .await
+            .unwrap();
+
+        let alternate_request =
+            read_until_opcode(&mut stream, OP_EMULEPROT, OP_MULTIPACKET_EXT).await;
+        assert_legacy_multipacket_omits_aich_request(
+            &alternate_request,
+            &alternate_hash,
+            alternate_size,
+            true,
+        );
+        stream
+            .write_all(&encode_file_req_ans_nofil(&alternate_hash))
+            .await
+            .unwrap();
+
+        let mut sink = [0u8; 256];
+        while !matches!(stream.read(&mut sink).await, Ok(0) | Err(_)) {}
+    });
+
+    let peer = Ed2kFoundSource {
+        file_hash: primary_hash,
+        ip: test_bind_ip(),
+        tcp_port: peer_addr.port(),
+        client_id: u32::from_le_bytes(test_bind_ip().octets()),
+        low_id: false,
+        obfuscated: false,
+        obfuscation_options: None,
+        user_hash: None,
+        source_server: None,
+        buddy_id: None,
+        buddy_endpoint: None,
+        source_udp_port: None,
+    };
+    let report = download_files_from_peer(
+        Ed2kPeerDownloadOptions {
+            bind_ip: test_bind_ip(),
+            peer: &peer,
+            hello_identity: Ed2kHelloIdentity {
+                user_hash: [0x14; 16],
+                client_id: 0,
+                tcp_port: 41001,
+                udp_port: 41000,
+                server_ip: 0,
+                server_port: 0,
+                connect_options: emule_connect_options(false),
+                direct_udp_callback: false,
+            },
+            secure_ident: &Arc::new(
+                Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+                    .unwrap(),
+            ),
+            transfer_runtime: &transfer_runtime,
+            display_name: "primary-missing.bin".to_string(),
+            file_size: primary_size,
+            current_source_count: 0,
+            timeout: Duration::from_secs(3),
+            reask_register: None,
+        },
+        vec![Ed2kPeerDownloadFile {
+            file_hash: alternate_hash,
+            display_name: "alternate-missing.bin".to_string(),
+            file_size: alternate_size,
+            current_source_count: 0,
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        report.file_outcomes,
+        vec![
+            Ed2kPeerFileDownloadOutcome {
+                file_hash: primary_hash,
+                outcome: Ed2kPeerDownloadOutcome::FileNotFound,
+            },
+            Ed2kPeerFileDownloadOutcome {
+                file_hash: alternate_hash,
+                outcome: Ed2kPeerDownloadOutcome::FileNotFound,
+            },
+        ]
+    );
+    assert_eq!(report.terminal_error, None);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn legacy_peer_without_aich_support_does_not_receive_aich_hash_request() {
     let root = unique_test_dir("ed2k-download-legacy-peer-no-aich");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -232,7 +355,7 @@ async fn legacy_peer_without_aich_support_does_not_receive_aich_hash_request() {
         assert_eq!(secure_ident_probe[5], OP_SECIDENTSTATE);
 
         let startup_request = read_packet(&mut stream).await;
-        assert_legacy_multipacket_omits_aich_request(&startup_request, &file_hash, file_size);
+        assert_legacy_multipacket_omits_aich_request(&startup_request, &file_hash, file_size, true);
         stream
             .write_all(&encode_file_req_ans_nofil(&file_hash))
             .await
@@ -319,6 +442,7 @@ fn assert_legacy_multipacket_omits_aich_request(
     packet: &[u8],
     file_hash: &Ed2kHash,
     file_size: u64,
+    expect_set_req_file_id: bool,
 ) {
     assert_eq!(packet[0], OP_EMULEPROT);
     assert_eq!(packet[5], OP_MULTIPACKET_EXT);
@@ -356,6 +480,6 @@ fn assert_legacy_multipacket_omits_aich_request(
         }
     }
     assert!(saw_request_filename);
-    assert!(saw_set_req_file_id);
+    assert_eq!(saw_set_req_file_id, expect_set_req_file_id);
     assert!(saw_request_sources2);
 }

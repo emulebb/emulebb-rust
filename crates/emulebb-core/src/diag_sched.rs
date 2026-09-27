@@ -300,7 +300,7 @@ pub(crate) fn keyword_search_queue(
 /// source registry: `sourceCount` = total live candidates; `validSourceCount` =
 /// leased (actively engaged) sources; `nnpSourceCount` = (source, file) pairs
 /// under an active No-Needed-Parts hold (the MFC `DS_NONEEDEDPARTS` aggregate);
-/// `a4afFileCount` = A4AF-lite candidate count (source-based). Keys are empty,
+/// `a4afFileCount` = A4AF cross-file candidate count (source-based). Keys are empty,
 /// matching MFC.
 pub(crate) fn source_count(
     source_count: usize,

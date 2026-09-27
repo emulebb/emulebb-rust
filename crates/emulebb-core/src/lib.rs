@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt, fs,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -33,10 +33,11 @@ use emulebb_ed2k::{
         search_source_batch_via_background_session, search_source_udp_server_batches,
     },
     ed2k_tcp::{
-        Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
-        Ed2kSecureIdent, HelloBuddySnapshot, OutboundBuddyLinkOptions, download_file_from_peer,
-        emule_connect_options, encode_kad_callback_relay_frame, run_ed2k_listener,
-        run_outbound_buddy_link, set_hello_buddy_snapshot, set_publish_rust_identity,
+        Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions,
+        Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport, Ed2kSecureIdent, HelloBuddySnapshot,
+        OutboundBuddyLinkOptions, download_files_from_peer, emule_connect_options,
+        encode_kad_callback_relay_frame, run_ed2k_listener, run_outbound_buddy_link,
+        set_hello_buddy_snapshot, set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry,
@@ -160,7 +161,8 @@ use direct_download_runtime::{parse_server_endpoint, run_ed2k_direct_downloads};
 use download_source_registry::DownloadSourceCandidate;
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_direct_download_types::{
-    DirectDownloadJoin, DirectDownloadOptions, DirectDownloadOutcome, DirectDownloadSpawnContext,
+    DirectDownloadAlternateOutcome, DirectDownloadJoin, DirectDownloadOptions,
+    DirectDownloadOutcome, DirectDownloadSpawnContext,
 };
 use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
@@ -1268,6 +1270,10 @@ impl EmulebbCore {
                     .iter()
                     .map(source_endpoint_key)
                     .collect::<Vec<_>>();
+                let a4af_alternates = Arc::new(
+                    self.a4af_alternate_download_files(&transfer.hash, &direct_sources)
+                        .await,
+                );
                 // Captured per-call into each peer attempt so a queued + UDP-eligible
                 // source can detach onto the reask loop (None when reask is off).
                 let reask_register = self.ed2k_reask_handle.lock().unwrap().clone();
@@ -1293,19 +1299,27 @@ impl EmulebbCore {
                           file_size,
                           connect_timeout| {
                         let reask_register = reask_register.clone();
+                        let a4af_alternates = Arc::clone(&a4af_alternates);
                         async move {
-                            download_file_from_peer(Ed2kPeerDownloadOptions {
-                                bind_ip,
-                                peer: &source,
-                                hello_identity,
-                                secure_ident: &secure_ident,
-                                transfer_runtime: transfer_runtime.as_ref(),
-                                display_name: file_name,
-                                file_size,
-                                current_source_count: source_exchange_source_count,
-                                timeout: connect_timeout,
-                                reask_register,
-                            })
+                            let alternate_files = a4af_alternates
+                                .get(&source_endpoint_key(&source))
+                                .cloned()
+                                .unwrap_or_default();
+                            download_files_from_peer(
+                                Ed2kPeerDownloadOptions {
+                                    bind_ip,
+                                    peer: &source,
+                                    hello_identity,
+                                    secure_ident: &secure_ident,
+                                    transfer_runtime: transfer_runtime.as_ref(),
+                                    display_name: file_name,
+                                    file_size,
+                                    current_source_count: source_exchange_source_count,
+                                    timeout: connect_timeout,
+                                    reask_register,
+                                },
+                                alternate_files,
+                            )
                             .await
                         }
                     },
@@ -1328,10 +1342,7 @@ impl EmulebbCore {
                 self.release_direct_download_source_leases(&endpoints_to_release)
                     .await;
                 let outcome = outcome?;
-                if outcome.completed {
-                    return Ok(Some("completed"));
-                }
-                // A4AF-lite NNP swap (eMuleBB CUpDownClient::SwapToAnotherFile):
+                // A4AF NNP swap (eMuleBB CUpDownClient::SwapToAnotherFile):
                 // a source that has No Needed Parts for THIS file but serves
                 // another wanted file in the registry is moved to that file
                 // (its transfer is re-driven so leg-1 selection reuses the peer).
@@ -1365,6 +1376,44 @@ impl EmulebbCore {
                         &outcome.file_not_found_sources,
                     )
                     .await;
+                }
+                for alternate in outcome.alternate_file_outcomes {
+                    match alternate.outcome {
+                        Ed2kPeerDownloadOutcome::NoNeededParts => {
+                            self.swap_no_needed_parts_sources(
+                                &alternate.file_hash,
+                                std::slice::from_ref(&alternate.source),
+                            )
+                            .await;
+                            self.hold_no_needed_parts_sources(
+                                &alternate.file_hash,
+                                std::slice::from_ref(&alternate.source),
+                            )
+                            .await;
+                        }
+                        Ed2kPeerDownloadOutcome::FileNotFound => {
+                            self.dead_list_file_not_found_sources(
+                                &alternate.file_hash,
+                                std::slice::from_ref(&alternate.source),
+                            )
+                            .await;
+                        }
+                        Ed2kPeerDownloadOutcome::Completed
+                        | Ed2kPeerDownloadOutcome::AcceptedButIncomplete => {
+                            if let Some(target) = self.transfer(&alternate.file_hash).await
+                                && should_retry_download_attempt_state(&target.state)
+                            {
+                                self.queue_ed2k_download_attempt(target);
+                            }
+                        }
+                        Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask => {}
+                    }
+                }
+                // A completed primary may share its final live TCP connection
+                // with additional A4AF file negotiations. Apply every per-file
+                // result above before ending this primary transfer driver.
+                if outcome.completed {
+                    return Ok(Some("completed"));
                 }
                 accepted_incomplete_peers =
                     accepted_incomplete_peers.saturating_add(outcome.accepted_incomplete_peers);
@@ -1809,6 +1858,45 @@ impl EmulebbCore {
         }
     }
 
+    /// Build the ordered other-file plans a leased peer may visit on the same
+    /// physical connection. This is the full A4AF source-set/hijacking bridge:
+    /// the peer-centric registry orders candidates, core filters authoritative
+    /// transfer lifecycle, and the ED2K session switches files in place.
+    async fn a4af_alternate_download_files(
+        &self,
+        current_file_hash: &str,
+        sources: &[Ed2kFoundSource],
+    ) -> HashMap<(Ipv4Addr, u16), Vec<Ed2kPeerDownloadFile>> {
+        let state = self.state.lock().await;
+        let now = Instant::now();
+        let mut by_endpoint = HashMap::new();
+        for source in sources {
+            let alternates = state
+                .download_source_registry
+                .swap_targets_for_peer(source, current_file_hash)
+                .into_iter()
+                .filter_map(|candidate| {
+                    let target = state.transfers.get(&candidate.file_hash)?;
+                    if !should_retry_download_attempt_state(&target.state) {
+                        return None;
+                    }
+                    Some(Ed2kPeerDownloadFile {
+                        file_hash: candidate.file_hash.parse().ok()?,
+                        display_name: target.name.clone(),
+                        file_size: target.size_bytes,
+                        current_source_count: state
+                            .download_source_registry
+                            .candidate_count_for_file(now, &target.hash),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !alternates.is_empty() {
+                by_endpoint.insert(source_endpoint_key(source), alternates);
+            }
+        }
+        by_endpoint
+    }
+
     /// A4AF NNP swap (eMuleBB `CUpDownClient::SwapToAnotherFile`). For each
     /// source that reported No Needed Parts on `current_file_hash`, consult the
     /// cross-transfer registry for the best OTHER wanted file the same peer
@@ -1846,7 +1934,7 @@ impl EmulebbCore {
         let swapped = swap_targets.len();
         for target in swap_targets {
             tracing::info!(
-                "ED2K A4AF-lite swap source from file_hash={} to wanted file_hash={}",
+                "ED2K A4AF swap source from file_hash={} to wanted file_hash={}",
                 current_file_hash,
                 target.hash
             );
@@ -1921,7 +2009,7 @@ impl EmulebbCore {
 
     /// Spawn a background download attempt for `transfer`. Synchronous (returns
     /// immediately after spawning) so it carries no opaque async return type:
-    /// an attempt may run the A4AF-lite NNP swap, which re-queues another attempt
+    /// an attempt may run an A4AF source-set transition, which re-queues another attempt
     /// (run_attempt -> swap -> queue -> run_attempt); keeping this a plain `fn`
     /// severs that type-inference cycle while the spawn breaks the recursion at
     /// runtime. The dedup guard runs inside the spawned task.

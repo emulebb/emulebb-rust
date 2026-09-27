@@ -13,8 +13,13 @@ pub(in crate::ed2k_tcp) use blocks::{
     flush_ready_download_blocks, reconcile_download_manifest_metadata,
 };
 pub use session::Ed2kPeerDownloadOutcome;
-pub(in crate::ed2k_tcp) use session::{DownloadSessionOptions, drive_download_session};
-pub use startup::{Ed2kPeerDownloadOptions, download_file_from_peer};
+pub(in crate::ed2k_tcp) use session::{
+    DownloadConnectionState, DownloadSessionOptions, drive_download_session,
+};
+pub use startup::{
+    Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions, Ed2kPeerDownloadReport,
+    Ed2kPeerFileDownloadOutcome, download_file_from_peer, download_files_from_peer,
+};
 pub(in crate::ed2k_tcp) use window::{
     ActiveDownloadPiece, DownloadRequestWindowOutcome, DownloadRequestWindowState,
     PendingPartRequest, next_download_read_timeout, pump_download_request_window,

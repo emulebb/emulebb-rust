@@ -46,7 +46,7 @@ where
         + Send
         + Sync
         + 'static,
-    DownloadFuture: Future<Output = Result<Ed2kPeerDownloadOutcome>> + Send + 'static,
+    DownloadFuture: Future<Output = Result<Ed2kPeerDownloadReport>> + Send + 'static,
 {
     let DirectDownloadOptions {
         bind_ip,
@@ -73,7 +73,7 @@ where
     // Endpoints that detached onto UDP reask across all retry rounds; their leases
     // are kept (not released) so the next cycle does not re-TCP them.
     let mut detached_reask_endpoints: Vec<(Ipv4Addr, u16)> = Vec::new();
-    // Sources that reported No Needed Parts; the driver runs the A4AF-lite swap
+    // Sources that reported No Needed Parts; the driver runs the A4AF swap
     // on each after the round (move to another wanted file the peer serves) and
     // then NNP-holds each on this file for the doubled 58-minute reask cycle
     // (oracle DS_NONEEDEDPARTS). Kept across retry rounds.
@@ -82,6 +82,7 @@ where
     // driver dead-lists + drops each after the round (oracle
     // ListenSocket.cpp:645-661). Kept across retry rounds.
     let mut file_not_found_sources: Vec<Ed2kFoundSource> = Vec::new();
+    let mut alternate_file_outcomes: Vec<DirectDownloadAlternateOutcome> = Vec::new();
 
     loop {
         let mut accepted_incomplete_peers = 0u32;
@@ -129,78 +130,105 @@ where
                         .context("ED2K direct download worker panicked"));
                 }
             };
+            let mut completed_primary_manifest = false;
             match result {
-                Ok(Ed2kPeerDownloadOutcome::Completed) => {
-                    let manifest = transfer_runtime.manifest(&file_hash_hex).await?;
-                    tracing::info!(
-                        "ED2K direct download peer completed file_hash={} peer={} manifest_completed={} verified_ranges={} file_size={}",
-                        file_hash_hex,
-                        peer_addr,
-                        manifest.completed,
-                        manifest.verified_ranges.len(),
-                        manifest.file_size
-                    );
-                    if manifest.completed {
-                        active_downloads.abort_all();
-                        // Release the budget slot held by each aborted download.
-                        while active_downloads.join_next().await.is_some() {
-                            transfer_runtime.release_source_connection();
-                        }
-                        return Ok(DirectDownloadOutcome {
-                            completed: true,
-                            accepted_incomplete_peers,
-                            last_error: last_error
-                                .as_ref()
-                                .map(|error| anyhow::anyhow!(error.to_string())),
-                            detached_reask_endpoints: detached_reask_endpoints.clone(),
-                            no_needed_parts_sources: no_needed_parts_sources.clone(),
-                            file_not_found_sources: file_not_found_sources.clone(),
-                        });
+                Ok(report) => {
+                    if let Some(error) = report.terminal_error {
+                        last_error = Some(anyhow::anyhow!(error));
                     }
-                }
-                Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete) => {
-                    accepted_incomplete_peers = accepted_incomplete_peers.saturating_add(1);
-                    tracing::info!(
-                        "ED2K direct download peer accepted incomplete file_hash={} peer={}",
-                        file_hash_hex,
-                        peer_addr
-                    );
-                }
-                Ok(Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask) => {
-                    // The source detached its TCP socket onto the UDP reask loop,
-                    // which now keeps its queue slot warm and re-engages over TCP
-                    // on UDP failure. Count it like an accepted-incomplete peer.
-                    accepted_incomplete_peers = accepted_incomplete_peers.saturating_add(1);
-                    detached_reask_endpoints.push(source_endpoint_key(&source));
-                    tracing::info!(
-                        "ED2K direct download peer detached to UDP reask file_hash={} peer={}",
-                        file_hash_hex,
-                        peer_addr
-                    );
-                }
-                Ok(Ed2kPeerDownloadOutcome::NoNeededParts) => {
-                    // No Needed Parts for this file (eMuleBB DS_NONEEDEDPARTS). The
-                    // driver runs the A4AF-lite SwapToAnotherFile afterwards (this
-                    // source is moved to another wanted file it serves, if any) and
-                    // then NNP-holds the source on this file for the doubled
-                    // 58-minute reask cycle instead of dropping it.
-                    no_needed_parts_sources.push(source.clone());
-                    tracing::info!(
-                        "ED2K direct download peer reported no needed parts file_hash={} peer={}",
-                        file_hash_hex,
-                        peer_addr
-                    );
-                }
-                Ok(Ed2kPeerDownloadOutcome::FileNotFound) => {
-                    // OP_FILEREQANSNOFIL (or AICH-mismatch-as-FNF): the driver
-                    // dead-lists the (source, file) pair for 45 minutes and drops
-                    // the source afterwards (oracle ListenSocket.cpp:645-661).
-                    file_not_found_sources.push(source.clone());
-                    tracing::info!(
-                        "ED2K direct download peer answered file-not-found file_hash={} peer={}",
-                        file_hash_hex,
-                        peer_addr
-                    );
+                    for file_result in report.file_outcomes {
+                        let result_file_hash = file_result.file_hash.to_string();
+                        let is_primary = result_file_hash == file_hash_hex;
+                        let mut result_source = source.clone();
+                        result_source.file_hash = file_result.file_hash;
+                        if !is_primary {
+                            alternate_file_outcomes.push(DirectDownloadAlternateOutcome {
+                                file_hash: result_file_hash.clone(),
+                                source: result_source.clone(),
+                                outcome: file_result.outcome,
+                            });
+                        }
+                        match file_result.outcome {
+                            Ed2kPeerDownloadOutcome::Completed if is_primary => {
+                                let manifest = transfer_runtime.manifest(&file_hash_hex).await?;
+                                tracing::info!(
+                                    "ED2K direct download peer completed file_hash={} peer={} manifest_completed={} verified_ranges={} file_size={}",
+                                    file_hash_hex,
+                                    peer_addr,
+                                    manifest.completed,
+                                    manifest.verified_ranges.len(),
+                                    manifest.file_size
+                                );
+                                if manifest.completed {
+                                    // Keep consuming this report so every result from the
+                                    // already-used A4AF connection is attributed before the
+                                    // remaining peer workers are cancelled.
+                                    completed_primary_manifest = true;
+                                }
+                            }
+                            Ed2kPeerDownloadOutcome::Completed => {
+                                tracing::info!(
+                                    "ED2K A4AF-switched peer completed file_hash={} peer={}",
+                                    result_file_hash,
+                                    peer_addr
+                                );
+                            }
+                            Ed2kPeerDownloadOutcome::AcceptedButIncomplete => {
+                                if is_primary {
+                                    accepted_incomplete_peers =
+                                        accepted_incomplete_peers.saturating_add(1);
+                                }
+                                tracing::info!(
+                                    "ED2K direct download peer accepted incomplete file_hash={} peer={}",
+                                    result_file_hash,
+                                    peer_addr
+                                );
+                            }
+                            Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask => {
+                                // The source detached its TCP socket onto the UDP reask loop,
+                                // which now keeps its queue slot warm and re-engages over TCP
+                                // on UDP failure. Count it like an accepted-incomplete peer.
+                                if is_primary {
+                                    accepted_incomplete_peers =
+                                        accepted_incomplete_peers.saturating_add(1);
+                                }
+                                detached_reask_endpoints.push(source_endpoint_key(&source));
+                                tracing::info!(
+                                    "ED2K direct download peer detached to UDP reask file_hash={} peer={}",
+                                    result_file_hash,
+                                    peer_addr
+                                );
+                            }
+                            Ed2kPeerDownloadOutcome::NoNeededParts => {
+                                // No Needed Parts for this file (eMuleBB DS_NONEEDEDPARTS). The
+                                // driver runs SwapToAnotherFile afterwards (this
+                                // source is moved to another wanted file it serves, if any) and
+                                // then NNP-holds the source on this file for the doubled
+                                // 58-minute reask cycle instead of dropping it.
+                                if is_primary {
+                                    no_needed_parts_sources.push(result_source);
+                                }
+                                tracing::info!(
+                                    "ED2K direct download peer reported no needed parts file_hash={} peer={}",
+                                    result_file_hash,
+                                    peer_addr
+                                );
+                            }
+                            Ed2kPeerDownloadOutcome::FileNotFound => {
+                                // OP_FILEREQANSNOFIL (or AICH-mismatch-as-FNF): the driver
+                                // dead-lists the (source, file) pair for 45 minutes and drops
+                                // the source afterwards (oracle ListenSocket.cpp:645-661).
+                                if is_primary {
+                                    file_not_found_sources.push(result_source);
+                                }
+                                tracing::info!(
+                                    "ED2K direct download peer answered file-not-found file_hash={} peer={}",
+                                    result_file_hash,
+                                    peer_addr
+                                );
+                            }
+                        }
+                    }
                 }
                 Err(error) => {
                     retryable_error_seen |= is_retryable_direct_download_error(&error);
@@ -211,6 +239,25 @@ where
                     );
                     last_error = Some(error);
                 }
+            }
+
+            if completed_primary_manifest {
+                active_downloads.abort_all();
+                // Release the budget slot held by each aborted download.
+                while active_downloads.join_next().await.is_some() {
+                    transfer_runtime.release_source_connection();
+                }
+                return Ok(DirectDownloadOutcome {
+                    completed: true,
+                    accepted_incomplete_peers,
+                    last_error: last_error
+                        .as_ref()
+                        .map(|error| anyhow::anyhow!(error.to_string())),
+                    detached_reask_endpoints: detached_reask_endpoints.clone(),
+                    no_needed_parts_sources: no_needed_parts_sources.clone(),
+                    file_not_found_sources: file_not_found_sources.clone(),
+                    alternate_file_outcomes: alternate_file_outcomes.clone(),
+                });
             }
 
             spawn_pending_ed2k_direct_downloads(
@@ -230,6 +277,7 @@ where
             detached_reask_endpoints: detached_reask_endpoints.clone(),
             no_needed_parts_sources: no_needed_parts_sources.clone(),
             file_not_found_sources: file_not_found_sources.clone(),
+            alternate_file_outcomes: alternate_file_outcomes.clone(),
         };
         if outcome.completed
             || outcome.accepted_incomplete_peers != 0
@@ -276,7 +324,7 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
         + Send
         + Sync
         + 'static,
-    DownloadFuture: Future<Output = Result<Ed2kPeerDownloadOutcome>> + Send + 'static,
+    DownloadFuture: Future<Output = Result<Ed2kPeerDownloadReport>> + Send + 'static,
 {
     while active_downloads.len() < max_parallel_download_peers {
         let Some(source) = pending_sources.pop_front() else {

@@ -7,11 +7,20 @@ use std::{
 use anyhow::Result;
 use emulebb_ed2k::{
     ed2k_server::Ed2kFoundSource,
-    ed2k_tcp::{Ed2kHelloIdentity, Ed2kPeerDownloadOutcome, Ed2kSecureIdent},
+    ed2k_tcp::{
+        Ed2kHelloIdentity, Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport, Ed2kSecureIdent,
+    },
     ed2k_transfer::Ed2kTransferRuntime,
 };
 
-pub(crate) type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPeerDownloadOutcome>);
+pub(crate) type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPeerDownloadReport>);
+
+#[derive(Debug, Clone)]
+pub(crate) struct DirectDownloadAlternateOutcome {
+    pub(crate) file_hash: String,
+    pub(crate) source: Ed2kFoundSource,
+    pub(crate) outcome: Ed2kPeerDownloadOutcome,
+}
 
 #[derive(Debug)]
 pub(crate) struct DirectDownloadOutcome {
@@ -22,14 +31,18 @@ pub(crate) struct DirectDownloadOutcome {
     /// source leases are deliberately NOT released so the next download cycle
     /// does not re-connect them over TCP while the reask loop holds them.
     pub(crate) detached_reask_endpoints: Vec<(Ipv4Addr, u16)>,
-    /// Sources that reported No Needed Parts for this file. The driver runs the
-    /// A4AF-lite swap on each.
+    /// Sources that reported No Needed Parts for this file. The driver applies
+    /// the A4AF source-set transition and NNP hold to each relation.
     pub(crate) no_needed_parts_sources: Vec<Ed2kFoundSource>,
     /// Sources that answered the file request with `OP_FILEREQANSNOFIL` (or an
     /// AICH-root mismatch treated like FNF). The driver dead-lists each for the
     /// oracle 45-minute block and drops it from the source registry
     /// (`ListenSocket.cpp:645-661`).
     pub(crate) file_not_found_sources: Vec<Ed2kFoundSource>,
+    /// Per-file results produced after the physical peer connection was A4AF-
+    /// switched away from this attempt's primary file. Core applies NNP/FNF to
+    /// the named relation and re-drives target manifests without reconnecting.
+    pub(crate) alternate_file_outcomes: Vec<DirectDownloadAlternateOutcome>,
 }
 
 pub(crate) struct DirectDownloadOptions {
