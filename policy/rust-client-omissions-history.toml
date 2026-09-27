@@ -130,6 +130,20 @@ review_disposition = "fix"
 review_disposition_note = "RUST-PAR-028 (2026-07-10): IMPLEMENTED with challenge, legacy/tag decoder, mismatch, persistence, and diagnostic-name tests. No longer an omission; retained as audit history."
 
 [[resolved_omissions]]
+id = "parser-fuzzing"
+area = "ed2k-kad"
+stock_behavior = "The maintained native client treats all server, peer, client-UDP, and Kad packet inputs as untrusted binary data and rejects malformed shapes without memory corruption."
+rust_behavior = "IMPLEMENTED: an isolated cargo-fuzz package now drives the complete hand-written ED2K server parser family, the peer-TCP parser family, clear and obfuscated client-UDP parsing, and the Kad v2 packet decoder. Parser-only entry points are feature-gated out of release builds, while corpus and crash artifacts remain local and ignored."
+reason = "Coverage-guided fuzzing closes the deferred parser-hardening task and continuously exercises truncated, oversized, compressed, encrypted, and structurally inconsistent network input under AddressSanitizer."
+compatibility = "No production packet or capability changed. Four 5,000-input sanitized seed campaigns completed without a crash on 2026-09-27; future crashes must become minimized deterministic regression tests."
+disposition = "fixed"
+owner = "protocol-hardening"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: added four libFuzzer targets spanning ED2K server/TCP/client-UDP and Kad parsers, documented Windows/MSVC sanitizer runtime requirements, and completed sanitized campaigns. No longer deferred."
+
+[[resolved_omissions]]
 id = "upload-slow-cooldown-suppression"
 area = "ed2k"
 stock_behavior = "eMule holds a slow-rate-recycled upload peer in a cooldown window (SetSlowUploadCooldownUntil / IsInSlowUploadCooldown gates FindBestClientInQueue, UploadQueue.cpp:228) and suppresses its queue score (bCooldownSuppressed, UploadClient.cpp:497), re-promoting it only via the broadband cooldown-probe path when capacity would otherwise idle."

@@ -163,6 +163,81 @@ const OP_PACKEDPROT: u8 = 0xD4;
 const TCP_PACKET_HEADER_LEN: usize = 6;
 const MAX_SERVER_DECOMPRESSED_PACKET_LEN: usize = 250_000;
 
+/// Parser multiplexer used only by the external cargo-fuzz target. Each input
+/// exercises exactly one bounded hand-written server codec so libFuzzer can
+/// minimize failures without needing access to private intermediate types.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_binary_parsers(data: &[u8]) {
+    let Some((&selector, payload)) = data.split_first() else {
+        return;
+    };
+    match selector % 15 {
+        0 => {
+            let protocol = if selector & 0x80 == 0 {
+                OP_EDONKEYPROT
+            } else {
+                OP_PACKEDPROT
+            };
+            let _ = decode_server_payload(protocol, payload.to_vec());
+        }
+        1 => {
+            let _ = decode_search_result_page(payload);
+        }
+        2 => {
+            let _ = decode_udp_search_result_pages(payload);
+        }
+        3 => {
+            let _ = decode_found_sources(payload, selector & 0x40 != 0);
+        }
+        4 => {
+            let _ = decode_udp_found_source_sets(payload);
+        }
+        5 => {
+            let _ = decode_server_list(payload);
+        }
+        6 => {
+            let _ = parse_server_met(payload);
+        }
+        7 => {
+            let _ = packet_handler::decode_id_change_payload(payload);
+        }
+        8 => {
+            let _ = packet_handler::decode_callback_request(payload);
+        }
+        9 => {
+            let _ = packet_handler::decode_server_ident(payload);
+        }
+        10 => {
+            let _ = decode_tag(payload);
+        }
+        11 => {
+            let _ = decode_ed2k_string(payload);
+        }
+        12 => {
+            let challenge = payload
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_le_bytes)
+                .unwrap_or_default();
+            let _ = server_status::decode_server_status_response(payload, challenge, 4661);
+        }
+        13 => {
+            let challenge = payload
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_le_bytes)
+                .unwrap_or_default();
+            let _ = server_description::decode_server_description_response(payload, challenge);
+        }
+        14 => {
+            search_expr::fuzz_parse_search_expression(
+                std::str::from_utf8(payload).unwrap_or_default(),
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
 const EDONKEY_VERSION: u32 = 0x3C;
 const EMULE_VERSION_MAJOR: u32 = 0;
 const EMULE_VERSION_MINOR: u32 = 72;

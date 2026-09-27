@@ -263,6 +263,121 @@ const EMULE_INFO_FEATURES: u32 = 3;
 const EMULE_ADVERTISED_KAD_VERSION: u32 = 10;
 const ED2K_SOURCE_EXCHANGE2_VERSION: u8 = 4;
 
+/// Parser multiplexer used only by the external cargo-fuzz target. The
+/// selectors cover envelopes, hello/tag variants, transfer packets, source
+/// exchange, secure-ident, AICH/hashsets, shared browsing and optional legacy
+/// payloads without exporting their internal result types.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_binary_parsers(data: &[u8]) {
+    let Some((&selector, payload)) = data.split_first() else {
+        return;
+    };
+    match selector % 28 {
+        0 => {
+            let protocol = match selector & 0xC0 {
+                0x00 => OP_EDONKEYPROT,
+                0x40 => OP_EMULEPROT,
+                _ => OP_PACKEDPROT,
+            };
+            let _ = codec::decode_peer_payload(protocol, payload.to_vec());
+        }
+        1 => {
+            let _ = hello::decode_hello_profile(payload);
+        }
+        2 => {
+            let _ = hello::decode_hello_answer_profile(payload);
+        }
+        3 => {
+            let _ = hello::decode_emule_info_profile(payload);
+        }
+        4 => {
+            let _ = codec::decode_request_parts_payload(payload, false);
+        }
+        5 => {
+            let _ = codec::decode_request_parts_payload(payload, true);
+        }
+        6 => {
+            let _ = codec::decode_sending_part_payload(payload, false);
+        }
+        7 => {
+            let _ = codec::decode_sending_part_payload(payload, true);
+        }
+        8 => {
+            let _ = codec::decode_compressed_part_fragment(payload, selector & 0x80 != 0);
+        }
+        9 => {
+            let _ = codec::decode_hashset_answer(payload);
+        }
+        10 => {
+            let _ = codec::decode_hashset_request2(payload);
+        }
+        11 => {
+            let _ = codec::decode_hashset_answer2(payload);
+        }
+        12 => {
+            let _ = codec::decode_request_sources_payload(OP_REQUESTSOURCES2, payload);
+        }
+        13 => {
+            let _ = codec::decode_answer_sources2_payload(payload);
+        }
+        14 => {
+            let version = selector % (ED2K_SOURCE_EXCHANGE2_VERSION + 1);
+            let _ = codec::decode_answer_sources_payload(payload, version);
+        }
+        15 => {
+            let _ = codec::decode_aich_recovery_request_payload(payload);
+        }
+        16 => {
+            let _ = codec::decode_aich_recovery_answer_payload(payload);
+        }
+        17 => {
+            let _ = codec::decode_aich_file_hash_answer(payload);
+        }
+        18 => {
+            let _ = codec::decode_file_status_availability(payload);
+        }
+        19 => {
+            let _ = codec::decode_file_description_payload(payload);
+        }
+        20 => {
+            let _ = codec::decode_shared_files_answer_payload(payload);
+        }
+        21 => {
+            let _ = codec::decode_shared_dirs_answer_payload(payload);
+        }
+        22 => {
+            let _ = codec::decode_shared_files_dir_answer_payload(payload);
+        }
+        23 => {
+            let _ = codec::decode_request_filename_answer(payload);
+        }
+        24 => {
+            let _ = identity::decode_secident_state(payload);
+        }
+        25 => {
+            let _ = identity::decode_public_key_payload(payload);
+        }
+        26 => {
+            let _ = identity::decode_signature_payload(payload);
+        }
+        27 => match selector & 0xC0 {
+            0x00 => {
+                let _ = codec::decode_client_message_payload(payload);
+            }
+            0x40 => {
+                let _ = codec::decode_chat_captcha_request_payload(payload);
+            }
+            0x80 => {
+                let _ = codec::decode_preview_answer_payload(payload);
+            }
+            _ => {
+                let _ = codec::decode_kad_callback_payload(payload);
+            }
+        },
+        _ => unreachable!(),
+    }
+}
+
 const TAGTYPE_STRING: u8 = 0x02;
 const TAGTYPE_UINT32: u8 = 0x03;
 const TAGTYPE_FLOAT32: u8 = 0x04;

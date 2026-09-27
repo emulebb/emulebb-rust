@@ -61,3 +61,12 @@ pub(crate) use state::{
     FILE_REASK_TIME, MIN_REQUEST_TIME, ReaskAction, ReaskReply, ReaskSource, UDP_MAX_QUEUE_TIME,
     apply_reask_reply, reask_interval, should_fall_back_to_tcp, udp_reask_eligible,
 };
+
+/// Parser entry point used only by the external cargo-fuzz package.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_binary_parser(data: &[u8]) {
+    let (version, datagram) = data
+        .split_first()
+        .map_or((4, &[][..]), |(version, data)| (version % 5, data));
+    let _ = parse_inbound_reask_datagram(datagram, [198, 51, 100, 23], &[0x42; 16], version);
+}

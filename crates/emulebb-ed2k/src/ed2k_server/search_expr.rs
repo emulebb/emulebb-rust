@@ -377,6 +377,11 @@ fn parse_search_expression(input: &str) -> Result<Option<SearchExprNode>> {
     Ok(Some(expression))
 }
 
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_parse_search_expression(input: &str) {
+    let _ = parse_search_expression(input);
+}
+
 fn tokenize_search_expression(input: &str) -> Result<Vec<SearchToken>> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();

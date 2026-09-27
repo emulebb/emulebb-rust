@@ -1,0 +1,44 @@
+[package]
+name = "emulebb-rust-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+emulebb-ed2k = { path = "../crates/emulebb-ed2k", features = ["fuzzing"] }
+emulebb-kad-proto = { path = "../crates/emulebb-kad-proto" }
+
+[[bin]]
+name = "ed2k_server_parsers"
+path = "fuzz_targets/ed2k_server_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ed2k_peer_tcp_parsers"
+path = "fuzz_targets/ed2k_peer_tcp_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ed2k_client_udp_parser"
+path = "fuzz_targets/ed2k_client_udp_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kad_packet_parser"
+path = "fuzz_targets/kad_packet_parser.rs"
+test = false
+doc = false
+bench = false
+
+# Keep this cargo-fuzz package isolated from the release workspace.
+[workspace]

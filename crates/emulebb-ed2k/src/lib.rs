@@ -37,6 +37,9 @@ pub mod reachability;
 pub mod shared_publish_rank;
 pub mod stun;
 
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
+
 pub use nat::{
     IgdPortMappingProvider, MappedEndpoint, MappingExposure, MappingSpec,
     MiniupnpcPortMappingProvider, NatCapableAgent, NatConfig, NatManager, NatManagerBuilder,
