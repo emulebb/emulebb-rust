@@ -502,6 +502,8 @@ export type Ed2kSettings = {
   reconnectIntervalSecs?: number;
   reconnectEnabled?: boolean;
   safeServerConnect?: boolean;
+  useServerPriorities?: boolean;
+  autoConnectStaticOnly?: boolean;
   keepaliveSecs?: number;
   sessionRotationSecs?: number;
   maxConcurrentDownloads?: number;

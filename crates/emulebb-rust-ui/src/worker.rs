@@ -403,6 +403,8 @@ fn app_settings_update_from_form(
         &form.ed2k_reconnect_interval_secs,
         "eD2K reconnect interval",
     )?;
+    next.ed2k.use_server_priorities = form.ed2k_use_server_priorities;
+    next.ed2k.auto_connect_static_only = form.ed2k_auto_connect_static_only;
     next.ed2k.enable_udp_reask = form.ed2k_enable_udp_reask;
     next.ed2k.publish_emule_rust_identity = form.ed2k_publish_emule_rust_identity;
     next.kad.listen_port = optional_u16(&form.kad_listen_port, "Kad listen port")?;

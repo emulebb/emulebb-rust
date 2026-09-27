@@ -76,7 +76,14 @@ impl EmulebbCore {
     }
 
     pub async fn connect_ed2k(&self) -> Result<NetworkStatus> {
-        self.connect_ed2k_to_server(None).await
+        self.connect_ed2k_to_server(None, false).await
+    }
+
+    /// Start the application auto-connect lane. This is distinct from the
+    /// operator-facing generic connect action because stock applies its
+    /// static-server-only preference only to automatic connection attempts.
+    pub async fn auto_connect_ed2k(&self) -> Result<NetworkStatus> {
+        self.connect_ed2k_to_server(None, true).await
     }
 
     pub async fn connect_ed2k_server(&self, endpoint: &str) -> Result<Option<NetworkStatus>> {
@@ -86,10 +93,16 @@ impl EmulebbCore {
         if !server.enabled {
             return Ok(None);
         }
-        self.connect_ed2k_to_server(Some(endpoint)).await.map(Some)
+        self.connect_ed2k_to_server(Some(endpoint), false)
+            .await
+            .map(Some)
     }
 
-    async fn connect_ed2k_to_server(&self, endpoint: Option<&str>) -> Result<NetworkStatus> {
+    async fn connect_ed2k_to_server(
+        &self,
+        endpoint: Option<&str>,
+        automatic_connection: bool,
+    ) -> Result<NetworkStatus> {
         tracing::info!(
             endpoint = endpoint.unwrap_or("auto"),
             "ED2K connect requested"
@@ -452,6 +465,7 @@ impl EmulebbCore {
             bind_ip: network.bind_ip,
             nat: Arc::clone(&nat),
             config,
+            automatic_connection,
             hello_identity,
             shared_catalog: self.ed2k_transfers.shared_catalog(),
             state: Arc::clone(&server_state),

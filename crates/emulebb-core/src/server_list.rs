@@ -24,10 +24,11 @@ impl EmulebbCore {
                     entry.port,
                     entry.name.as_deref(),
                     entry.description.as_deref(),
-                    true,
+                    entry.static_server,
                     connection.0.as_deref(),
                     connection.1.as_deref(),
                 );
+                server.priority = entry.normalized_priority().to_string();
                 server.enabled = !state.disabled_servers.contains(&endpoint);
                 apply_server_update(&mut server, state.server_overrides.get(&endpoint));
                 server_map.insert(endpoint, server);
@@ -118,6 +119,8 @@ impl EmulebbCore {
                 obfuscation_port_udp: server.obfuscation_udp_port.unwrap_or_default(),
                 soft_files: u32::try_from(server.soft_files).unwrap_or(u32::MAX),
                 hard_files: u32::try_from(server.hard_files).unwrap_or(u32::MAX),
+                priority: server.priority.clone(),
+                static_server: server.static_server,
             };
             if let Some(existing) = config.server_entries.iter_mut().find(|entry| {
                 format!("{}:{}", entry.host, entry.port).eq_ignore_ascii_case(endpoint)

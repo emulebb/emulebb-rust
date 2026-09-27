@@ -69,6 +69,8 @@ fn test_server(obfuscation_port_tcp: u16, udp_flags: u32) -> ResolvedServerEntry
             obfuscation_port_udp: 0,
             soft_files: 0,
             hard_files: 0,
+            priority: "normal".to_string(),
+            static_server: false,
         },
         ip: Ipv4Addr::LOCALHOST,
     }
@@ -89,6 +91,8 @@ fn test_udp_obfuscated_server() -> ResolvedServerEntry {
             obfuscation_port_udp: 4675,
             soft_files: 0,
             hard_files: 0,
+            priority: "normal".to_string(),
+            static_server: false,
         },
         ip: Ipv4Addr::LOCALHOST,
     }

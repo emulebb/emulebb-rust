@@ -218,6 +218,20 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
         "Shadowed by core safe server connection settings.",
     ),
     app_setting(
+        "ed2k.useServerPriorities",
+        SettingSurfaceClass::NormalControl,
+        true,
+        "Servers",
+        "Try high-priority servers before normal and low-priority servers.",
+    ),
+    app_setting(
+        "ed2k.autoConnectStaticOnly",
+        SettingSurfaceClass::NormalControl,
+        true,
+        "Servers",
+        "Restrict startup auto-connect to static servers.",
+    ),
+    app_setting(
         "ed2k.keepaliveSecs",
         SettingSurfaceClass::AdvancedControl,
         true,

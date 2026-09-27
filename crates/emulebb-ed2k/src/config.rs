@@ -47,6 +47,14 @@ pub struct Ed2kRuntimeConfig {
     /// Limit automatic server connection attempts to one at a time. When
     /// disabled, MFC keeps up to two attempts in flight.
     pub safe_server_connect: bool,
+    /// Honor each server's user-selected high/normal/low priority when choosing
+    /// automatic connection candidates. Mirrors eMule's `Scoresystem`
+    /// preference, which defaults to enabled.
+    pub use_server_priorities: bool,
+    /// Restrict automatic connection attempts to servers marked static.
+    /// Explicitly targeted REST/UI connections remain allowed. Mirrors eMule's
+    /// `AutoConnectStaticOnly` preference, which defaults to disabled.
+    pub auto_connect_static_only: bool,
     /// Idle interval before the client refreshes the ED2K server session with an
     /// empty OP_OFFERFILES keepalive (eMule `ServerKeepAliveTimeout`,
     /// ServerConnect.cpp:672-674). 0 disables the keepalive. Stock defaults this
@@ -164,6 +172,31 @@ pub struct Ed2kServerEntry {
     pub soft_files: u32,
     /// Server-reported hard file limit (server.met / status). 0 = unknown.
     pub hard_files: u32,
+    /// User-selected server priority (`high`, `normal`, or `low`). Empty or
+    /// unknown values are treated as `normal` for backward-compatible config.
+    #[serde(default = "default_server_priority")]
+    pub priority: String,
+    /// Membership in the operator's static server list. Static servers survive
+    /// dead-server pruning and may be selected by static-only auto-connect.
+    pub static_server: bool,
+}
+
+fn default_server_priority() -> String {
+    "normal".to_string()
+}
+
+impl Ed2kServerEntry {
+    /// Return a validated stock server-priority spelling. Programmatically
+    /// constructed legacy entries may still contain an empty value even though
+    /// serde supplies `normal` when the field is absent.
+    #[must_use]
+    pub fn normalized_priority(&self) -> &str {
+        match self.priority.as_str() {
+            "high" => "high",
+            "low" => "low",
+            _ => "normal",
+        }
+    }
 }
 
 impl Ed2kRuntimeConfig {
@@ -222,6 +255,11 @@ impl Default for Ed2kRuntimeConfig {
             reconnect_interval_secs: 30,
             reconnect_enabled: true,
             safe_server_connect: true,
+            // eMule Scoresystem defaults on; priority sorting is stable within
+            // high/normal/low tiers (ServerList::Sort).
+            use_server_priorities: true,
+            // eMule AutoConnectStaticOnly defaults off.
+            auto_connect_static_only: false,
             // eMule ServerKeepAliveTimeout is 0/disabled by default and, when
             // enabled, minutes-scale (cap 1440 min). 60s was a sub-minute
             // non-stock fingerprint; 20 minutes matches the stock posture while
@@ -305,6 +343,8 @@ mod tests {
         assert_eq!(config.upload_queue.session_time_limit_secs, 7_200);
         // eMule DeadServerRetry default is 1.
         assert_eq!(config.dead_server_retries, 1);
+        assert!(config.use_server_priorities);
+        assert!(!config.auto_connect_static_only);
         // Stock AddServersFromServer defaults to false (Preferences.cpp:3207).
         assert!(!config.add_servers_from_server);
         assert_eq!(config.server_nickname(), "eMule");

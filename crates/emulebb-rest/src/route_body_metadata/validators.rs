@@ -34,6 +34,8 @@ const ED2K_SETTINGS_FIELDS: &[&str] = &[
     "reconnectIntervalSecs",
     "reconnectEnabled",
     "safeServerConnect",
+    "useServerPriorities",
+    "autoConnectStaticOnly",
     "keepaliveSecs",
     "sessionRotationSecs",
     "maxConcurrentDownloads",

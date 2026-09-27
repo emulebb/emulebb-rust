@@ -262,6 +262,8 @@ pub(super) struct AppSettingsForm {
     pub(super) ed2k_obfuscation_enabled: bool,
     pub(super) ed2k_connect_timeout_secs: String,
     pub(super) ed2k_reconnect_interval_secs: String,
+    pub(super) ed2k_use_server_priorities: bool,
+    pub(super) ed2k_auto_connect_static_only: bool,
     pub(super) ed2k_enable_udp_reask: bool,
     pub(super) ed2k_publish_emule_rust_identity: bool,
     pub(super) kad_listen_port: String,

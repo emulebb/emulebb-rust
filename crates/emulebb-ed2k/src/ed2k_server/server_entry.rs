@@ -21,6 +21,8 @@ pub(super) struct ConfiguredServerEntry {
     pub(super) obfuscation_port_udp: u16,
     pub(super) soft_files: u32,
     pub(super) hard_files: u32,
+    pub(super) priority: String,
+    pub(super) static_server: bool,
 }
 
 /// eMule offer-batch cap from a server's soft file limit: use the soft limit,
@@ -58,6 +60,10 @@ impl ConfiguredServerEntry {
             obfuscation_port_udp: 0,
             soft_files: 0,
             hard_files: 0,
+            priority: "normal".to_string(),
+            // An endpoint-only row is an explicit operator bootstrap entry,
+            // equivalent to a staticservers.dat member.
+            static_server: true,
         })
     }
 
@@ -78,6 +84,8 @@ impl ConfiguredServerEntry {
             obfuscation_port_udp: entry.obfuscation_port_udp,
             soft_files: entry.soft_files,
             hard_files: entry.hard_files,
+            priority: entry.normalized_priority().to_string(),
+            static_server: entry.static_server,
         })
     }
 
@@ -169,6 +177,18 @@ pub(super) fn configured_server_entries(
         }
     }
 
+    if config.use_server_priorities {
+        // `CServerList::Sort` is stable within each preference tier: HIGH rows
+        // move to the head, LOW rows to the tail, and NORMAL rows retain their
+        // relative list order. A stable key sort expresses the resulting
+        // high -> normal -> low order directly.
+        ordered.sort_by_key(|entry| match entry.priority.as_str() {
+            "high" => 0,
+            "low" => 2,
+            _ => 1,
+        });
+    }
+
     Ok(ordered)
 }
 
@@ -253,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_endpoints_are_ordered_before_persisted_metadata() {
+    fn configured_endpoints_are_ordered_before_same_priority_persisted_metadata() {
         let config = Ed2kRuntimeConfig {
             server_endpoints: vec!["203.0.113.20:4661".to_string()],
             server_entries: vec![
@@ -268,6 +288,52 @@ mod tests {
         assert_eq!(entries[0].base_endpoint_text(), "203.0.113.20:4661");
         assert_eq!(entries[0].display_name(), "configured-with-metadata");
         assert_eq!(entries[1].base_endpoint_text(), "203.0.113.10:4661");
+    }
+
+    #[test]
+    fn configured_servers_use_stable_stock_priority_order() {
+        let mut high_a = metadata_entry("203.0.113.40", 4661, "high-a");
+        high_a.priority = "high".to_string();
+        let mut high_b = metadata_entry("203.0.113.50", 4661, "high-b");
+        high_b.priority = "high".to_string();
+        let mut low = metadata_entry("203.0.113.10", 4661, "low");
+        low.priority = "low".to_string();
+        let config = Ed2kRuntimeConfig {
+            server_entries: vec![
+                low,
+                metadata_entry("203.0.113.20", 4661, "normal-a"),
+                high_a,
+                metadata_entry("203.0.113.30", 4661, "normal-b"),
+                high_b,
+            ],
+            ..Ed2kRuntimeConfig::default()
+        };
+
+        let entries = configured_server_entries(&config).unwrap();
+        let names = entries
+            .iter()
+            .map(ConfiguredServerEntry::display_name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["high-a", "high-b", "normal-a", "normal-b", "low"]);
+    }
+
+    #[test]
+    fn disabling_server_priorities_preserves_configured_order() {
+        let mut high = metadata_entry("203.0.113.20", 4661, "high");
+        high.priority = "high".to_string();
+        let mut low = metadata_entry("203.0.113.10", 4661, "low");
+        low.priority = "low".to_string();
+        let config = Ed2kRuntimeConfig {
+            server_entries: vec![low, high],
+            use_server_priorities: false,
+            ..Ed2kRuntimeConfig::default()
+        };
+
+        let entries = configured_server_entries(&config).unwrap();
+
+        assert_eq!(entries[0].display_name(), "low");
+        assert_eq!(entries[1].display_name(), "high");
     }
 
     #[test]

@@ -230,6 +230,10 @@ pub struct Ed2kServerLoopOptions {
     pub bind_ip: Ipv4Addr,
     pub nat: Arc<NatManager>,
     pub config: Ed2kRuntimeConfig,
+    /// Whether this loop was started by application auto-connect. Stock applies
+    /// `AutoConnectStaticOnly` only to automatic connection cycles, not a
+    /// directed operator connection.
+    pub automatic_connection: bool,
     pub hello_identity: Ed2kHelloIdentity,
     pub shared_catalog: Ed2kSharedCatalog,
     pub state: Arc<RwLock<Ed2kServerState>>,

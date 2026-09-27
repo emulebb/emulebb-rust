@@ -2167,6 +2167,8 @@ type SettingsForm = {
   kadListenPort: string;
   obfuscationEnabled: boolean;
   ed2kReconnectEnabled: boolean;
+  useServerPriorities: boolean;
+  autoConnectStaticOnly: boolean;
   enableUdpReask: boolean;
   publishEmuleRustIdentity: boolean;
   kadPublishSharedFilesEnabled: boolean;
@@ -2268,6 +2270,8 @@ const emptySettingsForm: SettingsForm = {
   kadListenPort: "",
   obfuscationEnabled: false,
   ed2kReconnectEnabled: false,
+  useServerPriorities: false,
+  autoConnectStaticOnly: false,
   enableUdpReask: false,
   publishEmuleRustIdentity: false,
   kadPublishSharedFilesEnabled: false,
@@ -2503,6 +2507,8 @@ export function SettingsView(props: {
           "core.safeServerConnect",
           "core.addServersFromServer",
           "ed2k.reconnectEnabled",
+          "ed2k.useServerPriorities",
+          "ed2k.autoConnectStaticOnly",
           "ed2k.serverConnectTimeoutSecs",
           "ed2k.callbackTimeoutSecs",
           "ed2k.reconnectIntervalSecs",
@@ -2515,6 +2521,8 @@ export function SettingsView(props: {
               {renderToggle("core.safeServerConnect", "safeServerConnect", "Safe server connect")}
               {renderToggle("core.addServersFromServer", "addServersFromServer", "Add servers from server")}
               {renderToggle("ed2k.reconnectEnabled", "ed2kReconnectEnabled", "eD2K reconnect")}
+              {renderToggle("ed2k.useServerPriorities", "useServerPriorities", "Use server priorities")}
+              {renderToggle("ed2k.autoConnectStaticOnly", "autoConnectStaticOnly", "Auto-connect static servers only")}
               {renderField("ed2k.serverConnectTimeoutSecs", "ed2kServerConnectTimeoutSecs", "Server connect timeout seconds")}
               {renderField("ed2k.callbackTimeoutSecs", "ed2kCallbackTimeoutSecs", "Callback timeout seconds")}
               {renderField("ed2k.reconnectIntervalSecs", "ed2kReconnectIntervalSecs", "Reconnect interval seconds")}
@@ -3077,6 +3085,8 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(ed2k, "downloadLimitBytesPerSec", parseNumber(form.ed2kDownloadLimitBytesPerSec), parseNumber(baseline.ed2kDownloadLimitBytesPerSec));
   putChanged(ed2k, "obfuscationEnabled", form.obfuscationEnabled, baseline.obfuscationEnabled);
   putChanged(ed2k, "reconnectEnabled", form.ed2kReconnectEnabled, baseline.ed2kReconnectEnabled);
+  putChanged(ed2k, "useServerPriorities", form.useServerPriorities, baseline.useServerPriorities);
+  putChanged(ed2k, "autoConnectStaticOnly", form.autoConnectStaticOnly, baseline.autoConnectStaticOnly);
   putChanged(ed2k, "enableUdpReask", form.enableUdpReask, baseline.enableUdpReask);
   putChanged(ed2k, "publishEmuleRustIdentity", form.publishEmuleRustIdentity, baseline.publishEmuleRustIdentity);
   putChanged(ed2k, "deadServerRetries", parseNumber(form.ed2kDeadServerRetries), parseNumber(baseline.ed2kDeadServerRetries));
@@ -3222,6 +3232,8 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     kadListenPort: String(numberField(settings.kad, "listenPort") ?? ""),
     obfuscationEnabled: boolField(settings.ed2k, "obfuscationEnabled"),
     ed2kReconnectEnabled: boolField(settings.ed2k, "reconnectEnabled"),
+    useServerPriorities: boolField(settings.ed2k, "useServerPriorities"),
+    autoConnectStaticOnly: boolField(settings.ed2k, "autoConnectStaticOnly"),
     enableUdpReask: boolField(settings.ed2k, "enableUdpReask"),
     publishEmuleRustIdentity: boolField(settings.ed2k, "publishEmuleRustIdentity"),
     kadBootstrapMinRoutingContacts: String(numberField(settings.kad, "bootstrapMinRoutingContacts") ?? ""),

@@ -37,6 +37,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         bind_ip,
         nat,
         config,
+        automatic_connection,
         hello_identity,
         shared_catalog,
         state,
@@ -101,8 +102,11 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
     while !shutdown.load(Ordering::Relaxed) {
         let mut attempted_any = false;
         let target_endpoint = target_server_endpoint.read().await.clone();
-        let selected_servers =
-            selected_configured_servers(&configured_servers, target_endpoint.as_deref());
+        let selected_servers = selected_configured_servers(
+            &configured_servers,
+            target_endpoint.as_deref(),
+            automatic_connection && config.auto_connect_static_only,
+        );
         if max_simultaneous_server_attempts(config.safe_server_connect, target_endpoint.as_deref())
             == 2
             && selected_servers.len() > 1
@@ -462,9 +466,14 @@ fn report_parallel_attempt_failure(
 fn selected_configured_servers(
     configured_servers: &[ConfiguredServerEntry],
     target_endpoint: Option<&str>,
+    automatic_static_only: bool,
 ) -> Vec<ConfiguredServerEntry> {
     let Some(target_endpoint) = target_endpoint else {
-        return configured_servers.to_vec();
+        return configured_servers
+            .iter()
+            .filter(|entry| !automatic_static_only || entry.static_server)
+            .cloned()
+            .collect();
     };
     if let Some(target) = configured_servers.iter().find(|entry| {
         entry
@@ -511,7 +520,7 @@ mod tests {
             server("192.0.2.3:4661"),
         ];
 
-        let selected = selected_configured_servers(&servers, Some("192.0.2.2:4661"));
+        let selected = selected_configured_servers(&servers, Some("192.0.2.2:4661"), true);
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].base_endpoint_text(), "192.0.2.2:4661");
@@ -521,7 +530,7 @@ mod tests {
     fn unknown_target_uses_target_without_fallbacks() {
         let servers = vec![server("192.0.2.1:4661"), server("192.0.2.2:4661")];
 
-        let selected = selected_configured_servers(&servers, Some("192.0.2.99:4661"));
+        let selected = selected_configured_servers(&servers, Some("192.0.2.99:4661"), true);
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].base_endpoint_text(), "192.0.2.99:4661");
@@ -531,9 +540,35 @@ mod tests {
     fn invalid_unknown_target_has_no_fallbacks() {
         let servers = vec![server("192.0.2.1:4661"), server("192.0.2.2:4661")];
 
-        let selected = selected_configured_servers(&servers, Some("not-a-server"));
+        let selected = selected_configured_servers(&servers, Some("not-a-server"), true);
 
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn automatic_static_only_filters_without_reordering() {
+        let mut dynamic = server("192.0.2.1:4661");
+        dynamic.static_server = false;
+        let static_server = server("192.0.2.2:4661");
+        let mut dynamic_two = server("192.0.2.3:4661");
+        dynamic_two.static_server = false;
+        let servers = vec![dynamic, static_server, dynamic_two];
+
+        let selected = selected_configured_servers(&servers, None, true);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].base_endpoint_text(), "192.0.2.2:4661");
+    }
+
+    #[test]
+    fn explicit_target_bypasses_automatic_static_only_filter() {
+        let mut dynamic = server("192.0.2.1:4661");
+        dynamic.static_server = false;
+
+        let selected = selected_configured_servers(&[dynamic], Some("192.0.2.1:4661"), true);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].base_endpoint_text(), "192.0.2.1:4661");
     }
 
     #[test]

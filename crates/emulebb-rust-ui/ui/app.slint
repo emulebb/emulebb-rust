@@ -235,6 +235,8 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-ed2k-obfuscation-enabled;
     in-out property <string> settings-ed2k-connect-timeout-secs;
     in-out property <string> settings-ed2k-reconnect-interval-secs;
+    in-out property <bool> settings-ed2k-use-server-priorities;
+    in-out property <bool> settings-ed2k-auto-connect-static-only;
     in-out property <bool> settings-ed2k-enable-udp-reask;
     in-out property <bool> settings-ed2k-publish-emule-rust-identity;
     in-out property <string> settings-kad-listen-port;
@@ -1000,6 +1002,8 @@ export component MainWindow inherits Window {
                                         Switch { text: "Kademlia"; checked <=> root.core-network-kademlia; }
                                         Switch { text: "eD2K"; checked <=> root.core-network-ed2k; }
                                         Switch { text: "eD2K obfuscation"; checked <=> root.settings-ed2k-obfuscation-enabled; }
+                                        Switch { text: "Use server priorities"; checked <=> root.settings-ed2k-use-server-priorities; }
+                                        Switch { text: "Auto-connect static only"; checked <=> root.settings-ed2k-auto-connect-static-only; }
                                         Switch { text: "eD2K UDP reask"; checked <=> root.settings-ed2k-enable-udp-reask; }
                                         Switch { text: "Publish Rust identity"; checked <=> root.settings-ed2k-publish-emule-rust-identity; }
                                         Switch { text: "Kad publish shared files"; checked <=> root.settings-kad-publish-shared-files-enabled; }

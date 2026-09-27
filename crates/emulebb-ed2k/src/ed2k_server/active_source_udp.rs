@@ -534,6 +534,8 @@ mod tests {
                 obfuscation_port_udp: 0,
                 soft_files: 0,
                 hard_files: 0,
+                priority: "normal".to_string(),
+                static_server: false,
             },
             ip: Ipv4Addr::new(203, 0, 113, 10),
         };

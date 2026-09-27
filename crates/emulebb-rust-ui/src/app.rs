@@ -479,6 +479,8 @@ fn app_settings_form(ui: &MainWindow) -> AppSettingsForm {
         ed2k_obfuscation_enabled: ui.get_settings_ed2k_obfuscation_enabled(),
         ed2k_connect_timeout_secs: ui.get_settings_ed2k_connect_timeout_secs().to_string(),
         ed2k_reconnect_interval_secs: ui.get_settings_ed2k_reconnect_interval_secs().to_string(),
+        ed2k_use_server_priorities: ui.get_settings_ed2k_use_server_priorities(),
+        ed2k_auto_connect_static_only: ui.get_settings_ed2k_auto_connect_static_only(),
         ed2k_enable_udp_reask: ui.get_settings_ed2k_enable_udp_reask(),
         ed2k_publish_emule_rust_identity: ui.get_settings_ed2k_publish_emule_rust_identity(),
         kad_listen_port: ui.get_settings_kad_listen_port().to_string(),

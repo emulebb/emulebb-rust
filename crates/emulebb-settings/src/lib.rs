@@ -395,6 +395,8 @@ pub struct Ed2kSettings {
     pub reconnect_interval_secs: u64,
     pub reconnect_enabled: bool,
     pub safe_server_connect: bool,
+    pub use_server_priorities: bool,
+    pub auto_connect_static_only: bool,
     pub keepalive_secs: u64,
     pub session_rotation_secs: u64,
     pub max_concurrent_downloads: usize,
@@ -649,6 +651,10 @@ pub struct Ed2kSettingsUpdate {
     pub reconnect_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safe_server_connect: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_server_priorities: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_connect_static_only: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -913,6 +919,8 @@ impl Default for Ed2kSettings {
             reconnect_interval_secs: 30,
             reconnect_enabled: true,
             safe_server_connect: true,
+            use_server_priorities: true,
+            auto_connect_static_only: false,
             keepalive_secs: 20 * 60,
             session_rotation_secs: 0,
             max_concurrent_downloads: 500,
@@ -1365,6 +1373,12 @@ pub fn apply_ed2k_settings_update(settings: &mut Ed2kSettings, update: Ed2kSetti
     if let Some(value) = update.safe_server_connect {
         settings.safe_server_connect = value;
     }
+    if let Some(value) = update.use_server_priorities {
+        settings.use_server_priorities = value;
+    }
+    if let Some(value) = update.auto_connect_static_only {
+        settings.auto_connect_static_only = value;
+    }
     if let Some(value) = update.keepalive_secs {
         settings.keepalive_secs = value;
     }
@@ -1638,6 +1652,8 @@ impl From<Ed2kSettings> for Ed2kSettingsUpdate {
             reconnect_interval_secs: Some(settings.reconnect_interval_secs),
             reconnect_enabled: Some(settings.reconnect_enabled),
             safe_server_connect: Some(settings.safe_server_connect),
+            use_server_priorities: Some(settings.use_server_priorities),
+            auto_connect_static_only: Some(settings.auto_connect_static_only),
             keepalive_secs: Some(settings.keepalive_secs),
             session_rotation_secs: Some(settings.session_rotation_secs),
             max_concurrent_downloads: Some(settings.max_concurrent_downloads),

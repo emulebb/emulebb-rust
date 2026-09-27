@@ -198,8 +198,8 @@ async fn effective_ed2k_config_includes_runtime_servers() {
         address: "203.0.113.20".to_string(),
         port: 4661,
         name: None,
-        priority: None,
-        static_server: Some(false),
+        priority: Some("high".to_string()),
+        static_server: Some(true),
         connect: None,
     })
     .await
@@ -213,12 +213,13 @@ async fn effective_ed2k_config_includes_runtime_servers() {
             .iter()
             .any(|endpoint| endpoint == "203.0.113.10:4661")
     );
-    assert!(
-        config
-            .server_entries
-            .iter()
-            .any(|entry| entry.host == "203.0.113.20" && entry.port == 4661)
-    );
+    let runtime_server = config
+        .server_entries
+        .iter()
+        .find(|entry| entry.host == "203.0.113.20" && entry.port == 4661)
+        .expect("runtime server carried into connection config");
+    assert_eq!(runtime_server.priority, "high");
+    assert!(runtime_server.static_server);
 }
 
 #[tokio::test]

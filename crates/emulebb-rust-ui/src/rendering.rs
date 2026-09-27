@@ -227,6 +227,8 @@ pub(super) fn render_app_settings(ui: &MainWindow, settings: &AppSettings) {
     ui.set_settings_ed2k_reconnect_interval_secs(
         settings.ed2k.reconnect_interval_secs.to_string().into(),
     );
+    ui.set_settings_ed2k_use_server_priorities(settings.ed2k.use_server_priorities);
+    ui.set_settings_ed2k_auto_connect_static_only(settings.ed2k.auto_connect_static_only);
     ui.set_settings_ed2k_enable_udp_reask(settings.ed2k.enable_udp_reask);
     ui.set_settings_ed2k_publish_emule_rust_identity(settings.ed2k.publish_emule_rust_identity);
     ui.set_settings_kad_listen_port(optional_u16(settings.kad.listen_port).into());

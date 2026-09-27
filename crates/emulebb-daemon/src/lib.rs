@@ -479,6 +479,8 @@ fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfi
         reconnect_interval_secs: settings.reconnect_interval_secs,
         reconnect_enabled: settings.reconnect_enabled,
         safe_server_connect: settings.safe_server_connect,
+        use_server_priorities: settings.use_server_priorities,
+        auto_connect_static_only: settings.auto_connect_static_only,
         keepalive_secs: settings.keepalive_secs,
         session_rotation_secs: settings.session_rotation_secs,
         max_concurrent_downloads: settings.max_concurrent_downloads,
@@ -714,7 +716,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             if !connect_core.core_settings().await.auto_connect {
                 return;
             }
-            match connect_core.connect_ed2k().await {
+            match connect_core.auto_connect_ed2k().await {
                 Ok(status) => info!(
                     connected = status.connected,
                     firewalled = status.firewalled.unwrap_or(false),
