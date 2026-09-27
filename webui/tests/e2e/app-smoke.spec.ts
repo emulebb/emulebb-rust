@@ -138,13 +138,34 @@ test("search create form uses REST-native type tokens", async ({ page }) => {
   await searchPanel.getByPlaceholder("Search query").fill(" alpha   beta ");
   await searchPanel.locator("select").nth(0).selectOption("kad");
   await searchPanel.locator("select").nth(1).selectOption("arc");
+  await searchPanel.getByText("Advanced search filters").click();
+  await searchPanel.getByPlaceholder("Extension").fill(" zip ");
+  await searchPanel.getByPlaceholder("Minimum complete sources").fill("2");
+  await searchPanel.getByPlaceholder("Minimum bitrate (kbps)").fill("192");
+  await searchPanel.getByPlaceholder("Minimum length (seconds)").fill("180");
+  await searchPanel.getByPlaceholder("Codec").fill(" deflate ");
+  await searchPanel.getByPlaceholder("Title").fill(" Synthetic Title ");
+  await searchPanel.getByPlaceholder("Album").fill(" Sample Album ");
+  await searchPanel.getByPlaceholder("Artist").fill(" Example Artist ");
   await expect(searchPanel.getByText("Search query must be at most 160 characters.")).toHaveCount(0);
   await expect(searchPanel.getByText("Search query must not contain control characters.")).toHaveCount(0);
   await startSearch.click();
   await expect(page.getByText("Search started")).toBeVisible();
   const searchPost = requests.find((request) => request.method === "POST" && request.path === "searches");
   expect(searchPost).toBeDefined();
-  expect(JSON.parse(searchPost?.body ?? "{}")).toEqual({ query: "alpha beta", method: "kad", type: "arc" });
+  expect(JSON.parse(searchPost?.body ?? "{}")).toEqual({
+    query: "alpha beta",
+    method: "kad",
+    type: "arc",
+    extension: "zip",
+    minCompleteSources: 2,
+    minBitrateKbps: 192,
+    minLengthSeconds: 180,
+    codec: "deflate",
+    title: "Synthetic Title",
+    album: "Sample Album",
+    artist: "Example Artist"
+  });
 });
 
 test("shared folder add form validates root paths", async ({ page }) => {

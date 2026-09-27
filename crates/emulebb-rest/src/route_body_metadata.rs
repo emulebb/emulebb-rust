@@ -186,7 +186,14 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         "minSizeBytes",
         "maxSizeBytes",
         "minAvailability",
+        "minCompleteSources",
+        "minBitrateKbps",
+        "minLengthSeconds",
         "extension",
+        "codec",
+        "title",
+        "album",
+        "artist",
     ];
     const URL_IMPORT: &[&str] = &["url"];
     const KAD_BOOTSTRAP: &[&str] = &["address", "port"];

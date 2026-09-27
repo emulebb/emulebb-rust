@@ -431,6 +431,17 @@ export function SearchView(props: {
   const [query, setQuery] = useState("");
   const [method, setMethod] = useState("automatic");
   const [fileType, setFileType] = useState("");
+  const [extension, setExtension] = useState("");
+  const [minSizeBytes, setMinSizeBytes] = useState("");
+  const [maxSizeBytes, setMaxSizeBytes] = useState("");
+  const [minAvailability, setMinAvailability] = useState("");
+  const [minCompleteSources, setMinCompleteSources] = useState("");
+  const [minBitrateKbps, setMinBitrateKbps] = useState("");
+  const [minLengthSeconds, setMinLengthSeconds] = useState("");
+  const [codec, setCodec] = useState("");
+  const [title, setTitle] = useState("");
+  const [album, setAlbum] = useState("");
+  const [artist, setArtist] = useState("");
   const [categoryId, setCategoryId] = useState("0");
   const [paused, setPaused] = useState(false);
   const results = props.latestSearch?.results ?? [];
@@ -442,7 +453,22 @@ export function SearchView(props: {
     if (error) {
       throw new Error(error);
     }
-    const next = await props.client.post<SearchItem>("searches", { query: normalizedQuery, method, type: fileType });
+    const next = await props.client.post<SearchItem>("searches", {
+      query: normalizedQuery,
+      method,
+      type: fileType,
+      ...(extension.trim() ? { extension: extension.trim() } : {}),
+      ...(minSizeBytes ? { minSizeBytes: Number(minSizeBytes) } : {}),
+      ...(maxSizeBytes ? { maxSizeBytes: Number(maxSizeBytes) } : {}),
+      ...(minAvailability ? { minAvailability: Number(minAvailability) } : {}),
+      ...(minCompleteSources ? { minCompleteSources: Number(minCompleteSources) } : {}),
+      ...(minBitrateKbps ? { minBitrateKbps: Number(minBitrateKbps) } : {}),
+      ...(minLengthSeconds ? { minLengthSeconds: Number(minLengthSeconds) } : {}),
+      ...(codec.trim() ? { codec: codec.trim() } : {}),
+      ...(title.trim() ? { title: title.trim() } : {}),
+      ...(album.trim() ? { album: album.trim() } : {}),
+      ...(artist.trim() ? { artist: artist.trim() } : {})
+    });
     props.setLatestSearch(next);
     await props.refresh();
   };
@@ -480,6 +506,22 @@ export function SearchView(props: {
         <button class="btn" type="submit" disabled={!normalizeSearchQuery(query) || Boolean(searchQueryError)}><Search size={16} />Start</button>
       </form>
       {searchQueryError && <p class="field-error">{searchQueryError}</p>}
+      <details class="search-filters">
+        <summary>Advanced search filters</summary>
+        <div class="form-row subtle-row">
+          <input class="form-control" value={extension} maxlength={256} placeholder="Extension" onInput={(event) => setExtension(event.currentTarget.value)} />
+          <input class="form-control" type="number" min="0" step="1" value={minSizeBytes} placeholder="Minimum bytes" onInput={(event) => setMinSizeBytes(event.currentTarget.value)} />
+          <input class="form-control" type="number" min="0" step="1" value={maxSizeBytes} placeholder="Maximum bytes" onInput={(event) => setMaxSizeBytes(event.currentTarget.value)} />
+          <input class="form-control" type="number" min="0" max="1000000" step="1" value={minAvailability} placeholder="Minimum sources" onInput={(event) => setMinAvailability(event.currentTarget.value)} />
+          <input class="form-control" type="number" min="0" max="1000000" step="1" value={minCompleteSources} placeholder="Minimum complete sources" onInput={(event) => setMinCompleteSources(event.currentTarget.value)} />
+          <input class="form-control" type="number" min="0" max="4294967295" step="1" value={minBitrateKbps} placeholder="Minimum bitrate (kbps)" onInput={(event) => setMinBitrateKbps(event.currentTarget.value)} />
+          <input class="form-control" type="number" min="0" max="4294967295" step="1" value={minLengthSeconds} placeholder="Minimum length (seconds)" onInput={(event) => setMinLengthSeconds(event.currentTarget.value)} />
+          <input class="form-control" value={codec} maxlength={256} placeholder="Codec" onInput={(event) => setCodec(event.currentTarget.value)} />
+          <input class="form-control" value={title} maxlength={256} placeholder="Title" onInput={(event) => setTitle(event.currentTarget.value)} />
+          <input class="form-control" value={album} maxlength={256} placeholder="Album" onInput={(event) => setAlbum(event.currentTarget.value)} />
+          <input class="form-control" value={artist} maxlength={256} placeholder="Artist" onInput={(event) => setArtist(event.currentTarget.value)} />
+        </div>
+      </details>
       <div class="form-row subtle-row">
         <select class="form-select" value={categoryId} onInput={(event) => setCategoryId(event.currentTarget.value)}>
           <option value="0">Download uncategorized</option>

@@ -22,7 +22,13 @@ pub(crate) fn search_criteria_from_request(request: &SearchCreate) -> SearchCrit
         min_size: request.min_size_bytes.filter(|&v| v > 0),
         max_size: request.max_size_bytes.filter(|&v| v > 0),
         min_availability: request.min_availability.filter(|&v| v > 0),
-        min_complete_sources: None,
+        min_complete_sources: request.min_complete_sources.filter(|&v| v > 0),
+        min_bitrate_kbps: request.min_bitrate_kbps.filter(|&v| v > 0),
+        min_length_seconds: request.min_length_seconds.filter(|&v| v > 0),
+        codec: non_empty(&request.codec),
+        title: non_empty(&request.title),
+        album: non_empty(&request.album),
+        artist: non_empty(&request.artist),
     }
 }
 
@@ -219,6 +225,13 @@ mod tests {
             min_size_bytes: None,
             max_size_bytes: None,
             min_availability: None,
+            min_complete_sources: None,
+            min_bitrate_kbps: None,
+            min_length_seconds: None,
+            codec: String::new(),
+            title: String::new(),
+            album: String::new(),
+            artist: String::new(),
         }
     }
 
@@ -281,6 +294,38 @@ mod tests {
         apply_search_filters(&mut results, &req);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Movie.One.mkv");
+    }
+
+    #[test]
+    fn media_search_fields_map_to_server_criteria() {
+        let mut req = request();
+        req.r#type = "audio".to_string();
+        req.extension = " mp3 ".to_string();
+        req.min_size_bytes = Some(1_024);
+        req.max_size_bytes = Some(8_192);
+        req.min_availability = Some(4);
+        req.min_complete_sources = Some(2);
+        req.min_bitrate_kbps = Some(192);
+        req.min_length_seconds = Some(180);
+        req.codec = " MPEG Layer-3 ".to_string();
+        req.title = " Synthetic Title ".to_string();
+        req.album = " Sample Album ".to_string();
+        req.artist = " Example Artist ".to_string();
+
+        let criteria = search_criteria_from_request(&req);
+
+        assert_eq!(criteria.file_type.as_deref(), Some("Audio"));
+        assert_eq!(criteria.extension.as_deref(), Some("mp3"));
+        assert_eq!(criteria.min_size, Some(1_024));
+        assert_eq!(criteria.max_size, Some(8_192));
+        assert_eq!(criteria.min_availability, Some(4));
+        assert_eq!(criteria.min_complete_sources, Some(2));
+        assert_eq!(criteria.min_bitrate_kbps, Some(192));
+        assert_eq!(criteria.min_length_seconds, Some(180));
+        assert_eq!(criteria.codec.as_deref(), Some("MPEG Layer-3"));
+        assert_eq!(criteria.title.as_deref(), Some("Synthetic Title"));
+        assert_eq!(criteria.album.as_deref(), Some("Sample Album"));
+        assert_eq!(criteria.artist.as_deref(), Some("Example Artist"));
     }
 
     #[test]

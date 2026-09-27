@@ -675,6 +675,20 @@ td {
   padding: 8px;
 }
 
+.search-filters {
+  margin-bottom: 12px;
+}
+
+.search-filters summary {
+  color: var(--tblr-secondary);
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.search-filters:not([open]) summary {
+  margin-bottom: 0;
+}
+
 .danger-row {
   border-top: var(--tblr-border-width) solid var(--tblr-border-color);
   margin-top: 12px;

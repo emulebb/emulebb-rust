@@ -224,6 +224,20 @@ pub struct SearchCreate {
     pub max_size_bytes: Option<u64>,
     #[serde(default)]
     pub min_availability: Option<u32>,
+    #[serde(default)]
+    pub min_complete_sources: Option<u32>,
+    #[serde(default)]
+    pub min_bitrate_kbps: Option<u32>,
+    #[serde(default)]
+    pub min_length_seconds: Option<u32>,
+    #[serde(default)]
+    pub codec: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub artist: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

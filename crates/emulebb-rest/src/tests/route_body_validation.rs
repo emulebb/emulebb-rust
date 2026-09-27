@@ -224,6 +224,26 @@ async fn search_create_body_uses_canonical_validation() {
             r#"{"query":"sample","minAvailability":1000001}"#.to_string(),
             "minAvailability must be an unsigned number in the range 0..1000000",
         ),
+        (
+            r#"{"query":"sample","artist":1}"#.to_string(),
+            "artist must be a string",
+        ),
+        (
+            r#"{"query":"sample","codec":"bad\u0001codec"}"#.to_string(),
+            "codec must not contain control characters",
+        ),
+        (
+            r#"{"query":"sample","minCompleteSources":1000001}"#.to_string(),
+            "minCompleteSources must be an unsigned number in the range 0..1000000",
+        ),
+        (
+            r#"{"query":"sample","minBitrateKbps":4294967296}"#.to_string(),
+            "minBitrateKbps must be an unsigned 32-bit number",
+        ),
+        (
+            r#"{"query":"sample","minLengthSeconds":"60"}"#.to_string(),
+            "minLengthSeconds must be an unsigned number",
+        ),
     ];
 
     for (body, expected_message) in cases {

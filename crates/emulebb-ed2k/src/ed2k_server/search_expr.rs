@@ -26,6 +26,12 @@ const FT_FILETYPE: u8 = 0x03;
 const FT_FILEFORMAT: u8 = 0x04;
 const FT_SOURCES: u8 = 0x15;
 const FT_COMPLETE_SOURCES: u8 = 0x30;
+const FT_MEDIA_ARTIST: u8 = 0xD0;
+const FT_MEDIA_ALBUM: u8 = 0xD1;
+const FT_MEDIA_TITLE: u8 = 0xD2;
+const FT_MEDIA_LENGTH: u8 = 0xD3;
+const FT_MEDIA_BITRATE: u8 = 0xD4;
+const FT_MEDIA_CODEC: u8 = 0xD5;
 const ED2K_SEARCH_OP_GREATER_EQUAL: u8 = 3;
 const ED2K_SEARCH_OP_LESS_EQUAL: u8 = 4;
 
@@ -50,6 +56,12 @@ pub struct SearchCriteria {
     pub max_size: Option<u64>,
     pub min_availability: Option<u32>,
     pub min_complete_sources: Option<u32>,
+    pub min_bitrate_kbps: Option<u32>,
+    pub min_length_seconds: Option<u32>,
+    pub codec: Option<String>,
+    pub title: Option<String>,
+    pub album: Option<String>,
+    pub artist: Option<String>,
 }
 
 impl SearchCriteria {
@@ -60,6 +72,12 @@ impl SearchCriteria {
             && self.max_size.is_none()
             && self.min_availability.is_none()
             && self.min_complete_sources.is_none()
+            && self.min_bitrate_kbps.is_none()
+            && self.min_length_seconds.is_none()
+            && self.codec.is_none()
+            && self.title.is_none()
+            && self.album.is_none()
+            && self.artist.is_none()
     }
 }
 
@@ -102,6 +120,34 @@ pub(super) fn encode_search_request_with_criteria(
     // leaf order below. Our fold_and_chain then produces the identical
     // right-folded AND(c0, AND(c1, ... cn)) prefix tree the oracle emits.
     let mut constraints: Vec<Vec<u8>> = Vec::new();
+    if let Some(artist) = criteria.artist.as_deref() {
+        constraints.push(encode_string_meta_node(FT_MEDIA_ARTIST, artist)?);
+    }
+    if let Some(album) = criteria.album.as_deref() {
+        constraints.push(encode_string_meta_node(FT_MEDIA_ALBUM, album)?);
+    }
+    if let Some(title) = criteria.title.as_deref() {
+        constraints.push(encode_string_meta_node(FT_MEDIA_TITLE, title)?);
+    }
+    if let Some(codec) = criteria.codec.as_deref() {
+        constraints.push(encode_string_meta_node(FT_MEDIA_CODEC, codec)?);
+    }
+    if let Some(length) = criteria.min_length_seconds {
+        constraints.push(encode_numeric_meta_node(
+            FT_MEDIA_LENGTH,
+            ED2K_SEARCH_OP_GREATER_EQUAL,
+            u64::from(length),
+            supports_64bit,
+        ));
+    }
+    if let Some(bitrate) = criteria.min_bitrate_kbps {
+        constraints.push(encode_numeric_meta_node(
+            FT_MEDIA_BITRATE,
+            ED2K_SEARCH_OP_GREATER_EQUAL,
+            u64::from(bitrate),
+            supports_64bit,
+        ));
+    }
     if let Some(complete) = criteria.min_complete_sources {
         constraints.push(encode_numeric_meta_node(
             FT_COMPLETE_SOURCES,
@@ -558,6 +604,33 @@ mod criteria_tests {
     }
 
     #[test]
+    fn media_constraints_match_stock_leaf_order_and_tag_ids() {
+        let criteria = SearchCriteria {
+            artist: Some("Artist".to_string()),
+            album: Some("Album".to_string()),
+            title: Some("Title".to_string()),
+            codec: Some("Codec".to_string()),
+            min_length_seconds: Some(90),
+            min_bitrate_kbps: Some(192),
+            ..SearchCriteria::default()
+        };
+        let got = encode_search_request_with_criteria("sample", &criteria, false).unwrap();
+
+        let mut want = vec![0u8, 0x00];
+        want.extend_from_slice(&kw("sample"));
+        let leaves = [
+            encode_string_meta_node(FT_MEDIA_ARTIST, "Artist").unwrap(),
+            encode_string_meta_node(FT_MEDIA_ALBUM, "Album").unwrap(),
+            encode_string_meta_node(FT_MEDIA_TITLE, "Title").unwrap(),
+            encode_string_meta_node(FT_MEDIA_CODEC, "Codec").unwrap(),
+            encode_numeric_meta_node(FT_MEDIA_LENGTH, ED2K_SEARCH_OP_GREATER_EQUAL, 90, false),
+            encode_numeric_meta_node(FT_MEDIA_BITRATE, ED2K_SEARCH_OP_GREATER_EQUAL, 192, false),
+        ];
+        want.extend_from_slice(&fold_and_chain(&leaves));
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn over_complex_expression_is_refused() {
         // eMule errors IDS_SEARCH_TOOCOMPLEX above 10 boolean operators
         // (SearchResultsWnd.cpp:1134). 12 OR-terms => 11 OR operators > 10.
@@ -617,6 +690,7 @@ mod criteria_tests {
             max_size: Some(9_000_000),
             min_availability: Some(2),
             min_complete_sources: Some(1),
+            ..SearchCriteria::default()
         };
         assert!(encode_search_request_with_criteria(&eleven_words, &full, false).is_ok());
 

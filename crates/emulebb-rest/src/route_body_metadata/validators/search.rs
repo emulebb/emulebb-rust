@@ -15,11 +15,8 @@ pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<
     if let Some(search_type) = object.get("type") {
         validate_search_type_body_field(search_type)?;
     }
-    if object
-        .get("extension")
-        .is_some_and(|value| !value.is_string())
-    {
-        return Err(invalid_body_error("extension must be a string"));
+    for field in ["extension", "codec", "title", "album", "artist"] {
+        validate_optional_search_text_field(object, field)?;
     }
     let min_size = parse_optional_unsigned_body_field(object, "minSizeBytes")?;
     let max_size = parse_optional_unsigned_body_field(object, "maxSizeBytes")?;
@@ -36,6 +33,51 @@ pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<
         return Err(invalid_body_error(
             "minAvailability must be an unsigned number in the range 0..1000000",
         ));
+    }
+    if let Some(min_complete_sources) =
+        parse_optional_unsigned_body_field(object, "minCompleteSources")?
+        && min_complete_sources > 1_000_000
+    {
+        return Err(invalid_body_error(
+            "minCompleteSources must be an unsigned number in the range 0..1000000",
+        ));
+    }
+    if let Some(min_bitrate) = parse_optional_unsigned_body_field(object, "minBitrateKbps")?
+        && min_bitrate > u64::from(u32::MAX)
+    {
+        return Err(invalid_body_error(
+            "minBitrateKbps must be an unsigned 32-bit number",
+        ));
+    }
+    if let Some(min_length) = parse_optional_unsigned_body_field(object, "minLengthSeconds")?
+        && min_length > u64::from(u32::MAX)
+    {
+        return Err(invalid_body_error(
+            "minLengthSeconds must be an unsigned 32-bit number",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_search_text_field(
+    object: &JsonObject,
+    field: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    let Some(value) = value.as_str() else {
+        return Err(invalid_body_error(format!("{field} must be a string")));
+    };
+    if value.chars().any(char::is_control) {
+        return Err(invalid_body_error(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    if value.chars().count() > 256 {
+        return Err(invalid_body_error(format!(
+            "{field} must be at most 256 characters"
+        )));
     }
     Ok(())
 }
