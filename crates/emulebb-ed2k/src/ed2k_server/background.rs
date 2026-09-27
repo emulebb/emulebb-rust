@@ -257,7 +257,8 @@ pub async fn search_source_via_background_session(
 }
 
 /// Requests source searches for several files on the already-connected ED2K
-/// background session, packed into one oracle-style TCP frame.
+/// background session. Each file is carried in its own oracle-style TCP frame;
+/// TCP may still coalesce those frames on the wire.
 pub async fn search_source_batch_via_background_session(
     handle: &Ed2kServerSearchHandle,
     targets: &[Ed2kServerSourceBatchTarget],
@@ -623,15 +624,8 @@ pub(super) async fn start_background_server_search(
                     targets.len()
                 ),
             );
-            let mut payload = Vec::new();
-            let mut pending_hashes = HashSet::new();
-            for target in &targets {
-                payload
-                    .extend_from_slice(&encode_source_request(target.file_hash, target.file_size));
-                pending_hashes.insert(target.file_hash);
-            }
-            let opcode = source_request_opcode(context.connect_options, session.server_flags);
-            session.send_packet(opcode, &payload).await?;
+            let (opcode, pending_hashes) =
+                send_source_request_batch(session, &targets, context.connect_options).await?;
             info!(
                 "sent ED2K background source batch endpoint={} trace_id={} role={} opcode=0x{:02X} target_count={}",
                 session.endpoint,
@@ -678,6 +672,24 @@ pub(super) async fn start_background_server_search(
             Ok(None)
         }
     }
+}
+
+pub(super) async fn send_source_request_batch(
+    session: &mut ServerSession,
+    targets: &[Ed2kServerSourceBatchTarget],
+    connect_options: u8,
+) -> Result<(u8, HashSet<Ed2kHash>)> {
+    let opcode = source_request_opcode(connect_options, session.server_flags);
+    let mut pending_hashes = HashSet::with_capacity(targets.len());
+    for target in targets {
+        // WHY: OP_GETSOURCES and OP_GETSOURCES_OBFU define exactly one file
+        // record per ED2K frame. Concatenating several records into one payload
+        // makes only the first request independently decodable by stock servers.
+        let payload = encode_source_request(target.file_hash, target.file_size);
+        session.send_packet(opcode, &payload).await?;
+        pending_hashes.insert(target.file_hash);
+    }
+    Ok((opcode, pending_hashes))
 }
 
 pub(super) fn log_search_result_page(endpoint: SocketAddr, results: &[Ed2kSearchFile]) {

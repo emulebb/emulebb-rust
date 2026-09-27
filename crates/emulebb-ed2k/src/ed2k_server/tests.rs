@@ -1,3 +1,4 @@
+use super::background::send_source_request_batch;
 use super::{
     BackgroundServerSearchRequest, CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS,
     CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION, ConfiguredServerEntry, ED2K_FILETYPE_PROGRAM,

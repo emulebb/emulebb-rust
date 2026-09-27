@@ -1,5 +1,90 @@
 use super::*;
 use std::collections::HashMap;
+use tokio::net::TcpStream;
+
+async fn connected_background_test_session() -> (ServerSession, TcpStream) {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = TcpStream::connect(addr).await.unwrap();
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    (ServerSession::from_stream_for_test(stream, peer_addr), peer)
+}
+
+async fn read_source_request_frame(peer: &mut TcpStream) -> (u8, Vec<u8>) {
+    let mut header = [0u8; 6];
+    peer.read_exact(&mut header).await.unwrap();
+    assert_eq!(header[0], OP_EDONKEYPROT);
+    let frame_len = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
+    let mut payload = vec![0u8; frame_len - 1];
+    peer.read_exact(&mut payload).await.unwrap();
+    (header[5], payload)
+}
+
+#[tokio::test]
+async fn background_source_batch_sends_one_complete_frame_per_target() {
+    let small = Ed2kServerSourceBatchTarget {
+        file_hash: Ed2kHash([0x31; 16]),
+        file_size: u64::from(u32::MAX),
+    };
+    let large = Ed2kServerSourceBatchTarget {
+        file_hash: Ed2kHash([0x32; 16]),
+        file_size: u64::from(u32::MAX) + 1,
+    };
+
+    for (connect_options, server_flags, expected_opcode, targets) in [
+        (0, Some(0), OP_GETSOURCES, vec![small]),
+        (0, Some(0), OP_GETSOURCES, vec![small, large]),
+        (
+            0x01,
+            Some(SERVER_TCP_FLAG_TCPOBFUSCATION),
+            OP_GETSOURCES_OBFU,
+            vec![small, large],
+        ),
+    ] {
+        let (mut session, mut peer) = connected_background_test_session().await;
+        session.server_flags = server_flags;
+
+        let (opcode, pending_hashes) =
+            send_source_request_batch(&mut session, &targets, connect_options)
+                .await
+                .unwrap();
+
+        assert_eq!(opcode, expected_opcode);
+        assert_eq!(pending_hashes.len(), targets.len());
+        for target in targets {
+            let (wire_opcode, payload) = read_source_request_frame(&mut peer).await;
+            assert_eq!(wire_opcode, expected_opcode);
+            assert_eq!(
+                payload,
+                encode_source_request(target.file_hash, target.file_size)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn source_request_decoder_recovers_fragmented_coalesced_frames() {
+    let first_payload = encode_source_request(Ed2kHash([0x41; 16]), 42);
+    let second_payload = encode_source_request(Ed2kHash([0x42; 16]), u64::from(u32::MAX) + 1);
+    let mut wire = encode_packet(OP_GETSOURCES_OBFU, &first_payload, false).unwrap();
+    wire.extend_from_slice(&encode_packet(OP_GETSOURCES_OBFU, &second_payload, false).unwrap());
+    let (mut session, mut peer) = connected_background_test_session().await;
+
+    let writer = tokio::spawn(async move {
+        for chunk in wire.chunks(3) {
+            peer.write_all(chunk).await.unwrap();
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let first = session.read_packet().await.unwrap().unwrap();
+    let second = session.read_packet().await.unwrap().unwrap();
+    assert_eq!(first.opcode, OP_GETSOURCES_OBFU);
+    assert_eq!(first.payload, first_payload);
+    assert_eq!(second.opcode, OP_GETSOURCES_OBFU);
+    assert_eq!(second.payload, second_payload);
+    writer.await.unwrap();
+}
 
 #[tokio::test]
 async fn background_search_channel_round_trips_results() {
