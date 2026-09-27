@@ -448,7 +448,7 @@ pub(crate) fn search_result_response_with_options(
         "clientCount": 0,
         "serverCount": 0,
         "kadPublishInfo": 0,
-        "rating": 0,
+        "rating": result.rating,
         "hasComment": false,
         "spam": false
     });
@@ -460,7 +460,7 @@ pub(crate) fn search_result_response_with_options(
                 "fakeScore": 0,
                 "severity": "none",
                 "spam": false,
-                "userRating": 0,
+                "userRating": result.rating,
                 "kadBand": "unknown",
                 "reasons": []
             },
@@ -481,7 +481,7 @@ pub(crate) fn search_result_response_with_options(
                 "divergent": false
             },
             "integrityEvidence": {
-                "hasAichHash": false,
+                "hasAichHash": !result.aich_hash.is_empty(),
                 "multipleAich": false,
                 "pendingHeaderCheck": false,
                 "cachedHeaderEvidence": false,
@@ -683,12 +683,20 @@ mod tests {
             source_client_id: None,
             source_client_port: None,
             file_type: "doc".to_string(),
+            rating: 4,
+            aich_hash: "A".repeat(32),
             complete: true,
             directory: String::new(),
         };
 
         let complete = search_result_response(&result);
         assert_eq!(complete["complete"], true);
+        assert_eq!(complete["rating"], 4);
+        assert_eq!(complete["evidence"]["confidence"]["userRating"], 4);
+        assert_eq!(
+            complete["evidence"]["integrityEvidence"]["hasAichHash"],
+            true
+        );
         assert_eq!(
             complete["evidence"]["availabilityEvidence"]["completionState"],
             "complete"

@@ -564,6 +564,8 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
                 source_client_id: None,
                 source_client_port: None,
                 file_type: String::new(),
+                rating: 0,
+                aich_hash: String::new(),
                 complete: false,
                 directory: String::new(),
                 observed_at_ms: 2,

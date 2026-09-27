@@ -278,6 +278,12 @@ pub struct SearchResult {
     #[serde(default, skip_serializing)]
     pub source_client_port: Option<u16>,
     pub file_type: String,
+    #[serde(default)]
+    pub rating: u8,
+    /// AICH search-result metadata retained for integrity evidence and future
+    /// corroboration, but not exposed as an undocumented top-level REST key.
+    #[serde(default, skip_serializing)]
+    pub aich_hash: String,
     pub complete: bool,
     pub directory: String,
 }

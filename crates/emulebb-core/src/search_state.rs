@@ -81,6 +81,8 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
         source_client_id: result.source_client_id,
         source_client_port: result.source_client_port,
         file_type: result.file_type.clone(),
+        rating: result.rating,
+        aich_hash: result.aich_hash.clone(),
         complete: result.complete,
         directory: result.directory.clone(),
         observed_at_ms,
@@ -137,6 +139,8 @@ fn search_result_from_metadata(
         source_client_id: result.source_client_id,
         source_client_port: result.source_client_port,
         file_type: result.file_type,
+        rating: result.rating,
+        aich_hash: result.aich_hash,
         complete: result.complete,
         directory: result.directory,
     }

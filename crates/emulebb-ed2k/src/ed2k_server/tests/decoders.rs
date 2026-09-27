@@ -62,7 +62,7 @@ fn search_results_decoder_preserves_source_identity_and_metadata() {
     let client_id = u32::from_le_bytes([10, 20, 30, 40]);
     payload.extend_from_slice(&client_id.to_le_bytes());
     payload.extend_from_slice(&4662u16.to_le_bytes());
-    payload.extend_from_slice(&5u32.to_le_bytes());
+    payload.extend_from_slice(&8u32.to_le_bytes());
     payload.push(TAG_SHORT_NAME_MASK | (super::TAGTYPE_STR1 + 9));
     payload.push(FT_FILENAME);
     payload.extend_from_slice(b"ubuntu.iso");
@@ -81,6 +81,16 @@ fn search_results_decoder_preserves_source_identity_and_metadata() {
     payload.extend_from_slice(&1u16.to_le_bytes());
     payload.push(FT_COMPLETE_SOURCES);
     payload.extend_from_slice(&7u32.to_le_bytes());
+    payload.push(TAG_SHORT_NAME_MASK | super::TAGTYPE_UINT16);
+    payload.push(FT_FILERATING);
+    payload.extend_from_slice(&0x32CCu16.to_le_bytes());
+    payload.push(TAG_SHORT_NAME_MASK | super::TAGTYPE_STRING);
+    payload.push(FT_AICH_HASH);
+    payload.extend_from_slice(&32u16.to_le_bytes());
+    payload.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    payload.push(TAG_SHORT_NAME_MASK | (super::TAGTYPE_STR1 + 8));
+    payload.push(FT_FOLDERNAME);
+    payload.extend_from_slice(b"Synthetic");
     payload.push(0x01);
 
     let page = decode_search_result_page(&payload).unwrap();
@@ -94,6 +104,12 @@ fn search_results_decoder_preserves_source_identity_and_metadata() {
     assert_eq!(files[0].file_type.as_deref(), Some("Video"));
     assert_eq!(files[0].source_count, Some(12));
     assert_eq!(files[0].complete_source_count, Some(7));
+    assert_eq!(files[0].rating, Some(4));
+    assert_eq!(
+        files[0].aich_hash.as_deref(),
+        Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    );
+    assert_eq!(files[0].directory.as_deref(), Some("Synthetic"));
     assert!(page.more_results_available);
 }
 

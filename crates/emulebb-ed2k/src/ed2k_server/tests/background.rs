@@ -99,6 +99,9 @@ async fn background_search_channel_round_trips_results() {
         file_type: Some("Doc".to_string()),
         source_count: Some(7),
         complete_source_count: Some(3),
+        rating: None,
+        aich_hash: None,
+        directory: None,
     };
     let expected_for_task = expected.clone();
 

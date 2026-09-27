@@ -23,6 +23,8 @@ pub struct MetadataSearchResult {
     pub source_client_id: Option<u32>,
     pub source_client_port: Option<u16>,
     pub file_type: String,
+    pub rating: u8,
+    pub aich_hash: String,
     pub complete: bool,
     pub directory: String,
     pub observed_at_ms: i64,

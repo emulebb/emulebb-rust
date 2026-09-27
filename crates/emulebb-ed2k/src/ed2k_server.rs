@@ -224,7 +224,9 @@ const FT_FILENAME: u8 = 0x01;
 const FT_FILESIZE: u8 = 0x02;
 const FT_FILETYPE: u8 = 0x03;
 const FT_SOURCES: u8 = 0x15;
+const FT_AICH_HASH: u8 = 0x27;
 const FT_COMPLETE_SOURCES: u8 = 0x30;
+const FT_FOLDERNAME: u8 = 0x38;
 const FT_FILESIZE_HI: u8 = 0x3A;
 const FT_FILERATING: u8 = 0xF7;
 // ED2K search-ID file types (eserver 17.6+, OtherFunctions.h `ED2KFT_*`): the

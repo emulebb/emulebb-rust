@@ -4,9 +4,10 @@ use emulebb_kad_proto::Ed2kHash;
 use super::flags::is_low_id;
 use super::tag_codec::{DecodedTagValue, decode_tag_value};
 use super::{
-    Ed2kFoundSource, Ed2kSearchFile, FT_COMPLETE_SOURCES, FT_FILENAME, FT_FILESIZE, FT_FILESIZE_HI,
-    FT_FILETYPE, FT_SOURCES, OP_EDONKEYPROT, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES,
-    SOURCE_OBFUSCATION_USER_HASH_PRESENT, ipv4_from_client_id,
+    Ed2kFoundSource, Ed2kSearchFile, FT_AICH_HASH, FT_COMPLETE_SOURCES, FT_FILENAME, FT_FILERATING,
+    FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE, FT_FOLDERNAME, FT_SOURCES, OP_EDONKEYPROT,
+    OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES, SOURCE_OBFUSCATION_USER_HASH_PRESENT,
+    ipv4_from_client_id,
 };
 
 #[cfg(test)]
@@ -150,6 +151,9 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
     let mut file_type = None;
     let mut source_count = None;
     let mut complete_source_count = None;
+    let mut rating = None;
+    let mut aich_hash = None;
+    let mut directory = None;
     for _ in 0..tag_count {
         let (tag_name, tag_value, rest) = decode_tag_value(cursor)?;
         cursor = rest;
@@ -173,6 +177,18 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
                 complete_source_count =
                     Some(u32::try_from(value).context("ED2K complete source count overflow")?);
             }
+            (Some(FT_FILERATING), Some(DecodedTagValue::Unsigned(value))) => {
+                let packed_average = (value & u64::from(u8::MAX)) as u8;
+                rating = Some((packed_average / (u8::MAX / 5)).min(5));
+            }
+            (Some(FT_AICH_HASH), Some(DecodedTagValue::String(value))) => {
+                aich_hash = canonical_aich_hash(&value);
+            }
+            (Some(FT_FOLDERNAME), Some(DecodedTagValue::String(value)))
+                if directory.is_none() && !value.is_empty() =>
+            {
+                directory = Some(value);
+            }
             _ => {}
         }
     }
@@ -194,9 +210,21 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
             file_type,
             source_count,
             complete_source_count,
+            rating,
+            aich_hash,
+            directory,
         },
         cursor,
     ))
+}
+
+fn canonical_aich_hash(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || (b'2'..=b'7').contains(&byte)))
+    .then(|| value.to_ascii_uppercase())
 }
 
 fn decode_found_sources_from(

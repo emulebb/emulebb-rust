@@ -7,7 +7,8 @@ use crate::{
     text::normalize_search_text,
 };
 
-const ED2K_SEARCH_SOURCE_METADATA_MAGIC: &[u8; 4] = b"ESR1";
+const ED2K_SEARCH_METADATA_V1_MAGIC: &[u8; 4] = b"ESR1";
+const ED2K_SEARCH_METADATA_V2_MAGIC: &[u8; 4] = b"ESR2";
 
 impl super::MetadataStore {
     pub fn upsert_search(&self, search: &MetadataSearch) -> Result<()> {
@@ -165,8 +166,7 @@ fn load_search_results(
         "#,
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
-        let (source_client_id, source_client_port) =
-            decode_ed2k_search_source_metadata(row.get::<_, Option<Vec<u8>>>(9)?);
+        let metadata = decode_ed2k_search_metadata(row.get::<_, Option<Vec<u8>>>(9)?);
         Ok(MetadataSearchResult {
             network: row.get(0)?,
             file_hash: row.get(1)?,
@@ -174,9 +174,11 @@ fn load_search_results(
             size_bytes: row.get::<_, Option<i64>>(3)?.unwrap_or_default() as u64,
             source_count: row.get::<_, i64>(4)? as u32,
             complete_source_count: row.get::<_, i64>(5)? as u32,
-            source_client_id,
-            source_client_port,
+            source_client_id: metadata.source_client_id,
+            source_client_port: metadata.source_client_port,
             file_type: row.get(6)?,
+            rating: metadata.rating,
+            aich_hash: metadata.aich_hash,
             complete: row.get::<_, i64>(7)? != 0,
             directory: row.get(8)?,
             observed_at_ms: row.get(10)?,
@@ -187,28 +189,58 @@ fn load_search_results(
 }
 
 fn encode_ed2k_search_source_metadata(result: &MetadataSearchResult) -> Option<Vec<u8>> {
-    let (Some(client_id), Some(client_port)) = (result.source_client_id, result.source_client_port)
-    else {
+    let source = result.source_client_id.zip(result.source_client_port);
+    if source.is_none() && result.rating == 0 && result.aich_hash.is_empty() {
         return None;
-    };
-    let mut encoded = Vec::with_capacity(10);
-    encoded.extend_from_slice(ED2K_SEARCH_SOURCE_METADATA_MAGIC);
+    }
+    let aich_bytes = result.aich_hash.as_bytes();
+    let aich_len = u8::try_from(aich_bytes.len()).ok()?;
+    let mut encoded = Vec::with_capacity(12 + aich_bytes.len());
+    encoded.extend_from_slice(ED2K_SEARCH_METADATA_V2_MAGIC);
+    let (client_id, client_port) = source.unwrap_or_default();
     encoded.extend_from_slice(&client_id.to_le_bytes());
     encoded.extend_from_slice(&client_port.to_le_bytes());
+    encoded.push(result.rating.min(5));
+    encoded.push(aich_len);
+    encoded.extend_from_slice(aich_bytes);
     Some(encoded)
 }
 
-fn decode_ed2k_search_source_metadata(raw_metadata: Option<Vec<u8>>) -> (Option<u32>, Option<u16>) {
+#[derive(Default)]
+struct DecodedEd2kSearchMetadata {
+    source_client_id: Option<u32>,
+    source_client_port: Option<u16>,
+    rating: u8,
+    aich_hash: String,
+}
+
+fn decode_ed2k_search_metadata(raw_metadata: Option<Vec<u8>>) -> DecodedEd2kSearchMetadata {
     let Some(raw_metadata) = raw_metadata else {
-        return (None, None);
+        return DecodedEd2kSearchMetadata::default();
     };
-    if raw_metadata.len() != 10 || &raw_metadata[..4] != ED2K_SEARCH_SOURCE_METADATA_MAGIC {
-        return (None, None);
+    if raw_metadata.len() == 10 && &raw_metadata[..4] == ED2K_SEARCH_METADATA_V1_MAGIC {
+        return DecodedEd2kSearchMetadata {
+            source_client_id: Some(u32::from_le_bytes(raw_metadata[4..8].try_into().unwrap())),
+            source_client_port: Some(u16::from_le_bytes(raw_metadata[8..10].try_into().unwrap())),
+            ..DecodedEd2kSearchMetadata::default()
+        };
     }
-    (
-        Some(u32::from_le_bytes(raw_metadata[4..8].try_into().unwrap())),
-        Some(u16::from_le_bytes(raw_metadata[8..10].try_into().unwrap())),
-    )
+    if raw_metadata.len() < 12 || &raw_metadata[..4] != ED2K_SEARCH_METADATA_V2_MAGIC {
+        return DecodedEd2kSearchMetadata::default();
+    }
+    let aich_len = usize::from(raw_metadata[11]);
+    if raw_metadata.len() != 12 + aich_len {
+        return DecodedEd2kSearchMetadata::default();
+    }
+    let client_id = u32::from_le_bytes(raw_metadata[4..8].try_into().unwrap());
+    let client_port = u16::from_le_bytes(raw_metadata[8..10].try_into().unwrap());
+    let aich_hash = String::from_utf8(raw_metadata[12..].to_vec()).unwrap_or_default();
+    DecodedEd2kSearchMetadata {
+        source_client_id: (client_id != 0 && client_port != 0).then_some(client_id),
+        source_client_port: (client_id != 0 && client_port != 0).then_some(client_port),
+        rating: raw_metadata[10].min(5),
+        aich_hash,
+    }
 }
 
 fn optional_ed2k_hash(value: &str) -> Result<Option<Vec<u8>>> {
@@ -244,6 +276,8 @@ mod tests {
             Some(u32::from_le_bytes([10, 20, 30, 40]))
         );
         assert_eq!(searches[0].results[0].source_client_port, Some(4662));
+        assert_eq!(searches[0].results[0].rating, 4);
+        assert_eq!(searches[0].results[0].aich_hash, "A".repeat(32));
     }
 
     #[test]
@@ -259,6 +293,21 @@ mod tests {
         store.clear_searches().unwrap();
         assert!(store.load_searches().unwrap().is_empty());
         assert_eq!(store.table_count("search_results").unwrap(), 0);
+    }
+
+    #[test]
+    fn legacy_source_metadata_remains_readable() {
+        let client_id = u32::from_le_bytes([10, 20, 30, 40]);
+        let mut encoded = ED2K_SEARCH_METADATA_V1_MAGIC.to_vec();
+        encoded.extend_from_slice(&client_id.to_le_bytes());
+        encoded.extend_from_slice(&4662u16.to_le_bytes());
+
+        let decoded = decode_ed2k_search_metadata(Some(encoded));
+
+        assert_eq!(decoded.source_client_id, Some(client_id));
+        assert_eq!(decoded.source_client_port, Some(4662));
+        assert_eq!(decoded.rating, 0);
+        assert!(decoded.aich_hash.is_empty());
     }
 
     fn sample_search(public_id: &str) -> MetadataSearch {
@@ -282,6 +331,8 @@ mod tests {
                 source_client_id: Some(u32::from_le_bytes([10, 20, 30, 40])),
                 source_client_port: Some(4662),
                 file_type: "video".to_string(),
+                rating: 4,
+                aich_hash: "A".repeat(32),
                 complete: false,
                 directory: String::new(),
                 observed_at_ms: 2,

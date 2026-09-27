@@ -135,6 +135,8 @@ pub(crate) fn search_result_from_indexed(
         source_client_id: None,
         source_client_port: None,
         file_type: file.content_type.clone(),
+        rating: 0,
+        aich_hash: String::new(),
         complete: false,
         directory: String::new(),
     }
@@ -160,8 +162,10 @@ pub(crate) fn search_result_from_ed2k(
         source_client_id,
         source_client_port,
         file_type: file_type.clone(),
+        rating: file.rating.unwrap_or_default(),
+        aich_hash: file.aich_hash.unwrap_or_default(),
         complete: false,
-        directory: String::new(),
+        directory: file.directory.unwrap_or_default(),
     }
 }
 
@@ -188,6 +192,8 @@ pub(crate) fn search_result_from_kad(
         source_client_id: None,
         source_client_port: None,
         file_type: "unknown".to_string(),
+        rating: 0,
+        aich_hash: String::new(),
         complete: false,
         directory: String::new(),
     }
@@ -211,6 +217,8 @@ mod tests {
             source_client_id: None,
             source_client_port: None,
             file_type: String::new(),
+            rating: 0,
+            aich_hash: String::new(),
             complete: false,
             directory: String::new(),
         }
@@ -369,6 +377,9 @@ mod tests {
                 file_type: Some("doc".to_string()),
                 source_count: Some(5),
                 complete_source_count: Some(3),
+                rating: Some(4),
+                aich_hash: Some("A".repeat(32)),
+                directory: Some("Synthetic Folder".to_string()),
             },
         );
 
@@ -382,5 +393,8 @@ mod tests {
         );
         assert_eq!(result.source_client_port, Some(4662));
         assert_eq!(result.file_type, "doc");
+        assert_eq!(result.rating, 4);
+        assert_eq!(result.aich_hash, "A".repeat(32));
+        assert_eq!(result.directory, "Synthetic Folder");
     }
 }

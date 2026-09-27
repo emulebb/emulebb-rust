@@ -143,6 +143,12 @@ pub struct Ed2kSearchFile {
     pub source_count: Option<u32>,
     /// Server-reported complete-source availability, when present.
     pub complete_source_count: Option<u32>,
+    /// Stock packed server rating converted to the local 0..=5 scale.
+    pub rating: Option<u8>,
+    /// Valid 20-byte AICH root rendered as canonical upper-case Base32.
+    pub aich_hash: Option<String>,
+    /// Optional server-side result directory/folder tag.
+    pub directory: Option<String>,
 }
 
 /// One decoded ED2K server source-search entry.

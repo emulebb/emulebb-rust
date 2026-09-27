@@ -178,6 +178,8 @@ mod tests {
             source_client_id: client_id,
             source_client_port: client_port,
             file_type: String::new(),
+            rating: 0,
+            aich_hash: String::new(),
             complete: false,
             directory: String::new(),
         }
