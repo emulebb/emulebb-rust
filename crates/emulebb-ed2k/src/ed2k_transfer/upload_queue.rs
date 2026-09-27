@@ -283,6 +283,7 @@ pub(crate) enum Ed2kUploadSessionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ed2kUploadRangeAdmission {
     Accepted,
+    DuplicateQueued,
     DuplicateDone,
 }
 
@@ -305,6 +306,13 @@ pub enum Ed2kUploadSessionPhaseSnapshot {
 struct Ed2kUploadServedRange {
     start: u64,
     end: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ed2kUploadQueuedRange {
+    start: u64,
+    end: u64,
+    request_generation: u64,
 }
 
 /// Read-only snapshot of one inbound upload queue session.
@@ -373,6 +381,13 @@ struct Ed2kUploadSessionEntry {
     file_size: u64,
     uploaded_bytes: u64,
     upload_started_at: Option<Instant>,
+    /// Accepted request keys from the current and immediately preceding
+    /// OP_REQUESTPARTS packet. Rust serves synchronously, while MFC leaves these
+    /// keys in `m_BlockRequests_keys` until its disk-I/O thread dequeues them;
+    /// retaining one packet generation preserves the same cross-packet
+    /// duplicate-queued diagnostic classification.
+    queued_ranges: Vec<Ed2kUploadQueuedRange>,
+    request_generation: u64,
     served_ranges: VecDeque<Ed2kUploadServedRange>,
     /// Per-slot sliding-window upload datarate meter (RUST-PAR-024 GAP-1): the
     /// 10 s per-client window (oracle `m_AverageUDR_hist`,
@@ -574,6 +589,8 @@ impl Ed2kUploadQueueState {
                 self.replace_waiting_key(&existing_key, &key);
             }
             if existing_key.file_hash != key.file_hash {
+                session.queued_ranges.clear();
+                session.request_generation = 0;
                 session.served_ranges.clear();
             }
             session.connection_id = connection_id;
@@ -652,6 +669,8 @@ impl Ed2kUploadQueueState {
                 file_size,
                 uploaded_bytes: 0,
                 upload_started_at: None,
+                queued_ranges: Vec::new(),
+                request_generation: 0,
                 served_ranges: VecDeque::new(),
                 rate_meter: WindowedRateMeter::new(PER_SLOT_RATE_WINDOW),
                 requester_part_status: None,
@@ -714,6 +733,7 @@ impl Ed2kUploadQueueState {
             Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
         ) {
             session.phase = Ed2kUploadSessionPhase::Uploading;
+            session.request_generation = session.request_generation.saturating_add(1);
             return Ed2kUploadSessionStatus::Granted;
         }
         self.status_for_key(&handle.key, now)
@@ -780,6 +800,20 @@ impl Ed2kUploadQueueState {
                 Ed2kUploadRangeAdmission::Accepted,
             );
         }
+        let request_generation = session.request_generation;
+        session
+            .queued_ranges
+            .retain(|range| request_generation.saturating_sub(range.request_generation) <= 1);
+        if session
+            .queued_ranges
+            .iter()
+            .any(|range| range.start == start && range.end == end)
+        {
+            return (
+                Ed2kUploadSessionStatus::Granted,
+                Ed2kUploadRangeAdmission::DuplicateQueued,
+            );
+        }
         if session
             .served_ranges
             .iter()
@@ -790,6 +824,11 @@ impl Ed2kUploadQueueState {
                 Ed2kUploadRangeAdmission::DuplicateDone,
             );
         }
+        session.queued_ranges.push(Ed2kUploadQueuedRange {
+            start,
+            end,
+            request_generation,
+        });
         (
             Ed2kUploadSessionStatus::Granted,
             Ed2kUploadRangeAdmission::Accepted,
@@ -1433,6 +1472,8 @@ impl Ed2kUploadQueueState {
                 session.last_activity = now;
                 session.upload_started_at = None;
                 session.uploaded_bytes = 0;
+                session.queued_ranges.clear();
+                session.request_generation = 0;
                 session.served_ranges.clear();
                 session.rate_meter.reset();
                 session.waiting_sequence = waiting_sequence;

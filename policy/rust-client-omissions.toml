@@ -79,17 +79,3 @@ target = "public VPN deployment posture"
 beta_blocker = false
 review_disposition = "permanent-drop"
 review_disposition_note = "RUST-PAR-018 round-18 LowID-lane re-audit (2026-07-08): confirmed. Implementing the oracle's LAN-mode-only conditional (PacketTracking.cpp:199) would require introducing a LAN-mode concept solely to REDUCE leniency toward LAN sources that do not exist in the VPN'd public deployment. No wire effect on public peers; strictly gentler local defense. PERMANENT DROP - added to excluded_surface_ids in rust-client.toml."
-
-[[omissions]]
-id = "upload-duplicate-queued-intra-packet"
-area = "ed2k"
-stock_behavior = "eMule tracks queued (pending, not-yet-served) upload block requests in a per-slot set that persists across packets (m_BlockRequests_keys, UploadClient.cpp:766-784), so a re-request of an already-queued block is rejected as upload_duplicate_queued_block_rejected even across separate packets."
-rust_behavior = "The Rust listener serves upload block requests synchronously (no persistent pending-block queue between packets), so it detects a queued-duplicate only within one request batch (accepted_ranges in upload_payload.rs). A cross-packet re-request of a not-yet-served block collapses into the already-served DuplicateDone path instead, so it is still rejected but may be labeled upload_duplicate_done_block_rejected rather than the queued sibling."
-reason = "Architectural consequence of the synchronous serve model (rust serves each request batch to completion rather than holding a pending-block queue). Net anti-abuse coverage is preserved — the duplicate is always rejected; only the emitted bad_peer event label can differ for a cross-packet queued duplicate."
-compatibility = "Does not affect eD2K or Kad wire compatibility; the peer's duplicate block request is rejected either way. Only the diagnostic event classification differs from the oracle for the cross-packet case."
-disposition = "protocol_defer"
-owner = "transfer-runtime"
-target = "RUST-FEAT-025 diagnostics cleanup"
-beta_blocker = false
-review_disposition = "defer"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED anti-abuse intact - rust rejects both DuplicateQueued (intra-batch) and cross-packet re-requests collapsed to DuplicateDone (upload_payload.rs:48-52,311-362). The duplicate is ALWAYS rejected; only the diagnostic event label can differ. No wire difference. DEFER."

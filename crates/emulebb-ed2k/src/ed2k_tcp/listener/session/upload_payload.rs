@@ -303,7 +303,6 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     let reader_disk_bytes_before = verified_reader.disk_read_bytes();
 
     let mut range_plan = Vec::with_capacity(ranges.len());
-    let mut accepted_ranges = Vec::with_capacity(ranges.len());
     for &(start, end) in &ranges {
         // FIX (memory-amplification DoS): never read or buffer a whole
         // peer-requested range at once. The range size is peer-controlled and
@@ -330,17 +329,10 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             .await
         {
             (ListenerQueueDecision::Granted, Ed2kUploadRangeAdmission::Accepted) => {
-                if accepted_ranges
-                    .iter()
-                    .any(|&(accepted_start, accepted_end)| {
-                        accepted_start == start && accepted_end == end
-                    })
-                {
-                    UploadRangePlan::DuplicateQueued
-                } else {
-                    accepted_ranges.push((start, end));
-                    UploadRangePlan::Accepted
-                }
+                UploadRangePlan::Accepted
+            }
+            (ListenerQueueDecision::Granted, Ed2kUploadRangeAdmission::DuplicateQueued) => {
+                UploadRangePlan::DuplicateQueued
             }
             (ListenerQueueDecision::Granted, Ed2kUploadRangeAdmission::DuplicateDone) => {
                 UploadRangePlan::DuplicateDone

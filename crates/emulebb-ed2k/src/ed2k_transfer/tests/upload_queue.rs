@@ -372,7 +372,7 @@ async fn upload_queue_capacity_snapshot_classifies_active_sessions() {
 }
 
 #[tokio::test]
-async fn upload_queue_detects_duplicate_completed_ranges_per_slot() {
+async fn upload_queue_classifies_queued_and_completed_duplicates_across_packets() {
     let root = unique_test_dir("ed2k-upload-queue-duplicate-range");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
@@ -384,30 +384,55 @@ async fn upload_queue_detects_duplicate_completed_ranges_per_slot() {
         .begin_upload_session_at(peer.clone(), &file_hash, now)
         .await;
     assert_eq!(status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        runtime.note_upload_request_parts(&handle).await,
+        Ed2kUploadSessionStatus::Granted
+    );
 
     assert_eq!(
-        runtime
-            .note_upload_range_request_at(&handle, 0, 1024, now + std::time::Duration::from_secs(1))
-            .await,
+        runtime.note_upload_range_request(&handle, 0, 1024).await,
         (
             Ed2kUploadSessionStatus::Granted,
             Ed2kUploadRangeAdmission::Accepted
         )
     );
     assert_eq!(
-        runtime
-            .note_upload_range_served_at(&handle, 0, 1024, now + std::time::Duration::from_secs(2))
-            .await,
+        runtime.note_upload_range_request(&handle, 0, 1024).await,
+        (
+            Ed2kUploadSessionStatus::Granted,
+            Ed2kUploadRangeAdmission::DuplicateQueued
+        ),
+        "a duplicate within one request packet remains queued"
+    );
+    assert_eq!(
+        runtime.note_upload_range_served(&handle, 0, 1024).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+
+    assert_eq!(
+        runtime.note_upload_request_parts(&handle).await,
         Ed2kUploadSessionStatus::Granted
     );
     assert_eq!(
-        runtime
-            .note_upload_range_request_at(&handle, 0, 1024, now + std::time::Duration::from_secs(3))
-            .await,
+        runtime.note_upload_range_request(&handle, 0, 1024).await,
+        (
+            Ed2kUploadSessionStatus::Granted,
+            Ed2kUploadRangeAdmission::DuplicateQueued
+        ),
+        "the immediately following packet retains MFC pending-queue classification"
+    );
+
+    assert_eq!(
+        runtime.note_upload_request_parts(&handle).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime.note_upload_range_request(&handle, 0, 1024).await,
         (
             Ed2kUploadSessionStatus::Granted,
             Ed2kUploadRangeAdmission::DuplicateDone
-        )
+        ),
+        "once the pending generation drains, later repeats are completed duplicates"
     );
 
     let next_file_hash = Ed2kHash::from_bytes([0x36; 16]);
@@ -420,13 +445,12 @@ async fn upload_queue_detects_duplicate_completed_ranges_per_slot() {
         .await;
     assert_eq!(next_status, Ed2kUploadSessionStatus::Granted);
     assert_eq!(
+        runtime.note_upload_request_parts(&next_handle).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
         runtime
-            .note_upload_range_request_at(
-                &next_handle,
-                0,
-                1024,
-                now + std::time::Duration::from_secs(5)
-            )
+            .note_upload_range_request(&next_handle, 0, 1024)
             .await,
         (
             Ed2kUploadSessionStatus::Granted,

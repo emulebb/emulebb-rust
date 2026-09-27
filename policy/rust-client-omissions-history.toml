@@ -4,6 +4,20 @@
 # only contains current omissions and approved protocol drops.
 
 [[resolved_omissions]]
+id = "upload-duplicate-queued-intra-packet"
+area = "ed2k"
+stock_behavior = "eMule keeps accepted upload request keys in m_BlockRequests_keys while its disk-I/O queue owns them, so a duplicate in the same or immediately following OP_REQUESTPARTS packet is classified as upload_duplicate_queued_block_rejected; after dequeue it is classified against m_DoneBlocks_keys instead."
+rust_behavior = "IMPLEMENTED: every upload slot now retains accepted range keys with their request-packet generation. Duplicates in the current or immediately preceding generation return DuplicateQueued and emit upload_duplicate_queued_block_rejected; once that pending generation drains, the served-range history returns DuplicateDone. The state is cleared on file switch and slot recycle."
+reason = "A one-generation pending-key bridge preserves the oracle's asynchronous disk-queue classification across packet boundaries while retaining Rust's bounded synchronous payload serving model."
+compatibility = "Duplicate requests remain rejected without changing wire behavior. Diagnostic labels now distinguish queued from completed duplicates across packets like the maintained fork."
+disposition = "fixed"
+owner = "transfer-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: added per-slot request generations, persistent bounded queued-range keys, runtime admission classification, and focused same-packet/cross-packet/drained/file-switch tests. No longer an active omission."
+
+[[resolved_omissions]]
 id = "full-a4af-source-set-connection-hijacking"
 area = "ed2k"
 stock_behavior = "eMule keeps a peer-centric set of requested and no-needed files, selects the best other wanted file in CUpDownClient::SwapToAnotherFile, and reuses an already-connected peer socket for the next file request instead of opening a duplicate connection. NNP and FNF remain attributed to the relation that produced them."
