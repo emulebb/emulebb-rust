@@ -96,6 +96,8 @@ fn seed_servers_from_bytes(metadata: &MetadataStore, bytes: &[u8]) -> Result<usi
             soft_files: 0,
             hard_files: 0,
             version: String::new(),
+            dynamic_host: String::new(),
+            auxiliary_ports: Vec::new(),
             obfuscation_tcp_port: None,
             obfuscation_udp_port: None,
             udp_flags: None,

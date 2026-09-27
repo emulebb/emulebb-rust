@@ -44,6 +44,8 @@ fn persist_test_server(profile: &DaemonProfile) {
             soft_files: 0,
             hard_files: 0,
             version: String::new(),
+            dynamic_host: String::new(),
+            auxiliary_ports: Vec::new(),
             obfuscation_tcp_port: None,
             obfuscation_udp_port: None,
             udp_flags: None,
