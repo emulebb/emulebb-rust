@@ -842,7 +842,7 @@ fn log_shared_publish_offer_batch(
         .entries
         .iter()
         .take(16)
-        .map(|(file_hash, _, _, _, _, _)| hex::encode(file_hash))
+        .map(|(file_hash, ..)| hex::encode(file_hash))
         .collect::<Vec<_>>();
     crate::ed2k_transfer::diag_sched::shared_publish_offer_batch(
         &session.endpoint.to_string(),
