@@ -207,7 +207,7 @@ fn file_size_tag_value(tags: &[Tag]) -> Option<u64> {
             (TagName::Short(name), TagValue::U8(value)) if *name == tag_name::FILESIZE => {
                 size_low.get_or_insert(u32::from(*value));
             }
-            (TagName::Short(name), TagValue::Blob(bytes) | TagValue::SmallBlob(bytes))
+            (TagName::Short(name), TagValue::SmallBlob(bytes))
                 if *name == tag_name::FILESIZE && bytes.len() == 8 =>
             {
                 size.get_or_insert(u64::from_le_bytes(bytes.as_slice().try_into().ok()?));

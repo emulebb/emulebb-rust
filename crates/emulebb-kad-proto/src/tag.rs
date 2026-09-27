@@ -22,10 +22,10 @@ pub enum TagName {
 
 /// Typed Kad tag value.
 ///
-/// The oracle reuses the same generic tag envelope across search results,
-/// publish packets, HELLO metadata, and ED2K-side metadata. This enum keeps the
-/// raw storage class visible so callers can preserve or reinterpret tags
-/// without reserializing from a lossy intermediate model.
+/// Stock Kad's `CDataIO::ReadTag` accepts only hash, string, integer-width,
+/// float, and BSOB storage classes. Keeping that allowlist in the type model
+/// makes it impossible for an indexed Kad value to be relayed with one of the
+/// generic eD2K-only Bool, BoolArray, or Blob encodings.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TagValue {
     Hash(Ed2kHash),
@@ -36,8 +36,6 @@ pub enum TagValue {
     U16(u16),
     U8(u8),
     Float(f32),
-    Bool(bool),
-    Blob(Vec<u8>),
     SmallBlob(Vec<u8>),
 }
 
@@ -185,8 +183,6 @@ fn value_type_byte(v: &TagValue) -> u8 {
         }
         TagValue::U32(_) => 0x03,
         TagValue::Float(_) => 0x04,
-        TagValue::Bool(_) => 0x05,
-        TagValue::Blob(_) => 0x07,
         TagValue::SmallBlob(_) => 0x0A,
         TagValue::U16(_) => 0x08,
         TagValue::U8(_) => 0x09,
@@ -237,23 +233,15 @@ impl Tag {
         endian: Endian,
         mode: StringDecodeMode,
     ) -> BinResult<Self> {
-        let type_byte: u8 = reader.read_type(endian)?;
-        let short_name = (type_byte & 0x80) != 0;
-        let tag_type = type_byte & 0x7F;
-
-        let name = if short_name {
-            let name_byte: u8 = reader.read_type(endian)?;
-            TagName::Short(name_byte)
+        let tag_type: u8 = reader.read_type(endian)?;
+        let name_len: u16 = reader.read_type(endian)?;
+        let name_bytes = read_len_capped_bytes(reader, name_len as usize)?;
+        // Kad's canonical one-byte names still use the u16-length name form;
+        // the generic eD2K high-bit short-name marker is not valid here.
+        let name = if name_bytes.len() == 1 {
+            TagName::Short(name_bytes[0])
         } else {
-            let name_len: u16 = reader.read_type(endian)?;
-            let name_bytes = read_len_capped_bytes(reader, name_len as usize)?;
-            // eMule often writes single-byte numeric IDs as a 1-byte "long" name
-            // instead of using the 0x80 short-name flag. Normalize to Short.
-            if name_bytes.len() == 1 {
-                TagName::Short(name_bytes[0])
-            } else {
-                TagName::Long(decode_string_bytes(&name_bytes, mode))
-            }
+            TagName::Long(decode_string_bytes(&name_bytes, mode))
         };
 
         let value = match tag_type {
@@ -275,23 +263,6 @@ impl Tag {
             0x04 => {
                 let v: f32 = reader.read_type(endian)?;
                 TagValue::Float(v)
-            }
-            0x05 => {
-                let v: u8 = reader.read_type(endian)?;
-                TagValue::Bool(v != 0)
-            }
-            0x06 => {
-                // BOOLARRAY: u16 len + skip bytes => store as Blob
-                let arr_len: u16 = reader.read_type(endian)?;
-                let byte_count = (arr_len as usize).div_ceil(8);
-                let data = read_len_capped_bytes(reader, byte_count)?;
-                TagValue::Blob(data)
-            }
-            0x07 => {
-                // BLOB: u32 len + bytes
-                let blob_len: u32 = reader.read_type(endian)?;
-                let data = read_len_capped_bytes(reader, blob_len as usize)?;
-                TagValue::Blob(data)
             }
             0x08 => {
                 let v: u16 = reader.read_type(endian)?;
@@ -379,15 +350,6 @@ impl BinWrite for Tag {
             }
             TagValue::Float(v) => {
                 writer.write_type(v, endian)?;
-            }
-            TagValue::Bool(v) => {
-                let b = u8::from(*v);
-                writer.write_type(&b, endian)?;
-            }
-            TagValue::Blob(data) => {
-                let len = u32::try_from(data.len()).expect("blob tag length exceeds u32");
-                writer.write_type(&len, endian)?;
-                writer.write_all(data).map_err(binrw::Error::Io)?;
             }
             TagValue::SmallBlob(data) => {
                 let len = u8::try_from(data.len()).expect("small blob tag length exceeds Kad BSOB");
@@ -497,21 +459,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bool_value() {
-        let t_true = Tag::new_short(0x05, TagValue::Bool(true));
-        let t_false = Tag::new_short(0x05, TagValue::Bool(false));
-        assert_eq!(roundtrip(&t_true), t_true);
-        assert_eq!(roundtrip(&t_false), t_false);
-    }
-
-    #[test]
-    fn test_blob_value() {
-        let t = Tag::new_short(0x07, TagValue::Blob(vec![0xAA, 0xBB, 0xCC]));
-        let t2 = roundtrip(&t);
-        assert_eq!(t, t2);
-    }
-
-    #[test]
     fn test_small_blob_value_uses_bsob_wire_type() {
         let t = Tag::new_short(
             tag_name::KADAICHHASHPUB,
@@ -530,6 +477,23 @@ mod tests {
     }
 
     #[test]
+    fn test_stock_storage_class_allowlist_roundtrips() {
+        let hash = Ed2kHash::from_bytes([0xAB; 16]);
+        for tag in [
+            Tag::new_short(1, TagValue::Hash(hash)),
+            Tag::new_short(2, TagValue::String("value".to_owned())),
+            Tag::new_short(3, TagValue::U32(0xAABB_CCDD)),
+            Tag::new_short(4, TagValue::Float(1.5)),
+            Tag::new_short(8, TagValue::U16(0xAABB)),
+            Tag::new_short(9, TagValue::U8(0xAA)),
+            Tag::new_short(10, TagValue::SmallBlob(vec![1, 2, 3])),
+            Tag::new_short(11, TagValue::U64(0x1122_3344_5566_7788)),
+        ] {
+            assert_eq!(roundtrip(&tag), tag);
+        }
+    }
+
+    #[test]
     fn test_long_name_u32() {
         let t = Tag::new_long("bitrate", TagValue::U32(320));
         let t2 = roundtrip(&t);
@@ -544,30 +508,27 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_accepts_legacy_short_name_marker() {
+    fn test_reader_rejects_generic_ed2k_short_name_marker() {
         let mut buf = Cursor::new(vec![0x89, tag_name::SOURCES, 0x07]);
-        let tag = Tag::read_le(&mut buf).unwrap();
-        assert_eq!(tag, Tag::new_short(tag_name::SOURCES, TagValue::U8(7)));
+        assert!(Tag::read_le(&mut buf).is_err());
     }
 
     #[test]
-    fn test_blob_tag_with_bogus_length_errors_without_huge_alloc() {
-        // type 0x07 (BLOB), short name marker, name byte, then a u32 length of
-        // 0xFFFFFFFF (~4 GB) with no payload following. The capped reader must
-        // reject this immediately instead of pre-allocating a 4 GB Vec.
-        let mut buf = Cursor::new(vec![0x80 | 0x07, tag_name::SOURCES, 0xFF, 0xFF, 0xFF, 0xFF]);
-        let result = Tag::read_le(&mut buf);
-        assert!(
-            result.is_err(),
-            "a blob length far beyond the cursor must error, not allocate"
-        );
+    fn test_reader_rejects_non_stock_storage_classes() {
+        for tag_type in [0x05, 0x06, 0x07, 0x0c, 0x7f] {
+            let mut buf = Cursor::new(vec![tag_type, 0x01, 0x00, tag_name::SOURCES, 0x00]);
+            assert!(
+                Tag::read_le(&mut buf).is_err(),
+                "Kad storage class {tag_type:#04x} must be rejected"
+            );
+        }
     }
 
     #[test]
     fn test_string_tag_with_bogus_length_errors_without_huge_alloc() {
-        // type 0x02 (String), short name marker, name byte, then a u16 length of
+        // type 0x02 (String), canonical one-byte name, then a u16 length of
         // 0xFFFF with no payload following.
-        let mut buf = Cursor::new(vec![0x80 | 0x02, tag_name::FILENAME, 0xFF, 0xFF]);
+        let mut buf = Cursor::new(vec![0x02, 0x01, 0x00, tag_name::FILENAME, 0xFF, 0xFF]);
         let result = Tag::read_le(&mut buf);
         assert!(
             result.is_err(),
@@ -576,9 +537,12 @@ mod tests {
     }
 
     #[test]
-    fn test_blob_tag_with_valid_length_still_decodes() {
-        // A well-formed BLOB tag must still round-trip through the capped reader.
-        let t = Tag::new_short(tag_name::SOURCES, TagValue::Blob(vec![1, 2, 3, 4]));
-        assert_eq!(roundtrip(&t), t);
+    fn test_truncated_name_and_bsob_lengths_are_rejected() {
+        let mut truncated_name = Cursor::new(vec![0x09, 0x02, 0x00, tag_name::SOURCES]);
+        assert!(Tag::read_le(&mut truncated_name).is_err());
+
+        let mut truncated_bsob =
+            Cursor::new(vec![0x0A, 0x01, 0x00, tag_name::KADAICHHASHPUB, 0x04, 0xAA]);
+        assert!(Tag::read_le(&mut truncated_bsob).is_err());
     }
 }

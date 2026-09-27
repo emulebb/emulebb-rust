@@ -297,7 +297,8 @@ fn test_search_res_decodes_legacy_cp1252_strings() {
     bytes.extend_from_slice(&1u16.to_le_bytes()); // result count
     bytes.extend_from_slice(&[0x33; 16]); // file hash
     bytes.push(1); // tag count
-    bytes.push(0x82); // short-name string tag
+    bytes.push(0x02); // string tag
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // canonical one-byte name length
     bytes.push(crate::constants::tag_name::FILENAME);
     bytes.extend_from_slice(&4u16.to_le_bytes());
     bytes.extend_from_slice(&[b'T', 0xE9, b's', b't']); // "Tést" in cp1252

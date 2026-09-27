@@ -223,7 +223,7 @@ fn keyword_publish_info_tag(entry: &StoredKeywordPublish, tracker: &KeywordPubli
 
 fn stock_aich_publish_hash(tag: &Tag) -> Option<[u8; 20]> {
     let bytes = match &tag.value {
-        TagValue::Blob(bytes) | TagValue::SmallBlob(bytes) => bytes,
+        TagValue::SmallBlob(bytes) => bytes,
         _ => return None,
     };
     bytes.as_slice().try_into().ok()
