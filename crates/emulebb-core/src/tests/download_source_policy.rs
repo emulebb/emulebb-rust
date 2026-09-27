@@ -69,7 +69,7 @@ async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
 }
 
 #[tokio::test]
-async fn fnf_dead_listed_source_is_dropped_and_blocked_from_readmission() {
+async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmission() {
     // DL-2 (oracle CPartFile::m_DeadSourceList, ListenSocket.cpp:645-661): a
     // source that answered OP_FILEREQANSNOFIL is dead-listed for 45 minutes —
     // its registry candidate is dropped, re-registration is refused
@@ -87,6 +87,10 @@ async fn fnf_dead_listed_source_is_dropped_and_blocked_from_readmission() {
     );
     {
         let mut state = core.state.lock().await;
+        state.transfers.insert(
+            other_file.clone(),
+            a4af_test_transfer(&other_file, "downloading"),
+        );
         for hash in [&dead_file, &other_file] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
@@ -102,8 +106,12 @@ async fn fnf_dead_listed_source_is_dropped_and_blocked_from_readmission() {
         }
     }
 
-    core.dead_list_file_not_found_sources(&dead_file, std::slice::from_ref(&source))
-        .await;
+    assert_eq!(
+        core.dead_list_file_not_found_sources(&dead_file, std::slice::from_ref(&source))
+            .await,
+        1,
+        "FNF removes only the dead file relation and swaps the peer to its other wanted file"
+    );
     {
         let now = Instant::now();
         let state = core.state.lock().await;
@@ -316,12 +324,13 @@ async fn a4af_nnp_source_without_other_wanted_file_is_dropped() {
 }
 
 #[tokio::test]
-async fn a4af_nnp_source_other_file_completed_is_not_swapped() {
-    // A4AF-lite leg 2 guard: the swap target must still be a wanted transfer;
-    // a completed/paused other file is not a valid swap target.
+async fn a4af_nnp_swap_skips_terminal_best_candidate_for_live_fallback() {
+    // The swap target walk must skip terminal candidates instead of letting a
+    // completed high-priority file mask a lower-priority wanted file.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let current = Ed2kHash::from_bytes([0x76; 16]).to_string();
     let other = Ed2kHash::from_bytes([0x77; 16]).to_string();
+    let fallback = Ed2kHash::from_bytes([0x78; 16]).to_string();
     let source = direct_test_source(
         Ed2kHash::from_bytes([0x76; 16]),
         Ipv4Addr::new(192, 0, 2, 34),
@@ -332,12 +341,16 @@ async fn a4af_nnp_source_other_file_completed_is_not_swapped() {
         state
             .transfers
             .insert(other.clone(), a4af_test_transfer(&other, "completed"));
-        for hash in [&current, &other] {
+        state.transfers.insert(
+            fallback.clone(),
+            a4af_test_transfer(&fallback, "downloading"),
+        );
+        for (hash, priority) in [(&current, 5), (&other, 9), (&fallback, 1)] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-                    file_priority: 5,
+                    file_priority: priority,
                     needed_parts: 4,
                     rare_parts: 1,
                     source: source.clone(),
@@ -351,8 +364,8 @@ async fn a4af_nnp_source_other_file_completed_is_not_swapped() {
         .swap_no_needed_parts_sources(&current, std::slice::from_ref(&source))
         .await;
     assert_eq!(
-        swapped, 0,
-        "completed other file is not a valid swap target"
+        swapped, 1,
+        "completed best candidate must be skipped in favor of a live fallback"
     );
 }
 

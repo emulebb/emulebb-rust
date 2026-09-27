@@ -163,10 +163,10 @@ fn registry_swap_target_picks_best_other_wanted_file_and_skips_current() {
         candidate("cccccccccccccccccccccccccccccccc", 5, 1, source.clone()),
     );
 
-    let target = registry
-        .swap_target_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        .unwrap();
-    assert_eq!(target.file_hash, "cccccccccccccccccccccccccccccccc");
+    let targets = registry.swap_targets_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].file_hash, "cccccccccccccccccccccccccccccccc");
+    assert_eq!(targets[1].file_hash, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 }
 
 #[test]
@@ -181,8 +181,8 @@ fn registry_swap_target_is_none_when_peer_serves_only_the_current_file() {
 
     assert!(
         registry
-            .swap_target_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_none()
+            .swap_targets_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .is_empty()
     );
 }
 

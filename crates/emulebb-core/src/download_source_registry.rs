@@ -215,7 +215,9 @@ impl DownloadSourceRegistry {
             return None;
         }
         let candidates = self.peers.get(&peer_key)?;
-        let candidate = candidates.iter().max_by_key(candidate_score)?;
+        let candidate = candidates
+            .iter()
+            .max_by_key(|candidate| candidate_score(candidate))?;
         if candidate.file_hash != file_hash || !self.leased_peers.insert(peer_key) {
             return None;
         }
@@ -315,27 +317,26 @@ impl DownloadSourceRegistry {
         }
     }
 
-    /// A4AF-lite NNP swap target (master `CUpDownClient::SwapToAnotherFile`):
-    /// when a source reports No Needed Parts for `current_file_hash`, find the
-    /// best OTHER file this same peer is registered to serve, so the source is
-    /// moved to that file instead of being dropped. Returns the highest-priority
-    /// candidate (by [`candidate_score`]: file priority, then rare/needed parts)
-    /// among the peer's files whose hash differs from `current_file_hash`, or
-    /// `None` when the peer serves no other wanted file (caller then drops it as
-    /// before). Does not mutate lease state; the caller leases the chosen file's
-    /// candidate via [`lease_best_for_file`] on the swap target if it engages it.
-    pub(crate) fn swap_target_for_peer(
+    /// All OTHER files known for this peer, best first. Keeping target ordering
+    /// in the peer-centric registry mirrors the oracle's one-client/many-files
+    /// source set, while the core filters stopped/terminal transfers using its
+    /// authoritative lifecycle state. Used for NNP and FNF/AICH swap-or-remove.
+    pub(crate) fn swap_targets_for_peer(
         &self,
         source: &Ed2kFoundSource,
         current_file_hash: &str,
-    ) -> Option<DownloadSourceCandidate> {
+    ) -> Vec<DownloadSourceCandidate> {
         let peer_key = DownloadPeerKey::from_source(source);
-        let candidates = self.peers.get(&peer_key)?;
-        candidates
+        let Some(candidates) = self.peers.get(&peer_key) else {
+            return Vec::new();
+        };
+        let mut targets = candidates
             .iter()
             .filter(|candidate| candidate.file_hash != current_file_hash)
-            .max_by_key(candidate_score)
             .cloned()
+            .collect::<Vec<_>>();
+        targets.sort_by_key(|candidate| std::cmp::Reverse(candidate_score(candidate)));
+        targets
     }
 
     /// Find the SINGLE candidate source for `file_hash` owned by a peer at
@@ -500,7 +501,7 @@ fn is_stale(candidate: &DownloadSourceCandidate, now: Instant) -> bool {
     now.saturating_duration_since(candidate.last_seen) > CANDIDATE_LIVENESS_TTL
 }
 
-fn candidate_score(candidate: &&DownloadSourceCandidate) -> (u32, u32, u32) {
+fn candidate_score(candidate: &DownloadSourceCandidate) -> (u32, u32, u32) {
     (
         candidate.file_priority,
         candidate.rare_parts,

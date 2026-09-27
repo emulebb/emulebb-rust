@@ -1353,11 +1353,12 @@ impl EmulebbCore {
                     )
                     .await;
                 }
-                // FNF dead-listing (oracle ListenSocket.cpp:645-661 + UDPReaskFNF):
+                // FNF dead-listing + A4AF swap-or-remove (oracle
+                // ListenSocket.cpp:645-661 + UDPReaskFNF):
                 // a source that answered OP_FILEREQANSNOFIL (or an AICH-root
                 // mismatch treated like FNF) is blocked from re-admission for 45
-                // minutes and dropped from the registry. Rust maps the oracle
-                // swap-or-RemoveSource to a plain drop (A4AF intentionally parked).
+                // minutes, removed from this file and re-driven on its best other
+                // wanted file when its source set has one.
                 if !outcome.file_not_found_sources.is_empty() {
                     self.dead_list_file_not_found_sources(
                         &transfer.hash,
@@ -1695,22 +1696,42 @@ impl EmulebbCore {
     /// 45-minute block and drop its registry candidate. Mirrors the oracle
     /// OP_FILEREQANSNOFIL handler (`ListenSocket.cpp:645-661`:
     /// `m_DeadSourceList.AddDeadSource` then swap-or-`RemoveSource`) and the
-    /// identical AICH-mismatch path (`DownloadClient.cpp:2971-3004`); rust's
-    /// swap-or-remove is a plain drop because A4AF is intentionally parked.
-    async fn dead_list_file_not_found_sources(&self, file_hash: &str, sources: &[Ed2kFoundSource]) {
-        let mut state = self.state.lock().await;
-        let now = Instant::now();
-        for source in sources {
-            if state
-                .ed2k_dead_sources
-                .add_dead_source(now, file_hash, source)
-            {
-                crate::diag_sched::source_dead_listed(file_hash, source, "fnf");
+    /// identical AICH-mismatch path (`DownloadClient.cpp:2971-3004`). After the
+    /// dead relation is removed, re-drive the best other still-wanted file for
+    /// that peer, preserving its A4AF source set instead of discarding it.
+    async fn dead_list_file_not_found_sources(
+        &self,
+        file_hash: &str,
+        sources: &[Ed2kFoundSource],
+    ) -> usize {
+        let swap_targets = {
+            let mut state = self.state.lock().await;
+            let now = Instant::now();
+            let mut seen_targets = HashSet::new();
+            let mut swap_targets = Vec::new();
+            for source in sources {
+                if state
+                    .ed2k_dead_sources
+                    .add_dead_source(now, file_hash, source)
+                {
+                    crate::diag_sched::source_dead_listed(file_hash, source, "fnf");
+                }
+                state
+                    .download_source_registry
+                    .remove_candidate(source, file_hash);
+                if let Some(target) = wanted_a4af_swap_target(&state, source, file_hash)
+                    && seen_targets.insert(target.hash.clone())
+                {
+                    swap_targets.push(target);
+                }
             }
-            state
-                .download_source_registry
-                .remove_candidate(source, file_hash);
+            swap_targets
+        };
+        let swapped = swap_targets.len();
+        for target in swap_targets {
+            self.queue_ed2k_download_attempt(target);
         }
+        swapped
     }
 
     /// Dead-list a source that UDP-answered `OP_FILENOTFOUND` on the reask loop
@@ -1720,24 +1741,39 @@ impl EmulebbCore {
     /// so the full oracle identity is recovered from the registry by (ip, file);
     /// an already-forgotten or ambiguous source is left un-listed (it is already
     /// out of the reask loop, and without identity there is nothing to gate).
-    async fn dead_list_udp_fnf_source(&self, file_hash: &str, peer_ip: Ipv4Addr) {
-        let mut state = self.state.lock().await;
-        let now = Instant::now();
-        let Some(source) = state
-            .download_source_registry
-            .sole_candidate_source_by_ip(peer_ip, file_hash)
-        else {
-            return;
+    async fn dead_list_udp_fnf_source(&self, file_hash: &str, peer_ip: Ipv4Addr) -> bool {
+        let swap_target = {
+            let mut state = self.state.lock().await;
+            let now = Instant::now();
+            let Some(source) = state
+                .download_source_registry
+                .sole_candidate_source_by_ip(peer_ip, file_hash)
+            else {
+                return false;
+            };
+            if state
+                .ed2k_dead_sources
+                .add_dead_source(now, file_hash, &source)
+            {
+                crate::diag_sched::source_dead_listed(file_hash, &source, "udp_fnf");
+            }
+            state
+                .download_source_registry
+                .remove_candidate(&source, file_hash);
+            // SourceReleased follows SourceDead, but the swap-target task may run
+            // first. Release the old lease atomically; the later event is
+            // idempotent.
+            let endpoint = source_endpoint_key(&source);
+            state.active_download_peer_endpoints.remove(&endpoint);
+            state.download_source_registry.release_endpoint(endpoint);
+            wanted_a4af_swap_target(&state, &source, file_hash)
         };
-        if state
-            .ed2k_dead_sources
-            .add_dead_source(now, file_hash, &source)
-        {
-            crate::diag_sched::source_dead_listed(file_hash, &source, "udp_fnf");
+        if let Some(target) = swap_target {
+            self.queue_ed2k_download_attempt(target);
+            true
+        } else {
+            false
         }
-        state
-            .download_source_registry
-            .remove_candidate(&source, file_hash);
     }
 
     async fn register_download_source_candidates(
@@ -1773,7 +1809,7 @@ impl EmulebbCore {
         }
     }
 
-    /// A4AF-lite NNP swap (eMuleBB `CUpDownClient::SwapToAnotherFile`). For each
+    /// A4AF NNP swap (eMuleBB `CUpDownClient::SwapToAnotherFile`). For each
     /// source that reported No Needed Parts on `current_file_hash`, consult the
     /// cross-transfer registry for the best OTHER wanted file the same peer
     /// serves. When such a file exists and is still an active (non-terminal)
@@ -1796,25 +1832,15 @@ impl EmulebbCore {
             let state = self.state.lock().await;
             let mut seen_targets: HashSet<String> = HashSet::new();
             for source in sources {
-                let Some(candidate) = state
-                    .download_source_registry
-                    .swap_target_for_peer(source, current_file_hash)
+                let Some(target) = wanted_a4af_swap_target(&state, source, current_file_hash)
                 else {
                     continue;
                 };
-                crate::diag_sched::source_swapped(current_file_hash, &candidate.file_hash, source);
-                if !seen_targets.insert(candidate.file_hash.clone()) {
+                crate::diag_sched::source_swapped(current_file_hash, &target.hash, source);
+                if !seen_targets.insert(target.hash.clone()) {
                     continue;
                 }
-                // The swap target must still be a wanted (active) transfer.
-                if let Some(target) = state.transfers.get(&candidate.file_hash)
-                    && !matches!(
-                        target.state.as_str(),
-                        "completed" | "completing" | "paused" | "stopped"
-                    )
-                {
-                    swap_targets.push(target.clone());
-                }
+                swap_targets.push(target);
             }
         }
         let swapped = swap_targets.len();
@@ -6414,6 +6440,29 @@ fn parse_ed2k_source_user_hash(value: &str) -> Option<String> {
 
 fn should_retry_download_attempt_state(state: &str) -> bool {
     matches!(state, "downloading" | "queued")
+}
+
+/// Select the best still-wanted OTHER file from one peer's A4AF source set.
+/// The registry owns deterministic priority ordering; core owns authoritative
+/// transfer lifecycle, so a completed/paused top candidate must not hide a live
+/// lower-ranked fallback (the oracle skips non-ready/stopped part files while
+/// walking `m_OtherRequests_list` / `m_OtherNoNeeded_list`).
+fn wanted_a4af_swap_target(
+    state: &CoreState,
+    source: &Ed2kFoundSource,
+    current_file_hash: &str,
+) -> Option<Transfer> {
+    state
+        .download_source_registry
+        .swap_targets_for_peer(source, current_file_hash)
+        .into_iter()
+        .find_map(|candidate| {
+            state
+                .transfers
+                .get(&candidate.file_hash)
+                .filter(|target| should_retry_download_attempt_state(&target.state))
+                .cloned()
+        })
 }
 
 /// Case-insensitive check that `path` resides within `dir`, tolerating the
