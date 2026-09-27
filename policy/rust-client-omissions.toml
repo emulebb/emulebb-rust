@@ -109,20 +109,6 @@ review_disposition = "defer"
 review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED anti-abuse intact - rust rejects both DuplicateQueued (intra-batch) and cross-packet re-requests collapsed to DuplicateDone (upload_payload.rs:48-52,311-362). The duplicate is ALWAYS rejected; only the diagnostic event label can differ. No wire difference. DEFER."
 
 [[omissions]]
-id = "server-obfuscation-metadata-non-config"
-area = "ed2k"
-stock_behavior = "eMule imports and persists each server's UDP flags, obfuscated TCP/UDP ports, UDP key, and the public IP to which that key is bound. Extended OP_GLOBSERVSTATRES replies and crypt-ping probes refresh that state, and a public-IP change invalidates a stale key before keyed UDP traffic is sent."
-rust_behavior = "The Rust server model, REST DTO, SQLite table, and runtime config already carry and persist obfuscation_tcp_port plus udp_flags. Configured entries can additionally supply an obfuscated UDP port, UDP key, and key-binding IP for the current process. The missing path is metadata acquisition and the full UDP-key lifecycle: server.met import reads only IP/port/name; OP_SERVERLIST supplies only IP/port; OP_GLOBSERVSTATRES currently retains users/files/udp_flags but not obfuscated ports, UDP key, or key-binding IP; there is no stock crypt-ping discovery/bootstrap cycle; the persistent server schema has no UDP key, key-IP, or obfuscated-UDP-port fields; and stale keys are not invalidated when the public IP changes. Metadata-poor TCP sessions now make one bounded obfuscated attempt followed by the ordinary plaintext endpoint when crypt is not required, so failed crypt probing no longer loops forever."
-reason = "Defer the remaining discovery and persistence pipeline until the server metadata model can carry the complete stock tuple atomically. The bounded TCP fallback preserves reachability for metadata-poor plaintext servers without pretending that keyed UDP obfuscation or obfuscation-only discovered servers are complete."
-compatibility = "Configured servers with complete operator-supplied metadata use the intended obfuscated TCP/UDP endpoints, and metadata-poor plaintext servers can connect through the bounded fallback. A discovered/imported obfuscation-only server or a server requiring a learned/bound UDP key remains unsupported until the port/key/key-IP discovery and persistence lifecycle is implemented."
-disposition = "protocol_defer"
-owner = "server-runtime"
-target = "post-beta server metadata discovery and UDP-key lifecycle"
-beta_blocker = false
-review_disposition = "defer"
-review_disposition_note = "2026-09-27 stock-compatibility re-audit: corrected the stale claim that REST/state/SQLite lack obfuscation fields; obfuscation_tcp_port and udp_flags are present and persisted. The TCP crypt-to-plaintext retry blocker is fixed with bounded attempt-scoped fallback. DEFER now covers only the remaining UDP key, key-IP, obfuscated-port, import/discovery, crypt-ping, stale-key invalidation, and persistence work."
-
-[[omissions]]
 id = "kad-keyword-media-metadata-tags"
 area = "kad"
 stock_behavior = "eMule attaches media-metadata tags to each Kad keyword-publish file entry when GetMetaDataVer() > 0 (PreparePacketForTags, Search.cpp:1499-1547): FT_MEDIA_ARTIST / FT_MEDIA_ALBUM / FT_MEDIA_TITLE (string), FT_MEDIA_LENGTH / FT_MEDIA_BITRATE (uint32), FT_MEDIA_CODEC (string), skipping empty strings / zero ints / filename-redundant strings. A searcher can then filter Kad keyword-search results by bitrate / length / codec / artist / album / title."

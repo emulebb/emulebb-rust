@@ -118,7 +118,10 @@ use types::ServerUdpPacket;
 pub use types::{Ed2kFoundSource, Ed2kSearchFile, Ed2kServerLoopOptions, Ed2kServerState};
 #[cfg(test)]
 use udp::derive_server_udp_cipher;
-use udp::{decode_server_udp_datagram, encode_server_udp_datagram, server_udp_endpoint};
+use udp::{
+    decode_server_udp_datagram, decode_server_udp_datagram_with_key, encode_server_udp_crypt_ping,
+    encode_server_udp_datagram, server_udp_crypt_ping_endpoint, server_udp_endpoint,
+};
 use udp_runtime::{
     bind_server_udp_socket, read_server_udp_packet, read_server_udp_packet_from_any,
     send_udp_keyword_search, send_udp_source_search, send_udp_source_search_batch,

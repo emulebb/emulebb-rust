@@ -277,8 +277,9 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT address, port, name, description, server_priority, static_server,
-                   enabled, failed_count, ping_ms, users, files, soft_files, hard_files, version,
-                   obfuscation_tcp_port, udp_flags
+                   enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
+                   soft_files, hard_files, version,
+                   obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key, udp_key_ip
             FROM servers
             WHERE deleted_at_ms IS NULL
             ORDER BY address, port
@@ -297,11 +298,16 @@ impl super::MetadataStore {
                 ping_ms: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
                 users: row.get::<_, Option<i64>>(9)?.unwrap_or_default() as u64,
                 files: row.get::<_, Option<i64>>(10)?.unwrap_or_default() as u64,
-                soft_files: row.get::<_, Option<i64>>(11)?.unwrap_or_default() as u64,
-                hard_files: row.get::<_, Option<i64>>(12)?.unwrap_or_default() as u64,
-                version: row.get(13)?,
-                obfuscation_tcp_port: row.get::<_, Option<i64>>(14)?.map(|value| value as u16),
-                udp_flags: row.get::<_, Option<i64>>(15)?.map(|value| value as u32),
+                max_users: row.get::<_, Option<i64>>(11)?.unwrap_or_default() as u64,
+                low_id_users: row.get::<_, Option<i64>>(12)?.unwrap_or_default() as u64,
+                soft_files: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u64,
+                hard_files: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u64,
+                version: row.get(15)?,
+                obfuscation_tcp_port: row.get::<_, Option<i64>>(16)?.map(|value| value as u16),
+                obfuscation_udp_port: row.get::<_, Option<i64>>(17)?.map(|value| value as u16),
+                udp_flags: row.get::<_, Option<i64>>(18)?.map(|value| value as u32),
+                udp_key: row.get::<_, Option<i64>>(19)?.map(|value| value as u32),
+                udp_key_ip: row.get::<_, Option<i64>>(20)?.map(|value| value as u32),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -314,10 +320,12 @@ impl super::MetadataStore {
             r#"
             INSERT INTO servers(
                 address, port, name, description, server_priority, static_server,
-                enabled, failed_count, ping_ms, users, files, soft_files, hard_files,
-                version, obfuscation_tcp_port, udp_flags, first_seen_ms, last_seen_ms, deleted_at_ms
+                enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
+                soft_files, hard_files,
+                version, obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key,
+                udp_key_ip, first_seen_ms, last_seen_ms, deleted_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, NULL)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22, NULL)
             ON CONFLICT(address, port) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -328,11 +336,16 @@ impl super::MetadataStore {
                 ping_ms = excluded.ping_ms,
                 users = excluded.users,
                 files = excluded.files,
+                max_users = excluded.max_users,
+                low_id_users = excluded.low_id_users,
                 soft_files = excluded.soft_files,
                 hard_files = excluded.hard_files,
                 version = excluded.version,
                 obfuscation_tcp_port = excluded.obfuscation_tcp_port,
+                obfuscation_udp_port = excluded.obfuscation_udp_port,
                 udp_flags = excluded.udp_flags,
+                udp_key = excluded.udp_key,
+                udp_key_ip = excluded.udp_key_ip,
                 last_seen_ms = excluded.last_seen_ms,
                 deleted_at_ms = NULL
             "#,
@@ -348,11 +361,16 @@ impl super::MetadataStore {
                 server.ping_ms.map(i64::from),
                 server.users as i64,
                 server.files as i64,
+                server.max_users as i64,
+                server.low_id_users as i64,
                 server.soft_files as i64,
                 server.hard_files as i64,
                 server.version,
                 server.obfuscation_tcp_port.map(i64::from),
+                server.obfuscation_udp_port.map(i64::from),
                 server.udp_flags.map(i64::from),
+                server.udp_key.map(i64::from),
+                server.udp_key_ip.map(i64::from),
                 now,
             ],
         )?;
@@ -499,11 +517,16 @@ mod tests {
                 ping_ms: Some(50),
                 users: 10,
                 files: 20,
+                max_users: 25,
+                low_id_users: 5,
                 soft_files: 30,
                 hard_files: 40,
                 version: "17.15".to_string(),
                 obfuscation_tcp_port: Some(4665),
+                obfuscation_udp_port: Some(4675),
                 udp_flags: Some(0x331),
+                udp_key: Some(0x1122_3344),
+                udp_key_ip: Some(u32::from_le_bytes([198, 51, 100, 9])),
             })
             .unwrap();
         store
@@ -519,11 +542,16 @@ mod tests {
                 ping_ms: Some(50),
                 users: 10,
                 files: 20,
+                max_users: 25,
+                low_id_users: 5,
                 soft_files: 30,
                 hard_files: 40,
                 version: "17.15".to_string(),
                 obfuscation_tcp_port: Some(4665),
+                obfuscation_udp_port: Some(4675),
                 udp_flags: Some(0x331),
+                udp_key: Some(0x1122_3344),
+                udp_key_ip: Some(u32::from_le_bytes([198, 51, 100, 9])),
             })
             .unwrap();
         let servers = store.load_servers().unwrap();
@@ -531,8 +559,16 @@ mod tests {
         assert!(!servers[0].enabled);
         assert_eq!(servers[0].name, "Test Server");
         assert_eq!(servers[0].endpoint(), "192.0.2.10:4661");
+        assert_eq!(servers[0].max_users, 25);
+        assert_eq!(servers[0].low_id_users, 5);
         assert_eq!(servers[0].obfuscation_tcp_port, Some(4665));
+        assert_eq!(servers[0].obfuscation_udp_port, Some(4675));
         assert_eq!(servers[0].udp_flags, Some(0x331));
+        assert_eq!(servers[0].udp_key, Some(0x1122_3344));
+        assert_eq!(
+            servers[0].udp_key_ip,
+            Some(u32::from_le_bytes([198, 51, 100, 9]))
+        );
 
         store
             .upsert_transfer_manifest(&crate::MetadataTransferManifest {

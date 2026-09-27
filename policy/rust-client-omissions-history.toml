@@ -4,6 +4,20 @@
 # only contains current omissions and approved protocol drops.
 
 [[resolved_omissions]]
+id = "server-obfuscation-metadata-non-config"
+area = "ed2k"
+stock_behavior = "eMule imports and persists each server's UDP flags, obfuscated TCP/UDP ports, UDP key, and the public IP to which that key is bound. Extended OP_GLOBSERVSTATRES replies and crypt-ping probes refresh that state, and a public-IP change invalidates a stale key before keyed UDP traffic is sent."
+rust_behavior = "IMPLEMENTED: the Rust client decodes the full extended OP_GLOBSERVSTATRES tuple, binds learned UDP keys to the current public client ID, persists the key/key-IP and obfuscated TCP/UDP ports in profile metadata, hydrates configured and discovered server entries from that state, and suppresses a key whose binding no longer matches the current public IP. When no current key is available it sends the stock raw crypt-ping to base-port + 12, accepts the encrypted reply with the temporary challenge key, and falls back to a plaintext status request after the stock 20-second discovery timeout."
+reason = "The server runtime, core state, and schema-v19 persistence pipeline now carry the complete tuple atomically, closing the prior discovery and lifecycle gap."
+compatibility = "Discovered and imported servers can learn the stock keyed UDP endpoint metadata; current keys drive obfuscated UDP traffic, stale keys are never reused after a public-IP change, and metadata-poor plaintext servers retain the bounded fallback path."
+disposition = "fixed"
+owner = "server-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: implemented extended-status decoding, crypt-ping discovery and temporary-key decryption, 20-second plaintext fallback, key/IP validity gating, schema-v19 persistence, restart hydration, and focused protocol/core/metadata tests. No longer an active omission."
+
+[[resolved_omissions]]
 id = "conn-rate-spike-modifier"
 area = "ed2k"
 stock_behavior = "eMule scales the per-5s new-connection budget by GetMaxConperFiveModifier() (CListenSocket::TooManySockets / GetMaxConperFiveModifier, ListenSocket.cpp:2653,2722-2728). The modifier is a SUPPRESSOR, not a raiser: it returns a multiplier in [0,1) computed from the recent open-socket spike ((SpikeSize > SpikeTolerance) ? 0 : 1 - SpikeSize/SpikeTolerance), so during a connection spike stock throttles its effective per-5s budget BELOW GetMaxConperFive() (down to 0), then relaxes back to the flat budget as the spike subsides."

@@ -104,30 +104,47 @@ impl EmulebbCore {
             {
                 continue;
             }
-            let exists = config.server_entries.iter().any(|entry| {
+            let persisted = Ed2kServerEntry {
+                host: server.address.clone(),
+                port: server.port,
+                name: Some(server.name.clone()).filter(|name| !name.is_empty()),
+                description: Some(server.description.clone())
+                    .filter(|description| !description.is_empty()),
+                udp_flags: server.udp_flags.unwrap_or_default(),
+                udp_key: server.udp_key.unwrap_or_default(),
+                udp_key_ip: server.udp_key_ip.unwrap_or_default(),
+                obfuscation_port_tcp: server.obfuscation_tcp_port.unwrap_or_default(),
+                obfuscation_port_udp: server.obfuscation_udp_port.unwrap_or_default(),
+                soft_files: u32::try_from(server.soft_files).unwrap_or(u32::MAX),
+                hard_files: u32::try_from(server.hard_files).unwrap_or(u32::MAX),
+            };
+            if let Some(existing) = config.server_entries.iter_mut().find(|entry| {
                 format!("{}:{}", entry.host, entry.port).eq_ignore_ascii_case(endpoint)
-            }) || config
-                .server_endpoints
-                .iter()
-                .any(|existing| existing.eq_ignore_ascii_case(endpoint));
-            if !exists {
-                // Carry the full server record (incl. the persisted soft/hard file
-                // limits) so the OP_OFFERFILES batch can honor the server's soft
-                // limit (server_offer_file_limit) instead of the flat 200 default.
-                config.server_entries.push(Ed2kServerEntry {
-                    host: server.address.clone(),
-                    port: server.port,
-                    name: Some(server.name.clone()).filter(|name| !name.is_empty()),
-                    description: Some(server.description.clone())
-                        .filter(|description| !description.is_empty()),
-                    udp_flags: server.udp_flags.unwrap_or_default(),
-                    udp_key: 0,
-                    udp_key_ip: 0,
-                    obfuscation_port_tcp: server.obfuscation_tcp_port.unwrap_or_default(),
-                    obfuscation_port_udp: 0,
-                    soft_files: u32::try_from(server.soft_files).unwrap_or(u32::MAX),
-                    hard_files: u32::try_from(server.hard_files).unwrap_or(u32::MAX),
-                });
+            }) {
+                // Persisted live metadata supersedes stale static config for the
+                // same endpoint while preserving its configured host spelling.
+                let host = existing.host.clone();
+                *existing = persisted;
+                existing.host = host;
+            } else {
+                // Carry the full persisted record even when `server_endpoints`
+                // already names it: configured_server_entries uses this richer
+                // record for key/port selection and offer-file limits.
+                config.server_entries.push(persisted);
+            }
+        }
+        let public_client_id = self
+            .ed2k_reachability
+            .get()
+            .map(|ip| u32::from_le_bytes(ip.octets()));
+        for entry in &mut config.server_entries {
+            let key_is_current = entry.udp_key != 0
+                && entry.udp_key_ip != 0
+                && public_client_id == Some(entry.udp_key_ip);
+            if !key_is_current {
+                // Keep the binding IP for diagnostics/persistence, but do not
+                // offer a stale key to the runtime after a public-IP change.
+                entry.udp_key = 0;
             }
         }
         Ok(config)

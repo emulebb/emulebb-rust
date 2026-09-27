@@ -280,6 +280,64 @@ impl EmulebbCore {
             .insert(stored_endpoint, server);
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "flat challenge-validated server status event"
+    )]
+    pub(crate) async fn note_ed2k_server_status(
+        &self,
+        endpoint: &str,
+        users: u32,
+        files: u32,
+        max_users: u32,
+        low_id_users: u32,
+        ping_ms: u32,
+        soft_files: u32,
+        hard_files: u32,
+        udp_flags: u32,
+        udp_key: u32,
+        udp_key_ip: u32,
+        obfuscation_port_tcp: u16,
+        obfuscation_port_udp: u16,
+    ) {
+        let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
+            return;
+        };
+        let Some(mut server) = self.server(&stored_endpoint).await else {
+            return;
+        };
+        server.users = u64::from(users);
+        server.files = u64::from(files);
+        server.max_users = u64::from(max_users);
+        server.low_id_users = u64::from(low_id_users);
+        server.ping = ping_ms;
+        server.soft_files = u64::from(soft_files);
+        server.hard_files = u64::from(hard_files);
+        server.udp_flags = (udp_flags != 0).then_some(udp_flags);
+        server.udp_key = (udp_key != 0).then_some(udp_key);
+        server.udp_key_ip = (udp_key_ip != 0).then_some(udp_key_ip);
+        server.obfuscation_tcp_port = (obfuscation_port_tcp != 0).then_some(obfuscation_port_tcp);
+        server.obfuscation_udp_port = (obfuscation_port_udp != 0).then_some(obfuscation_port_udp);
+        let enabled = !self
+            .state
+            .lock()
+            .await
+            .disabled_servers
+            .contains(&stored_endpoint);
+        server.enabled = enabled;
+        if let Err(error) = profile_state::persist_server(&self.metadata_store, &server, enabled) {
+            tracing::warn!(
+                "failed to persist ED2K server UDP status for {stored_endpoint}: {error}"
+            );
+            return;
+        }
+        self.state
+            .lock()
+            .await
+            .servers
+            .insert(stored_endpoint, server);
+    }
+
     /// Endpoints whose consecutive-failure count is at or over the dead-server
     /// retry threshold, so a UDP source/keyword walk can skip them exactly like
     /// eMule (`GetFailedCount() >= GetDeadServerRetries()`, DownloadQueue.cpp:1798

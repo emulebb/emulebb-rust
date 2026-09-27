@@ -27,6 +27,22 @@ pub(super) fn server_udp_endpoint(server: &ResolvedServerEntry) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(server.ip), port)
 }
 
+pub(super) fn server_udp_crypt_ping_endpoint(server: &ResolvedServerEntry) -> SocketAddr {
+    let port = server
+        .entry
+        .port
+        .checked_add(12)
+        .unwrap_or(server.entry.port);
+    SocketAddr::new(IpAddr::V4(server.ip), port)
+}
+
+pub(super) fn encode_server_udp_crypt_ping(challenge: u32, padding: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(4 + padding.len());
+    packet.extend_from_slice(&challenge.to_le_bytes());
+    packet.extend_from_slice(padding);
+    packet
+}
+
 pub(super) fn encode_server_udp_datagram(
     server: &ResolvedServerEntry,
     opcode: u8,
@@ -60,17 +76,27 @@ pub(super) fn decode_server_udp_datagram(
     server: &ResolvedServerEntry,
     packet: &[u8],
 ) -> Option<Vec<u8>> {
+    decode_server_udp_datagram_with_key(server, packet, None)
+}
+
+pub(super) fn decode_server_udp_datagram_with_key(
+    server: &ResolvedServerEntry,
+    packet: &[u8],
+    decryption_key: Option<u32>,
+) -> Option<Vec<u8>> {
     if packet.first().copied() == Some(OP_EDONKEYPROT) {
         return Some(packet.to_vec());
     }
-    if !should_obfuscate_server_udp(server) || packet.len() <= EMULE_UDP_CRYPT_HEADER_LEN {
+    let decryption_key = decryption_key
+        .or_else(|| should_obfuscate_server_udp(server).then_some(server.entry.udp_key))?;
+    if packet.len() <= EMULE_UDP_CRYPT_HEADER_LEN {
         return None;
     }
 
     let random_key_part = u16::from_le_bytes([packet[1], packet[2]]);
     let mut decrypted = packet[3..].to_vec();
     let mut cipher = derive_server_udp_cipher(
-        server.entry.udp_key,
+        decryption_key,
         random_key_part,
         EMULE_UDP_CRYPT_MAGIC_SERVER_CLIENT,
     );

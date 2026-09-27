@@ -105,6 +105,18 @@ pub struct ServerInfo {
     pub version: String,
     pub obfuscation_tcp_port: Option<u16>,
     pub udp_flags: Option<u32>,
+    /// Internal persisted server-UDP obfuscation state. These fields are kept
+    /// out of the public REST contract but feed the next runtime configuration.
+    #[serde(default, skip)]
+    pub obfuscation_udp_port: Option<u16>,
+    #[serde(default, skip)]
+    pub udp_key: Option<u32>,
+    #[serde(default, skip)]
+    pub udp_key_ip: Option<u32>,
+    #[serde(default, skip)]
+    pub max_users: u64,
+    #[serde(default, skip)]
+    pub low_id_users: u64,
     pub users: u64,
     pub files: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

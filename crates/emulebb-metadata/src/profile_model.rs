@@ -31,11 +31,16 @@ pub struct MetadataServer {
     pub ping_ms: Option<u32>,
     pub users: u64,
     pub files: u64,
+    pub max_users: u64,
+    pub low_id_users: u64,
     pub soft_files: u64,
     pub hard_files: u64,
     pub version: String,
     pub obfuscation_tcp_port: Option<u16>,
+    pub obfuscation_udp_port: Option<u16>,
     pub udp_flags: Option<u32>,
+    pub udp_key: Option<u32>,
+    pub udp_key_ip: Option<u32>,
 }
 
 impl MetadataServer {

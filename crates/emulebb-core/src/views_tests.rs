@@ -74,7 +74,16 @@ fn server_live_details_overlay_protocol_status() {
         description: Some("live description".to_string()),
         users: Some(4242),
         files: Some(99000),
+        max_users: Some(5000),
+        low_id_users: Some(25),
+        ping_ms: Some(37),
         udp_flags: Some(0x331),
+        soft_files: Some(500),
+        hard_files: Some(600),
+        obfuscation_tcp_port: Some(4665),
+        obfuscation_udp_port: Some(4675),
+        udp_key: Some(0x1122_3344),
+        udp_key_ip: Some(0x5566_7788),
     };
 
     apply_server_live_details(&mut server, &live);
@@ -83,5 +92,14 @@ fn server_live_details_overlay_protocol_status() {
     assert_eq!(server.description, "live description");
     assert_eq!(server.users, 4242);
     assert_eq!(server.files, 99000);
+    assert_eq!(server.max_users, 5000);
+    assert_eq!(server.low_id_users, 25);
+    assert_eq!(server.ping, 37);
     assert_eq!(server.udp_flags, Some(0x331));
+    assert_eq!(server.soft_files, 500);
+    assert_eq!(server.hard_files, 600);
+    assert_eq!(server.obfuscation_tcp_port, Some(4665));
+    assert_eq!(server.obfuscation_udp_port, Some(4675));
+    assert_eq!(server.udp_key, Some(0x1122_3344));
+    assert_eq!(server.udp_key_ip, Some(0x5566_7788));
 }

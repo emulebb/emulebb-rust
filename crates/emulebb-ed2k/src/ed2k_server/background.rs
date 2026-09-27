@@ -346,11 +346,14 @@ pub async fn publish_shared_catalog_via_background_session(
 }
 
 pub(super) fn handle_background_udp_packet(
-    server: &ResolvedServerEntry,
+    server: &mut ResolvedServerEntry,
     packet: &ServerUdpPacket,
     pending_background_search: &mut Option<PendingBackgroundServerSearch>,
     state: &Arc<RwLock<Ed2kServerState>>,
     server_status_challenge: &mut Option<u32>,
+    public_client_id: Option<u32>,
+    status_ping_ms: u32,
+    server_list_events: Option<&super::Ed2kServerListEventSender>,
 ) -> Result<()> {
     if packet.from.ip() != IpAddr::V4(server.ip) {
         return Ok(());
@@ -464,25 +467,69 @@ pub(super) fn handle_background_udp_packet(
             let Some(expected) = *server_status_challenge else {
                 return Ok(());
             };
-            let Some(status) =
-                super::server_status::decode_server_status_response(&packet.payload, expected)
-            else {
+            let Some(status) = super::server_status::decode_server_status_response(
+                &packet.payload,
+                expected,
+                server.entry.port,
+            ) else {
                 return Ok(());
             };
             *server_status_challenge = None;
+            let udp_key_ip = if status.udp_key == 0 {
+                0
+            } else {
+                public_client_id.unwrap_or_default()
+            };
+            server.entry.soft_files = status.soft_files;
+            server.entry.hard_files = status.hard_files;
+            server.entry.udp_flags = status.udp_flags;
+            server.entry.udp_key = status.udp_key;
+            server.entry.udp_key_ip = udp_key_ip;
+            server.entry.obfuscation_port_tcp = status.obfuscation_port_tcp;
+            server.entry.obfuscation_port_udp = status.obfuscation_port_udp;
             if let Ok(mut guard) = state.try_write() {
                 guard.server_users = Some(status.users);
                 guard.server_files = Some(status.files);
-                if let Some(udp_flags) = status.udp_flags {
-                    guard.server_udp_flags = Some(udp_flags);
-                }
+                guard.server_max_users = Some(status.max_users);
+                guard.server_low_id_users = Some(status.low_id_users);
+                guard.server_ping_ms = Some(status_ping_ms);
+                guard.server_soft_files = Some(status.soft_files);
+                guard.server_hard_files = Some(status.hard_files);
+                guard.server_udp_flags = Some(status.udp_flags);
+                guard.server_obfuscation_port_tcp =
+                    (status.obfuscation_port_tcp != 0).then_some(status.obfuscation_port_tcp);
+                guard.server_obfuscation_port_udp =
+                    (status.obfuscation_port_udp != 0).then_some(status.obfuscation_port_udp);
+                guard.server_udp_key = (status.udp_key != 0).then_some(status.udp_key);
+                guard.server_udp_key_ip = (udp_key_ip != 0).then_some(udp_key_ip);
+            }
+            if let Some(sender) = server_list_events {
+                let _ = sender.send(super::Ed2kServerListEvent::StatusUpdated {
+                    endpoint: server.base_endpoint().to_string(),
+                    users: status.users,
+                    files: status.files,
+                    max_users: status.max_users,
+                    low_id_users: status.low_id_users,
+                    ping_ms: status_ping_ms,
+                    soft_files: status.soft_files,
+                    hard_files: status.hard_files,
+                    udp_flags: status.udp_flags,
+                    udp_key: status.udp_key,
+                    udp_key_ip,
+                    obfuscation_port_tcp: status.obfuscation_port_tcp,
+                    obfuscation_port_udp: status.obfuscation_port_udp,
+                });
             }
             tracing::debug!(
-                "ED2K server UDP status from {} users={} files={} udp_flags={:?}",
+                "ED2K server UDP status from {} users={} files={} udp_flags=0x{:08X} udp_key_present={} udp_key_ip=0x{:08X} obf_tcp={} obf_udp={}",
                 packet.from,
                 status.users,
                 status.files,
-                status.udp_flags
+                status.udp_flags,
+                status.udp_key != 0,
+                udp_key_ip,
+                status.obfuscation_port_tcp,
+                status.obfuscation_port_udp,
             );
         }
         _ => {}

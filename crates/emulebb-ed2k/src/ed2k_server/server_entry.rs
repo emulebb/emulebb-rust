@@ -103,6 +103,15 @@ impl ConfiguredServerEntry {
     pub(super) fn supports_obfuscation_udp(&self) -> bool {
         self.udp_flags & SERVER_UDP_FLAG_UDPOBFUSCATION != 0
     }
+
+    /// A server UDP key is scoped to the public IPv4 which obtained it. This is
+    /// stock's `GetServerKeyUDP(false)` gate and prevents stale persisted keys
+    /// from being selected after the external address changes.
+    pub(super) fn udp_key_is_valid_for(&self, public_ip: Option<Ipv4Addr>) -> bool {
+        self.udp_key != 0
+            && self.udp_key_ip != 0
+            && public_ip.is_some_and(|ip| self.udp_key_ip == u32::from_le_bytes(ip.octets()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,5 +307,17 @@ mod tests {
 
         assert_eq!(entries[0].base_endpoint_text(), "203.0.113.10:4661");
         assert_eq!(entries[1].base_endpoint_text(), "203.0.113.20:4661");
+    }
+
+    #[test]
+    fn udp_key_is_usable_only_for_its_bound_public_ip() {
+        let mut entry = metadata_entry("203.0.113.10", 4661, "keyed");
+        entry.udp_key = 0x1122_3344;
+        entry.udp_key_ip = u32::from_le_bytes([198, 51, 100, 9]);
+        let configured = ConfiguredServerEntry::from_metadata(&entry).unwrap();
+
+        assert!(configured.udp_key_is_valid_for(Some(Ipv4Addr::new(198, 51, 100, 9))));
+        assert!(!configured.udp_key_is_valid_for(Some(Ipv4Addr::new(198, 51, 100, 10))));
+        assert!(!configured.udp_key_is_valid_for(None));
     }
 }

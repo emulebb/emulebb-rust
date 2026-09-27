@@ -39,11 +39,16 @@ fn persist_test_server(profile: &DaemonProfile) {
             ping_ms: None,
             users: 0,
             files: 0,
+            max_users: 0,
+            low_id_users: 0,
             soft_files: 0,
             hard_files: 0,
             version: String::new(),
             obfuscation_tcp_port: None,
+            obfuscation_udp_port: None,
             udp_flags: None,
+            udp_key: None,
+            udp_key_ip: None,
         })
         .unwrap();
 }

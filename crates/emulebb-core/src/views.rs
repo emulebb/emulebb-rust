@@ -519,7 +519,12 @@ pub(crate) fn server_info_from_parts(
         soft_files: 0,
         version: String::new(),
         obfuscation_tcp_port: None,
+        obfuscation_udp_port: None,
         udp_flags: None,
+        udp_key: None,
+        udp_key_ip: None,
+        max_users: 0,
+        low_id_users: 0,
         users: 0,
         files: 0,
         host_name: None,
@@ -560,7 +565,16 @@ pub(crate) struct ServerLiveDetails {
     pub(crate) description: Option<String>,
     pub(crate) users: Option<u32>,
     pub(crate) files: Option<u32>,
+    pub(crate) max_users: Option<u32>,
+    pub(crate) low_id_users: Option<u32>,
+    pub(crate) ping_ms: Option<u32>,
     pub(crate) udp_flags: Option<u32>,
+    pub(crate) soft_files: Option<u32>,
+    pub(crate) hard_files: Option<u32>,
+    pub(crate) obfuscation_tcp_port: Option<u16>,
+    pub(crate) obfuscation_udp_port: Option<u16>,
+    pub(crate) udp_key: Option<u32>,
+    pub(crate) udp_key_ip: Option<u32>,
 }
 
 pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLiveDetails) {
@@ -576,8 +590,35 @@ pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLi
     if let Some(files) = live.files {
         server.files = u64::from(files);
     }
+    if let Some(max_users) = live.max_users {
+        server.max_users = u64::from(max_users);
+    }
+    if let Some(low_id_users) = live.low_id_users {
+        server.low_id_users = u64::from(low_id_users);
+    }
+    if let Some(ping_ms) = live.ping_ms {
+        server.ping = ping_ms;
+    }
     if let Some(udp_flags) = live.udp_flags {
         server.udp_flags = Some(udp_flags);
+    }
+    if let Some(soft_files) = live.soft_files {
+        server.soft_files = u64::from(soft_files);
+    }
+    if let Some(hard_files) = live.hard_files {
+        server.hard_files = u64::from(hard_files);
+    }
+    if let Some(port) = live.obfuscation_tcp_port {
+        server.obfuscation_tcp_port = Some(port);
+    }
+    if let Some(port) = live.obfuscation_udp_port {
+        server.obfuscation_udp_port = Some(port);
+    }
+    if let Some(key) = live.udp_key {
+        server.udp_key = Some(key);
+    }
+    if let Some(key_ip) = live.udp_key_ip {
+        server.udp_key_ip = Some(key_ip);
     }
 }
 

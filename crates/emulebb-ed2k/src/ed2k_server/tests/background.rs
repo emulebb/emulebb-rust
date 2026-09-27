@@ -307,7 +307,7 @@ async fn background_source_search_cancel_stops_queued_wait() {
 
 #[tokio::test]
 async fn background_udp_source_search_preserves_responding_server() {
-    let server = test_udp_obfuscated_server();
+    let mut server = test_udp_obfuscated_server();
     let file_hash = Ed2kHash([0x73; 16]);
     let source_ip = [10, 20, 30, 40];
     let (response, receive_response) = tokio::sync::oneshot::channel();
@@ -322,17 +322,21 @@ async fn background_udp_source_search_preserves_responding_server() {
     payload.push(1);
     payload.extend_from_slice(&source_ip);
     payload.extend_from_slice(&4662u16.to_le_bytes());
+    let response_port = server_udp_endpoint(&server).port();
 
     handle_background_udp_packet(
-        &server,
+        &mut server,
         &ServerUdpPacket {
             opcode: OP_GLOBFOUNDSOURCES,
             payload,
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server_udp_endpoint(&server).port())),
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
         },
         &mut pending,
         &state,
         &mut None,
+        None,
+        0,
+        None,
     )
     .unwrap();
 
@@ -343,7 +347,7 @@ async fn background_udp_source_search_preserves_responding_server() {
 
 #[test]
 fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
-    let server = test_udp_obfuscated_server();
+    let mut server = test_udp_obfuscated_server();
     let (response, _receive_response) = tokio::sync::oneshot::channel();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     let mut pending = Some(PendingBackgroundServerSearch::Keyword {
@@ -354,17 +358,21 @@ fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
         response,
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let response_port = server_udp_endpoint(&server).port();
 
     handle_background_udp_packet(
-        &server,
+        &mut server,
         &ServerUdpPacket {
             opcode: OP_GLOBSEARCHRES,
             payload: vec![1, 0, 0],
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server_udp_endpoint(&server).port())),
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
         },
         &mut pending,
         &state,
         &mut None,
+        None,
+        0,
+        None,
     )
     .unwrap();
 
@@ -385,7 +393,7 @@ fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
 
 #[test]
 fn background_udp_source_search_keeps_pending_after_malformed_reply() {
-    let server = test_udp_obfuscated_server();
+    let mut server = test_udp_obfuscated_server();
     let file_hash = Ed2kHash([0x73; 16]);
     let (response, _receive_response) = tokio::sync::oneshot::channel();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -395,17 +403,21 @@ fn background_udp_source_search_keeps_pending_after_malformed_reply() {
         response,
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let response_port = server_udp_endpoint(&server).port();
 
     handle_background_udp_packet(
-        &server,
+        &mut server,
         &ServerUdpPacket {
             opcode: OP_GLOBFOUNDSOURCES,
             payload: vec![1, 0, 0],
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server_udp_endpoint(&server).port())),
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
         },
         &mut pending,
         &state,
         &mut None,
+        None,
+        0,
+        None,
     )
     .unwrap();
 
@@ -441,30 +453,47 @@ fn server_status_payload(
     payload
 }
 
+fn extended_server_status_payload(challenge: u32, udp_flags: u32, udp_key: u32) -> Vec<u8> {
+    let mut payload = server_status_payload(challenge, 4242, 99000, Some(udp_flags));
+    payload[12..16].copy_from_slice(&5000u32.to_le_bytes()); // max users@12
+    payload[16..20].copy_from_slice(&200u32.to_le_bytes()); // soft files@16
+    payload[20..24].copy_from_slice(&300u32.to_le_bytes()); // hard files@20
+    payload.extend_from_slice(&25u32.to_le_bytes()); // lowid users@28
+    payload.extend_from_slice(&4675u16.to_le_bytes()); // obfuscated UDP port@32
+    payload.extend_from_slice(&4665u16.to_le_bytes()); // obfuscated TCP port@34
+    payload.extend_from_slice(&udp_key.to_le_bytes()); // server UDP key@36
+    payload
+}
+
 #[test]
 fn server_status_matching_challenge_records_users_files_and_udp_flags() {
-    let server = test_udp_obfuscated_server();
+    let mut server = test_udp_obfuscated_server();
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let challenge = 0x55AA_BEEF;
     let mut outstanding = Some(challenge);
     let mut pending = None;
+    let response_port = server.entry.port;
 
     handle_background_udp_packet(
-        &server,
+        &mut server,
         &ServerUdpPacket {
             opcode: OP_GLOBSERVSTATRES,
             payload: server_status_payload(challenge, 4242, 99000, Some(0x0000_0331)),
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server.entry.port)),
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
         },
         &mut pending,
         &state,
         &mut outstanding,
+        Some(u32::from_le_bytes([198, 51, 100, 9])),
+        41,
+        None,
     )
     .unwrap();
 
     let guard = state.blocking_read();
     assert_eq!(guard.server_users, Some(4242));
     assert_eq!(guard.server_files, Some(99000));
+    assert_eq!(guard.server_ping_ms, Some(41));
     assert_eq!(guard.server_udp_flags, Some(0x0000_0331));
     // The challenge is consumed so a replayed reply is ignored.
     assert_eq!(outstanding, None);
@@ -472,22 +501,26 @@ fn server_status_matching_challenge_records_users_files_and_udp_flags() {
 
 #[test]
 fn server_status_mismatched_challenge_is_discarded() {
-    let server = test_udp_obfuscated_server();
+    let mut server = test_udp_obfuscated_server();
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let mut outstanding = Some(0x55AA_0001);
     let mut pending = None;
+    let response_port = server.entry.port;
 
     handle_background_udp_packet(
-        &server,
+        &mut server,
         &ServerUdpPacket {
             opcode: OP_GLOBSERVSTATRES,
             // Echoes a different challenge than the one we issued.
             payload: server_status_payload(0x55AA_0002, 5, 6, None),
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server.entry.port)),
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
         },
         &mut pending,
         &state,
         &mut outstanding,
+        None,
+        0,
+        None,
     )
     .unwrap();
 
@@ -496,6 +529,69 @@ fn server_status_mismatched_challenge_is_discarded() {
     assert_eq!(guard.server_files, None);
     // The outstanding challenge stays armed until the right reply arrives.
     assert_eq!(outstanding, Some(0x55AA_0001));
+}
+
+#[test]
+fn server_status_refreshes_key_binding_ports_and_persistence_event() {
+    let mut server = test_server(0, 0);
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let challenge = 0x1357_2468;
+    let public_client_id = u32::from_le_bytes([198, 51, 100, 9]);
+    let udp_flags = SERVER_UDP_FLAG_UDPOBFUSCATION | SERVER_UDP_FLAG_TCPOBFUSCATION;
+    let udp_key = 0xAABB_CCDD;
+    let mut outstanding = Some(challenge);
+    let mut pending = None;
+    let response_port = server.entry.port;
+    let (events, mut event_inbox) = ed2k_server_list_event_channel();
+
+    handle_background_udp_packet(
+        &mut server,
+        &ServerUdpPacket {
+            opcode: OP_GLOBSERVSTATRES,
+            payload: extended_server_status_payload(challenge, udp_flags, udp_key),
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
+        },
+        &mut pending,
+        &state,
+        &mut outstanding,
+        Some(public_client_id),
+        37,
+        Some(&events),
+    )
+    .unwrap();
+
+    assert_eq!(server.entry.udp_flags, udp_flags);
+    assert_eq!(server.entry.udp_key, udp_key);
+    assert_eq!(server.entry.udp_key_ip, public_client_id);
+    assert_eq!(server.entry.obfuscation_port_tcp, 4665);
+    assert_eq!(server.entry.obfuscation_port_udp, 4675);
+    let guard = state.blocking_read();
+    assert_eq!(guard.server_udp_key, Some(udp_key));
+    assert_eq!(guard.server_udp_key_ip, Some(public_client_id));
+    assert_eq!(guard.server_max_users, Some(5000));
+    assert_eq!(guard.server_low_id_users, Some(25));
+    assert_eq!(guard.server_ping_ms, Some(37));
+    assert_eq!(guard.server_obfuscation_port_tcp, Some(4665));
+    assert_eq!(guard.server_obfuscation_port_udp, Some(4675));
+    drop(guard);
+    assert_eq!(
+        event_inbox.try_recv().unwrap(),
+        Ed2kServerListEvent::StatusUpdated {
+            endpoint: server.base_endpoint().to_string(),
+            users: 4242,
+            files: 99000,
+            max_users: 5000,
+            low_id_users: 25,
+            ping_ms: 37,
+            soft_files: 200,
+            hard_files: 300,
+            udp_flags,
+            udp_key,
+            udp_key_ip: public_client_id,
+            obfuscation_port_tcp: 4665,
+            obfuscation_port_udp: 4675,
+        }
+    );
 }
 
 #[tokio::test]

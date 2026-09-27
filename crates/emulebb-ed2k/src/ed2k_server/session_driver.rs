@@ -11,7 +11,8 @@ use tracing::{debug, info, warn};
 use super::server_status::status_ping_due_at;
 use super::types::{ServerSessionContext, ServerUdpPacket};
 use super::udp_runtime::{
-    bind_server_udp_socket, read_server_udp_packet, send_server_udp_status_request,
+    bind_server_udp_socket, read_server_udp_packet_with_key, send_server_udp_crypt_status_request,
+    send_server_udp_status_request,
 };
 use super::{
     BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
@@ -30,6 +31,7 @@ use super::{
 /// TCP keepalive is disabled (`keepalive_interval == None`). It sends no TCP
 /// traffic; it only keeps the status-ping schedule alive.
 const KEEPALIVE_DISABLED_STATUS_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+const SERVER_CRYPT_PING_FALLBACK_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServerSessionExit {
@@ -148,12 +150,22 @@ pub(super) async fn run_one_server_session(
     let observed_external_ip = nat_status.observed_external_addresses.first().cloned();
     let mut session =
         connect_server_transport(server, context, observed_external_ip.as_deref()).await?;
+    let mut live_server = server.clone();
+    if !live_server
+        .entry
+        .udp_key_is_valid_for(context.public_ip.get())
+    {
+        // WHY: server UDP keys are issued for one observed public IPv4. Never
+        // reuse a persisted key after an address change; the crypt-ping/status
+        // discovery cycle below will refresh it for the current identity.
+        live_server.entry.udp_key = 0;
+    }
     let server_udp_socket = match bind_server_udp_socket(context.bind_ip).await {
         Ok(socket) => {
             info!(
                 "bound ED2K server UDP helper local={} remote={} trace_id={}",
                 socket.local_addr()?,
-                server_udp_endpoint(server),
+                server_udp_endpoint(&live_server),
                 session.trace_id
             );
             Some(socket)
@@ -183,6 +195,7 @@ pub(super) async fn run_one_server_session(
     // set when we send OP_GLOBSERVSTATREQ, validated against the echoed challenge in
     // the OP_GLOBSERVSTATRES handler, then cleared.
     let mut server_status_challenge: Option<u32> = None;
+    let mut server_crypt_ping_fallback_deadline: Option<TokioInstant> = None;
     // Per-server UDP global-server-status ping cadence gate (eMule
     // `CServerList::ServerStats`): a status ping is sent at most once every
     // `UDPSERVSTATREASKTIME` (4.5h, floored at the 20min min-reask), DECOUPLED
@@ -270,7 +283,7 @@ pub(super) async fn run_one_server_session(
                         match start_background_server_search(
                             &mut session,
                             BackgroundServerSearchContext {
-                                server,
+                                server: &live_server,
                                 connect_options: context.hello_identity.connect_options,
                                 shared_catalog: &context.shared_catalog,
                                 bind_ip: context.bind_ip,
@@ -533,7 +546,7 @@ pub(super) async fn run_one_server_session(
                     match start_background_server_search(
                         &mut session,
                         BackgroundServerSearchContext {
-                            server,
+                            server: &live_server,
                             connect_options: context.hello_identity.connect_options,
                             shared_catalog: &context.shared_catalog,
                             bind_ip: context.bind_ip,
@@ -550,20 +563,37 @@ pub(super) async fn run_one_server_session(
             }
             udp_packet = async {
                 if let Some(socket) = server_udp_socket.as_ref() {
-                    read_server_udp_packet(socket, server).await
+                    let temporary_key = server_crypt_ping_fallback_deadline
+                        .and(server_status_challenge);
+                    read_server_udp_packet_with_key(socket, &live_server, temporary_key).await
                 } else {
                     std::future::pending::<Result<Option<ServerUdpPacket>>>().await
                 }
             } => {
                 match udp_packet {
                     Ok(Some(packet)) => {
+                        let status_ping_ms = last_status_ping
+                            .map(|sent| {
+                                u32::try_from(TokioInstant::now().duration_since(sent).as_millis())
+                                    .unwrap_or(u32::MAX)
+                            })
+                            .unwrap_or_default();
                         handle_background_udp_packet(
-                            server,
+                            &mut live_server,
                             &packet,
                             &mut pending_background_search,
                             &context.state,
                             &mut server_status_challenge,
+                            context
+                                .public_ip
+                                .get()
+                                .map(|ip| u32::from_le_bytes(ip.octets())),
+                            status_ping_ms,
+                            context.server_list_events.as_ref(),
                         )?;
+                        if server_status_challenge.is_none() {
+                            server_crypt_ping_fallback_deadline = None;
+                        }
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -572,6 +602,32 @@ pub(super) async fn run_one_server_session(
                             server.base_endpoint()
                         );
                     }
+                }
+            }
+            _ = async {
+                if let Some(deadline) = server_crypt_ping_fallback_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if server_crypt_ping_fallback_deadline.is_some() => {
+                let Some(socket) = server_udp_socket.as_ref() else {
+                    server_crypt_ping_fallback_deadline = None;
+                    continue;
+                };
+                // Stock gives the exploratory crypt-ping twenty seconds. A
+                // silent server then receives an ordinary framed status ping;
+                // the failed probe is not counted as a server failure.
+                match send_server_udp_status_request(socket, &live_server).await {
+                    Ok(challenge) => {
+                        server_status_challenge = Some(challenge);
+                        last_status_ping = Some(TokioInstant::now());
+                        server_crypt_ping_fallback_deadline = None;
+                    }
+                    Err(error) => warn!(
+                        "failed to send plaintext ED2K server UDP status fallback to {}: {error}",
+                        live_server.base_endpoint()
+                    ),
                 }
             }
             _ = tokio::time::sleep(context.keepalive_interval.unwrap_or(KEEPALIVE_DISABLED_STATUS_TICK)) => {
@@ -598,10 +654,21 @@ pub(super) async fn run_one_server_session(
                 if let Some(socket) = server_udp_socket.as_ref()
                     && status_ping_due_at(last_status_ping, TokioInstant::now())
                 {
-                    match send_server_udp_status_request(socket, server).await {
+                    let crypt_discovery = context.public_ip.is_known()
+                        && context.hello_identity.connect_options & 0x01 != 0;
+                    let request = async {
+                        if crypt_discovery {
+                            send_server_udp_crypt_status_request(socket, &live_server).await
+                        } else {
+                            send_server_udp_status_request(socket, &live_server).await
+                        }
+                    };
+                    match request.await {
                         Ok(challenge) => {
                             server_status_challenge = Some(challenge);
                             last_status_ping = Some(TokioInstant::now());
+                            server_crypt_ping_fallback_deadline = crypt_discovery
+                                .then(|| TokioInstant::now() + SERVER_CRYPT_PING_FALLBACK_DELAY);
                         }
                         Err(error) => warn!(
                             "failed to send ED2K server UDP status request to {}: {error}",

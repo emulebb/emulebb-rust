@@ -36,6 +36,23 @@ pub enum Ed2kServerListEvent {
         name: Option<String>,
         description: Option<String>,
     },
+    /// Challenge-validated UDP status and obfuscation metadata. The UDP key is
+    /// bound to the public client ID observed when the reply was accepted.
+    StatusUpdated {
+        endpoint: String,
+        users: u32,
+        files: u32,
+        max_users: u32,
+        low_id_users: u32,
+        ping_ms: u32,
+        soft_files: u32,
+        hard_files: u32,
+        udp_flags: u32,
+        udp_key: u32,
+        udp_key_ip: u32,
+        obfuscation_port_tcp: u16,
+        obfuscation_port_udp: u16,
+    },
 }
 
 /// Sender half handed to the server session loop.

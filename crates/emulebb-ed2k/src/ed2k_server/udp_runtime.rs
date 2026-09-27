@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use anyhow::{Context, Result};
+use rand::RngExt;
 use tokio::net::UdpSocket;
 
 use emulebb_kad_proto::Ed2kHash;
@@ -8,9 +9,10 @@ use emulebb_kad_proto::Ed2kHash;
 use super::{
     Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
     ResolvedServerEntry, ServerUdpPacket, decode_server_udp_datagram,
-    diagnostics::dump_ed2k_server_udp_packet, encode_server_udp_datagram,
-    encode_udp_search_request, encode_udp_source_request_batch,
-    server_description::server_description_challenge, server_status::server_status_challenge,
+    decode_server_udp_datagram_with_key, diagnostics::dump_ed2k_server_udp_packet,
+    encode_server_udp_crypt_ping, encode_server_udp_datagram, encode_udp_search_request,
+    encode_udp_source_request_batch, server_description::server_description_challenge,
+    server_status::server_status_challenge, server_udp_crypt_ping_endpoint,
 };
 
 pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
@@ -70,6 +72,32 @@ pub(super) async fn send_server_udp_status_request(
     Ok(challenge)
 }
 
+/// Send stock's raw crypt-ping discovery probe to `base_port + 12`. The random
+/// non-zero challenge is both the echoed status challenge and the temporary
+/// response decryption key; the request itself is intentionally not framed.
+pub(super) async fn send_server_udp_crypt_status_request(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+) -> Result<u32> {
+    let challenge = loop {
+        let value = rand::rng().random::<u32>();
+        if value != 0 {
+            break value;
+        }
+    };
+    let padding_len = usize::from(rand::rng().random::<u8>() & 0x0F);
+    let padding = (0..padding_len)
+        .map(|_| rand::rng().random::<u8>())
+        .collect::<Vec<_>>();
+    let packet = encode_server_udp_crypt_ping(challenge, &padding);
+    let endpoint = server_udp_crypt_ping_endpoint(server);
+    socket
+        .send_to(&packet, endpoint)
+        .await
+        .with_context(|| format!("failed to send ED2K server UDP crypt-ping to {endpoint}"))?;
+    Ok(challenge)
+}
+
 pub(super) async fn send_udp_keyword_search(
     socket: &UdpSocket,
     server: &ResolvedServerEntry,
@@ -110,6 +138,14 @@ pub(super) async fn read_server_udp_packet(
     socket: &UdpSocket,
     server: &ResolvedServerEntry,
 ) -> Result<Option<ServerUdpPacket>> {
+    read_server_udp_packet_with_key(socket, server, None).await
+}
+
+pub(super) async fn read_server_udp_packet_with_key(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+    decryption_key: Option<u32>,
+) -> Result<Option<ServerUdpPacket>> {
     let mut buffer = vec![0u8; 65_535];
     let (len, from) = socket
         .recv_from(&mut buffer)
@@ -120,7 +156,8 @@ pub(super) async fn read_server_udp_packet(
     } else {
         "obfuscated"
     };
-    let Some(packet) = decode_server_udp_datagram(server, &buffer[..len]) else {
+    let Some(packet) = decode_server_udp_datagram_with_key(server, &buffer[..len], decryption_key)
+    else {
         return Ok(None);
     };
     if packet.len() < 2 || packet[0] != OP_EDONKEYPROT {

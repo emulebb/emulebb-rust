@@ -435,6 +435,38 @@ pub(crate) async fn run_ed2k_server_list_events(
                 core.note_ed2k_server_metadata(&endpoint, name, description)
                     .await;
             }
+            Ed2kServerListEvent::StatusUpdated {
+                endpoint,
+                users,
+                files,
+                max_users,
+                low_id_users,
+                ping_ms,
+                soft_files,
+                hard_files,
+                udp_flags,
+                udp_key,
+                udp_key_ip,
+                obfuscation_port_tcp,
+                obfuscation_port_udp,
+            } => {
+                core.note_ed2k_server_status(
+                    &endpoint,
+                    users,
+                    files,
+                    max_users,
+                    low_id_users,
+                    ping_ms,
+                    soft_files,
+                    hard_files,
+                    udp_flags,
+                    udp_key,
+                    udp_key_ip,
+                    obfuscation_port_tcp,
+                    obfuscation_port_udp,
+                )
+                .await;
+            }
         }
     }
 }

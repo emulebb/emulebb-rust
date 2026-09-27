@@ -2802,7 +2802,16 @@ impl EmulebbCore {
             description: state.server_description.clone(),
             users: state.server_users,
             files: state.server_files,
+            max_users: state.server_max_users,
+            low_id_users: state.server_low_id_users,
+            ping_ms: state.server_ping_ms,
             udp_flags: state.server_udp_flags,
+            soft_files: state.server_soft_files,
+            hard_files: state.server_hard_files,
+            obfuscation_tcp_port: state.server_obfuscation_port_tcp,
+            obfuscation_udp_port: state.server_obfuscation_port_udp,
+            udp_key: state.server_udp_key,
+            udp_key_ip: state.server_udp_key_ip,
         };
         (connected, connecting, live)
     }

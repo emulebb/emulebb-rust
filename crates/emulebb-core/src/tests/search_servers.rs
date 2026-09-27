@@ -354,6 +354,97 @@ async fn udp_server_description_metadata_updates_the_persisted_server() {
 }
 
 #[tokio::test]
+async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-server-udp-status");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap();
+    core.add_server(ServerCreate {
+        address: "192.0.2.45".to_string(),
+        port: 4661,
+        name: Some("UDP metadata server".to_string()),
+        priority: None,
+        static_server: None,
+        connect: None,
+    })
+    .await
+    .unwrap();
+    let key_ip = Ipv4Addr::new(198, 51, 100, 7);
+    let key_ip_client_id = u32::from_le_bytes(key_ip.octets());
+    core.note_ed2k_server_status(
+        "192.0.2.45:4661",
+        12_345,
+        67_890,
+        15_000,
+        456,
+        37,
+        111,
+        222,
+        0x30,
+        0x1122_3344,
+        key_ip_client_id,
+        4711,
+        4723,
+    )
+    .await;
+
+    let reloaded = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap();
+    let persisted = reloaded.server("192.0.2.45:4661").await.expect("server");
+    assert_eq!(persisted.users, 12_345);
+    assert_eq!(persisted.files, 67_890);
+    assert_eq!(persisted.max_users, 15_000);
+    assert_eq!(persisted.low_id_users, 456);
+    assert_eq!(persisted.ping, 37);
+    assert_eq!(persisted.soft_files, 111);
+    assert_eq!(persisted.hard_files, 222);
+    assert_eq!(persisted.udp_flags, Some(0x30));
+    assert_eq!(persisted.udp_key, Some(0x1122_3344));
+    assert_eq!(persisted.udp_key_ip, Some(key_ip_client_id));
+    assert_eq!(persisted.obfuscation_tcp_port, Some(4711));
+    assert_eq!(persisted.obfuscation_udp_port, Some(4723));
+
+    reloaded.ed2k_reachability.set(key_ip);
+    let current = reloaded
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
+        .await
+        .unwrap();
+    let current = current
+        .server_entries
+        .iter()
+        .find(|entry| entry.host == "192.0.2.45" && entry.port == 4661)
+        .expect("persisted server entry");
+    assert_eq!(current.udp_key, 0x1122_3344);
+    assert_eq!(current.udp_key_ip, key_ip_client_id);
+    assert_eq!(current.obfuscation_port_tcp, 4711);
+    assert_eq!(current.obfuscation_port_udp, 4723);
+
+    reloaded
+        .ed2k_reachability
+        .set(Ipv4Addr::new(198, 51, 100, 8));
+    let stale = reloaded
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
+        .await
+        .unwrap();
+    let stale = stale
+        .server_entries
+        .iter()
+        .find(|entry| entry.host == "192.0.2.45" && entry.port == 4661)
+        .expect("persisted server entry");
+    assert_eq!(stale.udp_key, 0);
+    assert_eq!(stale.udp_key_ip, key_ip_client_id);
+}
+
+#[tokio::test]
 async fn explicit_server_connect_targets_running_server_loop() {
     let transfer_root = unique_runtime_dir("emulebb-core-target-running-server-loop");
     let mut network = test_network_config_with_store(

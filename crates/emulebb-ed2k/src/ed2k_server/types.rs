@@ -30,10 +30,24 @@ pub struct Ed2kServerState {
     pub server_users: Option<u32>,
     /// Last reported server file count.
     pub server_files: Option<u32>,
+    /// Extended UDP status totals and measured status round-trip latency.
+    pub server_max_users: Option<u32>,
+    pub server_low_id_users: Option<u32>,
+    pub server_ping_ms: Option<u32>,
     /// Last reported live UDP capability flags from `OP_GLOBSERVSTATRES`
     /// (offset 24); refreshed each time a challenge-validated status reply
     /// includes them (eMule `CServer::SetUDPFlags`).
     pub server_udp_flags: Option<u32>,
+    /// Server-reported soft/hard publish limits.
+    pub server_soft_files: Option<u32>,
+    pub server_hard_files: Option<u32>,
+    /// Server UDP obfuscation metadata learned from a challenge-validated
+    /// status reply. The key is usable only while `server_udp_key_ip` matches
+    /// the current public IPv4 identity.
+    pub server_obfuscation_port_tcp: Option<u16>,
+    pub server_obfuscation_port_udp: Option<u16>,
+    pub server_udp_key: Option<u32>,
+    pub server_udp_key_ip: Option<u32>,
     /// Last advertised server name, when known.
     pub server_name: Option<String>,
     /// Last advertised server description, when known.

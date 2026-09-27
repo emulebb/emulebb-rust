@@ -56,8 +56,15 @@ pub(super) fn server_status_challenge() -> u32 {
 pub(super) struct ServerStatusResponse {
     pub(super) users: u32,
     pub(super) files: u32,
-    /// Live UDP capability flags (offset 24), when the server included them.
-    pub(super) udp_flags: Option<u32>,
+    pub(super) max_users: u32,
+    pub(super) soft_files: u32,
+    pub(super) hard_files: u32,
+    /// Live UDP capability flags (offset 24).
+    pub(super) udp_flags: u32,
+    pub(super) low_id_users: u32,
+    pub(super) obfuscation_port_udp: u16,
+    pub(super) obfuscation_port_tcp: u16,
+    pub(super) udp_key: u32,
 }
 
 fn read_u32_le(payload: &[u8], offset: usize) -> u32 {
@@ -79,6 +86,7 @@ fn read_u32_le(payload: &[u8], offset: usize) -> u32 {
 pub(super) fn decode_server_status_response(
     payload: &[u8],
     expected_challenge: u32,
+    server_port: u16,
 ) -> Option<ServerStatusResponse> {
     if payload.len() < 12 {
         return None;
@@ -89,11 +97,46 @@ pub(super) fn decode_server_status_response(
     }
     let users = read_u32_le(payload, 4);
     let files = read_u32_le(payload, 8);
-    let udp_flags = (payload.len() >= 28).then(|| read_u32_le(payload, 24));
+    let max_users = (payload.len() >= 16)
+        .then(|| read_u32_le(payload, 12))
+        .unwrap_or_default();
+    let (soft_files, hard_files) = if payload.len() >= 24 {
+        (read_u32_le(payload, 16), read_u32_le(payload, 20))
+    } else {
+        (0, 0)
+    };
+    let udp_flags = (payload.len() >= 28)
+        .then(|| read_u32_le(payload, 24))
+        .unwrap_or_default();
+    let low_id_users = (payload.len() >= 32)
+        .then(|| read_u32_le(payload, 28))
+        .unwrap_or_default();
+    let (mut obfuscation_port_udp, mut obfuscation_port_tcp, udp_key) = if payload.len() >= 40 {
+        (
+            u16::from_le_bytes(payload[32..34].try_into().ok()?),
+            u16::from_le_bytes(payload[34..36].try_into().ok()?),
+            read_u32_le(payload, 36),
+        )
+    } else {
+        (0, 0, 0)
+    };
+    if obfuscation_port_tcp == 0 && udp_flags & super::SERVER_UDP_FLAG_TCPOBFUSCATION != 0 {
+        obfuscation_port_tcp = server_port;
+    }
+    if obfuscation_port_udp == 0 && udp_flags & super::SERVER_UDP_FLAG_UDPOBFUSCATION != 0 {
+        obfuscation_port_udp = server_port.checked_add(12).unwrap_or_default();
+    }
     Some(ServerStatusResponse {
         users,
         files,
+        max_users,
+        soft_files,
+        hard_files,
         udp_flags,
+        low_id_users,
+        obfuscation_port_udp,
+        obfuscation_port_tcp,
+        udp_key,
     })
 }
 
@@ -123,10 +166,17 @@ mod tests {
         let challenge = 0x55AA_1234;
         let payload = body(challenge, 5000, 90000, &[]);
         let decoded =
-            decode_server_status_response(&payload, challenge).expect("matching challenge");
+            decode_server_status_response(&payload, challenge, 4661).expect("matching challenge");
         assert_eq!(decoded.users, 5000);
         assert_eq!(decoded.files, 90000);
-        assert_eq!(decoded.udp_flags, None);
+        assert_eq!(decoded.max_users, 0);
+        assert_eq!(decoded.soft_files, 0);
+        assert_eq!(decoded.hard_files, 0);
+        assert_eq!(decoded.udp_flags, 0);
+        assert_eq!(decoded.low_id_users, 0);
+        assert_eq!(decoded.obfuscation_port_udp, 0);
+        assert_eq!(decoded.obfuscation_port_tcp, 0);
+        assert_eq!(decoded.udp_key, 0);
     }
 
     #[test]
@@ -143,22 +193,51 @@ mod tests {
         };
         let payload = body(challenge, 100, 200, &trailer);
         let decoded =
-            decode_server_status_response(&payload, challenge).expect("matching challenge");
+            decode_server_status_response(&payload, challenge, 4661).expect("matching challenge");
         assert_eq!(decoded.users, 100);
         assert_eq!(decoded.files, 200);
-        assert_eq!(decoded.udp_flags, Some(0x0000_0321));
+        assert_eq!(decoded.max_users, 7000);
+        assert_eq!(decoded.soft_files, 1);
+        assert_eq!(decoded.hard_files, 2);
+        assert_eq!(decoded.udp_flags, 0x0000_0321);
     }
 
     #[test]
     fn decode_rejects_mismatched_challenge() {
         let payload = body(0x55AA_0001, 1, 2, &[]);
-        assert!(decode_server_status_response(&payload, 0x55AA_0002).is_none());
+        assert!(decode_server_status_response(&payload, 0x55AA_0002, 4661).is_none());
     }
 
     #[test]
     fn decode_rejects_short_payload() {
         let payload = body(0x55AA_0001, 1, 2, &[]);
-        assert!(decode_server_status_response(&payload[..11], 0x55AA_0001).is_none());
+        assert!(decode_server_status_response(&payload[..11], 0x55AA_0001, 4661).is_none());
+    }
+
+    #[test]
+    fn decode_harvests_obfuscation_ports_key_and_default_ports() {
+        let challenge = 0x1234_5678;
+        let mut trailer = Vec::new();
+        trailer.extend_from_slice(&7000u32.to_le_bytes());
+        trailer.extend_from_slice(&500u32.to_le_bytes());
+        trailer.extend_from_slice(&600u32.to_le_bytes());
+        trailer.extend_from_slice(
+            &(super::super::SERVER_UDP_FLAG_UDPOBFUSCATION
+                | super::super::SERVER_UDP_FLAG_TCPOBFUSCATION)
+                .to_le_bytes(),
+        );
+        trailer.extend_from_slice(&25u32.to_le_bytes());
+        trailer.extend_from_slice(&0u16.to_le_bytes());
+        trailer.extend_from_slice(&0u16.to_le_bytes());
+        trailer.extend_from_slice(&0xAABB_CCDDu32.to_le_bytes());
+        let decoded =
+            decode_server_status_response(&body(challenge, 100, 200, &trailer), challenge, 4661)
+                .expect("matching challenge");
+
+        assert_eq!(decoded.low_id_users, 25);
+        assert_eq!(decoded.obfuscation_port_tcp, 4661);
+        assert_eq!(decoded.obfuscation_port_udp, 4673);
+        assert_eq!(decoded.udp_key, 0xAABB_CCDD);
     }
 
     #[test]

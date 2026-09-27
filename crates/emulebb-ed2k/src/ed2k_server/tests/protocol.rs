@@ -10,6 +10,36 @@ fn server_udp_endpoint_uses_obfuscation_port_when_keyed() {
 }
 
 #[test]
+fn server_udp_crypt_ping_uses_temporary_challenge_key() {
+    let server = test_server(0, 0);
+    let challenge = 0x1234_5678;
+    assert_eq!(server_udp_crypt_ping_endpoint(&server).port(), 4673);
+    assert_eq!(
+        encode_server_udp_crypt_ping(challenge, &[0xAA, 0xBB]),
+        [challenge.to_le_bytes().as_slice(), &[0xAA, 0xBB]].concat()
+    );
+
+    let random_key_part = 0x7788u16;
+    let mut response = vec![0x01];
+    response.extend_from_slice(&random_key_part.to_le_bytes());
+    response.extend_from_slice(&EMULE_UDP_CRYPT_MAGIC_SYNC_SERVER.to_le_bytes());
+    response.push(0);
+    response.extend_from_slice(&[OP_EDONKEYPROT, OP_GLOBSERVSTATRES, 1, 2, 3, 4]);
+    let mut cipher = derive_server_udp_cipher(
+        challenge,
+        random_key_part,
+        EMULE_UDP_CRYPT_MAGIC_SERVER_CLIENT,
+    );
+    cipher.apply(&mut response[3..]);
+
+    assert!(decode_server_udp_datagram(&server, &response).is_none());
+    assert_eq!(
+        decode_server_udp_datagram_with_key(&server, &response, Some(challenge)),
+        Some(vec![OP_EDONKEYPROT, OP_GLOBSERVSTATRES, 1, 2, 3, 4])
+    );
+}
+
+#[test]
 fn udp_keyword_search_request_uses_legacy_opcode_without_extensions() {
     let server = test_server(0, 0);
     let (opcode, payload) = encode_udp_search_request(&server, b"abc");
