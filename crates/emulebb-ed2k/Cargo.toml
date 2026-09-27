@@ -33,6 +33,7 @@ flate2.workspace = true
 fs4.workspace = true
 hex.workspace = true
 if-addrs.workspace = true
+lofty.workspace = true
 md4.workspace = true
 md5.workspace = true
 num-bigint.workspace = true

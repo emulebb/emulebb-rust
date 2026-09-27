@@ -19,6 +19,7 @@ fn one_entry() -> Ed2kSharedEntry {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
+        media: Default::default(),
         all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
         publish: Default::default(),
@@ -42,6 +43,7 @@ fn shared_entry(index: usize) -> Ed2kSharedEntry {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
+        media: Default::default(),
         all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
         publish: Default::default(),
@@ -146,6 +148,26 @@ fn offer_files_preserves_complete_sentinel_for_compression_servers() {
 }
 
 #[test]
+fn old_server_offer_files_use_long_media_names_and_string_length() {
+    let mut entry = one_entry();
+    entry.media.length_seconds = 3_661;
+    entry.media.bitrate_kbps = 128;
+    entry.media.codec = "PCM".to_string();
+    let payload = encode_offer_files_payload(
+        &[entry],
+        Some(u32::from_le_bytes([192, 168, 1, 210])),
+        Ipv4Addr::new(192, 168, 1, 210),
+        4662,
+        None,
+    );
+
+    assert!(payload.windows(6).any(|window| window == b"length"));
+    assert!(payload.windows(7).any(|window| window == b"1:01:01"));
+    assert!(payload.windows(7).any(|window| window == b"bitrate"));
+    assert!(payload.windows(5).any(|window| window == b"codec"));
+}
+
+#[test]
 fn offer_files_uses_incomplete_sentinel_for_part_files() {
     let mut entry = one_entry();
     entry.verified_complete = false;
@@ -197,6 +219,52 @@ fn offer_files_publishes_nonzero_rating() {
         tags = rest;
     }
     assert_eq!(rating, Some(DecodedTagValue::Unsigned(4)));
+}
+
+#[test]
+fn offer_files_publish_stock_media_subset() {
+    let mut entry = one_entry();
+    entry.media = crate::ed2k_transfer::Ed2kMediaMetadata {
+        artist: "Artist stays Kad-only".to_string(),
+        album: "Album stays Kad-only".to_string(),
+        title: "Title stays Kad-only".to_string(),
+        length_seconds: 321,
+        bitrate_kbps: 192,
+        codec: "XVID".to_string(),
+    };
+    let payload = encode_offer_files_payload(
+        &[entry],
+        Some(u32::from_le_bytes([192, 168, 1, 210])),
+        Ipv4Addr::new(192, 168, 1, 210),
+        4662,
+        Some(SERVER_TCP_FLAG_COMPRESSION | SERVER_TCP_FLAG_NEWTAGS),
+    );
+
+    let tag_count_offset = 26;
+    let tag_count = u32::from_le_bytes(
+        payload[tag_count_offset..tag_count_offset + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(tag_count, 6);
+    let mut tags = &payload[tag_count_offset + 4..];
+    let mut decoded = Vec::new();
+    for _ in 0..tag_count {
+        let (name, value, rest) = decode_tag_value(tags).unwrap();
+        decoded.push((name, value));
+        tags = rest;
+    }
+    assert!(decoded.contains(&(Some(FT_MEDIA_LENGTH), Some(DecodedTagValue::Unsigned(321)))));
+    assert!(decoded.contains(&(Some(FT_MEDIA_BITRATE), Some(DecodedTagValue::Unsigned(192)))));
+    assert!(decoded.contains(&(
+        Some(FT_MEDIA_CODEC),
+        Some(DecodedTagValue::String("XVID".to_string()))
+    )));
+    assert!(
+        !decoded
+            .iter()
+            .any(|(name, _)| matches!(name, Some(0xD0..=0xD2)))
+    );
 }
 
 #[test]

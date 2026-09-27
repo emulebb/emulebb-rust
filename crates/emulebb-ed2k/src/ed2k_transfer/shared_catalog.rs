@@ -4,7 +4,9 @@ use std::sync::{Arc, atomic::Ordering};
 
 use crate::PopularHash;
 
-use super::{Ed2kResumeManifest, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kTransferRuntime};
+use super::{
+    Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kTransferRuntime,
+};
 
 impl Ed2kTransferRuntime {
     /// Borrow the shared catalog used by server-session advertisement and
@@ -41,8 +43,39 @@ impl Ed2kTransferRuntime {
     pub(super) async fn upsert_verified_catalog_entry(&self, manifest: &Ed2kResumeManifest) {
         // Build the replacement entry (if any) before taking the write lock so the
         // lock hold covers only the in-place upsert.
-        let new_entry = (manifest.completed || !manifest.verified_ranges.is_empty())
+        let existing_media = {
+            let entries = self.shared_catalog.read().await;
+            entries
+                .iter()
+                .find(|entry| {
+                    !entry.compatibility_hint
+                        && entry.file_hash.eq_ignore_ascii_case(&manifest.file_hash)
+                })
+                .map(|entry| entry.media.clone())
+                .unwrap_or_default()
+        };
+        let mut new_entry = (manifest.completed || !manifest.verified_ranges.is_empty())
             .then(|| Ed2kSharedEntry::from_manifest(manifest));
+        if let Some(entry) = new_entry.as_mut() {
+            entry.media = if existing_media != Ed2kMediaMetadata::default() {
+                existing_media
+            } else if manifest.completed {
+                let path = manifest
+                    .source_path
+                    .as_deref()
+                    .or(manifest.delivered_path.as_deref())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| self.payload_path(&manifest.file_hash));
+                let display_name = manifest.display_name.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::media_metadata::extract_media_metadata(&path, &display_name)
+                })
+                .await
+                .unwrap_or_default()
+            } else {
+                Ed2kMediaMetadata::default()
+            };
+        }
         let mut entries = self.shared_catalog.write().await;
         // Collapse the old retain -> to_vec (whole-catalog deep clone) -> dedupe ->
         // replace_with chain into a single in-place upsert: no deep clone, one
@@ -118,6 +151,7 @@ mod upsert_collapse_tests {
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
+            media: Default::default(),
             all_time_uploaded_bytes: marker,
             complete_parts: Vec::new(),
             publish: Default::default(),

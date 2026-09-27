@@ -38,6 +38,7 @@ async fn seed_verified_entry(runtime: &Ed2kTransferRuntime, hash: &Ed2kHash) {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
+        media: Default::default(),
         all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
         publish: Ed2kSharedPublishStats::default(),

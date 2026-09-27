@@ -435,9 +435,12 @@ impl super::MetadataStore {
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
-                   known_files.last_upload_request_ms
+                   known_files.last_upload_request_ms,
+                   COALESCE(source_paths.display_path, delivered_paths.display_path)
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
+            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
+            LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
             WHERE known_files.completed != 0
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
@@ -460,6 +463,7 @@ impl super::MetadataStore {
                 all_time_upload_requests: row.get::<_, i64>(9)? as u64,
                 all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
                 last_upload_request_ms: row.get(11)?,
+                media_path: row.get(12)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

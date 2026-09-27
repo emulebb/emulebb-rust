@@ -39,7 +39,7 @@ use emulebb_ed2k::{
         run_outbound_buddy_link, set_hello_buddy_snapshot, set_publish_rust_identity,
     },
     ed2k_transfer::{
-        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSharedEntry,
+        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry,
         Ed2kSharedPublishDemandSignal, Ed2kSourceHint, Ed2kTransferRuntime,
         Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
@@ -65,11 +65,10 @@ use emulebb_kad_dht::{
 };
 #[cfg(test)]
 use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult};
-#[cfg(test)]
 use emulebb_kad_proto::tag_name;
 use emulebb_kad_proto::{
     CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes, HelloResAck, KAD_VERSION, KadPacket,
-    PublishRes, Tag, packet::ContactEntry,
+    PublishRes, Tag, TagValue, packet::ContactEntry,
 };
 #[cfg(test)]
 use emulebb_kad_proto::{
@@ -177,12 +176,13 @@ use ed2k_sources::{
     configured_server_attempts, direct_download_candidate_sources, drop_self_sources,
     ed2k_server_callback_permitted, ed2k_server_callback_route, found_source_from_hint,
     global_udp_source_batch_server_attempts, global_udp_source_search_excluded_endpoint,
-    hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source, keyword_target,
-    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
-    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
-    should_query_kad_source_supplement, should_query_server_udp_source_supplement,
-    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
-    significant_keyword_words_unique, sort_download_sources, source_endpoint_key, source_key,
+    hash_only_ed2k_search_query, kad_metadata_words, kad_source_result_to_ed2k_found_source,
+    keyword_target, manifest_has_ed2k_transfer_progress, merge_download_sources,
+    new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
+    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
+    should_query_server_udp_source_supplement, should_refresh_ed2k_server_sources,
+    should_skip_no_progress_source_requery, significant_keyword_words_unique,
+    sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -4429,6 +4429,7 @@ struct KadKeywordPublishCandidate {
     keyword_terms: Vec<String>,
     file_size: u64,
     aich_root: Option<String>,
+    media: Ed2kMediaMetadata,
 }
 
 impl KadKeywordPublishCandidate {
@@ -4447,19 +4448,26 @@ impl KadKeywordPublishCandidate {
             keyword_terms,
             file_size,
             aich_root,
+            media: Ed2kMediaMetadata::default(),
         })
+    }
+
+    fn with_media(mut self, media: Ed2kMediaMetadata) -> Self {
+        self.media = media;
+        self
     }
 }
 
 fn kad_keyword_publish_candidate_from_shared_entry(
     entry: &Ed2kSharedEntry,
 ) -> Result<KadKeywordPublishCandidate> {
-    KadKeywordPublishCandidate::new(
+    Ok(KadKeywordPublishCandidate::new(
         entry.file_hash.clone(),
         entry.display_name.clone(),
         entry.file_size,
         entry.aich_root.clone(),
-    )
+    )?
+    .with_media(entry.media.clone()))
 }
 
 /// Whether a shared-catalog entry may be published as a Kad SOURCE: one of our
@@ -4873,6 +4881,7 @@ fn kad_keyword_publish_entries_for_keyword(
         if let Some(file_type) = ed2k_file_type_search_term(&entry.display_name) {
             tags.push(Tag::filetype(file_type));
         }
+        push_kad_media_tags(&mut tags, &entry.display_name, &entry.media);
         entries.push((
             entry.file_hash.clone(),
             KeywordPublishEntry {
@@ -4886,6 +4895,45 @@ fn kad_keyword_publish_entries_for_keyword(
         ));
     }
     entries
+}
+
+fn push_kad_media_tags(tags: &mut Vec<Tag>, file_name: &str, media: &Ed2kMediaMetadata) {
+    for (name, value) in [
+        (tag_name::MEDIA_ARTIST, media.artist.as_str()),
+        (tag_name::MEDIA_ALBUM, media.album.as_str()),
+        (tag_name::MEDIA_TITLE, media.title.as_str()),
+    ] {
+        if !value.is_empty() && !media_text_redundant_with_filename(file_name, value) {
+            tags.push(Tag::new_short(name, TagValue::String(value.to_string())));
+        }
+    }
+    if media.length_seconds != 0 {
+        tags.push(Tag::new_short(
+            tag_name::MEDIA_LENGTH,
+            TagValue::UInt(u64::from(media.length_seconds)),
+        ));
+    }
+    if media.bitrate_kbps != 0 {
+        tags.push(Tag::new_short(
+            tag_name::MEDIA_BITRATE,
+            TagValue::UInt(u64::from(media.bitrate_kbps)),
+        ));
+    }
+    if !media.codec.is_empty() {
+        tags.push(Tag::new_short(
+            tag_name::MEDIA_CODEC,
+            TagValue::String(media.codec.clone()),
+        ));
+    }
+}
+
+fn media_text_redundant_with_filename(file_name: &str, value: &str) -> bool {
+    let file_words = kad_metadata_words(file_name)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    kad_metadata_words(value)
+        .into_iter()
+        .all(|word| file_words.contains(&word))
 }
 
 fn decode_aich_root_hex_for_publish(value: &str) -> Option<[u8; 20]> {

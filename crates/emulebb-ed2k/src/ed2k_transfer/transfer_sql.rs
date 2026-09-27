@@ -140,15 +140,29 @@ pub(super) fn manifest_from_metadata(
 
 pub(super) fn completed_catalog_from_metadata_store(
     metadata: &MetadataStore,
+    root_dir: &std::path::Path,
 ) -> Result<Vec<Ed2kSharedEntry>> {
     metadata
         .completed_transfer_catalog_entries()?
         .into_iter()
-        .map(shared_entry_from_catalog_entry)
+        .map(|entry| shared_entry_from_catalog_entry(entry, root_dir))
         .collect()
 }
 
-fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Result<Ed2kSharedEntry> {
+fn shared_entry_from_catalog_entry(
+    entry: MetadataTransferCatalogEntry,
+    root_dir: &std::path::Path,
+) -> Result<Ed2kSharedEntry> {
+    let media_path = entry
+        .media_path
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            root_dir
+                .join(&entry.file_hash)
+                .join(super::PAYLOAD_FILE_NAME)
+        });
+    let media = super::media_metadata::extract_media_metadata(&media_path, &entry.display_name);
     Ok(Ed2kSharedEntry {
         file_hash: entry.file_hash,
         display_name: entry.display_name,
@@ -162,6 +176,7 @@ fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Resul
         auto_upload_priority: entry.auto_upload_priority,
         comment: entry.comment,
         rating: entry.rating,
+        media,
         all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
         complete_parts: Vec::new(),
         publish: Ed2kSharedPublishStats {

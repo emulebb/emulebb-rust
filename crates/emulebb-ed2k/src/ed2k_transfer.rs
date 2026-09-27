@@ -48,6 +48,7 @@ mod ich_salvage;
 mod inbound_admission;
 mod ingest;
 mod manifest;
+mod media_metadata;
 mod metadata;
 mod model;
 mod piece_store;
@@ -63,7 +64,9 @@ mod upload;
 mod upload_cooldown;
 mod upload_queue;
 
-pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange, IndexedSharedCatalog};
+pub use catalog::{
+    Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange, IndexedSharedCatalog,
+};
 pub use deliver::Ed2kDeliveryOutcome;
 pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
@@ -379,7 +382,7 @@ impl Ed2kTransferRuntime {
             format!("failed to create ED2K transfer root {}", root_dir.display())
         })?;
         let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
-            transfer_sql::completed_catalog_from_metadata_store(&metadata)?,
+            transfer_sql::completed_catalog_from_metadata_store(&metadata, root_dir)?,
         )));
         // The ban store is built before the upload queue so the queue state can
         // hand a no-request repeat-offender straight to the shared ban list

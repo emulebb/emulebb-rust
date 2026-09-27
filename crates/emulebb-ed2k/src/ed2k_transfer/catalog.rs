@@ -224,6 +224,29 @@ impl Deref for IndexedSharedCatalog {
 }
 
 /// One persisted or hinted ED2K shared-file entry.
+#[derive(Debug, Clone, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ed2kMediaMetadata {
+    /// Track/stream artist, truncated to the stock 80-character ceiling.
+    #[serde(default)]
+    pub artist: String,
+    /// Album/product name, truncated to the stock 80-character ceiling.
+    #[serde(default)]
+    pub album: String,
+    /// Embedded media title, truncated to the stock 80-character ceiling.
+    #[serde(default)]
+    pub title: String,
+    /// Whole media duration in seconds.
+    #[serde(default)]
+    pub length_seconds: u32,
+    /// Average media bitrate in kilobits per second.
+    #[serde(default)]
+    pub bitrate_kbps: u32,
+    /// Container/stream codec label, truncated to 80 characters.
+    #[serde(default)]
+    pub codec: String,
+}
+
+/// One persisted or hinted ED2K shared-file entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ed2kSharedEntry {
     /// Stable ED2K file hash in lowercase hex.
@@ -256,6 +279,9 @@ pub struct Ed2kSharedEntry {
     /// Locally configured shared-file rating used for Kad note publishing.
     #[serde(default)]
     pub rating: u8,
+    /// Media properties published in server offers and Kad keyword entries.
+    #[serde(default)]
+    pub media: Ed2kMediaMetadata,
     /// Lifetime bytes uploaded for this file, used for the all-time share ratio.
     #[serde(default)]
     pub all_time_uploaded_bytes: u64,
@@ -314,6 +340,7 @@ impl Ed2kSharedEntry {
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
+            media: Ed2kMediaMetadata::default(),
             all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
             publish: Ed2kSharedPublishStats::default(),
@@ -345,6 +372,7 @@ impl Ed2kSharedEntry {
             auto_upload_priority: manifest.auto_upload_priority,
             comment: manifest.comment.clone(),
             rating: manifest.rating,
+            media: Ed2kMediaMetadata::default(),
             all_time_uploaded_bytes: 0,
             complete_parts,
             publish: Ed2kSharedPublishStats::default(),
@@ -462,6 +490,7 @@ mod indexed_catalog_tests {
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
+            media: Ed2kMediaMetadata::default(),
             all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
             publish: Ed2kSharedPublishStats::default(),

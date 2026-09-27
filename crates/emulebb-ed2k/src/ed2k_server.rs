@@ -228,6 +228,9 @@ const FT_AICH_HASH: u8 = 0x27;
 const FT_COMPLETE_SOURCES: u8 = 0x30;
 const FT_FOLDERNAME: u8 = 0x38;
 const FT_FILESIZE_HI: u8 = 0x3A;
+const FT_MEDIA_LENGTH: u8 = 0xD3;
+const FT_MEDIA_BITRATE: u8 = 0xD4;
+const FT_MEDIA_CODEC: u8 = 0xD5;
 const FT_FILERATING: u8 = 0xF7;
 // ED2K search-ID file types (eserver 17.6+, OtherFunctions.h `ED2KFT_*`): the
 // integer FT_FILETYPE value published in OP_OFFERFILES. `GetED2KFileTypeSearchID`

@@ -12,7 +12,7 @@ use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
     ed2k_tcp::Ed2kHelloIdentity,
-    ed2k_transfer::{Ed2kSharedCatalog, Ed2kSharedEntry},
+    ed2k_transfer::{Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry},
     shared_publish_rank::{
         SharedPublishRankInput, compare_shared_publish_rank, shared_file_publish_enabled,
         shared_publish_rank,
@@ -20,24 +20,25 @@ use crate::{
 };
 
 use super::tag_codec::{
-    push_short_int_tag, push_short_string_tag, push_short_u8_tag, push_string_tag, push_u32_tag,
+    push_named_int_tag, push_named_string_tag, push_short_int_tag, push_short_string_tag,
+    push_short_u8_tag, push_string_tag, push_u32_tag,
 };
 use super::{
     CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS, CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION,
     ED2K_FILETYPE_ANY, ED2K_FILETYPE_AUDIO, ED2K_FILETYPE_DOCUMENT, ED2K_FILETYPE_IMAGE,
     ED2K_FILETYPE_PROGRAM, ED2K_FILETYPE_VIDEO, EDONKEY_VERSION, EMULE_VERSION_MAJOR,
     EMULE_VERSION_MINOR, EMULE_VERSION_UPDATE, FT_FILENAME, FT_FILERATING, FT_FILESIZE,
-    FT_FILESIZE_HI, FT_FILETYPE, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID,
-    OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT, OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_ID,
-    OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_PORT, OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST,
-    OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ,
-    OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_OFFERFILES, ResolvedServerEntry,
-    SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_LARGEFILES, SERVER_TCP_FLAG_TCPOBFUSCATION,
-    SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES,
-    SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS,
-    SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES,
-    SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta,
-    is_low_id,
+    FT_FILESIZE_HI, FT_FILETYPE, FT_MEDIA_BITRATE, FT_MEDIA_CODEC, FT_MEDIA_LENGTH,
+    OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT,
+    OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_ID, OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_PORT,
+    OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST, OP_GETSOURCES, OP_GETSOURCES_OBFU,
+    OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
+    OP_OFFERFILES, ResolvedServerEntry, SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_LARGEFILES,
+    SERVER_TCP_FLAG_NEWTAGS, SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER,
+    SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2,
+    SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT,
+    SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES, SRVCAP_UNICODE,
+    SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta, is_low_id,
 };
 
 const MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES: usize = 510;
@@ -152,7 +153,10 @@ fn encode_offer_files_payload_at_cursor(
             .to_le_bytes(),
     );
     let use_integer_type = server_flags.unwrap_or_default() & SERVER_TCP_FLAG_TYPETAGINTEGER != 0;
-    for (file_hash, file_name, file_size, file_type, verified_complete, rating) in
+    let use_new_tags = server_flags.unwrap_or_default() & SERVER_TCP_FLAG_NEWTAGS != 0;
+    let use_integer_media_length =
+        server_flags.unwrap_or_default() & SERVER_TCP_FLAG_COMPRESSION != 0;
+    for (file_hash, file_name, file_size, file_type, verified_complete, rating, media) in
         &offered_files.entries
     {
         let (advertised_client_id, advertised_client_port) =
@@ -178,6 +182,15 @@ fn encode_offer_files_payload_at_cursor(
         if *rating != 0 {
             tag_count += 1;
         }
+        if media.length_seconds != 0 {
+            tag_count += 1;
+        }
+        if media.bitrate_kbps != 0 {
+            tag_count += 1;
+        }
+        if !media.codec.is_empty() {
+            tag_count += 1;
+        }
         payload.extend_from_slice(file_hash);
         payload.extend_from_slice(&advertised_client_id.to_le_bytes());
         payload.extend_from_slice(&advertised_client_port.to_le_bytes());
@@ -201,12 +214,62 @@ fn encode_offer_files_payload_at_cursor(
         if *rating != 0 {
             push_short_int_tag(&mut payload, FT_FILERATING, u64::from((*rating).min(5)));
         }
+        // Stock server offers expose only the numeric duration/bitrate and codec
+        // subset of the file's media metadata. Artist/album/title remain Kad-only.
+        if media.length_seconds != 0 {
+            if use_integer_media_length {
+                if use_new_tags {
+                    push_short_int_tag(
+                        &mut payload,
+                        FT_MEDIA_LENGTH,
+                        u64::from(media.length_seconds),
+                    );
+                } else {
+                    push_named_int_tag(&mut payload, "length", u64::from(media.length_seconds));
+                }
+            } else {
+                push_named_string_tag(
+                    &mut payload,
+                    "length",
+                    &format_media_length(media.length_seconds),
+                );
+            }
+        }
+        if media.bitrate_kbps != 0 {
+            if use_new_tags {
+                push_short_int_tag(
+                    &mut payload,
+                    FT_MEDIA_BITRATE,
+                    u64::from(media.bitrate_kbps),
+                );
+            } else {
+                push_named_int_tag(&mut payload, "bitrate", u64::from(media.bitrate_kbps));
+            }
+        }
+        if !media.codec.is_empty() {
+            if use_new_tags {
+                push_short_string_tag(&mut payload, FT_MEDIA_CODEC, &media.codec);
+            } else {
+                push_named_string_tag(&mut payload, "codec", &media.codec);
+            }
+        }
     }
     EncodedOfferFilesPayload {
         payload,
         entries: offered_files.entries,
         next_cursor: offered_files.next_cursor,
         total_entries: offered_files.total_entries,
+    }
+}
+
+fn format_media_length(seconds: u32) -> String {
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if hours != 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -374,7 +437,7 @@ pub(super) fn source_request_opcode(connect_options: u8, server_flags: Option<u3
 
 #[derive(Debug)]
 struct OfferedFilesCatalog {
-    entries: Vec<([u8; 16], String, u64, u8, bool, u8)>,
+    entries: Vec<([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)>,
     next_cursor: usize,
     total_entries: usize,
 }
@@ -382,7 +445,7 @@ struct OfferedFilesCatalog {
 #[derive(Debug)]
 struct EncodedOfferFilesPayload {
     payload: Vec<u8>,
-    entries: Vec<([u8; 16], String, u64, u8, bool, u8)>,
+    entries: Vec<([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)>,
     next_cursor: usize,
     total_entries: usize,
 }
@@ -490,7 +553,9 @@ pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]
     hasher.finish()
 }
 
-fn offer_files_entries_fingerprint(entries: &[([u8; 16], String, u64, u8, bool, u8)]) -> u64 {
+fn offer_files_entries_fingerprint(
+    entries: &[([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)],
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     entries.hash(&mut hasher);
     hasher.finish()
@@ -519,7 +584,7 @@ fn offer_files_cursor_wrapped(
 
 fn popular_hash_offer_file(
     hash: &Ed2kSharedEntry,
-) -> Option<([u8; 16], String, u64, u8, bool, u8)> {
+) -> Option<([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)> {
     let file_hash = hash.parsed_hash().ok()?;
     Some((
         file_hash.0,
@@ -528,13 +593,14 @@ fn popular_hash_offer_file(
         ed2k_offer_file_type(&hash.display_name),
         hash.verified_complete,
         hash.rating,
+        hash.media.clone(),
     ))
 }
 
 fn ranked_offer_files(
     shared_catalog: &[Ed2kSharedEntry],
     server_supports_large_files: bool,
-) -> Vec<([u8; 16], String, u64, u8, bool, u8)> {
+) -> Vec<([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)> {
     let now_unix_ms = unix_time_ms();
     let mut ranked = shared_catalog
         .iter()
@@ -716,7 +782,7 @@ pub(super) async fn send_offer_files_advertisement(
     session.offer_files_sent_at = Some(Instant::now());
     session.offer_files_catalog_fingerprint = Some(catalog_fingerprint);
     session.offer_files_catalog_cursor = encoded.next_cursor;
-    for (file_hash, _, _, _, _, _) in &encoded.entries {
+    for (file_hash, _, _, _, _, _, _) in &encoded.entries {
         session.offer_files_published_hashes.insert(*file_hash);
     }
     mark_offer_files_published(shared_catalog, &encoded.entries, unix_time_ms()).await;
@@ -749,12 +815,12 @@ pub(super) async fn send_offer_files_advertisement(
 
 async fn mark_offer_files_published(
     shared_catalog: &Ed2kSharedCatalog,
-    entries: &[([u8; 16], String, u64, u8, bool, u8)],
+    entries: &[([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)],
     published_at_ms: i64,
 ) {
     let published = entries
         .iter()
-        .map(|(file_hash, _, _, _, _, _)| hex::encode(file_hash))
+        .map(|(file_hash, _, _, _, _, _, _)| hex::encode(file_hash))
         .collect::<HashSet<_>>();
     let mut catalog = shared_catalog.write().await;
     catalog.mutate_all(|entry| {

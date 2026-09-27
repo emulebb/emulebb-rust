@@ -52,6 +52,8 @@ pub struct MetadataTransferCatalogEntry {
     pub all_time_upload_requests: u64,
     pub all_time_upload_accepts: u64,
     pub last_upload_request_ms: i64,
+    /// Best persisted payload path for rebuilding non-durable derived metadata.
+    pub media_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

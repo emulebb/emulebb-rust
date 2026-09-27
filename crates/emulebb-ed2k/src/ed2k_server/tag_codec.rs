@@ -60,6 +60,27 @@ pub(super) fn push_short_int_tag(payload: &mut Vec<u8>, name: u8, value: u64) {
     }
 }
 
+/// `WriteNewEd2kTag` integer encoding with a legacy textual tag name.
+pub(super) fn push_named_int_tag(payload: &mut Vec<u8>, name: &str, value: u64) {
+    let (tag_type, value_bytes): (u8, Vec<u8>) = if value <= u64::from(u8::MAX) {
+        (TAGTYPE_UINT8, vec![value as u8])
+    } else if value <= u64::from(u16::MAX) {
+        (TAGTYPE_UINT16, (value as u16).to_le_bytes().to_vec())
+    } else if value <= u64::from(u32::MAX) {
+        (TAGTYPE_UINT32, (value as u32).to_le_bytes().to_vec())
+    } else {
+        (TAGTYPE_UINT64, value.to_le_bytes().to_vec())
+    };
+    payload.push(tag_type);
+    payload.extend_from_slice(
+        &u16::try_from(name.len())
+            .expect("tag name length fits in u16")
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(name.as_bytes());
+    payload.extend_from_slice(&value_bytes);
+}
+
 pub(super) fn ed2k_string_tag_type(len: usize) -> u8 {
     if (1..=16).contains(&len) {
         TAGTYPE_STR1 + u8::try_from(len - 1).expect("string tag length fits in u8")
@@ -95,6 +116,27 @@ pub(super) fn push_short_string_tag(payload: &mut Vec<u8>, name: u8, value: &str
         payload.extend_from_slice(
             &u16::try_from(value_bytes.len())
                 .expect("string tag length fits in u16")
+                .to_le_bytes(),
+        );
+    }
+    payload.extend_from_slice(value_bytes);
+}
+
+/// `WriteNewEd2kTag` string encoding with a legacy textual tag name.
+pub(super) fn push_named_string_tag(payload: &mut Vec<u8>, name: &str, value: &str) {
+    let value_bytes = value.as_bytes();
+    let type_byte = ed2k_string_tag_type(value_bytes.len());
+    payload.push(type_byte);
+    payload.extend_from_slice(
+        &u16::try_from(name.len())
+            .expect("tag name length fits in u16")
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(name.as_bytes());
+    if type_byte == TAGTYPE_STRING {
+        payload.extend_from_slice(
+            &u16::try_from(value_bytes.len())
+                .expect("tag value length fits in u16")
                 .to_le_bytes(),
         );
     }

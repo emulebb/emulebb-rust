@@ -1214,6 +1214,17 @@ pub(crate) fn significant_keyword_words_unique(query: &str) -> Vec<String> {
     significant_keyword_words(query)
 }
 
+/// Tokenize media text for Kad's filename-redundancy check. Unlike keyword
+/// extraction, the oracle keeps one- and two-byte words and does not strip a
+/// trailing extension (`Search.cpp::GetMetaDataWords`).
+pub(crate) fn kad_metadata_words(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| INV_KAD_KEYWORD_CHARS.contains(character))
+        .filter(|word| !word.is_empty())
+        .map(kad_keyword_lowercase)
+        .collect()
+}
+
 pub(crate) fn keyword_target(query: &str) -> NodeId {
     let first_word = exact_ed2k_hash_query_token(query).unwrap_or_else(|| {
         significant_keyword_words(query)

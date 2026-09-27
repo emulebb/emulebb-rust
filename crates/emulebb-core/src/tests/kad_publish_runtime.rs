@@ -79,6 +79,58 @@ fn keyword_publish_source_count_is_self_inclusive() {
 }
 
 #[test]
+fn keyword_publish_entry_includes_stock_media_tags_and_omits_redundant_text() {
+    let shared_files = vec![
+        KadKeywordPublishCandidate::new(
+            Ed2kHash::from_bytes([9_u8; 16]).to_string(),
+            "Example Artist - File Title.mp3".to_string(),
+            1_024,
+            None,
+        )
+        .unwrap()
+        .with_media(Ed2kMediaMetadata {
+            artist: "Example Artist".to_string(),
+            album: "Different Album".to_string(),
+            title: "File Title".to_string(),
+            length_seconds: 240,
+            bitrate_kbps: 192,
+            codec: "AAC".to_string(),
+        }),
+    ];
+
+    let entries = kad_keyword_publish_entries_for_keyword(
+        &shared_files,
+        "example",
+        KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+        0,
+    );
+    let tags = &entries[0].1.tags;
+    assert!(
+        !tags
+            .iter()
+            .any(|tag| tag.name == emulebb_kad_proto::TagName::Short(tag_name::MEDIA_ARTIST))
+    );
+    assert!(
+        !tags
+            .iter()
+            .any(|tag| tag.name == emulebb_kad_proto::TagName::Short(tag_name::MEDIA_TITLE))
+    );
+    assert!(tags.contains(&Tag::new_short(
+        tag_name::MEDIA_ALBUM,
+        TagValue::String("Different Album".to_string())
+    )));
+    assert!(tags.contains(&Tag::new_short(tag_name::MEDIA_LENGTH, TagValue::UInt(240))));
+    assert!(tags.contains(&Tag::new_short(
+        tag_name::MEDIA_BITRATE,
+        TagValue::UInt(192)
+    )));
+    assert!(tags.contains(&Tag::new_short(
+        tag_name::MEDIA_CODEC,
+        TagValue::String("AAC".to_string())
+    )));
+}
+
+#[test]
 fn keyword_publish_entry_publishes_self_inclusive_source_count() {
     // rust tracks no other complete sources for shared files, so the built
     // keyword entry carries the self-only TAG_SOURCES value of 1 rather than
