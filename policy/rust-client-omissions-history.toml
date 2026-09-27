@@ -4,6 +4,20 @@
 # only contains current omissions and approved protocol drops.
 
 [[resolved_omissions]]
+id = "upload-throttle-focus-slot-distribution"
+area = "ed2k"
+stock_behavior = "The maintained eMuleBB fork distributes upload bandwidth equally across active slots and uses a 2600-byte socket-send granularity at or above 6 KiB/s and 536 bytes below 6 KiB/s (`UploadBandwidthThrottler.cpp`, `doubleSendSize`)."
+rust_behavior = "IMPLEMENTED: Rust retains its shared FIFO equal-share token bucket and now divides each rate-limited encoded upload packet into the same 2600/536-byte transport chunks. Each chunk independently reserves the shared upload budget before it is written. Unlimited uploads retain the efficient whole-packet write."
+reason = "The only remaining fork-specific pacing difference was rate-limited send burst size; chunking the TCP byte stream closes it without changing ED2K packet framing."
+compatibility = "Encoded ED2K packet bytes and order are unchanged. Rate-limited peers now observe the maintained fork's smoother socket-send cadence at both sides of the 6 KiB/s threshold."
+disposition = "fixed"
+owner = "transfer-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: implemented per-chunk token reservations and TCP writes with focused below-threshold, boundary, short-packet, and unlimited-path tests. No longer an active omission."
+
+[[resolved_omissions]]
 id = "server-obfuscation-metadata-non-config"
 area = "ed2k"
 stock_behavior = "eMule imports and persists each server's UDP flags, obfuscated TCP/UDP ports, UDP key, and the public IP to which that key is bound. Extended OP_GLOBSERVSTATRES replies and crypt-ping probes refresh that state, and a public-IP change invalidates a stale key before keyed UDP traffic is sent."

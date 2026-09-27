@@ -451,18 +451,26 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 let packet_len = u64::try_from(reply.packet.len()).unwrap_or(u64::MAX);
                 request_diag.sent_payload_bytes =
                     request_diag.sent_payload_bytes.saturating_add(packet_len);
-                let reservation = transfer_runtime
-                    .reserve_upload_payload_budget(packet_len)
+                let send_chunk_len = transfer_runtime
+                    .upload_payload_send_chunk_len(reply.packet.len())
                     .await;
-                if !reservation.delay.is_zero() {
-                    let delay_ms = u64::try_from(reservation.delay.as_millis()).unwrap_or(u64::MAX);
-                    request_diag.throttle_delay_ms =
-                        request_diag.throttle_delay_ms.saturating_add(delay_ms);
-                    tokio::time::sleep(reservation.delay).await;
+                for chunk in reply.packet.chunks(send_chunk_len) {
+                    let reservation = transfer_runtime
+                        .reserve_upload_payload_budget(
+                            u64::try_from(chunk.len()).unwrap_or(u64::MAX),
+                        )
+                        .await;
+                    if !reservation.delay.is_zero() {
+                        let delay_ms =
+                            u64::try_from(reservation.delay.as_millis()).unwrap_or(u64::MAX);
+                        request_diag.throttle_delay_ms =
+                            request_diag.throttle_delay_ms.saturating_add(delay_ms);
+                        tokio::time::sleep(reservation.delay).await;
+                    }
+                    transport.write_all(chunk).await.with_context(|| {
+                        format!("failed to send ED2K upload payload to {peer_addr}")
+                    })?;
                 }
-                transport.write_all(&reply.packet).await.with_context(|| {
-                    format!("failed to send ED2K upload payload to {peer_addr}")
-                })?;
             }
             request_diag.served_bytes = request_diag.served_bytes.saturating_add(fragment_bytes);
             range_served = true;

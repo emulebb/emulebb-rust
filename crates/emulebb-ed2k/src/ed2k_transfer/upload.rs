@@ -350,6 +350,13 @@ impl Ed2kTransferRuntime {
             .reserve_upload_payload(byte_count, now)
     }
 
+    pub(crate) async fn upload_payload_send_chunk_len(&self, packet_len: usize) -> usize {
+        self.upload_queue
+            .lock()
+            .await
+            .upload_payload_send_chunk_len(packet_len)
+    }
+
     /// Release one upload session after disconnect or explicit cancel: an
     /// active slot is freed, while a WAITING entry survives with its wait-start
     /// time (master keeps US_ONUPLOADQUEUE clients on disconnect,

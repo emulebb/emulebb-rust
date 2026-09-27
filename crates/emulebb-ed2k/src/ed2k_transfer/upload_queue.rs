@@ -1113,6 +1113,10 @@ impl Ed2kUploadQueueState {
         }
     }
 
+    pub(super) fn upload_payload_send_chunk_len(&self, packet_len: usize) -> usize {
+        upload_payload_send_chunk_len(packet_len, self.config.upload_limit_bytes_per_sec)
+    }
+
     fn status_for_key(&self, key: &Ed2kUploadSessionKey, now: Instant) -> Ed2kUploadSessionStatus {
         match self.sessions.get(key).map(|session| session.phase) {
             Some(Ed2kUploadSessionPhase::Waiting) => Ed2kUploadSessionStatus::Waiting {
@@ -2030,6 +2034,26 @@ fn upload_payload_interval(byte_count: u64, limit_bytes_per_sec: u64) -> Duratio
     let nanos = (u128::from(byte_count) * 1_000_000_000u128)
         .div_ceil(u128::from(limit_bytes_per_sec.max(1)));
     Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
+}
+
+/// Match the maintained fork's throttled socket-send granularity
+/// (`UploadBandwidthThrottler.cpp`: `doubleSendSize`). Unlimited uploads do not
+/// need artificial transport fragmentation; rate-limited traffic uses one TCP
+/// payload chunk (536 bytes) below 6 KiB/s and two MTU-friendly chunks (2600
+/// bytes) at or above it. Splitting the byte stream here does not alter ED2K
+/// framing: packet headers and payload remain contiguous on the TCP stream.
+fn upload_payload_send_chunk_len(packet_len: usize, limit_bytes_per_sec: u64) -> usize {
+    const LOW_SPEED_THRESHOLD_BYTES_PER_SEC: u64 = 6 * 1024;
+    const LOW_SPEED_SEND_BYTES: usize = 536;
+    const NORMAL_SEND_BYTES: usize = 2_600;
+
+    if limit_bytes_per_sec == 0 {
+        packet_len.max(1)
+    } else if limit_bytes_per_sec < LOW_SPEED_THRESHOLD_BYTES_PER_SEC {
+        packet_len.min(LOW_SPEED_SEND_BYTES).max(1)
+    } else {
+        packet_len.min(NORMAL_SEND_BYTES).max(1)
+    }
 }
 
 mod admission;

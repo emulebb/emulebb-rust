@@ -231,6 +231,26 @@ async fn upload_queue_reserves_global_payload_budget() {
 }
 
 #[tokio::test]
+async fn upload_payload_send_granularity_matches_mfc_threshold() {
+    let root = unique_test_dir("ed2k-upload-send-granularity");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let mut config = one_slot_config();
+
+    config.upload_limit_bytes_per_sec = (6 * 1024) - 1;
+    runtime.configure_upload_queue(config.clone()).await;
+    assert_eq!(runtime.upload_payload_send_chunk_len(10_240).await, 536);
+    assert_eq!(runtime.upload_payload_send_chunk_len(200).await, 200);
+
+    config.upload_limit_bytes_per_sec = 6 * 1024;
+    runtime.configure_upload_queue(config.clone()).await;
+    assert_eq!(runtime.upload_payload_send_chunk_len(10_240).await, 2_600);
+
+    config.upload_limit_bytes_per_sec = 0;
+    runtime.configure_upload_queue(config).await;
+    assert_eq!(runtime.upload_payload_send_chunk_len(10_240).await, 10_240);
+}
+
+#[tokio::test]
 async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
     let root = unique_test_dir("ed2k-upload-queue-snapshot");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
