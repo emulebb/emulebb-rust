@@ -3,7 +3,8 @@ use super::{
     PUBLISH_NOTES_LOOKUP_TIMEOUT, PUBLISH_SOURCE_LOOKUP_TIMEOUT, PublishAttempt,
     PublishAttemptStats, build_keyword_publish_packet, build_keyword_publish_packets,
     build_notes_publish_packet, build_source_publish_packet, keyword_publish_chunk_count,
-    publish_target_is_within_tolerance, record_keyword_publish_results, select_publish_contacts,
+    publish_response_requests_ack, publish_target_is_within_tolerance,
+    record_keyword_publish_results, select_publish_contacts,
 };
 use crate::traversal::TraversalContact;
 use emulebb_kad_proto::{
@@ -453,6 +454,22 @@ fn publish_res(load: u8) -> KadPacket {
         load,
         options: None,
     })
+}
+
+#[test]
+fn publish_response_ack_bit_is_detected_without_treating_other_options_as_requests() {
+    let response = |options| -> Result<KadPacket, emulebb_kad_net::NetError> {
+        Ok(KadPacket::PublishRes(PublishRes {
+            target: NodeId::from_bytes([9; 16]),
+            load: 1,
+            options,
+        }))
+    };
+    assert!(!publish_response_requests_ack(&response(None)));
+    assert!(!publish_response_requests_ack(&response(Some(0))));
+    assert!(publish_response_requests_ack(&response(Some(1))));
+    assert!(publish_response_requests_ack(&response(Some(3))));
+    assert!(!publish_response_requests_ack(&response(Some(2))));
 }
 
 fn timeout_error(secs: u64) -> emulebb_kad_net::NetError {

@@ -158,6 +158,28 @@ fn test_firewalled2_req_prefers_receiver_key_when_available() {
 }
 
 #[test]
+fn test_publish_res_ack_prefers_receiver_key_when_available() {
+    let sender = ObfuscationLayer::new(NodeId::from_bytes([0x36; 16]), 0xAABB_CCDD, true);
+    let receiver = ObfuscationLayer::new(NodeId::from_bytes([0x47; 16]), 0x1122_3344, true);
+    let sender_ip = match sender_addr().ip() {
+        IpAddr::V4(ip) => ip,
+        IpAddr::V6(_) => unreachable!(),
+    };
+
+    sender.register_peer_identity(receiver_addr(), receiver.our_node_id);
+    sender.register_peer_version(receiver_addr(), 8);
+    sender.register_peer_key(receiver_addr(), receiver.verify_key_for_ip(sender_ip));
+
+    let plaintext = vec![OP_KADEMLIAHEADER, opcode::PUBLISH_RES_ACK];
+    let encrypted = sender.encrypt(receiver_addr(), opcode::PUBLISH_RES_ACK, &plaintext);
+
+    assert_eq!(encrypted[0] & 0x03, KAD_MARKER_RECEIVER_KEY);
+    let decrypted = receiver.decrypt(sender_addr(), &encrypted);
+    assert_eq!(decrypted.data, plaintext);
+    assert!(decrypted.receiver_verify_key_valid);
+}
+
+#[test]
 fn test_pre_v6_contacts_fall_back_to_plaintext_without_receiver_key() {
     let sender = ObfuscationLayer::new(NodeId::from_bytes([0x77; 16]), 0x1020_3040, true);
     let receiver = ObfuscationLayer::new(NodeId::from_bytes([0x88; 16]), 0x5566_7788, true);

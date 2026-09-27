@@ -16,7 +16,10 @@ fn should_prefer_receiver_verify_key(opcode_value: u8) -> bool {
     // Firewalled recheck requests are an oracle exception to the usual
     // NodeID-first request rule: once we learned the peer's receiver verify
     // key, eMule sends KADEMLIA2_FIREWALLED2_REQ in receiver-key mode.
-    opcode_value == opcode::FIREWALLED2_REQ
+    matches!(
+        opcode_value,
+        opcode::FIREWALLED2_REQ | opcode::PUBLISH_RES_ACK
+    )
 }
 
 fn is_plain_protocol_marker(byte: u8) -> bool {

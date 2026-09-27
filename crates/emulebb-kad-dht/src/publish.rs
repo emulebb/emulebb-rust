@@ -129,6 +129,13 @@ async fn execute_publish_fanout_for_contacts(
                     work_class,
                 )
                 .await;
+            acknowledge_publish_response_if_requested(
+                &rpc,
+                attempt.contact.addr,
+                work_class,
+                &result,
+            )
+            .await;
             (attempt, result)
         });
     }
@@ -181,6 +188,7 @@ async fn execute_keyword_publish_fanout(
                         work_class,
                     )
                     .await;
+                acknowledge_publish_response_if_requested(&rpc, addr, work_class, &result).await;
                 (contact_index, chunk_index, result)
             });
         }
@@ -218,6 +226,34 @@ async fn execute_keyword_publish_fanout(
             )
         })
         .collect()
+}
+
+fn publish_response_requests_ack(result: &Result<KadPacket, emulebb_kad_net::NetError>) -> bool {
+    matches!(
+        result,
+        Ok(KadPacket::PublishRes(response))
+            if response.options.is_some_and(|options| options & 0x01 != 0)
+    )
+}
+
+async fn acknowledge_publish_response_if_requested(
+    rpc: &RpcManager,
+    addr: SocketAddr,
+    work_class: RpcWorkClass,
+    result: &Result<KadPacket, emulebb_kad_net::NetError>,
+) {
+    // The option is meaningful only for keyed responses. The receive loop
+    // learns the sender verify key before completing the pending request, so
+    // this mirrors the stock `sender key available` gate.
+    if !publish_response_requests_ack(result) || rpc.known_peer_key(addr).is_none() {
+        return;
+    }
+    if let Err(error) = rpc
+        .send_with_class(addr, &KadPacket::PublishResAck, work_class)
+        .await
+    {
+        tracing::debug!("failed to send Kad publish response ACK to {addr}: {error}");
+    }
 }
 
 #[expect(
