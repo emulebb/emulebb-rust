@@ -241,6 +241,7 @@ pub async fn search_keyword_servers(
         cancel,
     } = options;
     let mut configured_servers = configured_server_entries(config)?;
+    let nickname = config.server_nickname();
     if configured_servers.is_empty() {
         anyhow::bail!("ED2K keyword search requires at least one configured server");
     }
@@ -298,6 +299,7 @@ pub async fn search_keyword_servers(
             bind_ip,
             &resolved_server,
             hello_identity,
+            &nickname,
             shared_catalog,
             &search_payload,
             idle_timeout,
@@ -329,6 +331,7 @@ async fn search_keyword_on_server(
     bind_ip: Ipv4Addr,
     server: &ResolvedServerEntry,
     hello_identity: Ed2kHelloIdentity,
+    nickname: &str,
     shared_catalog: &[Ed2kSharedEntry],
     search_payload: &[u8],
     idle_timeout: Duration,
@@ -360,7 +363,7 @@ async fn search_keyword_on_server(
     );
     let login_request = encode_packet(
         OP_LOGINREQUEST,
-        &encode_login_request(login_identity),
+        &encode_login_request(login_identity, nickname),
         false,
     )?;
     if use_server_obfuscation {

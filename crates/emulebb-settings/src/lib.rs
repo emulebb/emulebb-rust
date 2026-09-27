@@ -386,6 +386,7 @@ pub struct HostnameLookupSettings {
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Ed2kSettings {
     pub listen_port: Option<u16>,
+    pub nickname: String,
     pub obfuscation_enabled: bool,
     pub probe_search_term: Option<String>,
     pub connect_timeout_secs: u64,
@@ -626,6 +627,8 @@ pub struct Ed2kSettingsUpdate {
         skip_serializing_if = "Option::is_none"
     )]
     pub listen_port: Option<NullableUpdate<u16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obfuscation_enabled: Option<bool>,
     #[serde(
@@ -901,6 +904,7 @@ impl Default for Ed2kSettings {
     fn default() -> Self {
         Self {
             listen_port: None,
+            nickname: "eMule".to_string(),
             obfuscation_enabled: true,
             probe_search_term: None,
             connect_timeout_secs: 30,
@@ -1194,6 +1198,7 @@ impl HostnameLookupSettingsUpdate {
 impl Ed2kSettingsUpdate {
     pub fn is_empty(&self) -> bool {
         self.listen_port.is_none()
+            && self.nickname.is_none()
             && self.obfuscation_enabled.is_none()
             && self.probe_search_term.is_none()
             && self.connect_timeout_secs.is_none()
@@ -1335,6 +1340,9 @@ fn apply_hostname_lookup_settings_update(
 
 pub fn apply_ed2k_settings_update(settings: &mut Ed2kSettings, update: Ed2kSettingsUpdate) {
     apply_nullable_update(&mut settings.listen_port, update.listen_port);
+    if let Some(value) = update.nickname {
+        settings.nickname = value;
+    }
     if let Some(value) = update.obfuscation_enabled {
         settings.obfuscation_enabled = value;
     }
@@ -1621,6 +1629,7 @@ impl From<Ed2kSettings> for Ed2kSettingsUpdate {
     fn from(settings: Ed2kSettings) -> Self {
         Self {
             listen_port: Some(nullable_from_option(settings.listen_port)),
+            nickname: Some(settings.nickname),
             obfuscation_enabled: Some(settings.obfuscation_enabled),
             probe_search_term: Some(nullable_from_option(settings.probe_search_term)),
             connect_timeout_secs: Some(settings.connect_timeout_secs),

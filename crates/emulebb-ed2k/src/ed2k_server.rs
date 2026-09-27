@@ -167,9 +167,9 @@ const EDONKEY_VERSION: u32 = 0x3C;
 const EMULE_VERSION_MAJOR: u32 = 0;
 const EMULE_VERSION_MINOR: u32 = 72;
 const EMULE_VERSION_UPDATE: u32 = 0;
-// Stock eMule reads the nick from preferences. Until the Rust client grows an
-// operator-configurable nick surface, keep a neutral stock-like default
-// instead of the earlier project URL identity.
+// Neutral stock-like default used by protocol fixtures and as the configured
+// nickname fallback instead of the earlier project URL identity.
+#[cfg(test)]
 const HELLO_NICKNAME: &str = "eMule";
 
 const TAGTYPE_HASH: u8 = 0x01;

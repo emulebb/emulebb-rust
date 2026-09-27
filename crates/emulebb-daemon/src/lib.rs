@@ -470,6 +470,7 @@ fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfi
         listen_port: settings.listen_port,
         server_entries: Vec::new(),
         server_endpoints: Vec::new(),
+        nickname: settings.nickname,
         obfuscation_enabled: settings.obfuscation_enabled,
         probe_search_term: settings.probe_search_term,
         connect_timeout_secs: settings.connect_timeout_secs,

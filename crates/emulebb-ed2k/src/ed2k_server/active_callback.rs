@@ -64,7 +64,8 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
         timeout,
     )
     .await?;
-    let login_payload = encode_login_request(login_identity);
+    let nickname = config.server_nickname();
+    let login_payload = encode_login_request(login_identity, &nickname);
     if use_server_obfuscation {
         let login_request = encode_packet(OP_LOGINREQUEST, &login_payload, false)?;
         session

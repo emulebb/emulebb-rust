@@ -31,6 +31,9 @@ pub(super) async fn handle_server_packet(
         OP_IDCHANGE => {
             let id_change = decode_id_change_payload(&packet.payload)?;
             if id_change.client_id == 0 {
+                context
+                    .last_client_id
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 {
                     let mut guard = session.state.write().await;
                     guard.connecting = false;
@@ -67,6 +70,9 @@ pub(super) async fn handle_server_packet(
                     .unwrap_or_else(|| "unknown".to_string())
             );
             session.assigned_client_id = Some(id_change.client_id);
+            context
+                .last_client_id
+                .store(id_change.client_id, std::sync::atomic::Ordering::Relaxed);
             session.server_flags = id_change.server_flags;
             session.login_accepted = true;
             // eMule `CServerList::ServerStats`: a successful connect resets the

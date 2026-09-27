@@ -610,7 +610,7 @@ async fn server_obfuscation_handshake_encrypts_login_request() {
     };
     let expected_login = encode_packet(
         OP_LOGINREQUEST,
-        &encode_login_request(hello_identity),
+        &encode_login_request(hello_identity, HELLO_NICKNAME),
         false,
     )
     .unwrap();

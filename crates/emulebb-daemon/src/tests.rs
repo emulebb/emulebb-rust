@@ -441,6 +441,19 @@ fn default_ed2k_settings_match_runtime_config_defaults() {
 }
 
 #[test]
+fn configured_ed2k_nickname_reaches_runtime_config() {
+    let settings = Ed2kSettings {
+        nickname: "  Sample User  ".to_string(),
+        ..Ed2kSettings::default()
+    };
+
+    assert_eq!(
+        ed2k_runtime_config_from_settings(settings).server_nickname(),
+        "Sample User"
+    );
+}
+
+#[test]
 fn default_upload_queue_settings_match_runtime_config_defaults() {
     assert_eq!(
         ed2k_upload_queue_runtime_config_from_settings(Ed2kUploadQueueSettings::default()),

@@ -18,6 +18,9 @@ pub struct Ed2kRuntimeConfig {
     pub server_entries: Vec<Ed2kServerEntry>,
     /// Ordered ED2K server bootstrap endpoints in `host:port` form.
     pub server_endpoints: Vec<String>,
+    /// Nickname sent in ED2K server login requests. Empty/whitespace values
+    /// fall back to the stock default `eMule`.
+    pub nickname: String,
     /// Whether the client should advertise and use ED2K TCP obfuscation.
     pub obfuscation_enabled: bool,
     /// Optional connected-session ED2K server search probe term used for parity runs.
@@ -164,6 +167,18 @@ pub struct Ed2kServerEntry {
 }
 
 impl Ed2kRuntimeConfig {
+    /// Stock-compatible bounded nickname used by server logins.
+    #[must_use]
+    pub fn server_nickname(&self) -> String {
+        let configured = self.nickname.trim();
+        let configured = if configured.is_empty() {
+            "eMule"
+        } else {
+            configured
+        };
+        configured.chars().take(50).collect()
+    }
+
     /// Idle TCP keepalive interval, or `None` when disabled. Mirrors eMule's
     /// `ServerKeepAliveTimeout` gate (`if (dwServerKeepAliveTimeout && ...)`,
     /// ServerConnect.cpp:673): a zero value disables the empty-OP_OFFERFILES
@@ -194,6 +209,7 @@ impl Default for Ed2kRuntimeConfig {
             listen_port: None,
             server_entries: Vec::new(),
             server_endpoints: Vec::new(),
+            nickname: "eMule".to_string(),
             obfuscation_enabled: true,
             probe_search_term: None,
             connect_timeout_secs: 30,
@@ -291,6 +307,20 @@ mod tests {
         assert_eq!(config.dead_server_retries, 1);
         // Stock AddServersFromServer defaults to false (Preferences.cpp:3207).
         assert!(!config.add_servers_from_server);
+        assert_eq!(config.server_nickname(), "eMule");
+    }
+
+    #[test]
+    fn server_nickname_trims_defaults_and_bounds_operator_input() {
+        let mut config = Ed2kRuntimeConfig {
+            nickname: "  Alice  ".to_string(),
+            ..Ed2kRuntimeConfig::default()
+        };
+        assert_eq!(config.server_nickname(), "Alice");
+        config.nickname = " ".to_string();
+        assert_eq!(config.server_nickname(), "eMule");
+        config.nickname = "x".repeat(80);
+        assert_eq!(config.server_nickname().len(), 50);
     }
 
     #[test]

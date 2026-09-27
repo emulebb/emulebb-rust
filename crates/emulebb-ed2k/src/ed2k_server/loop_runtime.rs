@@ -1,6 +1,9 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::Duration,
 };
 
@@ -51,6 +54,8 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         bind_ip,
         nat,
         hello_identity,
+        nickname: config.server_nickname(),
+        last_client_id: Arc::new(AtomicU32::new(hello_identity.client_id)),
         probe_search_term: config.probe_search_term.clone(),
         shared_catalog,
         state: Arc::clone(&state),

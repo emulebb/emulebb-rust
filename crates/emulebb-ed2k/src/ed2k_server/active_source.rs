@@ -66,6 +66,7 @@ pub async fn search_source_servers(
         cancel,
     } = options;
     let mut configured_servers = configured_server_entries(config)?;
+    let nickname = config.server_nickname();
     if configured_servers.is_empty() {
         anyhow::bail!("ED2K source search requires at least one configured server");
     }
@@ -134,6 +135,7 @@ pub async fn search_source_servers(
             bind_ip,
             server: &resolved_server,
             hello_identity,
+            nickname: &nickname,
             shared_catalog,
             file_hash,
             file_size: _file_size,
@@ -171,6 +173,7 @@ struct SourceSearchServerOptions<'a> {
     bind_ip: Ipv4Addr,
     server: &'a ResolvedServerEntry,
     hello_identity: Ed2kHelloIdentity,
+    nickname: &'a str,
     shared_catalog: &'a [Ed2kSharedEntry],
     file_hash: Ed2kHash,
     file_size: u64,
@@ -185,6 +188,7 @@ async fn search_sources_on_server(
         bind_ip,
         server,
         hello_identity,
+        nickname,
         shared_catalog,
         file_hash,
         file_size,
@@ -206,7 +210,7 @@ async fn search_sources_on_server(
     .await?;
     let login_request = encode_packet(
         OP_LOGINREQUEST,
-        &encode_login_request(login_identity),
+        &encode_login_request(login_identity, nickname),
         false,
     )?;
     if use_server_obfuscation {
@@ -221,7 +225,10 @@ async fn search_sources_on_server(
             })?;
     } else {
         session
-            .send_packet(OP_LOGINREQUEST, &encode_login_request(login_identity))
+            .send_packet(
+                OP_LOGINREQUEST,
+                &encode_login_request(login_identity, nickname),
+            )
             .await?;
     }
     session.last_tx = Instant::now();

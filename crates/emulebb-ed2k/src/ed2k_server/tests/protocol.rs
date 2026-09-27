@@ -213,16 +213,19 @@ fn server_udp_obfuscation_round_trips_plain_payload() {
 
 #[test]
 fn login_request_matches_oracle_tag_shape() {
-    let payload = encode_login_request(Ed2kHelloIdentity {
-        user_hash: [0x11; 16],
-        client_id: 0,
-        tcp_port: 41001,
-        udp_port: 41000,
-        server_ip: 0,
-        server_port: 0,
-        connect_options: emule_connect_options(true),
-        direct_udp_callback: false,
-    });
+    let payload = encode_login_request(
+        Ed2kHelloIdentity {
+            user_hash: [0x11; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(true),
+            direct_udp_callback: false,
+        },
+        HELLO_NICKNAME,
+    );
     // CT_NAME login tag uses the stock WriteTagToFile form: TAGTYPE_STRING + u16 name-len.
     let nickname_tag_header = [TAGTYPE_STRING, 0x01, 0x00, CT_NAME];
     let version_tag_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_VERSION];
@@ -280,17 +283,47 @@ fn login_request_matches_oracle_tag_shape() {
 }
 
 #[test]
+fn login_request_reuses_client_id_and_configured_nickname() {
+    let payload = encode_login_request(
+        Ed2kHelloIdentity {
+            user_hash: [0x55; 16],
+            client_id: 0x1122_3344,
+            tcp_port: 4662,
+            udp_port: 4672,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(true),
+            direct_udp_callback: false,
+        },
+        "Configured Nick",
+    );
+
+    assert_eq!(
+        u32::from_le_bytes(payload[16..20].try_into().unwrap()),
+        0x1122_3344
+    );
+    assert!(
+        payload
+            .windows("Configured Nick".len())
+            .any(|window| window == b"Configured Nick")
+    );
+}
+
+#[test]
 fn login_request_omits_crypt_flags_when_obfuscation_is_off() {
-    let payload = encode_login_request(Ed2kHelloIdentity {
-        user_hash: [0x22; 16],
-        client_id: 0,
-        tcp_port: 41001,
-        udp_port: 41000,
-        server_ip: 0,
-        server_port: 0,
-        connect_options: emule_connect_options(false),
-        direct_udp_callback: false,
-    });
+    let payload = encode_login_request(
+        Ed2kHelloIdentity {
+            user_hash: [0x22; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(false),
+            direct_udp_callback: false,
+        },
+        HELLO_NICKNAME,
+    );
 
     assert!(payload.windows(4).any(
             |window| window == server_capabilities(emule_connect_options(false)).to_le_bytes()
@@ -305,19 +338,22 @@ fn login_request_omits_crypt_flags_when_obfuscation_is_off() {
 fn login_request_matches_stock_072a_plaintext_sample() {
     let packet = encode_packet(
         OP_LOGINREQUEST,
-        &encode_login_request(Ed2kHelloIdentity {
-            user_hash: [
-                0x73, 0xBE, 0xC5, 0x66, 0x14, 0x0E, 0x7E, 0x60, 0x83, 0xC4, 0x50, 0xC9, 0xAF, 0x02,
-                0x6F, 0x83,
-            ],
-            client_id: 0,
-            tcp_port: 46671,
-            udp_port: 0,
-            server_ip: 0,
-            server_port: 0,
-            connect_options: emule_connect_options(false),
-            direct_udp_callback: false,
-        }),
+        &encode_login_request(
+            Ed2kHelloIdentity {
+                user_hash: [
+                    0x73, 0xBE, 0xC5, 0x66, 0x14, 0x0E, 0x7E, 0x60, 0x83, 0xC4, 0x50, 0xC9, 0xAF,
+                    0x02, 0x6F, 0x83,
+                ],
+                client_id: 0,
+                tcp_port: 46671,
+                udp_port: 0,
+                server_ip: 0,
+                server_port: 0,
+                connect_options: emule_connect_options(false),
+                direct_udp_callback: false,
+            },
+            HELLO_NICKNAME,
+        ),
         false,
     )
     .unwrap();
@@ -334,19 +370,22 @@ fn login_request_matches_stock_072a_plaintext_sample() {
 fn login_request_matches_stock_072a_obfuscated_preference_sample() {
     let packet = encode_packet(
         OP_LOGINREQUEST,
-        &encode_login_request(Ed2kHelloIdentity {
-            user_hash: [
-                0x73, 0xBE, 0xC5, 0x66, 0x14, 0x0E, 0x7E, 0x60, 0x83, 0xC4, 0x50, 0xC9, 0xAF, 0x02,
-                0x6F, 0x83,
-            ],
-            client_id: 0,
-            tcp_port: 46671,
-            udp_port: 0,
-            server_ip: 0,
-            server_port: 0,
-            connect_options: emule_connect_options(true),
-            direct_udp_callback: false,
-        }),
+        &encode_login_request(
+            Ed2kHelloIdentity {
+                user_hash: [
+                    0x73, 0xBE, 0xC5, 0x66, 0x14, 0x0E, 0x7E, 0x60, 0x83, 0xC4, 0x50, 0xC9, 0xAF,
+                    0x02, 0x6F, 0x83,
+                ],
+                client_id: 0,
+                tcp_port: 46671,
+                udp_port: 0,
+                server_ip: 0,
+                server_port: 0,
+                connect_options: emule_connect_options(true),
+                direct_udp_callback: false,
+            },
+            HELLO_NICKNAME,
+        ),
         false,
     )
     .unwrap();

@@ -25,6 +25,7 @@ const HOSTNAME_LOOKUP_SETTINGS_FIELDS: &[&str] = &[
 ];
 const ED2K_SETTINGS_FIELDS: &[&str] = &[
     "listenPort",
+    "nickname",
     "obfuscationEnabled",
     "probeSearchTerm",
     "connectTimeoutSecs",
@@ -297,6 +298,18 @@ fn validate_hostname_lookup_settings_patch_body_fields(
 }
 
 fn validate_ed2k_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    if let Some(value) = object.get("nickname") {
+        let Some(nickname) = value.as_str() else {
+            return Err(invalid_body_error(
+                "settings.ed2k.nickname must be a string",
+            ));
+        };
+        if nickname.chars().count() > 50 {
+            return Err(invalid_body_error(
+                "settings.ed2k.nickname must be at most 50 characters",
+            ));
+        }
+    }
     validate_unsigned_number_min(
         object,
         "maxParallelDownloadPeers",

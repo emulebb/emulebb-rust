@@ -1,6 +1,9 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32},
+    },
     time::Duration,
 };
 
@@ -76,6 +79,10 @@ pub(super) struct ServerSessionContext {
     pub(super) bind_ip: Ipv4Addr,
     pub(super) nat: Arc<NatManager>,
     pub(super) hello_identity: Ed2kHelloIdentity,
+    pub(super) nickname: String,
+    /// Last ID assigned by any successful server login. Stock reuses this
+    /// process-wide value in subsequent OP_LOGINREQUEST packets.
+    pub(super) last_client_id: Arc<AtomicU32>,
     pub(super) probe_search_term: Option<String>,
     pub(super) shared_catalog: Ed2kSharedCatalog,
     pub(super) state: Arc<RwLock<Ed2kServerState>>,

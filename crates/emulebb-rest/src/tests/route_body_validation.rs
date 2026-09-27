@@ -386,6 +386,14 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "unknown settings.ed2k field: unsupportedSetting",
         ),
         (
+            r#"{"ed2k":{"nickname":7}}"#,
+            "settings.ed2k.nickname must be a string",
+        ),
+        (
+            r#"{"ed2k":{"nickname":"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxy"}}"#,
+            "settings.ed2k.nickname must be at most 50 characters",
+        ),
+        (
             r#"{"ed2k":{"listenPort":0}}"#,
             "settings.ed2k.listenPort must be an unsigned number greater than or equal to 1",
         ),

@@ -85,6 +85,9 @@ async fn connect_server_transport_attempt(
     let use_server_obfuscation = mode.is_obfuscated();
     let mut login_identity =
         login_identity_for_server_transport(context.hello_identity, use_server_obfuscation);
+    login_identity.client_id = context
+        .last_client_id
+        .load(std::sync::atomic::Ordering::Relaxed);
     login_identity.tcp_port = context
         .public_ip
         .advertised_tcp_port(login_identity.tcp_port);
@@ -101,7 +104,7 @@ async fn connect_server_transport_attempt(
     )
     .await?;
     session.server_soft_files = server.entry.soft_files;
-    let login_payload = encode_login_request(login_identity);
+    let login_payload = encode_login_request(login_identity, &context.nickname);
     info!(
         "connected to ED2K server {} name={} trace_id={} role=background bind_ip={} observed_external_ip={} transport={} connect_options={} supports_obf_tcp={} obf_port={} udp_flags=0x{:08X} udp_key_present={} chosen_port={}",
         server.base_endpoint(),

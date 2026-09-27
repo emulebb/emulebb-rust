@@ -155,6 +155,13 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
         "eD2K TCP listen port.",
     ),
     app_setting(
+        "ed2k.nickname",
+        SettingSurfaceClass::NormalControl,
+        true,
+        "Network",
+        "Nickname advertised in eD2K server logins.",
+    ),
+    app_setting(
         "ed2k.obfuscationEnabled",
         SettingSurfaceClass::NormalControl,
         true,
