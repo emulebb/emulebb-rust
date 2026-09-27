@@ -518,10 +518,9 @@ pub(crate) fn download_stale_duplicate_block_abort(
 
 /// `download_out_of_part_reqs`: a download source reported No Needed Parts for our
 /// file (it sent `OP_OUTOFPARTREQS`). Mirrors MFC `CUpDownClient` -> bad_peer
-/// `download_out_of_part_reqs` (severity `low`, `action:"state_on_queue"`). rust's
+/// `download_out_of_part_reqs` (severity `low`, `action:"state_on_queue"`). Rust's
 /// driver may A4AF-swap the source rather than drop it, matching the oracle's
-/// on-queue disposition. (The oracle's escalated quarantine/cooldown variants for
-/// repeated OP_OutOfPartReqs abuse are a separate anti-abuse detector rust lacks.)
+/// on-queue disposition.
 pub(crate) fn download_out_of_part_reqs(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) {
     let keys = upload_keys(peer, peer_hash, file_hash);
     let body = json!({
@@ -529,6 +528,161 @@ pub(crate) fn download_out_of_part_reqs(peer: &str, peer_hash: Option<[u8; 16]>,
         "reason": "Remote sent OP_OutOfPartReqs",
     });
     emit("bad_peer", "download_out_of_part_reqs", "low", keys, body);
+}
+
+/// The third OP_OUTOFPARTREQS in the maintained MFC 30-second window starts a
+/// two-minute accept cooldown.
+pub(crate) fn download_out_of_part_reqs_cooldown(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    short_window_count: u32,
+    cooldown_bursts: u32,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "cooldown",
+        "reason": "Repeated OP_OutOfPartReqs loops",
+        "short_window_count": short_window_count,
+        "short_window_ms": 30_000,
+        "cooldown_bursts": cooldown_bursts,
+        "cooldown_ms": 120_000,
+    });
+    emit(
+        "bad_peer",
+        "download_out_of_part_reqs_cooldown",
+        "medium",
+        keys,
+        body,
+    );
+}
+
+/// Ten OP_OUTOFPARTREQS events in five minutes quarantine the source for the
+/// process lifetime, matching the maintained MFC long-window guard.
+pub(crate) fn download_out_of_part_reqs_quarantine(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    long_window_count: u32,
+    short_window_count: u32,
+    cooldown_bursts: u32,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "quarantine_source",
+        "reason": "Repeated OP_OutOfPartReqs loops",
+        "long_window_count": long_window_count,
+        "long_window_ms": 300_000,
+        "short_window_count": short_window_count,
+        "cooldown_bursts": cooldown_bursts,
+    });
+    emit(
+        "bad_peer",
+        "download_out_of_part_reqs_quarantine",
+        "high",
+        keys,
+        body,
+    );
+}
+
+/// A second short-window cooldown burst quarantines the source immediately.
+pub(crate) fn download_out_of_part_reqs_burst_quarantine(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    short_window_count: u32,
+    cooldown_bursts: u32,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "quarantine_source",
+        "reason": "Repeated OP_OutOfPartReqs cooldown bursts",
+        "cooldown_bursts": cooldown_bursts,
+        "burst_threshold": 2,
+        "short_window_count": short_window_count,
+        "short_window_ms": 30_000,
+    });
+    emit(
+        "bad_peer",
+        "download_out_of_part_reqs_burst_quarantine",
+        "high",
+        keys,
+        body,
+    );
+}
+
+/// An upload accept received while the source is cooled/quarantined is refused
+/// with OP_CANCELTRANSFER.
+pub(crate) fn download_accept_suppressed_out_of_part_cooldown(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    quarantined: bool,
+    cooldown_remaining_ms: Option<u64>,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let reason = if quarantined {
+        "client is quarantined after repeated OP_OutOfPartReqs loops".to_string()
+    } else {
+        format!(
+            "client is cooling down after repeated OP_OutOfPartReqs loops ({} ms remaining)",
+            cooldown_remaining_ms.unwrap_or(0)
+        )
+    };
+    let body = json!({
+        "action": "cancel_transfer",
+        "reason": reason,
+        "cooldown_remaining_ms": cooldown_remaining_ms,
+    });
+    emit(
+        "bad_peer",
+        "download_accept_suppressed_out_of_part_cooldown",
+        "medium",
+        keys,
+        body,
+    );
+}
+
+/// Suppressed accepts count toward the same five-minute quarantine threshold.
+pub(crate) fn download_out_of_part_reqs_suppression_quarantine(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    suppressed_accepts: u32,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "quarantine_source",
+        "reason": "Repeated suppressed OP_AcceptUploadReq during OP_OutOfPartReqs cooldown",
+        "suppressed_accepts": suppressed_accepts,
+        "long_window_ms": 300_000,
+    });
+    emit(
+        "bad_peer",
+        "download_out_of_part_reqs_suppression_quarantine",
+        "high",
+        keys,
+        body,
+    );
+}
+
+/// The second three-message unsolicited queue-rank flood is a four-hour client
+/// ban; the first burst is disconnected without this event, matching MFC.
+pub(crate) fn download_queue_rank_flood(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    unsolicited_count: u8,
+    tracked_bad_requests: u8,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "ban",
+        "reason": "QR flood",
+        "unsolicited_queue_rank_messages": unsolicited_count,
+        "tracked_bad_requests": tracked_bad_requests,
+    });
+    emit("bad_peer", "download_queue_rank_flood", "high", keys, body);
 }
 
 /// `upload_no_request_recycle` / `upload_slow_rate_recycle`: an active upload slot

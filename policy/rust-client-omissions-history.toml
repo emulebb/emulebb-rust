@@ -4,6 +4,20 @@
 # only contains current omissions and approved protocol drops.
 
 [[resolved_omissions]]
+id = "download-out-of-part-queue-rank-anti-abuse"
+area = "ed2k"
+stock_behavior = "The maintained eMuleBB client disconnects a source after three unsolicited queue-rank packets, bans it on the second tracked flood, and protects the download queue from repeated OP_OUTOFPARTREQS loops with a three-in-30s/two-minute cooldown plus second-burst or ten-in-five-minutes source quarantine. Upload failed-admission and short/no-data slot churn feed the corresponding upload cooldown and repeat-offender apparatus."
+rust_behavior = "IMPLEMENTED: a bounded process-scoped peer ledger, keyed by user hash with source-IP fallback, preserves queue-rank bad-request and OP_OUTOFPARTREQS state across reconnects and A4AF file switches. Solicited queue ranks clear the unsolicited counter; a first three-rank burst disconnects and a second burst bans through the shared four-hour BanStore. Three accepted-transfer OP_OUTOFPARTREQS events in 30 seconds start the two-minute accept guard; a second burst or ten long-window events/suppressions quarantines the source, and guarded OP_ACCEPTUPLOADREQ packets receive OP_CANCELTRANSFER. The existing upload cooldown implementation continues to cover failed promotion/admission and short/idle upload slots."
+reason = "The download session previously logged a single out-of-parts event and accepted unlimited queue-rank traffic. Moving the maintained thresholds to runtime scope prevents short-lived Rust sessions from resetting the client-level MFC guards."
+compatibility = "Normal solicited queue ranks, single out-of-parts transitions, A4AF, and upload traffic keep their existing wire behavior. Only abusive repeated traffic is disconnected, cancelled, cooled, quarantined, or banned at the maintained thresholds."
+disposition = "fixed"
+owner = "transfer-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: implemented deterministic threshold/state tests plus cleartext TCP proofs for the two-burst queue-rank ban and repeated-out-of-parts accept cancellation. No longer deferred."
+
+[[resolved_omissions]]
 id = "alternate-upnp-igd-implementation"
 area = "nat"
 stock_behavior = "eMuleBB can use more than one UPnP/IGD implementation path so one discovery or control-stack failure does not make an otherwise compatible gateway unreachable."

@@ -39,6 +39,7 @@ mod credit_ledger;
 mod deliver;
 pub(crate) mod diag_bad_peer;
 pub(crate) mod diag_sched;
+pub(crate) mod download_abuse;
 mod download_activity;
 mod download_coordinator;
 mod download_pick;
@@ -212,6 +213,12 @@ pub struct Ed2kTransferRuntime {
     /// to surface sourcesTransferring/partsAvailable and live transfer-source
     /// detail. In-memory only (live session state, never persisted).
     download_sources: Arc<StdMutex<HashMap<String, HashMap<String, Ed2kSourceActivity>>>>,
+    /// Cross-connection download-source anti-abuse counters (queue-rank flood
+    /// bad requests plus OP_OUTOFPARTREQS cooldown/quarantine state). MFC keeps
+    /// these on its long-lived client object; Rust keeps the equivalent bounded
+    /// process-scoped ledger here so reconnects and A4AF file switches do not
+    /// reset it.
+    download_abuse: Arc<parking_lot::Mutex<download_abuse::DownloadAbuseTracker>>,
     /// Cross-connection same-file upload-churn ledger keyed by (peer key, file
     /// hash) -> (count, first-seen) for MFC repeat_file_request parity. Bounded and
     /// window-pruned; observe-only.
@@ -405,6 +412,9 @@ impl Ed2kTransferRuntime {
             aich_root_corroboration: Arc::new(StdMutex::new(HashMap::new())),
             download_activity: Arc::new(StdMutex::new(HashMap::new())),
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
+            download_abuse: Arc::new(parking_lot::Mutex::new(
+                download_abuse::DownloadAbuseTracker::default(),
+            )),
             upload_file_churn: Arc::new(StdMutex::new(HashMap::new())),
             pending_catalog_upload: Arc::new(StdMutex::new(HashMap::new())),
             parked_credit: Arc::new(parking_lot::Mutex::new(
@@ -473,6 +483,52 @@ impl Ed2kTransferRuntime {
     #[must_use]
     pub fn is_client_banned(&self, ip: Option<Ipv4Addr>, user_hash: Option<&[u8; 16]>) -> bool {
         self.ban_store.is_banned(ip, user_hash)
+    }
+
+    pub(crate) fn note_download_out_of_part(
+        &self,
+        peer: SocketAddr,
+        user_hash: Option<[u8; 16]>,
+    ) -> download_abuse::OutOfPartRecord {
+        self.download_abuse
+            .lock()
+            .note_out_of_part(peer, user_hash, Instant::now())
+    }
+
+    pub(crate) fn download_out_of_part_accept_guard(
+        &self,
+        peer: SocketAddr,
+        user_hash: Option<[u8; 16]>,
+    ) -> download_abuse::OutOfPartAcceptGuard {
+        self.download_abuse
+            .lock()
+            .accept_guard(peer, user_hash, Instant::now())
+    }
+
+    pub(crate) fn note_download_out_of_part_suppression(
+        &self,
+        peer: SocketAddr,
+        user_hash: Option<[u8; 16]>,
+    ) -> download_abuse::OutOfPartSuppressionRecord {
+        self.download_abuse
+            .lock()
+            .note_out_of_part_suppression(peer, user_hash, Instant::now())
+    }
+
+    pub(crate) fn note_download_queue_rank(
+        &self,
+        peer: SocketAddr,
+        user_hash: Option<[u8; 16]>,
+        expected: bool,
+        downloading: bool,
+    ) -> download_abuse::QueueRankDecision {
+        self.download_abuse.lock().note_queue_rank(
+            peer,
+            user_hash,
+            expected,
+            downloading,
+            Instant::now(),
+        )
     }
 
     /// Reserve global download budget for `byte_count` inbound payload bytes,

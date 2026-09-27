@@ -261,6 +261,7 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
             .await
             .with_context(|| format!("failed to send OP_STARTUPLOADREQ to {peer_addr}"))?;
         session_state.upload_requested = true;
+        session_state.queue_rank_pending = true;
     }
 
     Ok(())

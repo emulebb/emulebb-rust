@@ -8,6 +8,7 @@ use emulebb_kad_proto::Ed2kHash;
 
 use crate::ed2k_transfer::{
     Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kTransferState, diag_bad_peer,
+    download_abuse::{OutOfPartAcceptGuard, OutOfPartDisposition, QueueRankDecision},
 };
 
 use super::super::{
@@ -78,6 +79,49 @@ fn apply_emule_info_profile(
     }
     if profile.udp_version != 0 {
         session_state.peer_udp_version = profile.udp_version;
+    }
+}
+
+fn check_queue_rank_flood(
+    transfer_runtime: &Ed2kTransferRuntime,
+    peer_addr: SocketAddr,
+    file_hash_hex: &str,
+    session_state: &mut DownloadSessionState,
+) -> Result<()> {
+    let expected = std::mem::take(&mut session_state.queue_rank_pending);
+    match transfer_runtime.note_download_queue_rank(
+        peer_addr,
+        session_state.peer_user_hash,
+        expected,
+        session_state.upload_accepted,
+    ) {
+        QueueRankDecision::Accept => Ok(()),
+        QueueRankDecision::Disconnect {
+            unsolicited_count,
+            tracked_bad_requests,
+        } => anyhow::bail!(
+            "QR flood from {peer_addr}: unsolicited={unsolicited_count} tracked_bad_requests={tracked_bad_requests}"
+        ),
+        QueueRankDecision::Ban {
+            unsolicited_count,
+            tracked_bad_requests,
+        } => {
+            diag_bad_peer::download_queue_rank_flood(
+                &peer_addr.to_string(),
+                session_state.peer_user_hash,
+                file_hash_hex,
+                unsolicited_count,
+                tracked_bad_requests,
+            );
+            transfer_runtime.ban_client(
+                match peer_addr.ip() {
+                    std::net::IpAddr::V4(ip) => Some(ip),
+                    std::net::IpAddr::V6(_) => None,
+                },
+                session_state.peer_user_hash,
+            );
+            anyhow::bail!("QR flood from {peer_addr}")
+        }
     }
 }
 
@@ -504,6 +548,57 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                 }
                 (OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ) => {
+                    // MFC marks the next queue rank as solicited even when this
+                    // accept is ultimately suppressed.
+                    session_state.queue_rank_pending = true;
+                    if !session_state.upload_accepted
+                        && let OutOfPartAcceptGuard::Suppressed {
+                            quarantined,
+                            cooldown_remaining,
+                            ..
+                        } = transfer_runtime.download_out_of_part_accept_guard(
+                            peer_addr,
+                            session_state.peer_user_hash,
+                        )
+                    {
+                        diag_bad_peer::download_accept_suppressed_out_of_part_cooldown(
+                            &peer_addr.to_string(),
+                            session_state.peer_user_hash,
+                            file_hash_hex,
+                            quarantined,
+                            cooldown_remaining.map(|duration| {
+                                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+                            }),
+                        );
+                        let suppression = transfer_runtime
+                            .note_download_out_of_part_suppression(
+                                peer_addr,
+                                session_state.peer_user_hash,
+                            );
+                        if suppression.newly_quarantined {
+                            diag_bad_peer::download_out_of_part_reqs_suppression_quarantine(
+                                &peer_addr.to_string(),
+                                session_state.peer_user_hash,
+                                file_hash_hex,
+                                suppression.long_window_count,
+                            );
+                        }
+                        let cancel = encode_packet(OP_EDONKEYPROT, OP_CANCELTRANSFER, &[]);
+                        dump_ed2k_tcp_download_send(
+                            peer_addr,
+                            transport.mode,
+                            "cancel_accept_out_of_part_guard",
+                            &cancel,
+                        );
+                        transport.write_all(&cancel).await.with_context(|| {
+                            format!(
+                                "failed to send guarded OP_CANCELTRANSFER to {peer_addr}"
+                            )
+                        })?;
+                        session_state.queued_until =
+                            Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
+                        continue;
+                    }
                     session_state.upload_accepted = true;
                     session_state.upload_accepted_at.get_or_insert_with(tokio::time::Instant::now);
                     session_state.queued_until = None;
@@ -950,6 +1045,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     let rank = decode_edonkey_queue_rank_payload(&packet.payload)?;
                     session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
                     transfer_runtime.note_download_source_queue_rank(file_hash_hex, peer_addr, rank);
+                    check_queue_rank_flood(
+                        transfer_runtime,
+                        peer_addr,
+                        file_hash_hex,
+                        &mut session_state,
+                    )?;
                     dump_ed2k_tcp_download_meta(
                         peer_addr,
                         Some(transport.mode),
@@ -965,6 +1066,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         u32::from(rank),
                     );
+                    check_queue_rank_flood(
+                        transfer_runtime,
+                        peer_addr,
+                        file_hash_hex,
+                        &mut session_state,
+                    )?;
                     dump_ed2k_tcp_download_meta(
                         peer_addr,
                         Some(transport.mode),
@@ -989,6 +1096,18 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                 }
                 (OP_EDONKEYPROT, OP_OUTOFPARTREQS) => {
+                    // The maintained MFC detector only treats this packet as a
+                    // state transition while DS_DOWNLOADING. Ignore stray copies
+                    // received while queued.
+                    if !session_state.upload_accepted {
+                        dump_ed2k_tcp_download_meta(
+                            peer_addr,
+                            Some(transport.mode),
+                            "out_of_part_requests_ignored",
+                            || format!("file_hash={file_hash_hex} state=on_queue"),
+                        );
+                        continue;
+                    }
                     dump_ed2k_tcp_download_meta(
                         peer_addr,
                         Some(transport.mode),
@@ -1000,6 +1119,41 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         session_state.peer_user_hash,
                         file_hash_hex,
                     );
+                    let escalation = transfer_runtime.note_download_out_of_part(
+                        peer_addr,
+                        session_state.peer_user_hash,
+                    );
+                    match escalation.disposition {
+                        OutOfPartDisposition::Observed => {}
+                        OutOfPartDisposition::Cooldown => {
+                            diag_bad_peer::download_out_of_part_reqs_cooldown(
+                                &peer_addr.to_string(),
+                                session_state.peer_user_hash,
+                                file_hash_hex,
+                                escalation.short_window_count,
+                                escalation.cooldown_bursts,
+                            );
+                        }
+                        OutOfPartDisposition::QuarantinedLongWindow => {
+                            diag_bad_peer::download_out_of_part_reqs_quarantine(
+                                &peer_addr.to_string(),
+                                session_state.peer_user_hash,
+                                file_hash_hex,
+                                escalation.long_window_count,
+                                escalation.short_window_count,
+                                escalation.cooldown_bursts,
+                            );
+                        }
+                        OutOfPartDisposition::QuarantinedCooldownBursts => {
+                            diag_bad_peer::download_out_of_part_reqs_burst_quarantine(
+                                &peer_addr.to_string(),
+                                session_state.peer_user_hash,
+                                file_hash_hex,
+                                escalation.short_window_count,
+                                escalation.cooldown_bursts,
+                            );
+                        }
+                    }
                     // No Needed Parts (eMuleBB DS_NONEEDEDPARTS): the driver may swap
                     // this source to another wanted file it serves (full A4AF
                     // SwapToAnotherFile) rather than drop it.

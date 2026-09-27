@@ -85,6 +85,10 @@ pub(super) struct DownloadSessionState {
     pub(super) hashset_requested: bool,
     pub(super) hashset_requested_at: Option<Instant>,
     pub(super) upload_requested: bool,
+    /// The next queue-rank packet is solicited by OP_STARTUPLOADREQ (or by an
+    /// accepted slot), matching MFC `m_fQueueRankPending`. Once consumed, ranks
+    /// received while not downloading feed the unsolicited-rank flood guard.
+    pub(super) queue_rank_pending: bool,
     pub(super) upload_accepted: bool,
     pub(super) upload_accepted_at: Option<Instant>,
     pub(super) part_response_deadline: Option<Instant>,
@@ -175,6 +179,7 @@ impl DownloadSessionState {
             hashset_requested: false,
             hashset_requested_at: None,
             upload_requested: false,
+            queue_rank_pending: false,
             upload_accepted: false,
             upload_accepted_at: None,
             part_response_deadline: None,
