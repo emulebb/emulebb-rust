@@ -15,6 +15,47 @@ fn ed2k_link_parser_decodes_stock_utf8_filename() {
     assert_eq!(parsed.file_hash, "00112233445566778899aabbccddeeff");
 }
 
+#[test]
+fn ed2k_link_parser_preserves_explicit_source_connect_options() {
+    let link = "ed2k://|file|Crypt.bin|123|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:7|/";
+    let parsed = parse_ed2k_link(link).expect("extended ED2K source hint");
+
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(
+        parsed.sources[0],
+        Ed2kSourceHint {
+            ip: "192.0.2.10".to_string(),
+            tcp_port: 4662,
+            user_hash: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            connect_options: Some(7),
+            file_comment: String::new(),
+            file_rating: 0,
+        }
+    );
+}
+
+#[test]
+fn ed2k_link_parser_does_not_infer_crypt_support_from_user_hash() {
+    let link = "ed2k://|file|Identity.bin|123|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/";
+    let parsed = parse_ed2k_link(link).expect("identity-only ED2K source hint");
+
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(parsed.sources[0].connect_options, None);
+}
+
+#[test]
+fn ed2k_link_parser_enriches_duplicate_source_metadata() {
+    let link = "ed2k://|file|Duplicate.bin|123|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:3|/";
+    let parsed = parse_ed2k_link(link).expect("duplicate ED2K source hints");
+
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(
+        parsed.sources[0].user_hash.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    assert_eq!(parsed.sources[0].connect_options, Some(3));
+}
+
 mod core_config;
 mod download_scheduler;
 mod download_source_policy;

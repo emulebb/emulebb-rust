@@ -6502,13 +6502,22 @@ fn parse_ed2k_link_sources<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<E
         };
         for item in rest.split(',') {
             let parts = item.split(':').collect::<Vec<_>>();
-            let (address, port, user_hash) = match parts.as_slice() {
-                [address, port] => (*address, *port, None),
+            let (address, port, user_hash, connect_options) = match parts.as_slice() {
+                [address, port] => (*address, *port, None, None),
                 [address, port, user_hash] => {
                     let Some(user_hash) = parse_ed2k_source_user_hash(user_hash) else {
                         continue;
                     };
-                    (*address, *port, Some(user_hash))
+                    (*address, *port, Some(user_hash), None)
+                }
+                [address, port, user_hash, connect_options] => {
+                    let Some(user_hash) = parse_ed2k_source_user_hash(user_hash) else {
+                        continue;
+                    };
+                    let Ok(connect_options) = connect_options.parse::<u8>() else {
+                        continue;
+                    };
+                    (*address, *port, Some(user_hash), Some(connect_options))
                 }
                 _ => continue,
             };
@@ -6529,12 +6538,15 @@ fn parse_ed2k_link_sources<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<E
                 if existing.user_hash.is_none() {
                     existing.user_hash = user_hash;
                 }
+                if existing.connect_options.is_none() {
+                    existing.connect_options = connect_options;
+                }
             } else {
                 sources.push(Ed2kSourceHint {
                     ip: ip.to_string(),
                     tcp_port,
                     user_hash,
-                    connect_options: None,
+                    connect_options,
                     file_comment: String::new(),
                     file_rating: 0,
                 });
