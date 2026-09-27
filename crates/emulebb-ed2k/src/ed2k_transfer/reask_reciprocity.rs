@@ -107,7 +107,13 @@ impl Ed2kTransferRuntime {
             self.upload_queue
                 .lock()
                 .await
-                .refresh_waiting_activity_by_udp(sender_ip, sender_udp_port, Instant::now());
+                .refresh_waiting_reask_state_by_udp(
+                    sender_ip,
+                    sender_udp_port,
+                    ping.part_status.clone(),
+                    ping.complete_source_count,
+                    Instant::now(),
+                );
         }
 
         // Framing comes from the located client; for an unlocated FileNotFound /

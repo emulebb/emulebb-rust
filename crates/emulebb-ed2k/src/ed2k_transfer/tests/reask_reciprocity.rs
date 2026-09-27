@@ -84,8 +84,8 @@ async fn reciprocity_acks_a_located_waiting_peer_with_its_rank() {
 
     let ping = ReaskFilePing {
         file_hash,
-        part_status: None,
-        complete_source_count: None,
+        part_status: Some(vec![true, false, true]),
+        complete_source_count: Some(9),
     };
     let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), peer_udp_port);
     let reply = runtime
@@ -105,6 +105,14 @@ async fn reciprocity_acks_a_located_waiting_peer_with_its_rank() {
         Some(InboundReaskMessage::Ack(ack)) => assert_eq!(ack.queue_position, 1),
         other => panic!("expected obfuscated Ack, got {other:?}"),
     }
+
+    let snapshot = runtime.upload_queue_snapshot().await;
+    let reasker = snapshot
+        .iter()
+        .find(|entry| entry.udp_port == Some(peer_udp_port))
+        .expect("reasking waiter");
+    assert_eq!(reasker.requester_part_status, Some(vec![true, false, true]));
+    assert_eq!(reasker.requester_complete_source_count, Some(9));
 }
 
 /// A servable in-progress partfile entry: not verified-complete, holding the

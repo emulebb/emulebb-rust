@@ -189,12 +189,16 @@ pub(super) fn decode_kad_callback_payload(payload: &[u8]) -> Result<KadCallbackR
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReaskCallbackTcp {
     pub(super) dest_ip: Ipv4Addr,
     pub(super) dest_port: u16,
     pub(super) file_hash: Ed2kHash,
     pub(super) extended_info_len: usize,
+    /// Raw `file_hash + version-gated requester tail` forwarded by the buddy.
+    /// The source-side UDP reask runtime decodes this using its own advertised
+    /// UDP version, exactly like a direct OP_REASKFILEPING.
+    pub(super) forwarded_reask: Vec<u8>,
 }
 
 pub(super) fn decode_reask_callback_tcp_payload(payload: &[u8]) -> Result<ReaskCallbackTcp> {
@@ -213,6 +217,7 @@ pub(super) fn decode_reask_callback_tcp_payload(payload: &[u8]) -> Result<ReaskC
         dest_port: u16::from_le_bytes(payload[4..6].try_into().unwrap()),
         file_hash: Ed2kHash(payload[6..22].try_into().unwrap()),
         extended_info_len: payload.len() - 22,
+        forwarded_reask: payload[6..].to_vec(),
     })
 }
 
@@ -407,7 +412,21 @@ pub(super) fn encode_request_filename_ext_info(manifest: &Ed2kResumeManifest) ->
     payload
 }
 
-pub(super) fn skip_request_filename_ext_info(payload: &[u8], file_size: u64) -> Result<&[u8]> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RequestFilenameExtInfo {
+    pub(super) part_status: Option<Vec<bool>>,
+    pub(super) complete_source_count: u16,
+}
+
+/// Decode the extended request information which follows `OP_REQUESTFILENAME`
+/// (standalone or inside a multipacket). A zero part count is the stock
+/// "no part-status" sentinel; otherwise the count must match the requested
+/// file's ED2K part count. The returned slice starts at the next multipacket
+/// sub-opcode.
+pub(super) fn decode_request_filename_ext_info(
+    payload: &[u8],
+    file_size: u64,
+) -> Result<(RequestFilenameExtInfo, &[u8])> {
     if payload.len() < 2 {
         anyhow::bail!("short OP_REQUESTFILENAME ext-info payload");
     }
@@ -415,6 +434,13 @@ pub(super) fn skip_request_filename_ext_info(payload: &[u8], file_size: u64) -> 
     // ext-info partstatus carries m_iED2KPartCount (size/PARTSIZE+1), not the
     // data-part count.
     let expected_parts = usize::from(ed2k_part_count(file_size));
+    if part_count != 0 && part_count != expected_parts {
+        anyhow::bail!(
+            "OP_REQUESTFILENAME part count mismatch {} expected {}",
+            part_count,
+            expected_parts
+        );
+    }
     let bitfield_len = part_count.div_ceil(8);
     let expected_len = 2 + bitfield_len + 2;
     if payload.len() < expected_len {
@@ -424,14 +450,22 @@ pub(super) fn skip_request_filename_ext_info(payload: &[u8], file_size: u64) -> 
             expected_len
         );
     }
-    if expected_parts != 0 && part_count != expected_parts {
-        anyhow::bail!(
-            "OP_REQUESTFILENAME part count mismatch {} expected {}",
-            part_count,
-            expected_parts
-        );
-    }
-    Ok(&payload[expected_len..])
+    let part_status = (part_count != 0).then(|| {
+        let bitfield = &payload[2..2 + bitfield_len];
+        (0..part_count)
+            .map(|index| (bitfield[index / 8] >> (index % 8)) & 1 == 1)
+            .collect()
+    });
+    let count_offset = 2 + bitfield_len;
+    let complete_source_count =
+        u16::from_le_bytes([payload[count_offset], payload[count_offset + 1]]);
+    Ok((
+        RequestFilenameExtInfo {
+            part_status,
+            complete_source_count,
+        },
+        &payload[expected_len..],
+    ))
 }
 
 pub(super) fn encode_request_filename(

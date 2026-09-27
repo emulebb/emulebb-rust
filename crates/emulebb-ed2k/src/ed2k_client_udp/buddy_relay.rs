@@ -171,15 +171,9 @@ pub(super) async fn answer_buddy_relayed_reask(
     transfer_runtime: &Ed2kTransferRuntime,
     our_public_ip: [u8; 4],
     dest: SocketAddr,
-    file_hash: Ed2kHash,
+    ping: super::codec::ReaskFilePing,
 ) {
-    // The reciprocity answer only consults our live upload-queue/catalog state
-    // keyed on the file hash, so a hash-only ping reproduces the oracle reply.
-    let ping = super::codec::ReaskFilePing {
-        file_hash,
-        part_status: None,
-        complete_source_count: None,
-    };
+    let file_hash = ping.file_hash;
     match transfer_runtime
         .reask_reciprocity_reply(&ping, dest, our_public_ip)
         .await

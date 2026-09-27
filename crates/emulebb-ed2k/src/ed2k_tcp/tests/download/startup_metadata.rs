@@ -334,7 +334,9 @@ fn assert_legacy_multipacket_omits_aich_request(
         remaining = rest;
         match sub_opcode {
             OP_REQUESTFILENAME => {
-                remaining = skip_request_filename_ext_info(remaining, file_size).unwrap();
+                remaining = decode_request_filename_ext_info(remaining, file_size)
+                    .unwrap()
+                    .1;
                 saw_request_filename = true;
             }
             OP_SETREQFILEID => {

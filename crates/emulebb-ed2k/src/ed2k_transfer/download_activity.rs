@@ -94,6 +94,10 @@ pub struct Ed2kLiveSource {
     pub endpoint: SocketAddr,
     pub user_hash: Option<[u8; 16]>,
     pub connect_options: Option<u8>,
+    /// Exact per-part availability advertised by this source. Kept in the
+    /// public snapshot so source exchange can apply the requester's part-needed
+    /// filter instead of reducing the state to a count.
+    pub part_bitmap: Option<Vec<bool>>,
     pub download_speed_bytes_per_sec: u64,
     pub transferring: bool,
     pub available_parts: u32,
@@ -369,6 +373,7 @@ impl Ed2kTransferRuntime {
                 endpoint: peer.endpoint,
                 user_hash: peer.user_hash,
                 connect_options: peer.connect_options,
+                part_bitmap: peer.part_bitmap.clone(),
                 download_speed_bytes_per_sec: source_speed_bytes_per_sec(peer, now),
                 transferring: is_transferring(peer, now),
                 available_parts: peer

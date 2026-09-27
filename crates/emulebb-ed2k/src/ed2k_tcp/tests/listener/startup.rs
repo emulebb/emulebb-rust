@@ -674,6 +674,115 @@ async fn listener_source_exchange_preserves_live_source_connect_options() {
 }
 
 #[tokio::test]
+async fn listener_source_exchange_returns_only_parts_useful_to_requester() {
+    let payload = b"source exchange requester part filtering".repeat(512);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let file_hash_hex = file_hash.to_string();
+    let root = unique_test_dir("ed2k-listener-sx-requester-parts");
+    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let job = new_transfer_job(
+        file_hash,
+        "sx-requester-parts.txt".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&job).await.unwrap();
+    transfer_runtime
+        .store_md4_hashset(&file_hash_hex, Vec::new())
+        .await
+        .unwrap();
+    transfer_runtime
+        .store_piece_data(&file_hash_hex, 0, &payload)
+        .await
+        .unwrap();
+
+    let helpful = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 44)), 4662);
+    let useless = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 45)), 4663);
+    transfer_runtime.note_download_source_part_bitmap(
+        &file_hash_hex,
+        helpful,
+        Some([0x64; 16]),
+        Some(0x07),
+        vec![true],
+    );
+    transfer_runtime.note_download_source_part_bitmap(
+        &file_hash_hex,
+        useless,
+        Some([0x65; 16]),
+        Some(0x03),
+        vec![false],
+    );
+    // A stale persisted copy of the same endpoint has no bitmap. It must not
+    // bypass the more authoritative live-state usefulness decision.
+    transfer_runtime
+        .remember_source(
+            &file_hash_hex,
+            Ed2kSourceHint {
+                ip: "10.20.30.45".to_string(),
+                tcp_port: 4663,
+                user_hash: Some(hex::encode([0x65; 16])),
+                connect_options: Some(0x03),
+            },
+        )
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let server = spawn_single_listener_connection(
+        listener,
+        test_dht().await,
+        Arc::new(RwLock::new(Ed2kServerState::default())),
+        Arc::new(Mutex::new(KadFirewallState::default())),
+        listener_secure_ident(),
+        Arc::clone(&transfer_runtime),
+        listener_hello_identity(),
+    );
+    let mut stream = connect_peer_and_exchange_hello(peer_addr, peer_hello_identity()).await;
+
+    // The requester lacks the file's only part and reports seven complete
+    // sources. This is the stock extended-request shape following the hash.
+    let mut request_filename = file_hash.0.to_vec();
+    request_filename.extend_from_slice(&1u16.to_le_bytes());
+    request_filename.push(0); // requester does not have part 0
+    request_filename.extend_from_slice(&7u16.to_le_bytes());
+    stream
+        .write_all(&encode_packet(
+            OP_EDONKEYPROT,
+            OP_REQUESTFILENAME,
+            &request_filename,
+        ))
+        .await
+        .unwrap();
+    let _ = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_REQFILENAMEANSWER).await;
+
+    stream
+        .write_all(&encode_request_sources2(&file_hash))
+        .await
+        .unwrap();
+    let source_answer = read_until_opcode(&mut stream, OP_EMULEPROT, OP_ANSWERSOURCES2).await;
+    assert_eq!(
+        u16::from_le_bytes([source_answer[23], source_answer[24]]),
+        1,
+        "the source with an empty bitmap must be filtered"
+    );
+    assert_eq!(&source_answer[25..29], &[44, 30, 20, 10]);
+    assert_eq!(source_answer[53], 0x07);
+
+    stream
+        .write_all(&encode_packet(
+            OP_EDONKEYPROT,
+            OP_END_OF_DOWNLOAD,
+            &file_hash.0,
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn listener_multipacket_ext2_source_only_returns_identifier_answer() {
     let hello_identity = listener_hello_identity();
     let mut runtime = ListenerTestRuntime::new(

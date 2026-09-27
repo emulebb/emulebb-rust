@@ -38,8 +38,8 @@ use super::{
     decode_kad_callback_payload, decode_optional_file_hash_payload, decode_peer_payload,
     decode_preview_answer_payload, decode_preview_request_payload, decode_public_ip_answer_payload,
     decode_public_key_payload, decode_reask_callback_tcp_payload, decode_request_filename_answer,
-    decode_request_parts_payload, decode_request_sources_payload, decode_secident_state,
-    decode_sending_part_payload, decode_shared_dirs_answer_payload,
+    decode_request_filename_ext_info, decode_request_parts_payload, decode_request_sources_payload,
+    decode_secident_state, decode_sending_part_payload, decode_shared_dirs_answer_payload,
     decode_shared_files_answer_payload, decode_shared_files_dir_answer_payload,
     decode_shared_files_dir_request_payload, decode_signature_payload, derive_obfuscation_key,
     download_file_from_peer, drive_download_session, emule_connect_options, emule_misc_options1,
@@ -57,7 +57,7 @@ use super::{
     encode_sending_part, encode_shared_browse_denied_answer, encode_start_upload_req,
     enrich_hello_identity, handle_connection, inflate_compressed_part_fragment, is_mule_hello,
     next_download_read_timeout, request_udp_firewall_check, select_download_window_limits,
-    set_hello_buddy_snapshot, skip_request_filename_ext_info, validate_file_status_part_count,
+    set_hello_buddy_snapshot, validate_file_status_part_count,
 };
 use crate::{
     ed2k_server::{Ed2kFoundSource, Ed2kServerState},
@@ -198,7 +198,9 @@ fn assert_startup_multipacket_ext2_with_source_exchange(
         remaining = rest;
         match sub_opcode {
             super::OP_REQUESTFILENAME => {
-                remaining = super::skip_request_filename_ext_info(remaining, file_size).unwrap();
+                remaining = super::decode_request_filename_ext_info(remaining, file_size)
+                    .unwrap()
+                    .1;
                 saw_request_filename = true;
             }
             super::OP_SETREQFILEID => {

@@ -342,6 +342,11 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub old_client_penalty_applied: bool,
     /// Peer software string (HELLO CT_EMULE_VERSION), display-only.
     pub client_software: Option<String>,
+    /// Last requester part bitmap received through direct/client-UDP reask
+    /// state. Retained on a disconnected waiter like the stock upload client.
+    pub requester_part_status: Option<Vec<bool>>,
+    /// Last requester complete-source count, when its UDP version carried one.
+    pub requester_complete_source_count: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +379,8 @@ struct Ed2kUploadSessionEntry {
     /// UploadClient.cpp:860-878). Reset on recycle so a re-promoted slot starts a
     /// fresh window.
     rate_meter: WindowedRateMeter,
+    requester_part_status: Option<Vec<bool>>,
+    requester_complete_source_count: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -647,6 +654,8 @@ impl Ed2kUploadQueueState {
                 upload_started_at: None,
                 served_ranges: VecDeque::new(),
                 rate_meter: WindowedRateMeter::new(PER_SLOT_RATE_WINDOW),
+                requester_part_status: None,
+                requester_complete_source_count: None,
             },
         );
         // Stamp the slot-open pacing clock on the inline grant, mirroring the
@@ -965,10 +974,12 @@ impl Ed2kUploadQueueState {
     /// reask (oracle `SetLastUpRequest` on OP_REASKFILEPING,
     /// ClientUDPSocket.cpp:307): a disconnected waiter that keeps re-asking
     /// over UDP must not be purged by the waiting timeout (MAX_PURGEQUEUETIME).
-    pub(super) fn refresh_waiting_activity_by_udp(
+    pub(super) fn refresh_waiting_reask_state_by_udp(
         &mut self,
         ip: IpAddr,
         udp_port: u16,
+        requester_part_status: Option<Vec<bool>>,
+        requester_complete_source_count: Option<u16>,
         now: Instant,
     ) {
         for (key, session) in &mut self.sessions {
@@ -977,6 +988,8 @@ impl Ed2kUploadQueueState {
                 && key.peer.udp_port == Some(udp_port)
             {
                 session.last_activity = now;
+                session.requester_part_status = requester_part_status.clone();
+                session.requester_complete_source_count = requester_complete_source_count;
             }
         }
     }
@@ -1056,6 +1069,8 @@ impl Ed2kUploadQueueState {
                 low_id_divisor: score::low_id_divisor_value(session.score_modifiers.low_id),
                 old_client_penalty_applied: session.score_modifiers.old_client,
                 client_software: key.peer.client_software.clone(),
+                requester_part_status: session.requester_part_status.clone(),
+                requester_complete_source_count: session.requester_complete_source_count,
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| {

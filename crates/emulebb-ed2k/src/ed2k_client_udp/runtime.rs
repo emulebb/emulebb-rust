@@ -50,10 +50,11 @@ pub enum ReaskCommand {
     MarkNoNeededParts { endpoint: (Ipv4Addr, u16) },
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the firewalled
     /// *source*): answer the downloader at `dest` like an inbound `OP_REASKFILEPING`
-    /// (oracle ListenSocket.cpp). Only the file hash is carried (reciprocity key).
+    /// (oracle ListenSocket.cpp). The buddy-forwarded request body is retained so
+    /// requester part status and complete-source count survive the relay.
     AnswerCallbackTcp {
         dest: SocketAddr,
-        file_hash: Ed2kHash,
+        forwarded_reask: Vec<u8>,
     },
     /// Originate an `OP_DIRECTCALLBACKREQ` to a firewalled type-6 source's Kad
     /// UDP endpoint so it TCP-connects back to us (oracle `CCS_DIRECTCALLBACK`).
@@ -154,10 +155,11 @@ impl ReaskSourceHandle {
 
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the source).
     /// Best-effort: a full/closed channel drops the answer (downloader retries/TCP).
-    pub(crate) fn answer_callback_tcp(&self, dest: std::net::SocketAddr, file_hash: Ed2kHash) {
-        let _ = self
-            .0
-            .try_send(ReaskCommand::AnswerCallbackTcp { dest, file_hash });
+    pub(crate) fn answer_callback_tcp(&self, dest: std::net::SocketAddr, forwarded_reask: Vec<u8>) {
+        let _ = self.0.try_send(ReaskCommand::AnswerCallbackTcp {
+            dest,
+            forwarded_reask,
+        });
     }
 
     /// Originate an `OP_DIRECTCALLBACKREQ` to a firewalled type-6 source. The
@@ -319,11 +321,19 @@ pub async fn run_ed2k_udp_reask_loop(
                 // AnswerCallbackTcp / SendDirectCallback need async UDP I/O
                 // (handled here); the rest are sync.
                 match command {
-                    ReaskCommand::AnswerCallbackTcp { dest, file_hash } => {
-                        super::buddy_relay::answer_buddy_relayed_reask(
-                            &dht, &transfer_runtime, public_ip.octets(), dest, file_hash,
-                        )
-                        .await;
+                    ReaskCommand::AnswerCallbackTcp { dest, forwarded_reask } => {
+                        match super::codec::decode_reask_file_ping(&forwarded_reask, udp_version) {
+                            Ok(ping) => {
+                                super::buddy_relay::answer_buddy_relayed_reask(
+                                    &dht, &transfer_runtime, public_ip.octets(), dest, ping,
+                                )
+                                .await;
+                            }
+                            Err(error) => debug!(
+                                "ed2k udp reask: malformed buddy-relayed requester state from \
+                                 {dest}: {error:#}"
+                            ),
+                        }
                     }
                     ReaskCommand::SendDirectCallback(args) => {
                         send_direct_callback_req(&dht, public_ip.octets(), args).await;

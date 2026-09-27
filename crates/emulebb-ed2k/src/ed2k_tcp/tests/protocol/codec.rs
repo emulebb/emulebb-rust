@@ -125,6 +125,42 @@ fn file_status_part_count_uses_ed2k_count_at_exact_partsize_multiple() {
 }
 
 #[test]
+fn request_filename_ext_info_preserves_bitmap_count_and_multipacket_tail() {
+    // Exact two-PARTSIZE files have three ED2K status bits, including the EOF
+    // sentinel part. Keep a trailing byte to prove the decoder returns the next
+    // multipacket sub-op without consuming it.
+    let file_size = ED2K_PART_SIZE * 2;
+    let payload = [0x03, 0x00, 0b0000_0101, 0x09, 0x00, OP_SETREQFILEID];
+
+    let (decoded, remaining) =
+        decode_request_filename_ext_info(&payload, file_size).expect("decode ext info");
+
+    assert_eq!(decoded.part_status, Some(vec![true, false, true]));
+    assert_eq!(decoded.complete_source_count, 9);
+    assert_eq!(remaining, &[OP_SETREQFILEID]);
+}
+
+#[test]
+fn request_filename_ext_info_accepts_stock_no_status_sentinel() {
+    let payload = [0x00, 0x00, 0x34, 0x12];
+
+    let (decoded, remaining) =
+        decode_request_filename_ext_info(&payload, ED2K_PART_SIZE * 4).unwrap();
+
+    assert_eq!(decoded.part_status, None);
+    assert_eq!(decoded.complete_source_count, 0x1234);
+    assert!(remaining.is_empty());
+}
+
+#[test]
+fn request_filename_ext_info_rejects_wrong_count_and_truncation() {
+    let file_size = ED2K_PART_SIZE * 2;
+    assert!(decode_request_filename_ext_info(&[2, 0, 0, 0, 0], file_size).is_err());
+    assert!(decode_request_filename_ext_info(&[3, 0, 0, 0], file_size).is_err());
+    assert!(decode_request_filename_ext_info(&[0, 0, 0], file_size).is_err());
+}
+
+#[test]
 fn exact_file_hash_payload_rejects_stock_exact_context_trailing_bytes() {
     let file_hash = Ed2kHash([0x51; 16]);
     let mut payload = file_hash.0.to_vec();
@@ -237,6 +273,10 @@ fn reask_callback_tcp_decodes_buddy_forwarded_udp_reask_shape() {
     payload.extend_from_slice(&[198, 51, 100, 8]);
     payload.extend_from_slice(&4672u16.to_le_bytes());
     payload.extend_from_slice(&file_hash.0);
+    // Our advertised UDP version is 4, so the forwarded OP_REASKFILEPING tail
+    // is partstatus(count=3,bits=101) followed by complete-source count 9.
+    payload.extend_from_slice(&3u16.to_le_bytes());
+    payload.push(0b0000_0101);
     payload.extend_from_slice(&9u16.to_le_bytes());
 
     let reask = decode_reask_callback_tcp_payload(&payload).unwrap();
@@ -244,7 +284,13 @@ fn reask_callback_tcp_decodes_buddy_forwarded_udp_reask_shape() {
     assert_eq!(reask.dest_ip, Ipv4Addr::new(198, 51, 100, 8));
     assert_eq!(reask.dest_port, 4672);
     assert_eq!(reask.file_hash, file_hash);
-    assert_eq!(reask.extended_info_len, 2);
+    assert_eq!(reask.extended_info_len, 5);
+    assert_eq!(reask.forwarded_reask, payload[6..]);
+    let reconstructed =
+        crate::ed2k_client_udp::decode_reask_file_ping(&reask.forwarded_reask, 4).unwrap();
+    assert_eq!(reconstructed.file_hash, file_hash);
+    assert_eq!(reconstructed.part_status, Some(vec![true, false, true]));
+    assert_eq!(reconstructed.complete_source_count, Some(9));
     assert!(decode_reask_callback_tcp_payload(&payload[..21]).is_err());
 }
 

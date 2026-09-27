@@ -287,10 +287,7 @@ async fn handle_buddy_packet(
                 Ok(reask) => {
                     if let Some(handle) = reask_handle {
                         let dest = SocketAddr::new(IpAddr::V4(reask.dest_ip), reask.dest_port);
-                        // The answer is derived from the file hash + our live
-                        // upload-queue/catalog state (the relaying downloader's
-                        // udp-version/partstatus tail is not needed to answer).
-                        handle.answer_callback_tcp(dest, reask.file_hash);
+                        handle.answer_callback_tcp(dest, reask.forwarded_reask);
                         debug!(
                             "buddy {buddy_addr} relayed OP_REASKCALLBACKTCP file_hash={} \
                              requester={dest}; answering over UDP",

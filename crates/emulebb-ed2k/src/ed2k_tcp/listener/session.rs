@@ -193,6 +193,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     }
     let mut peer_secure_ident = Ed2kPeerSecureIdentState::default();
     let mut requested_file_hash: Option<Ed2kHash> = None;
+    let mut requester_file_state: Option<shared_file::RequesterFileState> = None;
     let mut peer_supports_aich = false;
     // Whether the peer advertised secure-ident support in its hello. Gates the
     // credit-accrual identity check for served upload bytes (eMule
@@ -499,6 +500,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &packet.payload,
                     peer_supports_aich,
                     peer_supports_file_identifiers,
+                    &mut requester_file_state,
                 )
                 .await?;
             }
@@ -508,6 +510,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &mut transport,
                     peer_addr,
                     &packet.payload,
+                    &mut requester_file_state,
                 )
                 .await?;
             }
@@ -518,6 +521,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     &packet.payload,
                     peer_accept_comment_version,
+                    &mut requester_file_state,
                 )
                 .await?;
             }
@@ -683,6 +687,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     packet.opcode,
                     &packet.payload,
+                    requester_file_state.as_ref(),
                 )
                 .await?;
             }

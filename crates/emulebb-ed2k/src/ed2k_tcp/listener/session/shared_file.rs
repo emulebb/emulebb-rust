@@ -14,19 +14,39 @@ use crate::{
 
 use super::super::super::codec::{
     SourceExchangePeer, decode_exact_file_hash_payload, decode_file_hash_payload,
-    decode_hashset_request2, decode_request_sources_payload, encode_aich_file_hash_answer,
-    encode_answer_sources2, encode_file_desc, encode_file_req_ans_nofil, encode_file_status,
-    encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
-    encode_multipacket_ext2_answer, encode_request_filename_answer, skip_request_filename_ext_info,
+    decode_hashset_request2, decode_request_filename_ext_info, decode_request_sources_payload,
+    encode_aich_file_hash_answer, encode_answer_sources2, encode_file_desc,
+    encode_file_req_ans_nofil, encode_file_status, encode_hashset_answer, encode_hashset_answer2,
+    encode_multipacket_answer, encode_multipacket_ext2_answer, encode_request_filename_answer,
     source_exchange_entry_count,
 };
 use super::super::super::dump::dump_ed2k_tcp_listener_send;
+
+/// Requester-side availability retained for the life of an upload connection.
+/// Stock keeps this on the upload-client object and consults it when choosing
+/// useful SX peers. The complete-source count is retained alongside the bitmap
+/// because both fields belong to the same extended-request state update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::ed2k_tcp) struct RequesterFileState {
+    file_hash: Ed2kHash,
+    part_status: Option<Vec<bool>>,
+    complete_source_count: u16,
+}
+
+impl RequesterFileState {
+    fn part_status_for(&self, file_hash: &Ed2kHash) -> Option<&[bool]> {
+        (self.file_hash == *file_hash)
+            .then_some(self.part_status.as_deref())
+            .flatten()
+    }
+}
 
 pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     transfer_runtime: &Ed2kTransferRuntime,
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    requester_file_state: &mut Option<RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     let (requested_identifier, mut remaining) = Ed2kFileIdentifier::decode(payload)?;
     let requested = requested_identifier.file_hash;
@@ -55,8 +75,14 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
         remaining = rest;
         match sub_opcode {
             OP_REQUESTFILENAME => {
-                let rest = skip_request_filename_ext_info(remaining, shared.file_size)?;
+                let (ext_info, rest) =
+                    decode_request_filename_ext_info(remaining, shared.file_size)?;
                 remaining = rest;
+                *requester_file_state = Some(RequesterFileState {
+                    file_hash: requested,
+                    part_status: ext_info.part_status,
+                    complete_source_count: ext_info.complete_source_count,
+                });
                 include_filename = true;
             }
             OP_SETREQFILEID => {
@@ -77,8 +103,13 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
                     continue;
                 }
                 let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
-                let sources =
-                    source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
+                let sources = source_exchange_peers(
+                    transfer_runtime,
+                    &requested,
+                    peer_addr.ip(),
+                    requester_file_state.as_ref(),
+                )
+                .await?;
                 if source_exchange_entry_count(used_version, &sources) == 0 {
                     continue;
                 }
@@ -118,6 +149,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     payload: &[u8],
     peer_supports_aich: bool,
     peer_supports_file_identifiers: bool,
+    requester_file_state: &mut Option<RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     if payload.len() < 16 {
         anyhow::bail!("short OP_MULTIPACKET payload {}", payload.len());
@@ -156,7 +188,14 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
         remaining = rest;
         match sub_opcode {
             OP_REQUESTFILENAME => {
-                remaining = skip_request_filename_ext_info(remaining, shared.file_size)?;
+                let (ext_info, rest) =
+                    decode_request_filename_ext_info(remaining, shared.file_size)?;
+                remaining = rest;
+                *requester_file_state = Some(RequesterFileState {
+                    file_hash: requested,
+                    part_status: ext_info.part_status,
+                    complete_source_count: ext_info.complete_source_count,
+                });
                 include_filename = true;
             }
             OP_SETREQFILEID => {
@@ -170,6 +209,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
                     &requested,
                     sub_opcode,
                     remaining,
+                    requester_file_state.as_ref(),
                 )
                 .await?;
             }
@@ -221,11 +261,34 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     peer_addr: SocketAddr,
     payload: &[u8],
     peer_accept_comment_version: u8,
+    requester_file_state: &mut Option<RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_file_hash_payload(payload)?;
-    let reply = if let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? {
+    let shared = transfer_runtime.local_servable_entry(&requested).await?;
+    let reply = if let Some(shared) = shared.as_ref() {
+        let ext_info = if payload.len() == 16 {
+            None
+        } else {
+            let (ext_info, remaining) =
+                decode_request_filename_ext_info(&payload[16..], shared.file_size)?;
+            if !remaining.is_empty() {
+                anyhow::bail!(
+                    "unexpected trailing OP_REQUESTFILENAME bytes {}",
+                    remaining.len()
+                );
+            }
+            Some(ext_info)
+        };
+        *requester_file_state = Some(RequesterFileState {
+            file_hash: requested,
+            part_status: ext_info.as_ref().and_then(|info| info.part_status.clone()),
+            complete_source_count: ext_info
+                .as_ref()
+                .map_or(0, |info| info.complete_source_count),
+        });
         encode_request_filename_answer(&requested, &shared.display_name)?
     } else {
+        *requester_file_state = None;
         encode_file_req_ans_nofil(&requested)
     };
     dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "request_filename", &reply);
@@ -352,6 +415,7 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
     peer_addr: SocketAddr,
     opcode: u8,
     payload: &[u8],
+    requester_file_state: Option<&RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     let (requested, requested_version) = decode_request_sources_payload(opcode, payload)?;
     // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
@@ -366,7 +430,13 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
     }
     if transfer_runtime.local_entry(&requested).await?.is_some() {
         let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
-        let sources = source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
+        let sources = source_exchange_peers(
+            transfer_runtime,
+            &requested,
+            peer_addr.ip(),
+            requester_file_state,
+        )
+        .await?;
         if source_exchange_entry_count(used_version, &sources) == 0 {
             return Ok(Some(requested));
         }
@@ -387,6 +457,7 @@ async fn answer_source_request_subpacket<'a>(
     requested: &Ed2kHash,
     opcode: u8,
     remaining: &'a [u8],
+    requester_file_state: Option<&RequesterFileState>,
 ) -> Result<&'a [u8]> {
     // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
     // omission): inside a multipacket we answer the OP_REQUESTSOURCES2 sub-op only.
@@ -404,7 +475,13 @@ async fn answer_source_request_subpacket<'a>(
         return Ok(remaining);
     }
     let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
-    let sources = source_exchange_peers(transfer_runtime, requested, peer_addr.ip()).await?;
+    let sources = source_exchange_peers(
+        transfer_runtime,
+        requested,
+        peer_addr.ip(),
+        requester_file_state,
+    )
+    .await?;
     if source_exchange_entry_count(used_version, &sources) == 0 {
         return Ok(remaining);
     }
@@ -424,13 +501,28 @@ async fn source_exchange_peers(
     transfer_runtime: &Ed2kTransferRuntime,
     requested: &Ed2kHash,
     exclude_ip: IpAddr,
+    requester_file_state: Option<&RequesterFileState>,
 ) -> Result<Vec<SourceExchangePeer>> {
+    let requester_part_status =
+        requester_file_state.and_then(|state| state.part_status_for(requested));
     // The eD2k peer plane is IPv4-only; a non-IPv4 requester (never produced by
     // this stack) excludes nothing.
     let IpAddr::V4(exclude_ipv4) = exclude_ip else {
-        return source_exchange_peers_excluding(transfer_runtime, requested, None).await;
+        return source_exchange_peers_excluding(
+            transfer_runtime,
+            requested,
+            None,
+            requester_part_status,
+        )
+        .await;
     };
-    source_exchange_peers_excluding(transfer_runtime, requested, Some(exclude_ipv4)).await
+    source_exchange_peers_excluding(
+        transfer_runtime,
+        requested,
+        Some(exclude_ipv4),
+        requester_part_status,
+    )
+    .await
 }
 
 /// Max sources advertised in one OP_ANSWERSOURCES(2) reply (eMule
@@ -456,10 +548,32 @@ fn source_exchange_eligible(ip: Ipv4Addr, tcp_port: u16, exclude_ipv4: Option<Ip
     tcp_port != 0 && exclude_ipv4 != Some(ip) && !source_ip_is_low_id(ip)
 }
 
+/// Stock SX usefulness filter (`CKnownFile::CreateSrcInfoPacket`). A source with
+/// unknown part state remains eligible. A known source must own at least one
+/// part the requester lacks; when the requester has no status, any advertised
+/// source part is useful. Mismatched bitmap lengths are rejected conservatively.
+fn source_is_useful_to_requester(
+    requester_part_status: Option<&[bool]>,
+    source_part_status: Option<&[bool]>,
+) -> bool {
+    let Some(source) = source_part_status else {
+        return true;
+    };
+    let Some(requester) = requester_part_status else {
+        return source.iter().any(|present| *present);
+    };
+    source.len() == requester.len()
+        && source
+            .iter()
+            .zip(requester)
+            .any(|(source_has, requester_has)| *source_has && !*requester_has)
+}
+
 async fn source_exchange_peers_excluding(
     transfer_runtime: &Ed2kTransferRuntime,
     requested: &Ed2kHash,
     exclude_ipv4: Option<Ipv4Addr>,
+    requester_part_status: Option<&[bool]>,
 ) -> Result<Vec<SourceExchangePeer>> {
     let requested_hex = requested.to_string();
     let mut peers: Vec<SourceExchangePeer> = Vec::new();
@@ -476,7 +590,13 @@ async fn source_exchange_peers_excluding(
         if !source_exchange_eligible(ipv4, tcp_port, exclude_ipv4) {
             continue;
         }
+        // Claim the endpoint before usefulness filtering. Otherwise a live
+        // source known to be useless could re-enter below through its stale
+        // persisted hint, whose part state is necessarily unknown.
         if !seen.insert((ipv4, tcp_port)) {
+            continue;
+        }
+        if !source_is_useful_to_requester(requester_part_status, live.part_bitmap.as_deref()) {
             continue;
         }
         peers.push(SourceExchangePeer {
@@ -612,6 +732,57 @@ mod tests {
     fn source_exchange_cap_matches_oracle() {
         // eMule caps at nCount > 500, i.e. up to 501 entries per reply.
         assert_eq!(MAX_SOURCE_EXCHANGE_ENTRIES, 501);
+    }
+
+    #[test]
+    fn source_exchange_filters_known_sources_by_requester_needed_parts() {
+        let requester = [true, false, true];
+
+        // Unknown source state stays eligible (stock's hopeful fallback).
+        assert!(source_is_useful_to_requester(Some(&requester), None));
+        // The source has part 1, which the requester lacks.
+        assert!(source_is_useful_to_requester(
+            Some(&requester),
+            Some(&[false, true, false])
+        ));
+        // The source offers only parts the requester already owns.
+        assert!(!source_is_useful_to_requester(
+            Some(&requester),
+            Some(&[true, false, true])
+        ));
+        // Known source state with no available part is useless even when the
+        // requester did not advertise a bitmap.
+        assert!(!source_is_useful_to_requester(
+            None,
+            Some(&[false, false, false])
+        ));
+        assert!(source_is_useful_to_requester(
+            None,
+            Some(&[false, true, false])
+        ));
+        // Different file shapes must never be zipped partially.
+        assert!(!source_is_useful_to_requester(
+            Some(&requester),
+            Some(&[false, true])
+        ));
+    }
+
+    #[test]
+    fn requester_state_is_scoped_to_its_file_and_keeps_complete_count() {
+        let file_hash = Ed2kHash([0x41; 16]);
+        let other_hash = Ed2kHash([0x42; 16]);
+        let state = RequesterFileState {
+            file_hash,
+            part_status: Some(vec![true, false]),
+            complete_source_count: 17,
+        };
+
+        assert_eq!(
+            state.part_status_for(&file_hash),
+            Some([true, false].as_slice())
+        );
+        assert_eq!(state.part_status_for(&other_hash), None);
+        assert_eq!(state.complete_source_count, 17);
     }
 
     #[test]
