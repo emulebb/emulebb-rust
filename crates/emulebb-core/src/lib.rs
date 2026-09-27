@@ -302,6 +302,8 @@ struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
     server_state: Arc<RwLock<Ed2kServerState>>,
     dht: DhtNode,
+    /// Profile-local `nodes.dat` destination for the shutdown routing sample.
+    kad_nodes_dat_path: Option<PathBuf>,
     /// Shared Kad firewall verification state, read by `kad_status` to report the
     /// real UDP-firewall verdict (oracle `CUDPFirewallTester::IsFirewalledUDP`).
     kad_firewall: Arc<Mutex<KadFirewallState>>,

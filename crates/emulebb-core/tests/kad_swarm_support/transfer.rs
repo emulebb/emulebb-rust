@@ -120,6 +120,7 @@ fn test_network_config(
         },
         kad_snoop_queue: SnoopQueueConfig::default(),
         kad_nodes_dat: None,
+        kad_nodes_dat_path: None,
         kad_bootstrap_endpoints: vec![bootstrap.to_string()],
         kad_bootstrap_min_routing_contacts: 1,
         kad_publish_shared_files: publish_shared_files,

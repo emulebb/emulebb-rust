@@ -18,6 +18,7 @@ use parking_lot::Mutex;
 use peer_state::{PeerCryptoState, VerifyKeyEntry};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::AtomicBool;
 
 /// Kad UDP obfuscation sync constant used by the oracle `EncryptedDatagramSocket`.
 const MAGICVALUE_UDP_SYNC_CLIENT: u32 = 0x395F_2EC1;
@@ -99,6 +100,10 @@ pub struct ObfuscationLayer {
     enabled: bool,
     peers: Mutex<HashMap<SocketAddr, PeerCryptoState>>,
     receiver_verify_keys: Mutex<HashMap<IpAddr, VerifyKeyEntry>>,
+    /// Whether newly observed receiver keys may enter the live map. Generic
+    /// transport instances default to enabled; DHT runtime disables this while
+    /// its own public IPv4 is unknown, matching `CKadUDPKey` binding semantics.
+    peer_key_learning_enabled: AtomicBool,
 }
 
 impl ObfuscationLayer {
@@ -110,6 +115,7 @@ impl ObfuscationLayer {
             enabled,
             peers: Mutex::new(HashMap::new()),
             receiver_verify_keys: Mutex::new(HashMap::new()),
+            peer_key_learning_enabled: AtomicBool::new(true),
         }
     }
 

@@ -270,6 +270,11 @@ impl EmulebbCore {
             let kad_ip_filter = network.ip_filter.clone();
             dht.set_ip_filter(std::sync::Arc::new(move |ip| kad_ip_filter.is_filtered(ip)));
         }
+        // Seed `CKadUDPKey` binding state before any bootstrap packet can use a
+        // restored key. This may be unknown at startup; the sync task below
+        // applies server/STUN changes as reachability learns or clears it.
+        dht.set_public_ip_for_udp_keys(self.ed2k_reachability.get())
+            .await;
         let ed2k_bind_addr = SocketAddr::new(IpAddr::V4(network.bind_ip), network.listen_port);
         let ed2k_listener =
             Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {
@@ -279,6 +284,11 @@ impl EmulebbCore {
         let mut tasks = Vec::new();
         if kad_network_enabled {
             tasks.push(dht.clone().start());
+            tasks.push(tokio::spawn(run_kad_udp_key_public_ip_sync(
+                dht.clone(),
+                self.ed2k_reachability.clone(),
+                Arc::clone(&shutdown),
+            )));
         }
         tasks.push(tokio::spawn(hostname_lookup::run_hostname_lookup_loop(
             self.clone(),
@@ -565,6 +575,7 @@ impl EmulebbCore {
             search_handle,
             server_state,
             dht,
+            kad_nodes_dat_path: network.kad_nodes_dat_path.clone(),
             kad_firewall: Arc::clone(&kad_firewall),
             nat,
             shutdown,
@@ -604,6 +615,27 @@ impl EmulebbCore {
         }
         if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
             runtime.shutdown.store(true, Ordering::SeqCst);
+            // Capture the final reachability value and persist the live routing
+            // sample before aborting the Kad tasks. A write failure must not
+            // strand shutdown, but it is visible in logs and the previous file
+            // remains intact because replacement is atomic.
+            runtime
+                .dht
+                .set_public_ip_for_udp_keys(self.ed2k_reachability.get())
+                .await;
+            if let Some(path) = runtime.kad_nodes_dat_path.as_deref() {
+                match persist_kad_nodes_dat(&runtime.dht, path).await {
+                    Ok(contacts) => tracing::info!(
+                        contacts,
+                        path = %path.display(),
+                        "persisted Kad routing sample"
+                    ),
+                    Err(error) => tracing::warn!(
+                        path = %path.display(),
+                        "failed to persist Kad routing sample: {error:#}"
+                    ),
+                }
+            }
             for task in runtime.tasks {
                 task.abort();
             }
@@ -615,5 +647,175 @@ impl EmulebbCore {
             let _ = tokio::time::timeout(Duration::from_secs(2), runtime.nat.stop()).await;
         }
         self.ed2k_status().await
+    }
+}
+
+/// Keep persisted Kad receiver-key bindings aligned with the single live
+/// public-IP source used by server login, STUN and firewall checks.
+async fn run_kad_udp_key_public_ip_sync(
+    dht: DhtNode,
+    reachability: ExternalReachability,
+    shutdown: Arc<AtomicBool>,
+) {
+    let mut observed = dht.public_ip_for_udp_keys();
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    while !shutdown.load(Ordering::Relaxed) {
+        interval.tick().await;
+        let current = reachability.get();
+        if current != observed {
+            dht.set_public_ip_for_udp_keys(current).await;
+            observed = current;
+        }
+    }
+}
+
+async fn persist_kad_nodes_dat(dht: &DhtNode, path: &Path) -> Result<usize> {
+    let bytes = dht
+        .encode_nodes_dat_snapshot()
+        .await
+        .context("failed to encode live Kad routing sample")?;
+    let contacts = bytes
+        .get(8..12)
+        .and_then(|raw| raw.try_into().ok())
+        .map(u32::from_le_bytes)
+        .unwrap_or_default() as usize;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_nodes_dat_atomic(&path, &bytes))
+        .await
+        .context("Kad nodes.dat persistence worker failed")??;
+    Ok(contacts)
+}
+
+fn write_nodes_dat_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().context("nodes.dat path has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create nodes.dat directory {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("nodes.dat path has no UTF-8 file name")?;
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .with_context(|| format!("failed to create temporary {}", temporary.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write temporary {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync temporary {}", temporary.display()))?;
+        drop(file);
+        replace_file_atomically(&temporary, path)
+            .with_context(|| format!("failed to replace {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both buffers are NUL-terminated UTF-16 paths and remain alive
+    // for the call. MoveFileExW atomically replaces an existing destination on
+    // the same volume; the temporary is deliberately created beside it.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod nodes_dat_persistence_tests {
+    use super::*;
+    use emulebb_kad_proto::{KadUdpKey, NodeId};
+    use emulebb_kad_routing::Contact;
+
+    #[tokio::test]
+    async fn learned_contact_is_atomically_persisted_and_reloaded_on_restart() {
+        let directory =
+            std::env::temp_dir().join(format!("emulebb-nodes-dat-restart-{}", Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("nodes.dat");
+        fs::write(&path, b"previous-valid-destination").unwrap();
+
+        let public_ip: Ipv4Addr = "198.51.100.120".parse().unwrap();
+        let peer: SocketAddr = "203.0.113.120:46120".parse().unwrap();
+        let node_id = NodeId::from_bytes([0x78; 16]);
+        let first = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        first.set_public_ip_for_udp_keys(Some(public_ip)).await;
+        first.register_peer_key(peer, 0xA1B2_C3D4);
+        let mut learned = Contact::new(node_id, "203.0.113.120".parse().unwrap(), 46120, 46121, 10);
+        learned.verified = true;
+        first.add_contact(learned).await.unwrap();
+
+        let bytes = first.encode_nodes_dat_snapshot().await.unwrap();
+        write_nodes_dat_atomic(&path, &bytes).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+
+        let restarted = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            nodes_dat: Some(fs::read(&path).unwrap()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let restored = restarted.routing_contacts().await;
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, node_id);
+        assert_eq!(restored[0].udp_key, KadUdpKey::new(0xA1B2_C3D4));
+        assert_eq!(restored[0].udp_key_ip, Some(public_ip));
+        assert!(restored[0].verified);
+        assert_eq!(restarted.known_peer_key(peer), None);
+        restarted.set_public_ip_for_udp_keys(Some(public_ip)).await;
+        assert_eq!(
+            restarted.known_peer_key(peer),
+            Some(KadUdpKey::new(0xA1B2_C3D4))
+        );
+
+        drop(restarted);
+        drop(first);
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&directory).unwrap();
     }
 }

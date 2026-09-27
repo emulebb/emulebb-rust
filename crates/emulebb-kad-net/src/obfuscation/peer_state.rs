@@ -3,6 +3,7 @@ use emulebb_kad_proto::NodeId;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 /// Hard ceiling on each obfuscation peer map. The runtime touches one entry per
@@ -92,6 +93,9 @@ impl ObfuscationLayer {
     /// The oracle stores this as the peer's `CKadUDPKey` value bound to our own
     /// public IP and reuses it for reply packets.
     pub fn register_peer_key(&self, addr: SocketAddr, key: u32) {
+        if !self.peer_key_learning_enabled.load(Ordering::Acquire) {
+            return;
+        }
         let mut guard = self.receiver_verify_keys.lock();
         guard.insert(
             addr.ip(),
@@ -101,6 +105,19 @@ impl ObfuscationLayer {
             },
         );
         evict_over_cap(&mut guard, PEER_MAP_CAP, |entry| entry.last_seen);
+    }
+
+    /// Forget every receiver verify key. Persisted Kad keys are bound to our
+    /// public IPv4 address, so a public-address change must invalidate the live
+    /// lookup map before any key can be reused.
+    pub fn reset_peer_keys(&self, accept_new_keys: bool) {
+        // Disable first so the receive loop cannot repopulate the map between
+        // the clear and the new binding becoming active.
+        self.peer_key_learning_enabled
+            .store(false, Ordering::Release);
+        self.receiver_verify_keys.lock().clear();
+        self.peer_key_learning_enabled
+            .store(accept_new_keys, Ordering::Release);
     }
 
     /// Return the latest receiver verify key learned for the peer IP behind this endpoint.

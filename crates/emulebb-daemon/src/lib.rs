@@ -222,6 +222,7 @@ impl DaemonProfile {
             kad_local_store: kad_local_store_config(&self.kad),
             kad_snoop_queue: kad_snoop_queue_config(&self.kad),
             kad_nodes_dat: discovery_bootstrap::load_valid_nodes_dat(&self.profile_dir)?,
+            kad_nodes_dat_path: Some(self.profile_dir.join("nodes.dat")),
             kad_bootstrap_endpoints: self.kad_bootstrap_endpoints.clone(),
             kad_bootstrap_min_routing_contacts: self.kad.bootstrap_min_routing_contacts.max(1),
             kad_publish_shared_files: self.kad.publish_shared_files_enabled,

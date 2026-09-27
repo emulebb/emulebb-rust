@@ -30,6 +30,7 @@ use emulebb_kad_proto::{KadUdpKey, NodeId};
 use emulebb_kad_routing::{Contact, RoutingTable};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::SystemTime;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
@@ -39,6 +40,10 @@ struct DhtInner {
     own_id: NodeId,
     routing_table: Arc<Mutex<RoutingTable>>,
     rpc: RpcManager,
+    /// Our current public IPv4 as a network-order numeric value (`0` =
+    /// unknown). Peer UDP keys loaded from disk are exposed to the RPC layer
+    /// only when their saved binding matches this value.
+    current_public_ip: Arc<AtomicU32>,
     config: DhtConfig,
     /// Per-target dedup + bounded concurrency for search/publish traversals
     /// (oracle `CSearchManager::AlreadySearchingFor` + the concurrent-search
@@ -140,6 +145,9 @@ impl DhtNode {
         let transport = UdpTransport::bind_pinned(bind_addr, config.bind_if_index).await?;
         let obfuscation =
             ObfuscationLayer::new(config.node_id, config.udp_key, config.obfuscation_enabled);
+        // Until core supplies a public IPv4, no receiver key can be assigned a
+        // valid local binding and therefore none may be learned or exposed.
+        obfuscation.reset_peer_keys(false);
         let routing_table = Arc::new(Mutex::new(RoutingTable::with_max_size(
             config.node_id,
             config.max_routing_table_size,
@@ -162,18 +170,25 @@ impl DhtNode {
         );
 
         let search_concurrency = SearchConcurrency::new(config.max_concurrent_searches);
+        let current_public_ip = Arc::new(AtomicU32::new(0));
 
         // RES-contact ingestion channel (oracle AddUnfiltered): a dedicated drain
         // task owns the routing-table add-path so traversal can fire-and-forget
         // every good RES contact without blocking the lookup loop on the lock.
         let (res_contact_tx, res_contact_rx) = mpsc::unbounded_channel::<LearnedResContact>();
-        spawn_res_contact_drain(Arc::clone(&routing_table), rpc.clone(), res_contact_rx);
+        spawn_res_contact_drain(
+            Arc::clone(&routing_table),
+            rpc.clone(),
+            Arc::clone(&current_public_ip),
+            res_contact_rx,
+        );
 
-        Ok(Self {
+        let node = Self {
             inner: Arc::new(DhtInner {
                 own_id: config.node_id,
                 routing_table,
                 rpc,
+                current_public_ip,
                 config,
                 search_concurrency,
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
@@ -181,7 +196,17 @@ impl DhtNode {
                 ip_filter: std::sync::OnceLock::new(),
                 res_contact_tx,
             }),
-        })
+        };
+
+        // A persisted routing sample is live routing state, not merely a list
+        // of one-shot bootstrap endpoints. Restore it immediately so restart
+        // retains verification/key metadata and the table can bootstrap from
+        // its own contacts just like stock RoutingZone.
+        if let Some(nodes_dat) = node.inner.config.nodes_dat.clone() {
+            node.import_nodes_dat(&nodes_dat).await?;
+        }
+
+        Ok(node)
     }
 
     /// Start the receive loop. Must be called before any DHT operations.
@@ -218,6 +243,47 @@ impl DhtNode {
     /// Return the latest peer UDP key learned for this endpoint's IP, when available.
     pub fn known_peer_key(&self, addr: SocketAddr) -> Option<KadUdpKey> {
         self.inner.rpc.known_peer_key(addr).map(KadUdpKey::new)
+    }
+
+    /// Current public IPv4 used to validate persisted peer UDP keys.
+    #[must_use]
+    pub fn public_ip_for_udp_keys(&self) -> Option<Ipv4Addr> {
+        public_ip_from_bits(self.inner.current_public_ip.load(Ordering::Relaxed))
+    }
+
+    /// Update the public IPv4 binding used by stock `CKadUDPKey` semantics.
+    /// Every live receiver key is invalidated on a change; only persisted keys
+    /// whose saved binding matches the new address are re-exposed.
+    pub async fn set_public_ip_for_udp_keys(&self, public_ip: Option<Ipv4Addr>) {
+        let bits = public_ip.map_or(0, u32::from);
+        let previous = self.inner.current_public_ip.swap(bits, Ordering::Relaxed);
+        if previous == bits {
+            return;
+        }
+
+        self.inner.rpc.reset_peer_keys(public_ip.is_some());
+        let Some(public_ip) = public_ip else {
+            return;
+        };
+        for contact in self.inner.routing_table.lock().await.all_contacts() {
+            if contact.udp_key != KadUdpKey::ZERO && contact.udp_key_ip == Some(public_ip) {
+                self.inner.rpc.register_peer_key(
+                    SocketAddr::new(IpAddr::V4(contact.ip), contact.udp_port),
+                    contact.udp_key.value(),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn udp_key_matches_public_ip(
+        &self,
+        udp_key: KadUdpKey,
+        binding: Option<Ipv4Addr>,
+    ) -> bool {
+        udp_key != KadUdpKey::ZERO
+            && self
+                .public_ip_for_udp_keys()
+                .is_some_and(|public_ip| binding == Some(public_ip))
     }
 
     /// Actual UDP bind address.
@@ -413,6 +479,7 @@ impl DhtNode {
 fn spawn_res_contact_drain(
     routing_table: Arc<Mutex<RoutingTable>>,
     rpc: RpcManager,
+    current_public_ip: Arc<AtomicU32>,
     mut rx: mpsc::UnboundedReceiver<LearnedResContact>,
 ) {
     tokio::spawn(async move {
@@ -432,9 +499,18 @@ fn spawn_res_contact_drain(
             // Carry the latest known anti-spoof key for this IP, if any, so the
             // anti-hijack update guard is satisfied on a refresh.
             if let Some(key) = rpc.known_peer_key(addr) {
-                contact.udp_key = KadUdpKey::new(key);
+                if let Some(public_ip) =
+                    public_ip_from_bits(current_public_ip.load(Ordering::Relaxed))
+                {
+                    contact.udp_key = KadUdpKey::new(key);
+                    contact.udp_key_ip = Some(public_ip);
+                }
             }
             let _ = routing_table.lock().await.add_contact(contact);
         }
     });
+}
+
+fn public_ip_from_bits(bits: u32) -> Option<Ipv4Addr> {
+    (bits != 0).then(|| Ipv4Addr::from(bits))
 }

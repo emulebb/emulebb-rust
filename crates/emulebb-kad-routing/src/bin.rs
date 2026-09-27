@@ -81,9 +81,19 @@ impl RoutingBin {
             // has a non-zero UDP sender key, an update must present the SAME key
             // (anti-hijack protection). A mismatching or empty key on an entry
             // that already holds one is rejected: the table is left untouched.
-            let stored_key = self.contacts[pos].udp_key;
-            if stored_key != KadUdpKey::ZERO && contact.udp_key != stored_key {
-                return Ok(false);
+            let stored = &self.contacts[pos];
+            if stored.udp_key != KadUdpKey::ZERO {
+                // A key is scoped to the public IP under which it was learned.
+                // While the binding is unchanged, reject empty or mismatching
+                // updates exactly like stock. Once our public IP changes, a
+                // newly authenticated non-zero key with the new binding may
+                // replace the stale one.
+                let same_binding = stored.udp_key_ip == contact.udp_key_ip;
+                if contact.udp_key == KadUdpKey::ZERO
+                    || (same_binding && contact.udp_key != stored.udp_key)
+                {
+                    return Ok(false);
+                }
             }
 
             let existing = &mut self.contacts[pos];
@@ -93,6 +103,7 @@ impl RoutingBin {
             existing.kad_version = existing.kad_version.max(contact.kad_version);
             if contact.udp_key != KadUdpKey::ZERO {
                 existing.udp_key = contact.udp_key;
+                existing.udp_key_ip = contact.udp_key_ip;
             }
             existing.last_seen = contact.last_seen;
             // Move to back (most recently seen)

@@ -5,7 +5,7 @@ use super::{
 use crate::bootstrap::{BootstrapContact, hardcoded_bootstrap, parse_nodes_dat, parse_nodes_text};
 use crate::error::DhtError;
 use emulebb_kad_net::RpcWorkClass;
-use emulebb_kad_proto::{KadPacket, KadUdpKey, NodeId, opcode};
+use emulebb_kad_proto::{KadPacket, NodeId, opcode};
 use emulebb_kad_routing::Contact;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -108,6 +108,8 @@ impl DhtNode {
                 tcp_port: c.tcp_port,
                 version: c.kad_version,
                 udp_key: c.udp_key,
+                udp_key_ip: c.udp_key_ip,
+                verified: c.verified,
             })
             .collect()
     }
@@ -149,7 +151,7 @@ impl DhtNode {
             self.inner.rpc.register_peer_identity(addr, bc.node_id);
         }
         self.inner.rpc.register_peer_version(addr, bc.version);
-        if bc.udp_key != KadUdpKey::ZERO {
+        if self.udp_key_matches_public_ip(bc.udp_key, bc.udp_key_ip) {
             self.inner.rpc.register_peer_key(addr, bc.udp_key.value());
         }
     }
@@ -175,6 +177,7 @@ impl DhtNode {
         sender_contact.bootstrap = true;
         if let Some(known_udp_key) = self.known_peer_key(addr) {
             sender_contact.udp_key = known_udp_key;
+            sender_contact.udp_key_ip = self.public_ip_for_udp_keys();
         }
         if rt.add_contact(sender_contact).is_ok() {
             // kad_event bootstrap milestone bootstrap_contact_added (§3.3).

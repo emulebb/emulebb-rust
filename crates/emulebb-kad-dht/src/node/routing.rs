@@ -22,11 +22,47 @@ impl DhtNode {
         for bc in contacts {
             let mut contact = Contact::new(bc.node_id, bc.ip, bc.udp_port, bc.tcp_port, bc.version);
             contact.udp_key = bc.udp_key;
+            contact.udp_key_ip = bc.udp_key_ip;
+            contact.verified = bc.verified;
             if self.add_contact(contact).await.is_ok() {
                 added += 1;
             }
         }
         Ok(added)
+    }
+
+    /// Encode the stock shutdown routing sample (`nodes.dat` v2, at most 200
+    /// keyspace-spread contacts). Receiver keys learned after a contact's last
+    /// routing-table refresh are folded in and bound to our current public IP.
+    pub async fn encode_nodes_dat_snapshot(&self) -> Result<Vec<u8>, DhtError> {
+        const STOCK_SHUTDOWN_CONTACT_LIMIT: usize = 200;
+
+        let public_ip = self.public_ip_for_udp_keys();
+        let contacts = self
+            .bootstrap_contacts(STOCK_SHUTDOWN_CONTACT_LIMIT)
+            .await
+            .into_iter()
+            .map(|contact| {
+                let addr = addr_from_contact(&contact);
+                let learned_key = public_ip.and_then(|binding| {
+                    self.known_peer_key(addr)
+                        .map(|udp_key| (udp_key, Some(binding)))
+                });
+                let (udp_key, udp_key_ip) =
+                    learned_key.unwrap_or((contact.udp_key, contact.udp_key_ip));
+                crate::bootstrap::BootstrapContact {
+                    node_id: contact.id,
+                    ip: contact.ip,
+                    udp_port: contact.udp_port,
+                    tcp_port: contact.tcp_port,
+                    version: contact.kad_version,
+                    udp_key,
+                    udp_key_ip,
+                    verified: contact.verified,
+                }
+            })
+            .collect::<Vec<_>>();
+        crate::bootstrap::encode_nodes_dat(&contacts)
     }
 
     /// Upsert a single contact into the routing table.
@@ -35,14 +71,16 @@ impl DhtNode {
         let addr = addr_from_contact(&contact);
         if contact.udp_key == KadUdpKey::ZERO
             && let Some(known_udp_key) = self.known_peer_key(addr)
+            && let Some(public_ip) = self.public_ip_for_udp_keys()
         {
             contact.udp_key = known_udp_key;
+            contact.udp_key_ip = Some(public_ip);
         }
         self.inner.rpc.register_peer_identity(addr, contact.id);
         self.inner
             .rpc
             .register_peer_version(addr, contact.kad_version);
-        if contact.udp_key != KadUdpKey::ZERO {
+        if self.udp_key_matches_public_ip(contact.udp_key, contact.udp_key_ip) {
             self.inner
                 .rpc
                 .register_peer_key(addr, contact.udp_key.value());
@@ -236,6 +274,7 @@ impl DhtNode {
         contact.requests_hello_res_ack = metadata.requests_hello_res_ack;
         if let Some(known_udp_key) = self.known_peer_key(from) {
             contact.udp_key = known_udp_key;
+            contact.udp_key_ip = self.public_ip_for_udp_keys();
         }
 
         self.add_contact(contact).await?;
@@ -348,6 +387,7 @@ fn routing_split_denied_reason_label(reason: &RoutingSplitDeniedReason) -> &'sta
 mod tests {
     use super::*;
     use crate::DhtConfig;
+    use crate::bootstrap::{BootstrapContact, encode_nodes_dat};
     use emulebb_kad_proto::{Tag, TagValue, tag_name};
 
     #[tokio::test]
@@ -513,5 +553,94 @@ mod tests {
         assert_eq!(helpers[0].tcp_port, 42011);
 
         assert!(dht.firewall_check_helpers(0).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persisted_udp_key_is_exposed_only_for_its_bound_public_ip() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let peer_ip = "203.0.113.40".parse().unwrap();
+        let bound_ip = "198.51.100.90".parse().unwrap();
+        let saved = BootstrapContact {
+            node_id: NodeId::from_bytes([0x90; 16]),
+            ip: peer_ip,
+            udp_port: 44040,
+            tcp_port: 44041,
+            version: 10,
+            udp_key: KadUdpKey::new(0x1122_3344),
+            udp_key_ip: Some(bound_ip),
+            verified: true,
+        };
+        let data = encode_nodes_dat(&[saved]).unwrap();
+        assert_eq!(dht.import_nodes_dat(&data).await.unwrap(), 1);
+        let peer = "203.0.113.40:44040".parse().unwrap();
+
+        assert_eq!(dht.known_peer_key(peer), None);
+        dht.set_public_ip_for_udp_keys(Some("198.51.100.91".parse().unwrap()))
+            .await;
+        assert_eq!(dht.known_peer_key(peer), None);
+        dht.set_public_ip_for_udp_keys(Some(bound_ip)).await;
+        assert_eq!(dht.known_peer_key(peer), Some(KadUdpKey::new(0x1122_3344)));
+        dht.set_public_ip_for_udp_keys(None).await;
+        assert_eq!(dht.known_peer_key(peer), None);
+
+        let restored = dht.routing_contacts().await.pop().unwrap();
+        assert_eq!(restored.udp_key_ip, Some(bound_ip));
+        assert!(restored.verified);
+    }
+
+    #[tokio::test]
+    async fn learned_udp_key_rebinds_after_public_ip_change() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let peer: SocketAddr = "203.0.113.41:44041".parse().unwrap();
+        dht.register_peer_key(peer, 0x9999_9999);
+        assert_eq!(dht.known_peer_key(peer), None);
+        let first_public_ip = "198.51.100.100".parse().unwrap();
+        dht.set_public_ip_for_udp_keys(Some(first_public_ip)).await;
+        dht.register_peer_key(peer, 0xAAAA_BBBB);
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x91; 16]),
+            "203.0.113.41".parse().unwrap(),
+            44041,
+            44042,
+            10,
+        ))
+        .await
+        .unwrap();
+        let first = dht.routing_contacts().await.pop().unwrap();
+        assert_eq!(first.udp_key, KadUdpKey::new(0xAAAA_BBBB));
+        assert_eq!(first.udp_key_ip, Some(first_public_ip));
+
+        let second_public_ip = "198.51.100.101".parse().unwrap();
+        dht.set_public_ip_for_udp_keys(Some(second_public_ip)).await;
+        assert_eq!(dht.known_peer_key(peer), None);
+        dht.register_peer_key(peer, 0xCCCC_DDDD);
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x91; 16]),
+            "203.0.113.41".parse().unwrap(),
+            44041,
+            44042,
+            10,
+        ))
+        .await
+        .unwrap();
+        let rebound = dht.routing_contacts().await.pop().unwrap();
+        assert_eq!(rebound.udp_key, KadUdpKey::new(0xCCCC_DDDD));
+        assert_eq!(rebound.udp_key_ip, Some(second_public_ip));
     }
 }

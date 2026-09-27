@@ -236,7 +236,8 @@ mod tests {
 
     fn one_nodes_dat() -> Vec<u8> {
         let mut data = Vec::new();
-        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
         data.extend_from_slice(&1u32.to_le_bytes());
         data.extend_from_slice(&[0x11; 16]);
         data.extend_from_slice(&u32::from_be_bytes([203, 0, 113, 9]).to_le_bytes());

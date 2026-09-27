@@ -34,6 +34,9 @@ pub struct Contact {
     pub kad_version: u8,
     /// Latest persisted or learned UDP anti-spoofing key for this peer.
     pub udp_key: KadUdpKey,
+    /// Public IPv4 address for which `udp_key` is valid. Persisted keys are
+    /// usable only when this matches our current public address.
+    pub udp_key_ip: Option<Ipv4Addr>,
     /// Peer-advertised Kad UDP port from `TAG_SOURCEUPORT`, if provided.
     pub hello_source_udp_port: Option<u16>,
     /// Whether the peer announced itself as UDP firewalled in hello metadata.
@@ -99,6 +102,7 @@ impl Contact {
             tcp_port,
             kad_version,
             udp_key: KadUdpKey::ZERO,
+            udp_key_ip: None,
             hello_source_udp_port: None,
             udp_firewalled: false,
             tcp_firewalled: false,

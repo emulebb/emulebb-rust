@@ -31,6 +31,12 @@ impl RpcManager {
         self.inner.obfuscation.register_peer_key(addr, key);
     }
 
+    /// Clear all peer receiver keys after our public IPv4 binding changes and
+    /// control whether newly observed keys may be retained under that binding.
+    pub fn reset_peer_keys(&self, accept_new_keys: bool) {
+        self.inner.obfuscation.reset_peer_keys(accept_new_keys);
+    }
+
     /// Derive the verify key we should announce to a specific IPv4 peer.
     #[must_use]
     pub fn verify_key_for_ip(&self, ip: Ipv4Addr) -> u32 {
