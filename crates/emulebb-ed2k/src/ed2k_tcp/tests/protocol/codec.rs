@@ -1,4 +1,5 @@
 use super::*;
+use crate::ed2k_tcp::decode_answer_sources2_payload;
 
 #[test]
 fn firewall_check_udp_request_roundtrip() {
@@ -716,6 +717,45 @@ fn legacy_source_answer_rejects_v4_shape_from_v3_peer() {
 
     assert_eq!(decoded_hash, file_hash);
     assert_eq!(decoded_sources, vec![source]);
+}
+
+#[test]
+fn source_exchange2_v1_through_v4_preserve_their_wire_capabilities() {
+    let file_hash = Ed2kHash([0x5A; 16]);
+
+    for version in 1u8..=ED2K_SOURCE_EXCHANGE2_VERSION {
+        for connect_options in 0u8..=0x07 {
+            let source = SourceExchangePeer {
+                ip: [198, 51, 100, 20 + connect_options],
+                tcp_port: 4662,
+                server_ip: u32::from_le_bytes([203, 0, 113, 8]),
+                server_port: 4242,
+                user_hash: (version >= 2).then_some([0x70 + connect_options; 16]),
+                connect_options,
+            };
+            let packet = encode_answer_sources2(&file_hash, version, &[source]).unwrap();
+            assert_eq!(packet[0], OP_EMULEPROT);
+            let (decoded_hash, decoded_sources) =
+                decode_answer_sources2_payload(&packet[6..]).unwrap();
+
+            assert_eq!(decoded_hash, file_hash);
+            assert_eq!(decoded_sources.len(), 1);
+            assert_eq!(decoded_sources[0].ip, source.ip);
+            assert_eq!(decoded_sources[0].user_hash, source.user_hash);
+            assert_eq!(
+                decoded_sources[0].connect_options,
+                if version >= 4 { connect_options } else { 0 },
+                "SX2 version {version} options 0x{connect_options:02x}"
+            );
+        }
+    }
+
+    for unsupported in [0, ED2K_SOURCE_EXCHANGE2_VERSION + 1] {
+        let mut payload = vec![unsupported];
+        payload.extend_from_slice(&file_hash.0);
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        assert!(decode_answer_sources2_payload(&payload).is_err());
+    }
 }
 
 /// Build `count` SX2 v4 sources (each carries a user hash so it survives the

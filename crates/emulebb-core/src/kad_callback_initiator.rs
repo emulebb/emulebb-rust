@@ -189,6 +189,7 @@ impl EmulebbCore {
                         ip: source.ip.to_string(),
                         tcp_port: source.tcp_port,
                         user_hash: source.user_hash.map(hex::encode),
+                        connect_options: source.obfuscation_options,
                     },
                 })
                 .await;

@@ -40,6 +40,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
             ip: "192.0.2.10".to_string(),
             tcp_port: 4662,
             user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+            connect_options: Some(0x07),
         }],
         upload_priority: "high".to_string(),
         auto_upload_priority: true,

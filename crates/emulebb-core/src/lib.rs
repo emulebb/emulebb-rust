@@ -1195,6 +1195,7 @@ impl EmulebbCore {
                             ip: source.ip.to_string(),
                             tcp_port: source.tcp_port,
                             user_hash: source.user_hash.map(hex::encode),
+                            connect_options: source.obfuscation_options,
                         },
                     })
                     .await;
@@ -2327,6 +2328,7 @@ impl EmulebbCore {
                         ip: source.ip.to_string(),
                         tcp_port: source.tcp_port,
                         user_hash: source.user_hash.map(hex::encode),
+                        connect_options: source.obfuscation_options,
                     },
                 )
                 .await?;
@@ -2528,6 +2530,7 @@ impl EmulebbCore {
                         ip: source.ip.to_string(),
                         tcp_port: source.tcp_port,
                         user_hash: source.user_hash.map(hex::encode),
+                        connect_options: source.obfuscation_options,
                     },
                 })
                 .await;
@@ -6330,6 +6333,7 @@ fn parse_ed2k_link_sources<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<E
                     ip: ip.to_string(),
                     tcp_port,
                     user_hash,
+                    connect_options: None,
                 });
             }
         }

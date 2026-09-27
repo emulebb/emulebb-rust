@@ -154,6 +154,7 @@ fn search_result_source_hint(result: &SearchResult) -> Option<Ed2kSourceHint> {
         ip: std::net::Ipv4Addr::from(client_id.to_le_bytes()).to_string(),
         tcp_port,
         user_hash: None,
+        connect_options: None,
     })
 }
 

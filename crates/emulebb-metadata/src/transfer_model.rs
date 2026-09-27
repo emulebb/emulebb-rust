@@ -182,4 +182,5 @@ pub struct MetadataTransferSource {
     pub ip: String,
     pub tcp_port: u16,
     pub user_hash: Option<String>,
+    pub connect_options: Option<u8>,
 }

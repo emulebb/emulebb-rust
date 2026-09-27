@@ -701,6 +701,7 @@ fn remembered_source_hint_becomes_direct_dial_source() {
             ip: "192.0.2.10".to_string(),
             tcp_port: 4662,
             user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+            connect_options: Some(0x07),
         },
     )
     .unwrap();
@@ -710,9 +711,47 @@ fn remembered_source_hint_becomes_direct_dial_source() {
     assert_eq!(source.tcp_port, 4662);
     assert!(source.is_direct_dialable());
     assert!(source.obfuscated);
-    assert_eq!(source.obfuscation_options, Some(0x03));
+    assert_eq!(source.obfuscation_options, Some(0x07));
     assert_eq!(
         source.user_hash,
         Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
     );
+}
+
+#[test]
+fn remembered_source_hint_does_not_fabricate_crypt_options_from_user_hash() {
+    let file_hash: Ed2kHash = "00112233445566778899aabbccddeeff".parse().unwrap();
+    let hint = Ed2kSourceHint {
+        ip: "192.0.2.11".to_string(),
+        tcp_port: 4662,
+        user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+        connect_options: None,
+    };
+    let source = found_source_from_hint(file_hash, &hint).unwrap();
+
+    assert!(!source.obfuscated);
+    assert_eq!(source.obfuscation_options, None);
+    assert!(source.user_hash.is_some());
+}
+
+#[test]
+fn remembered_source_hint_preserves_every_crypt_bit_combination() {
+    let file_hash: Ed2kHash = "00112233445566778899aabbccddeeff".parse().unwrap();
+
+    for connect_options in 0u8..=0x07 {
+        let source = found_source_from_hint(
+            file_hash,
+            &Ed2kSourceHint {
+                ip: "192.0.2.12".to_string(),
+                tcp_port: 4662,
+                user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+                connect_options: Some(connect_options),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.obfuscation_options, Some(connect_options));
+        assert_eq!(source.obfuscated, connect_options & 0x01 != 0);
+        assert!(source.is_direct_dialable());
+    }
 }

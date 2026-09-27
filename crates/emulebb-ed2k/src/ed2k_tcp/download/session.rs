@@ -85,6 +85,7 @@ async fn remember_connected_peer_source(
     file_hash_hex: &str,
     peer_addr: SocketAddr,
     user_hash: [u8; 16],
+    connect_options: u8,
 ) -> Result<()> {
     transfer_runtime
         .remember_source(
@@ -93,6 +94,7 @@ async fn remember_connected_peer_source(
                 ip: peer_addr.ip().to_string(),
                 tcp_port: peer_addr.port(),
                 user_hash: Some(hex::encode(user_hash)),
+                connect_options: Some(connect_options),
             },
         )
         .await
@@ -394,6 +396,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         file_hash_hex,
                         peer_addr,
                         hello_profile.identity.user_hash,
+                        hello_profile.connect_options,
                     )
                     .await?;
                     session_state.peer_connect_options = Some(hello_profile.connect_options);
@@ -451,6 +454,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         file_hash_hex,
                         peer_addr,
                         hello_profile.identity.user_hash,
+                        hello_profile.connect_options,
                     )
                     .await?;
                     session_state.peer_connect_options = Some(hello_profile.connect_options);
@@ -1282,6 +1286,7 @@ async fn remember_source_exchange_sources(
                     ip: Ipv4Addr::from(source.ip).to_string(),
                     tcp_port: source.tcp_port,
                     user_hash: source.user_hash.map(hex::encode),
+                    connect_options: Some(source.connect_options),
                 },
             )
             .await?;

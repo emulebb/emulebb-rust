@@ -1204,9 +1204,9 @@ fn replace_transfer_children(
     let mut insert_source = tx.prepare_cached(
         r#"
         INSERT INTO transfer_sources(
-            transfer_id, ip, tcp_port, user_hash, first_seen_ms, last_seen_ms
+            transfer_id, ip, tcp_port, user_hash, connect_options, first_seen_ms, last_seen_ms
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
         "#,
     )?;
     for source in &manifest.sources {
@@ -1215,6 +1215,7 @@ fn replace_transfer_children(
             source.ip,
             i64::from(source.tcp_port),
             optional_fixed_hex(source.user_hash.as_deref(), 16, "source user hash")?,
+            source.connect_options.map(i64::from),
             now,
         ])?;
     }
@@ -1348,7 +1349,8 @@ fn read_sources(
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT ip, tcp_port,
-               CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END
+               CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END,
+               connect_options
         FROM transfer_sources
         WHERE transfer_id = ?1
         ORDER BY id
@@ -1359,6 +1361,7 @@ fn read_sources(
             ip: row.get(0)?,
             tcp_port: row.get::<_, i64>(1)? as u16,
             user_hash: row.get(2)?,
+            connect_options: row.get::<_, Option<i64>>(3)?.map(|value| value as u8),
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()

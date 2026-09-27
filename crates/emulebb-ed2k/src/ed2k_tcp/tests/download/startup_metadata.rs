@@ -103,11 +103,13 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
         ip: test_bind_ip().to_string(),
         tcp_port: peer_addr.port(),
         user_hash: Some(hex::encode([0x42; 16])),
+        connect_options: Some(emule_connect_options(false)),
     }));
     assert!(manifest.sources.contains(&Ed2kSourceHint {
         ip: "127.0.0.2".to_string(),
         tcp_port: 4662,
         user_hash: Some(hex::encode([0x77; 16])),
+        connect_options: Some(0),
     }));
     // FIX 3: the download path attributes credit only to a cryptographically
     // verified peer (eMule CClientCredits::AddDownloaded gates IS_IDFAILED/

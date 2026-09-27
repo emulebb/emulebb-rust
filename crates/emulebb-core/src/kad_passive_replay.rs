@@ -240,6 +240,7 @@ pub(crate) async fn remember_passive_source_results(
             ip: source.ip.to_string(),
             tcp_port: source.tcp_port,
             user_hash: source.user_hash.map(hex::encode),
+            connect_options: source.obfuscation_options,
         };
         if let Err(error) = transfer_runtime
             .remember_source(&result.file_hash.to_string(), hint)

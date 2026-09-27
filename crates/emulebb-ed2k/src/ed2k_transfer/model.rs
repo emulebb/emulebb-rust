@@ -186,6 +186,12 @@ pub struct Ed2kSourceHint {
     pub tcp_port: u16,
     /// Optional peer user hash when known.
     pub user_hash: Option<String>,
+    /// Raw eMule connect-options byte when the discovery path supplied it.
+    ///
+    /// `None` means the source path did not carry connect options; `Some(0)`
+    /// is a real advertised value and must not be conflated with unknown.
+    #[serde(default)]
+    pub connect_options: Option<u8>,
 }
 
 /// Canonical AICH master hash plus per-part hashes for one file.

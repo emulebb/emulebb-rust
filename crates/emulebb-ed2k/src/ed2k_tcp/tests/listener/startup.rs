@@ -42,6 +42,7 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
                 ip: "10.20.30.40".to_string(),
                 tcp_port: 4662,
                 user_hash: Some(hex::encode([0x61; 16])),
+                connect_options: Some(0x03),
             },
         )
         .await
@@ -113,7 +114,7 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
         4662
     );
     assert_eq!(&source_answer[37..53], &[0x61; 16]);
-    assert_eq!(source_answer[53], 0);
+    assert_eq!(source_answer[53], 0x03);
 
     let mut older_source_request = super::encode_request_sources2(&file_hash);
     older_source_request[6] = 2;
@@ -483,6 +484,7 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
                 ip: test_bind_ip().to_string(),
                 tcp_port: 5001,
                 user_hash: Some(hex::encode([0x71; 16])),
+                connect_options: Some(0x01),
             },
         )
         .await
@@ -495,6 +497,7 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
                 ip: "10.20.30.41".to_string(),
                 tcp_port: 4662,
                 user_hash: Some(hex::encode([0x62; 16])),
+                connect_options: Some(0x07),
             },
         )
         .await
@@ -555,6 +558,7 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
         u16::from_le_bytes([source_answer[29], source_answer[30]]),
         4662
     );
+    assert_eq!(source_answer[53], 0x07);
 
     stream
         .write_all(&super::encode_packet(
@@ -694,6 +698,7 @@ async fn listener_multipacket_ext2_source_only_returns_identifier_answer() {
                 ip: "10.20.30.43".to_string(),
                 tcp_port: 4662,
                 user_hash: Some(hex::encode([0x64; 16])),
+                connect_options: Some(0x05),
             },
         )
         .await
@@ -724,6 +729,7 @@ async fn listener_multipacket_ext2_source_only_returns_identifier_answer() {
         1
     );
     assert_eq!(&source_answer[25..29], &[43, 30, 20, 10]);
+    assert_eq!(source_answer[53], 0x05);
 
     let ext2_answer = read_until_opcode(&mut stream, OP_EMULEPROT, OP_MULTIPACKETANSWER_EXT2).await;
     let (returned_identifier, remaining) = Ed2kFileIdentifier::decode(&ext2_answer[6..]).unwrap();

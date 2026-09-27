@@ -359,6 +359,7 @@ CREATE TABLE transfer_sources (
     tcp_port INTEGER NOT NULL CHECK(tcp_port BETWEEN 1 AND 65535),
     udp_port INTEGER CHECK(udp_port IS NULL OR udp_port BETWEEN 1 AND 65535),
     user_hash BLOB CHECK(user_hash IS NULL OR length(user_hash) = 16),
+    connect_options INTEGER CHECK(connect_options IS NULL OR connect_options BETWEEN 0 AND 255),
     first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
     last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     last_outcome TEXT NOT NULL DEFAULT ''

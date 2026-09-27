@@ -311,6 +311,16 @@ impl Ed2kTransferRuntime {
                 existing.user_hash = source.user_hash;
                 changed = true;
             }
+            // Connect options are discovery metadata just like the user hash:
+            // a later known byte upgrades unknown state, while a plaintext
+            // retry that carries no byte must not erase what SX/server/Kad
+            // already taught us. `Some(0)` remains a meaningful known value.
+            if source.connect_options.is_some()
+                && existing.connect_options != source.connect_options
+            {
+                existing.connect_options = source.connect_options;
+                changed = true;
+            }
         } else {
             manifest.sources.push(source);
             changed = true;

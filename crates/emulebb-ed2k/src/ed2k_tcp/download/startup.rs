@@ -73,6 +73,7 @@ pub async fn download_file_from_peer(
                 ip: peer.ip.to_string(),
                 tcp_port: peer.tcp_port,
                 user_hash: peer.user_hash.map(hex::encode),
+                connect_options: peer.obfuscation_options,
             },
         )
         .await?;
