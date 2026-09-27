@@ -105,6 +105,10 @@ fn test_response_opcodes_keep_node_id_when_identity_is_known() {
     let decrypted = receiver.decrypt(sender_addr(), &encrypted);
     assert!(decrypted.was_obfuscated);
     assert_eq!(decrypted.data, plaintext);
+    assert!(
+        decrypted.receiver_verify_key_valid,
+        "NodeID-mode envelopes still prove their embedded receiver key"
+    );
 }
 
 #[test]

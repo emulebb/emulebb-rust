@@ -44,8 +44,8 @@ pub struct DecryptResult {
     pub was_obfuscated: bool,
     /// Sender verify key recovered from the encrypted trailer.
     pub sender_verify_key: Option<u32>,
-    /// Whether the packet proved our receiver verify key instead of using
-    /// NodeID-mode request obfuscation.
+    /// Whether the encrypted envelope carried our valid receiver verify key.
+    /// This is independent of whether NodeID or receiver-key RC4 mode decoded it.
     pub receiver_verify_key_valid: bool,
 }
 

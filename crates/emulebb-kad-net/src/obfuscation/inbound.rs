@@ -66,6 +66,11 @@ impl ObfuscationLayer {
                 continue;
             }
 
+            let receiver_verify_key = u32::from_le_bytes(
+                decrypted[5 + padding_len..5 + padding_len + 4]
+                    .try_into()
+                    .unwrap(),
+            );
             let sender_verify_key = u32::from_le_bytes(
                 decrypted[5 + padding_len + 4..5 + padding_len + 8]
                     .try_into()
@@ -82,7 +87,10 @@ impl ObfuscationLayer {
                 data: payload,
                 was_obfuscated: true,
                 sender_verify_key: Some(sender_verify_key),
-                receiver_verify_key_valid: matches!(mode, KadKeyMode::ReceiverVerifyKey),
+                // The encrypted envelope always carries the receiver key. Stock
+                // validates it against the locally derived key even when the RC4
+                // stream itself was selected by NodeID rather than by that key.
+                receiver_verify_key_valid: receiver_verify_key == self.verify_key_for_ip(remote_ip),
             };
         }
 
