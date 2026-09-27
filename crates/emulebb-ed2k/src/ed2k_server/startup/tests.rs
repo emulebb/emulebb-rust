@@ -93,26 +93,35 @@ async fn server_list_request_gated_on_add_servers_from_server() {
 }
 
 #[test]
-fn offer_files_uses_bind_ip_for_dialable_same_host_lan_sources() {
+fn old_server_offer_files_use_assigned_high_id_behind_nat() {
     let bind_ip = Ipv4Addr::new(192, 168, 1, 210);
-    let synthetic_duplicate_high_id = u32::from_le_bytes([1, 0, 0, 1]);
-    let payload = encode_offer_files_payload(
-        &[one_entry()],
-        Some(synthetic_duplicate_high_id),
-        bind_ip,
-        4662,
-        None,
-    );
+    let assigned_high_id = u32::from_le_bytes([203, 0, 113, 42]);
+    let payload =
+        encode_offer_files_payload(&[one_entry()], Some(assigned_high_id), bind_ip, 4662, None);
 
     assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 1);
     assert_eq!(
         u32::from_le_bytes(payload[20..24].try_into().unwrap()),
-        u32::from_le_bytes(bind_ip.octets())
+        assigned_high_id
     );
     assert_eq!(
         u16::from_le_bytes(payload[24..26].try_into().unwrap()),
         4662
     );
+}
+
+#[test]
+fn old_server_offer_files_hide_endpoint_for_low_id_client() {
+    let payload = encode_offer_files_payload(
+        &[one_entry()],
+        Some(42),
+        Ipv4Addr::new(192, 168, 1, 210),
+        4662,
+        None,
+    );
+
+    assert_eq!(u32::from_le_bytes(payload[20..24].try_into().unwrap()), 0);
+    assert_eq!(u16::from_le_bytes(payload[24..26].try_into().unwrap()), 0);
 }
 
 #[test]

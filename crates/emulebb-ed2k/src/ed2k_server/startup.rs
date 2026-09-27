@@ -119,13 +119,13 @@ fn encode_offer_files_payload_at_cursor(
     cursor: usize,
     already_published: Option<&HashSet<[u8; 16]>>,
     client_id: Option<u32>,
-    bind_ip: Ipv4Addr,
+    _bind_ip: Ipv4Addr,
     tcp_port: u16,
     server_flags: Option<u32>,
     max_offer_files: usize,
 ) -> EncodedOfferFilesPayload {
     let (advertised_client_id, advertised_client_port) =
-        advertised_client_endpoint_for_offer_file(client_id, bind_ip, tcp_port, server_flags);
+        advertised_client_endpoint_for_offer_file(client_id, tcp_port, server_flags);
     // eMule offers a >4GB file only to a server advertising LARGEFILES TCP
     // support (SharedFileList.cpp:2649); otherwise the file is excluded from the
     // candidate set (and thus from pagination) entirely.
@@ -196,7 +196,6 @@ fn encode_offer_files_payload_at_cursor(
 
 fn advertised_client_endpoint_for_offer_file(
     client_id: Option<u32>,
-    bind_ip: Ipv4Addr,
     tcp_port: u16,
     server_flags: Option<u32>,
 ) -> (u32, u16) {
@@ -206,9 +205,11 @@ fn advertised_client_endpoint_for_offer_file(
             OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT,
         );
     }
-    let bind_client_id = u32::from_le_bytes(bind_ip.octets());
     match client_id {
-        Some(client_id) if !is_low_id(client_id) => (bind_client_id, tcp_port),
+        // WHY: this server-assigned HighID is the public endpoint identity the
+        // server can route to. The local bind address may be wildcard/private
+        // and is therefore wrong for old-server publishing behind NAT.
+        Some(client_id) if !is_low_id(client_id) => (client_id, tcp_port),
         _ => (0, 0),
     }
 }
