@@ -30,11 +30,15 @@ pub enum Ed2kServerListEvent {
     /// A connect to `endpoint` succeeded (login accepted); the core clears the
     /// fail-count (eMule resets the count on a successful response/connect).
     ConnectSucceeded { endpoint: String },
-    /// Name/description refreshed through UDP `OP_SERVER_DESC_RES`.
+    /// Metadata refreshed through UDP `OP_SERVER_DESC_RES` or a connected
+    /// server's `OP_SERVERMESSAGE` metadata lines.
     MetadataUpdated {
         endpoint: String,
         name: Option<String>,
         description: Option<String>,
+        dynamic_host: Option<String>,
+        version: Option<String>,
+        auxiliary_ports: Vec<u16>,
     },
     /// Challenge-validated UDP status and obfuscation metadata. The UDP key is
     /// bound to the public client ID observed when the reply was accepted.

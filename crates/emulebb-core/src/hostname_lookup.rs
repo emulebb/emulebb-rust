@@ -464,6 +464,7 @@ mod tests {
             address: address.to_string(),
             ip: ip.to_string(),
             dyn_ip: dyn_ip.to_string(),
+            auxiliary_ports: Vec::new(),
             port: 4661,
             users: 0,
             files: 0,

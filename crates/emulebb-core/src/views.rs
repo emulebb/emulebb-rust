@@ -514,6 +514,7 @@ pub(crate) fn server_info_from_parts(
         current,
         description: description.unwrap_or_default().to_string(),
         dyn_ip: String::new(),
+        auxiliary_ports: Vec::new(),
         failed_count: 0,
         hard_files: 0,
         ip: String::new(),
@@ -565,6 +566,9 @@ pub(crate) fn apply_server_connection_flags(
 pub(crate) struct ServerLiveDetails {
     pub(crate) name: Option<String>,
     pub(crate) description: Option<String>,
+    pub(crate) dynamic_host: Option<String>,
+    pub(crate) version: Option<String>,
+    pub(crate) auxiliary_ports: Vec<u16>,
     pub(crate) users: Option<u32>,
     pub(crate) files: Option<u32>,
     pub(crate) max_users: Option<u32>,
@@ -585,6 +589,15 @@ pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLi
     }
     if let Some(description) = live.description.as_ref() {
         server.description = description.clone();
+    }
+    if let Some(dynamic_host) = live.dynamic_host.as_ref() {
+        server.dyn_ip = dynamic_host.clone();
+    }
+    if let Some(version) = live.version.as_ref() {
+        server.version = version.clone();
+    }
+    if !live.auxiliary_ports.is_empty() {
+        server.auxiliary_ports.clone_from(&live.auxiliary_ports);
     }
     if let Some(users) = live.users {
         server.users = u64::from(users);

@@ -232,6 +232,7 @@ mod tests {
                 port,
                 name: None,
                 description: None,
+                dynamic_host: None,
                 udp_flags: 0,
                 udp_key: 0,
                 udp_key_ip: 0,

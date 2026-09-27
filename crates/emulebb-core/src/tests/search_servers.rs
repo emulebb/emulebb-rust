@@ -345,12 +345,18 @@ async fn udp_server_description_metadata_updates_the_persisted_server() {
         "192.0.2.44:4661",
         Some("New Name".to_string()),
         Some("New Description".to_string()),
+        Some("dyn.example".to_string()),
+        Some("17.06".to_string()),
+        vec![4662, 4663],
     )
     .await;
 
     let server = core.server("192.0.2.44:4661").await.expect("server");
     assert_eq!(server.name, "New Name");
     assert_eq!(server.description, "New Description");
+    assert_eq!(server.dyn_ip, "dyn.example");
+    assert_eq!(server.version, "17.06");
+    assert_eq!(server.auxiliary_ports, vec![4662, 4663]);
 }
 
 #[tokio::test]

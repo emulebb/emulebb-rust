@@ -276,7 +276,8 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT address, port, name, description, server_priority, static_server,
+            SELECT address, port, name, description, dynamic_host, auxiliary_ports,
+                   server_priority, static_server,
                    enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
                    soft_files, hard_files, version,
                    obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key, udp_key_ip
@@ -291,23 +292,25 @@ impl super::MetadataStore {
                 port: row.get::<_, i64>(1)? as u16,
                 name: row.get(2)?,
                 description: row.get(3)?,
-                server_priority: row.get(4)?,
-                static_server: row.get::<_, i64>(5)? != 0,
-                enabled: row.get::<_, i64>(6)? != 0,
-                failed_count: row.get::<_, i64>(7)? as u32,
-                ping_ms: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
-                users: row.get::<_, Option<i64>>(9)?.unwrap_or_default() as u64,
-                files: row.get::<_, Option<i64>>(10)?.unwrap_or_default() as u64,
-                max_users: row.get::<_, Option<i64>>(11)?.unwrap_or_default() as u64,
-                low_id_users: row.get::<_, Option<i64>>(12)?.unwrap_or_default() as u64,
-                soft_files: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u64,
-                hard_files: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u64,
-                version: row.get(15)?,
-                obfuscation_tcp_port: row.get::<_, Option<i64>>(16)?.map(|value| value as u16),
-                obfuscation_udp_port: row.get::<_, Option<i64>>(17)?.map(|value| value as u16),
-                udp_flags: row.get::<_, Option<i64>>(18)?.map(|value| value as u32),
-                udp_key: row.get::<_, Option<i64>>(19)?.map(|value| value as u32),
-                udp_key_ip: row.get::<_, Option<i64>>(20)?.map(|value| value as u32),
+                dynamic_host: row.get(4)?,
+                auxiliary_ports: decode_auxiliary_ports(&row.get::<_, String>(5)?),
+                server_priority: row.get(6)?,
+                static_server: row.get::<_, i64>(7)? != 0,
+                enabled: row.get::<_, i64>(8)? != 0,
+                failed_count: row.get::<_, i64>(9)? as u32,
+                ping_ms: row.get::<_, Option<i64>>(10)?.map(|value| value as u32),
+                users: row.get::<_, Option<i64>>(11)?.unwrap_or_default() as u64,
+                files: row.get::<_, Option<i64>>(12)?.unwrap_or_default() as u64,
+                max_users: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u64,
+                low_id_users: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u64,
+                soft_files: row.get::<_, Option<i64>>(15)?.unwrap_or_default() as u64,
+                hard_files: row.get::<_, Option<i64>>(16)?.unwrap_or_default() as u64,
+                version: row.get(17)?,
+                obfuscation_tcp_port: row.get::<_, Option<i64>>(18)?.map(|value| value as u16),
+                obfuscation_udp_port: row.get::<_, Option<i64>>(19)?.map(|value| value as u16),
+                udp_flags: row.get::<_, Option<i64>>(20)?.map(|value| value as u32),
+                udp_key: row.get::<_, Option<i64>>(21)?.map(|value| value as u32),
+                udp_key_ip: row.get::<_, Option<i64>>(22)?.map(|value| value as u32),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -319,16 +322,19 @@ impl super::MetadataStore {
         self.connection()?.execute(
             r#"
             INSERT INTO servers(
-                address, port, name, description, server_priority, static_server,
+                address, port, name, description, dynamic_host, auxiliary_ports,
+                server_priority, static_server,
                 enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
                 soft_files, hard_files,
                 version, obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key,
                 udp_key_ip, first_seen_ms, last_seen_ms, deleted_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22, NULL)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24, NULL)
             ON CONFLICT(address, port) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
+                dynamic_host = excluded.dynamic_host,
+                auxiliary_ports = excluded.auxiliary_ports,
                 server_priority = excluded.server_priority,
                 static_server = excluded.static_server,
                 enabled = excluded.enabled,
@@ -354,6 +360,8 @@ impl super::MetadataStore {
                 i64::from(server.port),
                 server.name,
                 server.description,
+                server.dynamic_host,
+                encode_auxiliary_ports(&server.auxiliary_ports),
                 server.server_priority,
                 bool_to_i64(server.static_server),
                 bool_to_i64(server.enabled),
@@ -428,6 +436,27 @@ impl super::MetadataStore {
         )?;
         Ok(())
     }
+}
+
+fn encode_auxiliary_ports(ports: &[u16]) -> String {
+    ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn decode_auxiliary_ports(value: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for value in value.split(',') {
+        if let Ok(port) = value.parse::<u16>()
+            && port != 0
+            && !ports.contains(&port)
+        {
+            ports.push(port);
+        }
+    }
+    ports
 }
 
 #[cfg(test)]
@@ -510,6 +539,8 @@ mod tests {
                 port: 4661,
                 name: "Test Server".to_string(),
                 description: "Synthetic".to_string(),
+                dynamic_host: "server.example".to_string(),
+                auxiliary_ports: vec![4662, 4663],
                 server_priority: "high".to_string(),
                 static_server: true,
                 enabled: true,
@@ -535,6 +566,8 @@ mod tests {
                 port: 4661,
                 name: "Test Server".to_string(),
                 description: "Synthetic".to_string(),
+                dynamic_host: "server.example".to_string(),
+                auxiliary_ports: vec![4662, 4663],
                 server_priority: "high".to_string(),
                 static_server: true,
                 enabled: false,
@@ -558,6 +591,8 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert!(!servers[0].enabled);
         assert_eq!(servers[0].name, "Test Server");
+        assert_eq!(servers[0].dynamic_host, "server.example");
+        assert_eq!(servers[0].auxiliary_ports, vec![4662, 4663]);
         assert_eq!(servers[0].endpoint(), "192.0.2.10:4661");
         assert_eq!(servers[0].max_users, 25);
         assert_eq!(servers[0].low_id_users, 5);

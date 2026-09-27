@@ -110,6 +110,7 @@ impl EmulebbCore {
                 name: Some(server.name.clone()).filter(|name| !name.is_empty()),
                 description: Some(server.description.clone())
                     .filter(|description| !description.is_empty()),
+                dynamic_host: Some(server.dyn_ip.clone()).filter(|host| !host.is_empty()),
                 udp_flags: server.udp_flags.unwrap_or_default(),
                 udp_key: server.udp_key.unwrap_or_default(),
                 udp_key_ip: server.udp_key_ip.unwrap_or_default(),

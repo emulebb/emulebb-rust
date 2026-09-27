@@ -2811,6 +2811,9 @@ impl EmulebbCore {
         let live = ServerLiveDetails {
             name: state.server_name.clone(),
             description: state.server_description.clone(),
+            dynamic_host: state.server_dynamic_host.clone(),
+            version: state.server_version.clone(),
+            auxiliary_ports: state.server_auxiliary_ports.clone(),
             users: state.server_users,
             files: state.server_files,
             max_users: state.server_max_users,

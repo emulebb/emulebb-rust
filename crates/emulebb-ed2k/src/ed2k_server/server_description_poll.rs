@@ -212,6 +212,9 @@ async fn poll_one_server_with_timeouts(
         endpoint: server.entry.base_endpoint_text(),
         name: metadata.name,
         description: metadata.description,
+        dynamic_host: metadata.dynamic_host,
+        version: metadata.version,
+        auxiliary_ports: metadata.auxiliary_ports,
     });
     Ok(())
 }
@@ -372,6 +375,9 @@ mod tests {
                 endpoint: SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)).to_string(),
                 name: Some("Server".to_string()),
                 description: Some("Description".to_string()),
+                dynamic_host: None,
+                version: None,
+                auxiliary_ports: Vec::new(),
             }
         );
     }

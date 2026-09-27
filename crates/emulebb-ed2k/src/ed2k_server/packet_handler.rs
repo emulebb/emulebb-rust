@@ -1,10 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use crate::ed2k_tcp::{connect_callback_peer, enrich_hello_identity};
 
+use super::server_description::valid_dynamic_host;
 use super::server_events::Ed2kServerListEvent;
 use super::types::{CallbackRequest, ServerSessionContext};
 use super::{
@@ -187,7 +188,47 @@ pub(super) async fn handle_server_packet(
         }
         OP_SERVERMESSAGE => {
             if let Some(message) = decode_ed2k_string(&packet.payload)? {
-                info!("ED2K server message from {}: {}", session.endpoint, message);
+                let decoded = decode_server_message(&message);
+                for line in &decoded.lines {
+                    match line.kind {
+                        ServerMessageLineKind::Error => {
+                            error!("ED2K server error from {}: {}", session.endpoint, line.text);
+                        }
+                        ServerMessageLineKind::Warning => {
+                            warn!(
+                                "ED2K server warning from {}: {}",
+                                session.endpoint, line.text
+                            );
+                        }
+                        ServerMessageLineKind::Information => {
+                            info!(
+                                "ED2K server message from {}: {}",
+                                session.endpoint, line.text
+                            );
+                        }
+                    }
+                }
+                if decoded.version.is_some() || decoded.dynamic_host.is_some() {
+                    {
+                        let mut guard = session.state.write().await;
+                        if let Some(version) = decoded.version.as_ref() {
+                            guard.server_version = Some(version.clone());
+                        }
+                        if let Some(dynamic_host) = decoded.dynamic_host.as_ref() {
+                            guard.server_dynamic_host = Some(dynamic_host.clone());
+                        }
+                    }
+                    if let Some(sender) = context.server_list_events.as_ref() {
+                        let _ = sender.send(Ed2kServerListEvent::MetadataUpdated {
+                            endpoint: session.endpoint.to_string(),
+                            name: None,
+                            description: None,
+                            dynamic_host: decoded.dynamic_host,
+                            version: decoded.version,
+                            auxiliary_ports: Vec::new(),
+                        });
+                    }
+                }
             }
             if allow_probe_search {
                 maybe_send_probe_search(session, context).await?;
@@ -259,6 +300,78 @@ pub(super) async fn handle_server_packet(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerMessageLineKind {
+    Information,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerMessageLine {
+    kind: ServerMessageLineKind,
+    text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DecodedServerMessage {
+    lines: Vec<ServerMessageLine>,
+    version: Option<String>,
+    dynamic_host: Option<String>,
+}
+
+fn decode_server_message(message: &str) -> DecodedServerMessage {
+    const VERSION_PREFIX: &str = "server version";
+    const DYNAMIC_IP_PREFIX: &str = "[emDynIP: ";
+
+    let mut decoded = DecodedServerMessage::default();
+    for line in message
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let kind = if line.starts_with("ERROR") {
+            ServerMessageLineKind::Error
+        } else if line.starts_with("WARNING") {
+            ServerMessageLineKind::Warning
+        } else {
+            ServerMessageLineKind::Information
+        };
+        let text = match kind {
+            ServerMessageLineKind::Error => line["ERROR".len()..]
+                .trim_start_matches([':', ' '])
+                .to_string(),
+            ServerMessageLineKind::Warning => line["WARNING".len()..]
+                .trim_start_matches([':', ' '])
+                .to_string(),
+            ServerMessageLineKind::Information => line.to_string(),
+        };
+        decoded.lines.push(ServerMessageLine { kind, text });
+
+        if line.len() >= VERSION_PREFIX.len()
+            && line[..VERSION_PREFIX.len()].eq_ignore_ascii_case(VERSION_PREFIX)
+        {
+            let version = line[VERSION_PREFIX.len()..]
+                .trim_start_matches([':', ' '])
+                .trim();
+            if !version.is_empty() {
+                decoded.version = Some(version.to_string());
+            }
+        }
+
+        if let Some(start) = line.find(DYNAMIC_IP_PREFIX) {
+            let value_start = start + DYNAMIC_IP_PREFIX.len();
+            if let Some(relative_end) = line[value_start..].find(']') {
+                let value = &line[value_start..value_start + relative_end];
+                if let Some(dynamic_host) = valid_dynamic_host(value) {
+                    decoded.dynamic_host = Some(dynamic_host);
+                }
+            }
+        }
+    }
+    decoded
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,4 +468,33 @@ pub(super) fn decode_server_ident(payload: &[u8]) -> Result<(Option<String>, Opt
         }
     }
     Ok((name, description))
+}
+
+#[cfg(test)]
+mod server_message_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_stock_server_message_semantics() {
+        let decoded = decode_server_message(
+            "Server Version: 17.6\r\nWARNING: maintenance soon\nhello [emDynIP: srv.example]\rERROR bad request",
+        );
+        assert_eq!(decoded.version.as_deref(), Some("17.6"));
+        assert_eq!(decoded.dynamic_host.as_deref(), Some("srv.example"));
+        assert_eq!(decoded.lines.len(), 4);
+        assert_eq!(decoded.lines[1].kind, ServerMessageLineKind::Warning);
+        assert_eq!(decoded.lines[1].text, "maintenance soon");
+        assert_eq!(decoded.lines[3].kind, ServerMessageLineKind::Error);
+        assert_eq!(decoded.lines[3].text, "bad request");
+    }
+
+    #[test]
+    fn version_prefix_is_case_insensitive_and_ipv4_dynip_is_rejected() {
+        let decoded = decode_server_message(
+            "SERVER VERSION 18.01\n[emDynIP: 192.0.2.8]\nwarning stays informational",
+        );
+        assert_eq!(decoded.version.as_deref(), Some("18.01"));
+        assert_eq!(decoded.dynamic_host, None);
+        assert_eq!(decoded.lines[2].kind, ServerMessageLineKind::Information);
+    }
 }

@@ -252,6 +252,9 @@ impl EmulebbCore {
         endpoint: &str,
         name: Option<String>,
         description: Option<String>,
+        dynamic_host: Option<String>,
+        version: Option<String>,
+        auxiliary_ports: Vec<u16>,
     ) {
         let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
             return;
@@ -264,6 +267,15 @@ impl EmulebbCore {
         }
         if let Some(description) = description {
             server.description = description;
+        }
+        if let Some(dynamic_host) = dynamic_host {
+            server.dyn_ip = dynamic_host;
+        }
+        if let Some(version) = version {
+            server.version = version;
+        }
+        if !auxiliary_ports.is_empty() {
+            server.auxiliary_ports = auxiliary_ports;
         }
         let enabled = !self
             .state

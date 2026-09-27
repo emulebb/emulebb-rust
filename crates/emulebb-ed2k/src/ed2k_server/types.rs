@@ -52,6 +52,11 @@ pub struct Ed2kServerState {
     pub server_name: Option<String>,
     /// Last advertised server description, when known.
     pub server_description: Option<String>,
+    /// Dynamic DNS host and version advertised by the connected server.
+    pub server_dynamic_host: Option<String>,
+    pub server_version: Option<String>,
+    /// Alternate TCP ports advertised in a server-description response.
+    pub server_auxiliary_ports: Vec<u16>,
     /// Whether a server TCP connection attempt is in progress.
     pub connecting: bool,
     /// Whether the current session is established.

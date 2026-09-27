@@ -13,6 +13,7 @@ pub(super) struct ConfiguredServerEntry {
     pub(super) port: u16,
     pub(super) name: Option<String>,
     pub(super) description: Option<String>,
+    pub(super) dynamic_host: Option<String>,
     pub(super) udp_flags: u32,
     pub(super) udp_key: u32,
     pub(super) udp_key_ip: u32,
@@ -49,6 +50,7 @@ impl ConfiguredServerEntry {
             port: endpoint.port(),
             name: None,
             description: None,
+            dynamic_host: None,
             udp_flags: 0,
             udp_key: 0,
             udp_key_ip: 0,
@@ -68,6 +70,7 @@ impl ConfiguredServerEntry {
             port: entry.port,
             name: entry.name.clone(),
             description: entry.description.clone(),
+            dynamic_host: entry.dynamic_host.clone(),
             udp_flags: entry.udp_flags,
             udp_key: entry.udp_key,
             udp_key_ip: entry.udp_key_ip,
@@ -192,8 +195,9 @@ pub(super) fn retain_live_servers(
 pub(super) async fn resolve_server_entry(
     entry: &ConfiguredServerEntry,
 ) -> Result<ResolvedServerEntry> {
-    let lookup = format!("{}:{}", entry.host, entry.port);
-    let ip = if let Ok(parsed_ip) = entry.host.parse::<Ipv4Addr>() {
+    let resolution_host = entry.dynamic_host.as_deref().unwrap_or(&entry.host);
+    let lookup = format!("{resolution_host}:{}", entry.port);
+    let ip = if let Ok(parsed_ip) = resolution_host.parse::<Ipv4Addr>() {
         parsed_ip
     } else {
         lookup_host(&lookup)

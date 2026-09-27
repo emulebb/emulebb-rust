@@ -72,6 +72,9 @@ fn server_live_details_overlay_protocol_status() {
     let live = ServerLiveDetails {
         name: Some("live name".to_string()),
         description: Some("live description".to_string()),
+        dynamic_host: Some("dyn.example".to_string()),
+        version: Some("17.06".to_string()),
+        auxiliary_ports: vec![4662, 4663],
         users: Some(4242),
         files: Some(99000),
         max_users: Some(5000),
@@ -90,6 +93,9 @@ fn server_live_details_overlay_protocol_status() {
 
     assert_eq!(server.name, "live name");
     assert_eq!(server.description, "live description");
+    assert_eq!(server.dyn_ip, "dyn.example");
+    assert_eq!(server.version, "17.06");
+    assert_eq!(server.auxiliary_ports, vec![4662, 4663]);
     assert_eq!(server.users, 4242);
     assert_eq!(server.files, 99000);
     assert_eq!(server.max_users, 5000);

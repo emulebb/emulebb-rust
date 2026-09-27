@@ -431,9 +431,19 @@ pub(crate) async fn run_ed2k_server_list_events(
                 endpoint,
                 name,
                 description,
+                dynamic_host,
+                version,
+                auxiliary_ports,
             } => {
-                core.note_ed2k_server_metadata(&endpoint, name, description)
-                    .await;
+                core.note_ed2k_server_metadata(
+                    &endpoint,
+                    name,
+                    description,
+                    dynamic_host,
+                    version,
+                    auxiliary_ports,
+                )
+                .await;
             }
             Ed2kServerListEvent::StatusUpdated {
                 endpoint,

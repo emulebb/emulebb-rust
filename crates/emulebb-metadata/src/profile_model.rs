@@ -24,6 +24,8 @@ pub struct MetadataServer {
     pub port: u16,
     pub name: String,
     pub description: String,
+    pub dynamic_host: String,
+    pub auxiliary_ports: Vec<u16>,
     pub server_priority: String,
     pub static_server: bool,
     pub enabled: bool,

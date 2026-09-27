@@ -300,6 +300,8 @@ CREATE TABLE servers (
     port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
     name TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
+    dynamic_host TEXT NOT NULL DEFAULT '',
+    auxiliary_ports TEXT NOT NULL DEFAULT '',
     server_priority TEXT NOT NULL DEFAULT 'normal' CHECK(server_priority IN ('low', 'normal', 'high')),
     static_server INTEGER NOT NULL DEFAULT 0 CHECK(static_server IN (0, 1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),

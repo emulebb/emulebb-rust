@@ -217,6 +217,9 @@ const SERVER_UDP_FLAG_TCPOBFUSCATION: u32 = 0x0000_0400;
 
 const ST_SERVERNAME: u8 = 0x01;
 const ST_DESCRIPTION: u8 = 0x0B;
+const ST_DYNIP: u8 = 0x85;
+const ST_VERSION: u8 = 0x91;
+const ST_AUXPORTSLIST: u8 = 0x93;
 const FT_FILENAME: u8 = 0x01;
 const FT_FILESIZE: u8 = 0x02;
 const FT_FILETYPE: u8 = 0x03;

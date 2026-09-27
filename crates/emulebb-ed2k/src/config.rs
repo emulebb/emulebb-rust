@@ -149,6 +149,9 @@ pub struct Ed2kServerEntry {
     pub port: u16,
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Dynamic DNS name learned from the server. The stable `host:port` remains
+    /// the list identity while outbound resolution follows this name.
+    pub dynamic_host: Option<String>,
     pub udp_flags: u32,
     pub udp_key: u32,
     pub udp_key_ip: u32,
