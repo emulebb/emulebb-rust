@@ -98,14 +98,19 @@ fn search_results_decoder_preserves_source_identity_and_metadata() {
 }
 
 #[test]
-fn search_results_decoder_rejects_invalid_more_marker() {
+fn search_results_decoder_tolerates_stock_diagnostic_trailing_data() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());
     payload.push(0x7F);
 
-    let error = decode_search_result_page(&payload).unwrap_err().to_string();
+    let page = decode_search_result_page(&payload).unwrap();
+    assert!(page.files.is_empty());
+    assert!(!page.more_results_available);
 
-    assert!(error.contains("More marker"));
+    payload.extend_from_slice(&[0x01, 0x02]);
+    let page = decode_search_result_page(&payload).unwrap();
+    assert!(page.files.is_empty());
+    assert!(!page.more_results_available);
 }
 
 #[test]

@@ -38,13 +38,7 @@ pub(super) fn decode_search_results(payload: &[u8]) -> Result<SearchResultSummar
 }
 
 pub(super) fn decode_search_result_page(payload: &[u8]) -> Result<SearchResultPage> {
-    let (page, rest) = decode_search_result_page_from(payload)?;
-    if !rest.is_empty() {
-        anyhow::bail!(
-            "unexpected ED2K search trailing data len={} after result page",
-            rest.len()
-        );
-    }
+    let (page, _) = decode_search_result_page_from(payload)?;
     Ok(page)
 }
 
@@ -121,18 +115,13 @@ fn decode_search_result_page_from(payload: &[u8]) -> Result<(SearchResultPage, &
         cursor = rest;
     }
 
-    let (more_results_available, rest) = match cursor {
-        [] => (false, &[][..]),
-        [marker @ (0x00 | 0x01)] => (*marker != 0, &[][..]),
-        [marker @ (0x00 | 0x01), rest @ ..] if udp_chain_matches(rest, OP_GLOBSEARCHRES) => {
-            (*marker != 0, &rest[2..])
-        }
-        rest if udp_chain_matches(rest, OP_GLOBSEARCHRES) => (false, &rest[2..]),
-        [marker] => anyhow::bail!("invalid ED2K search More marker 0x{marker:02X}"),
-        _ => anyhow::bail!(
-            "unexpected ED2K search trailing data len={} after result page",
-            cursor.len()
-        ),
+    // Stock treats the tail as a More flag only when exactly one byte remains
+    // and that byte is 0 or 1. A different one-byte value or any longer tail is
+    // diagnostic add-data: it is ignored and the page completes normally.
+    let more_results_available = match cursor {
+        [0x00] => false,
+        [0x01] => true,
+        _ => false,
     };
 
     Ok((
@@ -140,7 +129,7 @@ fn decode_search_result_page_from(payload: &[u8]) -> Result<(SearchResultPage, &
             files,
             more_results_available,
         },
-        rest,
+        &[][..],
     ))
 }
 
