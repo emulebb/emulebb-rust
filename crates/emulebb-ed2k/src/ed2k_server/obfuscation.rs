@@ -3,9 +3,30 @@ use md5::compute as md5_compute;
 use num_bigint::BigUint;
 use rand::Rng;
 
+use crate::ed2k_tcp::EMULE_CRYPT_REQUIRES;
+
 use super::{
     EMULE_TCP_CRYPT_DISCARD_LEN, OP_EDONKEYPROT, OP_EMULEPROT, OP_PACKEDPROT, ResolvedServerEntry,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServerTransportMode {
+    Plaintext,
+    Obfuscated,
+}
+
+impl ServerTransportMode {
+    pub(super) fn is_obfuscated(self) -> bool {
+        matches!(self, Self::Obfuscated)
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Plaintext => "plaintext",
+            Self::Obfuscated => "obfuscated",
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct Rc4KeyStream {
@@ -63,7 +84,56 @@ pub(super) fn should_use_server_obfuscation(
     server: &ResolvedServerEntry,
 ) -> bool {
     connect_options != 0
-        && (server.entry.supports_obfuscation_tcp() || !server.entry.has_obfuscation_metadata())
+        && (connect_options & EMULE_CRYPT_REQUIRES != 0
+            || server.entry.supports_obfuscation_tcp()
+            || !server.entry.has_obfuscation_metadata())
+}
+
+/// Returns the bounded transport order for one resolved server-session attempt.
+///
+/// Stock first probes metadata-poor or crypt-capable servers with obfuscation,
+/// then falls back to their ordinary endpoint after that transport fails. A
+/// crypt-required identity must never be downgraded.
+pub(super) fn server_transport_attempts(
+    connect_options: u8,
+    server: &ResolvedServerEntry,
+) -> Vec<ServerTransportMode> {
+    if connect_options & EMULE_CRYPT_REQUIRES != 0 {
+        return vec![ServerTransportMode::Obfuscated];
+    }
+    if !should_use_server_obfuscation(connect_options, server) {
+        return vec![ServerTransportMode::Plaintext];
+    }
+    vec![
+        ServerTransportMode::Obfuscated,
+        ServerTransportMode::Plaintext,
+    ]
+}
+
+/// Runs one bounded transport plan, stopping immediately after the first
+/// successful attempt and returning the final failure only after exhaustion.
+pub(super) async fn run_server_transport_attempts<T, E, F, Fut, N>(
+    attempts: &[ServerTransportMode],
+    mut attempt: F,
+    mut note_failure: N,
+) -> std::result::Result<(T, ServerTransportMode), E>
+where
+    F: FnMut(ServerTransportMode) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+    N: FnMut(ServerTransportMode, &E, bool),
+{
+    let mut last_error = None;
+    for (index, mode) in attempts.iter().copied().enumerate() {
+        match attempt(mode).await {
+            Ok(value) => return Ok((value, mode)),
+            Err(error) => {
+                let will_retry = index + 1 < attempts.len();
+                note_failure(mode, &error, will_retry);
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.expect("server transport attempt plan must not be empty"))
 }
 
 pub(super) fn random_nonzero_biguint(byte_len: usize) -> BigUint {

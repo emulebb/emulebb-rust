@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use tokio::{
     sync::{Mutex, RwLock},
@@ -17,12 +17,13 @@ use super::{
     BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
     Ed2kServerSearchInbox, Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST,
     OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT, PendingBackgroundServerSearch,
-    ResolvedServerEntry, ServerSession, ServerSessionPhase, annotate_found_sources_server,
-    decode_found_sources, decode_search_result_page, dump_ed2k_server_meta, encode_login_request,
-    encode_packet, fail_background_search_request, fail_pending_background_search,
-    format_connect_options, handle_background_udp_packet, handle_server_packet,
-    log_search_result_page, login_identity_for_server_transport, server_udp_endpoint,
-    should_use_server_obfuscation, start_background_server_search, validate_found_sources,
+    ResolvedServerEntry, ServerSession, ServerSessionPhase, ServerTransportMode,
+    annotate_found_sources_server, decode_found_sources, decode_search_result_page,
+    dump_ed2k_server_loop_meta, dump_ed2k_server_meta, encode_login_request, encode_packet,
+    fail_background_search_request, fail_pending_background_search, format_connect_options,
+    handle_background_udp_packet, handle_server_packet, log_search_result_page,
+    login_identity_for_server_transport, run_server_transport_attempts, server_transport_attempts,
+    server_udp_endpoint, start_background_server_search, validate_found_sources,
 };
 
 /// Wakeup cadence used to drive the periodic UDP server-status ping when the
@@ -36,23 +37,52 @@ pub(super) enum ServerSessionExit {
     RestartPreferredOrder,
 }
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "linear protocol orchestration flow"
-)]
-pub(super) async fn run_one_server_session(
+async fn connect_server_transport(
     server: &ResolvedServerEntry,
     context: &ServerSessionContext,
-    search_inbox: &Arc<Mutex<Ed2kServerSearchInbox>>,
-) -> Result<ServerSessionExit> {
-    let use_server_obfuscation =
-        should_use_server_obfuscation(context.hello_identity.connect_options, server);
+    observed_external_ip: Option<&str>,
+) -> Result<ServerSession> {
+    let attempts = server_transport_attempts(context.hello_identity.connect_options, server);
+    let base_endpoint = server.base_endpoint().to_string();
+    let (session, _) = run_server_transport_attempts(
+        &attempts,
+        |mode| connect_server_transport_attempt(server, context, observed_external_ip, mode),
+        |mode, error, will_retry| {
+            if will_retry {
+                // WHY: metadata-poor servers are probed with obfuscation first,
+                // but the transport decision must not become an infinite
+                // same-mode loop when their ordinary endpoint is plaintext.
+                dump_ed2k_server_loop_meta(
+                    &base_endpoint,
+                    "transport_fallback",
+                    format!(
+                        "server transport failed mode={} detail={error}; retrying mode=plaintext endpoint={}",
+                        mode.label(),
+                        server.base_endpoint()
+                    ),
+                );
+                warn!(
+                    "ED2K server {} transport={} failed: {error}; retrying plaintext endpoint={}",
+                    server.base_endpoint(),
+                    mode.label(),
+                    server.base_endpoint()
+                );
+            }
+        },
+    )
+    .await?;
+    Ok(session)
+}
+
+async fn connect_server_transport_attempt(
+    server: &ResolvedServerEntry,
+    context: &ServerSessionContext,
+    observed_external_ip: Option<&str>,
+    mode: ServerTransportMode,
+) -> Result<ServerSession> {
+    let use_server_obfuscation = mode.is_obfuscated();
     let mut login_identity =
         login_identity_for_server_transport(context.hello_identity, use_server_obfuscation);
-    // "upnp ready": advertise the externally-reachable ports at login time (read
-    // dynamically), so a UPnP mapping that became ready or was remapped after
-    // startup yields the right HighID callback TCP port + UDP port on (re)connect.
-    // The startup-snapshot identity carries the internal ports as the fallback.
     login_identity.tcp_port = context
         .public_ip
         .advertised_tcp_port(login_identity.tcp_port);
@@ -68,9 +98,56 @@ pub(super) async fn run_one_server_session(
         context.connect_timeout,
     )
     .await?;
-    // Cap each OP_OFFERFILES batch at the connected server's soft file limit
-    // (server_offer_file_limit clamps unknown/oversized to 200, matching MFC).
     session.server_soft_files = server.entry.soft_files;
+    let login_payload = encode_login_request(login_identity);
+    info!(
+        "connected to ED2K server {} name={} trace_id={} role=background bind_ip={} observed_external_ip={} transport={} connect_options={} supports_obf_tcp={} obf_port={} udp_flags=0x{:08X} udp_key_present={} chosen_port={}",
+        server.base_endpoint(),
+        server.entry.display_name(),
+        session.trace_id,
+        context.bind_ip,
+        observed_external_ip.unwrap_or("unknown"),
+        mode.label(),
+        format_connect_options(login_identity.connect_options),
+        server.entry.supports_obfuscation_tcp(),
+        server.entry.obfuscation_port_tcp,
+        server.entry.udp_flags,
+        server.entry.udp_key != 0,
+        transport_endpoint.port(),
+    );
+    if use_server_obfuscation {
+        let login_request = encode_packet(OP_LOGINREQUEST, &login_payload, false)?;
+        tokio::time::timeout(
+            context.connect_timeout,
+            session.negotiate_obfuscation_and_send(&login_request),
+        )
+        .await
+        .with_context(|| {
+            format!("timed out negotiating ED2K server obfuscation with {transport_endpoint}")
+        })??;
+    } else {
+        session.send_packet(OP_LOGINREQUEST, &login_payload).await?;
+    }
+    session.set_phase(
+        ServerSessionPhase::AwaitingIdChange,
+        "login request sent; awaiting OP_IDCHANGE",
+    );
+    Ok(session)
+}
+
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
+pub(super) async fn run_one_server_session(
+    server: &ResolvedServerEntry,
+    context: &ServerSessionContext,
+    search_inbox: &Arc<Mutex<Ed2kServerSearchInbox>>,
+) -> Result<ServerSessionExit> {
+    let nat_status = context.nat.status().await;
+    let observed_external_ip = nat_status.observed_external_addresses.first().cloned();
+    let mut session =
+        connect_server_transport(server, context, observed_external_ip.as_deref()).await?;
     let server_udp_socket = match bind_server_udp_socket(context.bind_ip).await {
         Ok(socket) => {
             info!(
@@ -96,41 +173,6 @@ pub(super) async fn run_one_server_session(
         guard.client_id = None;
         guard.server_flags = None;
     }
-
-    let nat_status = context.nat.status().await;
-    let observed_external_ip = nat_status.observed_external_addresses.first().cloned();
-    let login_payload = encode_login_request(login_identity);
-    info!(
-        "connected to ED2K server {} name={} trace_id={} role=background bind_ip={} observed_external_ip={} transport={} connect_options={} supports_obf_tcp={} obf_port={} udp_flags=0x{:08X} udp_key_present={} chosen_port={}",
-        server.base_endpoint(),
-        server.entry.display_name(),
-        session.trace_id,
-        context.bind_ip,
-        observed_external_ip.as_deref().unwrap_or("unknown"),
-        if use_server_obfuscation {
-            "obfuscated"
-        } else {
-            "plaintext"
-        },
-        format_connect_options(login_identity.connect_options),
-        server.entry.supports_obfuscation_tcp(),
-        server.entry.obfuscation_port_tcp,
-        server.entry.udp_flags,
-        server.entry.udp_key != 0,
-        transport_endpoint.port(),
-    );
-    if use_server_obfuscation {
-        let login_request = encode_packet(OP_LOGINREQUEST, &login_payload, false)?;
-        session
-            .negotiate_obfuscation_and_send(&login_request)
-            .await?;
-    } else {
-        session.send_packet(OP_LOGINREQUEST, &login_payload).await?;
-    }
-    session.set_phase(
-        ServerSessionPhase::AwaitingIdChange,
-        "login request sent; awaiting OP_IDCHANGE",
-    );
 
     let rotation_deadline = context
         .rotation_interval

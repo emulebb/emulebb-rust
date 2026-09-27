@@ -71,8 +71,9 @@ use diagnostics::{dump_ed2k_server_loop_meta, dump_ed2k_server_meta, dump_ed2k_s
 use flags::{format_connect_options, format_server_flags, is_low_id};
 pub use loop_runtime::run_ed2k_server_loop;
 use obfuscation::{
-    Rc4KeyStream, biguint_to_fixed_be, derive_server_cipher, random_non_protocol_marker,
-    random_nonzero_biguint, should_use_server_obfuscation,
+    Rc4KeyStream, ServerTransportMode, biguint_to_fixed_be, derive_server_cipher,
+    random_non_protocol_marker, random_nonzero_biguint, run_server_transport_attempts,
+    server_transport_attempts, should_use_server_obfuscation,
 };
 use packet_codec::{decode_server_payload, encode_packet, server_opcode_allows_compression};
 use packet_handler::handle_server_packet;

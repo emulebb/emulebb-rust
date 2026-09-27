@@ -388,6 +388,163 @@ fn metadata_with_tcp_obfuscation_flag_uses_obfuscated_transport() {
 }
 
 #[test]
+fn server_transport_plan_falls_back_to_the_ordinary_endpoint_once() {
+    let metadata_poor = test_server(0, 0);
+    let attempts = server_transport_attempts(0x03, &metadata_poor);
+
+    assert_eq!(
+        attempts,
+        vec![
+            ServerTransportMode::Obfuscated,
+            ServerTransportMode::Plaintext,
+        ]
+    );
+    assert_eq!(
+        metadata_poor.transport_endpoint(attempts[0].is_obfuscated()),
+        metadata_poor.base_endpoint()
+    );
+    assert_eq!(
+        metadata_poor.transport_endpoint(attempts[1].is_obfuscated()),
+        metadata_poor.base_endpoint()
+    );
+
+    let separate_obfuscated_port = test_server(4665, SERVER_UDP_FLAG_TCPOBFUSCATION);
+    let attempts = server_transport_attempts(0x03, &separate_obfuscated_port);
+    assert_eq!(
+        separate_obfuscated_port.transport_endpoint(attempts[0].is_obfuscated()),
+        "127.0.0.1:4665".parse::<SocketAddr>().unwrap()
+    );
+    assert_eq!(
+        separate_obfuscated_port.transport_endpoint(attempts[1].is_obfuscated()),
+        separate_obfuscated_port.base_endpoint()
+    );
+}
+
+#[test]
+fn server_transport_plan_never_downgrades_required_crypt() {
+    let server = test_server(4665, SERVER_UDP_FLAG_TCPOBFUSCATION);
+    let known_plain_server = test_server(0, SERVER_UDP_FLAG_EXT_GETSOURCES2);
+
+    assert_eq!(
+        server_transport_attempts(0x07, &server),
+        vec![ServerTransportMode::Obfuscated]
+    );
+    assert_eq!(
+        server_transport_attempts(0x07, &known_plain_server),
+        vec![ServerTransportMode::Obfuscated]
+    );
+    assert!(should_use_server_obfuscation(0x07, &known_plain_server));
+    assert_eq!(
+        server_transport_attempts(0, &server),
+        vec![ServerTransportMode::Plaintext]
+    );
+}
+
+#[tokio::test]
+async fn server_transport_attempts_stop_after_obfuscated_success() {
+    let attempts = [
+        ServerTransportMode::Obfuscated,
+        ServerTransportMode::Plaintext,
+    ];
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_by_attempt = Arc::clone(&seen);
+
+    let (value, mode) = run_server_transport_attempts(
+        &attempts,
+        move |mode| {
+            let seen = Arc::clone(&seen_by_attempt);
+            async move {
+                seen.lock().unwrap().push(mode);
+                Ok::<_, &'static str>("connected")
+            }
+        },
+        |_, _, _| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(value, "connected");
+    assert_eq!(mode, ServerTransportMode::Obfuscated);
+    assert_eq!(*seen.lock().unwrap(), vec![ServerTransportMode::Obfuscated]);
+}
+
+#[tokio::test]
+async fn server_transport_attempts_fall_back_once_then_succeed() {
+    let attempts = [
+        ServerTransportMode::Obfuscated,
+        ServerTransportMode::Plaintext,
+    ];
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_by_attempt = Arc::clone(&seen);
+
+    let (_, mode) = run_server_transport_attempts(
+        &attempts,
+        move |mode| {
+            let seen = Arc::clone(&seen_by_attempt);
+            async move {
+                seen.lock().unwrap().push(mode);
+                match mode {
+                    ServerTransportMode::Obfuscated => Err("crypt failed"),
+                    ServerTransportMode::Plaintext => Ok("connected"),
+                }
+            }
+        },
+        |mode, error, will_retry| {
+            assert_eq!(mode, ServerTransportMode::Obfuscated);
+            assert_eq!(*error, "crypt failed");
+            assert!(will_retry);
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(mode, ServerTransportMode::Plaintext);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ServerTransportMode::Obfuscated,
+            ServerTransportMode::Plaintext,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn server_transport_attempt_state_is_bounded_and_session_scoped() {
+    let attempts = [
+        ServerTransportMode::Obfuscated,
+        ServerTransportMode::Plaintext,
+    ];
+    for _ in 0..2 {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_by_attempt = Arc::clone(&seen);
+        let result = run_server_transport_attempts(
+            &attempts,
+            move |mode| {
+                let seen = Arc::clone(&seen_by_attempt);
+                async move {
+                    seen.lock().unwrap().push(mode);
+                    Err::<(), _>(match mode {
+                        ServerTransportMode::Obfuscated => "crypt failed",
+                        ServerTransportMode::Plaintext => "plain failed",
+                    })
+                }
+            },
+            |_, _, _| {},
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), "plain failed");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ServerTransportMode::Obfuscated,
+                ServerTransportMode::Plaintext,
+            ]
+        );
+    }
+}
+
+#[test]
 fn packet_encoder_uses_ed2k_framing() {
     let packet = encode_packet(OP_GETSERVERLIST, &[], false).unwrap();
     assert_eq!(packet[0], 0xE3);
