@@ -78,7 +78,7 @@ fn wire_file_type(file_type: &str) -> Option<String> {
 }
 
 pub(super) fn encode_search_request(term: &str) -> Result<Vec<u8>> {
-    encode_search_request_with_criteria(term, &SearchCriteria::default())
+    encode_search_request_with_criteria(term, &SearchCriteria::default(), false)
 }
 
 /// Encode an OP_SEARCHREQUEST expression for `term` plus server-side metatag
@@ -90,6 +90,7 @@ pub(super) fn encode_search_request(term: &str) -> Result<Vec<u8>> {
 pub(super) fn encode_search_request_with_criteria(
     term: &str,
     criteria: &SearchCriteria,
+    supports_64bit: bool,
 ) -> Result<Vec<u8>> {
     let keyword_expression = parse_search_expression(term)?;
     let keyword = encode_keyword_payload(keyword_expression.as_ref())?;
@@ -106,6 +107,7 @@ pub(super) fn encode_search_request_with_criteria(
             FT_COMPLETE_SOURCES,
             ED2K_SEARCH_OP_GREATER_EQUAL,
             u64::from(complete),
+            supports_64bit,
         ));
     }
     if let Some(file_type) = criteria.file_type.as_deref().and_then(wire_file_type) {
@@ -116,6 +118,7 @@ pub(super) fn encode_search_request_with_criteria(
             FT_FILESIZE,
             ED2K_SEARCH_OP_GREATER_EQUAL,
             min,
+            supports_64bit,
         ));
     }
     if let Some(max) = criteria.max_size {
@@ -123,6 +126,7 @@ pub(super) fn encode_search_request_with_criteria(
             FT_FILESIZE,
             ED2K_SEARCH_OP_LESS_EQUAL,
             max,
+            supports_64bit,
         ));
     }
     if let Some(avail) = criteria.min_availability {
@@ -130,6 +134,7 @@ pub(super) fn encode_search_request_with_criteria(
             FT_SOURCES,
             ED2K_SEARCH_OP_GREATER_EQUAL,
             u64::from(avail),
+            supports_64bit,
         ));
     }
     if let Some(extension) = criteria.extension.as_deref() {
@@ -235,16 +240,22 @@ fn encode_string_meta_node(meta_tag_id: u8, value: &str) -> Result<Vec<u8>> {
 
 /// `03 <u32>|08 <u64> <op> <u16 1><tagid>` — numeric parameter with comparison
 /// operator and a 1-byte metatag id (oracle `WriteMetaDataSearchParam(id, op,
-/// value)`); emits the 64-bit form only when the value exceeds u32 (Lugdunum
-/// 17.15 supports 64-bit), else the 32-bit form.
-fn encode_numeric_meta_node(meta_tag_id: u8, operator: u8, value: u64) -> Vec<u8> {
+/// value)`). Values above `u32::MAX` use the 64-bit form only when the target
+/// server advertises LARGEFILES; older servers receive the stock-compatible
+/// saturated 32-bit value instead.
+fn encode_numeric_meta_node(
+    meta_tag_id: u8,
+    operator: u8,
+    value: u64,
+    supports_64bit: bool,
+) -> Vec<u8> {
     let mut node = Vec::with_capacity(9);
-    if value > u64::from(u32::MAX) {
+    if value > u64::from(u32::MAX) && supports_64bit {
         node.push(8);
         node.extend_from_slice(&value.to_le_bytes());
     } else {
         node.push(3);
-        node.extend_from_slice(&(value as u32).to_le_bytes());
+        node.extend_from_slice(&u32::try_from(value).unwrap_or(u32::MAX).to_le_bytes());
     }
     node.push(operator);
     node.extend_from_slice(&1u16.to_le_bytes());
@@ -475,7 +486,8 @@ mod criteria_tests {
     fn empty_criteria_is_keyword_only() {
         let only_kw = encode_search_request("linux").unwrap();
         let via_criteria =
-            encode_search_request_with_criteria("linux", &SearchCriteria::default()).unwrap();
+            encode_search_request_with_criteria("linux", &SearchCriteria::default(), false)
+                .unwrap();
         assert_eq!(only_kw, kw("linux"));
         assert_eq!(via_criteria, only_kw);
     }
@@ -486,7 +498,7 @@ mod criteria_tests {
             file_type: Some("Video".to_string()),
             ..SearchCriteria::default()
         };
-        let got = encode_search_request_with_criteria("linux", &criteria).unwrap();
+        let got = encode_search_request_with_criteria("linux", &criteria, false).unwrap();
         // AND(00 00) + keyword + string-meta(02 <len> "Video" <01 00> <FT_FILETYPE=03>)
         let mut want = vec![0u8, 0x00];
         want.extend_from_slice(&kw("linux"));
@@ -503,7 +515,7 @@ mod criteria_tests {
             max_size: Some(2000),
             ..SearchCriteria::default()
         };
-        let got = encode_search_request_with_criteria("iso", &criteria).unwrap();
+        let got = encode_search_request_with_criteria("iso", &criteria, false).unwrap();
         // AND(keyword, AND(minsize, maxsize))
         let mut want = vec![0u8, 0x00];
         want.extend_from_slice(&kw("iso"));
@@ -529,7 +541,7 @@ mod criteria_tests {
             min_complete_sources: Some(5),
             ..SearchCriteria::default()
         };
-        let got = encode_search_request_with_criteria("iso", &criteria).unwrap();
+        let got = encode_search_request_with_criteria("iso", &criteria, false).unwrap();
 
         let mut want = vec![0u8, 0x00];
         want.extend_from_slice(&kw("iso"));
@@ -588,7 +600,7 @@ mod criteria_tests {
             min_availability: Some(5),
             ..SearchCriteria::default()
         };
-        let encoded = encode_search_request_with_criteria(&eight_words, &criteria)
+        let encoded = encode_search_request_with_criteria(&eight_words, &criteria, false)
             .expect("8 keyword operators + 4 constraints must encode (constraints do not count)");
         assert!(!encoded.is_empty());
 
@@ -606,7 +618,7 @@ mod criteria_tests {
             min_availability: Some(2),
             min_complete_sources: Some(1),
         };
-        assert!(encode_search_request_with_criteria(&eleven_words, &full).is_ok());
+        assert!(encode_search_request_with_criteria(&eleven_words, &full, false).is_ok());
 
         // But a genuinely over-complex KEYWORD expression still refuses even with
         // no constraints (12 words => 11 implicit ANDs > 10).
@@ -614,7 +626,7 @@ mod criteria_tests {
             .map(|i| format!("k{i}"))
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(encode_search_request_with_criteria(&twelve_words, &full).is_err());
+        assert!(encode_search_request_with_criteria(&twelve_words, &full, false).is_err());
     }
 
     #[test]
@@ -626,12 +638,31 @@ mod criteria_tests {
     }
 
     #[test]
-    fn large_size_uses_64bit_numeric_form() {
+    fn large_size_uses_64bit_numeric_form_only_for_capable_server() {
         let big = u64::from(u32::MAX) + 1;
-        let node = encode_numeric_meta_node(FT_FILESIZE, ED2K_SEARCH_OP_GREATER_EQUAL, big);
+        let node = encode_numeric_meta_node(FT_FILESIZE, ED2K_SEARCH_OP_GREATER_EQUAL, big, true);
         assert_eq!(
             node[0], 8,
-            "values > u32 must use the 64-bit (0x08) numeric form"
+            "capable servers must receive the 64-bit (0x08) numeric form"
         );
+
+        let downgraded =
+            encode_numeric_meta_node(FT_FILESIZE, ED2K_SEARCH_OP_GREATER_EQUAL, big, false);
+        assert_eq!(downgraded[0], 3);
+        assert_eq!(&downgraded[1..5], &u32::MAX.to_le_bytes());
+    }
+
+    #[test]
+    fn uint32_boundary_remains_32bit_for_every_server() {
+        for supports_64bit in [false, true] {
+            let node = encode_numeric_meta_node(
+                FT_FILESIZE,
+                ED2K_SEARCH_OP_LESS_EQUAL,
+                u64::from(u32::MAX),
+                supports_64bit,
+            );
+            assert_eq!(node[0], 3);
+            assert_eq!(&node[1..5], &u32::MAX.to_le_bytes());
+        }
     }
 }
