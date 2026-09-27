@@ -1,8 +1,43 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{DownloadSessionState, Ed2kPeerDownloadOutcome};
+
+#[cfg(feature = "packet-diagnostics")]
+const DIAGNOSTIC_INITIAL_REASK_DELAY_ENV: &str =
+    "EMULEBB_RUST_DIAGNOSTIC_INITIAL_REASK_DELAY_SECS";
+#[cfg(any(feature = "packet-diagnostics", test))]
+const MAX_DIAGNOSTIC_INITIAL_REASK_DELAY_SECS: u64 = 60;
+
+/// Returns the stock first-reask delay, except for the tightly bounded
+/// diagnostics-only live-proof override.
+fn queued_initial_reask_delay() -> Duration {
+    #[cfg(feature = "packet-diagnostics")]
+    if let Ok(raw) = std::env::var(DIAGNOSTIC_INITIAL_REASK_DELAY_ENV) {
+        if let Some(delay) = parse_diagnostic_initial_reask_delay(&raw) {
+            tracing::warn!(
+                delay_secs = delay.as_secs(),
+                "using diagnostics-only accelerated initial UDP reask delay"
+            );
+            return delay;
+        }
+        tracing::warn!(
+            value = raw,
+            "ignoring invalid diagnostics-only initial UDP reask delay"
+        );
+    }
+    crate::ed2k_client_udp::FILE_REASK_TIME
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn parse_diagnostic_initial_reask_delay(raw: &str) -> Option<Duration> {
+    raw.parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds <= MAX_DIAGNOSTIC_INITIAL_REASK_DELAY_SECS)
+        .map(Duration::from_secs)
+}
 
 /// Return the incomplete outcome for a queued peer, detaching it to UDP reask
 /// only after the live TCP queue session is gone or timed out.
@@ -92,7 +127,7 @@ fn try_detach_queued_source_for_reask(
         // WHY: MFC stamps SetLastAskedTime() when the TCP file request is sent,
         // so a queued source is not immediately reasked over UDP after the TCP
         // queue-rank response detaches the socket.
-        initial_reask_delay: crate::ed2k_client_udp::FILE_REASK_TIME,
+        initial_reask_delay: queued_initial_reask_delay(),
         user_hash: session_state.peer_user_hash,
         should_crypt,
         low_id: session_state.peer_low_id,
@@ -144,6 +179,10 @@ mod tests {
                 // from the UDP routing port above (RUST-PAR-017 DL-11).
                 assert_eq!(args.tcp_port, 4662);
                 assert_eq!(args.udp_version, 4);
+                assert_eq!(
+                    args.initial_reask_delay,
+                    crate::ed2k_client_udp::FILE_REASK_TIME
+                );
                 assert_eq!(args.user_hash, Some([0x42; 16]));
                 assert!(args.should_crypt);
                 assert!(!args.low_id);
@@ -172,5 +211,19 @@ mod tests {
             false,
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn diagnostics_initial_reask_delay_override_is_bounded() {
+        assert_eq!(
+            parse_diagnostic_initial_reask_delay("0"),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_diagnostic_initial_reask_delay("60"),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(parse_diagnostic_initial_reask_delay("61"), None);
+        assert_eq!(parse_diagnostic_initial_reask_delay("invalid"), None);
     }
 }
