@@ -220,7 +220,11 @@ fn encode_emule_info_payload(kad_udp_port: u16) -> Vec<u8> {
     push_ed2k_u32_tag(&mut payload, ET_COMPRESSION, 1);
     push_ed2k_u32_tag(&mut payload, ET_UDPVER, 4);
     push_ed2k_u32_tag(&mut payload, ET_UDPPORT, u32::from(kad_udp_port));
-    push_ed2k_u32_tag(&mut payload, ET_SOURCEEXCHANGE, 3);
+    // Runtime source exchange is SX2-only. ET_SOURCEEXCHANGE is the legacy
+    // SX1 version advertised to old peers, so keep it at zero just like the
+    // CT_EMULE_MISCOPTIONS1 SX1 field above. SX2 remains advertised through
+    // CT_EMULE_MISCOPTIONS2 and is unaffected by this compatibility packet.
+    push_ed2k_u32_tag(&mut payload, ET_SOURCEEXCHANGE, 0);
     push_ed2k_u32_tag(&mut payload, ET_COMMENTS, 1);
     push_ed2k_u32_tag(&mut payload, ET_EXTENDEDREQUEST, 2);
     push_ed2k_u32_tag(&mut payload, ET_FEATURES, EMULE_INFO_FEATURES);

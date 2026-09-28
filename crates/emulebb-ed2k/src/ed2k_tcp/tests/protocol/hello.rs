@@ -238,6 +238,36 @@ fn hello_misc_options2_is_truthful_about_implemented_capabilities() {
         1,
         "source exchange 2 is implemented"
     );
+    assert_eq!(
+        (misc_options2 >> 9) & 1,
+        0,
+        "required crypt is not a local policy"
+    );
+    assert_eq!(
+        (misc_options2 >> 8) & 1,
+        0,
+        "crypt request follows the disabled local setting"
+    );
+    assert_eq!(
+        (misc_options2 >> 7) & 1,
+        0,
+        "crypt support follows the disabled local setting"
+    );
+    assert_eq!(
+        (misc_options2 >> 5) & 1,
+        1,
+        "extended multipacket is implemented"
+    );
+    assert_eq!(
+        (misc_options2 >> 4) & 1,
+        1,
+        "64-bit large-file transfer is implemented"
+    );
+    assert_eq!(
+        misc_options2 & 0x0F,
+        EMULE_ADVERTISED_KAD_VERSION,
+        "the advertised Kad version is the implemented wire family"
+    );
 }
 
 #[test]
@@ -245,6 +275,22 @@ fn hello_misc_options1_advertises_stock_comments_but_not_preview() {
     let misc_options1 = emule_misc_options1();
 
     assert_eq!((misc_options1 >> 29) & 0x7, 1, "AICH is implemented");
+    assert_eq!((misc_options1 >> 28) & 1, 1, "Unicode is implemented");
+    assert_eq!(
+        (misc_options1 >> 24) & 0x0F,
+        4,
+        "client UDP v4 is implemented"
+    );
+    assert_eq!(
+        (misc_options1 >> 20) & 0x0F,
+        1,
+        "compressed transfer blocks are implemented"
+    );
+    assert_eq!(
+        (misc_options1 >> 16) & 0x0F,
+        EMULE_SECURE_IDENT_VERSION,
+        "secure identification is implemented"
+    );
     assert_eq!(
         (misc_options1 >> 12) & 0x0F,
         0,
@@ -256,6 +302,11 @@ fn hello_misc_options1_advertises_stock_comments_but_not_preview() {
         "stock comment/rating acceptance is advertised"
     );
     assert_eq!(
+        (misc_options1 >> 8) & 0x0F,
+        2,
+        "extended request part state is implemented"
+    );
+    assert_eq!(
         (misc_options1 >> 3) & 1,
         0,
         "defunct PeerCache is not advertised"
@@ -265,6 +316,7 @@ fn hello_misc_options1_advertises_stock_comments_but_not_preview() {
         1,
         "shared-file browsing is disabled"
     );
+    assert_eq!((misc_options1 >> 1) & 1, 1, "multipacket is implemented");
     assert_eq!(misc_options1 & 1, 0, "preview is not implemented");
 }
 
@@ -314,6 +366,11 @@ fn emule_info_request_uses_expected_protocol_and_tag_count() {
 fn emule_info_advertises_stock_comments_but_not_preview() {
     let packet = encode_emule_info_answer(41000);
 
+    assert_eq!(
+        emule_info_u32_tag(&packet, ET_SOURCEEXCHANGE),
+        Some(0),
+        "deprecated source exchange 1 is not advertised"
+    );
     assert_eq!(emule_info_u32_tag(&packet, ET_COMMENTS), Some(1));
     assert_eq!(
         emule_info_u32_tag(&packet, ET_FEATURES),
@@ -339,8 +396,8 @@ fn emule_info_decode_preserves_stock_capability_tags() {
     assert_eq!(profile.data_compression_version, 1);
     assert_eq!(profile.udp_version, 4);
     assert_eq!(profile.udp_port, 41000);
-    assert_eq!(profile.source_exchange_version, 3);
-    assert!(profile.supports_source_exchange);
+    assert_eq!(profile.source_exchange_version, 0);
+    assert!(!profile.supports_source_exchange);
     assert_eq!(profile.extended_requests_version, 2);
     assert!(profile.accepts_comments);
     assert!(profile.supports_secure_ident);
