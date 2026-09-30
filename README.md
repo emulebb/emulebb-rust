@@ -13,6 +13,13 @@ is a cross-platform source and offline-fixture reference in this workspace.
 The repository began from earlier Kad and ED2K work, but it is intentionally a
 local client product. The `0.1.0-beta.1` line does not expose a coordinator API.
 
+> **Beta code freeze (effective 2026-09-30):** changes are accepted only for
+> release blockers, test/evidence fixes, documentation corrections, and
+> packaging fixes. Indexer and Arr integration, major refactors, and new
+> protocol features remain post-beta work until the freeze is explicitly
+> lifted. The release decision is tracked in
+> [RUST-FEAT-033](https://github.com/emulebb/emulebb-rust/issues/20).
+
 Rust development uses the exact toolchain declared in `rust-toolchain.toml`.
 Update that pin, the workspace `rust-version`, and CI together in a dedicated
 toolchain commit after each stable Rust release has passed the full quality
@@ -30,9 +37,10 @@ contract live in
 `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust`.
 The repo-local `docs` directory is only a pointer.
 
-New contributors should start with [`CONTRIBUTING.md`](CONTRIBUTING.md), the
-public eMuleBB Suite board, and starter issues labeled `good first issue` or
-`help wanted`.
+New contributors should start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+public eMuleBB Suite board. During the beta code freeze, do not start an issue
+solely because it carries an older `good first issue` or `help wanted` label;
+the freeze admission rules take precedence.
 
 ## 0.1.0-beta.1 Shape
 

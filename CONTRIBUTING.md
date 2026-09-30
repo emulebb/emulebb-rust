@@ -4,6 +4,23 @@
 first useful contributions should stay small, preserve stock-compatible protocol
 behavior, and keep the embedded SPA WebUI, REST contract, and tests aligned.
 
+## Beta Code Freeze
+
+The `rust-v0.1.0-beta.1` code freeze is active as of 2026-09-30. Contributions
+are accepted only when they are one of the following:
+
+- a release blocker;
+- a test or evidence fix;
+- a documentation correction;
+- a packaging fix.
+
+Do not start indexer or Arr integration, major refactors, or new protocol
+features during the freeze. In particular, `RUST-FEAT-002`, `RUST-FEAT-004`,
+and `RUST-REF-005` through `RUST-REF-007` remain post-beta work. A test/evidence
+label does not authorize unrelated cleanup or feature work. Coordinate allowed
+work through [RUST-FEAT-033](https://github.com/emulebb/emulebb-rust/issues/20)
+and the public suite board before implementation.
+
 ## Start Here
 
 - Read `README.md` for the repo shape and local quality gates.
@@ -11,16 +28,9 @@ behavior, and keep the embedded SPA WebUI, REST contract, and tests aligned.
   output rules.
 - Use the public suite board for workflow state:
   <https://github.com/orgs/emulebb/projects/3>
-- Prefer starter issues labeled `good first issue` or `help wanted`.
-
-Good starter areas are:
-
-- `RUST-CI-003`: wire OpenAPI conformance/drift checks into CI.
-- `RUST-REF-005`: small behavior-preserving module decomposition slices.
-- `RUST-FEAT-036`: focused embedded WebUI/settings polish.
-
-Avoid taking the automated VPN leak-test gate (`RUST-FEAT-005`) as a first task
-unless you already have the required Windows/VPN test environment.
+- Confirm that proposed work satisfies one of the four freeze admission classes
+  before implementation. Older issue labels and starter suggestions do not
+  override the freeze.
 
 ## Local Checks
 
