@@ -6,8 +6,7 @@ use emulebb_kad_proto::Ed2kHash;
 use super::{DownloadSessionState, Ed2kPeerDownloadOutcome};
 
 #[cfg(feature = "packet-diagnostics")]
-const DIAGNOSTIC_INITIAL_REASK_DELAY_ENV: &str =
-    "EMULEBB_RUST_DIAGNOSTIC_INITIAL_REASK_DELAY_SECS";
+const DIAGNOSTIC_INITIAL_REASK_DELAY_ENV: &str = "EMULEBB_RUST_DIAGNOSTIC_INITIAL_REASK_DELAY_SECS";
 #[cfg(any(feature = "packet-diagnostics", test))]
 const MAX_DIAGNOSTIC_INITIAL_REASK_DELAY_SECS: u64 = 60;
 
