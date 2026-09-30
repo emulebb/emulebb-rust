@@ -217,7 +217,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         peer_user_hash,
         peer_connect_options,
         reask_register,
-        mut connection_state,
+        connection_state,
     } = options;
     const QUEUE_RANK_GRACE: Duration = Duration::from_secs(75);
     const PART_RESPONSE_GRACE: Duration = Duration::from_secs(75);
@@ -1388,7 +1388,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
     }
     .await;
 
-    if let Some(connection_state) = connection_state.as_deref_mut() {
+    if let Some(connection_state) = connection_state {
         *connection_state = session_state.connection_state();
     }
 

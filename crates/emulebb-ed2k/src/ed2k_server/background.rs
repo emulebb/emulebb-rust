@@ -117,7 +117,7 @@ pub struct Ed2kServerSourceBatchTarget {
 pub(super) enum BackgroundServerSearchRequest {
     Keyword {
         query: String,
-        criteria: SearchCriteria,
+        criteria: Box<SearchCriteria>,
         timeout: Duration,
         response: oneshot::Sender<BackgroundKeywordSearchResponse>,
     },
@@ -201,7 +201,7 @@ pub async fn search_keyword_via_background_session(
         .sender
         .send(BackgroundServerSearchRequest::Keyword {
             query: query.to_string(),
-            criteria,
+            criteria: Box::new(criteria),
             timeout,
             response,
         })
@@ -345,6 +345,10 @@ pub async fn publish_shared_catalog_via_background_session(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "packet dispatch keeps mutable protocol state explicit"
+)]
 pub(super) fn handle_background_udp_packet(
     server: &mut ResolvedServerEntry,
     packet: &ServerUdpPacket,
@@ -611,7 +615,7 @@ pub(super) async fn start_background_server_search(
             // node. Stock eMule saturates oversized terms to UINT32_MAX for
             // those peers instead of emitting an unsupported wire type.
             let search_payload =
-                encode_search_request_with_criteria(&query, &criteria, supports_64bit)?;
+                encode_search_request_with_criteria(&query, criteria.as_ref(), supports_64bit)?;
             if search_payload.is_empty() {
                 let _ = response.send(Ok(Vec::new()));
                 anyhow::bail!("ED2K background keyword search payload was unexpectedly empty");

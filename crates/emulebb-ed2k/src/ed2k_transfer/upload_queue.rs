@@ -2091,9 +2091,9 @@ fn upload_payload_send_chunk_len(packet_len: usize, limit_bytes_per_sec: u64) ->
     if limit_bytes_per_sec == 0 {
         packet_len.max(1)
     } else if limit_bytes_per_sec < LOW_SPEED_THRESHOLD_BYTES_PER_SEC {
-        packet_len.min(LOW_SPEED_SEND_BYTES).max(1)
+        packet_len.clamp(1, LOW_SPEED_SEND_BYTES)
     } else {
-        packet_len.min(NORMAL_SEND_BYTES).max(1)
+        packet_len.clamp(1, NORMAL_SEND_BYTES)
     }
 }
 

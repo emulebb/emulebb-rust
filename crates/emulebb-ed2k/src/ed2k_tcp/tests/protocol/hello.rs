@@ -443,28 +443,29 @@ fn hello_binary_corpus_skips_every_stock_tag_representation() {
 
     let mut raw = Vec::new();
     let mut tag_count = 0u32;
-    let mut push = |tag_type, value: &[u8]| {
-        push_unknown_short_hello_tag(&mut raw, tag_type, value);
-        tag_count += 1;
-    };
-    push(TAGTYPE_NONE, &[]);
-    push(TAGTYPE_HASH, &[0x11; 16]);
-    push(TAGTYPE_STRING, &[3, 0, b'a', b'b', b'c']);
-    push(TAGTYPE_UINT32, &0x1122_3344u32.to_le_bytes());
-    push(TAGTYPE_FLOAT32, &1.5f32.to_le_bytes());
-    push(TAGTYPE_BOOL, &[1]);
-    // Stock's historical formula consumes (bit_len / 8) + 1 bytes.
-    push(TAGTYPE_BOOLARRAY, &[9, 0, 0xAA, 0x01]);
-    push(TAGTYPE_BLOB, &[3, 0, 0, 0, 0x10, 0x20, 0x30]);
-    push(TAGTYPE_UINT16, &0x5566u16.to_le_bytes());
-    push(TAGTYPE_UINT8, &[0x77]);
-    push(TAGTYPE_BSOB, &[3, 0x40, 0x50, 0x60]);
-    push(TAGTYPE_UINT64, &0x0102_0304_0506_0708u64.to_le_bytes());
-    for tag_type in TAGTYPE_STR1..=TAGTYPE_STR22 {
-        let len = usize::from(tag_type - TAGTYPE_STR1 + 1);
-        push(tag_type, &vec![tag_type; len]);
+    {
+        let mut push = |tag_type, value: &[u8]| {
+            push_unknown_short_hello_tag(&mut raw, tag_type, value);
+            tag_count += 1;
+        };
+        push(TAGTYPE_NONE, &[]);
+        push(TAGTYPE_HASH, &[0x11; 16]);
+        push(TAGTYPE_STRING, &[3, 0, b'a', b'b', b'c']);
+        push(TAGTYPE_UINT32, &0x1122_3344u32.to_le_bytes());
+        push(TAGTYPE_FLOAT32, &1.5f32.to_le_bytes());
+        push(TAGTYPE_BOOL, &[1]);
+        // Stock's historical formula consumes (bit_len / 8) + 1 bytes.
+        push(TAGTYPE_BOOLARRAY, &[9, 0, 0xAA, 0x01]);
+        push(TAGTYPE_BLOB, &[3, 0, 0, 0, 0x10, 0x20, 0x30]);
+        push(TAGTYPE_UINT16, &0x5566u16.to_le_bytes());
+        push(TAGTYPE_UINT8, &[0x77]);
+        push(TAGTYPE_BSOB, &[3, 0x40, 0x50, 0x60]);
+        push(TAGTYPE_UINT64, &0x0102_0304_0506_0708u64.to_le_bytes());
+        for tag_type in TAGTYPE_STR1..=TAGTYPE_STR22 {
+            let len = usize::from(tag_type - TAGTYPE_STR1 + 1);
+            push(tag_type, &vec![tag_type; len]);
+        }
     }
-    drop(push);
     push_emule_version_sentinel(&mut raw);
     tag_count += 1;
 

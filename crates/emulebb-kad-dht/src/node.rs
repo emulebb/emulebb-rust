@@ -498,13 +498,12 @@ fn spawn_res_contact_drain(
             );
             // Carry the latest known anti-spoof key for this IP, if any, so the
             // anti-hijack update guard is satisfied on a refresh.
-            if let Some(key) = rpc.known_peer_key(addr) {
-                if let Some(public_ip) =
+            if let Some(key) = rpc.known_peer_key(addr)
+                && let Some(public_ip) =
                     public_ip_from_bits(current_public_ip.load(Ordering::Relaxed))
-                {
-                    contact.udp_key = KadUdpKey::new(key);
-                    contact.udp_key_ip = Some(public_ip);
-                }
+            {
+                contact.udp_key = KadUdpKey::new(key);
+                contact.udp_key_ip = Some(public_ip);
             }
             let _ = routing_table.lock().await.add_contact(contact);
         }

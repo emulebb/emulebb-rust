@@ -97,20 +97,26 @@ pub(super) fn decode_server_status_response(
     }
     let users = read_u32_le(payload, 4);
     let files = read_u32_le(payload, 8);
-    let max_users = (payload.len() >= 16)
-        .then(|| read_u32_le(payload, 12))
-        .unwrap_or_default();
+    let max_users = if payload.len() >= 16 {
+        read_u32_le(payload, 12)
+    } else {
+        0
+    };
     let (soft_files, hard_files) = if payload.len() >= 24 {
         (read_u32_le(payload, 16), read_u32_le(payload, 20))
     } else {
         (0, 0)
     };
-    let udp_flags = (payload.len() >= 28)
-        .then(|| read_u32_le(payload, 24))
-        .unwrap_or_default();
-    let low_id_users = (payload.len() >= 32)
-        .then(|| read_u32_le(payload, 28))
-        .unwrap_or_default();
+    let udp_flags = if payload.len() >= 28 {
+        read_u32_le(payload, 24)
+    } else {
+        0
+    };
+    let low_id_users = if payload.len() >= 32 {
+        read_u32_le(payload, 28)
+    } else {
+        0
+    };
     let (mut obfuscation_port_udp, mut obfuscation_port_tcp, udp_key) = if payload.len() >= 40 {
         (
             u16::from_le_bytes(payload[32..34].try_into().ok()?),

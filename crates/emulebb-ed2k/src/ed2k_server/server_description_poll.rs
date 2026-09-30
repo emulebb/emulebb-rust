@@ -32,6 +32,10 @@ const SERVER_CRYPT_PING_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 const SERVER_METADATA_PACING: Duration = Duration::from_secs(1);
 const SERVER_CONNECTION_WAIT_POLL: Duration = Duration::from_millis(100);
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "long-lived poll task receives its owned runtime dependencies explicitly"
+)]
 pub(super) async fn poll_server_descriptions(
     bind_ip: std::net::Ipv4Addr,
     configured_servers: Vec<ConfiguredServerEntry>,

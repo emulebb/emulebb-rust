@@ -327,6 +327,10 @@ pub async fn search_keyword_servers(
     Ok(Vec::new())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "single-call-site protocol session inputs stay explicit"
+)]
 async fn search_keyword_on_server(
     bind_ip: Ipv4Addr,
     server: &ResolvedServerEntry,

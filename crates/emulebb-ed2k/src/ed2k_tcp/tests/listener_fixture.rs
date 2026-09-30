@@ -265,6 +265,10 @@ pub(super) fn spawn_single_listener_connection(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper mirrors the listener connection dependencies"
+)]
 pub(super) fn spawn_single_listener_connection_with_port_test_registry(
     listener: TcpListener,
     dht: DhtNode,

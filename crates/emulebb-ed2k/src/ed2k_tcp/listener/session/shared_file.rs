@@ -141,6 +141,10 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     Ok(Some(requested))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "wire request handler keeps peer capabilities and mutable state explicit"
+)]
 pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     transfer_runtime: &Ed2kTransferRuntime,
     transport: &mut Ed2kTransport,

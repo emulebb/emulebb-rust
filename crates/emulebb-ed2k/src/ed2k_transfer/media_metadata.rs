@@ -314,10 +314,10 @@ fn parse_id3v2(bytes: &[u8], media: &mut Ed2kMediaMetadata) -> usize {
             b"TIT2" => Some(&mut media.title),
             _ => None,
         };
-        if let Some(target) = target {
-            if let Some(text) = decode_id3_text(&bytes[body_start..body_end]) {
-                *target = text;
-            }
+        if let Some(target) = target
+            && let Some(text) = decode_id3_text(&bytes[body_start..body_end])
+        {
+            *target = text;
         }
         offset = body_end;
     }
@@ -350,7 +350,7 @@ fn decode_utf16(bytes: &[u8], force_big_endian: Option<bool>) -> String {
         None if bytes.starts_with(&[0xff, 0xfe]) => (false, &bytes[2..]),
         None => (false, bytes),
     };
-    let words = body.chunks_exact(2).map(|pair| {
+    let words = body.as_chunks::<2>().0.iter().map(|pair| {
         if big_endian {
             u16::from_be_bytes([pair[0], pair[1]])
         } else {
@@ -481,8 +481,8 @@ fn parse_riff_chunks(
         // duration; never require the payload bytes to be resident.
         if id == b"data" && form == b"WAVE" {
             let byte_rate = u64::from(*wave_byte_rate);
-            if byte_rate != 0 {
-                media.length_seconds = u32::try_from(size as u64 / byte_rate).unwrap_or(u32::MAX);
+            if let Some(length_seconds) = (size as u64).checked_div(byte_rate) {
+                media.length_seconds = u32::try_from(length_seconds).unwrap_or(u32::MAX);
             }
             if end > bytes.len() {
                 break;
@@ -819,7 +819,7 @@ mod tests {
         target.extend_from_slice(id);
         target.extend_from_slice(&(body.len() as u32).to_le_bytes());
         target.extend_from_slice(body);
-        if body.len() % 2 != 0 {
+        if !body.len().is_multiple_of(2) {
             target.push(0);
         }
     }
@@ -828,7 +828,7 @@ mod tests {
         target.extend_from_slice(id);
         target.extend_from_slice(&(body.len() as u32).to_be_bytes());
         target.extend_from_slice(body);
-        if body.len() % 2 != 0 {
+        if !body.len().is_multiple_of(2) {
             target.push(0);
         }
     }

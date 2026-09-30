@@ -48,6 +48,8 @@ const UDP_SOURCE_REQUEST_G1_BYTES_PER_FILE: usize = 16;
 const UDP_SOURCE_REQUEST_G2_BYTES_PER_FILE: usize = 20;
 const UDP_SOURCE_REQUEST_G2_LARGE_FILE_EXTRA_BYTES: usize = 8;
 
+type OfferedFileEntry = ([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Ed2kUdpSourceRequestTarget {
     pub file_hash: Ed2kHash,
@@ -437,7 +439,7 @@ pub(super) fn source_request_opcode(connect_options: u8, server_flags: Option<u3
 
 #[derive(Debug)]
 struct OfferedFilesCatalog {
-    entries: Vec<([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)>,
+    entries: Vec<OfferedFileEntry>,
     next_cursor: usize,
     total_entries: usize,
 }
@@ -445,7 +447,7 @@ struct OfferedFilesCatalog {
 #[derive(Debug)]
 struct EncodedOfferFilesPayload {
     payload: Vec<u8>,
-    entries: Vec<([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)>,
+    entries: Vec<OfferedFileEntry>,
     next_cursor: usize,
     total_entries: usize,
 }
@@ -553,9 +555,7 @@ pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]
     hasher.finish()
 }
 
-fn offer_files_entries_fingerprint(
-    entries: &[([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)],
-) -> u64 {
+fn offer_files_entries_fingerprint(entries: &[OfferedFileEntry]) -> u64 {
     let mut hasher = DefaultHasher::new();
     entries.hash(&mut hasher);
     hasher.finish()
@@ -582,9 +582,7 @@ fn offer_files_cursor_wrapped(
         || next_cursor <= (current_cursor % total_entries.max(1))
 }
 
-fn popular_hash_offer_file(
-    hash: &Ed2kSharedEntry,
-) -> Option<([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)> {
+fn popular_hash_offer_file(hash: &Ed2kSharedEntry) -> Option<OfferedFileEntry> {
     let file_hash = hash.parsed_hash().ok()?;
     Some((
         file_hash.0,
@@ -600,7 +598,7 @@ fn popular_hash_offer_file(
 fn ranked_offer_files(
     shared_catalog: &[Ed2kSharedEntry],
     server_supports_large_files: bool,
-) -> Vec<([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)> {
+) -> Vec<OfferedFileEntry> {
     let now_unix_ms = unix_time_ms();
     let mut ranked = shared_catalog
         .iter()
@@ -815,7 +813,7 @@ pub(super) async fn send_offer_files_advertisement(
 
 async fn mark_offer_files_published(
     shared_catalog: &Ed2kSharedCatalog,
-    entries: &[([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata)],
+    entries: &[OfferedFileEntry],
     published_at_ms: i64,
 ) {
     let published = entries
