@@ -879,7 +879,7 @@ mod tests {
             current: true,
             description: String::new(),
             dyn_ip: String::new(),
-            auxiliary_ports: Vec::new(),
+            auxiliary_ports: vec![4662, 4663],
             failed_count: 0,
             hard_files: 0,
             ip: String::new(),
@@ -907,6 +907,8 @@ mod tests {
         assert_eq!(value["connecting"], true);
         assert_eq!(value["currentServer"]["connecting"], true);
         assert_eq!(value["currentServer"]["connected"], false);
+        assert_eq!(value["currentServer"]["auxiliaryPorts"][0], 4662);
+        assert_eq!(value["currentServer"]["auxiliaryPorts"][1], 4663);
         assert_eq!(value["currentServer"]["obfuscationTcpPort"], 4665);
         assert_eq!(value["currentServer"]["udpFlags"], 0x331);
         assert_eq!(value["ed2kIdState"], "unknown");

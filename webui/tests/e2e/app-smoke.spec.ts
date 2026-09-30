@@ -250,6 +250,8 @@ test("section resource operation forms validate endpoint addresses and ports", a
 
   await page.getByRole("button", { name: "Servers" }).click();
   const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
+  await expect(serversPanel.getByText("Auxiliary ports")).toBeVisible();
+  await expect(serversPanel.getByText("4662, 4663")).toBeVisible();
   const initialServerPosts = requests.filter((request) => request.method === "POST" && request.path === "servers").length;
   await serversPanel.getByPlaceholder("Address").fill("   ");
   await expect(serversPanel.getByText("Address must not be empty.")).toBeVisible();
@@ -490,6 +492,14 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await expect(revert).toBeDisabled();
 
+  const nickname = settingsPanel.getByLabel("eD2K nickname");
+  await expect(nickname).toHaveValue("Sample Mule");
+  await nickname.fill("x".repeat(51));
+  await expect(settingsPanel.getByText("eD2K nickname must be at most 50 characters.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await nickname.fill("Sample Mule");
+  await expect(settingsPanel.getByText("eD2K nickname must be at most 50 characters.")).toHaveCount(0);
+
   await settingsPanel.getByLabel("Max connections").fill("2147483648");
   await expect(settingsPanel.getByText("Max connections must be between 1 and 2147483647.")).toBeVisible();
   await expect(save).toBeDisabled();
@@ -576,11 +586,21 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
 
   await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
+  await settingsPanel.getByLabel("eD2K nickname").fill("Phase B Mule");
+  await settingsPanel.getByLabel("Use server priorities").uncheck();
+  await settingsPanel.getByLabel("Auto-connect static servers only").check();
   await save.click();
   await expect(page.getByText("Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")).toBeVisible();
   const settingsPatch = requests.find((request) => request.method === "PATCH" && request.path === "app/settings");
   expect(settingsPatch).toBeDefined();
-  expect(JSON.parse(settingsPatch?.body ?? "{}")).toEqual({ daemon: { incomingDir: "C:\\Changed\\Incoming" } });
+  expect(JSON.parse(settingsPatch?.body ?? "{}")).toEqual({
+    daemon: { incomingDir: "C:\\Changed\\Incoming" },
+    ed2k: {
+      nickname: "Phase B Mule",
+      useServerPriorities: false,
+      autoConnectStaticOnly: true
+    }
+  });
   await settingsPanel.getByRole("button", { name: "Reload IP filter" }).click();
   await expect(page.getByText("IP filter reloaded")).toBeVisible();
   expect(requests.some((request) => request.method === "POST" && request.path === "ip-filter/operations/reload")).toBe(true);

@@ -81,7 +81,7 @@ const snapshot = {
     }
   ],
   searches: [],
-  servers: [{ endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true }],
+  servers: [{ endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true, auxiliaryPorts: [4662, 4663] }],
   kad: { enabled: true, connected: true, firewalled: false },
   uploads: [
     {
@@ -395,6 +395,7 @@ function dataFor(method: string, path: string): unknown {
           setting("daemon.hostnameLookup.maxLookupsPerTick", "advancedControl", false),
           setting("daemon.hostnameLookup.tickIntervalSecs", "advancedControl", false),
           setting("ed2k.listenPort", "normalControl", true),
+          setting("ed2k.nickname", "normalControl", true),
           setting("ed2k.connectTimeoutSecs", "advancedControl", true),
           setting("ed2k.serverConnectTimeoutSecs", "advancedControl", true),
           setting("ed2k.callbackTimeoutSecs", "advancedControl", true),
@@ -412,6 +413,8 @@ function dataFor(method: string, path: string): unknown {
           setting("ed2k.sourceServerAttemptBudget", "advancedControl", true),
           setting("ed2k.obfuscationEnabled", "normalControl", true),
           setting("ed2k.reconnectEnabled", "normalControl", true),
+          setting("ed2k.useServerPriorities", "normalControl", true),
+          setting("ed2k.autoConnectStaticOnly", "normalControl", true),
           setting("ed2k.enableUdpReask", "normalControl", true),
           setting("ed2k.publishEmuleRustIdentity", "advancedControl", true),
           setting("ed2k.deadServerRetries", "advancedControl", true),
@@ -515,6 +518,7 @@ function dataFor(method: string, path: string): unknown {
         },
         ed2k: {
           listenPort: 4662,
+          nickname: "Sample Mule",
           connectTimeoutSecs: 30,
           serverConnectTimeoutSecs: 25,
           callbackTimeoutSecs: 45,
@@ -532,6 +536,8 @@ function dataFor(method: string, path: string): unknown {
           sourceServerAttemptBudget: 3,
           obfuscationEnabled: true,
           reconnectEnabled: true,
+          useServerPriorities: true,
+          autoConnectStaticOnly: false,
           enableUdpReask: true,
           publishEmuleRustIdentity: false,
           deadServerRetries: 1,

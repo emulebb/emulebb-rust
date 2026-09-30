@@ -1589,6 +1589,7 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
             <span>Configured address</span><strong>{selected.address ?? ""}</strong>
             <span>Resolved IP</span><strong>{selected.ip || ""}</strong>
             <span>Dynamic IP/name</span><strong>{selected.dynIp || ""}</strong>
+            <span>Auxiliary ports</span><strong>{selected.auxiliaryPorts?.join(", ") || ""}</strong>
             <span>Hostname</span><strong>{hostNameLabel(selected)}</strong>
             <span>DNS status</span><strong>{selected.hostNameStatus ?? "unknown"}</strong>
             <span>Description</span><strong>{selected.description || ""}</strong>
@@ -2137,6 +2138,7 @@ type SettingsForm = {
   hostnameLookupMaxLookupsPerTick: string;
   hostnameLookupTickIntervalSecs: string;
   ed2kListenPort: string;
+  ed2kNickname: string;
   ed2kConnectTimeoutSecs: string;
   ed2kServerConnectTimeoutSecs: string;
   ed2kCallbackTimeoutSecs: string;
@@ -2241,6 +2243,7 @@ const emptySettingsForm: SettingsForm = {
   hostnameLookupMaxLookupsPerTick: "",
   hostnameLookupTickIntervalSecs: "",
   ed2kListenPort: "",
+  ed2kNickname: "",
   ed2kConnectTimeoutSecs: "",
   ed2kServerConnectTimeoutSecs: "",
   ed2kCallbackTimeoutSecs: "",
@@ -2452,6 +2455,7 @@ export function SettingsView(props: {
           "core.networkEd2k",
           "core.networkKademlia",
           "ed2k.listenPort",
+          "ed2k.nickname",
           "ed2k.connectTimeoutSecs",
           "ed2k.keepaliveSecs",
           "ed2k.maxNewConnectionsPerFiveSeconds",
@@ -2473,6 +2477,7 @@ export function SettingsView(props: {
               {renderField("core.maxConnections", "maxConnections", "Max connections")}
               {renderField("core.maxConnectionsPerFiveSeconds", "maxConnectionsPerFiveSeconds", "New connections / 5s")}
               {renderField("ed2k.listenPort", "ed2kListenPort", "eD2K listen port")}
+              {renderField("ed2k.nickname", "ed2kNickname", "eD2K nickname")}
               {renderField("ed2k.connectTimeoutSecs", "ed2kConnectTimeoutSecs", "eD2K connect timeout seconds")}
               {renderField("ed2k.keepaliveSecs", "ed2kKeepaliveSecs", "eD2K keepalive seconds")}
               {renderField("ed2k.maxNewConnectionsPerFiveSeconds", "ed2kMaxNewConnectionsPerFiveSeconds", "eD2K new connections / 5s")}
@@ -2838,6 +2843,9 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "hostnameLookupTickIntervalSecs", "DNS tick seconds", { min: 5 });
   validateOptionalIpv4(errors, form, "p2pBindIp", "P2P bind IP");
   validateUnsigned(errors, form, "ed2kListenPort", "eD2K listen port", { optional: true, min: 1, max: 65535 });
+  if (Array.from(form.ed2kNickname).length > 50) {
+    errors.set("ed2kNickname", "eD2K nickname must be at most 50 characters.");
+  }
   validateUnsigned(errors, form, "ed2kConnectTimeoutSecs", "eD2K connect timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kServerConnectTimeoutSecs", "Server connect timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kCallbackTimeoutSecs", "Callback timeout seconds", { min: 1 });
@@ -3069,6 +3077,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
 
   const ed2k: Ed2kSettingsUpdate = {};
   putChanged(ed2k, "listenPort", optionalPort(form.ed2kListenPort), optionalPort(baseline.ed2kListenPort));
+  putChanged(ed2k, "nickname", form.ed2kNickname, baseline.ed2kNickname);
   putChanged(ed2k, "connectTimeoutSecs", parseNumber(form.ed2kConnectTimeoutSecs), parseNumber(baseline.ed2kConnectTimeoutSecs));
   putChanged(ed2k, "serverConnectTimeoutSecs", parseNumber(form.ed2kServerConnectTimeoutSecs), parseNumber(baseline.ed2kServerConnectTimeoutSecs));
   putChanged(ed2k, "callbackTimeoutSecs", parseNumber(form.ed2kCallbackTimeoutSecs), parseNumber(baseline.ed2kCallbackTimeoutSecs));
@@ -3203,6 +3212,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     hostnameLookupMaxLookupsPerTick: String(numberField(recordField(settings.daemon, "hostnameLookup"), "maxLookupsPerTick") ?? ""),
     hostnameLookupTickIntervalSecs: String(numberField(recordField(settings.daemon, "hostnameLookup"), "tickIntervalSecs") ?? ""),
     ed2kListenPort: String(numberField(settings.ed2k, "listenPort") ?? ""),
+    ed2kNickname: stringField(settings.ed2k, "nickname"),
     ed2kConnectTimeoutSecs: String(numberField(settings.ed2k, "connectTimeoutSecs") ?? ""),
     ed2kServerConnectTimeoutSecs: String(numberField(settings.ed2k, "serverConnectTimeoutSecs") ?? ""),
     ed2kCallbackTimeoutSecs: String(numberField(settings.ed2k, "callbackTimeoutSecs") ?? ""),

@@ -198,6 +198,7 @@ export type ServerItem = {
   current?: boolean;
   description?: string;
   dynIp?: string;
+  auxiliaryPorts?: number[];
   failedCount?: number;
   hardFiles?: number;
   ip?: string;
@@ -494,6 +495,7 @@ export type Ed2kUploadQueueSettings = {
 
 export type Ed2kSettings = {
   listenPort?: number | null;
+  nickname?: string;
   obfuscationEnabled?: boolean;
   probeSearchTerm?: string | null;
   connectTimeoutSecs?: number;
