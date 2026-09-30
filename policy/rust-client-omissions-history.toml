@@ -88,6 +88,20 @@ review_disposition = "fix"
 review_disposition_note = "2026-09-27: implemented extended-status decoding, crypt-ping discovery and temporary-key decryption, 20-second plaintext fallback, key/IP validity gating, schema-v19 persistence, restart hydration, and focused protocol/core/metadata tests. No longer an active omission."
 
 [[resolved_omissions]]
+id = "kad-keyword-media-metadata-tags"
+area = "kad"
+stock_behavior = "eMule attaches media-metadata tags to each Kad keyword-publish file entry when GetMetaDataVer() > 0: FT_MEDIA_ARTIST, FT_MEDIA_ALBUM, and FT_MEDIA_TITLE strings plus FT_MEDIA_LENGTH, FT_MEDIA_BITRATE, and FT_MEDIA_CODEC, skipping empty, zero, or filename-redundant values. Searchers can filter Kad keyword results by those attributes."
+rust_behavior = "IMPLEMENTED: bounded shared-file metadata extraction carries artist, album, title, duration, bitrate, and codec through the shared catalog. Kad keyword publishing emits the stock-gated tag set, while eD2K server offers emit the stock duration/bitrate/codec subset in legacy or new-tag form according to server capabilities. Extraction failure leaves the optional fields empty and never prevents a share from loading."
+reason = "The shared-file scan now owns bounded derived-metadata extraction and both publication paths consume the same catalog record, closing the former no-extractor/no-schema gap without coupling publication to a UI surface."
+compatibility = "Published tags use the stock identifiers, value types, omission rules, and server-capability gates. Media-filtered Kad searches can match Rust-published entries, while files without readable metadata remain valid keyword/type/name/size results."
+disposition = "fixed"
+owner = "kad-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: implemented bounded extraction plus stock-compatible Kad keyword and eD2K server publication with focused catalog, restart, and wire-tag tests. The 2026-09-30 parser-backend replacement preserved that behavior and coverage. No longer deferred."
+
+[[resolved_omissions]]
 id = "conn-rate-spike-modifier"
 area = "ed2k"
 stock_behavior = "eMule scales the per-5s new-connection budget by GetMaxConperFiveModifier() (CListenSocket::TooManySockets / GetMaxConperFiveModifier, ListenSocket.cpp:2653,2722-2728). The modifier is a SUPPRESSOR, not a raiser: it returns a multiplier in [0,1) computed from the recent open-socket spike ((SpikeSize > SpikeTolerance) ? 0 : 1 - SpikeSize/SpikeTolerance), so during a connection spike stock throttles its effective per-5s budget BELOW GetMaxConperFive() (down to 0), then relaxes back to the flat budget as the spike subsides."
