@@ -9,6 +9,8 @@ disposition = "protocol_drop_approved"
 owner = "operator"
 target = "rust-v0.1.0-beta.1"
 beta_blocker = false
+review_disposition = "permanent-drop"
+review_disposition_note = "RUST-CI-002 A4 beta freeze (2026-09-30): standing REF-002 decision; live source exchange remains SX2-only, both SX1 capability fields are zero, and SX1 packets are not acted on. PERMANENT DROP."
 
 [[omissions]]
 id = "conn-rate-rolling-five-second-window"
