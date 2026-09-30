@@ -15,3 +15,9 @@ the UI binary must retain an easily found Slint badge or provide the license's
 `AboutSlint` attribution in the application.
 
 The Slint license and upstream copyright notices must not be removed or altered.
+
+## Symphonia
+
+Media metadata extraction uses Symphonia under the Mozilla Public License 2.0.
+Symphonia remains a separately licensed third-party component; its source files
+and upstream notices remain under the MPL-2.0.

@@ -1,9 +1,10 @@
 //! Bounded media-header extraction for stock ED2K publish tags.
 //!
 //! Media metadata is derived cache data: an unreadable or malformed file must
-//! never prevent a share from loading. Common audio formats use Lofty's mature
-//! reader with cover-art loading disabled; the legacy video/RIFF fallbacks are
-//! bounds checked and inspect at most [`MAX_PREFIX_BYTES`] plus tiny trailers.
+//! never prevent a share from loading. Common audio formats use Symphonia's
+//! bounded reader with cover-art loading disabled; the legacy video/RIFF
+//! fallbacks are bounds checked and inspect at most [`MAX_PREFIX_BYTES`] plus
+//! tiny trailers.
 
 use std::{
     fs::File,
@@ -11,11 +12,15 @@ use std::{
     path::Path,
 };
 
-use lofty::{
-    config::ParseOptions,
-    file::{AudioFile, FileType, TaggedFileExt},
-    probe::Probe,
-    tag::Accessor,
+use symphonia::core::{
+    codecs::audio::{
+        AudioCodecId,
+        well_known::{CODEC_ID_OPUS, CODEC_ID_SPEEX},
+    },
+    common::Limit,
+    formats::{FormatOptions, TrackType, probe::Hint},
+    io::MediaSourceStream,
+    meta::{MetadataOptions, MetadataRevision, StandardTag},
 };
 
 use super::Ed2kMediaMetadata;
@@ -43,7 +48,7 @@ pub(super) fn extract_media_metadata(path: &Path, display_name: &str) -> Ed2kMed
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_lowercase())
         .unwrap_or_default();
-    let mut media = extract_lofty_audio(path, &extension).unwrap_or_default();
+    let mut media = extract_symphonia_audio(path, &extension, file_size).unwrap_or_default();
     let legacy = match extension.as_str() {
         "mp3" | "mp2" | "mp1" | "mpa" => extract_mpeg_audio(&mut file, &prefix, file_size),
         "wav" | "avi" => extract_riff(&prefix, file_size),
@@ -72,7 +77,11 @@ pub(super) fn extract_media_metadata(path: &Path, display_name: &str) -> Ed2kMed
     media
 }
 
-fn extract_lofty_audio(path: &Path, extension: &str) -> Option<Ed2kMediaMetadata> {
+fn extract_symphonia_audio(
+    path: &Path,
+    extension: &str,
+    file_size: u64,
+) -> Option<Ed2kMediaMetadata> {
     if !matches!(
         extension,
         "aac"
@@ -99,63 +108,113 @@ fn extract_lofty_audio(path: &Path, extension: &str) -> Option<Ed2kMediaMetadata
     ) {
         return None;
     }
-    let options = ParseOptions::new()
-        .read_cover_art(false)
-        .max_junk_bytes(4_096);
-    let tagged = Probe::open(path)
-        .ok()?
-        .guess_file_type()
-        .ok()?
-        .options(options)
-        .read()
+
+    let source = MediaSourceStream::new(Box::new(File::open(path).ok()?), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(extension);
+    let metadata_options = MetadataOptions::default().limit_visual_bytes(Limit::Maximum(0));
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, source, FormatOptions::default(), metadata_options)
         .ok()?;
-    let properties = tagged.properties();
-    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    let media_info = *format.media_info();
+    let (track_id, track_time_base, track_duration, codec) = {
+        let track = format.default_track(TrackType::Audio)?;
+        let codec = track.codec_params.as_ref()?.audio()?.codec;
+        (track.id, track.time_base, track.duration, codec)
+    };
+    let duration = media_info
+        .time_base
+        .zip(media_info.duration)
+        .and_then(|(time_base, duration)| time_base.calc_duration(duration))
+        .or_else(|| {
+            track_time_base
+                .zip(track_duration)
+                .and_then(|(time_base, duration)| time_base.calc_duration(duration))
+        });
+    let length_seconds = duration
+        .map(|duration| u32::try_from(duration.as_secs()).unwrap_or(u32::MAX))
+        .unwrap_or_default();
     let mut media = Ed2kMediaMetadata {
-        length_seconds: u32::try_from(properties.duration().as_secs()).unwrap_or(u32::MAX),
-        bitrate_kbps: properties
-            .overall_bitrate()
-            .or_else(|| properties.audio_bitrate())
+        length_seconds,
+        bitrate_kbps: duration
+            .map(|duration| {
+                let seconds = duration.as_secs_f64();
+                if seconds > 0.0 {
+                    ((file_size as f64 * 8.0 / (seconds * 1_000.0)) + 0.5) as u32
+                } else {
+                    0
+                }
+            })
             .unwrap_or_default(),
-        codec: lofty_codec_name(tagged.file_type()).to_string(),
+        codec: symphonia_codec_name(extension, codec).to_string(),
         ..Default::default()
     };
-    if let Some(tag) = tag {
-        media.artist = tag
-            .artist()
-            .as_deref()
-            .and_then(nonempty_media_text)
-            .unwrap_or_default();
-        media.album = tag
-            .album()
-            .as_deref()
-            .and_then(nonempty_media_text)
-            .unwrap_or_default();
-        media.title = tag
-            .title()
-            .as_deref()
-            .and_then(nonempty_media_text)
-            .unwrap_or_default();
+
+    let mut revisions = Vec::new();
+    let mut metadata = format.metadata();
+    loop {
+        if let Some(revision) = metadata.current() {
+            revisions.push(revision.clone());
+        }
+        if metadata.pop().is_none() {
+            break;
+        }
+    }
+    for revision in revisions.iter().rev() {
+        merge_symphonia_metadata(&mut media, revision, track_id);
     }
     Some(media)
 }
 
-fn lofty_codec_name(file_type: FileType) -> &'static str {
-    match file_type {
-        FileType::Aac => "AAC",
-        FileType::Aiff => "AIFF",
-        FileType::Ape => "Monkey's Audio",
-        FileType::Flac => "FLAC",
+fn merge_symphonia_metadata(
+    media: &mut Ed2kMediaMetadata,
+    revision: &MetadataRevision,
+    track_id: u32,
+) {
+    let tags = revision.media.tags.iter().chain(
+        revision
+            .per_track
+            .iter()
+            .filter(|track| track.track_id == u64::from(track_id))
+            .flat_map(|track| track.metadata.tags.iter()),
+    );
+    for tag in tags {
+        let Some(standard) = tag.std.as_ref() else {
+            continue;
+        };
+        let target_and_value = match standard {
+            StandardTag::Artist(value) => Some((&mut media.artist, value.as_str())),
+            StandardTag::Album(value) => Some((&mut media.album, value.as_str())),
+            StandardTag::TrackTitle(value) => Some((&mut media.title, value.as_str())),
+            _ => None,
+        };
+        if let Some((target, value)) = target_and_value
+            && target.is_empty()
+            && let Some(value) = nonempty_media_text(value)
+        {
+            *target = value;
+        }
+    }
+}
+
+fn symphonia_codec_name(extension: &str, codec: AudioCodecId) -> &'static str {
+    match extension {
+        "aac" => "AAC",
+        "aif" | "aiff" => "AIFF",
+        "ape" => "Monkey's Audio",
+        "flac" => "FLAC",
         // Stock's built-in MPEG fallback deliberately omits a codec tag.
-        FileType::Mpeg => "",
-        FileType::Mp4 => "MPEG-4 Audio",
-        FileType::Mpc => "Musepack",
-        FileType::Opus => "Opus",
-        FileType::Vorbis => "Vorbis",
-        FileType::Speex => "Speex",
+        "mp1" | "mp2" | "mp3" | "mpa" => "",
+        "mp4" | "m4a" | "m4b" | "m4v" | "mov" => "MPEG-4 Audio",
+        "mpc" => "Musepack",
+        "opus" => "Opus",
+        "spx" => "Speex",
+        "oga" | "ogg" if codec == CODEC_ID_OPUS => "Opus",
+        "oga" | "ogg" if codec == CODEC_ID_SPEEX => "Speex",
+        "oga" | "ogg" => "Vorbis",
         // The RIFF parser below provides the precise WAVE format tag.
-        FileType::Wav => "",
-        FileType::WavPack => "WavPack",
+        "wav" => "",
+        "wv" => "WavPack",
         _ => "",
     }
 }
@@ -610,6 +669,20 @@ mod tests {
         assert!(media.codec.is_empty(), "stock does not publish MP3 codec");
     }
 
+    #[test]
+    fn extracts_aiff_metadata_and_properties_with_symphonia() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        write_synthetic_aiff(temp.path());
+
+        let media = extract_media_metadata(temp.path(), "sample.aiff");
+        assert_eq!(media.artist, "Example Artist");
+        assert_eq!(media.album, "Example Album");
+        assert_eq!(media.title, "Example Title");
+        assert_eq!(media.length_seconds, 1);
+        assert_eq!(media.bitrate_kbps, 1_412);
+        assert_eq!(media.codec, "AIFF");
+    }
+
     #[tokio::test]
     async fn shared_catalog_media_survives_runtime_restart_from_source_path() {
         let temp = tempfile::tempdir().unwrap();
@@ -702,6 +775,37 @@ mod tests {
         file.flush().unwrap();
     }
 
+    fn write_synthetic_aiff(path: &Path) {
+        let frames = [
+            id3_text_frame(b"TPE1", "Example Artist"),
+            id3_text_frame(b"TALB", "Example Album"),
+            id3_text_frame(b"TIT2", "Example Title"),
+        ]
+        .concat();
+        let mut id3 = b"ID3\x03\0\0".to_vec();
+        id3.extend_from_slice(&syncsafe_bytes(frames.len() as u32));
+        id3.extend_from_slice(&frames);
+
+        let mut common = Vec::new();
+        common.extend_from_slice(&2u16.to_be_bytes());
+        common.extend_from_slice(&44_100u32.to_be_bytes());
+        common.extend_from_slice(&16u16.to_be_bytes());
+        common.extend_from_slice(&[0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0]);
+
+        let mut sound = vec![0; 8 + 44_100 * 2 * 2];
+        sound[..4].copy_from_slice(&0u32.to_be_bytes());
+        sound[4..8].copy_from_slice(&0u32.to_be_bytes());
+
+        let mut form = b"AIFF".to_vec();
+        push_aiff_chunk(&mut form, b"COMM", &common);
+        push_aiff_chunk(&mut form, b"ID3 ", &id3);
+        push_aiff_chunk(&mut form, b"SSND", &sound);
+        let mut aiff = b"FORM".to_vec();
+        aiff.extend_from_slice(&(form.len() as u32).to_be_bytes());
+        aiff.extend_from_slice(&form);
+        std::fs::write(path, aiff).unwrap();
+    }
+
     fn syncsafe_bytes(value: u32) -> [u8; 4] {
         [
             ((value >> 21) & 0x7f) as u8,
@@ -714,6 +818,15 @@ mod tests {
     fn push_riff_chunk(target: &mut Vec<u8>, id: &[u8; 4], body: &[u8]) {
         target.extend_from_slice(id);
         target.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        target.extend_from_slice(body);
+        if body.len() % 2 != 0 {
+            target.push(0);
+        }
+    }
+
+    fn push_aiff_chunk(target: &mut Vec<u8>, id: &[u8; 4], body: &[u8]) {
+        target.extend_from_slice(id);
+        target.extend_from_slice(&(body.len() as u32).to_be_bytes());
         target.extend_from_slice(body);
         if body.len() % 2 != 0 {
             target.push(0);

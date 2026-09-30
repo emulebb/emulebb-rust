@@ -36,7 +36,6 @@ flate2.workspace = true
 fs4.workspace = true
 hex.workspace = true
 if-addrs.workspace = true
-lofty.workspace = true
 md4.workspace = true
 md5.workspace = true
 num-bigint.workspace = true
@@ -50,6 +49,7 @@ serde_json.workspace = true
 sha1.workspace = true
 sha1-legacy.workspace = true
 socket2.workspace = true
+symphonia.workspace = true
 tokio-stream.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-util.workspace = true
