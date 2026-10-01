@@ -33,6 +33,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await page.getByRole("button", { name: "Transfers" }).click();
   await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
   await expect(page.locator("tr", { hasText: "Sample Transfer.bin" }).locator("select")).toHaveValue("1");
+  await page.getByRole("button", { name: "Sample Transfer.bin", exact: true }).click();
   await expect(page.getByText("Sample Peer")).toBeVisible();
 
   await page.getByRole("button", { name: "Sharing" }).click();

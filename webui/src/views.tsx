@@ -215,7 +215,7 @@ export function TransfersView(props: {
     () => props.transfers.filter((transfer) => !stateFilter || transfer.state === stateFilter),
     [props.transfers, stateFilter]
   );
-  const selected = props.transfers.find((transfer) => transfer.hash === selectedHash) ?? props.transfers[0];
+  const selected = props.transfers.find((transfer) => transfer.hash === selectedHash);
   const selectedId = selected?.hash ?? "";
 
   useEffect(() => {
