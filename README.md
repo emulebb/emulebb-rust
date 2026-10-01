@@ -140,8 +140,11 @@ failed bootstrap does not prevent the daemon and WebUI from starting.
 The daemon serves the browser WebUI from a `webui` directory beside
 `emulebb-rust.exe` when that directory exists. Set `[rest].webRootDir` to an
 explicit asset directory to override that default; relative override paths are
-resolved from the profile directory. Browser API calls use the existing
-`X-API-Key` header.
+resolved from the profile directory. The WebUI is mounted at the REST origin
+root: primary views use clean history paths such as `/transfers` and selected
+search sessions use `/searches/<id>`, while production assets are served from
+`/assets`. Reverse-proxy subpath mounting is not part of the current deployment
+contract. Browser API calls use the existing `X-API-Key` header.
 
 Harnesses may use operator-local inputs to create the profile directory and
 write those fixed files, but the Rust client itself only consumes the profile.

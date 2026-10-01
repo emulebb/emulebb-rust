@@ -448,7 +448,7 @@ async fn webui_serves_static_files_without_api_key() {
 }
 
 #[tokio::test]
-async fn webui_history_fallback_does_not_capture_api_routes() {
+async fn webui_history_fallback_only_serves_html_navigation() {
     let web_root = unique_test_dir("webui-history");
     std::fs::write(
         web_root.join("index.html"),
@@ -459,7 +459,8 @@ async fn webui_history_fallback_does_not_capture_api_routes() {
     let history = test_router_with_webui(web_root.clone())
         .oneshot(
             Request::builder()
-                .uri("/transfers")
+                .uri("/searches/17")
+                .header("Accept", "text/html,application/xhtml+xml")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -468,6 +469,18 @@ async fn webui_history_fallback_does_not_capture_api_routes() {
     assert_eq!(history.status(), StatusCode::OK);
     let body = to_bytes(history.into_body(), usize::MAX).await.unwrap();
     assert!(String::from_utf8_lossy(&body).contains("eMuleBB"));
+
+    let missing_asset = test_router_with_webui(web_root.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/searches/assets/missing.js")
+                .header("Accept", "application/javascript,*/*;q=0.8")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_asset.status(), StatusCode::NOT_FOUND);
 
     let api_unknown = test_router_with_webui(web_root)
         .oneshot(

@@ -45,6 +45,12 @@ import {
 } from "./api";
 import { errorMessage, formatRate, numberField } from "./format";
 import {
+  type AppRoute,
+  type Tab,
+  pathForRoute,
+  routeFromPathname
+} from "./routes";
+import {
   CategoriesView,
   DiagnosticsView,
   FriendsView,
@@ -72,22 +78,6 @@ const EVENT_STREAM_RETRY_MS = 3000;
 const EVENT_STREAM_REFRESH_THROTTLE_MS = 1000;
 
 type AuthenticationState = "checking" | "authenticated" | "unauthenticated";
-
-type Tab =
-  | "overview"
-  | "transfers"
-  | "search"
-  | "sharing"
-  | "shared-files"
-  | "uploads"
-  | "network"
-  | "servers"
-  | "kad"
-  | "categories"
-  | "friends"
-  | "settings"
-  | "diagnostics"
-  | "logs";
 
 const client = new RestClient();
 
@@ -126,6 +116,20 @@ function mostRecentSearch(searches: SearchItem[] | undefined): SearchItem | unde
   }, undefined);
 }
 
+function currentRoute(): AppRoute {
+  const route = routeFromPathname(window.location.pathname);
+  if (route) {
+    const canonicalPath = pathForRoute(route);
+    if (window.location.pathname !== canonicalPath) {
+      window.history.replaceState(null, "", canonicalPath);
+    }
+    return route;
+  }
+  const fallback: AppRoute = { tab: "overview" };
+  window.history.replaceState(null, "", pathForRoute(fallback));
+  return fallback;
+}
+
 export function App() {
   const [apiKey, setApiKey] = useState(readStoredApiKey);
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
@@ -133,7 +137,7 @@ export function App() {
   const [authError, setAuthError] = useState("");
   const [authAttempt, setAuthAttempt] = useState(0);
   const [storageWarning, setStorageWarning] = useState("");
-  const [tab, setTab] = useState<Tab>("overview");
+  const [route, setRoute] = useState<AppRoute>(currentRoute);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [capabilities, setCapabilities] = useState<unknown>(null);
@@ -153,7 +157,7 @@ export function App() {
   const [uploadQueue, setUploadQueue] = useState<Upload[]>([]);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [searches, setSearches] = useState<SearchItem[]>([]);
-  const [latestSearch, setLatestSearch] = useState<SearchItem | null>(null);
+  const [selectedSearch, setSelectedSearch] = useState<SearchItem | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -179,8 +183,32 @@ export function App() {
     setUploadQueue([]);
     setLogs([]);
     setSearches([]);
-    setLatestSearch(null);
+    setSelectedSearch(null);
   }, []);
+
+  const navigate = useCallback((nextRoute: AppRoute, replace = false) => {
+    const path = pathForRoute(nextRoute);
+    if (window.location.pathname !== path) {
+      window.history[replace ? "replaceState" : "pushState"](null, "", path);
+    }
+    setRoute(nextRoute);
+  }, []);
+
+  const navigateToTab = useCallback((nextTab: Tab) => {
+    navigate({ tab: nextTab });
+  }, [navigate]);
+
+  const navigateToSearch = useCallback((searchId: string, replace = false) => {
+    navigate({ tab: "search", searchId }, replace);
+  }, [navigate]);
+
+  useEffect(() => {
+    const syncRoute = () => setRoute(currentRoute());
+    window.addEventListener("popstate", syncRoute);
+    return () => window.removeEventListener("popstate", syncRoute);
+  }, []);
+
+  const tab = route.tab;
 
   useEffect(() => {
     let cancelled = false;
@@ -462,8 +490,10 @@ export function App() {
     if (authState !== "authenticated" || tab !== "search") {
       return;
     }
+    const selectedSearchId = route.searchId;
+    setSelectedSearch((current) => current?.id === selectedSearchId ? current : null);
     let cancelled = false;
-    const loadRecentSearch = async () => {
+    const loadSearchSessions = async () => {
       try {
         const collection = await client.get<Page<SearchItem> | SearchItem[]>("searches");
         const nextSearches = Array.isArray(collection) ? collection : collection.items ?? [];
@@ -471,17 +501,20 @@ export function App() {
           return;
         }
         setSearches(nextSearches);
-        const recent = mostRecentSearch(nextSearches);
-        if (recent?.id === undefined) {
-          setLatestSearch(null);
+        if (!selectedSearchId) {
+          const recent = mostRecentSearch(nextSearches);
+          if (recent?.id !== undefined) {
+            navigateToSearch(recent.id, true);
+          } else {
+            setSelectedSearch(null);
+          }
           return;
         }
-        setLatestSearch(recent);
         const search = await client.get<SearchItem>(
-          `searches/${recent.id}?limit=250&includeEvidence=false&exactTotal=true`
+          `searches/${selectedSearchId}?limit=250&includeEvidence=false&exactTotal=true`
         );
         if (!cancelled) {
-          setLatestSearch(search);
+          setSelectedSearch(search);
         }
       } catch (caught) {
         if (!cancelled) {
@@ -489,11 +522,11 @@ export function App() {
         }
       }
     };
-    void loadRecentSearch();
+    void loadSearchSessions();
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration, authState]);
+  }, [tab, route.searchId, refreshGeneration, authState, navigateToSearch]);
 
   const transferSseEnabled = supportsTransferSse(appInfo) || supportsTransferSse(capabilities);
 
@@ -631,13 +664,19 @@ export function App() {
     setAuthAttempt((value) => value + 1);
   };
 
-  const run = async (operation: () => Promise<unknown>, success: string) => {
+  const run = async (
+    operation: () => Promise<unknown>,
+    success: string,
+    options: { refresh?: boolean } = {}
+  ) => {
     setError("");
     setMessage("");
     try {
       await operation();
       setMessage(success);
-      await refresh();
+      if (options.refresh !== false) {
+        await refresh();
+      }
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -677,32 +716,32 @@ export function App() {
                     value={serverConnected ? "Connected" : "Disconnected"}
                     icon={<Server size={17} />}
                     state={serverConnected ? "connected" : "disconnected"}
-                    onClick={() => setTab("servers")}
+                    onClick={() => navigateToTab("servers")}
                   />
                   <ToolbarButton
                     label="Kad"
                     value={kadStatus}
                     icon={<Shield size={17} />}
                     state={kad.connected ? "connected" : "disconnected"}
-                    onClick={() => setTab("kad")}
+                    onClick={() => navigateToTab("kad")}
                   />
                   <ToolbarButton
                     label="Download"
                     value={downloadRate}
                     icon={<Download size={17} />}
-                    onClick={() => setTab("transfers")}
+                    onClick={() => navigateToTab("transfers")}
                   />
                   <ToolbarButton
                     label="Upload"
                     value={uploadRate}
                     icon={<UploadCloud size={17} />}
-                    onClick={() => setTab("uploads")}
+                    onClick={() => navigateToTab("uploads")}
                   />
                   <ToolbarButton
                     label="Transfers"
                     value={`${activeTransfers} active`}
                     icon={<Activity size={17} />}
-                    onClick={() => setTab("transfers")}
+                    onClick={() => navigateToTab("transfers")}
                   />
                 </div>
                 <div class="top-actions navbar-nav flex-row">
@@ -721,20 +760,20 @@ export function App() {
           </div>
           {authState === "authenticated" && (
             <nav class="tabs topbar-tabs nav nav-pills" aria-label="Primary views">
-              <TabButton tab="overview" active={tab} setTab={setTab} icon={<Activity size={16} />} label="Overview" />
-              <TabButton tab="transfers" active={tab} setTab={setTab} icon={<Download size={16} />} label="Transfers" />
-              <TabButton tab="search" active={tab} setTab={setTab} icon={<Search size={16} />} label="Search" />
-              <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
-              <TabButton tab="shared-files" active={tab} setTab={setTab} icon={<Share2 size={16} />} label="Shared Files" />
-              <TabButton tab="uploads" active={tab} setTab={setTab} icon={<UploadCloud size={16} />} label="Uploads" />
-              <TabButton tab="network" active={tab} setTab={setTab} icon={<Network size={16} />} label="Network" />
-              <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
-              <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
-              <TabButton tab="categories" active={tab} setTab={setTab} icon={<ListChecks size={16} />} label="Categories" />
-              <TabButton tab="friends" active={tab} setTab={setTab} icon={<Users size={16} />} label="Friends" />
-              <TabButton tab="settings" active={tab} setTab={setTab} icon={<Settings size={16} />} label="Settings" />
-              <TabButton tab="diagnostics" active={tab} setTab={setTab} icon={<Gauge size={16} />} label="Diagnostics" />
-              <TabButton tab="logs" active={tab} setTab={setTab} icon={<FileText size={16} />} label="Logs" />
+              <TabButton tab="overview" active={tab} navigate={navigateToTab} icon={<Activity size={16} />} label="Overview" />
+              <TabButton tab="transfers" active={tab} navigate={navigateToTab} icon={<Download size={16} />} label="Transfers" />
+              <TabButton tab="search" active={tab} navigate={navigateToTab} icon={<Search size={16} />} label="Search" />
+              <TabButton tab="sharing" active={tab} navigate={navigateToTab} icon={<FolderTree size={16} />} label="Sharing" />
+              <TabButton tab="shared-files" active={tab} navigate={navigateToTab} icon={<Share2 size={16} />} label="Shared Files" />
+              <TabButton tab="uploads" active={tab} navigate={navigateToTab} icon={<UploadCloud size={16} />} label="Uploads" />
+              <TabButton tab="network" active={tab} navigate={navigateToTab} icon={<Network size={16} />} label="Network" />
+              <TabButton tab="servers" active={tab} navigate={navigateToTab} icon={<Server size={16} />} label="Servers" />
+              <TabButton tab="kad" active={tab} navigate={navigateToTab} icon={<Shield size={16} />} label="Kad" />
+              <TabButton tab="categories" active={tab} navigate={navigateToTab} icon={<ListChecks size={16} />} label="Categories" />
+              <TabButton tab="friends" active={tab} navigate={navigateToTab} icon={<Users size={16} />} label="Friends" />
+              <TabButton tab="settings" active={tab} navigate={navigateToTab} icon={<Settings size={16} />} label="Settings" />
+              <TabButton tab="diagnostics" active={tab} navigate={navigateToTab} icon={<Gauge size={16} />} label="Diagnostics" />
+              <TabButton tab="logs" active={tab} navigate={navigateToTab} icon={<FileText size={16} />} label="Logs" />
             </nav>
           )}
         </div>
@@ -810,12 +849,20 @@ export function App() {
             {tab === "search" && (
               <SearchView
                 searches={searches}
-                latestSearch={latestSearch}
+                selectedSearch={selectedSearch}
+                selectedSearchId={route.searchId}
                 categories={categories}
                 client={client}
                 run={run}
-                refresh={refresh}
-                setLatestSearch={setLatestSearch}
+                selectSearch={navigateToSearch}
+                onSearchCreated={(search) => {
+                  setSearches((current) => [
+                    ...current.filter((candidate) => candidate.id !== search.id),
+                    search
+                  ]);
+                  setSelectedSearch(search);
+                  navigateToSearch(search.id);
+                }}
               />
             )}
             {tab === "sharing" && (
@@ -859,7 +906,7 @@ export function App() {
                 run={run}
                 openSection={(name) => {
                   setSettingsSectionTarget(name);
-                  setTab(settingsSectionTabs[name] ?? "settings");
+                  navigateToTab(settingsSectionTabs[name] ?? "settings");
                 }}
               />
             )}
@@ -935,19 +982,31 @@ function delayWithAbort(ms: number, signal: AbortSignal): Promise<void> {
 function TabButton(props: {
   tab: Tab;
   active: Tab;
-  setTab: (tab: Tab) => void;
+  navigate: (tab: Tab) => void;
   icon: ComponentChildren;
   label: string;
 }) {
   return (
-    <button
-      type="button"
+    <a
+      href={pathForRoute({ tab: props.tab })}
       class={props.active === props.tab ? "tab nav-link active" : "tab nav-link"}
-      onClick={() => props.setTab(props.tab)}
+      aria-current={props.active === props.tab ? "page" : undefined}
+      onClick={(event) => {
+        if (
+          event.button === 0
+          && !event.altKey
+          && !event.ctrlKey
+          && !event.metaKey
+          && !event.shiftKey
+        ) {
+          event.preventDefault();
+          props.navigate(props.tab);
+        }
+      }}
     >
       {props.icon}
       {props.label}
-    </button>
+    </a>
   );
 }
 

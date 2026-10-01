@@ -74,7 +74,11 @@ import {
   stringField
 } from "./format";
 
-export type RunFunction = (operation: () => Promise<unknown>, success: string) => Promise<void>;
+export type RunFunction = (
+  operation: () => Promise<unknown>,
+  success: string,
+  options?: { refresh?: boolean }
+) => Promise<void>;
 
 export function Overview(props: {
   snapshot: Snapshot | null;
@@ -470,12 +474,13 @@ export function TransfersView(props: {
 
 export function SearchView(props: {
   searches: SearchItem[];
-  latestSearch: SearchItem | null;
+  selectedSearch: SearchItem | null;
+  selectedSearchId?: string;
   categories: Category[];
   client: RestClient;
   run: RunFunction;
-  refresh: () => Promise<void>;
-  setLatestSearch: (search: SearchItem | null) => void;
+  selectSearch: (searchId: string) => void;
+  onSearchCreated: (search: SearchItem) => void;
 }) {
   const [query, setQuery] = useState("");
   const [method, setMethod] = useState("automatic");
@@ -493,7 +498,13 @@ export function SearchView(props: {
   const [artist, setArtist] = useState("");
   const [categoryId, setCategoryId] = useState("0");
   const [paused, setPaused] = useState(false);
-  const results = props.latestSearch?.items ?? props.latestSearch?.results ?? [];
+  const orderedSearches = useMemo(
+    () => [...props.searches].sort((left, right) => Number(right.id) - Number(left.id)),
+    [props.searches]
+  );
+  const selectedSummary = props.searches.find((search) => search.id === props.selectedSearchId);
+  const displayedSearch = props.selectedSearch ?? selectedSummary;
+  const results = props.selectedSearch?.items ?? props.selectedSearch?.results ?? [];
   const searchQueryError = searchQueryValidationError(query);
 
   const startSearch = async () => {
@@ -518,8 +529,7 @@ export function SearchView(props: {
       ...(album.trim() ? { album: album.trim() } : {}),
       ...(artist.trim() ? { artist: artist.trim() } : {})
     });
-    props.setLatestSearch(next);
-    await props.refresh();
+    props.onSearchCreated(next);
   };
 
   return (
@@ -531,7 +541,7 @@ export function SearchView(props: {
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         if (!searchQueryError) {
-          void props.run(startSearch, "Search started");
+          void props.run(startSearch, "Search started", { refresh: false });
         }
       }}>
         <input class="form-control" value={query} placeholder="Search query" aria-invalid={searchQueryError ? "true" : "false"} onInput={(event) => setQuery(event.currentTarget.value)} />
@@ -555,6 +565,25 @@ export function SearchView(props: {
         <button class="btn" type="submit" disabled={!normalizeSearchQuery(query) || Boolean(searchQueryError)}><Search size={16} />Start</button>
       </form>
       {searchQueryError && <p class="field-error">{searchQueryError}</p>}
+      {orderedSearches.length > 0 && (
+        <div class="form-row subtle-row search-session-row">
+          <label for="search-session">Search session</label>
+          <select
+            id="search-session"
+            class="form-select search-session-select"
+            value={props.selectedSearchId ?? ""}
+            onInput={(event) => props.selectSearch(event.currentTarget.value)}
+          >
+            {!props.selectedSearchId && <option value="" disabled>Select a search session</option>}
+            {orderedSearches.map((search) => (
+              <option key={search.id} value={search.id}>
+                #{search.id} {search.query || "Untitled search"} · {search.status ?? search.state ?? "unknown"} · {search.resultCount ?? search.total ?? 0} results
+              </option>
+            ))}
+          </select>
+          {displayedSearch && <StatusPill value={displayedSearch.status ?? displayedSearch.state ?? "unknown"} />}
+        </div>
+      )}
       <details class="search-filters">
         <summary>Advanced search filters</summary>
         <div class="form-row subtle-row">
@@ -605,7 +634,7 @@ export function SearchView(props: {
                   <button class="btn"
                     type="button"
                     onClick={() => void props.run(
-                      () => props.client.post(`searches/${props.latestSearch?.id}/results/${result.hash}/operations/download`, {
+                      () => props.client.post(`searches/${props.selectedSearch?.id}/results/${result.hash}/operations/download`, {
                         paused,
                         categoryId: Number(categoryId)
                       }),

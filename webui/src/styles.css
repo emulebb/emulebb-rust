@@ -779,6 +779,16 @@ td {
   margin-bottom: 0;
 }
 
+.search-session-row label {
+  color: var(--tblr-secondary);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.form-row .search-session-select {
+  flex: 1 1 320px;
+}
+
 .danger-row {
   border-top: var(--tblr-border-width) solid var(--tblr-border-color);
   margin-top: 12px;

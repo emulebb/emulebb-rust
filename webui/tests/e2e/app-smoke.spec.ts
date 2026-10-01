@@ -30,8 +30,8 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(statusToolbar.getByRole("button", { name: "Upload: 1.0 KiB/s", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Transfers: 1 active", exact: true })).toBeVisible();
   await expect(page.locator(".page-header")).toHaveCount(0);
-  await expect(primaryViews.getByRole("button")).toHaveCount(14);
-  await expect(primaryViews.locator("button svg")).toHaveCount(14);
+  await expect(primaryViews.getByRole("link")).toHaveCount(14);
+  await expect(primaryViews.locator("a svg")).toHaveCount(14);
   await expect.poll(async () => topbar.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
     return bounds.width >= window.innerWidth - 32;
@@ -49,12 +49,14 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
 
   await statusToolbar.getByRole("button", { name: "Transfers: 1 active", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
+  await expect(page).toHaveURL(/\/transfers$/);
   await expect(page.locator("tr", { hasText: "Sample Transfer.bin" }).locator("select")).toHaveValue("1");
   await page.getByRole("button", { name: "Sample Transfer.bin", exact: true }).click();
   await expect(page.getByText("Sample Peer")).toBeVisible();
 
-  await page.getByRole("button", { name: "Sharing" }).click();
+  await page.getByRole("link", { name: "Sharing" }).click();
   await expect(page.getByRole("heading", { name: "Shared Folders" })).toBeVisible();
+  await expect(page).toHaveURL(/\/sharing$/);
   await expect(page.locator("section.metric", { hasText: "Shared Files" }).locator("strong")).toHaveText("1");
   await expect(page.locator("section.metric", { hasText: "Active Uploads" }).locator("strong")).toHaveText("1");
   await expect(page.locator("section.metric", { hasText: "Waiting Uploads" }).locator("strong")).toHaveText("1");
@@ -79,17 +81,18 @@ test("keeps the unified toolbar usable at a narrow viewport", async ({ page }) =
 
   const topbar = page.locator("header .topbar");
   const primaryViews = topbar.getByRole("navigation", { name: "Primary views" });
-  await expect(primaryViews.getByRole("button")).toHaveCount(14);
-  await expect(primaryViews.locator("button svg")).toHaveCount(14);
-  await expect(primaryViews.getByRole("button", { name: "Shared Files", exact: true })).toBeVisible();
-  await expect(primaryViews.getByRole("button", { name: "Logs", exact: true })).toBeVisible();
+  await expect(primaryViews.getByRole("link")).toHaveCount(14);
+  await expect(primaryViews.locator("a svg")).toHaveCount(14);
+  await expect(primaryViews.getByRole("link", { name: "Shared Files", exact: true })).toBeVisible();
+  await expect(primaryViews.getByRole("link", { name: "Logs", exact: true })).toBeVisible();
   await expect(page.locator(".page-header")).toHaveCount(0);
   await expect.poll(async () => topbar.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   await expect.poll(async () => page.locator("body").evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
 
-  await primaryViews.getByRole("button", { name: "Search", exact: true }).click();
+  await primaryViews.getByRole("link", { name: "Search", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
-  await expect(primaryViews.getByRole("button", { name: "Search", exact: true })).toHaveClass(/active/);
+  await expect(page).toHaveURL(/\/searches$/);
+  await expect(primaryViews.getByRole("link", { name: "Search", exact: true })).toHaveClass(/active/);
 });
 
 test("recovers from a stale API key without a manual refresh", async ({ page }) => {
@@ -110,7 +113,7 @@ test("recovers from a stale API key without a manual refresh", async ({ page }) 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
   await expect(page.getByText(/Could not authenticate.*missing or invalid API key/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Overview" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Overview" })).toHaveCount(0);
 
   await page.getByPlaceholder("X-API-Key").fill("fresh-key");
   await page.getByRole("button", { name: "Connect" }).click();
@@ -122,7 +125,7 @@ test("recovers from a stale API key without a manual refresh", async ({ page }) 
     .toBe(true);
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem("emulebb.webui.apiKey"))).toBe("fresh-key");
 
-  await page.getByRole("button", { name: "Network" }).click();
+  await page.getByRole("link", { name: "Network" }).click();
   await expect(page.getByRole("heading", { name: "Network Health" })).toBeVisible();
   await expect
     .poll(() => requests.some((request) => request.path === "app/settings" && request.headers["x-api-key"] === "fresh-key"))
@@ -138,7 +141,7 @@ test("submits a synthetic transfer operation", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Transfers", exact: true }).click();
+  await page.getByRole("link", { name: "Transfers", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
 
   await page.getByTitle("Pause").click();
@@ -158,7 +161,7 @@ test("search create form uses REST-native type tokens", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Search" }).click();
+  await page.getByRole("link", { name: "Search" }).click();
   const searchPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Search" }) });
   const startSearch = searchPanel.getByRole("button", { name: "Start" });
   const initialSearchPosts = requests.filter((request) => request.method === "POST" && request.path === "searches").length;
@@ -205,6 +208,71 @@ test("search create form uses REST-native type tokens", async ({ page }) => {
     album: "Sample Album",
     artist: "Example Artist"
   });
+});
+
+test("loads a selected search session from a deep link", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  const state: any = mockSnapshotFixture();
+  state.searches = [{
+    id: "7",
+    query: "synthetic archive",
+    method: "kad",
+    status: "completed",
+    resultCount: 1
+  }];
+  const fallback = installMockApi(requests);
+
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname.replace(/^\/api\/v1\/?/, "");
+    if (request.method() === "GET" && path === "snapshot") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: state })
+      });
+      return;
+    }
+    if (request.method() === "GET" && path === "searches") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: { items: state.searches } })
+      });
+      return;
+    }
+    if (request.method() === "GET" && path === "searches/7") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            ...state.searches[0],
+            total: 1,
+            offset: 0,
+            limit: 250,
+            items: [{
+              hash: "00112233445566778899AABBCCDDEEFF",
+              name: "Synthetic Archive.bin",
+              sizeBytes: 4096,
+              sources: 3,
+              fileType: "arc"
+            }]
+          }
+        })
+      });
+      return;
+    }
+    await fallback(route);
+  });
+
+  await page.goto("/searches/7");
+
+  await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Search session" })).toHaveValue("7");
+  await expect(page.getByText("Synthetic Archive.bin")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Search" })).toHaveAttribute("aria-current", "page");
+  await expect(page).toHaveURL(/\/searches\/7$/);
 });
 
 test("runs the complete server, Kad, search, download, and reconnect workflow", async ({ page }) => {
@@ -370,7 +438,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   });
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Servers" }).click();
+  await page.getByRole("link", { name: "Servers" }).click();
   const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
   await expect(serversPanel.getByText(/Server network: Disconnected/)).toBeVisible();
   await serversPanel.getByRole("button", { name: "Import" }).click();
@@ -379,7 +447,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
   await expect(serversPanel.getByText(/LowID: connected/)).toBeVisible();
 
-  await page.getByRole("button", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "Kad", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
   await kadPanel.getByRole("button", { name: "Import" }).click();
@@ -387,29 +455,40 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await kadPanel.getByRole("button", { name: "Start" }).click();
   await expect(kadPanel.getByText(/Kad network: Connected/)).toBeVisible();
 
-  await page.getByRole("button", { name: "Servers" }).click();
+  await page.getByRole("link", { name: "Servers" }).click();
   await serversPanel.locator("button.btn").filter({ hasText: /^Disconnect$/ }).click();
   await expect(serversPanel.getByText(/Server network: Disconnected/)).toBeVisible();
-  await page.getByRole("button", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "Kad", exact: true }).click();
   await expect(kadPanel.getByText(/Kad network: Connected/)).toBeVisible();
-  await page.getByRole("button", { name: "Servers" }).click();
+  await page.getByRole("link", { name: "Servers" }).click();
   await serversPanel.locator("button.btn").filter({ hasText: /^Connect$/ }).click();
   await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
 
-  await page.getByRole("button", { name: "Search" }).click();
+  await page.getByRole("link", { name: "Search" }).click();
   const searchPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Search" }) });
+  await expect(page).toHaveURL(/\/searches\/1$/);
+  const searchSessions = searchPanel.getByRole("combobox", { name: "Search session" });
+  await expect(searchSessions).toHaveValue("1");
+  await expect(searchPanel.getByText("Older Result.bin")).toBeVisible();
   await searchPanel.getByPlaceholder("Search query").fill("linux");
   await searchPanel.getByText("Advanced search filters").click();
   await searchPanel.getByPlaceholder("Extension").fill("pdf");
   await searchPanel.getByPlaceholder("Maximum bytes").fill("5242879");
   await searchPanel.getByRole("button", { name: "Start" }).click();
-  await page.getByTitle("Refresh").click();
+  await expect(page).toHaveURL(/\/searches\/2$/);
+  await expect(searchSessions).toHaveValue("2");
   const resultRow = searchPanel.locator("tr", { hasText: "Linux Guide.pdf" });
+  await expect(resultRow).toBeVisible();
+  await searchSessions.selectOption("1");
+  await expect(page).toHaveURL(/\/searches\/1$/);
+  await expect(searchPanel.getByText("Older Result.bin")).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/searches\/2$/);
   await expect(resultRow).toBeVisible();
   await resultRow.getByRole("button", { name: "Download" }).click();
   await expect(page.getByText("Download queued")).toBeVisible();
 
-  await page.getByRole("button", { name: "Transfers", exact: true }).click();
+  await page.getByRole("link", { name: "Transfers", exact: true }).click();
   const transferRow = page.locator("tr", { hasText: "Linux Guide.pdf" });
   await expect(transferRow).toContainText("downloading");
   await transferRow.getByRole("button", { name: "Stop", exact: true }).click();
@@ -425,10 +504,10 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(transferRow).toHaveCount(0);
   await expect(page.getByText("No transfers.", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "Kad", exact: true }).click();
   await kadPanel.getByRole("button", { name: "Stop" }).click();
   await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
-  await page.getByRole("button", { name: "Servers" }).click();
+  await page.getByRole("link", { name: "Servers" }).click();
   await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
 
   expect(requests.some((request) => request.path === "servers/operations/disconnect")).toBe(true);
@@ -451,7 +530,7 @@ test("shared folder add form validates root paths", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Sharing" }).click();
+  await page.getByRole("link", { name: "Sharing" }).click();
   const sharingPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Folders" }) });
   const addFolder = sharingPanel.getByRole("button", { name: "Add root" });
   const initialSharedDirectoryPosts = requests.filter((request) => request.method === "POST" && request.path === "shared-directories/roots").length;
@@ -474,13 +553,13 @@ test("shared folder add form validates root paths", async ({ page }) => {
   await expect(page.getByText("Reload queued")).toBeVisible();
   expect(requests.some((request) => request.method === "POST" && request.path === "shared-directories/operations/reload")).toBe(true);
 
-  await page.getByRole("button", { name: "Shared Files", exact: true }).click();
+  await page.getByRole("link", { name: "Shared Files", exact: true }).click();
   const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
   const sharedFileRow = sharedFilesPanel.locator("tbody tr").filter({ hasText: "Shared Sample.bin" });
   await expect(sharedFileRow).toHaveCount(1);
   await expect(sharedFileRow).toContainText("4.0 KiB");
 
-  await page.getByRole("button", { name: "Sharing", exact: true }).click();
+  await page.getByRole("link", { name: "Sharing", exact: true }).click();
 
   page.once("dialog", (dialog) => dialog.accept());
   await sharingPanel.getByTitle("Remove").first().click();
@@ -495,7 +574,7 @@ test("transfer add form validates eD2K link batches", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Transfers", exact: true }).click();
+  await page.getByRole("link", { name: "Transfers", exact: true }).click();
   const transfersPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Transfers" }) });
   const linkInput = transfersPanel.getByPlaceholder("One eD2K link per line");
   const addLinks = transfersPanel.getByRole("button", { name: "Add links" });
@@ -534,7 +613,7 @@ test("section resource operation forms validate endpoint addresses and ports", a
 
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Servers" }).click();
+  await page.getByRole("link", { name: "Servers" }).click();
   const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
   await expect(serversPanel.getByText("Auxiliary ports")).toBeVisible();
   await expect(serversPanel.getByText("4662, 4663")).toBeVisible();
@@ -557,7 +636,7 @@ test("section resource operation forms validate endpoint addresses and ports", a
   expect(serverPost).toBeDefined();
   expect(JSON.parse(serverPost?.body ?? "{}")).toMatchObject({ address: "127.0.0.1", port: 4661 });
 
-  await page.getByRole("button", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "Kad", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   const initialKadBootstrapPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/bootstrap").length;
   await kadPanel.getByPlaceholder("Bootstrap address").fill("   ");
@@ -585,7 +664,7 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
 
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Servers" }).click();
+  await page.getByRole("link", { name: "Servers" }).click();
   const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
   const serverImportButton = serversPanel.getByRole("button", { name: "Import" });
   const initialServerImportPosts = requests.filter((request) => request.method === "POST" && request.path === "servers/operations/import-met-url").length;
@@ -611,7 +690,7 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   expect(serverImportPost).toBeDefined();
   expect(JSON.parse(serverImportPost?.body ?? "{}")).toEqual({ url: "HTTPS://example.invalid/server.met" });
 
-  await page.getByRole("button", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "Kad", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   const kadImportButton = kadPanel.getByRole("button", { name: "Import" });
   const initialKadImportPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url").length;
@@ -635,7 +714,7 @@ test("friend create form validates hash and name", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Friends" }).click();
+  await page.getByRole("link", { name: "Friends" }).click();
   const friendsPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Friends" }) });
   const addFriend = friendsPanel.getByRole("button", { name: "Add" });
   const initialFriendPosts = requests.filter((request) => request.method === "POST" && request.path === "friends").length;
@@ -674,7 +753,7 @@ test("category forms validate names and priority inputs", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Categories" }).click();
+  await page.getByRole("link", { name: "Categories" }).click();
   const categoriesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Categories" }) });
   const addCategory = categoriesPanel.getByRole("button", { name: "Add" });
   const initialCategoryPosts = requests.filter((request) => request.method === "POST" && request.path === "categories").length;
@@ -714,7 +793,7 @@ test("shared file metadata form validates rating and priority contract", async (
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Shared Files" }).click();
+  await page.getByRole("link", { name: "Shared Files" }).click();
   const metadataPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) });
   await expect(metadataPanel.getByText("Shared Sample.bin")).toBeVisible();
   await expect(metadataPanel.getByRole("option", { name: "Very high" })).toHaveCount(0);
@@ -742,7 +821,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("link", { name: "Settings" }).click();
   const settingsPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Settings" }) });
 
   await expect(settingsPanel.getByRole("heading", { name: "Storage" })).toBeVisible();
@@ -923,7 +1002,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(metricValue("Latest Bus Event")).toHaveText("1");
   await expect(metricValue("Resume")).toHaveText("reset");
 
-  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("link", { name: "Settings" }).click();
   await settingsPanel.getByRole("button", { name: "Open Logs" }).click();
   await expect(page.getByRole("heading", { name: "Logs" })).toBeVisible();
 });
