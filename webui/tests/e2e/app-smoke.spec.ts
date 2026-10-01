@@ -445,6 +445,14 @@ test("shared folder add form validates root paths", async ({ page }) => {
   await expect(page.getByText("Reload queued")).toBeVisible();
   expect(requests.some((request) => request.method === "POST" && request.path === "shared-directories/operations/reload")).toBe(true);
 
+  await page.getByRole("button", { name: "Shared Files", exact: true }).click();
+  const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
+  const sharedFileRow = sharedFilesPanel.locator("tbody tr").filter({ hasText: "Shared Sample.bin" });
+  await expect(sharedFileRow).toHaveCount(1);
+  await expect(sharedFileRow).toContainText("4.0 KiB");
+
+  await page.getByRole("button", { name: "Sharing", exact: true }).click();
+
   page.once("dialog", (dialog) => dialog.accept());
   await sharingPanel.getByTitle("Remove").first().click();
   await expect(page.getByText("Folder removed")).toBeVisible();
