@@ -323,6 +323,8 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await searchPanel.getByPlaceholder("Extension").fill("pdf");
   await searchPanel.getByPlaceholder("Maximum bytes").fill("5242879");
   await searchPanel.getByRole("button", { name: "Start" }).click();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Search" }).click();
   const resultRow = searchPanel.locator("tr", { hasText: "Linux Guide.pdf" });
   await expect(resultRow).toBeVisible();
   await resultRow.getByRole("button", { name: "Download" }).click();
