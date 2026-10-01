@@ -41,7 +41,6 @@ pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
 
 const REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);
 const AUTO_CONNECT_POPULARITY_WAIT: Duration = Duration::from_secs(20);
-const AUTO_CONNECT_POPULARITY_SETTLE: Duration = Duration::from_secs(3);
 const AUTO_CONNECT_POPULARITY_POLL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -730,6 +729,12 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             if !connect_core.core_settings().await.auto_connect {
                 return;
             }
+            // Record Kad as desired before constructing the shared eD2K/Kad
+            // runtime. The connect path applies this flag to the new DHT, so a
+            // fresh profile starts both networks without a WebUI Start click.
+            if let Err(error) = connect_core.start_kad().await {
+                tracing::warn!(%error, "automatic Kad startup failed; REST start remains available");
+            }
             match connect_core.auto_connect_ed2k().await {
                 Ok(status) => {
                     info!(
@@ -759,23 +764,10 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
 
 async fn connect_to_most_popular_server(core: &EmulebbCore) {
     let deadline = tokio::time::Instant::now() + AUTO_CONNECT_POPULARITY_WAIT;
-    let mut population_signature = Vec::new();
-    let mut last_population_change = None;
     loop {
         let now = tokio::time::Instant::now();
-        let servers = core.servers().await;
-        let signature = servers
-            .iter()
-            .filter(|server| server.enabled && server.users > 0)
-            .map(|server| (server.endpoint.clone(), server.users, server.files))
-            .collect::<Vec<_>>();
-        if signature != population_signature {
-            population_signature = signature;
-            last_population_change = Some(now);
-        }
-        let population_settled = last_population_change
-            .is_some_and(|observed| now.duration_since(observed) >= AUTO_CONNECT_POPULARITY_SETTLE);
-        if population_settled || now >= deadline {
+        if now >= deadline {
+            let servers = core.servers().await;
             let Some(server) = most_popular_enabled_server(servers) else {
                 warn!(
                     wait_seconds = AUTO_CONNECT_POPULARITY_WAIT.as_secs(),
