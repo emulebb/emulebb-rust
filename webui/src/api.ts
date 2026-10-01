@@ -751,7 +751,6 @@ export type Snapshot = {
   status?: Status;
   stats?: Stats;
   transfers?: Transfer[];
-  searches?: SearchItem[];
   servers?: ServerItem[];
   kad?: KadStatus;
   uploads?: Upload[];

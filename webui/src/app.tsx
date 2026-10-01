@@ -152,6 +152,7 @@ export function App() {
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [uploadQueue, setUploadQueue] = useState<Upload[]>([]);
   const [logs, setLogs] = useState<LogRecord[]>([]);
+  const [searches, setSearches] = useState<SearchItem[]>([]);
   const [latestSearch, setLatestSearch] = useState<SearchItem | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -177,6 +178,7 @@ export function App() {
     setUploads([]);
     setUploadQueue([]);
     setLogs([]);
+    setSearches([]);
     setLatestSearch(null);
   }, []);
 
@@ -234,13 +236,6 @@ export function App() {
       setUploads(nextSnapshot.uploads ?? []);
       setUploadQueue(nextSnapshot.uploadQueue ?? []);
       setRefreshGeneration((value) => value + 1);
-
-      const recent = mostRecentSearch(nextSnapshot.searches);
-      if (recent?.id !== undefined) {
-        setLatestSearch(recent);
-      } else {
-        setLatestSearch(null);
-      }
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -467,22 +462,30 @@ export function App() {
     if (authState !== "authenticated" || tab !== "search") {
       return;
     }
-    const recent = mostRecentSearch(snapshot?.searches);
-    if (recent?.id === undefined) {
-      return;
-    }
     let cancelled = false;
     const loadRecentSearch = async () => {
       try {
+        const collection = await client.get<Page<SearchItem> | SearchItem[]>("searches");
+        const nextSearches = Array.isArray(collection) ? collection : collection.items ?? [];
+        if (cancelled) {
+          return;
+        }
+        setSearches(nextSearches);
+        const recent = mostRecentSearch(nextSearches);
+        if (recent?.id === undefined) {
+          setLatestSearch(null);
+          return;
+        }
+        setLatestSearch(recent);
         const search = await client.get<SearchItem>(
           `searches/${recent.id}?limit=250&includeEvidence=false&exactTotal=true`
         );
         if (!cancelled) {
           setLatestSearch(search);
         }
-      } catch {
+      } catch (caught) {
         if (!cancelled) {
-          setLatestSearch(recent);
+          setError(errorMessage(caught));
         }
       }
     };
@@ -490,7 +493,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration, snapshot?.searches, authState]);
+  }, [tab, refreshGeneration, authState]);
 
   const transferSseEnabled = supportsTransferSse(appInfo) || supportsTransferSse(capabilities);
 
@@ -643,7 +646,6 @@ export function App() {
   const stats = snapshot?.stats ?? snapshot?.status?.stats ?? {};
   const transfers = snapshot?.transfers ?? [];
   const servers = snapshot?.servers ?? [];
-  const searches = snapshot?.searches ?? [];
   const kad: KadStatus = snapshot?.kad ?? {};
 
   return (

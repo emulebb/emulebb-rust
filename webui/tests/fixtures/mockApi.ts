@@ -167,6 +167,8 @@ function dataFor(method: string, path: string): unknown {
       return snapshot.status.runtimeDiagnostics.transferEvents;
     case "snapshot":
       return snapshot;
+    case "searches":
+      return { items: snapshot.searches };
     case "kad/nodes":
       return { items: [] };
     case "logs":

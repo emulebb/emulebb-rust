@@ -209,6 +209,11 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       await fulfill(state);
       return;
     }
+    if (method === "GET" && path === "searches") {
+      record();
+      await fulfill({ items: state.searches });
+      return;
+    }
     if (method === "POST" && path === "servers/operations/import-met-url") {
       record();
       state.servers = [{ endpoint: "192.0.2.10:4661", name: "Imported Server", connected: false, enabled: true }];
@@ -364,6 +369,8 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
 
   expect(requests.some((request) => request.path === "servers/operations/disconnect")).toBe(true);
   expect(requests.filter((request) => request.path === "servers/operations/connect")).toHaveLength(2);
+  expect(requests.some((request) => request.method === "GET" && request.path === "searches")).toBe(true);
+  expect(requests.some((request) => request.method === "GET" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) => request.path === `searches/2/results/${resultHash}/operations/download`)).toBe(true);
   expect(requests.some((request) => request.path === `transfers/${resultHash}/operations/stop`)).toBe(true);
   expect(state.transfers[0]).toMatchObject({ state: "paused", stopped: true });
