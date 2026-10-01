@@ -42,6 +42,8 @@ pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
 const REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);
 const AUTO_CONNECT_POPULARITY_WAIT: Duration = Duration::from_secs(20);
 const AUTO_CONNECT_POPULARITY_POLL: Duration = Duration::from_millis(500);
+const AUTO_CONNECT_TARGET_VERIFY: Duration = Duration::from_secs(12);
+const AUTO_CONNECT_TARGET_STABLE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -768,38 +770,47 @@ async fn connect_to_most_popular_server(core: &EmulebbCore) {
         let now = tokio::time::Instant::now();
         if now >= deadline {
             let servers = core.servers().await;
-            let Some(server) = most_popular_enabled_server(servers) else {
+            let candidates = ranked_popular_enabled_servers(servers);
+            if candidates.is_empty() {
                 warn!(
                     wait_seconds = AUTO_CONNECT_POPULARITY_WAIT.as_secs(),
                     "automatic server selection received no live population data; keeping the current server"
                 );
                 return;
-            };
-            if server.current {
-                info!(
-                    endpoint = %server.endpoint,
-                    users = server.users,
-                    files = server.files,
-                    "automatic connection already uses the most popular responding server"
-                );
-                return;
             }
-            match core.connect_ed2k_server(&server.endpoint).await {
-                Ok(Some(_)) => info!(
+            for server in candidates {
+                if !server.current {
+                    match core.connect_ed2k_server(&server.endpoint).await {
+                        Ok(Some(_)) => info!(
+                            endpoint = %server.endpoint,
+                            users = server.users,
+                            files = server.files,
+                            "automatic connection trying the most popular responding server"
+                        ),
+                        Ok(None) => continue,
+                        Err(error) => {
+                            warn!(endpoint = %server.endpoint, %error, "automatic popular-server connect request failed");
+                            continue;
+                        }
+                    }
+                }
+                if server_connection_is_stable(core, &server.endpoint).await {
+                    info!(
+                        endpoint = %server.endpoint,
+                        users = server.users,
+                        files = server.files,
+                        "automatic connection selected the most popular reachable server"
+                    );
+                    return;
+                }
+                warn!(
                     endpoint = %server.endpoint,
                     users = server.users,
-                    files = server.files,
-                    "automatic connection selected the most popular responding server"
-                ),
-                Ok(None) => warn!(
-                    endpoint = %server.endpoint,
-                    "most popular responding server became unavailable before automatic selection"
-                ),
-                Err(error) => warn!(
-                    endpoint = %server.endpoint,
-                    %error,
-                    "automatic connection could not select the most popular responding server"
-                ),
+                    "popular server did not stay connected; trying the next candidate"
+                );
+            }
+            if let Err(error) = core.connect_ed2k().await {
+                warn!(%error, "automatic server fallback failed; REST connect remains available");
             }
             return;
         }
@@ -807,16 +818,45 @@ async fn connect_to_most_popular_server(core: &EmulebbCore) {
     }
 }
 
-fn most_popular_enabled_server(servers: Vec<ServerInfo>) -> Option<ServerInfo> {
-    servers
+async fn server_connection_is_stable(core: &EmulebbCore, endpoint: &str) -> bool {
+    let deadline = tokio::time::Instant::now() + AUTO_CONNECT_TARGET_VERIFY;
+    let mut connected_since = None;
+    loop {
+        let now = tokio::time::Instant::now();
+        let Some(server) = core.server(endpoint).await else {
+            return false;
+        };
+        if !server.enabled {
+            return false;
+        }
+        if server.current && server.connected {
+            let since = connected_since.get_or_insert(now);
+            if now.duration_since(*since) >= AUTO_CONNECT_TARGET_STABLE {
+                return true;
+            }
+        } else {
+            connected_since = None;
+        }
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep(AUTO_CONNECT_POPULARITY_POLL).await;
+    }
+}
+
+fn ranked_popular_enabled_servers(servers: Vec<ServerInfo>) -> Vec<ServerInfo> {
+    let mut servers = servers
         .into_iter()
         .filter(|server| server.enabled && server.users > 0)
-        .max_by(|left, right| {
-            left.users
-                .cmp(&right.users)
-                .then_with(|| left.files.cmp(&right.files))
-                .then_with(|| left.name.cmp(&right.name))
-        })
+        .collect::<Vec<_>>();
+    servers.sort_by(|left, right| {
+        right
+            .users
+            .cmp(&left.users)
+            .then_with(|| right.files.cmp(&left.files))
+            .then_with(|| right.name.cmp(&left.name))
+    });
+    servers
 }
 
 fn spawn_regular_diagnostic_summary(core: Arc<EmulebbCore>) {

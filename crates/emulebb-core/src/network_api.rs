@@ -152,7 +152,7 @@ impl EmulebbCore {
         let mut runtime_guard = self.ed2k_runtime.lock().await;
         if let Some(runtime) = runtime_guard.as_ref() {
             runtime.server_enabled.store(true, Ordering::SeqCst);
-            let mut reconnect_needed = false;
+            let mut reconnect_needed;
             if let Some(endpoint) = endpoint {
                 let requested_endpoint = endpoint.parse::<SocketAddr>().ok();
                 let same_live_endpoint = {
@@ -170,6 +170,16 @@ impl EmulebbCore {
                 // not drop a healthy persistent server session just because a
                 // controller re-sent the same connect command.
                 reconnect_needed = !same_live_endpoint;
+            } else {
+                // A global Connect returns the loop to automatic selection. This
+                // is also the escape hatch when a directed server is full or
+                // disappears after accepting the TCP connection.
+                reconnect_needed = runtime
+                    .target_server_endpoint
+                    .write()
+                    .await
+                    .take()
+                    .is_some();
             }
             let server_state = runtime.server_state.read().await;
             if !server_state.connected && !server_state.connecting {

@@ -514,6 +514,19 @@ async fn explicit_server_connect_targets_running_server_loop() {
         .is_ok(),
         "retargeting a running server loop must signal reconnect"
     );
+
+    core.connect_ed2k().await.unwrap();
+
+    assert_eq!(target_server_endpoint.read().await.as_deref(), None);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            server_reconnect_signal.notified()
+        )
+        .await
+        .is_ok(),
+        "global connect must clear a directed target and resume automatic selection"
+    );
     shutdown.store(true, Ordering::SeqCst);
     let _ = core.disconnect_ed2k().await;
 }

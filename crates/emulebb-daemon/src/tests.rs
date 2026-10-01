@@ -41,7 +41,10 @@ async fn automatic_server_selection_prefers_the_largest_enabled_population() {
     disabled.users = 100_000;
     disabled.enabled = false;
 
-    let selected = most_popular_enabled_server(vec![smaller, larger, disabled]).unwrap();
+    let selected = ranked_popular_enabled_servers(vec![smaller, larger, disabled])
+        .into_iter()
+        .next()
+        .unwrap();
 
     assert_eq!(selected.endpoint, "192.0.2.20:4661");
 }
