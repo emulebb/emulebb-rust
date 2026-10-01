@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
+use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, ServerInfo, VpnGuardConfig};
 use emulebb_ed2k::{
     NatConfig,
     config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig},
@@ -40,6 +40,9 @@ pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
 pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
 
 const REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);
+const AUTO_CONNECT_POPULARITY_WAIT: Duration = Duration::from_secs(20);
+const AUTO_CONNECT_POPULARITY_SETTLE: Duration = Duration::from_secs(3);
+const AUTO_CONNECT_POPULARITY_POLL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -728,11 +731,14 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
                 return;
             }
             match connect_core.auto_connect_ed2k().await {
-                Ok(status) => info!(
-                    connected = status.connected,
-                    firewalled = status.firewalled.unwrap_or(false),
-                    "automatic ED2K/Kad startup complete"
-                ),
+                Ok(status) => {
+                    info!(
+                        connected = status.connected,
+                        firewalled = status.firewalled.unwrap_or(false),
+                        "automatic ED2K/Kad startup complete"
+                    );
+                    connect_to_most_popular_server(&connect_core).await;
+                }
                 Err(error) => tracing::warn!(
                     %error,
                     "automatic ED2K/Kad startup failed; REST connect remains available"
@@ -749,6 +755,76 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     graceful_teardown(&core).await;
     serve_result?;
     Ok(())
+}
+
+async fn connect_to_most_popular_server(core: &EmulebbCore) {
+    let deadline = tokio::time::Instant::now() + AUTO_CONNECT_POPULARITY_WAIT;
+    let mut population_signature = Vec::new();
+    let mut last_population_change = None;
+    loop {
+        let now = tokio::time::Instant::now();
+        let servers = core.servers().await;
+        let signature = servers
+            .iter()
+            .filter(|server| server.enabled && server.users > 0)
+            .map(|server| (server.endpoint.clone(), server.users, server.files))
+            .collect::<Vec<_>>();
+        if signature != population_signature {
+            population_signature = signature;
+            last_population_change = Some(now);
+        }
+        let population_settled = last_population_change
+            .is_some_and(|observed| now.duration_since(observed) >= AUTO_CONNECT_POPULARITY_SETTLE);
+        if population_settled || now >= deadline {
+            let Some(server) = most_popular_enabled_server(servers) else {
+                warn!(
+                    wait_seconds = AUTO_CONNECT_POPULARITY_WAIT.as_secs(),
+                    "automatic server selection received no live population data; keeping the current server"
+                );
+                return;
+            };
+            if server.current {
+                info!(
+                    endpoint = %server.endpoint,
+                    users = server.users,
+                    files = server.files,
+                    "automatic connection already uses the most popular responding server"
+                );
+                return;
+            }
+            match core.connect_ed2k_server(&server.endpoint).await {
+                Ok(Some(_)) => info!(
+                    endpoint = %server.endpoint,
+                    users = server.users,
+                    files = server.files,
+                    "automatic connection selected the most popular responding server"
+                ),
+                Ok(None) => warn!(
+                    endpoint = %server.endpoint,
+                    "most popular responding server became unavailable before automatic selection"
+                ),
+                Err(error) => warn!(
+                    endpoint = %server.endpoint,
+                    %error,
+                    "automatic connection could not select the most popular responding server"
+                ),
+            }
+            return;
+        }
+        tokio::time::sleep(AUTO_CONNECT_POPULARITY_POLL).await;
+    }
+}
+
+fn most_popular_enabled_server(servers: Vec<ServerInfo>) -> Option<ServerInfo> {
+    servers
+        .into_iter()
+        .filter(|server| server.enabled && server.users > 0)
+        .max_by(|left, right| {
+            left.users
+                .cmp(&right.users)
+                .then_with(|| left.files.cmp(&right.files))
+                .then_with(|| left.name.cmp(&right.name))
+        })
 }
 
 fn spawn_regular_diagnostic_summary(core: Arc<EmulebbCore>) {

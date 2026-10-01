@@ -135,7 +135,13 @@ async fn valid_path_parameters_still_reach_handlers() {
         ("GET", "/api/v1/categories/0"),
         ("GET", "/api/v1/searches/1"),
         ("GET", "/api/v1/servers/local:4661"),
+        ("GET", "/api/v1/servers/local%3A4661"),
+        (
+            "POST",
+            "/api/v1/servers/192.0.2.1%3A4661/operations/connect",
+        ),
         ("GET", "/api/v1/uploads/192.0.2.1:4662"),
+        ("GET", "/api/v1/uploads/192.0.2.1%3A4662"),
         ("GET", "/api/v1/transfers/00112233445566778899aabbccddeeff"),
     ];
     for (method, uri) in accepted_routes {

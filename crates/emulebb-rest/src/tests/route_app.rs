@@ -148,7 +148,9 @@ async fn settings_use_typed_get_and_patch_route() {
     assert_eq!(value["data"]["ed2k"]["useServerPriorities"], true);
     assert_eq!(value["data"]["ed2k"]["autoConnectStaticOnly"], false);
     assert_eq!(value["data"]["kad"]["bootstrapMinRoutingContacts"], 10);
-    assert_eq!(value["data"]["nat"]["enabled"], false);
+    assert_eq!(value["data"]["core"]["autoConnect"], true);
+    assert_eq!(value["data"]["nat"]["enabled"], true);
+    assert_eq!(value["data"]["nat"]["requireInitialMapping"], false);
     assert_eq!(value["data"]["vpnGuard"]["enabled"], false);
     assert_eq!(value["data"]["ipFilter"]["level"], 127);
 

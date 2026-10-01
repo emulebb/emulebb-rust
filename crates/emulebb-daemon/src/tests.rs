@@ -7,6 +7,45 @@ fn metadata_store(profile: &DaemonProfile) -> MetadataStore {
     MetadataStore::open(profile.metadata_path()).unwrap()
 }
 
+#[tokio::test]
+async fn automatic_server_selection_prefers_the_largest_enabled_population() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let mut smaller = core
+        .add_server(emulebb_core::ServerCreate {
+            address: "192.0.2.10".to_string(),
+            port: 4661,
+            name: Some("smaller".to_string()),
+            priority: None,
+            static_server: None,
+            connect: None,
+        })
+        .await
+        .unwrap();
+    smaller.users = 10_000;
+    smaller.files = 1_000_000;
+    let mut larger = core
+        .add_server(emulebb_core::ServerCreate {
+            address: "192.0.2.20".to_string(),
+            port: 4661,
+            name: Some("larger".to_string()),
+            priority: None,
+            static_server: None,
+            connect: None,
+        })
+        .await
+        .unwrap();
+    larger.users = 50_000;
+    larger.files = 500_000;
+    let mut disabled = larger.clone();
+    disabled.endpoint = "192.0.2.30:4661".to_string();
+    disabled.users = 100_000;
+    disabled.enabled = false;
+
+    let selected = most_popular_enabled_server(vec![smaller, larger, disabled]).unwrap();
+
+    assert_eq!(selected.endpoint, "192.0.2.20:4661");
+}
+
 fn collect_leaf_paths(prefix: &str, value: &serde_json::Value, output: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::Object(object) if !object.is_empty() => {
@@ -462,11 +501,12 @@ fn default_upload_queue_settings_match_runtime_config_defaults() {
 }
 
 #[test]
-fn default_nat_settings_match_runtime_config_defaults() {
-    assert_eq!(
-        nat_config_from_settings(NatSettings::default()),
-        NatConfig::default()
-    );
+fn default_nat_settings_enable_best_effort_upnp() {
+    let config = nat_config_from_settings(NatSettings::default());
+
+    assert!(config.enabled);
+    assert!(!config.require_initial_mapping);
+    assert_eq!(config.backend_order, NatConfig::default().backend_order);
 }
 
 #[test]

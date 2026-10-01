@@ -228,6 +228,14 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       await fulfill({ running: true, connected: true, firewalled: true });
       return;
     }
+    if (method === "POST" && path === "servers/192.0.2.10%3A4661/operations/connect") {
+      record();
+      state.status.serverConnected = true;
+      state.status.firewalled = true;
+      state.servers[0].connected = true;
+      await fulfill({ running: true, connected: true, firewalled: true });
+      return;
+    }
     if (method === "POST" && path === "servers/operations/disconnect") {
       record();
       state.status.serverConnected = false;
@@ -321,7 +329,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(serversPanel.getByText(/Server network: Disconnected/)).toBeVisible();
   await serversPanel.getByRole("button", { name: "Import" }).click();
   await expect(page.getByText("server.met imported; the server list is ready")).toBeVisible();
-  await serversPanel.locator("button.btn").filter({ hasText: /^Connect$/ }).click();
+  await serversPanel.locator("tbody tr", { hasText: "192.0.2.10:4661" }).getByTitle("Connect").click();
   await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
   await expect(serversPanel.getByText(/LowID: connected/)).toBeVisible();
 
@@ -368,7 +376,8 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
 
   expect(requests.some((request) => request.path === "servers/operations/disconnect")).toBe(true);
-  expect(requests.filter((request) => request.path === "servers/operations/connect")).toHaveLength(2);
+  expect(requests.filter((request) => request.path === "servers/operations/connect")).toHaveLength(1);
+  expect(requests.filter((request) => request.path === "servers/192.0.2.10%3A4661/operations/connect")).toHaveLength(1);
   expect(requests.some((request) => request.method === "GET" && request.path === "searches")).toBe(true);
   expect(requests.some((request) => request.method === "GET" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) => request.path === `searches/2/results/${resultHash}/operations/download`)).toBe(true);
@@ -675,6 +684,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByRole("heading", { name: "Transfers" })).toBeVisible();
   await expect(settingsPanel.getByRole("heading", { name: "Network" })).toBeVisible();
   await expect(settingsPanel.getByRole("heading", { name: "VPN Guard" })).toBeVisible();
+  await expect(settingsPanel.getByRole("checkbox", { name: /^Auto connect(?:\s|$)/ })).toBeChecked();
 
   await expect(settingsPanel.getByText("Max connections")).toHaveCount(0);
   await expect(settingsPanel.getByText("eD2K half-open connections")).toHaveCount(0);
@@ -686,8 +696,8 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByText("Discovery timeout seconds")).toHaveCount(0);
   await settingsPanel.getByLabel(/Advanced/).check();
   const natSection = settingsPanel.locator('[data-settings-section="nat"]');
-  await expect(natSection.getByRole("checkbox", { name: /^NAT(?:\s|$)/ })).not.toBeChecked();
-  await expect(natSection.getByRole("checkbox", { name: /^Require initial NAT mapping(?:\s|$)/ })).toBeChecked();
+  await expect(natSection.getByRole("checkbox", { name: /^NAT(?:\s|$)/ })).toBeChecked();
+  await expect(natSection.getByRole("checkbox", { name: /^Require initial NAT mapping(?:\s|$)/ })).not.toBeChecked();
   await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
   await expect(settingsPanel.getByLabel("eD2K half-open connections")).toBeVisible();
   await expect(settingsPanel.getByLabel("Concurrent downloads")).toBeVisible();

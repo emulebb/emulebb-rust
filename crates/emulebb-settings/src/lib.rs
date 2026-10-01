@@ -193,7 +193,7 @@ pub const CORE_SETTING_SPECS: &[CoreSettingSpec] = &[
         FIELD_AUTO_CONNECT,
         "Auto-connect",
         CoreSettingGroup::Server,
-        false,
+        true,
         true,
         "Connect to eD2K servers automatically on daemon startup.",
     ),
@@ -883,7 +883,7 @@ pub fn default_core_settings() -> CoreSettings {
         max_upload_slots: 12,
         upload_slot_elastic_percent: 80,
         queue_size: 10000,
-        auto_connect: false,
+        auto_connect: true,
         reconnect: true,
         credit_system: true,
         safe_server_connect: true,
@@ -1021,8 +1021,11 @@ impl Default for KadSettings {
 impl Default for NatSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
-            require_initial_mapping: true,
+            // A consumer install should attempt UPnP without requiring router
+            // support to start. This gives a zero-configuration HighID path
+            // while keeping server/Kad connectivity usable when no IGD exists.
+            enabled: true,
+            require_initial_mapping: false,
             backend_order: vec![
                 UPNP_MINIUPNPC_BACKEND.to_string(),
                 UPNP_IGD_BACKEND.to_string(),
@@ -1972,8 +1975,18 @@ mod tests {
         let value = serde_json::to_value(default_core_settings()).unwrap();
 
         assert_eq!(value[FIELD_UPLOAD_LIMIT_KIBPS], 6200);
+        assert_eq!(value[FIELD_AUTO_CONNECT], true);
         assert_eq!(value[FIELD_RECONNECT], true);
         assert_eq!(value.as_object().unwrap().len(), CORE_SETTING_SPECS.len());
+    }
+
+    #[test]
+    fn consumer_network_defaults_are_zero_configuration() {
+        let settings = AppSettings::default();
+
+        assert!(settings.core.auto_connect);
+        assert!(settings.nat.enabled);
+        assert!(!settings.nat.require_initial_mapping);
     }
 
     #[test]

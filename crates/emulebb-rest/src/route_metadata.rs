@@ -12,6 +12,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use percent_encoding::percent_decode_str;
 
 use crate::{
     envelope::{api_error, out_of_range_response},
@@ -300,7 +301,8 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         }
         ("GET" | "PATCH" | "DELETE", ["servers", server_id])
         | ("POST", ["servers", server_id, "operations", "connect"]) => {
-            validate_endpoint_path_token(server_id, "serverId")?
+            let server_id = decode_path_parameter(server_id, "serverId")?;
+            validate_endpoint_path_token(&server_id, "serverId")?
         }
         ("GET" | "PATCH", ["shared-files", hash])
         | ("GET", ["shared-files", hash, "ed2k-link"])
@@ -316,13 +318,15 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         ("GET", ["transfers", hash, "sources", client_id])
         | ("POST", ["transfers", hash, "sources", client_id, "operations", _]) => {
             validate_lowercase_md4_hex(hash, "hash")?;
-            validate_client_id_path_token(client_id)?;
+            let client_id = decode_path_parameter(client_id, "clientId")?;
+            validate_client_id_path_token(&client_id)?;
         }
         ("GET", ["uploads", client_id])
         | ("POST", ["uploads", client_id, "operations", _])
         | ("GET", ["upload-queue", client_id])
         | ("POST", ["upload-queue", client_id, "operations", _]) => {
-            validate_client_id_path_token(client_id)?
+            let client_id = decode_path_parameter(client_id, "clientId")?;
+            validate_client_id_path_token(&client_id)?
         }
         (
             "POST",
@@ -341,6 +345,22 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         _ => {}
     }
     Ok(())
+}
+
+fn decode_path_parameter(value: &str, field: &'static str) -> Result<String, Box<Response>> {
+    percent_decode_str(value)
+        .decode_utf8()
+        .map(|value| value.into_owned())
+        .map_err(|_| {
+            Box::new(
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ARGUMENT",
+                    format!("{field} must be valid UTF-8 after URL decoding"),
+                )
+                .into_response(),
+            )
+        })
 }
 
 fn validate_bounded_path_uint(

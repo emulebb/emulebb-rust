@@ -577,8 +577,8 @@ function dataFor(method: string, path: string): unknown {
           routingMaintenanceEnabled: true
         },
         nat: {
-          enabled: false,
-          requireInitialMapping: true,
+          enabled: true,
+          requireInitialMapping: false,
           bindIp: "",
           backendOrder: [],
           igdIp: "",

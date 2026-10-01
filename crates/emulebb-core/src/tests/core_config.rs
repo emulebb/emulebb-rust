@@ -161,7 +161,7 @@ async fn default_core_settings_match_the_master() {
     assert_eq!(core_settings.max_upload_slots, 12);
     assert_eq!(core_settings.upload_slot_elastic_percent, 80);
     assert_eq!(core_settings.queue_size, 10000);
-    assert!(!core_settings.auto_connect);
+    assert!(core_settings.auto_connect);
     assert!(core_settings.reconnect);
 }
 
