@@ -779,7 +779,11 @@ async fn connect_to_most_popular_server(core: &EmulebbCore) {
                 return;
             }
             for server in candidates {
-                if !server.current {
+                let is_live_current = core
+                    .server(&server.endpoint)
+                    .await
+                    .is_some_and(|current| current.current && current.connected);
+                if !is_live_current {
                     match core.connect_ed2k_server(&server.endpoint).await {
                         Ok(Some(_)) => info!(
                             endpoint = %server.endpoint,
