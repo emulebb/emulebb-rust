@@ -177,7 +177,9 @@ export type SearchItem = {
   statusReason?: string | null;
   method?: string;
   type?: string;
+  items?: SearchResult[];
   results?: SearchResult[];
+  total?: number;
   resultCount?: number;
   [key: string]: unknown;
 };

@@ -445,7 +445,7 @@ export function SearchView(props: {
   const [artist, setArtist] = useState("");
   const [categoryId, setCategoryId] = useState("0");
   const [paused, setPaused] = useState(false);
-  const results = props.latestSearch?.results ?? [];
+  const results = props.latestSearch?.items ?? props.latestSearch?.results ?? [];
   const searchQueryError = searchQueryValidationError(query);
 
   const startSearch = async () => {

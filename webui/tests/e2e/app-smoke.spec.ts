@@ -180,7 +180,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     query: "older search",
     method: "server",
     status: "completed",
-    results: [{ hash: "00112233445566778899AABBCCDDEEFF", name: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
+    resultCount: 1
   }];
   state.transfers = [];
   const resultHash = "AABBCCDDEEFF00112233445566778899";
@@ -255,16 +255,25 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
         query: "linux",
         method: "automatic",
         status: "completed",
-        results: [{ hash: resultHash, name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 2, fileType: "doc" }]
+        resultCount: 1
       };
       state.searches = [...state.searches, search];
-      await fulfill(search);
+      await fulfill({ ...search, total: 0, offset: 0, limit: 100, items: [] });
       return;
     }
     if (method === "GET" && /^searches\/\d+$/.test(path)) {
       record();
       const searchId = path.split("/")[1];
-      await fulfill(state.searches.find((search: any) => search.id === searchId));
+      const search = state.searches.find((candidate: any) => candidate.id === searchId);
+      await fulfill({
+        ...search,
+        total: 1,
+        offset: 0,
+        limit: 250,
+        items: searchId === "2"
+          ? [{ hash: resultHash, name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 2, fileType: "doc" }]
+          : [{ hash: "00112233445566778899AABBCCDDEEFF", name: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
+      });
       return;
     }
     if (method === "POST" && path === `searches/2/results/${resultHash}/operations/download`) {
