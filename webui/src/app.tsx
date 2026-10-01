@@ -43,7 +43,7 @@ import {
   Upload,
   VpnGuardStatus
 } from "./api";
-import { errorMessage } from "./format";
+import { errorMessage, formatRate, numberField } from "./format";
 import {
   CategoriesView,
   DiagnosticsView,
@@ -647,11 +647,20 @@ export function App() {
   const transfers = snapshot?.transfers ?? [];
   const servers = snapshot?.servers ?? [];
   const kad: KadStatus = snapshot?.kad ?? {};
+  const serverConnected = snapshot?.status?.serverConnected ?? servers.some((server) => server.connected);
+  const activeTransfers = transfers.filter((transfer) => transfer.state !== "completed" && transfer.stopped !== true).length;
+  const downloadRate = formatRate(
+    numberField(stats, "downloadRateBytesPerSec") ?? (numberField(stats, "downloadSpeedKiBps") ?? 0) * 1024
+  );
+  const uploadRate = formatRate(
+    numberField(stats, "uploadRateBytesPerSec") ?? (numberField(stats, "uploadSpeedKiBps") ?? 0) * 1024
+  );
+  const kadStatus = kad.connected ? "Connected" : kad.running ? "Starting" : "Stopped";
 
   return (
     <div class="page">
       <header class="navbar navbar-expand-md d-print-none">
-        <div class="container-xl topbar">
+        <div class="container-fluid topbar">
           <div class="navbar-brand app-brand">
             <span class="brand-mark">eM</span>
             <div>
@@ -660,16 +669,53 @@ export function App() {
             </div>
           </div>
           {authState === "authenticated" && (
-            <div class="top-actions navbar-nav flex-row order-md-last">
-              <span class="badge bg-success-lt"><Unlock size={14} /> API connected</span>
-              <button type="button" class="btn btn-outline-secondary" title="Change API key" onClick={clearApiKey}>
-                <KeyRound size={16} />
-                Change key
-              </button>
-              <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title="Refresh" onClick={() => void refresh()}>
-                <RefreshCw size={16} class={refreshing ? "spin" : ""} />
-              </button>
-            </div>
+            <>
+              <div class="status-toolbar" role="toolbar" aria-label="Connection and transfer status">
+                <ToolbarButton
+                  label="Server"
+                  value={serverConnected ? "Connected" : "Disconnected"}
+                  icon={<Server size={17} />}
+                  state={serverConnected ? "connected" : "disconnected"}
+                  onClick={() => setTab("servers")}
+                />
+                <ToolbarButton
+                  label="Kad"
+                  value={kadStatus}
+                  icon={<Shield size={17} />}
+                  state={kad.connected ? "connected" : "disconnected"}
+                  onClick={() => setTab("kad")}
+                />
+                <ToolbarButton
+                  label="Download"
+                  value={downloadRate}
+                  icon={<Download size={17} />}
+                  onClick={() => setTab("transfers")}
+                />
+                <ToolbarButton
+                  label="Upload"
+                  value={uploadRate}
+                  icon={<UploadCloud size={17} />}
+                  onClick={() => setTab("uploads")}
+                />
+                <ToolbarButton
+                  label="Transfers"
+                  value={`${activeTransfers} active`}
+                  icon={<Activity size={17} />}
+                  onClick={() => setTab("transfers")}
+                />
+              </div>
+              <div class="top-actions navbar-nav flex-row order-md-last">
+                <span class="badge bg-success-lt api-status"><Unlock size={14} /> API connected</span>
+                <button type="button" class="btn btn-outline-secondary" title="Change API key" onClick={clearApiKey}>
+                  <KeyRound size={16} />
+                  Change key
+                </button>
+                <button type="button" class="btn btn-outline-secondary" title="Refresh" onClick={() => void refresh()}>
+                  <RefreshCw size={16} class={refreshing ? "spin" : ""} />
+                  Refresh
+                </button>
+              </div>
+            </>
           )}
         </div>
       </header>
@@ -904,6 +950,29 @@ function TabButton(props: {
     >
       {props.icon}
       {props.label}
+    </button>
+  );
+}
+
+function ToolbarButton(props: {
+  label: string;
+  value: string;
+  icon: ComponentChildren;
+  state?: "connected" | "disconnected";
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      class={`toolbar-item${props.state ? ` is-${props.state}` : ""}`}
+      aria-label={`${props.label}: ${props.value}`}
+      onClick={props.onClick}
+    >
+      <span class="toolbar-icon">{props.icon}</span>
+      <span class="toolbar-copy">
+        <span class="toolbar-label">{props.label}</span>
+        <strong>{props.value}</strong>
+      </span>
     </button>
   );
 }

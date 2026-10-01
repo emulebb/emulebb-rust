@@ -21,7 +21,16 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.getByRole("heading", { name: "eMuleBB WebUI" })).toBeVisible();
   await expect(page.getByText("0.1.0-beta.1")).toBeVisible();
   await expect(page.getByText("Sample Transfer.bin")).toBeVisible();
-  await expect(page.locator("strong").filter({ hasText: /^Connected$/ })).toBeVisible();
+  const statusToolbar = page.getByRole("toolbar", { name: "Connection and transfer status" });
+  await expect(statusToolbar.getByRole("button", { name: "Server: Connected", exact: true })).toBeVisible();
+  await expect(statusToolbar.getByRole("button", { name: "Kad: Connected", exact: true })).toBeVisible();
+  await expect(statusToolbar.getByRole("button", { name: "Download: 2.0 KiB/s", exact: true })).toBeVisible();
+  await expect(statusToolbar.getByRole("button", { name: "Upload: 1.0 KiB/s", exact: true })).toBeVisible();
+  await expect(statusToolbar.getByRole("button", { name: "Transfers: 1 active", exact: true })).toBeVisible();
+  await expect.poll(async () => page.locator("header .topbar").evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return bounds.width >= window.innerWidth - 32;
+  })).toBe(true);
   await expect.poll(async () => {
     return page.locator(".tabs").evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
   }).toBe(true);
@@ -30,7 +39,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   expect(requests.some((request) => request.method === "GET" && request.path === "app/settings")).toBe(false);
   expect(requests.some((request) => request.method === "GET" && request.path.startsWith("upload-queue"))).toBe(false);
 
-  await page.getByRole("button", { name: "Transfers" }).click();
+  await statusToolbar.getByRole("button", { name: "Transfers: 1 active", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
   await expect(page.locator("tr", { hasText: "Sample Transfer.bin" }).locator("select")).toHaveValue("1");
   await page.getByRole("button", { name: "Sample Transfer.bin", exact: true }).click();
@@ -100,7 +109,7 @@ test("submits a synthetic transfer operation", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Transfers" }).click();
+  await page.getByRole("button", { name: "Transfers", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
 
   await page.getByTitle("Pause").click();
@@ -341,7 +350,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
   await expect(serversPanel.getByText(/LowID: connected/)).toBeVisible();
 
-  await page.getByRole("button", { name: "Kad" }).click();
+  await page.getByRole("button", { name: "Kad", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
   await kadPanel.getByRole("button", { name: "Import" }).click();
@@ -352,7 +361,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await page.getByRole("button", { name: "Servers" }).click();
   await serversPanel.locator("button.btn").filter({ hasText: /^Disconnect$/ }).click();
   await expect(serversPanel.getByText(/Server network: Disconnected/)).toBeVisible();
-  await page.getByRole("button", { name: "Kad" }).click();
+  await page.getByRole("button", { name: "Kad", exact: true }).click();
   await expect(kadPanel.getByText(/Kad network: Connected/)).toBeVisible();
   await page.getByRole("button", { name: "Servers" }).click();
   await serversPanel.locator("button.btn").filter({ hasText: /^Connect$/ }).click();
@@ -371,7 +380,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await resultRow.getByRole("button", { name: "Download" }).click();
   await expect(page.getByText("Download queued")).toBeVisible();
 
-  await page.getByRole("button", { name: "Transfers" }).click();
+  await page.getByRole("button", { name: "Transfers", exact: true }).click();
   const transferRow = page.locator("tr", { hasText: "Linux Guide.pdf" });
   await expect(transferRow).toContainText("downloading");
   await transferRow.getByRole("button", { name: "Stop", exact: true }).click();
@@ -387,7 +396,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(transferRow).toHaveCount(0);
   await expect(page.getByText("No transfers.", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Kad" }).click();
+  await page.getByRole("button", { name: "Kad", exact: true }).click();
   await kadPanel.getByRole("button", { name: "Stop" }).click();
   await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
   await page.getByRole("button", { name: "Servers" }).click();
@@ -449,7 +458,7 @@ test("transfer add form validates eD2K link batches", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Transfers" }).click();
+  await page.getByRole("button", { name: "Transfers", exact: true }).click();
   const transfersPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Transfers" }) });
   const linkInput = transfersPanel.getByPlaceholder("One eD2K link per line");
   const addLinks = transfersPanel.getByRole("button", { name: "Add links" });
@@ -511,7 +520,7 @@ test("section resource operation forms validate endpoint addresses and ports", a
   expect(serverPost).toBeDefined();
   expect(JSON.parse(serverPost?.body ?? "{}")).toMatchObject({ address: "127.0.0.1", port: 4661 });
 
-  await page.getByRole("button", { name: "Kad" }).click();
+  await page.getByRole("button", { name: "Kad", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   const initialKadBootstrapPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/bootstrap").length;
   await kadPanel.getByPlaceholder("Bootstrap address").fill("   ");
@@ -565,7 +574,7 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   expect(serverImportPost).toBeDefined();
   expect(JSON.parse(serverImportPost?.body ?? "{}")).toEqual({ url: "HTTPS://example.invalid/server.met" });
 
-  await page.getByRole("button", { name: "Kad" }).click();
+  await page.getByRole("button", { name: "Kad", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   const kadImportButton = kadPanel.getByRole("button", { name: "Import" });
   const initialKadImportPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url").length;
