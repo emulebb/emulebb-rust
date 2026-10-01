@@ -48,6 +48,7 @@ import {
   SettingSurfaceSpec,
   SettingsSurface,
   Snapshot,
+  Status,
   Transfer,
   TransferSource,
   Upload,
@@ -1454,7 +1455,7 @@ export function NetworkHealthView(props: {
   );
 }
 
-export function ServersView(props: { servers: ServerItem[]; client: RestClient; run: RunFunction }) {
+export function ServersView(props: { servers: ServerItem[]; status: Status; client: RestClient; run: RunFunction }) {
   const [address, setAddress] = useState("");
   const [port, setPort] = useState("4661");
   const [name, setName] = useState("");
@@ -1465,6 +1466,9 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
   const serverAddressError = endpointAddressError(address, "Address");
   const serverPortError = endpointPortError(port, "Port");
   const serverImportUrlError = urlImportError(importUrl, "server.met URL");
+  const connected = Boolean(props.status.serverConnected ?? props.servers.some((server) => server.connected));
+  const connecting = props.servers.some((server) => server.connecting);
+  const connectionLabel = connected ? "Connected" : connecting ? "Connecting" : "Disconnected";
 
   const filteredServers = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -1507,9 +1511,15 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
       <div class="section-title">
         <h2>Servers</h2>
         <div class="row-actions">
-          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("servers/operations/connect"), "Server connection queued")}><Plug size={15} />Connect</button>
-          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("servers/operations/disconnect"), "Servers disconnected")}><Ban size={15} />Disconnect</button>
+          <button class="btn" type="button" disabled={connected || connecting || props.servers.length === 0} onClick={() => void props.run(() => props.client.post("servers/operations/connect"), "Server connection started")}><Plug size={15} />Connect</button>
+          <button class="btn" type="button" disabled={!connected && !connecting} onClick={() => void props.run(() => props.client.post("servers/operations/disconnect"), "Server disconnected; Kad remains available")}><Ban size={15} />Disconnect</button>
         </div>
+      </div>
+      <div class="notice alert alert-info" role="status">
+        Server network: {connectionLabel}.
+        {connected && props.status.firewalled === true && " LowID: connected, but inbound TCP is not reachable; downloads and searches still work, while callbacks may be slower. Enable UPnP in Settings or forward the shown TCP/UDP ports to try for HighID."}
+        {connected && props.status.firewalled === false && " HighID: inbound TCP reachability is confirmed."}
+        {!connected && props.servers.length === 0 && " Import server.met or add a server before connecting."}
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
@@ -1528,7 +1538,7 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
         event.preventDefault();
         const url = parseUrlImportText(importUrl);
         if (url) {
-          void props.run(() => props.client.post("servers/operations/import-met-url", { url }), "Server list import started");
+          void props.run(() => props.client.post("servers/operations/import-met-url", { url }), "server.met imported; the server list is ready");
         }
       }}>
         <input class="form-control" value={importUrl} placeholder="server.met URL" aria-invalid={serverImportUrlError ? "true" : "false"} onInput={(event) => setImportUrl(event.currentTarget.value)} />
@@ -1657,10 +1667,14 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
         <h2>Kad</h2>
         <div class="row-actions">
           <button class="btn" type="button" onClick={() => void loadNodes()}><RefreshCw size={15} />Refresh</button>
-          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("kad/operations/start"), "Kad started")}><Play size={15} />Start</button>
-          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("kad/operations/stop"), "Kad stopped")}><Pause size={15} />Stop</button>
-          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("kad/operations/recheck-firewall"), "Kad firewall recheck started")}><Shield size={15} />Recheck</button>
+          <button class="btn" type="button" disabled={Boolean(props.kad.running)} onClick={() => void props.run(() => props.client.post("kad/operations/start"), "Kad started")}><Play size={15} />Start</button>
+          <button class="btn" type="button" disabled={!props.kad.running} onClick={() => void props.run(() => props.client.post("kad/operations/stop"), "Kad stopped; the server connection remains available")}><Pause size={15} />Stop</button>
+          <button class="btn" type="button" disabled={!props.kad.running} onClick={() => void props.run(() => props.client.post("kad/operations/recheck-firewall"), "Kad firewall recheck started")}><Shield size={15} />Recheck</button>
         </div>
+      </div>
+      <div class="notice alert alert-info" role="status">
+        Kad network: {props.kad.connected ? "Connected" : props.kad.running ? props.kad.bootstrapping ? "Bootstrapping" : "Starting" : "Stopped"}.
+        {!props.kad.running && " You can import nodes.dat now; it is validated and saved for the next Start."}
       </div>
       <div class="kv compact">
         <span>Running</span>
@@ -1684,7 +1698,7 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
         event.preventDefault();
         const url = parseUrlImportText(importUrl);
         if (url) {
-          void props.run(() => props.client.post("kad/operations/import-nodes-url", { url }), "Kad nodes import started");
+          void props.run(() => props.client.post("kad/operations/import-nodes-url", { url }), "nodes.dat imported, validated, and saved");
         }
       }}>
         <input class="form-control" value={importUrl} placeholder="nodes.dat URL" aria-invalid={kadImportUrlError ? "true" : "false"} onInput={(event) => setImportUrl(event.currentTarget.value)} />

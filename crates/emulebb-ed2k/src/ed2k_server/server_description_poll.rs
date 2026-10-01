@@ -44,6 +44,7 @@ pub(super) async fn poll_server_descriptions(
     crypt_enabled: bool,
     add_servers_from_server: bool,
     shutdown: Arc<AtomicBool>,
+    server_enabled: Arc<AtomicBool>,
     events: Option<Ed2kServerListEventSender>,
 ) {
     let Some(events) = events else {
@@ -53,7 +54,7 @@ pub(super) async fn poll_server_descriptions(
     // established. Waiting also gives OP_IDCHANGE a chance to establish the
     // public IPv4 needed to bind a newly learned UDP key.
     loop {
-        if shutdown.load(Ordering::Relaxed) {
+        if shutdown.load(Ordering::Relaxed) || !server_enabled.load(Ordering::SeqCst) {
             return;
         }
         if state.read().await.connected {
@@ -69,7 +70,7 @@ pub(super) async fn poll_server_descriptions(
         }
     };
     for configured in configured_servers {
-        if shutdown.load(Ordering::Relaxed) {
+        if shutdown.load(Ordering::Relaxed) || !server_enabled.load(Ordering::SeqCst) {
             return;
         }
         let mut server = match resolve_server_entry(&configured).await {

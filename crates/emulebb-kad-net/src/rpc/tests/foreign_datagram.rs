@@ -104,6 +104,51 @@ async fn send_raw_datagram_writes_unencoded_bytes() {
 }
 
 #[tokio::test]
+async fn stopped_kad_rejects_kad_send_but_keeps_foreign_datagrams_live() {
+    let transport = Arc::new(MockTransport::new(make_local_addr()));
+    let inject_tx = transport.injector();
+    let rpc = make_rpc_with_shared_transport(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::from_bytes([0x10; 16]), 0x1122_3344, true),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    rpc.set_foreign_datagram_handler(Arc::new(move |_, _| {
+        let _ = tx.send(());
+        true
+    }));
+    let mut subscriber = rpc.subscribe();
+    let _handle = rpc.start();
+    rpc.set_kad_enabled(false);
+
+    let peer_addr = make_peer_addr();
+    let hello = KadPacket::HelloReq(emulebb_kad_proto::HelloReq {
+        node_id: NodeId::from_bytes([0x44; 16]),
+        tcp_port: 4662,
+        version: 8,
+        tags: Vec::new(),
+    });
+    assert!(matches!(
+        rpc.send(peer_addr, &hello).await,
+        Err(crate::error::NetError::KadStopped)
+    ));
+
+    inject_tx
+        .send((hello.encode().unwrap(), peer_addr))
+        .await
+        .unwrap();
+    inject_tx
+        .send((non_kad_datagram(), peer_addr))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("foreign handler not invoked while Kad stopped")
+        .expect("foreign handler channel closed");
+    assert!(subscriber.try_recv().is_err());
+    assert!(transport.drain_outgoing().is_empty());
+}
+
+#[tokio::test]
 async fn foreign_handler_registration_is_at_most_once() {
     let rpc = make_rpc(RpcConfig::default());
     let first: ForeignDatagramHandler = Arc::new(|_: &[u8], _: SocketAddr| true);

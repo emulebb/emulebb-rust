@@ -44,6 +44,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         search_inbox,
         kad_firewall,
         shutdown,
+        server_enabled,
         public_ip,
         reconnect_signal,
         target_server_endpoint,
@@ -70,7 +71,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             .then(|| Duration::from_secs(config.session_rotation_secs)),
         shutdown: Arc::clone(&shutdown),
         public_ip,
-        reconnect_signal,
+        reconnect_signal: Arc::clone(&reconnect_signal),
         server_list_events,
         add_servers_from_server: config.add_servers_from_server,
     };
@@ -96,11 +97,24 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         session_context.hello_identity.connect_options & 0x01 != 0,
         session_context.add_servers_from_server,
         Arc::clone(&shutdown),
+        Arc::clone(&server_enabled),
         session_context.server_list_events.clone(),
     ));
     let reconnect_enabled = config.reconnect_enabled;
 
     while !shutdown.load(Ordering::Relaxed) {
+        if !server_enabled.load(Ordering::SeqCst) {
+            clear_server_connection_state(&state).await;
+            tokio::select! {
+                () = reconnect_signal.notified() => {},
+                () = async {
+                    while !shutdown.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                } => break,
+            }
+            continue;
+        }
         let mut attempted_any = false;
         let target_endpoint = target_server_endpoint.read().await.clone();
         let selected_servers = selected_configured_servers(

@@ -104,6 +104,11 @@ const snapshot = {
   sharedFiles: [{ hash: sharedFileHash, name: "Shared Sample.bin", sizeBytes: 4096 }]
 };
 
+/** Fresh mutable dashboard state for stateful browser workflow tests. */
+export function mockSnapshotFixture(): typeof snapshot {
+  return structuredClone(snapshot);
+}
+
 export function installMockApi(requests: RecordedApiRequest[]) {
   return async (route: Route): Promise<void> => {
     const request = route.request();

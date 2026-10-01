@@ -304,6 +304,9 @@ const TRANSFER_EVENT_CHANNEL_CAPACITY: usize = 1024;
 struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
     server_state: Arc<RwLock<Ed2kServerState>>,
+    /// Operator-facing server connection gate. This is deliberately separate
+    /// from `shutdown`, which tears down the complete shared server/Kad stack.
+    server_enabled: Arc<AtomicBool>,
     dht: DhtNode,
     /// Profile-local `nodes.dat` destination for the shutdown routing sample.
     kad_nodes_dat_path: Option<PathBuf>,
@@ -2529,6 +2532,9 @@ impl EmulebbCore {
         let (handle, server_state) = {
             let runtime_guard = self.ed2k_runtime.lock().await;
             let runtime = runtime_guard.as_ref()?;
+            if !runtime.server_enabled.load(Ordering::SeqCst) {
+                return None;
+            }
             (
                 runtime.search_handle.clone(),
                 Arc::clone(&runtime.server_state),
@@ -2975,6 +2981,9 @@ impl EmulebbCore {
             let Some(runtime) = runtime_guard.as_ref() else {
                 return ed2k_stopped_status();
             };
+            if !runtime.server_enabled.load(Ordering::SeqCst) {
+                return ed2k_stopped_status();
+            }
             Arc::clone(&runtime.server_state)
         };
         let state = server_state.read().await;
@@ -2998,6 +3007,9 @@ impl EmulebbCore {
 
     async fn kad_status(&self, manual_running: bool) -> NetworkStatus {
         if !self.state.lock().await.core_settings.network_kademlia {
+            return kad_status_from_running(false);
+        }
+        if !manual_running {
             return kad_status_from_running(false);
         }
         let runtime_snapshot = {

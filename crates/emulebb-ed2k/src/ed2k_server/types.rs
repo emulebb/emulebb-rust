@@ -240,6 +240,9 @@ pub struct Ed2kServerLoopOptions {
     pub search_inbox: Ed2kServerSearchInbox,
     pub kad_firewall: Arc<Mutex<KadFirewallState>>,
     pub shutdown: Arc<AtomicBool>,
+    /// Operator server lifecycle gate. This is independent from process-wide
+    /// network shutdown so Kad can remain active while the server is stopped.
+    pub server_enabled: Arc<AtomicBool>,
     /// Learned public-IP cell (eMule `theApp` public IP), set from the HighID
     /// `OP_IDCHANGE`. Created by core and shared with the UDP reask loop.
     pub public_ip: crate::reachability::ExternalReachability,

@@ -1,11 +1,14 @@
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 
-use crate::{EmulebbCore, KadNode, NetworkStatus, kad_status_from_running};
+use crate::{EmulebbCore, KadNode, NetworkStatus};
 
 impl EmulebbCore {
     pub async fn set_kad_running(&self, running: bool) {
         self.state.lock().await.kad_running = running;
+        if let Some(runtime) = self.ed2k_runtime.lock().await.as_ref() {
+            runtime.dht.set_running(running);
+        }
     }
 
     pub async fn start_kad(&self) -> Result<NetworkStatus> {
@@ -25,7 +28,7 @@ impl EmulebbCore {
             anyhow::bail!("blocked by VPN guard: {}", guard.startup_block_reason);
         }
         self.set_kad_running(true).await;
-        let status = kad_status_from_running(self.state.lock().await.kad_running);
+        let status = self.kad_status(true).await;
         tracing::info!(running = status.running, "Kad start accepted");
         Ok(status)
     }

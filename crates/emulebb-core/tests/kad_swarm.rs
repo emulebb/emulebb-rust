@@ -213,6 +213,7 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
     let share = require_share_by_name(&shares, payload_name);
     let second_share = require_share_by_name(&shares, second_payload_name);
     seed_core.connect_ed2k().await.expect("start seed network");
+    seed_core.start_kad().await.expect("start seed Kad");
     wait_for_kad_connected(&seed_core).await;
 
     let download_core = open_network_core(
@@ -227,6 +228,10 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
         .connect_ed2k()
         .await
         .expect("start downloader network");
+    download_core
+        .start_kad()
+        .await
+        .expect("start downloader Kad");
     wait_for_kad_connected(&download_core).await;
 
     let transfers = download_core

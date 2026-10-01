@@ -100,11 +100,15 @@ python tools\rust_quality_gate.py build
 ```
 
 Run the WebUI test gate after embedded SPA changes. It installs the locked npm
-dependencies, runs Vitest unit tests, runs the mocked Playwright Chromium smoke
-suite, and verifies the production Vite build.
+dependencies, runs Vitest unit tests, runs the stateful Playwright Chromium
+suite, checks types, and verifies the production Vite build. The release
+orchestrator stages all generated npm/test/build content below
+`EMULEBB_WORKSPACE_OUTPUT_ROOT`:
 
 ```powershell
-python tools\rust_quality_gate.py webui-test
+Push-Location ..\emulebb-build
+python -m emule_workspace test rust-webui
+Pop-Location
 ```
 
 Use `--force-rebuild` only when intentionally clearing Cargo state, for example

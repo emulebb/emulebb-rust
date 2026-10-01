@@ -27,7 +27,7 @@ use emulebb_kad_proto::KadPacket;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot};
@@ -72,6 +72,10 @@ struct RpcInner {
     /// shared port). Late-bound and at-most-once; `None` until the eD2k layer
     /// registers it.
     foreign_datagram_handler: OnceLock<ForeignDatagramHandler>,
+    /// Operator Kad lifecycle gate. The socket must stay bound because eD2K
+    /// client-UDP packets share it, but decoded Kad traffic is ignored and Kad
+    /// sends are rejected while this is false.
+    kad_enabled: AtomicBool,
     global_rate_limiter: RateLimiter,
     interactive_rate_limiter: RateLimiter,
     harvest_rate_limiter: RateLimiter,
@@ -112,6 +116,7 @@ impl RpcManager {
             transport: Arc::new(transport),
             obfuscation,
             foreign_datagram_handler: OnceLock::new(),
+            kad_enabled: AtomicBool::new(true),
             global_rate_limiter: RateLimiter::new(config.max_outbound_pps),
             interactive_rate_limiter: RateLimiter::new(
                 config
@@ -157,6 +162,22 @@ impl RpcManager {
     /// follow the unchanged Kad decode-failure path.
     pub fn set_foreign_datagram_handler(&self, handler: ForeignDatagramHandler) -> bool {
         self.inner.foreign_datagram_handler.set(handler).is_ok()
+    }
+
+    /// Pause or resume Kad traffic without closing the shared UDP transport.
+    pub fn set_kad_enabled(&self, enabled: bool) {
+        self.inner.kad_enabled.store(enabled, Ordering::SeqCst);
+        if !enabled {
+            // Wake in-flight request futures immediately instead of leaving
+            // them blocked until their network timeout expires.
+            self.inner.pending.lock().clear();
+        }
+    }
+
+    /// Whether Kad packet handling is currently enabled.
+    #[must_use]
+    pub fn kad_enabled(&self) -> bool {
+        self.inner.kad_enabled.load(Ordering::SeqCst)
     }
 
     /// Send an already-framed datagram on the shared UDP socket. For eD2k client

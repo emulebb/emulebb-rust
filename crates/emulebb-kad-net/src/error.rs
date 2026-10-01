@@ -18,6 +18,10 @@ pub enum NetError {
     /// An internal response or control channel closed unexpectedly.
     #[error("channel closed")]
     ChannelClosed,
+    /// Kad packet handling is paused while the shared UDP socket remains open
+    /// for eD2K client-UDP traffic.
+    #[error("Kad is stopped")]
+    KadStopped,
     /// The local outbound rate limiter rejected the send attempt.
     #[error("rate limited")]
     RateLimited,

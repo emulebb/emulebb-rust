@@ -14,12 +14,30 @@ impl EmulebbCore {
 
     /// Parse a `nodes.dat` payload and add its contacts to the running Kad node.
     pub async fn import_kad_nodes_bytes(&self, data: &[u8]) -> Result<usize> {
-        let Some(dht) = self.ed2k_dht_node().await else {
-            anyhow::bail!("Kad is not running");
-        };
-        dht.import_nodes_dat(data)
-            .await
-            .map_err(|error| anyhow::anyhow!("nodes.dat import failed: {error}"))
+        let contacts = emulebb_kad_dht::bootstrap::parse_nodes_dat(data)
+            .map_err(|error| anyhow::anyhow!("nodes.dat import failed: {error}"))?;
+        ensure!(
+            !contacts.is_empty(),
+            "nodes.dat contains no usable contacts"
+        );
+
+        let path = self
+            .ed2k_network
+            .as_ref()
+            .and_then(|network| network.kad_nodes_dat_path.clone());
+        if let Some(path) = path {
+            let bytes = data.to_vec();
+            tokio::task::spawn_blocking(move || write_nodes_dat_atomic(&path, &bytes))
+                .await
+                .context("nodes.dat persistence worker failed")??;
+        }
+
+        if let Some(dht) = self.ed2k_dht_node().await {
+            dht.import_nodes_dat(data)
+                .await
+                .map_err(|error| anyhow::anyhow!("nodes.dat import failed: {error}"))?;
+        }
+        Ok(contacts.len())
     }
 
     pub async fn import_server_met_url(&self, url: &str) -> Result<bool> {
@@ -133,6 +151,7 @@ impl EmulebbCore {
 
         let mut runtime_guard = self.ed2k_runtime.lock().await;
         if let Some(runtime) = runtime_guard.as_ref() {
+            runtime.server_enabled.store(true, Ordering::SeqCst);
             let mut reconnect_needed = false;
             if let Some(endpoint) = endpoint {
                 let requested_endpoint = endpoint.parse::<SocketAddr>().ok();
@@ -265,7 +284,7 @@ impl EmulebbCore {
             obfuscation_enabled: network.ed2k.obfuscation_enabled,
             bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
             max_concurrent_searches: KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP,
-            nodes_dat: network.kad_nodes_dat.clone(),
+            nodes_dat: current_kad_nodes_dat(&network),
             nodes_text: configured_bootstrap_endpoints_text.clone(),
             class_budgets: kad_rpc_class_budgets(),
             // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
@@ -299,6 +318,7 @@ impl EmulebbCore {
         // loop stays active even when Kad routing itself is disabled so
         // OP_PORTTEST and other client-UDP traffic remain reachable.
         tasks.push(dht.clone().start());
+        dht.set_running(self.state.lock().await.kad_running);
         {
             tasks.push(tokio::spawn(run_kad_udp_key_public_ip_sync(
                 dht.clone(),
@@ -314,6 +334,7 @@ impl EmulebbCore {
         // external port changes (UPnP ready / remapped) so the server loop re-logs
         // in with the new HighID callback port instead of waiting for a reconnect.
         let server_reconnect_signal = Arc::new(tokio::sync::Notify::new());
+        let server_enabled = Arc::new(AtomicBool::new(true));
         let target_server_endpoint = Arc::new(RwLock::new(endpoint.map(str::to_string)));
         // Keep the advertised external eD2k TCP + UDP ports in sync with the NAT
         // mappings so peers/servers can reach us (incoming TCP + HighID callback)
@@ -472,6 +493,7 @@ impl EmulebbCore {
             search_inbox,
             kad_firewall: Arc::clone(&kad_firewall),
             shutdown: Arc::clone(&shutdown),
+            server_enabled: Arc::clone(&server_enabled),
             public_ip: ed2k_public_ip.clone(),
             reconnect_signal: Arc::clone(&server_reconnect_signal),
             target_server_endpoint: Arc::clone(&target_server_endpoint),
@@ -605,6 +627,7 @@ impl EmulebbCore {
         *runtime_guard = Some(Ed2kRuntime {
             search_handle,
             server_state,
+            server_enabled,
             dht,
             kad_nodes_dat_path: network.kad_nodes_dat_path.clone(),
             kad_firewall: Arc::clone(&kad_firewall),
@@ -625,6 +648,24 @@ impl EmulebbCore {
             "ED2K runtime started for connect request"
         );
         Ok(status)
+    }
+
+    /// Disconnect only the eD2K server session. Kad, the shared UDP socket,
+    /// peer transfers, and NAT state remain available for an independent
+    /// server reconnect.
+    pub async fn disconnect_ed2k_server(&self) -> NetworkStatus {
+        let state = {
+            let runtime_guard = self.ed2k_runtime.lock().await;
+            runtime_guard.as_ref().map(|runtime| {
+                runtime.server_enabled.store(false, Ordering::SeqCst);
+                runtime.server_reconnect_signal.notify_one();
+                Arc::clone(&runtime.server_state)
+            })
+        };
+        if let Some(state) = state {
+            *state.write().await = Ed2kServerState::default();
+        }
+        self.ed2k_status().await
     }
 
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
@@ -679,6 +720,18 @@ impl EmulebbCore {
         }
         self.ed2k_status().await
     }
+}
+
+fn current_kad_nodes_dat(network: &Ed2kNetworkConfig) -> Option<Vec<u8>> {
+    let persisted = network
+        .kad_nodes_dat_path
+        .as_deref()
+        .and_then(|path| fs::read(path).ok())
+        .filter(|bytes| {
+            emulebb_kad_dht::bootstrap::parse_nodes_dat(bytes)
+                .is_ok_and(|contacts| !contacts.is_empty())
+        });
+    persisted.or_else(|| network.kad_nodes_dat.clone())
 }
 
 /// Keep persisted Kad receiver-key bindings aligned with the single live

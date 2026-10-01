@@ -215,6 +215,18 @@ impl DhtNode {
         self.inner.rpc.start()
     }
 
+    /// Pause or resume Kad protocol traffic while retaining the shared UDP
+    /// socket for eD2K client-UDP packets.
+    pub fn set_running(&self, running: bool) {
+        self.inner.rpc.set_kad_enabled(running);
+    }
+
+    /// Whether Kad protocol traffic is enabled on this node.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.inner.rpc.kad_enabled()
+    }
+
     /// Our node ID.
     pub fn own_id(&self) -> NodeId {
         self.inner.own_id

@@ -426,6 +426,7 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
         server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        server_enabled: Arc::new(AtomicBool::new(true)),
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
@@ -437,6 +438,7 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
         tasks: vec![dht_task],
         download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
+    core.set_kad_running(true).await;
 
     let status = core.status().await;
 
@@ -450,8 +452,75 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     assert_eq!(status.kad.firewalled, Some(false));
     assert_eq!(status.kad.users, None);
     assert_eq!(status.kad.files, None);
+
+    core.set_kad_running(false).await;
+    let stopped = core.status().await;
+    assert!(!stopped.kad.running);
+    let runtime = core.ed2k_runtime.lock().await;
+    assert!(!runtime.as_ref().unwrap().dht.is_running());
+    assert!(
+        runtime
+            .as_ref()
+            .unwrap()
+            .server_enabled
+            .load(Ordering::SeqCst)
+    );
+    drop(runtime);
+
+    core.set_kad_running(true).await;
+    {
+        let runtime = core.ed2k_runtime.lock().await;
+        let mut server = runtime.as_ref().unwrap().server_state.write().await;
+        server.connected = true;
+        server.endpoint = Some("127.0.0.1:4661".parse().unwrap());
+    }
+    let ed2k = core.disconnect_ed2k_server().await;
+    assert!(!ed2k.running);
+    let status = core.status().await;
+    assert!(status.kad.running);
+    assert!(
+        core.ed2k_runtime
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .dht
+            .is_running()
+    );
+
     shutdown.store(true, Ordering::SeqCst);
     let _ = core.disconnect_ed2k().await;
+}
+
+#[tokio::test]
+async fn nodes_dat_import_persists_while_kad_is_stopped() {
+    let transfer_root = unique_runtime_dir("emulebb-core-kad-stopped-import");
+    let nodes_path = transfer_root.join("nodes.dat");
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.kad_nodes_dat_path = Some(nodes_path.clone());
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
+    .unwrap();
+
+    // One valid legacy nodes.dat contact: count, node id, IPv4, UDP/TCP, type.
+    let mut bytes = 1u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&[0x42; 16]);
+    bytes.extend_from_slice(&u32::from_be_bytes([1, 2, 3, 4]).to_le_bytes());
+    bytes.extend_from_slice(&4665u16.to_le_bytes());
+    bytes.extend_from_slice(&4662u16.to_le_bytes());
+    bytes.push(0);
+
+    assert_eq!(core.import_kad_nodes_bytes(&bytes).await.unwrap(), 1);
+    assert_eq!(fs::read(nodes_path).unwrap(), bytes);
+    assert!(!core.status().await.kad.running);
 }
 
 #[tokio::test]
@@ -477,6 +546,7 @@ async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() 
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
         server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        server_enabled: Arc::new(AtomicBool::new(true)),
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),

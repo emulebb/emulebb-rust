@@ -485,6 +485,7 @@ async fn explicit_server_connect_targets_running_server_loop() {
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
         server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        server_enabled: Arc::new(AtomicBool::new(true)),
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
@@ -553,6 +554,7 @@ async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
         server_state,
+        server_enabled: Arc::new(AtomicBool::new(true)),
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),

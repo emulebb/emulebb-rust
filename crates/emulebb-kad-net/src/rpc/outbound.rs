@@ -90,6 +90,9 @@ impl RpcManager {
         timeout_duration: Duration,
         work_class: RpcWorkClass,
     ) -> Result<KadPacket, NetError> {
+        if !self.kad_enabled() {
+            return Err(NetError::KadStopped);
+        }
         let (tx, rx) = oneshot::channel();
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
 
@@ -176,6 +179,9 @@ impl RpcManager {
         packet: &KadPacket,
         work_class: RpcWorkClass,
     ) -> Result<(), NetError> {
+        if !self.kad_enabled() {
+            return Err(NetError::KadStopped);
+        }
         let budget_started = std::time::Instant::now();
         self.rate_limiter_for_class(work_class).acquire().await;
         self.inner.global_rate_limiter.acquire().await;

@@ -100,6 +100,14 @@ impl RpcManager {
                             }
                         };
 
+                        // Keep the socket alive for foreign eD2K client-UDP
+                        // datagrams, but do not mutate Kad state or answer Kad
+                        // packets after the operator pressed Stop.
+                        if !inner.kad_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                            debug!("kad recv drop reason=kad_stopped from={from}");
+                            continue;
+                        }
+
                         let response_opcode = packet.opcode();
                         let inbound = inspect_inbound_packet(&packet);
 

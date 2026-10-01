@@ -49,7 +49,7 @@ pub(crate) async fn servers_connect(State(state): State<RestState>) -> impl Into
 }
 
 pub(crate) async fn servers_disconnect(State(state): State<RestState>) -> impl IntoResponse {
-    state.core.disconnect_ed2k().await;
+    state.core.disconnect_ed2k_server().await;
     api_ok(server_status_response(&state).await)
 }
 

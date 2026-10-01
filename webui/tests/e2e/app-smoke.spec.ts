@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockApi, type RecordedApiRequest } from "../fixtures/mockApi";
+import { installMockApi, mockSnapshotFixture, type RecordedApiRequest } from "../fixtures/mockApi";
 
 const longSharedRoot =
   "F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
@@ -168,6 +168,185 @@ test("search create form uses REST-native type tokens", async ({ page }) => {
   });
 });
 
+test("runs the complete server, Kad, search, download, and reconnect workflow", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  const state: any = mockSnapshotFixture();
+  state.status.serverConnected = false;
+  state.status.firewalled = true;
+  state.servers = [];
+  state.kad = { enabled: true, running: false, connected: false, firewalled: null, contactCount: 0 };
+  state.searches = [];
+  state.transfers = [];
+  const resultHash = "AABBCCDDEEFF00112233445566778899";
+  const fallback = installMockApi(requests);
+
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname.replace(/^\/api\/v1\/?/, "");
+    const method = request.method();
+    const record = () => requests.push({
+      method,
+      path,
+      query: url.search,
+      headers: request.headers(),
+      body: request.postData()
+    });
+    const fulfill = async (data: unknown) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data })
+    });
+
+    if (method === "GET" && path === "snapshot") {
+      record();
+      await fulfill(state);
+      return;
+    }
+    if (method === "POST" && path === "servers/operations/import-met-url") {
+      record();
+      state.servers = [{ endpoint: "192.0.2.10:4661", name: "Imported Server", connected: false, enabled: true }];
+      await fulfill({ ok: true, imported: true });
+      return;
+    }
+    if (method === "POST" && path === "servers/operations/connect") {
+      record();
+      state.status.serverConnected = true;
+      state.status.firewalled = true;
+      state.servers[0].connected = true;
+      await fulfill({ running: true, connected: true, firewalled: true });
+      return;
+    }
+    if (method === "POST" && path === "servers/operations/disconnect") {
+      record();
+      state.status.serverConnected = false;
+      state.servers[0].connected = false;
+      await fulfill({ running: false, connected: false });
+      return;
+    }
+    if (method === "POST" && path === "kad/operations/import-nodes-url") {
+      record();
+      state.kad.contactCount = 188;
+      await fulfill({ ok: true, imported: true });
+      return;
+    }
+    if (method === "POST" && path === "kad/operations/start") {
+      record();
+      state.kad = { ...state.kad, running: true, connected: true, firewalled: false };
+      await fulfill(state.kad);
+      return;
+    }
+    if (method === "POST" && path === "kad/operations/stop") {
+      record();
+      state.kad = { ...state.kad, running: false, connected: false, firewalled: null };
+      await fulfill(state.kad);
+      return;
+    }
+    if (method === "POST" && path === "searches") {
+      record();
+      const search = {
+        id: "1",
+        query: "linux",
+        method: "automatic",
+        status: "completed",
+        results: [{ hash: resultHash, name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 2, fileType: "doc" }]
+      };
+      state.searches = [search];
+      await fulfill(search);
+      return;
+    }
+    if (method === "POST" && path === `searches/1/results/${resultHash}/operations/download`) {
+      record();
+      state.transfers = [{
+        hash: resultHash,
+        name: "Linux Guide.pdf",
+        state: "downloading",
+        sizeBytes: 1_048_576,
+        completedBytes: 4096,
+        sources: 2,
+        sourcesTransferring: 1,
+        stopped: false
+      }];
+      await fulfill(state.transfers[0]);
+      return;
+    }
+    if (method === "POST" && path === `transfers/${resultHash}/operations/stop`) {
+      record();
+      state.transfers[0] = { ...state.transfers[0], state: "paused", stopped: true, downloadRateBytesPerSec: 0 };
+      await fulfill(state.transfers[0]);
+      return;
+    }
+    if (method === "GET" && path === `transfers/${resultHash}/details`) {
+      record();
+      await fulfill(state.transfers[0]);
+      return;
+    }
+    if (method === "GET" && path === `transfers/${resultHash}/sources`) {
+      record();
+      await fulfill({ items: [{ clientId: "safe-pdf-source", state: "downloading" }] });
+      return;
+    }
+    await fallback(route);
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Servers" }).click();
+  const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
+  await expect(serversPanel.getByText(/Server network: Disconnected/)).toBeVisible();
+  await serversPanel.getByRole("button", { name: "Import" }).click();
+  await expect(page.getByText("server.met imported; the server list is ready")).toBeVisible();
+  await serversPanel.locator("button.btn").filter({ hasText: /^Connect$/ }).click();
+  await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
+  await expect(serversPanel.getByText(/LowID: connected/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Kad" }).click();
+  const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
+  await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
+  await kadPanel.getByRole("button", { name: "Import" }).click();
+  await expect(page.getByText("nodes.dat imported, validated, and saved")).toBeVisible();
+  await kadPanel.getByRole("button", { name: "Start" }).click();
+  await expect(kadPanel.getByText(/Kad network: Connected/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Servers" }).click();
+  await serversPanel.locator("button.btn").filter({ hasText: /^Disconnect$/ }).click();
+  await expect(serversPanel.getByText(/Server network: Disconnected/)).toBeVisible();
+  await page.getByRole("button", { name: "Kad" }).click();
+  await expect(kadPanel.getByText(/Kad network: Connected/)).toBeVisible();
+  await page.getByRole("button", { name: "Servers" }).click();
+  await serversPanel.locator("button.btn").filter({ hasText: /^Connect$/ }).click();
+  await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Search" }).click();
+  const searchPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Search" }) });
+  await searchPanel.getByPlaceholder("Search query").fill("linux");
+  await searchPanel.getByText("Advanced search filters").click();
+  await searchPanel.getByPlaceholder("Extension").fill("pdf");
+  await searchPanel.getByPlaceholder("Maximum bytes").fill("5242879");
+  await searchPanel.getByRole("button", { name: "Start" }).click();
+  const resultRow = searchPanel.locator("tr", { hasText: "Linux Guide.pdf" });
+  await expect(resultRow).toBeVisible();
+  await resultRow.getByRole("button", { name: "Download" }).click();
+  await expect(page.getByText("Download queued")).toBeVisible();
+
+  await page.getByRole("button", { name: "Transfers" }).click();
+  const transferRow = page.locator("tr", { hasText: "Linux Guide.pdf" });
+  await expect(transferRow).toContainText("downloading");
+  await transferRow.getByTitle("Stop").click();
+  await expect(transferRow).toContainText("paused");
+
+  await page.getByRole("button", { name: "Kad" }).click();
+  await kadPanel.getByRole("button", { name: "Stop" }).click();
+  await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
+  await page.getByRole("button", { name: "Servers" }).click();
+  await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
+
+  expect(requests.some((request) => request.path === "servers/operations/disconnect")).toBe(true);
+  expect(requests.filter((request) => request.path === "servers/operations/connect")).toHaveLength(2);
+  expect(requests.some((request) => request.path === `searches/1/results/${resultHash}/operations/download`)).toBe(true);
+  expect(requests.some((request) => request.path === `transfers/${resultHash}/operations/stop`)).toBe(true);
+  expect(state.transfers[0]).toMatchObject({ state: "paused", stopped: true });
+});
+
 test("shared folder add form validates root paths", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
@@ -320,7 +499,7 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   await serversPanel.getByPlaceholder("server.met URL").fill(" HTTPS://example.invalid/server.met ");
   await expect(serversPanel.getByText(serverUrlError)).toHaveCount(0);
   await serverImportButton.click();
-  await expect(page.getByText("Server list import started")).toBeVisible();
+  await expect(page.getByText("server.met imported; the server list is ready")).toBeVisible();
   const serverImportPost = requests.find((request) => request.method === "POST" && request.path === "servers/operations/import-met-url");
   expect(serverImportPost).toBeDefined();
   expect(JSON.parse(serverImportPost?.body ?? "{}")).toEqual({ url: "HTTPS://example.invalid/server.met" });
@@ -338,7 +517,7 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   await kadPanel.getByPlaceholder("nodes.dat URL").fill("http://example.invalid/nodes.dat");
   await expect(kadPanel.getByText(kadUrlError)).toHaveCount(0);
   await kadImportButton.click();
-  await expect(page.getByText("Kad nodes import started")).toBeVisible();
+  await expect(page.getByText("nodes.dat imported, validated, and saved")).toBeVisible();
   const kadImportPost = requests.find((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url");
   expect(kadImportPost).toBeDefined();
   expect(JSON.parse(kadImportPost?.body ?? "{}")).toEqual({ url: "http://example.invalid/nodes.dat" });
