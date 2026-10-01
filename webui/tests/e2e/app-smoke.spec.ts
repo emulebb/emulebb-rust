@@ -21,19 +21,27 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.getByRole("heading", { name: "eMuleBB WebUI" })).toBeVisible();
   await expect(page.getByText("0.1.0-beta.1")).toBeVisible();
   await expect(page.getByText("Sample Transfer.bin")).toBeVisible();
+  const topbar = page.locator("header .topbar");
+  const primaryViews = topbar.getByRole("navigation", { name: "Primary views" });
   const statusToolbar = page.getByRole("toolbar", { name: "Connection and transfer status" });
   await expect(statusToolbar.getByRole("button", { name: "Server: Connected", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Kad: Connected", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Download: 2.0 KiB/s", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Upload: 1.0 KiB/s", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Transfers: 1 active", exact: true })).toBeVisible();
-  await expect.poll(async () => page.locator("header .topbar").evaluate((element) => {
+  await expect(page.locator(".page-header")).toHaveCount(0);
+  await expect(primaryViews.getByRole("button")).toHaveCount(14);
+  await expect(primaryViews.locator("button svg")).toHaveCount(14);
+  await expect.poll(async () => topbar.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
     return bounds.width >= window.innerWidth - 32;
   })).toBe(true);
   await expect.poll(async () => {
-    return page.locator(".tabs").evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
+    return primaryViews.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
   }).toBe(true);
+  await expect.poll(async () => topbar.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  await expect.poll(async () => page.locator(".app-brand h1").evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBeLessThanOrEqual(16);
+  await expect.poll(async () => page.locator(".brand-version").evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBeLessThanOrEqual(12);
   expect(requests.some((request) => request.method === "GET" && request.path === "snapshot")).toBe(true);
   expect(requests.some((request) => request.method === "GET" && request.path === "events/status")).toBe(false);
   expect(requests.some((request) => request.method === "GET" && request.path === "app/settings")).toBe(false);
@@ -61,6 +69,27 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.locator("body")).not.toContainText("\\\\?\\");
 
   expect(requests.some((request) => request.path === "snapshot")).toBe(true);
+});
+
+test("keeps the unified toolbar usable at a narrow viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/v1/**", installMockApi([]));
+
+  await page.goto("/");
+
+  const topbar = page.locator("header .topbar");
+  const primaryViews = topbar.getByRole("navigation", { name: "Primary views" });
+  await expect(primaryViews.getByRole("button")).toHaveCount(14);
+  await expect(primaryViews.locator("button svg")).toHaveCount(14);
+  await expect(primaryViews.getByRole("button", { name: "Shared Files", exact: true })).toBeVisible();
+  await expect(primaryViews.getByRole("button", { name: "Logs", exact: true })).toBeVisible();
+  await expect(page.locator(".page-header")).toHaveCount(0);
+  await expect.poll(async () => topbar.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  await expect.poll(async () => page.locator("body").evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+
+  await primaryViews.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
+  await expect(primaryViews.getByRole("button", { name: "Search", exact: true })).toHaveClass(/active/);
 });
 
 test("recovers from a stale API key without a manual refresh", async ({ page }) => {

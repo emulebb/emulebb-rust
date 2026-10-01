@@ -661,89 +661,86 @@ export function App() {
     <div class="page">
       <header class="navbar navbar-expand-md d-print-none">
         <div class="container-fluid topbar">
-          <div class="navbar-brand app-brand">
-            <span class="brand-mark">eM</span>
-            <div>
-              <h1>eMuleBB WebUI</h1>
-              <p>{appInfo?.version ?? appInfo?.apiVersion ?? snapshot?.app?.version ?? "REST dashboard"}</p>
+          <div class="topbar-main">
+            <div class="navbar-brand app-brand">
+              <span class="brand-mark">eM</span>
+              <div>
+                <h1>eMuleBB WebUI</h1>
+                <p class="brand-version">{appInfo?.version ?? appInfo?.apiVersion ?? snapshot?.app?.version ?? "REST dashboard"}</p>
+              </div>
             </div>
+            {authState === "authenticated" && (
+              <>
+                <div class="status-toolbar" role="toolbar" aria-label="Connection and transfer status">
+                  <ToolbarButton
+                    label="Server"
+                    value={serverConnected ? "Connected" : "Disconnected"}
+                    icon={<Server size={17} />}
+                    state={serverConnected ? "connected" : "disconnected"}
+                    onClick={() => setTab("servers")}
+                  />
+                  <ToolbarButton
+                    label="Kad"
+                    value={kadStatus}
+                    icon={<Shield size={17} />}
+                    state={kad.connected ? "connected" : "disconnected"}
+                    onClick={() => setTab("kad")}
+                  />
+                  <ToolbarButton
+                    label="Download"
+                    value={downloadRate}
+                    icon={<Download size={17} />}
+                    onClick={() => setTab("transfers")}
+                  />
+                  <ToolbarButton
+                    label="Upload"
+                    value={uploadRate}
+                    icon={<UploadCloud size={17} />}
+                    onClick={() => setTab("uploads")}
+                  />
+                  <ToolbarButton
+                    label="Transfers"
+                    value={`${activeTransfers} active`}
+                    icon={<Activity size={17} />}
+                    onClick={() => setTab("transfers")}
+                  />
+                </div>
+                <div class="top-actions navbar-nav flex-row">
+                  <span class="badge bg-success-lt api-status"><Unlock size={14} /> API connected</span>
+                  <button type="button" class="btn btn-outline-secondary" title="Change API key" onClick={clearApiKey}>
+                    <KeyRound size={16} />
+                    Change key
+                  </button>
+                  <button type="button" class="btn btn-outline-secondary" title="Refresh" onClick={() => void refresh()}>
+                    <RefreshCw size={16} class={refreshing ? "spin" : ""} />
+                    Refresh
+                  </button>
+                </div>
+              </>
+            )}
           </div>
           {authState === "authenticated" && (
-            <>
-              <div class="status-toolbar" role="toolbar" aria-label="Connection and transfer status">
-                <ToolbarButton
-                  label="Server"
-                  value={serverConnected ? "Connected" : "Disconnected"}
-                  icon={<Server size={17} />}
-                  state={serverConnected ? "connected" : "disconnected"}
-                  onClick={() => setTab("servers")}
-                />
-                <ToolbarButton
-                  label="Kad"
-                  value={kadStatus}
-                  icon={<Shield size={17} />}
-                  state={kad.connected ? "connected" : "disconnected"}
-                  onClick={() => setTab("kad")}
-                />
-                <ToolbarButton
-                  label="Download"
-                  value={downloadRate}
-                  icon={<Download size={17} />}
-                  onClick={() => setTab("transfers")}
-                />
-                <ToolbarButton
-                  label="Upload"
-                  value={uploadRate}
-                  icon={<UploadCloud size={17} />}
-                  onClick={() => setTab("uploads")}
-                />
-                <ToolbarButton
-                  label="Transfers"
-                  value={`${activeTransfers} active`}
-                  icon={<Activity size={17} />}
-                  onClick={() => setTab("transfers")}
-                />
-              </div>
-              <div class="top-actions navbar-nav flex-row order-md-last">
-                <span class="badge bg-success-lt api-status"><Unlock size={14} /> API connected</span>
-                <button type="button" class="btn btn-outline-secondary" title="Change API key" onClick={clearApiKey}>
-                  <KeyRound size={16} />
-                  Change key
-                </button>
-                <button type="button" class="btn btn-outline-secondary" title="Refresh" onClick={() => void refresh()}>
-                  <RefreshCw size={16} class={refreshing ? "spin" : ""} />
-                  Refresh
-                </button>
-              </div>
-            </>
+            <nav class="tabs topbar-tabs nav nav-pills" aria-label="Primary views">
+              <TabButton tab="overview" active={tab} setTab={setTab} icon={<Activity size={16} />} label="Overview" />
+              <TabButton tab="transfers" active={tab} setTab={setTab} icon={<Download size={16} />} label="Transfers" />
+              <TabButton tab="search" active={tab} setTab={setTab} icon={<Search size={16} />} label="Search" />
+              <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
+              <TabButton tab="shared-files" active={tab} setTab={setTab} icon={<Share2 size={16} />} label="Shared Files" />
+              <TabButton tab="uploads" active={tab} setTab={setTab} icon={<UploadCloud size={16} />} label="Uploads" />
+              <TabButton tab="network" active={tab} setTab={setTab} icon={<Network size={16} />} label="Network" />
+              <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
+              <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
+              <TabButton tab="categories" active={tab} setTab={setTab} icon={<ListChecks size={16} />} label="Categories" />
+              <TabButton tab="friends" active={tab} setTab={setTab} icon={<Users size={16} />} label="Friends" />
+              <TabButton tab="settings" active={tab} setTab={setTab} icon={<Settings size={16} />} label="Settings" />
+              <TabButton tab="diagnostics" active={tab} setTab={setTab} icon={<Gauge size={16} />} label="Diagnostics" />
+              <TabButton tab="logs" active={tab} setTab={setTab} icon={<FileText size={16} />} label="Logs" />
+            </nav>
           )}
         </div>
       </header>
 
       <div class="page-wrapper">
-        {authState === "authenticated" && (
-          <div class="page-header d-print-none">
-            <div class="container-xl">
-              <nav class="tabs nav nav-pills card p-2" aria-label="Primary views">
-                <TabButton tab="overview" active={tab} setTab={setTab} icon={<Activity size={16} />} label="Overview" />
-                <TabButton tab="transfers" active={tab} setTab={setTab} icon={<Download size={16} />} label="Transfers" />
-                <TabButton tab="search" active={tab} setTab={setTab} icon={<Search size={16} />} label="Search" />
-                <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
-                <TabButton tab="shared-files" active={tab} setTab={setTab} icon={<Share2 size={16} />} label="Shared Files" />
-                <TabButton tab="uploads" active={tab} setTab={setTab} icon={<UploadCloud size={16} />} label="Uploads" />
-                <TabButton tab="network" active={tab} setTab={setTab} icon={<Network size={16} />} label="Network" />
-                <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
-                <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
-                <TabButton tab="categories" active={tab} setTab={setTab} icon={<ListChecks size={16} />} label="Categories" />
-                <TabButton tab="friends" active={tab} setTab={setTab} icon={<Users size={16} />} label="Friends" />
-                <TabButton tab="settings" active={tab} setTab={setTab} icon={<Settings size={16} />} label="Settings" />
-                <TabButton tab="diagnostics" active={tab} setTab={setTab} icon={<Gauge size={16} />} label="Diagnostics" />
-                <TabButton tab="logs" active={tab} setTab={setTab} icon={<FileText size={16} />} label="Logs" />
-              </nav>
-            </div>
-          </div>
-        )}
-
         <div class="page-body">
           <div class="container-xl shell">
             {authState !== "authenticated" && (

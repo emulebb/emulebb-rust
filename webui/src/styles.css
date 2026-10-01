@@ -79,20 +79,28 @@ td {
 }
 
 .topbar {
-  align-items: center;
   display: flex;
-  gap: 1rem;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 0.5rem;
   min-height: 64px;
   max-width: none;
   padding: 0.5rem clamp(0.75rem, 2vw, 1.5rem);
   width: 100%;
 }
 
+.topbar-main {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  min-width: 0;
+  width: 100%;
+}
+
 .app-brand {
   align-items: center;
   display: inline-flex;
-  gap: 0.75rem;
+  gap: 0.625rem;
   min-width: 0;
 }
 
@@ -102,23 +110,25 @@ td {
   border-radius: var(--tblr-border-radius);
   color: var(--tblr-primary-fg);
   display: inline-flex;
-  font-size: 0.86rem;
+  font-size: 0.78rem;
   font-weight: 800;
-  height: 2.25rem;
+  height: 2rem;
   justify-content: center;
   letter-spacing: 0;
-  width: 2.25rem;
+  width: 2rem;
 }
 
 .topbar h1 {
-  font-size: 1.25rem;
-  line-height: 1.2;
+  font-size: 1rem;
+  line-height: 1.1;
   margin: 0;
 }
 
-.topbar p {
+.topbar .brand-version {
   color: var(--tblr-secondary);
-  margin: 3px 0 0;
+  font-size: 0.75rem;
+  line-height: 1.1;
+  margin: 2px 0 0;
 }
 
 .status-toolbar {
@@ -237,6 +247,13 @@ td {
   flex-wrap: wrap;
   gap: 0.25rem;
   overflow-x: visible;
+}
+
+.topbar-tabs {
+  border-top: var(--tblr-border-width) solid var(--tblr-border-color);
+  justify-content: center;
+  padding-top: 0.5rem;
+  width: 100%;
 }
 
 .tab {
@@ -1057,7 +1074,7 @@ td {
 }
 
 @media (max-width: 980px) {
-  .topbar {
+  .topbar-main {
     flex-wrap: wrap;
   }
 
@@ -1105,6 +1122,15 @@ td {
   .form-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .topbar-main .app-brand,
+  .topbar-main .top-actions {
+    width: 100%;
+  }
+
+  .topbar-tabs {
+    justify-content: flex-start;
   }
 
   .status-toolbar {
