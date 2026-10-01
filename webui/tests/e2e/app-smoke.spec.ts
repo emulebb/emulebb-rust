@@ -175,7 +175,13 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   state.status.firewalled = true;
   state.servers = [];
   state.kad = { enabled: true, running: false, connected: false, firewalled: null, contactCount: 0 };
-  state.searches = [];
+  state.searches = [{
+    id: "1",
+    query: "older search",
+    method: "server",
+    status: "completed",
+    results: [{ hash: "00112233445566778899AABBCCDDEEFF", name: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
+  }];
   state.transfers = [];
   const resultHash = "AABBCCDDEEFF00112233445566778899";
   const fallback = installMockApi(requests);
@@ -245,17 +251,23 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     if (method === "POST" && path === "searches") {
       record();
       const search = {
-        id: "1",
+        id: "2",
         query: "linux",
         method: "automatic",
         status: "completed",
         results: [{ hash: resultHash, name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 2, fileType: "doc" }]
       };
-      state.searches = [search];
+      state.searches = [...state.searches, search];
       await fulfill(search);
       return;
     }
-    if (method === "POST" && path === `searches/1/results/${resultHash}/operations/download`) {
+    if (method === "GET" && /^searches\/\d+$/.test(path)) {
+      record();
+      const searchId = path.split("/")[1];
+      await fulfill(state.searches.find((search: any) => search.id === searchId));
+      return;
+    }
+    if (method === "POST" && path === `searches/2/results/${resultHash}/operations/download`) {
       record();
       state.transfers = [{
         hash: resultHash,
@@ -323,8 +335,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await searchPanel.getByPlaceholder("Extension").fill("pdf");
   await searchPanel.getByPlaceholder("Maximum bytes").fill("5242879");
   await searchPanel.getByRole("button", { name: "Start" }).click();
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.getByRole("button", { name: "Search" }).click();
+  await page.getByTitle("Refresh").click();
   const resultRow = searchPanel.locator("tr", { hasText: "Linux Guide.pdf" });
   await expect(resultRow).toBeVisible();
   await resultRow.getByRole("button", { name: "Download" }).click();
@@ -344,7 +355,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
 
   expect(requests.some((request) => request.path === "servers/operations/disconnect")).toBe(true);
   expect(requests.filter((request) => request.path === "servers/operations/connect")).toHaveLength(2);
-  expect(requests.some((request) => request.path === `searches/1/results/${resultHash}/operations/download`)).toBe(true);
+  expect(requests.some((request) => request.path === `searches/2/results/${resultHash}/operations/download`)).toBe(true);
   expect(requests.some((request) => request.path === `transfers/${resultHash}/operations/stop`)).toBe(true);
   expect(state.transfers[0]).toMatchObject({ state: "paused", stopped: true });
 });

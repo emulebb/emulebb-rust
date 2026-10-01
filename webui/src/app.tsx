@@ -113,6 +113,19 @@ const pollingEventStreamStatus: EventStreamStatus = {
   retryIntervalMs: EVENT_STREAM_RETRY_MS
 };
 
+function mostRecentSearch(searches: SearchItem[] | undefined): SearchItem | undefined {
+  return searches?.reduce<SearchItem | undefined>((recent, candidate) => {
+    if (!recent) {
+      return candidate;
+    }
+    const candidateId = Number(candidate.id);
+    const recentId = Number(recent.id);
+    return Number.isFinite(candidateId) && (!Number.isFinite(recentId) || candidateId > recentId)
+      ? candidate
+      : recent;
+  }, undefined);
+}
+
 export function App() {
   const [apiKey, setApiKey] = useState(readStoredApiKey);
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
@@ -222,8 +235,7 @@ export function App() {
       setUploadQueue(nextSnapshot.uploadQueue ?? []);
       setRefreshGeneration((value) => value + 1);
 
-      const searches = nextSnapshot.searches ?? [];
-      const recent = searches[0];
+      const recent = mostRecentSearch(nextSnapshot.searches);
       if (recent?.id !== undefined) {
         setLatestSearch(recent);
       } else {
@@ -455,7 +467,7 @@ export function App() {
     if (authState !== "authenticated" || tab !== "search") {
       return;
     }
-    const recent = snapshot?.searches?.[0];
+    const recent = mostRecentSearch(snapshot?.searches);
     if (recent?.id === undefined) {
       return;
     }
