@@ -656,6 +656,9 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByText("Bootstrap contact floor")).toHaveCount(0);
   await expect(settingsPanel.getByText("Discovery timeout seconds")).toHaveCount(0);
   await settingsPanel.getByLabel(/Advanced/).check();
+  const natSection = settingsPanel.locator('[data-settings-section="nat"]');
+  await expect(natSection.getByRole("checkbox", { name: /^NAT(?:\s|$)/ })).not.toBeChecked();
+  await expect(natSection.getByRole("checkbox", { name: /^Require initial NAT mapping(?:\s|$)/ })).toBeChecked();
   await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
   await expect(settingsPanel.getByLabel("eD2K half-open connections")).toBeVisible();
   await expect(settingsPanel.getByLabel("Concurrent downloads")).toBeVisible();
