@@ -310,6 +310,13 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       await fulfill(state.transfers[0]);
       return;
     }
+    if (method === "DELETE" && path === `transfers/${resultHash}/files` && url.searchParams.get("confirm") === "true") {
+      record();
+      const [deleted] = state.transfers;
+      state.transfers = [];
+      await fulfill({ items: [{ hash: deleted.hash, name: deleted.name, ok: true }] });
+      return;
+    }
     if (method === "GET" && path === `transfers/${resultHash}/details`) {
       record();
       await fulfill(state.transfers[0]);
@@ -366,8 +373,18 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await page.getByRole("button", { name: "Transfers" }).click();
   const transferRow = page.locator("tr", { hasText: "Linux Guide.pdf" });
   await expect(transferRow).toContainText("downloading");
-  await transferRow.getByTitle("Stop").click();
-  await expect(transferRow).toContainText("paused");
+  await transferRow.getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(transferRow).toContainText("stopped");
+  await expect(transferRow.getByRole("button", { name: "Stop", exact: true })).toBeDisabled();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("partial download data");
+    await dialog.accept();
+  });
+  await transferRow.getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(page.getByText("Transfer deleted", { exact: true })).toBeVisible();
+  await expect(transferRow).toHaveCount(0);
+  await expect(page.getByText("No transfers.", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Kad" }).click();
   await kadPanel.getByRole("button", { name: "Stop" }).click();
@@ -382,7 +399,12 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   expect(requests.some((request) => request.method === "GET" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) => request.path === `searches/2/results/${resultHash}/operations/download`)).toBe(true);
   expect(requests.some((request) => request.path === `transfers/${resultHash}/operations/stop`)).toBe(true);
-  expect(state.transfers[0]).toMatchObject({ state: "paused", stopped: true });
+  expect(requests.some((request) =>
+    request.method === "DELETE" &&
+    request.path === `transfers/${resultHash}/files` &&
+    new URLSearchParams(request.query).get("confirm") === "true"
+  )).toBe(true);
+  expect(state.transfers).toEqual([]);
 });
 
 test("shared folder add form validates root paths", async ({ page }) => {

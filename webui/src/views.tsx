@@ -264,6 +264,24 @@ export function TransfersView(props: {
   const patchCategory = (transfer: Transfer, categoryId: string) =>
     props.client.patch(`transfers/${transfer.hash}`, { categoryId: Number(categoryId) });
 
+  const removeCompletedTransfer = (transfer: Transfer) => {
+    const name = transfer.name?.trim() || transfer.hash;
+    if (window.confirm(`Remove "${name}" from the transfer list? The downloaded file will be preserved.`)) {
+      void props.run(() => props.client.delete(`transfers/${transfer.hash}`), "Transfer removed from list");
+    }
+  };
+
+  const deleteTransfer = (transfer: Transfer) => {
+    const name = transfer.name?.trim() || transfer.hash;
+    const localData = transfer.state === "completed" ? "downloaded file" : "partial download data";
+    if (window.confirm(`Delete "${name}" and its ${localData}? This cannot be undone.`)) {
+      void props.run(
+        () => props.client.delete(`transfers/${transfer.hash}/files?confirm=true`),
+        "Transfer deleted"
+      );
+    }
+  };
+
   return (
     <section class="view-stack">
       <section class="panel card">
@@ -336,7 +354,7 @@ export function TransfersView(props: {
                       {transfer.name ?? transfer.hash}
                     </button>
                   </td>
-                  <td><StatusPill value={transfer.state ?? "unknown"} /></td>
+                  <td><StatusPill value={transfer.stopped ? "stopped" : transfer.state ?? "unknown"} /></td>
                   <td>{formatProgress(transfer)}</td>
                   <td>{formatKiBRate(transfer.downloadSpeedKiBps) || formatRate(transfer.downloadRateBytesPerSec)}</td>
                   <td>
@@ -352,16 +370,46 @@ export function TransfersView(props: {
                   </td>
                   <td>
                     <div class="row-actions">
-                      <Action title="Pause" icon={<Pause size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/pause`), "Transfer paused")} />
-                      <Action title="Resume" icon={<Play size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/resume`), "Transfer resumed")} />
-                      <Action title="Stop" icon={<Ban size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/stop`), "Transfer stopped")} />
+                      <button
+                        type="button"
+                        class="btn btn-outline-secondary transfer-action"
+                        disabled={transfer.state === "completed" || transfer.stopped === true}
+                        onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/stop`), "Transfer stopped")}
+                      >
+                        <Ban size={15} />
+                        Stop
+                      </button>
+                      <Action
+                        title="Pause"
+                        icon={<Pause size={15} />}
+                        disabled={transfer.state === "completed" || transfer.state === "paused" || transfer.stopped === true}
+                        onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/pause`), "Transfer paused")}
+                      />
+                      <Action
+                        title="Resume"
+                        icon={<Play size={15} />}
+                        disabled={transfer.state !== "paused" || transfer.stopped === true}
+                        onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/resume`), "Transfer resumed")}
+                      />
                       <Action title="Recheck" icon={<RefreshCw size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/recheck`), "Recheck queued")} />
-                      <Action title="Delete row" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.delete(`transfers/${transfer.hash}`), "Transfer row deleted")} />
-                      <Action title="Delete files" icon={<FileText size={15} />} onClick={() => {
-                        if (window.confirm("Delete this transfer and its local files?")) {
-                          void props.run(() => props.client.delete(`transfers/${transfer.hash}/files?confirm=true`), "Transfer files deleted");
-                        }
-                      }} />
+                      {transfer.state === "completed" && (
+                        <button
+                          type="button"
+                          class="btn btn-outline-secondary transfer-action"
+                          onClick={() => removeCompletedTransfer(transfer)}
+                        >
+                          <FileText size={15} />
+                          Remove from list
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        class="btn btn-outline-danger transfer-action"
+                        onClick={() => deleteTransfer(transfer)}
+                      >
+                        <Trash2 size={15} />
+                        Delete
+                      </button>
                     </div>
                   </td>
                 </tr>
