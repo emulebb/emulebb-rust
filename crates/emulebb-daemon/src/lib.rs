@@ -40,7 +40,7 @@ pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
 pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
 
 const REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);
-const AUTO_CONNECT_POPULARITY_WAIT: Duration = Duration::from_secs(20);
+const AUTO_CONNECT_POPULARITY_WAIT: Duration = Duration::from_secs(60);
 const AUTO_CONNECT_POPULARITY_POLL: Duration = Duration::from_millis(500);
 const AUTO_CONNECT_TARGET_VERIFY: Duration = Duration::from_secs(12);
 const AUTO_CONNECT_TARGET_STABLE: Duration = Duration::from_secs(2);
