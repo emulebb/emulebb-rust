@@ -8,40 +8,28 @@
 
 Everything below is this repo's local deltas only:
 
-- **BETA CODE FREEZE:** effective 2026-09-30, accept only release blockers,
-  test/evidence fixes, documentation corrections, and packaging fixes for
-  `rust-v0.1.0-beta.1`. Every change must identify which of those four classes
-  it satisfies. Do not start the indexer (`RUST-FEAT-002`), Arr integration
-  (`RUST-FEAT-004`), major refactors (including `RUST-REF-005` through
-  `RUST-REF-007`), or new protocol features. Those items remain post-beta until
-  the operator explicitly lifts the freeze.
 - This repo owns the Rust headless eMuleBB client. Keep the public controller
   surface aligned with the Rust-forward `/api/v1` contract in
   `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\api`;
   do not treat the frozen emulebb-mfc contract as a forward compatibility
-  constraint. The beta code freeze does not by itself declare long-term REST
-  compatibility. If an allowed release-blocker fix must change a route or DTO,
-  evolve the daemon, OpenAPI artifact, route/body validators, embedded SPA WebUI
-  models, and tests together; do not add compatibility aliases or awkward
-  legacy shapes for hypothetical consumers. Rust is not an MFC, stock GUI,
-  legacy WebServer, or legacy preference mirror: preserve eD2K/Kad
+  constraint. A route or DTO change must evolve the daemon, OpenAPI artifact,
+  route/body validators, embedded SPA WebUI models, and tests together; do not
+  add compatibility aliases or awkward legacy shapes for hypothetical
+  consumers. Rust is not an MFC, stock GUI, legacy WebServer, or legacy
+  preference mirror: preserve eD2K/Kad
   protocol-operational parity, but keep local REST, UI, scheduling,
   diagnostics, and preference surfaces as clean Rust-native async daemon
   concepts with Rust-native names. Broadband-oriented async IO is the daemon
   baseline, not a compatibility preference or runtime toggle.
-- Do not bump `apiVersion` or REST `contractVersion` merely because the beta
-  code freeze is active. Reserve version bumps for a deliberate API-freeze or
-  release-boundary decision. Any permitted release-blocker change to the
-  contract must update implementation, OpenAPI, WebUI consumers, and tests
-  together.
+- Do not bump `apiVersion` or REST `contractVersion` without a deliberate API
+  freeze or release-boundary decision. Contract changes must update the
+  implementation, OpenAPI, WebUI consumers, and tests together.
 - The embedded SPA WebUI is the active UI completeness target. Slint/native UI
   work is a frozen/abandoned experiment unless the operator explicitly requests
   removal or revival work; do not spend UI feature effort there by default.
-- During the beta code freeze, do not begin development cleanup or redesign of
-  code, settings, metadata/schema, REST, or UI surfaces. For an allowed
-  release-blocker correction, keep the current-only model: do not add
-  compatibility shims, legacy aliases, old-name remapping, compatibility
-  readers, Rust schema migrations, or speculative version bumps. When a local
+- Keep the current-only model: do not add compatibility shims, legacy aliases,
+  old-name remapping, compatibility readers, Rust schema migrations, or
+  speculative version bumps. When a local
   persisted development profile must be preserved, use an explicit one-off
   SQLite/Python update against that operator-local DB (for example a soak
   `emulebb-rust-metadata.db`) instead of encoding the compatibility path in
