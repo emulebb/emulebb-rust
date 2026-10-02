@@ -1,7 +1,7 @@
 name: emulebb-rust-beta-test
 services:
   gluetun:
-    image: qmcgaw/gluetun:v3.41.0
+    image: qmcgaw/gluetun:v3.41.3
     cap_add: [NET_ADMIN]
     devices: [/dev/net/tun:/dev/net/tun]
     environment:
