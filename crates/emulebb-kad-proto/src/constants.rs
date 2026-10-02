@@ -41,6 +41,12 @@ pub const KBASE: usize = 4;
 pub const KK: usize = 5;
 
 pub const SEARCH_TIMEOUT_SECS: u64 = 45;
+/// Result-only grace after the active Kad search lifetime expires.
+///
+/// Stock eMule stops sending new search packets at `SEARCH_LIFETIME`, then
+/// keeps the search registered for another 15 seconds so delayed replies are
+/// still accepted (`CSearch::PrepareToStop`, Search.cpp:212-258).
+pub const SEARCH_RESULT_GRACE_SECS: u64 = 15;
 pub const STORE_KEYWORD_TIMEOUT_SECS: u64 = 140;
 pub const STORE_SOURCE_TIMEOUT_SECS: u64 = 140;
 pub const STORE_NOTES_TIMEOUT_SECS: u64 = 100;

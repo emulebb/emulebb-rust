@@ -288,6 +288,7 @@ async fn resolve_publish_contacts(
             target,
             search_kind: TraversalKind::Store,
             timeout: lookup_timeout,
+            response_grace: Duration::ZERO,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout: publish_contact_fanout.max(K),
             cancel: CancellationToken::new(),

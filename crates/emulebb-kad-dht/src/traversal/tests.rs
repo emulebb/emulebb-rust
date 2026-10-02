@@ -658,7 +658,8 @@ async fn test_run_search_phase_collects_results_after_query_timeout_until_deadli
             // Short per-node window: with the old `qt = query_timeout` cap the
             // phase would end at ~40ms and never see the 120ms response.
             query_timeout: Duration::from_millis(40),
-            deadline: Instant::now() + Duration::from_millis(400),
+            emit_deadline: Instant::now() + Duration::from_millis(400),
+            response_deadline: Instant::now() + Duration::from_millis(400),
             phase2_fanout: 1,
             last_lookup_response_at: None,
             jumpstart_idle_grace: Duration::ZERO,
@@ -740,7 +741,8 @@ async fn test_run_search_phase_collects_multiple_search_res_packets() {
             },
             target,
             query_timeout: Duration::from_millis(100),
-            deadline: Instant::now() + Duration::from_millis(300),
+            emit_deadline: Instant::now() + Duration::from_millis(300),
+            response_deadline: Instant::now() + Duration::from_millis(300),
             phase2_fanout: 10,
             last_lookup_response_at: None,
             jumpstart_idle_grace: Duration::ZERO,
@@ -793,7 +795,8 @@ async fn test_run_search_phase_replays_plain_keyword_request_shape() {
             },
             target,
             query_timeout: Duration::from_millis(20),
-            deadline: Instant::now() + Duration::from_millis(50),
+            emit_deadline: Instant::now() + Duration::from_millis(50),
+            response_deadline: Instant::now() + Duration::from_millis(50),
             phase2_fanout: 1,
             last_lookup_response_at: None,
             jumpstart_idle_grace: Duration::ZERO,
@@ -849,7 +852,8 @@ async fn test_run_search_phase_replays_restrictive_keyword_payload() {
             },
             target,
             query_timeout: Duration::from_millis(20),
-            deadline: Instant::now() + Duration::from_millis(50),
+            emit_deadline: Instant::now() + Duration::from_millis(50),
+            response_deadline: Instant::now() + Duration::from_millis(50),
             phase2_fanout: 1,
             last_lookup_response_at: None,
             jumpstart_idle_grace: Duration::ZERO,
@@ -903,7 +907,8 @@ async fn test_run_search_phase_replays_source_request_wire_shape() {
             },
             target,
             query_timeout: Duration::from_millis(20),
-            deadline: Instant::now() + Duration::from_millis(50),
+            emit_deadline: Instant::now() + Duration::from_millis(50),
+            response_deadline: Instant::now() + Duration::from_millis(50),
             phase2_fanout: 1,
             last_lookup_response_at: None,
             jumpstart_idle_grace: Duration::ZERO,
@@ -991,7 +996,8 @@ async fn test_run_search_phase_walks_one_contact_per_jumpstart_tick() {
                     // jumpstart tick later). The two drains below sample at 150ms
                     // and 350ms, leaving ~90ms of slack on each side.
                     query_timeout: Duration::from_millis(640),
-                    deadline: Instant::now() + Duration::from_millis(900),
+                    emit_deadline: Instant::now() + Duration::from_millis(900),
+                    response_deadline: Instant::now() + Duration::from_millis(900),
                     phase2_fanout: 2,
                     last_lookup_response_at: Some(Instant::now()),
                     jumpstart_idle_grace: Duration::from_millis(60),
@@ -1057,6 +1063,7 @@ async fn test_run_traversal_obfuscates_phase1_queries_for_fresh_contacts() {
             target,
             search_kind: TraversalKind::FindNode,
             timeout: Duration::from_secs(1),
+            response_grace: Duration::ZERO,
             query_timeout: Duration::from_millis(200),
             phase2_fanout: 1,
             cancel: CancellationToken::new(),
@@ -1120,7 +1127,8 @@ async fn test_run_search_phase_emits_even_when_idle_grace_exceeds_remaining_budg
             target,
             query_timeout: Duration::from_millis(200),
             // Only ~300ms of budget remains, far shorter than the 3s idle grace.
-            deadline: Instant::now() + Duration::from_millis(300),
+            emit_deadline: Instant::now() + Duration::from_millis(300),
+            response_deadline: Instant::now() + Duration::from_millis(300),
             phase2_fanout: 10,
             // Lookup just responded -> grace would defer the first emit by 3s.
             last_lookup_response_at: Some(Instant::now()),
@@ -1141,6 +1149,106 @@ async fn test_run_search_phase_emits_even_when_idle_grace_exceeds_remaining_budg
         "phase-2 must send at least one SEARCH_KEY_REQ even under a tight deadline; sent {} packets",
         outgoing.len()
     );
+}
+
+/// Regression for issue #19's VPN-only Kad zero-result failure. Phase 1 uses
+/// nearly all of the active budget, the keyword request is emitted just before
+/// active sending stops, and the valid reply arrives during eMule's result-only
+/// stop grace. The reply must still be collected.
+#[tokio::test]
+async fn keyword_traversal_collects_reply_after_active_deadline() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let injector = transport.injector();
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+
+    let target = NodeId::from_bytes([0x67; 16]);
+    let contact = TraversalContact {
+        id: NodeId::from_bytes([0x22; 16]),
+        addr: "192.168.1.32:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+    let reply_addr = contact.addr;
+    let sender_id = contact.id;
+
+    tokio::spawn(async move {
+        // Land the lookup response near the reserved phase-1 boundary.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        injector
+            .send((
+                KadPacket::Res(emulebb_kad_proto::packet::Res {
+                    target,
+                    contacts: Vec::new(),
+                })
+                .encode()
+                .unwrap(),
+                reply_addr,
+            ))
+            .await
+            .unwrap();
+
+        // The phase-2 request is clamped near the 300ms active deadline. Model
+        // the VPN round trip by returning after that deadline but inside grace.
+        tokio::time::sleep(Duration::from_millis(210)).await;
+        injector
+            .send((
+                KadPacket::SearchRes(SearchRes {
+                    sender_id,
+                    target,
+                    results: vec![emulebb_kad_proto::packet::SearchResultEntry {
+                        entry_id: Ed2kHash::from_bytes([0x88; 16]),
+                        tags: vec![],
+                    }],
+                })
+                .encode()
+                .unwrap(),
+                reply_addr,
+            ))
+            .await
+            .unwrap();
+    });
+
+    let result = run_traversal(
+        &rpc,
+        vec![contact],
+        TraversalConfig {
+            target,
+            search_kind: TraversalKind::Keyword {
+                request: SearchKeyReq {
+                    target,
+                    start_position: 0,
+                    restrictive_payload: Vec::new(),
+                },
+            },
+            timeout: Duration::from_millis(300),
+            response_grace: Duration::from_millis(200),
+            query_timeout: Duration::from_millis(140),
+            phase2_fanout: 1,
+            cancel: CancellationToken::new(),
+            result_tx: None,
+            work_class: RpcWorkClass::Interactive,
+            ip_filter: None,
+            res_contact_sink: None,
+        },
+    )
+    .await;
+
+    let outgoing = transport.drain_outgoing();
+    assert!(
+        outgoing.iter().any(|(_, bytes)| {
+            KadPacket::decode(bytes)
+                .map(|packet| matches!(packet, KadPacket::SearchKeyReq(_)))
+                .unwrap_or(false)
+        }),
+        "phase 2 must emit SEARCH_KEY_REQ before active sending stops: {outgoing:?}"
+    );
+    assert_eq!(result.search_entries.len(), 1);
+    assert_eq!(result.search_entries[0].0, Ed2kHash::from_bytes([0x88; 16]));
 }
 
 /// RUST-PAR-017 KAD-G1 guard: the NODE-lite refresh lookup must NOT change the
@@ -1179,6 +1287,7 @@ async fn test_value_lookup_phase_still_fans_out_alpha_initial_reqs() {
                 },
             },
             timeout: Duration::from_millis(150),
+            response_grace: Duration::ZERO,
             query_timeout: Duration::from_millis(150),
             phase2_fanout: 1,
             cancel: CancellationToken::new(),
@@ -1370,6 +1479,7 @@ async fn test_find_buddy_walk_req_carries_store_contact_count() {
                 request: find_buddy_request(target),
             },
             timeout: Duration::from_millis(100),
+            response_grace: Duration::ZERO,
             query_timeout: Duration::from_millis(40),
             phase2_fanout: emulebb_kad_proto::constants::SEARCHFINDBUDDY_TOTAL,
             cancel: CancellationToken::new(),
@@ -1448,7 +1558,8 @@ async fn test_find_buddy_action_walk_targets_each_tolerated_responder() {
             },
             target,
             query_timeout: Duration::from_millis(30),
-            deadline: Instant::now() + Duration::from_millis(200),
+            emit_deadline: Instant::now() + Duration::from_millis(200),
+            response_deadline: Instant::now() + Duration::from_millis(200),
             phase2_fanout: emulebb_kad_proto::constants::SEARCHFINDBUDDY_TOTAL,
             last_lookup_response_at: None,
             jumpstart_idle_grace: Duration::ZERO,
@@ -1517,7 +1628,8 @@ async fn test_find_buddy_action_walk_stops_at_the_oracle_answer_target() {
             query_timeout: Duration::from_millis(30),
             // Generous budget: OS timer granularity paces each jump-start emit
             // well above the nominal 1 ms tick; only the send count matters.
-            deadline: Instant::now() + Duration::from_secs(2),
+            emit_deadline: Instant::now() + Duration::from_secs(2),
+            response_deadline: Instant::now() + Duration::from_secs(2),
             phase2_fanout: emulebb_kad_proto::constants::SEARCHFINDBUDDY_TOTAL,
             last_lookup_response_at: None,
             jumpstart_idle_grace: Duration::ZERO,

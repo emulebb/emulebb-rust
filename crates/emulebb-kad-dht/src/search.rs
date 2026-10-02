@@ -4,7 +4,7 @@ use crate::traversal::{
 };
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
-use emulebb_kad_proto::constants::SEARCH_TIMEOUT_SECS;
+use emulebb_kad_proto::constants::{SEARCH_RESULT_GRACE_SECS, SEARCH_TIMEOUT_SECS};
 use emulebb_kad_proto::{Ed2kHash, NodeId, SearchKeyReq, SearchSourceReq};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -16,6 +16,7 @@ use tracing::info;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(SEARCH_TIMEOUT_SECS);
+const SEARCH_RESULT_GRACE: Duration = Duration::from_secs(SEARCH_RESULT_GRACE_SECS);
 /// Buffer used between traversal SEARCH_RES ingestion and higher-level search consumers.
 ///
 /// Large passive harvest bursts can deliver many consecutive SEARCH_RES pages
@@ -103,6 +104,7 @@ pub(crate) fn search_keywords_by_request(
             target: request.target,
             search_kind: TraversalKind::Keyword { request },
             timeout: SEARCH_TIMEOUT,
+            response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
             cancel: cancel.clone(),
@@ -225,6 +227,7 @@ pub(crate) fn search_sources_by_request(
             target,
             search_kind: TraversalKind::Source { request },
             timeout: SEARCH_TIMEOUT,
+            response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
             cancel: cancel.clone(),
@@ -306,6 +309,7 @@ pub(crate) fn search_notes(
                 requester_id: request.requester_id,
             },
             timeout: SEARCH_TIMEOUT,
+            response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
             cancel: cancel.clone(),

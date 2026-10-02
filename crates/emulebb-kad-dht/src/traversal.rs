@@ -121,8 +121,11 @@ pub struct TraversalConfig {
     pub target: NodeId,
     /// Traversal flavor and phase-2 behavior.
     pub search_kind: TraversalKind,
-    /// Whole-traversal deadline.
+    /// Active traversal lifetime during which new requests may be sent.
     pub timeout: Duration,
+    /// Result-only grace after the active lifetime. New phase-2 requests stop
+    /// at `timeout`, but already-requested replies remain acceptable here.
+    pub response_grace: Duration,
     /// Per-node `REQ` timeout budget.
     pub query_timeout: Duration,
     /// Maximum number of close contacts to use in phase 2.
@@ -172,7 +175,10 @@ struct SearchPhaseConfig<'a> {
     kind: TraversalKind,
     target: NodeId,
     query_timeout: Duration,
-    deadline: Instant,
+    /// Deadline for emitting new phase-2 requests.
+    emit_deadline: Instant,
+    /// Later deadline for collecting replies to already-emitted requests.
+    response_deadline: Instant,
     phase2_fanout: usize,
     /// Timestamp of the last traversal `RES` response.
     ///
@@ -226,6 +232,7 @@ pub async fn run_traversal(
         target,
         search_kind,
         timeout,
+        response_grace,
         query_timeout,
         phase2_fanout,
         cancel,
@@ -234,8 +241,17 @@ pub async fn run_traversal(
         ip_filter,
         res_contact_sink,
     } = config;
-    let deadline = Instant::now() + timeout;
+    let started_at = Instant::now();
+    let emit_deadline = started_at + timeout;
+    let response_deadline = emit_deadline + response_grace;
     let closest_limit = traversal_closest_limit(&search_kind, phase2_fanout);
+    let lookup_deadline = lookup_deadline_for_search(
+        &search_kind,
+        started_at,
+        emit_deadline,
+        query_timeout,
+        phase2_fanout,
+    );
 
     // ── Phase 1: Req/Res traversal to find K closest nodes ──────────────────
 
@@ -249,7 +265,7 @@ pub async fn run_traversal(
         LookupPhaseConfig {
             target,
             search_kind: &search_kind,
-            deadline,
+            deadline: lookup_deadline,
             query_timeout,
             closest_limit,
             req_count: req_count_for_kind(&search_kind),
@@ -274,7 +290,8 @@ pub async fn run_traversal(
                     kind,
                     target,
                     query_timeout,
-                    deadline,
+                    emit_deadline,
+                    response_deadline,
                     phase2_fanout,
                     last_lookup_response_at,
                     jumpstart_idle_grace: SEARCH_JUMPSTART_IDLE_GRACE,
@@ -292,6 +309,36 @@ pub async fn run_traversal(
         closest,
         search_entries,
     }
+}
+
+/// Bound the sequential lookup so phase 2 can send to the selected contacts
+/// and leave each one a normal response window before active search traffic
+/// stops. Stock eMule interleaves lookup and value requests; allowing this
+/// two-step traversal's lookup to own the whole lifetime recreates the
+/// VPN-only "connected, 0 results" race.
+fn lookup_deadline_for_search(
+    search_kind: &TraversalKind,
+    started_at: Instant,
+    emit_deadline: Instant,
+    query_timeout: Duration,
+    phase2_fanout: usize,
+) -> Instant {
+    if matches!(search_kind, TraversalKind::FindNode | TraversalKind::Store) {
+        return emit_deadline;
+    }
+
+    let active_lifetime = emit_deadline.saturating_duration_since(started_at);
+    let selected_fanout = phase2_fanout.clamp(1, K);
+    let walk_spacing = SEARCH_JUMPSTART_TICK
+        .saturating_mul(u32::try_from(selected_fanout.saturating_sub(1)).unwrap_or(u32::MAX));
+    let desired_reserve = query_timeout
+        .saturating_add(SEARCH_JUMPSTART_IDLE_GRACE)
+        .saturating_add(walk_spacing);
+    // Tiny synthetic budgets still need enough time to discover a contact.
+    // The normal 45-second lifetime is large enough to reserve the complete
+    // idle grace + paced fanout + per-query response window.
+    let reserve = desired_reserve.min(active_lifetime / 2);
+    emit_deadline.checked_sub(reserve).unwrap_or(started_at)
 }
 
 fn req_count_for_kind(search_kind: &TraversalKind) -> u8 {
@@ -739,7 +786,8 @@ async fn run_search_phase(
         kind,
         target,
         query_timeout,
-        deadline,
+        emit_deadline,
+        response_deadline,
         phase2_fanout,
         last_lookup_response_at,
         jumpstart_idle_grace,
@@ -752,7 +800,7 @@ async fn run_search_phase(
         return vec![];
     }
     let now = Instant::now();
-    if now >= deadline {
+    if now >= response_deadline {
         return vec![];
     }
     // Phase 2 must keep collecting SEARCH_RES for the FULL remaining search
@@ -762,11 +810,10 @@ async fn run_search_phase(
     // only emits one SEARCH_KEY_REQ per `jumpstart_tick` after a multi-second
     // idle grace — with a ~10s cap the furthest closest-set nodes were never
     // queried and the late ones had no window to answer, so every keyword
-    // collected 0 entries even when results exist. eMule keeps a Kad search
-    // alive for its whole lifetime (SEARCH_LIFETIME), walking and collecting in
-    // parallel; mirror that by running until the traversal `deadline`.
-    let phase_deadline = deadline;
-    let qt = phase_deadline.saturating_duration_since(now);
+    // collected 0 entries even when results exist. eMule stops emitting at the
+    // active SEARCH_LIFETIME but keeps the stopped search registered so delayed
+    // replies can land. Keep those two deadlines distinct here as well.
+    let qt = response_deadline.saturating_duration_since(now);
 
     let send_to = select_phase2_contacts(responded, target, phase2_fanout);
 
@@ -786,7 +833,7 @@ async fn run_search_phase(
         last_lookup_response_at,
         Instant::now(),
         jumpstart_idle_grace,
-        phase_deadline,
+        emit_deadline,
     );
 
     loop {
@@ -794,17 +841,19 @@ async fn run_search_phase(
             break;
         }
         let now = Instant::now();
-        if now >= phase_deadline {
+        if now >= response_deadline {
             break;
         }
+        if now >= emit_deadline {
+            pending_contacts.clear();
+        }
         let receive_until = if pending_contacts.is_empty() {
-            // All closest nodes have been walked: keep draining until the full
-            // phase deadline, but wake at least every `query_timeout` so the
-            // cancel/deadline checks stay responsive instead of parking on one
-            // long blocking receive.
-            (now + query_timeout).min(phase_deadline)
+            // All closest nodes have been walked (or active sending stopped):
+            // keep draining through the result grace, but wake at least every
+            // `query_timeout` so cancellation stays responsive.
+            (now + query_timeout).min(response_deadline)
         } else {
-            next_emit_at.min(phase_deadline)
+            next_emit_at.min(emit_deadline).min(response_deadline)
         };
         collect_search_results_until(SearchResultDrain {
             unsolicited: &mut unsolicited,
@@ -819,8 +868,12 @@ async fn run_search_phase(
         .await;
 
         let now = Instant::now();
-        if now >= phase_deadline {
+        if now >= response_deadline {
             break;
+        }
+        if now >= emit_deadline {
+            pending_contacts.clear();
+            continue;
         }
         if pending_contacts.is_empty() || now < next_emit_at {
             continue;

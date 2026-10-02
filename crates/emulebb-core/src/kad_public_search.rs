@@ -4,7 +4,10 @@ use std::{collections::HashSet, time::Duration};
 
 use anyhow::{Result, ensure};
 use emulebb_kad_dht::{DhtNode, RpcWorkClass};
-use emulebb_kad_proto::{NodeId, constants::SEARCH_TIMEOUT_SECS};
+use emulebb_kad_proto::{
+    NodeId,
+    constants::{SEARCH_RESULT_GRACE_SECS, SEARCH_TIMEOUT_SECS},
+};
 use md4::{Digest, Md4};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -13,17 +16,11 @@ use crate::{SearchCreate, SearchResult, search_query::search_result_from_kad};
 
 const INVALID_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
 const KAD_KEYWORD_SEARCH_RESULT_LIMIT: usize = 200;
-// Give the keyword search the full Kad traversal lifetime. The underlying
-// traversal (emulebb-kad-dht SEARCH_TIMEOUT) runs phase-1 find-node toward the
-// keyword target and only THEN walks phase-2 SEARCH_KEY_REQ across the closest
-// responders. A shorter outer cap (was 15s) cancelled the stream while phase-1
-// was still converging, so phase-2 never emitted a single SEARCH_KEY_REQ and
-// every keyword search returned 0 (live "0 results, no 0x33 on the wire"). The
-// Kad *source* search already uses the 45s floor and works for the same reason;
-// match it here so keyword file-discovery reaches phase-2. The search runs in a
-// background task (create_search spawns run_background_search), so the longer
-// budget does not block the POST — the client polls running->completed.
-const KAD_KEYWORD_SEARCH_TIMEOUT_SECS: u64 = SEARCH_TIMEOUT_SECS;
+// Keep the REST collector alive through both the active Kad lifetime and
+// eMule's result-only stop grace. Ending it at SEARCH_TIMEOUT dropped valid VPN
+// replies which arrived after the last-moment SEARCH_KEY_REQ but before the
+// oracle would delete the stopped search.
+const KAD_KEYWORD_SEARCH_TIMEOUT_SECS: u64 = SEARCH_TIMEOUT_SECS + SEARCH_RESULT_GRACE_SECS;
 
 pub(crate) async fn search_kad_keywords(
     dht: DhtNode,
@@ -137,10 +134,9 @@ mod tests {
         assert!(kad_public_search_keyword("\"unterminated").is_err());
     }
 
-    // Regression: the keyword-search outer timeout must cover the full Kad
-    // traversal lifetime, or the stream is cancelled while phase-1 find-node is
-    // still converging and no phase-2 SEARCH_KEY_REQ ever reaches the wire
-    // (returns 0). Was 15s vs a 45s traversal; keep it >= the traversal lifetime.
+    // Regression: the keyword-search outer timeout must cover both the active
+    // traversal and the result-only stop grace, otherwise a valid late VPN
+    // response is discarded while the oracle search would still accept it.
     #[test]
     fn keyword_search_timeout_covers_traversal_lifetime() {
         // Compile-time assertion: both operands are consts, so a const block fails
@@ -149,8 +145,8 @@ mod tests {
         // numbers live in the regression comment above.
         const {
             assert!(
-                KAD_KEYWORD_SEARCH_TIMEOUT_SECS >= SEARCH_TIMEOUT_SECS,
-                "keyword search outer timeout must be >= the Kad traversal lifetime so phase-2 SEARCH_KEY_REQ can fire"
+                KAD_KEYWORD_SEARCH_TIMEOUT_SECS >= SEARCH_TIMEOUT_SECS + SEARCH_RESULT_GRACE_SECS,
+                "keyword search outer timeout must include active traversal and result grace"
             )
         };
     }
