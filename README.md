@@ -1,7 +1,7 @@
 # emulebb-rust
 
-`emulebb-rust` is the Rust client for the eMuleBB product family and the forward
-eD2K/Kad core. It owns the Rust-forward `/api/v1` contract, runs as a headless
+`emulebb-rust` is the active experimental Rust eD2K/Kad client in the eMuleBB
+organization. It owns the Rust-forward `/api/v1` contract, runs as a headless
 daemon, and serves the embedded browser SPA WebUI from packaged static assets.
 It keeps local client state plus indexing data in SQLite.
 
@@ -13,11 +13,10 @@ is a cross-platform source and offline-fixture reference in this workspace.
 The repository began from earlier Kad and ED2K work, but it is intentionally a
 local client product. The `0.1.0-beta.1` line does not expose a coordinator API.
 
-> **Beta code freeze (effective 2026-09-30):** changes are accepted only for
-> release blockers, test/evidence fixes, documentation corrections, and
-> packaging fixes. Indexer and Arr integration, major refactors, and new
-> protocol features remain post-beta work until the freeze is explicitly
-> lifted. The release decision is tracked in
+> **Public beta:** [`rust-v0.1.0-beta.1`](https://github.com/emulebb/emulebb-rust/releases/tag/rust-v0.1.0-beta.1)
+> is published for Windows, Linux, and macOS. It is experimental software and
+> is not presented as production-ready. The release decision and retained
+> evidence are tracked in
 > [RUST-FEAT-033](https://github.com/emulebb/emulebb-rust/issues/20).
 
 Rust development uses the exact toolchain declared in `rust-toolchain.toml`.
@@ -38,9 +37,9 @@ contract live in
 The repo-local `docs` directory is only a pointer.
 
 New contributors should start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
-public eMuleBB Suite board. During the beta code freeze, do not start an issue
-solely because it carries an older `good first issue` or `help wanted` label;
-the freeze admission rules take precedence.
+public [eMuleBB Roadmap](https://github.com/orgs/emulebb/projects/3). The beta
+is published; new work should be scoped through the normal issue and validation
+process rather than the former pre-release freeze.
 
 ## 0.1.0-beta.1 Shape
 

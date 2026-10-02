@@ -8,11 +8,10 @@
 
 Everything below is this repo's local deltas only:
 
-**BETA RELEASE FREEZE:** Phase F evidence is active for
-`rust-v0.1.0-beta.1`. Accept only release blockers, exact-candidate evidence
-fixes, documentation corrections, and packaging fixes. Every source or release
-workflow change invalidates the candidate evidence and requires selection of a
-new SHA. Do not start post-beta work until the operator closes the freeze.
+**Lifecycle:** `rust-v0.1.0-beta.1` is published. This is the active
+experimental eMuleBB product-development lane; beta status is not a
+production-readiness claim. Post-beta work follows the normal scoped backlog
+and validation policy. Do not rewrite the published beta tag or artifacts.
 
 - This repo owns the Rust headless eMuleBB client. Keep the public controller
   surface aligned with the Rust-forward `/api/v1` contract in
