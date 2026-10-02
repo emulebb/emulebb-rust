@@ -51,19 +51,19 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build
-          ref: ebc13973311f953a16f0c8d8423b857f76ca22fe
+          ref: 80e2a1cae4cdd1b56ffba75685466c1f4ceabe12
           path: .ci/emulebb-build
       - name: Checkout pinned release documentation
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-tooling
-          ref: 914d02a9ef219dbfc813be4cdd6322a6c3b10c60
+          ref: 8035fc8ad161917bdaf97306e0c4a41eebe52437
           path: .ci/emulebb-tooling
       - name: Checkout pinned package smoke harness
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build-tests
-          ref: 42896ef2efb34cb20288aff0d2d8707086e69d9f
+          ref: 0e4444fad7e976d6947db481cec2000980d876e8
           path: .ci/emulebb-build-tests
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -159,13 +159,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build
-          ref: ebc13973311f953a16f0c8d8423b857f76ca22fe
+          ref: 80e2a1cae4cdd1b56ffba75685466c1f4ceabe12
           path: .ci/emulebb-build
       - name: Checkout pinned image smoke harness
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build-tests
-          ref: d7a59c85d8a86ee88ab178d7c1ae1f73e00e210f
+          ref: 0e4444fad7e976d6947db481cec2000980d876e8
           path: .ci/emulebb-build-tests
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -230,7 +230,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build
-          ref: ebc13973311f953a16f0c8d8423b857f76ca22fe
+          ref: 80e2a1cae4cdd1b56ffba75685466c1f4ceabe12
           path: .ci/emulebb-build
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -277,13 +277,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build
-          ref: ebc13973311f953a16f0c8d8423b857f76ca22fe
+          ref: 80e2a1cae4cdd1b56ffba75685466c1f4ceabe12
           path: emulebb-build
       - name: Checkout pinned release documentation
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-tooling
-          ref: 914d02a9ef219dbfc813be4cdd6322a6c3b10c60
+          ref: 8035fc8ad161917bdaf97306e0c4a41eebe52437
           path: emulebb-tooling
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
