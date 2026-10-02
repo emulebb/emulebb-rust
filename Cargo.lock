@@ -1398,7 +1398,7 @@ checksum = "ba92c8f4591bf29f89716b45e5f5f56577adbb81426e5620c6e994da7c88bb7a"
 
 [[package]]
 name = "emulebb-core"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1431,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-daemon"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-ed2k"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-index"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "binrw",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-dht"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "binrw",
  "emulebb-kad-net",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-net"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-proto"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "binrw",
  "encoding_rs",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-routing"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "emulebb-kad-proto",
  "thiserror 2.0.21",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-metadata"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-miniupnpc"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "emulebb-miniupnpc-sys",
@@ -1588,14 +1588,14 @@ dependencies = [
 
 [[package]]
 name = "emulebb-miniupnpc-sys"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "emulebb-rest"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-rust-ui"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1628,7 +1628,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-settings"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-tools"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "clap",

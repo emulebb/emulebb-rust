@@ -525,7 +525,7 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "assemble-emulebb-rust-release-ci": "verified release assembly",
         "RELEASE-${RELEASE_VERSION}-NOTES.md": "versioned release notes asset",
         "RELEASE-${RELEASE_VERSION}-CHANGELOG.md": "versioned changelog asset",
-        "body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.1-NOTES.md": "GitHub release notes body",
+        "body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md": "GitHub release notes body",
     }
     return [
         f".github/workflows/release.yml is missing {description} configuration"

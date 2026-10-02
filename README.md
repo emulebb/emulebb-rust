@@ -11,20 +11,20 @@ are the primary wire-compatibility target. The separate maintained aMule client
 is a cross-platform source and offline-fixture reference in this workspace.
 
 The repository began from earlier Kad and ED2K work, but it is intentionally a
-local client product. The `0.1.0-beta.1` line does not expose a coordinator API.
+local client product. The `0.1.0-beta.2` line does not expose a coordinator API.
 
-> **Public beta:** [`rust-v0.1.0-beta.1`](https://github.com/emulebb/emulebb-rust/releases/tag/rust-v0.1.0-beta.1)
+> **Public beta:** [`rust-v0.1.0-beta.2`](https://github.com/emulebb/emulebb-rust/releases/tag/rust-v0.1.0-beta.2)
 > is published for Windows, Linux, and macOS. It is experimental software and
 > is not presented as production-ready. The release decision and retained
 > evidence are tracked in
-> [RUST-FEAT-033](https://github.com/emulebb/emulebb-rust/issues/20).
+> [RUST-BUG-101 / issue 19](https://github.com/emulebb/emulebb-rust/issues/19).
 
 Rust development uses the exact toolchain declared in `rust-toolchain.toml`.
 Update that pin, the workspace `rust-version`, and CI together in a dedicated
 toolchain commit after each stable Rust release has passed the full quality
 gate; normal development must not float independently on `stable`.
 
-The `0.1.0-beta.1` scope is eD2K/Kad protocol-operational parity: configured binding,
+The `0.1.0-beta.2` scope is eD2K/Kad protocol-operational parity: configured binding,
 interoperability, search, sharing, transfers, uploads, queues, persistence,
 local SQLite/FTS indexing, REST controller visibility, and embedded SPA WebUI
 operation. Local API, UI, settings, diagnostics, and scheduling surfaces are
@@ -41,7 +41,7 @@ public [eMuleBB Roadmap](https://github.com/orgs/emulebb/projects/3). The beta
 is published; new work should be scoped through the normal issue and validation
 process rather than the former pre-release freeze.
 
-## 0.1.0-beta.1 Shape
+## 0.1.0-beta.2 Shape
 
 - `emulebb-daemon`: CLI, config, logging, and REST listener.
 - `emulebb-rest`: Rust-native `/api/v1` routes, envelopes, and API-key
@@ -148,10 +148,10 @@ contract. Browser API calls use the existing `X-API-Key` header.
 Harnesses may use operator-local inputs to create the profile directory and
 write those fixed files, but the Rust client itself only consumes the profile.
 
-## Beta.1 candidate artifacts
+## Beta.2 artifacts
 
-The public [release notes](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-0.1.0-beta.1-NOTES.md),
-[changelog](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-0.1.0-beta.1-CHANGELOG.md),
+The public [release notes](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md),
+[changelog](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-CHANGELOG.md),
 and [release scope](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-SCOPE.md)
 are the version-specific operator and compatibility references.
 
@@ -159,7 +159,7 @@ The manual [release workflow](.github/workflows/release.yml) retains unsigned
 candidate artifacts for Windows, Linux, and macOS on x64 and ARM64. Native ZIP,
 DEB/AppImage, and app-in-DMG packages include the daemon and browser WebUI. It
 also builds a Linux amd64/arm64 OCI image without publishing it. An approved
-`rust-v0.1.0-beta.1` tag is required to publish versioned GitHub Release and
+`rust-v0.1.0-beta.2` tag is required to publish versioned GitHub Release and
 GHCR assets; the workflow does not publish a `latest` image.
 
 The image uses LinuxServer's s6 base and supports `PUID`/`PGID`, `/config` for

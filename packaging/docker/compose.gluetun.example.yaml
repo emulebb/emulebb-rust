@@ -18,7 +18,7 @@ services:
       - "127.0.0.1:14711:4711/tcp"
     restart: unless-stopped
   emulebb-rust:
-    image: ghcr.io/emulebb/emulebb-rust:0.1.0-beta.1
+    image: ghcr.io/emulebb/emulebb-rust:0.1.0-beta.2
     network_mode: service:gluetun
     depends_on:
       gluetun:

@@ -8,8 +8,8 @@
 
 Everything below is this repo's local deltas only:
 
-**Lifecycle:** `rust-v0.1.0-beta.1` is published. This is the active
-experimental eMuleBB product-development lane; beta status is not a
+**Lifecycle:** `rust-v0.1.0-beta.2` is the active corrective release line. This
+is the active experimental eMuleBB product-development lane; beta status is not a
 production-readiness claim. Post-beta work follows the normal scoped backlog
 and validation policy. Do not rewrite the published beta tag or artifacts.
 

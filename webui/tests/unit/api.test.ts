@@ -4,10 +4,10 @@ import { RestClient } from "../../src/api";
 
 describe("RestClient", () => {
   it("unwraps successful API envelopes", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ data: { version: "0.1.0-beta.1" } })) as unknown as typeof fetch;
+    const fetchMock = vi.fn(async () => jsonResponse({ data: { version: "0.1.0-beta.2" } })) as unknown as typeof fetch;
     const client = new RestClient({ basePath: "/test-api", fetch: fetchMock });
 
-    await expect(client.get<{ version: string }>("app")).resolves.toEqual({ version: "0.1.0-beta.1" });
+    await expect(client.get<{ version: string }>("app")).resolves.toEqual({ version: "0.1.0-beta.2" });
     expect(fetchMock).toHaveBeenCalledWith("/test-api/app", {
       method: "GET",
       headers: {}

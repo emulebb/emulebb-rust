@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  RELEASE_VERSION: 0.1.0-beta.1
+  RELEASE_VERSION: 0.1.0-beta.2
   MINIUPNP_REF: bced81fb0b73ae78c9b911c89e881fbc6d4a5c7c
 
 jobs:
@@ -57,13 +57,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-tooling
-          ref: 8035fc8ad161917bdaf97306e0c4a41eebe52437
+          ref: adb49ac93ac1c0b59319c7fd6c004faeb876720c
           path: .ci/emulebb-tooling
       - name: Checkout pinned package smoke harness
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build-tests
-          ref: ecd19103d4a3bab615d47b89d195594501d7b0b4
+          ref: 5ef34ae3eff53e5686b6eec0c95bced4dda076a9
           path: .ci/emulebb-build-tests
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -165,7 +165,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build-tests
-          ref: ecd19103d4a3bab615d47b89d195594501d7b0b4
+          ref: 5ef34ae3eff53e5686b6eec0c95bced4dda076a9
           path: .ci/emulebb-build-tests
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -283,7 +283,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-tooling
-          ref: 8035fc8ad161917bdaf97306e0c4a41eebe52437
+          ref: adb49ac93ac1c0b59319c7fd6c004faeb876720c
           path: emulebb-tooling
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -312,6 +312,6 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           prerelease: true
-          body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.1-NOTES.md
+          body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md
           files: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
           fail_on_unmatched_files: true

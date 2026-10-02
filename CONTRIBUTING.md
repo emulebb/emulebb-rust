@@ -4,10 +4,10 @@
 first useful contributions should stay small, preserve stock-compatible protocol
 behavior, and keep the embedded SPA WebUI, REST contract, and tests aligned.
 
-## Beta Code Freeze
+## Beta Change Policy
 
-The `rust-v0.1.0-beta.1` code freeze is active as of 2026-09-30. Contributions
-are accepted only when they are one of the following:
+The public beta remains experimental. Release-candidate changes are accepted
+only when they are one of the following:
 
 - a release blocker;
 - a test or evidence fix;

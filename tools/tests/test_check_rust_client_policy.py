@@ -259,14 +259,14 @@ EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
 CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 path: .ci/emulebb-tooling
 working-directory: .ci/emulebb-build
-package-emulebb-rust-ci --release-version 0.1.0-beta.1 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
+package-emulebb-rust-ci --release-version 0.1.0-beta.2 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
 smoke-rust-release-package.py
 smoke-rust-container.py
-path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.1
+path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
 RELEASE-${RELEASE_VERSION}-NOTES.md
 RELEASE-${RELEASE_VERSION}-CHANGELOG.md
-body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.1-NOTES.md
+body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md
 """
         self.assertEqual(CHECKER.check_release_output_paths(workflow), [])
 

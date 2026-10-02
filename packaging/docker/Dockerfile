@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG VERSION=0.1.0-beta.1
+ARG VERSION=0.1.0-beta.2
 FROM lscr.io/linuxserver/baseimage-ubuntu:noble
 
 ARG VERSION

@@ -14,7 +14,7 @@ const longSharedRoot =
   "\\\\?\\F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
 
 const snapshot = {
-  app: { version: "0.1.0-beta.1" },
+  app: { version: "0.1.0-beta.2" },
   status: {
     lifecycle: "running",
     sharedStartupCache: {
@@ -599,7 +599,7 @@ function dataFor(method: string, path: string): unknown {
     case "app":
       return {
         name: "eMuleBB",
-        version: "0.1.0-beta.1",
+        version: "0.1.0-beta.2",
         apiVersion: "v1",
         capabilities: { transfers: true, "transfers.sse": true, "transfers.sse.status": true }
       };

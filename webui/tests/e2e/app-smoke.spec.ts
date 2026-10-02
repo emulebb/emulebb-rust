@@ -19,7 +19,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "eMuleBB WebUI" })).toBeVisible();
-  await expect(page.getByText("0.1.0-beta.1")).toBeVisible();
+  await expect(page.getByText("0.1.0-beta.2")).toBeVisible();
   await expect(page.getByText("Sample Transfer.bin")).toBeVisible();
   const topbar = page.locator("header .topbar");
   const primaryViews = topbar.getByRole("navigation", { name: "Primary views" });
