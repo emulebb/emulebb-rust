@@ -20,8 +20,8 @@ pub const SECTION_IP_FILTER: &str = "ip.filter";
 
 pub const DEFAULT_IP_FILTER_LEVEL: u32 = 127;
 pub const DEFAULT_KAD_PUBLISH_CONTACT_FANOUT: usize = 10;
+pub const PCP_NATPMP_BACKEND: &str = "pcp_natpmp";
 pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
-pub const UPNP_IGD_BACKEND: &str = "upnp_igd";
 
 pub const FIELD_UPLOAD_LIMIT_KIBPS: &str = "uploadLimitKiBps";
 pub const FIELD_DOWNLOAD_LIMIT_KIBPS: &str = "downloadLimitKiBps";
@@ -470,6 +470,7 @@ pub struct NatSettings {
     pub require_initial_mapping: bool,
     pub backend_order: Vec<String>,
     pub bind_ip: Option<String>,
+    pub pcp_server_ip: Option<String>,
     pub igd_ip: Option<String>,
     pub minissdpd_socket: Option<String>,
     pub ssdp_local_port: Option<u16>,
@@ -798,6 +799,12 @@ pub struct NatSettingsUpdate {
         deserialize_with = "deserialize_nullable_update",
         skip_serializing_if = "Option::is_none"
     )]
+    pub pcp_server_ip: Option<NullableUpdate<String>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nullable_update",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub igd_ip: Option<NullableUpdate<String>>,
     #[serde(
         default,
@@ -1021,16 +1028,17 @@ impl Default for KadSettings {
 impl Default for NatSettings {
     fn default() -> Self {
         Self {
-            // A consumer install should attempt UPnP without requiring router
+            // A consumer install should attempt NAT traversal without requiring gateway
             // support to start. This gives a zero-configuration HighID path
             // while keeping server/Kad connectivity usable when no IGD exists.
             enabled: true,
             require_initial_mapping: false,
             backend_order: vec![
+                PCP_NATPMP_BACKEND.to_string(),
                 UPNP_MINIUPNPC_BACKEND.to_string(),
-                UPNP_IGD_BACKEND.to_string(),
             ],
             bind_ip: None,
+            pcp_server_ip: None,
             igd_ip: None,
             minissdpd_socket: None,
             ssdp_local_port: None,
@@ -1039,6 +1047,22 @@ impl Default for NatSettings {
             renew_margin_secs: 300,
             external_ip_override: None,
         }
+    }
+}
+
+/// Replaces the removed pure-Rust `upnp_igd` provider in persisted settings.
+///
+/// Returns `true` when the caller must persist the repaired NAT section.
+pub fn reset_legacy_nat_backend_order(settings: &mut NatSettings) -> bool {
+    if settings
+        .backend_order
+        .iter()
+        .any(|backend| backend == "upnp_igd")
+    {
+        settings.backend_order = NatSettings::default().backend_order;
+        true
+    } else {
+        false
     }
 }
 
@@ -1297,6 +1321,7 @@ impl NatSettingsUpdate {
             && self.require_initial_mapping.is_none()
             && self.backend_order.is_none()
             && self.bind_ip.is_none()
+            && self.pcp_server_ip.is_none()
             && self.igd_ip.is_none()
             && self.minissdpd_socket.is_none()
             && self.ssdp_local_port.is_none()
@@ -1565,6 +1590,7 @@ pub fn apply_nat_settings_update(settings: &mut NatSettings, update: NatSettings
         settings.backend_order = value;
     }
     apply_nullable_update(&mut settings.bind_ip, update.bind_ip);
+    apply_nullable_update(&mut settings.pcp_server_ip, update.pcp_server_ip);
     apply_nullable_update(&mut settings.igd_ip, update.igd_ip);
     apply_nullable_update(&mut settings.minissdpd_socket, update.minissdpd_socket);
     apply_nullable_update(&mut settings.ssdp_local_port, update.ssdp_local_port);
@@ -1755,6 +1781,7 @@ impl From<NatSettings> for NatSettingsUpdate {
             require_initial_mapping: Some(settings.require_initial_mapping),
             backend_order: Some(settings.backend_order),
             bind_ip: Some(nullable_from_option(settings.bind_ip)),
+            pcp_server_ip: Some(nullable_from_option(settings.pcp_server_ip)),
             igd_ip: Some(nullable_from_option(settings.igd_ip)),
             minissdpd_socket: Some(nullable_from_option(settings.minissdpd_socket)),
             ssdp_local_port: Some(nullable_from_option(settings.ssdp_local_port)),

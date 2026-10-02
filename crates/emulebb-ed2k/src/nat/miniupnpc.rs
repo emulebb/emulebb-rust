@@ -12,8 +12,8 @@ use tokio::{sync::RwLock, task};
 use tracing::{info, warn};
 
 use super::{
-    MappedEndpoint, MappingSpec, NatConfig, NatStatus, PortMappingProvider, SelectedGateway,
-    UPNP_MINIUPNPC_BACKEND,
+    MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatStatus, PortMappingProvider,
+    SelectedGateway, UPNP_MINIUPNPC_BACKEND,
 };
 
 #[derive(Debug, Default)]
@@ -24,6 +24,7 @@ struct ReconcileOutcome {
     gateway: SelectedGateway,
     observed_external_addresses: Vec<String>,
     mappings: Vec<MappedEndpoint>,
+    preferred_error: Option<String>,
 }
 
 #[async_trait]
@@ -85,7 +86,9 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
         guard.enabled = true;
         guard.gateway_discovered = true;
         guard.backend = Some(self.name().to_string());
+        guard.protocol = Some("upnp_igd".to_string());
         guard.bind_ip = status_config.bind_ip.clone();
+        guard.pcp_server_ip = status_config.pcp_server_ip.clone();
         guard.igd_ip = status_config.igd_ip.clone();
         guard.minissdpd_socket = status_config.minissdpd_socket.clone();
         guard.ssdp_local_port = status_config.ssdp_local_port;
@@ -94,7 +97,7 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
         guard.observed_external_addresses = outcome.observed_external_addresses;
         guard.mappings = outcome.mappings;
         guard.last_refresh_unix_secs = Some(now);
-        guard.last_error = None;
+        guard.last_error = outcome.preferred_error;
         Ok(())
     }
 
@@ -161,7 +164,16 @@ fn reconcile_blocking(
 
     let mut applied = Vec::new();
     let mut mapped = Vec::with_capacity(mappings.len());
-    for spec in mappings {
+    let mut preferred_errors = Vec::new();
+    for spec in mappings
+        .iter()
+        .filter(|spec| spec.exposure == MappingExposure::Required)
+        .chain(
+            mappings
+                .iter()
+                .filter(|spec| spec.exposure == MappingExposure::Preferred),
+        )
+    {
         let external_port = spec
             .preferred_external_port
             .unwrap_or_else(|| spec.local_addr.port());
@@ -221,20 +233,29 @@ fn reconcile_blocking(
                 spec.name,
                 add_error
             );
-            if !mapping_matches_existing_entry(
+            let existing_matches = mapping_matches_existing_entry(
                 &gateway,
                 external_port,
                 spec.protocol.as_upnp_token(),
                 &internal_ip,
                 spec.local_addr.port(),
-            )
-            .with_context(|| {
-                format!(
-                    "gateway {} failed to inspect existing {} mapping",
-                    gateway.control_url(),
-                    spec.name
-                )
-            })? {
+            );
+            if !matches!(existing_matches, Ok(true)) {
+                let error = match existing_matches {
+                    Ok(false) => error,
+                    Ok(true) => unreachable!(),
+                    Err(inspect_error) => error.context(format!(
+                        "gateway {} also failed to inspect existing {} mapping: {inspect_error}",
+                        gateway.control_url(),
+                        spec.name
+                    )),
+                };
+                if spec.exposure == MappingExposure::Preferred {
+                    let message = format!("preferred mapping {} failed: {error:#}", spec.name);
+                    warn!("UPnP backend {} {message}", backend_name);
+                    preferred_errors.push(message);
+                    continue;
+                }
                 for (protocol, port) in applied.into_iter().rev() {
                     let _ = gateway.delete_port_mapping(port, protocol);
                 }
@@ -297,6 +318,7 @@ fn reconcile_blocking(
         },
         observed_external_addresses: external_ip_text.into_iter().collect(),
         mappings: mapped,
+        preferred_error: (!preferred_errors.is_empty()).then(|| preferred_errors.join("; ")),
     })
 }
 

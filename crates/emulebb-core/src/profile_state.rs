@@ -9,8 +9,8 @@ use emulebb_settings::{
     SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, app_settings_update_is_empty,
     apply_daemon_settings_update, apply_ed2k_settings_update, apply_ip_filter_settings_update,
     apply_kad_settings_update, apply_nat_settings_update, apply_vpn_guard_settings_update,
-    core_settings_from_values, core_settings_to_values, section_settings_from_values,
-    section_settings_to_values,
+    core_settings_from_values, core_settings_to_values, reset_legacy_nat_backend_order,
+    section_settings_from_values, section_settings_to_values,
 };
 
 use crate::{
@@ -117,12 +117,16 @@ pub(crate) fn persist_core_settings(
 pub(crate) fn load_app_settings(metadata: &MetadataStore) -> Result<AppSettings> {
     let mut daemon = load_settings_section(metadata, SECTION_DAEMON)?;
     normalize_daemon_settings_paths(&mut daemon);
+    let mut nat = load_settings_section(metadata, SECTION_NAT)?;
+    if reset_legacy_nat_backend_order(&mut nat) {
+        persist_settings_section(metadata, SECTION_NAT, &nat)?;
+    }
     Ok(AppSettings {
         core: load_core_settings(metadata)?,
         daemon,
         ed2k: load_settings_section(metadata, SECTION_ED2K)?,
         kad: load_settings_section(metadata, SECTION_KAD)?,
-        nat: load_settings_section(metadata, SECTION_NAT)?,
+        nat,
         vpn_guard: load_settings_section(metadata, SECTION_VPN_GUARD)?,
         ip_filter: load_settings_section(metadata, SECTION_IP_FILTER)?,
     })

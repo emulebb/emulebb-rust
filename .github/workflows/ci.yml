@@ -16,8 +16,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Pin the vendored MiniUPnP C source the native miniupnpc-sys build links against.
-  MINIUPNP_REF: bced81fb0b73ae78c9b911c89e881fbc6d4a5c7c
+  # Pin the native NAT sources linked by the sys crates.
+  MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
+  PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
 jobs:
   build-test:
@@ -39,6 +40,13 @@ jobs:
           repository: emulebb/emulebb-miniupnp
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
+
+      - name: Checkout emulebb-libpcpnatpmp (native C source)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
 
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -68,6 +76,7 @@ jobs:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+          PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
         run: python tools/rust_quality_gate.py ci-test
 
       - name: Retain tested beta build
@@ -148,15 +157,21 @@ jobs:
       - name: Checkout emulebb-rust
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # clippy --workspace builds emulebb-miniupnpc-sys, whose build.rs compiles
-      # the vendored MiniUPnP C source; provide it exactly as the build-test job
-      # does so the clippy step is not blocked on a native build failure.
+      # clippy --workspace builds both native NAT sys crates; provide the same
+      # pinned sources as the build-test job.
       - name: Checkout emulebb-miniupnp (native C source)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-miniupnp
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
+
+      - name: Checkout emulebb-libpcpnatpmp (native C source)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
 
       - name: Install pinned Rust with rustfmt and Clippy
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -182,6 +197,7 @@ jobs:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+          PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
         run: python tools/rust_quality_gate.py quick
 
   supply-chain:

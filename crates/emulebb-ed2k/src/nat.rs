@@ -8,22 +8,22 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, oneshot},
     task::JoinHandle,
 };
 use tracing::{debug, info, warn};
 
-#[path = "nat/igd.rs"]
-mod igd;
 #[path = "nat/miniupnpc.rs"]
 mod miniupnpc;
+#[path = "nat/pcpnatpmp.rs"]
+mod pcpnatpmp;
 
-pub use igd::IgdPortMappingProvider;
 pub use miniupnpc::MiniupnpcPortMappingProvider;
+pub use pcpnatpmp::PcpNatPmpPortMappingProvider;
 
 mod types {
     use std::net::SocketAddr;
@@ -96,7 +96,9 @@ mod types {
         pub enabled: bool,
         pub gateway_discovered: bool,
         pub backend: Option<String>,
+        pub protocol: Option<String>,
         pub bind_ip: Option<String>,
+        pub pcp_server_ip: Option<String>,
         pub igd_ip: Option<String>,
         pub minissdpd_socket: Option<String>,
         pub ssdp_local_port: Option<u16>,
@@ -116,7 +118,9 @@ mod types {
         pub enabled: bool,
         pub gateway_discovered: bool,
         pub backend: Option<String>,
+        pub protocol: Option<String>,
         pub bind_ip: Option<String>,
+        pub pcp_server_ip: Option<String>,
         pub igd_ip: Option<String>,
         pub minissdpd_socket: Option<String>,
         pub ssdp_local_port: Option<u16>,
@@ -136,7 +140,9 @@ mod types {
                 enabled: self.enabled,
                 gateway_discovered: self.gateway_discovered,
                 backend: self.backend.clone(),
+                protocol: self.protocol.clone(),
                 bind_ip: self.bind_ip.clone(),
+                pcp_server_ip: self.pcp_server_ip.clone(),
                 igd_ip: self.igd_ip.clone(),
                 minissdpd_socket: self.minissdpd_socket.clone(),
                 ssdp_local_port: self.ssdp_local_port,
@@ -158,8 +164,8 @@ pub use types::{
 
 /// MiniUPnPc backend identifier inherited from the original Rust agent.
 pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
-/// Independent in-tree SSDP + UPnP IGD SOAP backend identifier.
-pub const UPNP_IGD_BACKEND: &str = "upnp_igd";
+/// Shared libpcpnatpmp PCP/NAT-PMP backend identifier.
+pub const PCP_NATPMP_BACKEND: &str = "pcp_natpmp";
 /// NAT traversal configuration loaded from the daemon config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -168,6 +174,7 @@ pub struct NatConfig {
     pub require_initial_mapping: bool,
     pub backend_order: Vec<String>,
     pub bind_ip: Option<String>,
+    pub pcp_server_ip: Option<String>,
     pub igd_ip: Option<String>,
     pub minissdpd_socket: Option<String>,
     pub ssdp_local_port: Option<u16>,
@@ -182,8 +189,9 @@ impl Default for NatConfig {
         Self {
             enabled: false,
             require_initial_mapping: true,
-            backend_order: default_upnp_backend_order(),
+            backend_order: default_nat_backend_order(),
             bind_ip: None,
+            pcp_server_ip: None,
             igd_ip: None,
             minissdpd_socket: None,
             ssdp_local_port: None,
@@ -202,21 +210,26 @@ impl NatConfig {
     /// names fail instead of being ignored or silently falling back.
     pub fn validate(&self) -> Result<()> {
         for backend in &self.backend_order {
-            if ![UPNP_MINIUPNPC_BACKEND, UPNP_IGD_BACKEND].contains(&backend.as_str()) {
+            if ![PCP_NATPMP_BACKEND, UPNP_MINIUPNPC_BACKEND].contains(&backend.as_str()) {
                 bail!(
                     "nat.backendOrder supports only {} and {}; remove unsupported backend {:?} from the configuration",
+                    PCP_NATPMP_BACKEND,
                     UPNP_MINIUPNPC_BACKEND,
-                    UPNP_IGD_BACKEND,
                     backend
                 );
             }
+        }
+        if let Some(server_ip) = self.pcp_server_ip.as_deref() {
+            server_ip.parse::<std::net::Ipv4Addr>().with_context(|| {
+                format!("nat.pcpServerIp must be an IPv4 address, got {server_ip:?}")
+            })?;
         }
         Ok(())
     }
 
     fn effective_backend_order(&self) -> Vec<String> {
         if self.backend_order.is_empty() {
-            default_upnp_backend_order()
+            default_nat_backend_order()
         } else {
             self.backend_order.clone()
         }
@@ -263,21 +276,21 @@ pub struct NoopReachabilityStrategy;
 #[async_trait]
 impl ReachabilityStrategy for NoopReachabilityStrategy {}
 
-/// Returns the preferred UPnP providers, with the battle-tested native backend first.
+/// Returns the preferred NAT providers, trying PCP/NAT-PMP before UPnP IGD.
 #[must_use]
-pub fn default_upnp_backend_order() -> Vec<String> {
+pub fn default_nat_backend_order() -> Vec<String> {
     vec![
+        PCP_NATPMP_BACKEND.to_string(),
         UPNP_MINIUPNPC_BACKEND.to_string(),
-        UPNP_IGD_BACKEND.to_string(),
     ]
 }
 
 /// Returns compiled-in port mapping providers.
 #[must_use]
-pub fn built_in_upnp_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider>> {
+pub fn built_in_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider>> {
     vec![
+        Arc::new(PcpNatPmpPortMappingProvider::default()),
         Arc::new(MiniupnpcPortMappingProvider),
-        Arc::new(IgdPortMappingProvider),
     ]
 }
 
@@ -340,6 +353,7 @@ impl NatManagerBuilder {
             status: Arc::new(RwLock::new(NatStatus::default())),
             task: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            reconcile_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -353,6 +367,7 @@ pub struct NatManager {
     status: Arc<RwLock<NatStatus>>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
     shutdown: Arc<AtomicBool>,
+    reconcile_lock: Arc<Mutex<()>>,
 }
 
 impl Default for NatManager {
@@ -383,10 +398,28 @@ impl NatManager {
         let status = Arc::clone(&self.status);
         let shutdown = Arc::clone(&self.shutdown);
         let reachability = Arc::clone(&self.reachability);
+        let reconcile_lock = Arc::clone(&self.reconcile_lock);
+        let (initial_tx, initial_rx) = oneshot::channel();
         *slot = Some(tokio::spawn(async move {
-            run_manager_loop(config, mappings, providers, status, reachability, shutdown).await;
+            run_manager_loop(
+                ManagerLoopState {
+                    config,
+                    mappings,
+                    providers,
+                    status,
+                    reachability,
+                    shutdown,
+                    reconcile_lock,
+                },
+                initial_tx,
+            )
+            .await;
         }));
-        Ok(())
+        drop(slot);
+        initial_rx
+            .await
+            .map_err(|_| anyhow!("NAT manager stopped before initial reconcile completed"))?
+            .map_err(anyhow::Error::msg)
     }
 
     /// Runs a single reconcile pass synchronously and returns once the port
@@ -408,6 +441,7 @@ impl NatManager {
         if !self.config.enabled || self.mappings.is_empty() {
             return Ok(());
         }
+        let _reconcile_guard = self.reconcile_lock.lock().await;
         reconcile_once(
             &self.config,
             &self.mappings,
@@ -437,6 +471,7 @@ impl NatManager {
         if let Some(task) = self.task.lock().await.take() {
             task.abort();
         }
+        let _reconcile_guard = self.reconcile_lock.lock().await;
 
         let status = self.status.read().await.clone();
         let mappings = if status.mappings.is_empty() {
@@ -472,6 +507,7 @@ impl NatManager {
         let mut status = self.status.write().await;
         status.enabled = self.config.enabled;
         status.bind_ip = self.config.bind_ip.clone();
+        status.pcp_server_ip = self.config.pcp_server_ip.clone();
         status.igd_ip = self.config.igd_ip.clone();
         status.minissdpd_socket = self.config.minissdpd_socket.clone();
         status.ssdp_local_port = self.config.ssdp_local_port;
@@ -487,6 +523,7 @@ impl NatManager {
         let mut status = self.status.write().await;
         status.enabled = self.config.enabled;
         status.bind_ip = self.config.bind_ip.clone();
+        status.pcp_server_ip = self.config.pcp_server_ip.clone();
         status.igd_ip = self.config.igd_ip.clone();
         status.minissdpd_socket = self.config.minissdpd_socket.clone();
         status.ssdp_local_port = self.config.ssdp_local_port;
@@ -496,18 +533,29 @@ impl NatManager {
     }
 }
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "linear protocol orchestration flow"
-)]
-async fn run_manager_loop(
+struct ManagerLoopState {
     config: NatConfig,
     mappings: Vec<MappingSpec>,
     providers: Vec<Arc<dyn PortMappingProvider>>,
     status: Arc<RwLock<NatStatus>>,
     reachability: Arc<dyn ReachabilityStrategy>,
     shutdown: Arc<AtomicBool>,
+    reconcile_lock: Arc<Mutex<()>>,
+}
+
+async fn run_manager_loop(
+    state: ManagerLoopState,
+    initial_tx: oneshot::Sender<std::result::Result<(), String>>,
 ) {
+    let ManagerLoopState {
+        config,
+        mappings,
+        providers,
+        status,
+        reachability,
+        shutdown,
+        reconcile_lock,
+    } = state;
     let refresh_period = Duration::from_secs(
         config
             .lease_duration_secs
@@ -524,21 +572,31 @@ async fn run_manager_loop(
     const BACKOFF_MAX: Duration = Duration::from_secs(300);
     let mut failure_backoff = BACKOFF_INITIAL;
     let mut consecutive_failures: u32 = 0;
+    let mut initial_tx = Some(initial_tx);
 
     while !shutdown.load(Ordering::Relaxed) {
         info!(
-            "UPnP reconcile starting: bind_ip={} igd_ip={} backends={} mappings={}",
+            "NAT reconcile starting: bind_ip={} pcp_server_ip={} igd_ip={} backends={} mappings={}",
             option_display(config.bind_ip.as_deref(), "auto"),
+            option_display(config.pcp_server_ip.as_deref(), "auto"),
             option_display(config.igd_ip.as_deref(), "auto"),
             backend_order_display(&config.effective_backend_order()),
             requested_mappings_display(&mappings)
         );
-        match reconcile_once(&config, &mappings, &providers, Arc::clone(&status)).await {
+        let result = {
+            let _reconcile_guard = reconcile_lock.lock().await;
+            reconcile_once(&config, &mappings, &providers, Arc::clone(&status)).await
+        };
+        if let Some(sender) = initial_tx.take() {
+            let _ = sender.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+        }
+        match result {
             Ok(()) => {
                 let snapshot = status.read().await.clone();
                 info!(
-                    "UPnP reconcile succeeded via backend {}: external_ip={} mappings={}",
+                    "NAT reconcile succeeded via backend {} protocol {}: external_ip={} mappings={}",
                     option_display(snapshot.backend.as_deref(), "unknown"),
+                    option_display(snapshot.protocol.as_deref(), "unknown"),
                     observed_external_ip_display(&snapshot.observed_external_addresses),
                     mapped_endpoints_display(&snapshot.mappings)
                 );
@@ -565,6 +623,7 @@ async fn run_manager_loop(
                 let mut guard = status.write().await;
                 guard.enabled = config.enabled;
                 guard.bind_ip = config.bind_ip.clone();
+                guard.pcp_server_ip = config.pcp_server_ip.clone();
                 guard.igd_ip = config.igd_ip.clone();
                 guard.minissdpd_socket = config.minissdpd_socket.clone();
                 guard.ssdp_local_port = config.ssdp_local_port;
@@ -611,7 +670,7 @@ async fn reconcile_once(
     let count = backend_order.len();
     let noun = if count == 1 { "backend" } else { "backends" };
     Err(anyhow!(
-        "UPnP reconcile failed after {count} {noun}: {}",
+        "NAT reconcile failed after {count} {noun}: {}",
         backend_errors.join("; ")
     ))
 }
@@ -641,9 +700,11 @@ fn release_backend_order(
     if let Some(selected_backend) = selected_backend {
         order.push(selected_backend.clone());
     }
-    for backend in configured_order {
-        if !order.iter().any(|existing| existing == backend) {
-            order.push(backend.clone());
+    if selected_backend.is_none() {
+        for backend in configured_order {
+            if !order.iter().any(|existing| existing == backend) {
+                order.push(backend.clone());
+            }
         }
     }
     order

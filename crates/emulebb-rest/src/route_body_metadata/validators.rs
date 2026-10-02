@@ -99,6 +99,7 @@ const NAT_SETTINGS_FIELDS: &[&str] = &[
     "requireInitialMapping",
     "backendOrder",
     "bindIp",
+    "pcpServerIp",
     "igdIp",
     "minissdpdSocket",
     "ssdpLocalPort",
@@ -109,9 +110,9 @@ const NAT_SETTINGS_FIELDS: &[&str] = &[
 ];
 const VPN_GUARD_SETTINGS_FIELDS: &[&str] = &["enabled", "mode", "allowedPublicIpCidrs"];
 const IP_FILTER_SETTINGS_FIELDS: &[&str] = &["enabled", "path", "level"];
+const NAT_BACKEND_PCP_NATPMP: &str = "pcp_natpmp";
 const NAT_BACKEND_UPNP_MINIUPNPC: &str = "upnp_miniupnpc";
-const NAT_BACKEND_UPNP_IGD: &str = "upnp_igd";
-const NAT_BACKENDS: &[&str] = &[NAT_BACKEND_UPNP_MINIUPNPC, NAT_BACKEND_UPNP_IGD];
+const NAT_BACKENDS: &[&str] = &[NAT_BACKEND_PCP_NATPMP, NAT_BACKEND_UPNP_MINIUPNPC];
 const VPN_GUARD_MODES: &[&str] = &["off", "block"];
 
 pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
@@ -520,6 +521,7 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
 
 fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
     validate_nullable_ipv4_text(object, "bindIp", "settings.nat.bindIp")?;
+    validate_nullable_ipv4_text(object, "pcpServerIp", "settings.nat.pcpServerIp")?;
     validate_nullable_ipv4_text(object, "igdIp", "settings.nat.igdIp")?;
     validate_nullable_ipv4_text(
         object,
@@ -561,7 +563,7 @@ fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
 fn invalid_nat_backend_order_error() -> Box<Response> {
     invalid_body_error(format!(
         "settings.nat.backendOrder must contain only {} and {}",
-        NAT_BACKEND_UPNP_MINIUPNPC, NAT_BACKEND_UPNP_IGD
+        NAT_BACKEND_PCP_NATPMP, NAT_BACKEND_UPNP_MINIUPNPC
     ))
 }
 

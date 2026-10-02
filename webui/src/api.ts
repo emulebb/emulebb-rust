@@ -562,6 +562,7 @@ export type NatSettings = {
   requireInitialMapping?: boolean;
   backendOrder?: string[];
   bindIp?: string | null;
+  pcpServerIp?: string | null;
   igdIp?: string | null;
   minissdpdSocket?: string | null;
   ssdpLocalPort?: number | null;
@@ -653,7 +654,9 @@ export type NatStatus = {
   enabled?: boolean;
   gatewayDiscovered?: boolean;
   backend?: string | null;
+  protocol?: string | null;
   bindIp?: string | null;
+  pcpServerIp?: string | null;
   igdIp?: string | null;
   minissdpdSocket?: string | null;
   ssdpLocalPort?: number | null;

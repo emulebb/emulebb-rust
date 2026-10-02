@@ -624,6 +624,13 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
         "Local IP used for NAT discovery.",
     ),
     app_setting(
+        "nat.pcpServerIp",
+        SettingSurfaceClass::AdvancedControl,
+        true,
+        "NAT",
+        "Optional explicit PCP/NAT-PMP server IPv4 address (port 5351).",
+    ),
+    app_setting(
         "nat.igdIp",
         SettingSurfaceClass::AdvancedControl,
         true,

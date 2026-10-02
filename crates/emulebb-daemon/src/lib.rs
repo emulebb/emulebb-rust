@@ -22,7 +22,8 @@ use emulebb_rest::{RestServerSettings, router_with_shutdown};
 use emulebb_settings::{
     DaemonSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
     NatSettings, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT,
-    SECTION_VPN_GUARD, VpnGuardSettings,
+    SECTION_VPN_GUARD, VpnGuardSettings, reset_legacy_nat_backend_order,
+    section_settings_to_values,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -435,8 +436,13 @@ fn load_settings(metadata: &MetadataStore) -> Result<LoadedSettings> {
         .context("failed to load Kad bootstrap endpoints")?;
     let ed2k_settings: Ed2kSettings =
         load_section_settings(metadata, SECTION_ED2K).context("failed to load ed2k settings")?;
-    let nat_settings: NatSettings =
+    let mut nat_settings: NatSettings =
         load_section_settings(metadata, SECTION_NAT).context("failed to load nat settings")?;
+    if reset_legacy_nat_backend_order(&mut nat_settings) {
+        persist_section_settings(metadata, SECTION_NAT, &nat_settings)
+            .context("failed to persist repaired nat backend order")?;
+        info!("reset persisted nat.backendOrder after removal of the upnp_igd backend");
+    }
     Ok(LoadedSettings {
         daemon,
         kad,
@@ -467,6 +473,20 @@ where
     }
     serde_json::from_value(Value::Object(object))
         .with_context(|| format!("invalid settings section {section}"))
+}
+
+fn persist_section_settings<T>(metadata: &MetadataStore, section: &str, settings: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let entries = section_settings_to_values(settings)?;
+    metadata.replace_settings_section(
+        section,
+        entries
+            .iter()
+            .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
+    )?;
+    Ok(())
 }
 
 fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfig {
@@ -528,6 +548,7 @@ fn nat_config_from_settings(settings: NatSettings) -> NatConfig {
         require_initial_mapping: settings.require_initial_mapping,
         backend_order: settings.backend_order,
         bind_ip: settings.bind_ip,
+        pcp_server_ip: settings.pcp_server_ip,
         igd_ip: settings.igd_ip,
         minissdpd_socket: settings.minissdpd_socket,
         ssdp_local_port: settings.ssdp_local_port,

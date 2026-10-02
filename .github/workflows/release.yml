@@ -15,7 +15,8 @@ permissions:
 
 env:
   RELEASE_VERSION: 0.1.0-beta.2
-  MINIUPNP_REF: bced81fb0b73ae78c9b911c89e881fbc6d4a5c7c
+  MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
+  PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
 jobs:
   native-package:
@@ -36,6 +37,7 @@ jobs:
       EMULEBB_RUST_REPO: ${{ github.workspace }}
       EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
       MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
     steps:
       - name: Checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -47,6 +49,12 @@ jobs:
           repository: emulebb/emulebb-miniupnp
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
+      - name: Checkout native libpcpnatpmp source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
       - name: Checkout pinned workspace packaging
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

@@ -11,6 +11,8 @@ members = [
     "crates/emulebb-metadata",
     "crates/emulebb-miniupnpc",
     "crates/emulebb-miniupnpc-sys",
+    "crates/emulebb-pcpnatpmp",
+    "crates/emulebb-pcpnatpmp-sys",
     "crates/emulebb-settings",
     "crates/emulebb-rest",
     "crates/emulebb-rust-ui",

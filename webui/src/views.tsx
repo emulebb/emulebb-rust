@@ -2278,6 +2278,7 @@ type SettingsForm = {
   natEnabled: boolean;
   natRequireInitialMapping: boolean;
   natBindIp: string;
+  natPcpServerIp: string;
   natBackendOrder: string;
   natIgdIp: string;
   natMinissdpdSocket: string;
@@ -2302,8 +2303,8 @@ type SettingsBooleanKey = {
   [K in keyof SettingsForm]: SettingsForm[K] extends boolean ? K : never;
 }[keyof SettingsForm];
 
+const NAT_BACKEND_PCP_NATPMP = "pcp_natpmp";
 const NAT_BACKEND_UPNP_MINIUPNPC = "upnp_miniupnpc";
-const NAT_BACKEND_UPNP_IGD = "upnp_igd";
 const CORE_I32_MAX = 2147483647;
 const CORE_U32_MAX = 4294967295;
 const CORE_U32_MAX_MINUS_ONE = 4294967294;
@@ -2383,6 +2384,7 @@ const emptySettingsForm: SettingsForm = {
   natEnabled: false,
   natRequireInitialMapping: false,
   natBindIp: "",
+  natPcpServerIp: "",
   natBackendOrder: "",
   natIgdIp: "",
   natMinissdpdSocket: "",
@@ -2702,6 +2704,7 @@ export function SettingsView(props: {
           "nat.enabled",
           "nat.requireInitialMapping",
           "nat.bindIp",
+          "nat.pcpServerIp",
           "nat.backendOrder",
           "nat.igdIp",
           "nat.minissdpdSocket",
@@ -2715,6 +2718,7 @@ export function SettingsView(props: {
             <section class="view-grid compact-grid">
               <Metric label="NAT" value={props.natStatus?.enabled ? "Enabled" : "Off"} />
               <Metric label="Gateway" value={props.natStatus?.gatewayDiscovered ? "Discovered" : "Missing"} />
+              <Metric label="Protocol" value={props.natStatus?.protocol || "None"} />
               <Metric label="Mappings" value={String(props.natStatus?.mappings?.length ?? 0)} />
               <Metric label="NAT Error" value={props.natStatus?.lastError || "None"} />
             </section>
@@ -2728,6 +2732,7 @@ export function SettingsView(props: {
               {renderToggle("nat.enabled", "natEnabled", "NAT")}
               {renderToggle("nat.requireInitialMapping", "natRequireInitialMapping", "Require initial NAT mapping")}
               {renderField("nat.bindIp", "natBindIp", "NAT bind IP")}
+              {renderField("nat.pcpServerIp", "natPcpServerIp", "PCP/NAT-PMP server IP")}
               {renderField("nat.backendOrder", "natBackendOrder", "NAT backend order")}
               {renderField("nat.igdIp", "natIgdIp", "Pinned IGD IP")}
               {renderField("nat.minissdpdSocket", "natMinissdpdSocket", "miniSSDPd socket")}
@@ -2971,6 +2976,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "kadUdpFirewallCheckIntervalSecs", "UDP firewall interval seconds", { min: 60 });
   validateUnsigned(errors, form, "kadTcpFirewallCheckIntervalSecs", "TCP firewall interval seconds", { min: 60 });
   validateOptionalIpv4(errors, form, "natBindIp", "NAT bind IP");
+  validateOptionalIpv4(errors, form, "natPcpServerIp", "PCP/NAT-PMP server IP");
   validateOptionalIpv4(errors, form, "natIgdIp", "Pinned IGD IP");
   validateOptionalIpv4(errors, form, "natExternalIpOverride", "External IP override");
   validateUnsigned(errors, form, "natSsdpLocalPort", "SSDP local port", { optional: true, min: 1, max: 65535 });
@@ -3049,8 +3055,8 @@ function parseIpv4Address(value: string): number[] | null {
 
 function validateNatBackendOrder(errors: Map<SettingsTextKey, string>, form: SettingsForm) {
   for (const backend of commaList(form.natBackendOrder)) {
-    if (backend !== NAT_BACKEND_UPNP_MINIUPNPC && backend !== NAT_BACKEND_UPNP_IGD) {
-      errors.set("natBackendOrder", `NAT backend order must contain only ${NAT_BACKEND_UPNP_MINIUPNPC} and ${NAT_BACKEND_UPNP_IGD}.`);
+    if (backend !== NAT_BACKEND_PCP_NATPMP && backend !== NAT_BACKEND_UPNP_MINIUPNPC) {
+      errors.set("natBackendOrder", `NAT backend order must contain only ${NAT_BACKEND_PCP_NATPMP} and ${NAT_BACKEND_UPNP_MINIUPNPC}.`);
       return;
     }
   }
@@ -3213,6 +3219,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(nat, "enabled", form.natEnabled, baseline.natEnabled);
   putChanged(nat, "requireInitialMapping", form.natRequireInitialMapping, baseline.natRequireInitialMapping);
   putChanged(nat, "bindIp", optionalString(form.natBindIp), optionalString(baseline.natBindIp));
+  putChanged(nat, "pcpServerIp", optionalString(form.natPcpServerIp), optionalString(baseline.natPcpServerIp));
   putChanged(nat, "backendOrder", commaList(form.natBackendOrder), commaList(baseline.natBackendOrder));
   putChanged(nat, "igdIp", optionalString(form.natIgdIp), optionalString(baseline.natIgdIp));
   putChanged(nat, "minissdpdSocket", optionalString(form.natMinissdpdSocket), optionalString(baseline.natMinissdpdSocket));
@@ -3352,6 +3359,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     natEnabled: boolField(settings.nat, "enabled"),
     natRequireInitialMapping: boolField(settings.nat, "requireInitialMapping"),
     natBindIp: stringField(settings.nat, "bindIp"),
+    natPcpServerIp: stringField(settings.nat, "pcpServerIp"),
     natBackendOrder: Array.isArray(settings.nat?.backendOrder) ? settings.nat.backendOrder.join(", ") : "",
     natIgdIp: stringField(settings.nat, "igdIp"),
     natMinissdpdSocket: stringField(settings.nat, "minissdpdSocket"),

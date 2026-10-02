@@ -583,15 +583,15 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         ),
         (
             r#"{"nat":{"backendOrder":"upnp_miniupnpc"}}"#,
-            "settings.nat.backendOrder must contain only upnp_miniupnpc and upnp_igd",
+            "settings.nat.backendOrder must contain only pcp_natpmp and upnp_miniupnpc",
         ),
         (
             r#"{"nat":{"backendOrder":["upnp_miniupnpc",7]}}"#,
-            "settings.nat.backendOrder must contain only upnp_miniupnpc and upnp_igd",
+            "settings.nat.backendOrder must contain only pcp_natpmp and upnp_miniupnpc",
         ),
         (
             r#"{"nat":{"backendOrder":["natpmp"]}}"#,
-            "settings.nat.backendOrder must contain only upnp_miniupnpc and upnp_igd",
+            "settings.nat.backendOrder must contain only pcp_natpmp and upnp_miniupnpc",
         ),
         (
             r#"{"nat":{"discoveryTimeoutSecs":0}}"#,
@@ -608,6 +608,10 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         (
             r#"{"nat":{"bindIp":"not-an-ip"}}"#,
             "settings.nat.bindIp must be an IPv4 address string or null",
+        ),
+        (
+            r#"{"nat":{"pcpServerIp":"2001:db8::1"}}"#,
+            "settings.nat.pcpServerIp must be an IPv4 address string or null",
         ),
         (
             r#"{"nat":{"igdIp":"2001:db8::1"}}"#,

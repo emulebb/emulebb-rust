@@ -504,12 +504,39 @@ fn default_upload_queue_settings_match_runtime_config_defaults() {
 }
 
 #[test]
-fn default_nat_settings_enable_best_effort_upnp() {
+fn default_nat_settings_enable_best_effort_pcp_with_upnp_fallback() {
     let config = nat_config_from_settings(NatSettings::default());
 
     assert!(config.enabled);
     assert!(!config.require_initial_mapping);
     assert_eq!(config.backend_order, NatConfig::default().backend_order);
+}
+
+#[test]
+fn load_repairs_and_persists_removed_upnp_igd_backend_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = write_bootstrap_settings(temp.path());
+    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "backendOrder",
+        serde_json::json!(["upnp_miniupnpc", "upnp_igd"]),
+    );
+
+    let profile = DaemonProfile::load(Some(profile_dir)).unwrap();
+
+    assert_eq!(
+        profile.nat.backend_order,
+        ["pcp_natpmp".to_string(), "upnp_miniupnpc".to_string()]
+    );
+    let rows = metadata.load_settings_section(SECTION_NAT).unwrap();
+    assert_eq!(
+        rows.into_iter()
+            .find(|(key, _)| key == "backendOrder")
+            .map(|(_, value)| value),
+        Some(r#"["pcp_natpmp","upnp_miniupnpc"]"#.to_string())
+    );
 }
 
 #[test]

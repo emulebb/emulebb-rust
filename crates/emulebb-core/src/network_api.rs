@@ -229,22 +229,20 @@ impl EmulebbCore {
         let nat = Arc::new(
             NatManagerBuilder::new(network.nat_config.clone())
                 .with_mappings(ed2k_nat_mappings(&network))
-                .with_providers(built_in_upnp_port_mapping_providers())
+                .with_providers(built_in_port_mapping_providers())
                 .build(),
         );
-        nat.start().await?;
-        // Connection ordering (VPN guard -> UPnP await -> P2P sockets -> connect):
+        // Connection ordering (VPN guard -> NAT await -> P2P sockets -> connect):
         // the eD2k server login must announce an already-forwarded listen port to
         // win HighID on the FIRST connect, and when UPnP is active the public P2P
         // sockets should not exist before the mapping gate completes. NAT mapping
-        // only needs the intended ports, so await one reconcile now (bounded) and
+        // only needs the intended ports, so await the background task's initial
+        // reconcile (bounded) and
         // copy the gateway-granted external ports into reachability before binding
         // Kad UDP or the eD2K TCP listener. Profiles that intentionally run
         // best-effort can set nat.requireInitialMapping=false.
         if network.nat_config.enabled {
-            match tokio::time::timeout(ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT, nat.reconcile_now())
-                .await
-            {
+            match tokio::time::timeout(ED2K_NAT_INITIAL_RECONCILE_TIMEOUT, nat.start()).await {
                 Ok(Ok(())) => {
                     let status = nat.status().await;
                     crate::ed2k_net_drivers::sync_advertised_ports_from_nat(
@@ -254,7 +252,7 @@ impl EmulebbCore {
                         network.kad_bind_addr.port(),
                     );
                     tracing::info!(
-                        "UPnP initial reconcile complete before ED2K login: advertised_tcp_port={} advertised_udp_port={}",
+                        "NAT initial reconcile complete before ED2K login: advertised_tcp_port={} advertised_udp_port={}",
                         self.ed2k_reachability
                             .advertised_tcp_port(network.listen_port),
                         self.ed2k_reachability
@@ -264,26 +262,28 @@ impl EmulebbCore {
                 Ok(Err(error)) => {
                     if network.nat_config.require_initial_mapping {
                         let _ = nat.stop().await;
-                        bail!("UPnP initial reconcile failed before ED2K/Kad startup: {error:#}");
+                        bail!("NAT initial reconcile failed before ED2K/Kad startup: {error:#}");
                     }
                     tracing::warn!(
-                        "UPnP initial reconcile failed before ED2K login; connecting with internal ports (may be LowID until UPnP succeeds): {error:#}"
+                        "NAT initial reconcile failed before ED2K login; connecting with internal ports (may be LowID until mapping succeeds): {error:#}"
                     );
                 }
                 Err(_) => {
                     if network.nat_config.require_initial_mapping {
                         let _ = nat.stop().await;
                         bail!(
-                            "UPnP initial reconcile timed out after {}s before ED2K/Kad startup",
-                            ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT.as_secs()
+                            "NAT initial reconcile timed out after {}s before ED2K/Kad startup",
+                            ED2K_NAT_INITIAL_RECONCILE_TIMEOUT.as_secs()
                         );
                     }
                     tracing::warn!(
-                        "UPnP initial reconcile timed out after {}s before ED2K login; connecting with internal ports (may be LowID until UPnP succeeds)",
-                        ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT.as_secs(),
+                        "NAT initial reconcile timed out after {}s before ED2K login; connecting with internal ports (may be LowID until mapping succeeds)",
+                        ED2K_NAT_INITIAL_RECONCILE_TIMEOUT.as_secs(),
                     );
                 }
             }
+        } else {
+            nat.start().await?;
         }
         let configured_bootstrap_endpoints_text =
             configured_kad_bootstrap_endpoints_text(&network.kad_bootstrap_endpoints);

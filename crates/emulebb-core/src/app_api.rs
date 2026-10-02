@@ -193,5 +193,26 @@ fn validate_app_settings_update_paths(request: &mut AppSettingsUpdate) -> Result
         }
         *path = PathBuf::from(normal_path_display(trimmed));
     }
+    if let Some(nat) = &request.nat {
+        if let Some(backends) = &nat.backend_order {
+            for backend in backends {
+                ensure!(
+                    matches!(
+                        backend.as_str(),
+                        emulebb_settings::PCP_NATPMP_BACKEND
+                            | emulebb_settings::UPNP_MINIUPNPC_BACKEND
+                    ),
+                    "nat.backendOrder supports only {} and {}; unsupported backend {backend:?}",
+                    emulebb_settings::PCP_NATPMP_BACKEND,
+                    emulebb_settings::UPNP_MINIUPNPC_BACKEND,
+                );
+            }
+        }
+        if let Some(emulebb_settings::NullableUpdate::Value(server_ip)) = &nat.pcp_server_ip {
+            server_ip.parse::<Ipv4Addr>().with_context(|| {
+                format!("nat.pcpServerIp must be an IPv4 address, got {server_ip:?}")
+            })?;
+        }
+    }
     Ok(())
 }

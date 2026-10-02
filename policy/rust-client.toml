@@ -79,6 +79,7 @@ allowed_ipv6_mentions = [
     "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs",
     "crates/emulebb-ed2k/src/stun.rs",
     "crates/emulebb-ed2k/src/nat/miniupnpc.rs",
+    "crates/emulebb-ed2k/src/nat/pcpnatpmp.rs",
     "crates/emulebb-kad-dht/src/publish.rs",
     "crates/emulebb-kad-dht/src/traversal.rs",
     "crates/emulebb-kad-net/src/obfuscation/inbound.rs",
@@ -87,4 +88,6 @@ allowed_ipv6_mentions = [
     "crates/emulebb-kad-net/src/rpc/tests/obfuscation.rs",
     "crates/emulebb-miniupnpc/src/lib.rs",
     "crates/emulebb-miniupnpc-sys/src/lib.rs",
+    "crates/emulebb-pcpnatpmp/src/lib.rs",
+    "crates/emulebb-pcpnatpmp-sys/src/lib.rs",
 ]

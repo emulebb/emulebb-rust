@@ -1,0 +1,15 @@
+[package]
+name = "emulebb-pcpnatpmp-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Raw FFI bindings to the eMuleBB libpcpnatpmp source tree"
+links = "emulebb_pcpnatpmp"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cc.workspace = true

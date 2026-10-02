@@ -1,4 +1,4 @@
-//! NAT/UPnP diagnostic tool for eMuleBB Rust.
+//! NAT port-mapping diagnostic tool for eMuleBB Rust.
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -9,18 +9,18 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use emulebb_ed2k::{
-    IgdPortMappingProvider, MappedEndpoint, MappingExposure, MappingSpec,
-    MiniupnpcPortMappingProvider, NatConfig, NatStatus, NatStatusSnapshot, PortMappingProvider,
-    TransportProtocol, UPNP_IGD_BACKEND, UPNP_MINIUPNPC_BACKEND,
+    MappedEndpoint, MappingExposure, MappingSpec, MiniupnpcPortMappingProvider, NatConfig,
+    NatStatus, NatStatusSnapshot, PCP_NATPMP_BACKEND, PcpNatPmpPortMappingProvider,
+    PortMappingProvider, TransportProtocol, UPNP_MINIUPNPC_BACKEND,
 };
 use tokio::{sync::RwLock, time::sleep};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// eMuleBB NAT and UPnP mapping diagnostic command.
+/// eMuleBB NAT mapping diagnostic command.
 #[derive(Debug, Parser)]
 #[command(name = "emulebb-nat-diagnostic")]
-#[command(about = "NAT/UPnP mapping diagnostic tool for eMuleBB Rust")]
+#[command(about = "NAT mapping diagnostic tool for eMuleBB Rust")]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -35,24 +35,24 @@ enum Command {
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum NatBackend {
     #[default]
+    #[value(name = "pcp_natpmp")]
+    PcpNatpmp,
     #[value(name = "upnp_miniupnpc")]
     Miniupnpc,
-    #[value(name = "upnp_igd")]
-    Igd,
 }
 
 impl NatBackend {
     fn name(self) -> &'static str {
         match self {
+            Self::PcpNatpmp => PCP_NATPMP_BACKEND,
             Self::Miniupnpc => UPNP_MINIUPNPC_BACKEND,
-            Self::Igd => UPNP_IGD_BACKEND,
         }
     }
 
     fn provider(self) -> Arc<dyn PortMappingProvider> {
         match self {
+            Self::PcpNatpmp => Arc::new(PcpNatPmpPortMappingProvider::default()),
             Self::Miniupnpc => Arc::new(MiniupnpcPortMappingProvider),
-            Self::Igd => Arc::new(IgdPortMappingProvider),
         }
     }
 }
@@ -63,6 +63,8 @@ struct SharedArgs {
     backend: NatBackend,
     #[arg(long)]
     bind_ip: Option<String>,
+    #[arg(long)]
+    pcp_server_ip: Option<String>,
     #[arg(long)]
     igd_ip: Option<String>,
     #[arg(long)]
@@ -196,6 +198,7 @@ fn build_config(args: &SharedArgs) -> NatConfig {
         require_initial_mapping: true,
         backend_order: vec![args.backend.name().to_string()],
         bind_ip: args.bind_ip.clone(),
+        pcp_server_ip: args.pcp_server_ip.clone(),
         igd_ip: args.igd_ip.clone(),
         minissdpd_socket: args.minissdpd_socket.clone(),
         ssdp_local_port: args.ssdp_local_port,
@@ -271,8 +274,9 @@ mod tests {
     #[test]
     fn build_config_maps_cli_fields_to_nat_config() {
         let config = build_config(&SharedArgs {
-            backend: NatBackend::Igd,
+            backend: NatBackend::PcpNatpmp,
             bind_ip: Some("192.0.2.10".to_string()),
+            pcp_server_ip: Some("192.0.2.1".to_string()),
             igd_ip: Some("192.0.2.1".to_string()),
             minissdpd_socket: Some("minissdpd.sock".to_string()),
             ssdp_local_port: Some(1901),
@@ -285,8 +289,9 @@ mod tests {
         });
 
         assert!(config.enabled);
-        assert_eq!(config.backend_order, ["upnp_igd"]);
+        assert_eq!(config.backend_order, ["pcp_natpmp"]);
         assert_eq!(config.bind_ip.as_deref(), Some("192.0.2.10"));
+        assert_eq!(config.pcp_server_ip.as_deref(), Some("192.0.2.1"));
         assert_eq!(config.igd_ip.as_deref(), Some("192.0.2.1"));
         assert_eq!(config.minissdpd_socket.as_deref(), Some("minissdpd.sock"));
         assert_eq!(config.ssdp_local_port, Some(1901));

@@ -1469,6 +1469,7 @@ dependencies = [
  "emulebb-kad-proto",
  "emulebb-metadata",
  "emulebb-miniupnpc",
+ "emulebb-pcpnatpmp",
  "flate2",
  "fs4",
  "hex",
@@ -1479,8 +1480,6 @@ dependencies = [
  "num-bigint",
  "parking_lot",
  "rand 0.10.3",
- "reqwest",
- "roxmltree",
  "rsa",
  "serde",
  "serde_json",
@@ -1588,6 +1587,21 @@ dependencies = [
 
 [[package]]
 name = "emulebb-miniupnpc-sys"
+version = "0.1.0-beta.2"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "emulebb-pcpnatpmp"
+version = "0.1.0-beta.2"
+dependencies = [
+ "anyhow",
+ "emulebb-pcpnatpmp-sys",
+]
+
+[[package]]
+name = "emulebb-pcpnatpmp-sys"
 version = "0.1.0-beta.2"
 dependencies = [
  "cc",

@@ -21,7 +21,7 @@ pub use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_ed2k::{
     DirectCallbackArgs, NatManager, NatManagerBuilder, PortTestRegistry, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
-    built_in_upnp_port_mapping_providers,
+    built_in_port_mapping_providers,
     config::Ed2kRuntimeConfig,
     ed2k_server::{
         Ed2kBackgroundSearchInterrupted, Ed2kFoundSource, Ed2kServerLoopOptions,
@@ -298,7 +298,7 @@ const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 /// SSDP discovery + AddPortMapping for both eD2k TCP and Kad UDP with headroom over
 /// the 5s default discovery timeout, while bounding startup if the gateway is slow
 /// or absent.
-const ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT: Duration = Duration::from_secs(20);
+const ED2K_NAT_INITIAL_RECONCILE_TIMEOUT: Duration = Duration::from_secs(20);
 const TRANSFER_EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 struct Ed2kRuntime {

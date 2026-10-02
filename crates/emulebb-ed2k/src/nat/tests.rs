@@ -76,19 +76,19 @@ fn sample_mapping() -> MappingSpec {
 }
 
 #[test]
-fn default_nat_config_prefers_miniupnpc_then_independent_igd() {
+fn default_nat_config_prefers_pcp_natpmp_then_miniupnpc() {
     assert_eq!(
         NatConfig::default().backend_order,
         vec![
-            UPNP_MINIUPNPC_BACKEND.to_string(),
-            UPNP_IGD_BACKEND.to_string()
+            PCP_NATPMP_BACKEND.to_string(),
+            UPNP_MINIUPNPC_BACKEND.to_string()
         ]
     );
 }
 
 #[test]
 fn built_in_providers_use_explicit_backend_ids() {
-    let provider_names = built_in_upnp_port_mapping_providers()
+    let provider_names = built_in_port_mapping_providers()
         .into_iter()
         .map(|provider| provider.name().to_string())
         .collect::<Vec<_>>();
@@ -96,8 +96,8 @@ fn built_in_providers_use_explicit_backend_ids() {
     assert_eq!(
         provider_names,
         [
-            UPNP_MINIUPNPC_BACKEND.to_string(),
-            UPNP_IGD_BACKEND.to_string()
+            PCP_NATPMP_BACKEND.to_string(),
+            UPNP_MINIUPNPC_BACKEND.to_string()
         ]
     );
 }
@@ -122,9 +122,9 @@ async fn disabled_start_records_config_status_without_task() {
 }
 
 #[tokio::test]
-async fn reconcile_once_empty_backend_order_uses_miniupnpc() {
+async fn reconcile_once_empty_backend_order_uses_pcp_natpmp() {
     let provider = Arc::new(FakeProvider {
-        name: UPNP_MINIUPNPC_BACKEND,
+        name: PCP_NATPMP_BACKEND,
         failures_before_success: AtomicUsize::new(0),
         reconcile_calls: AtomicUsize::new(0),
         release_calls: AtomicUsize::new(0),
@@ -149,7 +149,7 @@ async fn reconcile_once_empty_backend_order_uses_miniupnpc() {
     .unwrap();
 
     let status = status.read().await.clone();
-    assert_eq!(status.backend.as_deref(), Some(UPNP_MINIUPNPC_BACKEND));
+    assert_eq!(status.backend.as_deref(), Some(PCP_NATPMP_BACKEND));
     assert_eq!(status.bind_ip.as_deref(), Some("192.0.2.10"));
     assert_eq!(status.igd_ip.as_deref(), Some("192.0.2.1"));
     assert_eq!(status.observed_external_addresses, ["203.0.113.10"]);
@@ -157,15 +157,15 @@ async fn reconcile_once_empty_backend_order_uses_miniupnpc() {
 }
 
 #[tokio::test]
-async fn reconcile_once_falls_back_to_independent_igd_backend() {
-    let miniupnpc = Arc::new(FakeProvider {
-        name: UPNP_MINIUPNPC_BACKEND,
+async fn reconcile_once_falls_back_to_miniupnpc_backend() {
+    let pcp_natpmp = Arc::new(FakeProvider {
+        name: PCP_NATPMP_BACKEND,
         failures_before_success: AtomicUsize::new(1),
         reconcile_calls: AtomicUsize::new(0),
         release_calls: AtomicUsize::new(0),
     });
-    let igd = Arc::new(FakeProvider {
-        name: UPNP_IGD_BACKEND,
+    let miniupnpc = Arc::new(FakeProvider {
+        name: UPNP_MINIUPNPC_BACKEND,
         failures_before_success: AtomicUsize::new(0),
         reconcile_calls: AtomicUsize::new(0),
         release_calls: AtomicUsize::new(0),
@@ -178,17 +178,17 @@ async fn reconcile_once_falls_back_to_independent_igd_backend() {
             ..NatConfig::default()
         },
         &[sample_mapping()],
-        &[miniupnpc.clone(), igd.clone()],
+        &[pcp_natpmp.clone(), miniupnpc.clone()],
         Arc::clone(&status),
     )
     .await
     .unwrap();
 
+    assert_eq!(pcp_natpmp.reconcile_calls.load(Ordering::SeqCst), 1);
     assert_eq!(miniupnpc.reconcile_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(igd.reconcile_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         status.read().await.backend.as_deref(),
-        Some(UPNP_IGD_BACKEND)
+        Some(UPNP_MINIUPNPC_BACKEND)
     );
 }
 
@@ -207,7 +207,7 @@ async fn reconcile_once_rejects_retired_backend() {
 
     assert_eq!(
         error.to_string(),
-        "nat.backendOrder supports only upnp_miniupnpc and upnp_igd; remove unsupported backend \"upnp_rupnp\" from the configuration"
+        "nat.backendOrder supports only pcp_natpmp and upnp_miniupnpc; remove unsupported backend \"upnp_rupnp\" from the configuration"
     );
 }
 
@@ -273,6 +273,34 @@ async fn reconcile_now_awaits_mapping_before_returning() {
     let status = manager.status().await;
     assert_eq!(status.mappings.len(), 1);
     assert_eq!(status.backend.as_deref(), Some(UPNP_MINIUPNPC_BACKEND));
+}
+
+#[tokio::test]
+async fn start_waits_for_exactly_one_background_initial_reconcile() {
+    let provider = Arc::new(FakeProvider {
+        name: PCP_NATPMP_BACKEND,
+        failures_before_success: AtomicUsize::new(0),
+        reconcile_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+    });
+    let manager = NatManagerBuilder::new(NatConfig {
+        enabled: true,
+        backend_order: vec![PCP_NATPMP_BACKEND.to_string()],
+        lease_duration_secs: 3_600,
+        ..NatConfig::default()
+    })
+    .with_mappings(vec![sample_mapping()])
+    .with_provider(provider.clone())
+    .build();
+
+    manager.start().await.unwrap();
+
+    assert_eq!(provider.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        manager.status().await.backend.as_deref(),
+        Some(PCP_NATPMP_BACKEND)
+    );
+    manager.stop().await.unwrap();
 }
 
 #[tokio::test]
