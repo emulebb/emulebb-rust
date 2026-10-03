@@ -112,7 +112,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-tooling
-          ref: 8035fc8ad161917bdaf97306e0c4a41eebe52437
+          ref: 4a466f4a7ff3ceee62993e2c150fef3e6e7d08fb
           path: repos/emulebb-tooling
 
       - name: Download tested Linux daemon
