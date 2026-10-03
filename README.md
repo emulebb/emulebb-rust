@@ -162,6 +162,23 @@ also builds a Linux amd64/arm64 OCI image without publishing it. An approved
 `rust-v0.1.0-beta.2` tag is required to publish versioned GitHub Release and
 GHCR assets; the workflow does not publish a `latest` image.
 
+## Nightly beta builds
+
+The scheduled [nightly workflow](.github/workflows/nightly.yml) packages the
+latest `main` commit only after the normal CI checks for that exact commit have
+passed. Each build is an immutable prerelease derived from the promoted beta,
+for example `0.1.0-beta.2.nightly.20261003.g9e43ea5e`, across the same Windows,
+Linux, macOS, x64, ARM64, and multi-architecture container matrix as a formal
+beta. Nightly binaries remain experimental and are not code-signed; GitHub
+build-provenance attestations and `SHA256SUMS` are published with them.
+
+Release notes are generated from commit subjects since the previous successful
+nightly and include links to every commit plus the full GitHub comparison. The
+newest 14 nightly prereleases are retained. GHCR publishes both the immutable
+version tag and the moving `nightly` tag; formal betas remain version-only and
+the workflow never publishes `latest`. A manual run builds candidates without
+publishing unless the operator explicitly enables its `publish` input.
+
 The image uses LinuxServer's s6 base and supports `PUID`/`PGID`, `/config` for
 profile state, and `/data/ed2k` for completed downloads. It serves the WebUI
 and REST API on port 4711. The optional

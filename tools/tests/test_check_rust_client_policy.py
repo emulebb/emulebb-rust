@@ -266,7 +266,7 @@ path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
 RELEASE-${RELEASE_VERSION}-NOTES.md
 RELEASE-${RELEASE_VERSION}-CHANGELOG.md
-body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md
+body_path: ${{ inputs.channel == 'nightly' && 'nightly-release-notes.md' || 'release-notes.md' }}
 """
         self.assertEqual(CHECKER.check_release_output_paths(workflow), [])
 

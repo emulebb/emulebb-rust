@@ -1,0 +1,84 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the verified prerelease and GHCR images"
+        required: false
+        type: boolean
+        default: false
+      force:
+        description: "Build even when HEAD already has a nightly"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: rust-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  prepare:
+    name: Derive immutable nightly metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      sha: ${{ steps.metadata.outputs.sha }}
+      previous_ref: ${{ steps.metadata.outputs.previous_ref }}
+      should_build: ${{ steps.metadata.outputs.should_build }}
+    steps:
+      - name: Checkout main with release tags
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Compute version and source range
+        id: metadata
+        run: python tools/nightly_release.py metadata --force "${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}" --github-output "$GITHUB_OUTPUT"
+
+  verify-ci:
+    name: Require green main CI
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout the selected source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Verify required checks on the exact source commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/nightly_release.py verify-ci --sha "${{ needs.prepare.outputs.sha }}"
+
+  package:
+    name: Build and optionally publish nightly
+    needs: [prepare, verify-ci]
+    if: ${{ needs.prepare.outputs.should_build == 'true' && needs.verify-ci.result == 'success' }}
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+      packages: write
+      attestations: write
+      id-token: write
+    with:
+      release_version: ${{ needs.prepare.outputs.version }}
+      source_ref: ${{ needs.prepare.outputs.sha }}
+      previous_ref: ${{ needs.prepare.outputs.previous_ref }}
+      channel: nightly
+      publish: ${{ github.event_name == 'schedule' || inputs.publish }}
+    secrets: inherit

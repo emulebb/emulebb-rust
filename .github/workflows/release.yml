@@ -1,6 +1,7 @@
 name: Release
 
-# Manual runs retain candidate artifacts; only an approved tag publishes them.
+# Manual runs retain candidate artifacts. Approved tags and the reusable nightly
+# caller may publish the verified result.
 on:
   push:
     tags: ["rust-v*"]
@@ -9,12 +10,37 @@ on:
       ref:
         description: "Rust ref to package (defaults to the selected branch)"
         required: false
+  workflow_call:
+    inputs:
+      release_version:
+        description: "Distribution version assigned to the packages and release"
+        required: true
+        type: string
+      source_ref:
+        description: "Immutable Rust commit to package"
+        required: true
+        type: string
+      previous_ref:
+        description: "Previous nightly tag used to generate release notes"
+        required: false
+        type: string
+        default: ""
+      channel:
+        description: "Release channel (candidate or nightly)"
+        required: false
+        type: string
+        default: candidate
+      publish:
+        description: "Publish verified GitHub and GHCR assets"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 env:
-  RELEASE_VERSION: 0.1.0-beta.2
+  RELEASE_VERSION: ${{ inputs.release_version || '0.1.0-beta.2' }}
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
@@ -42,7 +68,7 @@ jobs:
       - name: Checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ inputs.source_ref || github.event.inputs.ref || github.ref }}
       - name: Checkout native MiniUPnP source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -59,7 +85,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build
-          ref: 80e2a1cae4cdd1b56ffba75685466c1f4ceabe12
+          ref: 1a9ad5b19b29b24470547c0514844d192b83079c
           path: .ci/emulebb-build
       - name: Checkout pinned release documentation
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -162,12 +188,12 @@ jobs:
       - name: Checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ inputs.source_ref || github.event.inputs.ref || github.ref }}
       - name: Checkout pinned workspace packaging
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build
-          ref: 80e2a1cae4cdd1b56ffba75685466c1f4ceabe12
+          ref: 1a9ad5b19b29b24470547c0514844d192b83079c
           path: .ci/emulebb-build
       - name: Checkout pinned image smoke harness
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -219,8 +245,8 @@ jobs:
           retention-days: 30
 
   publish-image:
-    name: Publish versioned GHCR image
-    if: startsWith(github.ref, 'refs/tags/rust-v')
+    name: Publish verified GHCR image
+    if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
     needs: image-candidate
     runs-on: ubuntu-24.04
     permissions:
@@ -230,15 +256,18 @@ jobs:
       EMULEBB_RUST_REPO: ${{ github.workspace }}
     steps:
       - name: Require the approved beta tag
+        if: ${{ startsWith(github.ref, 'refs/tags/rust-v') }}
         shell: bash
         run: test "$GITHUB_REF_NAME" = "rust-v${RELEASE_VERSION}"
       - name: Checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Checkout pinned workspace packaging
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build
-          ref: 80e2a1cae4cdd1b56ffba75685466c1f4ceabe12
+          ref: 1a9ad5b19b29b24470547c0514844d192b83079c
           path: .ci/emulebb-build
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -265,27 +294,43 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Push the verified versioned image
+        if: ${{ inputs.channel != 'nightly' }}
         working-directory: .ci/emulebb-build
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
         run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --push
+      - name: Push immutable and floating nightly images
+        if: ${{ inputs.channel == 'nightly' }}
+        working-directory: .ci/emulebb-build
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+        run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --channel-tag nightly --push
 
   publish-native:
-    name: Publish verified native beta assets
-    if: startsWith(github.ref, 'refs/tags/rust-v')
+    name: Publish verified native assets
+    if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
     needs: publish-image
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
       - name: Require the approved beta tag
+        if: ${{ startsWith(github.ref, 'refs/tags/rust-v') }}
         shell: bash
         run: test "$GITHUB_REF_NAME" = "rust-v${RELEASE_VERSION}"
+      - name: Checkout candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+          fetch-depth: 0
+          path: emulebb-rust
       - name: Checkout pinned workspace packaging
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build
-          ref: 80e2a1cae4cdd1b56ffba75685466c1f4ceabe12
+          ref: 1a9ad5b19b29b24470547c0514844d192b83079c
           path: emulebb-build
       - name: Checkout pinned release documentation
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -311,15 +356,33 @@ jobs:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
         run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
       - name: Add versioned release documentation
+        if: ${{ inputs.channel != 'nightly' }}
         shell: bash
         run: |
           release_dir="${{ runner.temp }}/emulebb-rust-out/release/rust-v${RELEASE_VERSION}"
           cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-NOTES.md" "$release_dir/"
           cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-CHANGELOG.md" "$release_dir/"
+      - name: Generate commit-based nightly notes
+        if: ${{ inputs.channel == 'nightly' }}
+        working-directory: emulebb-rust
+        run: python tools/nightly_release.py notes --version "${RELEASE_VERSION}" --previous-ref "${{ inputs.previous_ref }}" --output "${{ runner.temp }}/nightly-release-notes.md"
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
       - name: Publish GitHub prerelease
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          tag_name: ${{ inputs.channel == 'nightly' && format('rust-v{0}', inputs.release_version) || github.ref_name }}
+          target_commitish: ${{ inputs.source_ref || github.sha }}
           prerelease: true
-          body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md
+          make_latest: false
+          body_path: ${{ inputs.channel == 'nightly' && format('{0}/nightly-release-notes.md', runner.temp) || 'emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md' }}
           files: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
           fail_on_unmatched_files: true
+      - name: Keep the newest 14 nightlies
+        if: ${{ inputs.channel == 'nightly' }}
+        working-directory: emulebb-rust
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/nightly_release.py prune --keep 14
