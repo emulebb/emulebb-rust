@@ -605,7 +605,7 @@ async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
         .await
         .unwrap();
     let transfer_dir = std::path::Path::new(&share.transfer_dir);
-    assert!(transfer_dir.is_dir());
+    assert!(!transfer_dir.exists());
     assert!(core.transfer(&share.hash).await.is_none());
     assert!(core.transfers().await.is_empty());
 
@@ -629,7 +629,7 @@ async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
         .unwrap();
 
     assert_eq!(deleted.hash, share.hash);
-    assert!(transfer_dir.is_dir());
+    assert!(!transfer_dir.exists());
     assert!(core.transfer(&share.hash).await.is_none());
     assert!(
         core.shares()
@@ -646,9 +646,9 @@ async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
     .unwrap();
     assert!(reloaded.transfer(&share.hash).await.is_none());
     assert!(reloaded.transfers().await.is_empty());
-    assert!(reloaded.shares().await.iter().any(
-        |entry| entry.hash == share.hash && std::path::Path::new(&entry.transfer_dir).is_dir()
-    ));
+    assert!(reloaded.shares().await.iter().any(|entry| {
+        entry.hash == share.hash && !std::path::Path::new(&entry.transfer_dir).exists()
+    }));
 
     let restored = reloaded
         .create_transfer(TransferCreate {

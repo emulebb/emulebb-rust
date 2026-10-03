@@ -35,6 +35,10 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     // (1) The manifest is a completed share that records the ORIGINAL path.
     let manifest = runtime.manifest(&file_hash).await.unwrap();
     assert!(manifest.completed, "shared complete file must be completed");
+    assert!(
+        manifest.transfer_row_removed,
+        "shared complete file must stay out of the download queue from its first write",
+    );
     assert_eq!(
         manifest.source_path.as_deref().map(canonicalize_lossy),
         Some(canonicalize_lossy(source_path.to_string_lossy().as_ref())),
@@ -49,6 +53,10 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         !piece_store.exists(),
         "share-in-place must NOT copy the payload into the piece store ({})",
         piece_store.display(),
+    );
+    assert!(
+        !runtime.transfer_dir_path(&file_hash).exists(),
+        "share-in-place must not create an empty per-hash transfer directory",
     );
 
     // (3) The original file is untouched and still its full size.

@@ -110,15 +110,21 @@ impl Ed2kTransferRuntime {
         &self,
         manifest: &Ed2kResumeManifest,
     ) -> Result<()> {
-        let transfer_dir = self.transfer_dir(&manifest.file_hash);
-        tokio::fs::create_dir_all(&transfer_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to create ED2K transfer directory {}",
-                    transfer_dir.display()
-                )
-            })?;
+        // Share-in-place manifests live entirely in SQLite and serve bytes from
+        // `source_path`. Creating an empty hash directory for each such file
+        // turns a 100k-file library into 100k unnecessary MFT/inode writes.
+        // Downloads still need their directory for `pieces.bin`.
+        if manifest.source_path.is_none() {
+            let transfer_dir = self.transfer_dir(&manifest.file_hash);
+            tokio::fs::create_dir_all(&transfer_dir)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to create ED2K transfer directory {}",
+                        transfer_dir.display()
+                    )
+                })?;
+        }
         // The upsert commits a SQLite transaction (a WAL fsync under
         // `synchronous = FULL`): run it on the blocking pool so the fsync
         // never parks an async worker thread.

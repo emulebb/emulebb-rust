@@ -156,24 +156,16 @@ impl Ed2kTransferRuntime {
         let file_hash = hashsets.file_hash;
         let job = new_transfer_job(file_hash, display_name.to_string(), metadata.len());
         let transfer_dir = self.transfer_dir(&job.file_hash);
-        tokio::fs::create_dir_all(&transfer_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to create ED2K transfer directory {}",
-                    transfer_dir.display()
-                )
-            })?;
         // Seed the shared, already-complete file IN PLACE: it is served for
         // upload directly from its original on-disk path. We deliberately do NOT
         // copy it into the internal piece store (`transfer_dir/pieces.bin`),
         // which would duplicate the whole (potentially hundreds-of-GB) library
         // on disk, and the manifest records `source_path` so the upload-serving
         // read path resolves to the original file and finished-file delivery
-        // skips it (delivery is download-only). The transfer dir still exists to
-        // hold the resume manifest; only the payload bytes are never duplicated.
-        // AICH/MD4 are computed straight from the original file in the single read
-        // pass above.
+        // skips it (delivery is download-only). The resume manifest lives in
+        // SQLite, so no per-hash transfer directory is created for an in-place
+        // share. AICH/MD4 are computed straight from the original file in the
+        // single read pass above.
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.source_path = Some(source_path.display().to_string());
         // Record the source file's last-modified time so the incremental
@@ -183,6 +175,10 @@ impl Ed2kTransferRuntime {
         // once), so correctness never depends on mtime being available.
         manifest.source_mtime_ms = source_mtime_ms(&metadata);
         manifest.completed = true;
+        // A share-in-place file belongs in the shared catalog, not the download
+        // queue. Persist that state in the initial transaction so callers do not
+        // need a second full manifest rewrite merely to hide its transfer row.
+        manifest.transfer_row_removed = true;
         manifest.md4_hashset_acquired = true;
         manifest.md4_hashset = hashsets.md4_hashset.iter().map(hex::encode).collect();
         manifest.aich_hashset_acquired = true;
@@ -245,19 +241,12 @@ impl Ed2kTransferRuntime {
             piece_size: super::ED2K_PART_SIZE,
         };
         let transfer_dir = self.transfer_dir(&job.file_hash);
-        tokio::fs::create_dir_all(&transfer_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to create ED2K transfer directory {}",
-                    transfer_dir.display()
-                )
-            })?;
 
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.source_path = Some(source_path.display().to_string());
         manifest.source_mtime_ms = source_mtime_ms;
         manifest.completed = true;
+        manifest.transfer_row_removed = true;
         manifest.md4_hashset_acquired = true;
         manifest.md4_hashset = entry.md4_hashset.clone();
         manifest.aich_hashset_acquired = entry.aich_root.is_some();

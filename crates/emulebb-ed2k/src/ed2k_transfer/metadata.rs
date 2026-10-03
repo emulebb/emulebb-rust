@@ -102,15 +102,9 @@ impl Ed2kTransferRuntime {
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(&job.file_hash).await;
-        let transfer_dir = self.transfer_dir(&job.file_hash);
-        tokio::fs::create_dir_all(&transfer_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to create ED2K transfer directory {}",
-                    transfer_dir.display()
-                )
-            })?;
+        // The store creates a payload directory only when it creates a new
+        // download manifest. An existing share-in-place manifest needs no
+        // directory when its hidden transfer row is restored.
         self.load_manifest_or_rebuild_unlocked(job).await
     }
 

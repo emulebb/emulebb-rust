@@ -170,7 +170,6 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
     let existing_shares = reloaded.shares().await;
     let existing_first_share = require_share_by_name(&existing_shares, "Persisted Unicode äöü.bin");
     assert_eq!(existing_first_share.hash, first_hash);
-    assert!(PathBuf::from(&existing_first_share.transfer_dir).is_dir());
     assert_no_piece_store_copy(&existing_first_share);
     assert_eq!(
         fs::read(nested_root.join("Persisted Unicode äöü.bin")).unwrap(),
@@ -561,11 +560,14 @@ fn require_share_by_name(shares: &[LocalShare], name: &str) -> LocalShare {
 
 /// A shared, already-complete file is seeded IN PLACE: the daemon must never
 /// copy its payload into the internal piece store (`transfer_dir/pieces.bin`).
-/// The transfer dir still exists (it holds the resume manifest), but the bulky
-/// payload bytes are never duplicated there.
+/// Its resume manifest lives in SQLite, so an empty transfer directory is not
+/// created either.
 fn assert_no_piece_store_copy(share: &LocalShare) {
     let transfer_dir = PathBuf::from(&share.transfer_dir);
-    assert!(transfer_dir.is_dir(), "transfer dir must hold the manifest");
+    assert!(
+        !transfer_dir.exists(),
+        "share-in-place must not create an empty transfer directory"
+    );
     let piece_store = transfer_dir.join("pieces.bin");
     assert!(
         !piece_store.exists(),

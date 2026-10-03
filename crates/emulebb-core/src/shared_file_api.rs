@@ -31,9 +31,6 @@ impl EmulebbCore {
                     .await?
             }
         };
-        self.ed2k_transfers
-            .remove_completed_transfer_row(&summary.file_hash)
-            .await?;
         if self
             .state
             .lock()
