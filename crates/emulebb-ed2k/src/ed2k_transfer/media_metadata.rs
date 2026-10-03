@@ -27,14 +27,37 @@ use super::Ed2kMediaMetadata;
 
 const MAX_PREFIX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TEXT_CHARS: usize = 80;
+const MAGIC_SNIFF_BYTES: usize = 12;
 
 pub(super) fn extract_media_metadata(path: &Path, display_name: &str) -> Ed2kMediaMetadata {
+    let extension = display_name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
     let Ok(mut file) = File::open(path) else {
         return Ed2kMediaMetadata::default();
     };
     let Ok(file_size) = file.metadata().map(|metadata| metadata.len()) else {
         return Ed2kMediaMetadata::default();
     };
+    if !extension_uses_media_parser(&extension) {
+        let mut signature = [0_u8; MAGIC_SNIFF_BYTES];
+        let Ok(read) = file.read(&mut signature) else {
+            return Ed2kMediaMetadata::default();
+        };
+        if !has_legacy_media_magic(&signature[..read]) {
+            // WHY: The common large-library case includes documents, archives, and
+            // arbitrary binary files. Reading up to 2 MiB from every one after
+            // the mandatory ED2K/AICH hash pass doubled physical I/O for those
+            // files without producing media fields. A tiny magic sniff preserves
+            // extensionless ID3/RIFF detection while making non-media a bounded
+            // metadata operation.
+            return Ed2kMediaMetadata::default();
+        }
+        if file.seek(SeekFrom::Start(0)).is_err() {
+            return Ed2kMediaMetadata::default();
+        }
+    }
     let mut prefix = Vec::with_capacity(file_size.min(MAX_PREFIX_BYTES) as usize);
     if file
         .by_ref()
@@ -44,10 +67,6 @@ pub(super) fn extract_media_metadata(path: &Path, display_name: &str) -> Ed2kMed
     {
         return Ed2kMediaMetadata::default();
     }
-    let extension = display_name
-        .rsplit_once('.')
-        .map(|(_, extension)| extension.to_ascii_lowercase())
-        .unwrap_or_default();
     let mut media = extract_symphonia_audio(path, &extension, file_size).unwrap_or_default();
     let legacy = match extension.as_str() {
         "mp3" | "mp2" | "mp1" | "mpa" => extract_mpeg_audio(&mut file, &prefix, file_size),
@@ -75,6 +94,44 @@ pub(super) fn extract_media_metadata(path: &Path, display_name: &str) -> Ed2kMed
         media.codec = codec.to_string();
     }
     media
+}
+
+fn extension_uses_media_parser(extension: &str) -> bool {
+    matches!(
+        extension,
+        "aac"
+            | "aif"
+            | "aiff"
+            | "ape"
+            | "avi"
+            | "flac"
+            | "m4a"
+            | "m4b"
+            | "m4v"
+            | "mov"
+            | "mp1"
+            | "mp2"
+            | "mp3"
+            | "mp4"
+            | "mpa"
+            | "mpc"
+            | "oga"
+            | "ogg"
+            | "opus"
+            | "ra"
+            | "rm"
+            | "rmvb"
+            | "spx"
+            | "wav"
+            | "wma"
+            | "wmv"
+            | "wv"
+            | "asf"
+    )
+}
+
+fn has_legacy_media_magic(prefix: &[u8]) -> bool {
+    prefix.starts_with(b"ID3") || prefix.starts_with(b"RIFF")
 }
 
 fn extract_symphonia_audio(
@@ -654,6 +711,29 @@ fn parse_real_content(bytes: &[u8], media: &mut Ed2kMediaMetadata) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn non_media_extensions_use_only_magic_sniffing() {
+        assert!(!extension_uses_media_parser("bin"));
+        assert!(extension_uses_media_parser("mp3"));
+        assert!(has_legacy_media_magic(b"ID3 synthetic"));
+        assert!(has_legacy_media_magic(b"RIFF synthetic"));
+        assert!(!has_legacy_media_magic(b"not media"));
+
+        let opaque = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(opaque.path(), vec![0x5a; 3 * 1024 * 1024]).unwrap();
+        assert_eq!(
+            extract_media_metadata(opaque.path(), "opaque.bin"),
+            Ed2kMediaMetadata::default(),
+        );
+
+        let extensionless_mp3 = tempfile::NamedTempFile::new().unwrap();
+        write_synthetic_mp3(extensionless_mp3.path());
+        assert_eq!(
+            extract_media_metadata(extensionless_mp3.path(), "opaque.bin").artist,
+            "Example Artist",
+        );
+    }
 
     #[test]
     fn extracts_id3_text_and_mpeg_properties() {
