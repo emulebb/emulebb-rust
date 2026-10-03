@@ -513,6 +513,10 @@ struct ReusedReloadShare {
     /// `monitor_shared_hashes` at reload time so the live directory monitor can
     /// resolve and de-offer this file if its source is later deleted (HASH-1).
     source_path: PathBuf,
+    /// File size in the reused source identity.
+    file_size: u64,
+    /// Source mtime in the reused source identity.
+    source_mtime_ms: Option<i64>,
     /// Older duplicate hashes for the same source path, if any.
     stale_hashes: Vec<String>,
 }
@@ -730,6 +734,8 @@ async fn plan_incremental_reload(
                         reused_shares.push(ReusedReloadShare {
                             file_hash: entry.file_hash.clone(),
                             source_path: path.clone(),
+                            file_size: size,
+                            source_mtime_ms: mtime_ms,
                             stale_hashes: entries
                                 .iter()
                                 .filter(|stale| stale.file_hash != entry.file_hash)
@@ -779,6 +785,8 @@ async fn plan_incremental_reload(
                         reused_shares.push(ReusedReloadShare {
                             file_hash: entry.file_hash.clone(),
                             source_path: path.clone(),
+                            file_size: size,
+                            source_mtime_ms: mtime_ms,
                             stale_hashes: Vec::new(),
                         });
                     }
@@ -1179,7 +1187,14 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         }
         // Register the source path -> hash so the live directory monitor can
         // de-offer this file if its source is deleted at runtime (HASH-1).
-        register_monitor_shared_hash(core, reused.source_path.clone(), &reused.file_hash).await;
+        register_monitor_shared_hash(
+            core,
+            reused.source_path.clone(),
+            &reused.file_hash,
+            reused.file_size,
+            reused.source_mtime_ms,
+        )
+        .await;
         forget_stale_shares(core, &reused.stale_hashes, &reused.file_hash).await;
     }
     for promotion in plan.imported_known_promotions {
@@ -1195,7 +1210,14 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
             })
             .await?;
         // Same HASH-1 registration for a freshly (re)hashed startup share.
-        register_monitor_shared_hash(core, source_path, &share.hash).await;
+        register_monitor_shared_hash(
+            core,
+            source_path,
+            &share.hash,
+            target.file_size,
+            target.source_mtime_ms,
+        )
+        .await;
         forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
         shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
@@ -1214,17 +1236,26 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
 /// directory monitor watches the same roots the startup reload scans, so its
 /// `Remove` event for a vanished startup share resolves the hash here (the file
 /// is gone and can no longer be re-hashed) and drops it from the catalog.
-async fn register_monitor_shared_hash(core: &EmulebbCore, source_path: PathBuf, hash: &str) {
+pub(crate) async fn register_monitor_shared_hash(
+    core: &EmulebbCore,
+    source_path: PathBuf,
+    hash: &str,
+    file_size: u64,
+    source_mtime_ms: Option<i64>,
+) -> Option<crate::core_state::MonitoredSharedFile> {
     // Normalize through `long_path` so the key matches the form the live monitor
     // resolves against (see `monitor_shared_key`): the scan already walks the
     // root through `long_path`, but normalize here too so the invariant is local
     // and holds even if a caller passes a raw path.
     let key = long_path(&source_path);
-    core.state
-        .lock()
-        .await
-        .monitor_shared_hashes
-        .insert(key, hash.to_string());
+    core.state.lock().await.monitor_shared_hashes.insert(
+        key,
+        crate::core_state::MonitoredSharedFile {
+            hash: hash.to_string(),
+            file_size,
+            source_mtime_ms,
+        },
+    )
 }
 
 async fn promote_imported_known_share(
@@ -1259,7 +1290,14 @@ async fn promote_imported_known_share(
             .to_string(),
         availability_score: 1,
     })?;
-    register_monitor_shared_hash(core, source_path, &summary.file_hash).await;
+    register_monitor_shared_hash(
+        core,
+        source_path,
+        &summary.file_hash,
+        summary.file_size,
+        promotion.source_mtime_ms,
+    )
+    .await;
     core.queue_ed2k_shared_catalog_publish();
     core.share(&summary.file_hash).await.with_context(|| {
         format!(
@@ -1272,7 +1310,11 @@ async fn promote_imported_known_share(
 /// Drop previous identities for the same share-in-place source path so modified
 /// files do not leave duplicate, unreachable shares. A no-op for the current
 /// hash, which covers timestamp-only changes that hash to the same content.
-async fn forget_stale_shares(core: &EmulebbCore, stale_hashes: &[String], new_hash: &str) {
+pub(crate) async fn forget_stale_shares(
+    core: &EmulebbCore,
+    stale_hashes: &[String],
+    new_hash: &str,
+) {
     for stale_hash in stale_hashes {
         if stale_hash.eq_ignore_ascii_case(new_hash) {
             continue;
@@ -1377,6 +1419,14 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     );
 
     for reused in &plan.reused_shares {
+        register_monitor_shared_hash(
+            &core,
+            reused.source_path.clone(),
+            &reused.file_hash,
+            reused.file_size,
+            reused.source_mtime_ms,
+        )
+        .await;
         forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
     }
     for promotion in plan.imported_known_promotions {
@@ -1482,7 +1532,14 @@ async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
         .await
     {
         Ok(share) => {
-            register_monitor_shared_hash(core, source_path, &share.hash).await;
+            register_monitor_shared_hash(
+                core,
+                source_path,
+                &share.hash,
+                target.file_size,
+                target.source_mtime_ms,
+            )
+            .await;
             forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
             record_hash_target_finished(core, &target, Some(&share.hash), None);
         }

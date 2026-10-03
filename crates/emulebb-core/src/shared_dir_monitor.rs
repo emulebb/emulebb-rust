@@ -36,6 +36,7 @@
 //! forwarding to the applier, which is the single authority on whether a
 //! Share/Remove actually has an effect.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -123,6 +124,29 @@ pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction
     events.iter().flat_map(classify_event).collect()
 }
 
+fn action_path(action: &MonitorAction) -> &Path {
+    match action {
+        MonitorAction::Share(path) | MonitorAction::Remove(path) => path,
+    }
+}
+
+/// Collapse a queued event burst to the final intent for each path.
+///
+/// Large copies and in-place rewrites can produce several settled events for
+/// the same file while the serial hashing consumer is busy. Keeping only the
+/// last intent avoids redundant full-file reads and also bounds the pending
+/// work to the number of distinct paths. Ordering follows each path's final
+/// event, preserving remove-before-share ordering for two-leg renames.
+fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
+    let mut by_path: HashMap<PathBuf, (usize, MonitorAction)> = HashMap::new();
+    for (sequence, action) in actions.into_iter().enumerate() {
+        by_path.insert(action_path(&action).to_path_buf(), (sequence, action));
+    }
+    let mut coalesced = by_path.into_values().collect::<Vec<_>>();
+    coalesced.sort_by_key(|(sequence, _)| *sequence);
+    coalesced.into_iter().map(|(_, action)| action).collect()
+}
+
 /// Handle to a running shared-directory monitor.
 ///
 /// Owns the `notify` debouncer (its `Drop` stops the watcher thread) and the
@@ -186,7 +210,7 @@ where
 
     let handler = move |result: DebounceEventResult| match result {
         Ok(events) => {
-            for action in actions_for_events(&events) {
+            for action in coalesce_actions(actions_for_events(&events)) {
                 // Receiver gone == monitor stopped; drop silently.
                 let _ = action_tx.send(action);
             }
@@ -254,8 +278,8 @@ where
 
 /// Consume settled actions and apply them in order.
 ///
-/// The consumer is a thin drain loop: it forwards every action to the applier
-/// and lets the applier decide whether it has any effect. This is deliberate.
+/// The consumer drains all immediately queued actions into one coalesced burst
+/// before forwarding the final intent for each distinct path to the applier.
 /// The applier is the single authority: a `Share` goes through the (cheap,
 /// hash-keyed) ingest path, and a `Remove` resolves the vanished path's hash
 /// from the core's `monitor_shared_hashes` map -- which now records BOTH files
@@ -268,14 +292,21 @@ where
 /// file the startup reload had shared, leaving a deleted file offered/published
 /// until a manual reload. Keeping the gate solely in the applier (against the
 /// authoritative `monitor_shared_hashes` map) is what closes that gap, without
-/// two maps redundantly tracking the same "is this shared?" question.
+/// two maps redundantly tracking the same "is this shared?" question. Burst
+/// coalescing is intentionally stateless: the applier remains authoritative.
 async fn run_consumer<F, Fut>(mut action_rx: UnboundedReceiver<MonitorAction>, apply: F)
 where
     F: Fn(MonitorAction) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    while let Some(action) = action_rx.recv().await {
-        apply(action).await;
+    while let Some(first) = action_rx.recv().await {
+        let mut pending = vec![first];
+        while let Ok(action) = action_rx.try_recv() {
+            pending.push(action);
+        }
+        for action in coalesce_actions(pending) {
+            apply(action).await;
+        }
     }
 }
 
@@ -291,7 +322,9 @@ where
 
 use emulebb_ed2k::long_path::long_path;
 
-use crate::shared_directories::refresh_shared_directory_row;
+use crate::shared_directories::{
+    forget_stale_shares, refresh_shared_directory_row, register_monitor_shared_hash,
+};
 use crate::{EmulebbCore, LocalShareCreate};
 
 /// Canonical key for the `monitor_shared_hashes` source-path -> hash map.
@@ -352,9 +385,48 @@ pub(crate) fn stop_shared_directory_monitor(core: &EmulebbCore) {
 /// already-shared identical file is cheap/idempotent. A vanished/unreadable file
 /// (settled then disappeared) is logged and skipped, not propagated.
 async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
-    // Only auto-share regular files; a directory event under a recursive root
-    // would otherwise hit the ingest path with a directory.
-    if !path.is_file() {
+    let key = monitor_shared_key(path);
+    let metadata = match tokio::fs::metadata(&key).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        // Windows can report an ambiguous rename/modify event for a path that
+        // has already disappeared. Reconcile it as a removal so the old hash is
+        // not left offered until a manual reload. Directory events are harmless
+        // because directories never have an entry in the path -> share map.
+        Ok(_) => {
+            auto_unshare_monitored_path(core, path).await;
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            auto_unshare_monitored_path(core, path).await;
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to stat monitored file (skipping)",
+            );
+            return;
+        }
+    };
+    let (_, file_size, source_mtime_ms) =
+        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity_from_metadata(
+            &key, &metadata,
+        );
+    let previous = core
+        .state
+        .lock()
+        .await
+        .monitor_shared_hashes
+        .get(&key)
+        .cloned();
+    if source_mtime_ms.is_some()
+        && previous.as_ref().is_some_and(|entry| {
+            entry.file_size == file_size && entry.source_mtime_ms == source_mtime_ms
+        })
+    {
+        // Another event in the same logical write burst already ingested this
+        // settled identity. A stat is enough; do not re-read the payload.
         return;
     }
     match core
@@ -365,11 +437,23 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
         .await
     {
         Ok(share) => {
-            core.state
-                .lock()
-                .await
-                .monitor_shared_hashes
-                .insert(monitor_shared_key(path), share.hash.clone());
+            let replaced =
+                register_monitor_shared_hash(core, key, &share.hash, file_size, source_mtime_ms)
+                    .await;
+            if let Some(replaced) = replaced
+                && !replaced.hash.eq_ignore_ascii_case(&share.hash)
+            {
+                let old_hash_still_referenced = core
+                    .state
+                    .lock()
+                    .await
+                    .monitor_shared_hashes
+                    .values()
+                    .any(|entry| entry.hash.eq_ignore_ascii_case(&replaced.hash));
+                if !old_hash_still_referenced {
+                    forget_stale_shares(core, &[replaced.hash], &share.hash).await;
+                }
+            }
             tracing::info!(path = %path.display(), hash = %share.hash, "auto-shared monitored file");
         }
         Err(error) => {
@@ -390,15 +474,16 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
 /// the initial reload is de-offered/de-published on delete exactly like one the
 /// live monitor added. A path we never shared is a no-op.
 async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
-    let hash = {
+    let shared_file = {
         let mut state = core.state.lock().await;
         state
             .monitor_shared_hashes
             .remove(&monitor_shared_key(path))
     };
-    let Some(hash) = hash else {
+    let Some(shared_file) = shared_file else {
         return;
     };
+    let hash = shared_file.hash;
     match core.unshare_file(&hash).await {
         Ok(Some(_)) => {
             tracing::info!(path = %path.display(), %hash, "auto-removed monitored file from shared catalog");
@@ -509,12 +594,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn coalesce_actions_keeps_only_each_paths_final_intent() {
+        assert_eq!(
+            coalesce_actions(vec![
+                share("/s/a.dat"),
+                share("/s/b.dat"),
+                remove("/s/a.dat"),
+                share("/s/a.dat"),
+                remove("/s/b.dat"),
+            ]),
+            vec![share("/s/a.dat"), remove("/s/b.dat")]
+        );
+    }
+
     /// Drive `run_consumer` over `inputs` and return the actions it actually
     /// applied -- the consumer's in-order forwarding seam (the OS watcher
     /// cannot be tested deterministically).
     async fn applied_actions(inputs: Vec<MonitorAction>) -> Vec<MonitorAction> {
         let applied: Arc<Mutex<Vec<MonitorAction>>> = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        for action in inputs {
+            tx.send(action).unwrap();
+        }
+        drop(tx);
         let sink = Arc::clone(&applied);
         let consumer = tokio::spawn(run_consumer(rx, move |action| {
             let sink = Arc::clone(&sink);
@@ -522,31 +625,22 @@ mod tests {
                 sink.lock().unwrap().push(action);
             }
         }));
-        for action in inputs {
-            tx.send(action).unwrap();
-        }
-        drop(tx);
         consumer.await.unwrap();
         Arc::try_unwrap(applied).unwrap().into_inner().unwrap()
     }
 
-    /// The consumer forwards every action in order, including a Remove of a
-    /// path it never saw a Share for. The decision to actually un-share (or
-    /// no-op an unknown path) lives in the applier, which resolves the hash from
-    /// `monitor_shared_hashes`. This forwarding is what lets a Remove reach the
-    /// applier for a startup-reload share the consumer itself never observed.
+    /// The consumer forwards the final queued intent for each path, including a
+    /// Remove of a path it never saw a Share for. The decision to actually
+    /// un-share (or no-op an unknown path) remains in the applier.
     #[tokio::test]
-    async fn consumer_forwards_every_action_in_order() {
+    async fn consumer_coalesces_queued_actions_and_preserves_final_order() {
         let applied = applied_actions(vec![
             share("/s/a.dat"),
             remove("/s/a.dat"),
             remove("/s/b.dat"),
         ])
         .await;
-        assert_eq!(
-            applied,
-            vec![share("/s/a.dat"), remove("/s/a.dat"), remove("/s/b.dat")]
-        );
+        assert_eq!(applied, vec![remove("/s/a.dat"), remove("/s/b.dat")]);
     }
 
     /// Remove-then-readd: a Share after a Remove is forwarded and re-shares.
@@ -558,10 +652,7 @@ mod tests {
             share("/s/a.dat"),
         ])
         .await;
-        assert_eq!(
-            applied,
-            vec![share("/s/a.dat"), remove("/s/a.dat"), share("/s/a.dat")]
-        );
+        assert_eq!(applied, vec![share("/s/a.dat")]);
     }
 
     /// A file shared by the INITIAL startup reload (never touched by the live
@@ -605,8 +696,9 @@ mod tests {
                 .lock()
                 .await
                 .monitor_shared_hashes
-                .get(&monitor_shared_key(&source)),
-            Some(&hash),
+                .get(&monitor_shared_key(&source))
+                .map(|entry| entry.hash.as_str()),
+            Some(hash.as_str()),
             "startup reload must register the shared source path -> hash so a live \
              Remove can resolve it",
         );
@@ -631,6 +723,48 @@ mod tests {
                 .contains_key(&monitor_shared_key(&source)),
             "the removed path must be dropped from the tracking map",
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn monitored_change_replaces_old_hash_and_duplicate_event_is_a_noop() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "emulebb-monitor-modify-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("Modified.At.Runtime.bin");
+        std::fs::write(&source, b"before").unwrap();
+
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        auto_share_monitored_path(&core, &source).await;
+        let old_hash = core.shares().await[0].hash.clone();
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+
+        std::fs::write(&source, b"after payload with a different size").unwrap();
+        auto_share_monitored_path(&core, &source).await;
+        let new_hash = core.shares().await[0].hash.clone();
+        assert_ne!(old_hash, new_hash);
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+        assert!(core.share(&old_hash).await.is_none());
+        assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
+
+        // A duplicate settled event for the same size + mtime identity must not
+        // ingest or create another catalog row.
+        auto_share_monitored_path(&core, &source).await;
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+        assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
+
+        // An ambiguous Share event received after disappearance reconciles as a
+        // removal, covering Windows rename/delete notifications.
+        std::fs::remove_file(&source).unwrap();
+        auto_share_monitored_path(&core, &source).await;
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
         std::fs::remove_dir_all(&root).ok();
     }
 }

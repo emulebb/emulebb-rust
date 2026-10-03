@@ -13,6 +13,19 @@ use crate::{
     ed2k_dead_source_list::DeadSourceList,
 };
 
+/// Last settled on-disk identity observed for one monitored shared path.
+///
+/// The live watcher can emit multiple events for one logical write. Retaining
+/// the cheap `(size, mtime)` identity prevents every duplicate event from
+/// re-reading and re-hashing the payload, while the hash still lets a later
+/// change or removal retire the previous catalog entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MonitoredSharedFile {
+    pub(crate) hash: String,
+    pub(crate) file_size: u64,
+    pub(crate) source_mtime_ms: Option<i64>,
+}
+
 #[derive(Debug)]
 pub(crate) struct CoreState {
     pub(crate) searches: HashMap<String, Search>,
@@ -59,7 +72,7 @@ pub(crate) struct CoreState {
         HashMap<crate::kad_callback_initiator::KadCallbackKey, Instant>,
     pub(crate) shared_directories: Vec<SharedDirectoryRoot>,
     pub(crate) unshared_hashes: HashSet<String>,
-    pub(crate) monitor_shared_hashes: HashMap<PathBuf, String>,
+    pub(crate) monitor_shared_hashes: HashMap<PathBuf, MonitoredSharedFile>,
     pub(crate) kad_running: bool,
     /// Last time the periodic `sched:source_count` snapshot was emitted, so the
     /// download-source picture is throttled to roughly the MFC snapshot cadence
