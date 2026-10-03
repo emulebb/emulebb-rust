@@ -320,6 +320,10 @@ pub(crate) fn collect_shared_directory_files(
     root: &Path,
     output: &mut Vec<ScannedSharedFile>,
 ) -> Result<usize> {
+    // Resolve the physical disk once per configured root. On a 100k-file
+    // library this avoids 100k volume opens + disk-extent IOCTLs, while every
+    // scanned file still carries the key needed by the per-disk scheduler.
+    let disk_key = physical_disk_key(root);
     // Operator-facing shared-directory boundary: walk the root through the
     // long-path helper so a shared tree deeper than the legacy MAX_PATH (260)
     // limit is still enumerated. The verbatim root flows into every entry path
@@ -377,6 +381,7 @@ pub(crate) fn collect_shared_directory_files(
             output.push(ScannedSharedFile {
                 path,
                 key,
+                disk_key: disk_key.clone(),
                 file_size,
                 source_mtime_ms,
             });
@@ -418,6 +423,7 @@ pub(crate) struct SharedScanResult {
 pub(crate) struct ScannedSharedFile {
     path: PathBuf,
     key: String,
+    disk_key: String,
     file_size: u64,
     source_mtime_ms: Option<i64>,
 }
@@ -637,6 +643,7 @@ fn target_name(path: &Path) -> String {
 fn reload_hash_target(
     path: PathBuf,
     key: String,
+    disk_key: String,
     file_size: u64,
     source_mtime_ms: Option<i64>,
     stale_hashes: Vec<String>,
@@ -645,7 +652,7 @@ fn reload_hash_target(
     ReloadHashTarget {
         id: String::new(),
         order: 0,
-        disk_key: String::new(),
+        disk_key,
         path,
         reason: reason.to_string(),
         key,
@@ -699,6 +706,7 @@ async fn plan_incremental_reload(
             let ScannedSharedFile {
                 path,
                 key,
+                disk_key,
                 file_size: size,
                 source_mtime_ms: mtime_ms,
             } = file;
@@ -739,6 +747,7 @@ async fn plan_incremental_reload(
                         to_hash.push(reload_hash_target(
                             path,
                             key,
+                            disk_key,
                             size,
                             mtime_ms,
                             entries
@@ -801,6 +810,7 @@ async fn plan_incremental_reload(
                         to_hash.push(reload_hash_target(
                             path,
                             key,
+                            disk_key,
                             size,
                             mtime_ms,
                             Vec::new(),
@@ -1389,7 +1399,6 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     for (order, target) in to_hash.iter_mut().enumerate() {
         target.order = order;
         target.id = format!("hash-{order:06}");
-        target.disk_key = physical_disk_key(&target.path);
     }
     record_hash_queue(&core, &to_hash);
     for target in to_hash {

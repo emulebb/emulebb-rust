@@ -3,8 +3,9 @@
 //! time per spindle while distinct disks hash in parallel (concurrent reads on a
 //! single HDD seek-thrash and run slower than serial).
 //!
-//! On Windows the key is the disk number reported by
-//! `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`, so two drive letters backed by one
+//! On Windows the path is first resolved to its real volume mount point (drive
+//! letter or mounted folder), then the key is the disk number reported by
+//! `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`. Thus two mount points backed by one
 //! physical drive share a worker and a volume striped across disks fans out by
 //! its first extent. Raw FFI mirrors `emulebb-kad-net/src/socket_opts.rs`. Any
 //! resolution failure (and every non-Windows platform) falls back to a
@@ -18,13 +19,22 @@ use std::path::Path;
 pub(crate) fn physical_disk_key(path: &Path) -> String {
     #[cfg(windows)]
     {
+        if let Some(mount_path) = windows_volume_mount_path(path) {
+            let fallback = format!("vol:{}", mount_path.to_string_lossy().to_ascii_lowercase());
+            if let Some(volume_device) = windows_volume_device_path(&mount_path) {
+                return windows_disk_number(&volume_device)
+                    .map(|disk| format!("disk:{disk}"))
+                    .unwrap_or(fallback);
+            }
+            return fallback;
+        }
+
+        // Retain a useful fallback for a path that does not exist yet or a
+        // volume whose mount point cannot be queried.
         match drive_letter(path) {
-            Some(letter) => match windows_disk_number(letter) {
-                Some(disk) => format!("disk:{disk}"),
-                None => format!("vol:{letter}:"),
-            },
-            // No drive letter (UNC/mount-point volume): group all such paths
-            // together rather than risk thrashing; rare for shared libraries.
+            Some(letter) => windows_disk_number(&format!(r"\\.\{letter}:"))
+                .map(|disk| format!("disk:{disk}"))
+                .unwrap_or_else(|| format!("vol:{letter}:")),
             None => "vol:other".to_string(),
         }
     }
@@ -37,6 +47,74 @@ pub(crate) fn physical_disk_key(path: &Path) -> String {
             .map(|c| format!("vol:{}", c.as_os_str().to_string_lossy()))
             .unwrap_or_else(|| "vol:other".to_string())
     }
+}
+
+/// Resolve a path to the deepest volume mount point containing it. Unlike
+/// taking the leading drive letter, this recognizes volumes mounted below a
+/// directory such as `C:\M\library-disk\`.
+#[cfg(windows)]
+fn windows_volume_mount_path(path: &Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
+
+    const WINDOWS_LONG_PATH_CAPACITY: usize = 32_768;
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut buffer = vec![0u16; WINDOWS_LONG_PATH_CAPACITY];
+    // SAFETY: both buffers are valid UTF-16 storage, the input is
+    // NUL-terminated, and the output capacity passed to Win32 matches the
+    // allocation.
+    let ok = unsafe {
+        GetVolumePathNameW(
+            wide.as_ptr(),
+            buffer.as_mut_ptr(),
+            u32::try_from(buffer.len()).ok()?,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let len = buffer.iter().position(|unit| *unit == 0)?;
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(
+        &buffer[..len],
+    )))
+}
+
+/// Convert a mount point to the GUID volume device accepted by `CreateFileW`.
+#[cfg(windows)]
+fn windows_volume_device_path(mount_path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+
+    const VOLUME_GUID_CAPACITY: usize = 64;
+    let wide = mount_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut buffer = vec![0u16; VOLUME_GUID_CAPACITY];
+    // SAFETY: both buffers are valid UTF-16 storage, the input is
+    // NUL-terminated, and the output capacity passed to Win32 matches the
+    // allocation.
+    let ok = unsafe {
+        GetVolumeNameForVolumeMountPointW(
+            wide.as_ptr(),
+            buffer.as_mut_ptr(),
+            u32::try_from(buffer.len()).ok()?,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let len = buffer.iter().position(|unit| *unit == 0)?;
+    let volume_name = String::from_utf16_lossy(&buffer[..len]);
+    // CreateFileW opens a volume GUID without its final backslash.
+    Some(volume_name.trim_end_matches(['\\', '/']).to_string())
 }
 
 /// Extract the ASCII drive letter (uppercased) from a path, tolerating the
@@ -54,13 +132,14 @@ fn drive_letter(path: &Path) -> Option<char> {
     }
 }
 
-/// Query the physical disk number backing drive `letter` (e.g. `'F'`). Opens the
-/// `\\.\F:` volume device and issues `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`,
+/// Query the physical disk number backing a volume device. Opens a path such as
+/// `\\?\Volume{GUID}` or `\\.\F:` and issues
+/// `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`,
 /// returning the first extent's disk number. `None` on any failure (callers fall
 /// back to a per-letter key). No access is requested, so this does not require
 /// elevation for a fixed local volume.
 #[cfg(windows)]
-fn windows_disk_number(letter: char) -> Option<u32> {
+fn windows_disk_number(device_path: &str) -> Option<u32> {
     use std::ffi::c_void;
     use std::ptr;
 
@@ -86,8 +165,7 @@ fn windows_disk_number(letter: char) -> Option<u32> {
         extents: [DISK_EXTENT; MAX_EXTENTS],
     }
 
-    // `\\.\F:` as a NUL-terminated UTF-16 device path.
-    let device: Vec<u16> = format!(r"\\.\{letter}:")
+    let device: Vec<u16> = device_path
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -172,5 +250,17 @@ mod tests {
         let key = physical_disk_key(&PathBuf::from("C:\\Windows"));
         // Either we resolved the physical disk, or we degraded gracefully.
         assert!(key == "disk:0" || key.starts_with("disk:") || key == "vol:C:");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_path_resolves_to_a_mount_point_and_volume_device() {
+        let mount = windows_volume_mount_path(&PathBuf::from(r"C:\Windows"))
+            .expect("system path should resolve to a volume mount point");
+        assert!(mount.is_absolute());
+        let device = windows_volume_device_path(&mount)
+            .expect("system mount point should resolve to a volume device");
+        assert!(device.starts_with(r"\\?\Volume{"), "got {device}");
+        assert!(!device.ends_with('\\'));
     }
 }

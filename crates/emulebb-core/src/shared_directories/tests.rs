@@ -35,6 +35,7 @@ fn scanned_file(path: &Path) -> ScannedSharedFile {
     ScannedSharedFile {
         path: path.to_path_buf(),
         key,
+        disk_key: "disk:test".to_string(),
         file_size,
         source_mtime_ms,
     }
