@@ -44,6 +44,13 @@ pub struct Ed2kServerState {
     /// Server-reported soft/hard publish limits.
     pub server_soft_files: Option<u32>,
     pub server_hard_files: Option<u32>,
+    /// Connection-scoped offer-files negotiation and effective pacing.
+    pub offer_files_mode: Option<String>,
+    pub offer_files_batch_max: Option<u32>,
+    pub offer_files_min_interval_ms: Option<u32>,
+    pub offer_files_fallback_reason: Option<String>,
+    pub offer_files_published_entries: usize,
+    pub offer_files_pending_entries: usize,
     /// Server UDP obfuscation metadata learned from a challenge-validated
     /// status reply. The key is usable only while `server_udp_key_ip` matches
     /// the current public IPv4 identity.
@@ -108,6 +115,7 @@ pub(super) struct ServerSessionContext {
     /// eMule `thePrefs.GetAddServersFromServer()` (default false): gates sending
     /// OP_GETSERVERLIST on connect and accepting servers from OP_SERVERLIST.
     pub(super) add_servers_from_server: bool,
+    pub(super) offer_files_capability_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

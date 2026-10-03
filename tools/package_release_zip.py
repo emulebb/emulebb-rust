@@ -202,7 +202,7 @@ def package_readme(version: str) -> str:
         "This is the unsigned Windows x64 beta package for the headless emulebb-rust daemon.\n\n"
         "Run `emulebb-rust.exe --profile <profile-dir>` from this directory or from a script that points at a profile.\n"
         "The daemon serves the embedded browser WebUI from the packaged `webui` directory beside the executable.\n\n"
-        "The native Slint UI is not shipped in this package.\n"
+        "The retired native Slint UI has been removed; use the embedded browser WebUI.\n"
     )
 
 

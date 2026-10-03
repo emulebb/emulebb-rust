@@ -54,6 +54,24 @@ pub struct MetadataTransferCatalogEntry {
     pub last_upload_request_ms: i64,
     /// Best persisted payload path for rebuilding non-durable derived metadata.
     pub media_path: Option<String>,
+    pub media: MetadataTransferMediaMetadata,
+}
+
+/// Persisted derived media tags for a completed shared payload.
+///
+/// The file hash is the content identity, so a non-zero extractor version makes
+/// even an all-empty result a valid cache hit. This prevents warm startup from
+/// reopening every shared payload merely to rediscover that it is not a media
+/// file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetadataTransferMediaMetadata {
+    pub artist: String,
+    pub album: String,
+    pub title: String,
+    pub length_seconds: u32,
+    pub bitrate_kbps: u32,
+    pub codec: String,
+    pub extractor_version: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

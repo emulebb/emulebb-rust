@@ -1,8 +1,12 @@
 //! Runtime facade for shared-catalog reads and mutation.
 
-use std::sync::{Arc, atomic::Ordering};
+use std::{
+    str::FromStr,
+    sync::{Arc, atomic::Ordering},
+};
 
 use crate::PopularHash;
+use emulebb_kad_proto::Ed2kHash;
 
 use super::{
     Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kTransferRuntime,
@@ -41,24 +45,24 @@ impl Ed2kTransferRuntime {
     }
 
     pub(super) async fn upsert_verified_catalog_entry(&self, manifest: &Ed2kResumeManifest) {
+        let Ok(file_hash) = Ed2kHash::from_str(&manifest.file_hash) else {
+            return;
+        };
         // Build the replacement entry (if any) before taking the write lock so the
         // lock hold covers only the in-place upsert.
-        let existing_media = {
-            let entries = self.shared_catalog.read().await;
-            entries
-                .iter()
-                .find(|entry| {
-                    !entry.compatibility_hint
-                        && entry.file_hash.eq_ignore_ascii_case(&manifest.file_hash)
-                })
-                .map(|entry| entry.media.clone())
-                .unwrap_or_default()
-        };
         let mut new_entry = (manifest.completed || !manifest.verified_ranges.is_empty())
             .then(|| Ed2kSharedEntry::from_manifest(manifest));
         if let Some(entry) = new_entry.as_mut() {
-            entry.media = if existing_media != Ed2kMediaMetadata::default() {
-                existing_media
+            let cached = self
+                .metadata
+                .transfer_media_metadata(&manifest.file_hash)
+                .ok()
+                .flatten()
+                .filter(|media| {
+                    media.extractor_version == super::transfer_sql::MEDIA_METADATA_EXTRACTOR_VERSION
+                });
+            entry.media = if let Some(cached) = cached {
+                super::transfer_sql::media_from_metadata(cached)
             } else if manifest.completed {
                 let path = manifest
                     .source_path
@@ -67,35 +71,42 @@ impl Ed2kTransferRuntime {
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| self.payload_path(&manifest.file_hash));
                 let display_name = manifest.display_name.clone();
-                tokio::task::spawn_blocking(move || {
+                let media = tokio::task::spawn_blocking(move || {
                     super::media_metadata::extract_media_metadata(&path, &display_name)
                 })
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+                let persisted = super::transfer_sql::media_to_metadata(
+                    &media,
+                    super::transfer_sql::MEDIA_METADATA_EXTRACTOR_VERSION,
+                );
+                if let Err(error) = self
+                    .metadata
+                    .update_transfer_media_metadata(&manifest.file_hash, &persisted)
+                {
+                    tracing::warn!(
+                        file_hash = %manifest.file_hash,
+                        "failed to persist shared media metadata: {error:#}"
+                    );
+                }
+                media
             } else {
                 Ed2kMediaMetadata::default()
             };
         }
         let mut entries = self.shared_catalog.write().await;
-        // Collapse the old retain -> to_vec (whole-catalog deep clone) -> dedupe ->
-        // replace_with chain into a single in-place upsert: no deep clone, one
-        // index rebuild. The predicate, the appended entry, and the dedupe policy
-        // are unchanged, so the resulting order + index are identical.
-        entries.retain_push_dedup(
-            |entry| entry.file_hash != manifest.file_hash || entry.compatibility_hint,
-            new_entry,
-            dedupe_entries,
-        );
+        entries.upsert_verified(file_hash, new_entry);
         self.note_shared_catalog_entries_changed();
     }
 
     /// Remove a locally verified file from the live serving/advertisement
     /// catalog while preserving compatibility hints for the same hash.
     pub async fn remove_verified_catalog_entry(&self, file_hash: &str) {
+        let Ok(file_hash) = Ed2kHash::from_str(file_hash) else {
+            return;
+        };
         let mut entries = self.shared_catalog.write().await;
-        entries.retain(|entry| {
-            !entry.file_hash.eq_ignore_ascii_case(file_hash) || entry.compatibility_hint
-        });
+        entries.upsert_verified(file_hash, None);
         self.note_shared_catalog_entries_changed();
     }
 

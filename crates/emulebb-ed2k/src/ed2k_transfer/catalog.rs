@@ -166,6 +166,55 @@ impl IndexedSharedCatalog {
         }
     }
 
+    /// Borrow the unique verified/non-hint catalog entry for `hash` in O(1).
+    #[must_use]
+    pub fn entry_by_hash(&self, hash: &Ed2kHash) -> Option<&Ed2kSharedEntry> {
+        self.by_hash.get(&hash.0).map(|&idx| &self.entries[idx])
+    }
+
+    /// Insert, replace, or remove one verified catalog entry without rebuilding
+    /// the complete by-hash index.
+    ///
+    /// Initial large-library ingestion calls this once per hashed file.  The old
+    /// retain/deduplicate/reindex path walked the complete catalog for every file,
+    /// making a fresh N-file ingest quadratic.  A verified hash is unique by
+    /// construction, so replacement can stay in its existing slot and insertion
+    /// can append. Removal uses `swap_remove` and repairs only the moved entry's
+    /// index. Compatibility hints are deliberately untouched.
+    pub fn upsert_verified(&mut self, hash: Ed2kHash, new_entry: Option<Ed2kSharedEntry>) {
+        if let Some(entry) = new_entry.as_ref() {
+            debug_assert!(!entry.compatibility_hint);
+            debug_assert_eq!(Self::entry_hash_key(entry), Some(hash.0));
+        }
+
+        match (self.by_hash.get(&hash.0).copied(), new_entry) {
+            (Some(idx), Some(entry)) => {
+                self.entries[idx] = entry;
+            }
+            (None, Some(entry)) => {
+                let idx = self.entries.len();
+                self.entries.push(entry);
+                self.by_hash.insert(hash.0, idx);
+            }
+            (Some(idx), None) => {
+                self.by_hash.remove(&hash.0);
+                self.entries.swap_remove(idx);
+                if idx < self.entries.len() {
+                    let moved = &self.entries[idx];
+                    if !moved.compatibility_hint
+                        && let Some(moved_hash) = Self::entry_hash_key(moved)
+                    {
+                        self.by_hash.insert(moved_hash, idx);
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+
+        #[cfg(debug_assertions)]
+        self.assert_index_consistent();
+    }
+
     /// Apply `mutate` to every entry, then rebuild the index. Used off the hot path
     /// where a mutation could in principle touch a field the index depends on; the
     /// wholesale rebuild guarantees the index cannot drift regardless of what
@@ -584,6 +633,47 @@ mod indexed_catalog_tests {
             .expect("verified entry present");
         assert!(!catalog[idx].compatibility_hint);
         assert!(catalog.index_by_hash(&key(2)).is_none());
+    }
+
+    #[test]
+    fn verified_upsert_is_indexed_and_preserves_compatibility_hints() {
+        let mut catalog = IndexedSharedCatalog::from_entries(vec![
+            hint_entry(1),
+            verified_entry(1),
+            verified_entry(2),
+        ]);
+        let mut replacement = verified_entry(1);
+        replacement.all_time_uploaded_bytes = 99;
+
+        catalog.upsert_verified(key(1), Some(replacement));
+        assert_eq!(
+            catalog
+                .entry_by_hash(&key(1))
+                .unwrap()
+                .all_time_uploaded_bytes,
+            99
+        );
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|entry| entry.compatibility_hint && entry.file_hash == hex_hash(1))
+                .count(),
+            1
+        );
+
+        catalog.upsert_verified(key(1), None);
+        catalog.assert_index_consistent();
+        assert!(catalog.entry_by_hash(&key(1)).is_none());
+        assert!(catalog.entry_by_hash(&key(2)).is_some());
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.compatibility_hint && entry.file_hash == hex_hash(1))
+        );
+
+        catalog.upsert_verified(key(3), Some(verified_entry(3)));
+        catalog.assert_index_consistent();
+        assert!(catalog.entry_by_hash(&key(3)).is_some());
     }
 
     #[test]

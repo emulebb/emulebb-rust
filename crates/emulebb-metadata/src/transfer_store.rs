@@ -7,9 +7,9 @@ use crate::{
     transfer_model::{
         MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
         MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
-        MetadataTransferCounts, MetadataTransferManifest, MetadataTransferPiece,
-        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferShareEntry,
-        MetadataTransferSource,
+        MetadataTransferCounts, MetadataTransferManifest, MetadataTransferMediaMetadata,
+        MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
+        MetadataTransferShareEntry, MetadataTransferSource,
     },
 };
 
@@ -436,7 +436,11 @@ impl super::MetadataStore {
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
                    known_files.last_upload_request_ms,
-                   COALESCE(source_paths.display_path, delivered_paths.display_path)
+                   COALESCE(source_paths.display_path, delivered_paths.display_path),
+                   known_files.media_artist, known_files.media_album,
+                   known_files.media_title, known_files.media_length_seconds,
+                   known_files.media_bitrate_kbps, known_files.media_codec,
+                   known_files.media_extractor_version
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
@@ -464,9 +468,83 @@ impl super::MetadataStore {
                 all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
                 last_upload_request_ms: row.get(11)?,
                 media_path: row.get(12)?,
+                media: MetadataTransferMediaMetadata {
+                    artist: row.get(13)?,
+                    album: row.get(14)?,
+                    title: row.get(15)?,
+                    length_seconds: row.get::<_, i64>(16)? as u32,
+                    bitrate_kbps: row.get::<_, i64>(17)? as u32,
+                    codec: row.get(18)?,
+                    extractor_version: row.get::<_, i64>(19)? as u32,
+                },
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn transfer_media_metadata(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferMediaMetadata>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        self.connection()?
+            .query_row(
+                r#"
+                SELECT media_artist, media_album, media_title,
+                       media_length_seconds, media_bitrate_kbps, media_codec,
+                       media_extractor_version
+                FROM known_files
+                WHERE ed2k_hash = ?1
+                "#,
+                params![hash],
+                |row| {
+                    Ok(MetadataTransferMediaMetadata {
+                        artist: row.get(0)?,
+                        album: row.get(1)?,
+                        title: row.get(2)?,
+                        length_seconds: row.get::<_, i64>(3)? as u32,
+                        bitrate_kbps: row.get::<_, i64>(4)? as u32,
+                        codec: row.get(5)?,
+                        extractor_version: row.get::<_, i64>(6)? as u32,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn update_transfer_media_metadata(
+        &self,
+        file_hash: &str,
+        media: &MetadataTransferMediaMetadata,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let changed = self.connection()?.execute(
+            r#"
+            UPDATE known_files
+            SET media_artist = ?2,
+                media_album = ?3,
+                media_title = ?4,
+                media_length_seconds = ?5,
+                media_bitrate_kbps = ?6,
+                media_codec = ?7,
+                media_extractor_version = ?8,
+                updated_at_ms = ?9
+            WHERE ed2k_hash = ?1
+            "#,
+            params![
+                hash,
+                media.artist,
+                media.album,
+                media.title,
+                i64::from(media.length_seconds),
+                i64::from(media.bitrate_kbps),
+                media.codec,
+                i64::from(media.extractor_version),
+                unix_ms(),
+            ],
+        )?;
+        Ok(changed != 0)
     }
 
     pub fn share_in_place_reload_entries(&self) -> Result<Vec<MetadataShareInPlaceReloadEntry>> {
@@ -977,6 +1055,67 @@ impl super::MetadataStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn completed_transfer_share_entry(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferShareEntry>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
+                   known_files.size_bytes, coalesce(known_files.part_count, 0),
+                   COALESCE(source_paths.display_path, (
+                       SELECT local_paths.display_path
+                       FROM shared_file_sources
+                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                       WHERE shared_file_sources.known_file_id = known_files.id
+                       ORDER BY local_paths.display_path
+                       LIMIT 1
+                   )),
+                   CASE
+                       WHEN known_files.aich_root IS NULL THEN NULL
+                       ELSE lower(hex(known_files.aich_root))
+                   END,
+                   known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.all_time_uploaded_bytes,
+                   known_files.all_time_upload_requests,
+                   known_files.all_time_upload_accepts,
+                   known_files.comment, known_files.rating
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
+            WHERE known_files.ed2k_hash = ?1
+              AND known_files.completed != 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM unshared_files
+                  WHERE unshared_files.known_file_id = known_files.id
+              )
+            LIMIT 1
+            "#,
+            params![hash],
+            |row| {
+                Ok(MetadataTransferShareEntry {
+                    file_hash: row.get(0)?,
+                    display_name: row.get(1)?,
+                    file_size: row.get::<_, i64>(2)? as u64,
+                    part_count: row.get::<_, i64>(3)? as u32,
+                    source_path: row.get(4)?,
+                    aich_root: row.get(5)?,
+                    upload_priority: row.get(6)?,
+                    auto_upload_priority: row.get::<_, i64>(7)? != 0,
+                    all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
+                    all_time_upload_requests: row.get::<_, i64>(9)? as u64,
+                    all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
+                    comment: row.get(11)?,
+                    rating: row.get::<_, i64>(12)? as u8,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn completed_transfer_share_entries_page(
         &self,
         offset: usize,
@@ -1049,6 +1188,87 @@ impl super::MetadataStore {
         })?;
         let entries = rows.collect::<Result<Vec<_>, _>>()?;
         Ok((entries, total))
+    }
+
+    pub fn completed_transfer_share_entries_after(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<MetadataTransferShareEntry>, usize, bool)> {
+        let after_hash = after_hash
+            .map(|hash| decode_fixed_hex(hash, 16, "ED2K after hash"))
+            .transpose()?;
+        let conn = self.connection()?;
+        let total = conn.query_row(
+            r#"
+            SELECT count(*)
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE known_files.completed != 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM unshared_files
+                  WHERE unshared_files.known_file_id = known_files.id
+              )
+            "#,
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
+                   known_files.size_bytes, coalesce(known_files.part_count, 0),
+                   COALESCE(source_paths.display_path, (
+                       SELECT local_paths.display_path
+                       FROM shared_file_sources
+                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                       WHERE shared_file_sources.known_file_id = known_files.id
+                       ORDER BY local_paths.display_path
+                       LIMIT 1
+                   )),
+                   CASE
+                       WHEN known_files.aich_root IS NULL THEN NULL
+                       ELSE lower(hex(known_files.aich_root))
+                   END,
+                   known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.all_time_uploaded_bytes,
+                   known_files.all_time_upload_requests,
+                   known_files.all_time_upload_accepts,
+                   known_files.comment, known_files.rating
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
+            WHERE known_files.completed != 0
+              AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
+              AND NOT EXISTS (
+                  SELECT 1 FROM unshared_files
+                  WHERE unshared_files.known_file_id = known_files.id
+              )
+            ORDER BY known_files.ed2k_hash
+            LIMIT ?2
+            "#,
+        )?;
+        let fetch_limit = limit.saturating_add(1);
+        let rows = stmt.query_map(params![after_hash, fetch_limit as i64], |row| {
+            Ok(MetadataTransferShareEntry {
+                file_hash: row.get(0)?,
+                display_name: row.get(1)?,
+                file_size: row.get::<_, i64>(2)? as u64,
+                part_count: row.get::<_, i64>(3)? as u32,
+                source_path: row.get(4)?,
+                aich_root: row.get(5)?,
+                upload_priority: row.get(6)?,
+                auto_upload_priority: row.get::<_, i64>(7)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
+                comment: row.get(11)?,
+                rating: row.get::<_, i64>(12)? as u8,
+            })
+        })?;
+        let mut entries = rows.collect::<Result<Vec<_>, _>>()?;
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        Ok((entries, total, has_more))
     }
 
     pub fn pending_completed_delivery_hashes(&self) -> Result<Vec<String>> {

@@ -79,6 +79,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
             all_time_upload_accepts: 0,
             last_upload_request_ms: 0,
             media_path: manifest.source_path.clone(),
+            media: MetadataTransferMediaMetadata::default(),
         }]
     );
     assert_eq!(
@@ -137,6 +138,58 @@ fn transfer_manifest_roundtrips_sql_tables() {
         }]
     );
     assert_eq!(
+        store
+            .completed_transfer_share_entry(&manifest.file_hash.to_uppercase())
+            .unwrap(),
+        store.completed_transfer_share_entries().unwrap().pop()
+    );
+    assert_eq!(
+        store
+            .completed_transfer_share_entry("ffeeddccbbaa99887766554433221100")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .completed_transfer_share_entries_after(None, 1)
+            .unwrap(),
+        (store.completed_transfer_share_entries().unwrap(), 1, false)
+    );
+    assert_eq!(
+        store
+            .completed_transfer_share_entries_after(Some(&manifest.file_hash), 1)
+            .unwrap(),
+        (Vec::new(), 1, false)
+    );
+    let media = MetadataTransferMediaMetadata {
+        artist: "Artist".to_string(),
+        album: "Album".to_string(),
+        title: "Title".to_string(),
+        length_seconds: 123,
+        bitrate_kbps: 320,
+        codec: "MP3".to_string(),
+        extractor_version: 1,
+    };
+    assert!(
+        store
+            .update_transfer_media_metadata(&manifest.file_hash, &media)
+            .unwrap()
+    );
+    assert_eq!(
+        store.transfer_media_metadata(&manifest.file_hash).unwrap(),
+        Some(media.clone())
+    );
+    assert_eq!(
+        store
+            .completed_transfer_catalog_entries()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .media,
+        media
+    );
+    assert_eq!(
         store.completed_transfer_share_entries_page(0, 1).unwrap(),
         (
             vec![MetadataTransferShareEntry {
@@ -162,6 +215,12 @@ fn transfer_manifest_roundtrips_sql_tables() {
         .unwrap();
     assert_eq!(store.completed_transfer_publish_entries().unwrap(), vec![]);
     assert_eq!(store.completed_transfer_share_entries().unwrap(), vec![]);
+    assert_eq!(
+        store
+            .completed_transfer_share_entry(&manifest.file_hash)
+            .unwrap(),
+        None
+    );
     store.unmark_unshared_file(&manifest.file_hash).unwrap();
     assert_eq!(store.transfer_manifests().unwrap(), vec![manifest]);
 }

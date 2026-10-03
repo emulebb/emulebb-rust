@@ -225,7 +225,6 @@ def check_no_legacy_rust_native_surface() -> list[str]:
     checked_roots = (
         "crates/emulebb-settings",
         "crates/emulebb-rest",
-        "crates/emulebb-rust-ui",
         "crates/emulebb-core",
     )
     files = [

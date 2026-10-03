@@ -400,6 +400,13 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
         "Advertise the Rust client identity string.",
     ),
     app_setting(
+        "ed2k.offerFilesCapabilityEnabled",
+        SettingSurfaceClass::AdvancedControl,
+        true,
+        "Servers",
+        "Honor validated server-advertised accelerated offer-file pacing.",
+    ),
+    app_setting(
         "ed2k.addServersFromServer",
         SettingSurfaceClass::NotUserFacing,
         true,

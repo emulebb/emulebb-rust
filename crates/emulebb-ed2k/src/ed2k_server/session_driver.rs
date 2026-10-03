@@ -23,8 +23,9 @@ use super::{
     dump_ed2k_server_loop_meta, dump_ed2k_server_meta, encode_login_request, encode_packet,
     fail_background_search_request, fail_pending_background_search, format_connect_options,
     handle_background_udp_packet, handle_server_packet, log_search_result_page,
-    login_identity_for_server_transport, run_server_transport_attempts, server_transport_attempts,
-    server_udp_endpoint, start_background_server_search, validate_found_sources,
+    login_identity_for_server_transport, run_server_transport_attempts,
+    send_due_offer_files_advertisement, server_transport_attempts, server_udp_endpoint,
+    start_background_server_search, validate_found_sources,
 };
 
 /// Wakeup cadence used to drive the periodic UDP server-status ping when the
@@ -104,6 +105,8 @@ async fn connect_server_transport_attempt(
     )
     .await?;
     session.server_soft_files = server.entry.soft_files;
+    session.server_hard_files = server.entry.hard_files;
+    session.configure_offer_files_capability(context.offer_files_capability_enabled);
     let login_payload = encode_login_request(login_identity, &context.nickname);
     info!(
         "connected to ED2K server {} name={} trace_id={} role=background bind_ip={} observed_external_ip={} transport={} connect_options={} supports_obf_tcp={} obf_port={} udp_flags=0x{:08X} udp_key_present={} chosen_port={}",
@@ -224,6 +227,7 @@ pub(super) async fn run_one_server_session(
             return Ok(ServerSessionExit::ContinueOrder);
         }
 
+        let offer_files_wakeup = session.offer_files_wakeup_at();
         tokio::select! {
             _ = async {
                 if let Some(deadline) = rotation_deadline {
@@ -277,6 +281,32 @@ pub(super) async fn run_one_server_session(
                 );
                 clear_server_connection_state(&context.state).await;
                 return Ok(ServerSessionExit::RestartPreferredOrder);
+            }
+            _ = async {
+                if let Some(deadline) = offer_files_wakeup {
+                    tokio::time::sleep_until(TokioInstant::from_std(deadline)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if offer_files_wakeup.is_some()
+                && queued_background_search.is_none()
+                && pending_background_search.is_none() => {
+                session.resolve_offer_files_negotiation_timeout().await;
+                if let Some(stats) = send_due_offer_files_advertisement(
+                    &mut session,
+                    &context.shared_catalog,
+                    context.bind_ip,
+                    context.hello_identity.tcp_port,
+                ).await? {
+                    debug!(
+                        "ED2K session offer-files pump endpoint={} entries={} published={} pending={} mode={:?}",
+                        session.endpoint,
+                        stats.entries_sent,
+                        stats.published_entries,
+                        stats.pending_entries,
+                        session.offer_files_pacing,
+                    );
+                }
             }
             request = async {
                 search_inbox.lock().await.receiver.recv().await
@@ -691,4 +721,10 @@ pub(super) async fn clear_server_connection_state(state: &Arc<RwLock<Ed2kServerS
     guard.endpoint = None;
     guard.client_id = None;
     guard.server_flags = None;
+    guard.offer_files_mode = None;
+    guard.offer_files_batch_max = None;
+    guard.offer_files_min_interval_ms = None;
+    guard.offer_files_fallback_reason = None;
+    guard.offer_files_published_entries = 0;
+    guard.offer_files_pending_entries = 0;
 }

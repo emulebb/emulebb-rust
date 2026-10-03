@@ -115,6 +115,10 @@ pub struct Ed2kRuntimeConfig {
     /// Publish the real `emule-rust` mod identity in the eD2k hello instead of
     /// the default "eMule Community" (0.7-series) identity used to blend in.
     pub publish_emule_rust_identity: bool,
+    /// Honor the connection-scoped `offerfiles_v=1` server capability and use
+    /// its advertised batch/interval envelope. Invalid, incomplete, disabled,
+    /// or absent advertisements always retain conservative legacy pacing.
+    pub offer_files_capability_enabled: bool,
     /// Whether to request the server's server list on connect (OP_GETSERVERLIST)
     /// and merge unsolicited OP_SERVERLIST replies into the local server list.
     /// Mirrors eMule `thePrefs.GetAddServersFromServer()` (`AddServersFromServer`
@@ -281,6 +285,7 @@ impl Default for Ed2kRuntimeConfig {
             download_limit_bytes_per_sec: 0,
             enable_udp_reask: true,
             publish_emule_rust_identity: false,
+            offer_files_capability_enabled: true,
             // eMule AddServersFromServer default is FALSE (Preferences.cpp:3207):
             // a stock client neither requests OP_GETSERVERLIST nor adds servers
             // reported by the server.
@@ -332,6 +337,7 @@ mod tests {
         assert_eq!(config.source_server_attempt_budget, 3);
         assert_eq!(config.max_source_per_file_udp(), 100);
         assert!(config.enable_udp_reask);
+        assert!(config.offer_files_capability_enabled);
         // Download throttle is unlimited (0) by default, matching today's
         // unbounded aggregate inbound behavior.
         assert_eq!(config.download_limit_bytes_per_sec, 0);

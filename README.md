@@ -56,9 +56,9 @@ process rather than the former pre-release freeze.
 Indexing is a client capability, not a separate public API. It improves
 search results returned through the eMuleBB search resources.
 
-`crates/emulebb-rust-ui` is frozen legacy Slint UI work. It remains in the
-workspace until a later code/build cleanup removes or repurposes it, but it is
-not the forward beta UI target.
+The former native Slint client has been removed. The supported product shape is
+the headless daemon plus its REST API and embedded SPA WebUI; release cleanup
+still rejects stale `emulebb-rust-ui` artifacts from older build directories.
 
 ## Rust Client Policy
 

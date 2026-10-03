@@ -15,9 +15,6 @@ ignore = [
     # timing measurements against an attacker-chosen ciphertext oracle, which our
     # usage does not expose. Revisit and drop this ignore once `rsa` ships a fix.
     "RUSTSEC-2023-0071",
-    # RUSTSEC-2026-0192 — `ttf-parser` is unmaintained. The latest Slint release
-    # still resolves it through its font/rendering stack, with no safe upgrade.
-    "RUSTSEC-2026-0192",
 ]
 
 [bans]
@@ -29,9 +26,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 
 [licenses]
-# GPL-2.0-compatible and other approved dependency licenses. Slint is selected
-# under its royalty-free application license (not GPL-3.0-only); its attribution
-# requirements are recorded in THIRD-PARTY-LICENSES.md.
+# GPL-2.0-compatible and other approved dependency licenses.
 confidence-threshold = 0.8
 allow = [
   "MIT",
@@ -47,6 +42,5 @@ allow = [
   "Unicode-3.0",
   "CC0-1.0",
   "GPL-2.0-only",
-  "LicenseRef-Slint-Royalty-free-2.0",
   "Unlicense",
 ]

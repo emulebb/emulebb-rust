@@ -28,6 +28,7 @@ mod flags;
 mod legacy_udp;
 mod loop_runtime;
 mod obfuscation;
+mod offer_policy;
 mod packet_codec;
 mod packet_handler;
 mod result_decoder;
@@ -81,7 +82,10 @@ use obfuscation::{
 use packet_codec::{decode_server_payload, encode_packet, server_opcode_allows_compression};
 use packet_handler::handle_server_packet;
 #[cfg(test)]
-use packet_handler::{decode_callback_request, decode_id_change_payload, decode_server_ident};
+use packet_handler::{
+    decode_callback_request, decode_id_change_payload, decode_server_ident,
+    decode_server_ident_details,
+};
 #[cfg(test)]
 use result_decoder::decode_search_results;
 use result_decoder::{
@@ -112,11 +116,13 @@ use startup::{
     Ed2kUdpSourceRequestTarget, encode_login_request, encode_source_request,
     encode_udp_search_request, encode_udp_source_request_batch,
     login_identity_for_server_transport, send_connected_server_startup,
-    send_offer_files_advertisement, source_request_opcode, wait_for_offer_files_settle,
+    send_due_offer_files_advertisement, source_request_opcode, wait_for_offer_files_settle,
 };
 #[cfg(test)]
 use startup::{encode_offer_files_payload, offer_files_catalog_fingerprint, server_capabilities};
-use tag_codec::{decode_ed2k_string, decode_tag};
+use tag_codec::decode_ed2k_string;
+#[cfg(feature = "fuzzing")]
+use tag_codec::decode_tag;
 use types::ServerUdpPacket;
 pub use types::{Ed2kFoundSource, Ed2kSearchFile, Ed2kServerLoopOptions, Ed2kServerState};
 #[cfg(test)]
@@ -300,6 +306,8 @@ const SERVER_UDP_FLAG_TCPOBFUSCATION: u32 = 0x0000_0400;
 
 const ST_SERVERNAME: u8 = 0x01;
 const ST_DESCRIPTION: u8 = 0x0B;
+const ST_SOFTFILES: u8 = 0x88;
+const ST_HARDFILES: u8 = 0x89;
 const ST_DYNIP: u8 = 0x85;
 const ST_VERSION: u8 = 0x91;
 const ST_AUXPORTSLIST: u8 = 0x93;

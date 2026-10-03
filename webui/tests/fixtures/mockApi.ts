@@ -426,6 +426,7 @@ function dataFor(method: string, path: string): unknown {
           setting("ed2k.autoConnectStaticOnly", "normalControl", true),
           setting("ed2k.enableUdpReask", "normalControl", true),
           setting("ed2k.publishEmuleRustIdentity", "advancedControl", true),
+          setting("ed2k.offerFilesCapabilityEnabled", "advancedControl", true),
           setting("ed2k.deadServerRetries", "advancedControl", true),
           setting("ed2k.uploadQueue.activeSlots", "advancedControl", true),
           setting("ed2k.uploadQueue.elasticPercent", "advancedControl", true),
@@ -550,6 +551,7 @@ function dataFor(method: string, path: string): unknown {
           autoConnectStaticOnly: false,
           enableUdpReask: true,
           publishEmuleRustIdentity: false,
+          offerFilesCapabilityEnabled: true,
           deadServerRetries: 1,
           uploadQueue: {
             activeSlots: 3,

@@ -404,6 +404,20 @@ fn not_published_files_are_excluded_from_offer_catalog() {
 }
 
 #[test]
+fn verified_share_suppresses_same_hash_compatibility_hint() {
+    let verified = shared_entry(1);
+    let mut hint = verified.clone();
+    hint.compatibility_hint = true;
+    hint.verified_complete = false;
+    hint.display_name = "compatibility-hint.bin".to_string();
+
+    let ranked = ranked_offer_files(&[hint, verified.clone()], true);
+
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0], popular_hash_offer_file(&verified).unwrap());
+}
+
+#[test]
 fn empty_share_advertises_zero_files_without_a_placeholder() {
     // Stock parity: an empty share sends a 0-file OP_OFFERFILES, not a
     // fabricated sample entry.
@@ -547,4 +561,42 @@ fn offered_files_catalog_restarts_ranked_cycle_when_every_hash_was_published() {
     assert_eq!(offered.entries, ranked);
     assert_eq!(offered.next_cursor, 0);
     assert_eq!(offered.total_entries, 3);
+}
+
+#[test]
+fn cached_ranked_catalog_covers_one_hundred_thousand_distinct_files_once() {
+    let shared_catalog = (0..100_000).map(shared_entry).collect::<Vec<_>>();
+    let ranked = ranked_offer_files(&shared_catalog, true);
+    let mut published = HashSet::with_capacity(ranked.len());
+    let mut cursor = 0usize;
+    let mut batches = 0usize;
+
+    while published.len() < ranked.len() {
+        let offered = ranked_offer_files_at_cursor_skipping_published(
+            &ranked,
+            cursor,
+            &published,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
+        );
+        assert!(!offered.entries.is_empty());
+        assert!(offered.entries.len() <= MAX_OFFER_FILES_PER_ADVERTISEMENT);
+        for entry in offered.entries {
+            assert!(published.insert(entry.0));
+        }
+        cursor = offered.next_cursor;
+        batches += 1;
+    }
+
+    assert_eq!(published.len(), 100_000);
+    assert_eq!(batches, 500);
+    assert!(
+        ranked_offer_files_at_cursor_skipping_published(
+            &ranked,
+            cursor,
+            &published,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
+        )
+        .entries
+        .is_empty()
+    );
 }

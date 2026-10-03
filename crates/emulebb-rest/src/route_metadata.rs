@@ -480,6 +480,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const NONE: &[&str] = &[];
     const SNAPSHOT: &[&str] = &["limit"];
     const PAGE: &[&str] = &["offset", "limit"];
+    const SHARED_FILES: &[&str] = &["offset", "limit", "afterHash"];
     const TRANSFERS: &[&str] = &["state", "categoryId", "offset", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
@@ -536,7 +537,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
             _ => NONE,
         }),
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
-        ("GET", "/api/v1/shared-files") => Some(PAGE),
+        ("GET", "/api/v1/shared-files") => Some(SHARED_FILES),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
         ("GET", "/api/v1/transfers") => Some(TRANSFERS),
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),

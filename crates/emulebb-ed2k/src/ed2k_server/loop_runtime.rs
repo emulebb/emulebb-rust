@@ -74,6 +74,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         reconnect_signal: Arc::clone(&reconnect_signal),
         server_list_events,
         add_servers_from_server: config.add_servers_from_server,
+        offer_files_capability_enabled: config.offer_files_capability_enabled,
     };
 
     let configured_servers = match configured_server_entries(&config) {

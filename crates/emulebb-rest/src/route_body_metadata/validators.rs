@@ -50,6 +50,7 @@ const ED2K_SETTINGS_FIELDS: &[&str] = &[
     "downloadLimitBytesPerSec",
     "enableUdpReask",
     "publishEmuleRustIdentity",
+    "offerFilesCapabilityEnabled",
     "addServersFromServer",
     "deadServerRetries",
 ];

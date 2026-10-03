@@ -412,6 +412,7 @@ pub struct Ed2kSettings {
     pub download_limit_bytes_per_sec: u64,
     pub enable_udp_reask: bool,
     pub publish_emule_rust_identity: bool,
+    pub offer_files_capability_enabled: bool,
     pub add_servers_from_server: bool,
     pub dead_server_retries: u32,
 }
@@ -686,6 +687,8 @@ pub struct Ed2kSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_emule_rust_identity: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_files_capability_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_servers_from_server: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dead_server_retries: Option<u32>,
@@ -943,6 +946,7 @@ impl Default for Ed2kSettings {
             download_limit_bytes_per_sec: 0,
             enable_udp_reask: true,
             publish_emule_rust_identity: false,
+            offer_files_capability_enabled: true,
             add_servers_from_server: false,
             dead_server_retries: 1,
         }
@@ -1263,6 +1267,7 @@ impl Ed2kSettingsUpdate {
             && self.download_limit_bytes_per_sec.is_none()
             && self.enable_udp_reask.is_none()
             && self.publish_emule_rust_identity.is_none()
+            && self.offer_files_capability_enabled.is_none()
             && self.add_servers_from_server.is_none()
             && self.dead_server_retries.is_none()
     }
@@ -1452,6 +1457,9 @@ pub fn apply_ed2k_settings_update(settings: &mut Ed2kSettings, update: Ed2kSetti
     }
     if let Some(value) = update.publish_emule_rust_identity {
         settings.publish_emule_rust_identity = value;
+    }
+    if let Some(value) = update.offer_files_capability_enabled {
+        settings.offer_files_capability_enabled = value;
     }
     if let Some(value) = update.add_servers_from_server {
         settings.add_servers_from_server = value;
@@ -1705,6 +1713,7 @@ impl From<Ed2kSettings> for Ed2kSettingsUpdate {
             download_limit_bytes_per_sec: Some(settings.download_limit_bytes_per_sec),
             enable_udp_reask: Some(settings.enable_udp_reask),
             publish_emule_rust_identity: Some(settings.publish_emule_rust_identity),
+            offer_files_capability_enabled: Some(settings.offer_files_capability_enabled),
             add_servers_from_server: Some(settings.add_servers_from_server),
             dead_server_retries: Some(settings.dead_server_retries),
         }

@@ -519,6 +519,7 @@ fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfi
         download_limit_bytes_per_sec: settings.download_limit_bytes_per_sec,
         enable_udp_reask: settings.enable_udp_reask,
         publish_emule_rust_identity: settings.publish_emule_rust_identity,
+        offer_files_capability_enabled: settings.offer_files_capability_enabled,
         add_servers_from_server: settings.add_servers_from_server,
         dead_server_retries: settings.dead_server_retries,
     }

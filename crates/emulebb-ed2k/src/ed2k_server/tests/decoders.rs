@@ -35,6 +35,87 @@ fn server_ident_parser_skips_non_short_named_tags() {
     assert_eq!(description, None);
 }
 
+fn push_exact_named_u32_tag(payload: &mut Vec<u8>, name: &str, value: u32) {
+    payload.push(TAGTYPE_UINT32);
+    payload.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    payload.extend_from_slice(name.as_bytes());
+    payload.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_exact_numeric_u32_tag(payload: &mut Vec<u8>, name: u8, value: u32) {
+    payload.push(TAG_SHORT_NAME_MASK | TAGTYPE_UINT32);
+    payload.push(name);
+    payload.extend_from_slice(&value.to_le_bytes());
+}
+
+#[test]
+fn server_ident_parser_accepts_complete_offer_files_v1_policy() {
+    let mut payload = vec![0u8; 22];
+    payload.extend_from_slice(&5u32.to_le_bytes());
+    push_exact_named_u32_tag(&mut payload, "offerfiles_v", 1);
+    push_exact_named_u32_tag(&mut payload, "offerfiles_batch_max", 200);
+    push_exact_named_u32_tag(&mut payload, "offerfiles_min_interval_ms", 500);
+    push_exact_numeric_u32_tag(&mut payload, ST_SOFTFILES, 100_000);
+    push_exact_numeric_u32_tag(&mut payload, ST_HARDFILES, 201);
+
+    let ident = decode_server_ident_details(&payload).unwrap();
+
+    assert_eq!(
+        ident.offer_files_capability,
+        OfferFilesCapabilityAdvertisement::Supported(OfferFilesPolicy {
+            batch_max: 200,
+            min_interval_ms: 500,
+            soft_files: 100_000,
+            hard_files: 201,
+        })
+    );
+}
+
+#[test]
+fn server_ident_parser_rejects_partial_or_compact_integer_capability() {
+    let mut partial = vec![0u8; 22];
+    partial.extend_from_slice(&1u32.to_le_bytes());
+    push_exact_named_u32_tag(&mut partial, "offerfiles_v", 1);
+    assert!(matches!(
+        decode_server_ident_details(&partial)
+            .unwrap()
+            .offer_files_capability,
+        OfferFilesCapabilityAdvertisement::Invalid(_)
+    ));
+
+    let mut compact = vec![0u8; 22];
+    compact.extend_from_slice(&5u32.to_le_bytes());
+    compact.push(TAGTYPE_UINT8);
+    compact.extend_from_slice(&12u16.to_le_bytes());
+    compact.extend_from_slice(b"offerfiles_v");
+    compact.push(1);
+    push_exact_named_u32_tag(&mut compact, "offerfiles_batch_max", 200);
+    push_exact_named_u32_tag(&mut compact, "offerfiles_min_interval_ms", 500);
+    push_exact_numeric_u32_tag(&mut compact, ST_SOFTFILES, 100_000);
+    push_exact_numeric_u32_tag(&mut compact, ST_HARDFILES, 201);
+    assert!(matches!(
+        decode_server_ident_details(&compact)
+            .unwrap()
+            .offer_files_capability,
+        OfferFilesCapabilityAdvertisement::Invalid(_)
+    ));
+}
+
+#[test]
+fn server_ident_parser_keeps_legacy_when_capability_is_absent() {
+    let mut payload = vec![0u8; 22];
+    payload.extend_from_slice(&2u32.to_le_bytes());
+    push_exact_numeric_u32_tag(&mut payload, ST_SOFTFILES, 1_000);
+    push_exact_numeric_u32_tag(&mut payload, ST_HARDFILES, 2_000);
+
+    assert_eq!(
+        decode_server_ident_details(&payload)
+            .unwrap()
+            .offer_files_capability,
+        OfferFilesCapabilityAdvertisement::Absent
+    );
+}
+
 #[test]
 fn search_results_decoder_extracts_count_and_names() {
     let mut payload = Vec::new();

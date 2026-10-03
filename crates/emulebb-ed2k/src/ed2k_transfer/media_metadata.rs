@@ -706,6 +706,7 @@ mod tests {
             assert_eq!(entry.media.bitrate_kbps, 128);
             summary.file_hash
         };
+        std::fs::remove_file(&source).unwrap();
 
         let reloaded = super::super::Ed2kTransferRuntime::load_or_create(&runtime_root).unwrap();
         let catalog = reloaded.shared_catalog();
@@ -719,6 +720,54 @@ mod tests {
         assert_eq!(entry.media.title, "Example Title");
         assert_eq!(entry.media.length_seconds, 10);
         assert_eq!(entry.media.bitrate_kbps, 128);
+    }
+
+    #[tokio::test]
+    async fn legacy_media_cache_is_refilled_once_on_runtime_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("legacy-cache.mp3");
+        let runtime_root = temp.path().join("runtime");
+        write_synthetic_mp3(&source);
+
+        let file_hash = {
+            let runtime = super::super::Ed2kTransferRuntime::load_or_create(&runtime_root).unwrap();
+            runtime
+                .ingest_local_file(&source, "legacy-cache.mp3")
+                .await
+                .unwrap()
+                .file_hash
+        };
+        let metadata =
+            emulebb_metadata::MetadataStore::open(runtime_root.join("metadata.sqlite")).unwrap();
+        metadata
+            .update_transfer_media_metadata(
+                &file_hash,
+                &emulebb_metadata::MetadataTransferMediaMetadata::default(),
+            )
+            .unwrap();
+        drop(metadata);
+
+        let reloaded = super::super::Ed2kTransferRuntime::load_or_create(&runtime_root).unwrap();
+        let catalog = reloaded.shared_catalog();
+        let guard = catalog.read().await;
+        let entry = guard
+            .iter()
+            .find(|entry| entry.file_hash == file_hash)
+            .unwrap();
+        assert_eq!(entry.media.artist, "Example Artist");
+        drop(guard);
+
+        let metadata =
+            emulebb_metadata::MetadataStore::open(runtime_root.join("metadata.sqlite")).unwrap();
+        let cached = metadata
+            .transfer_media_metadata(&file_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cached.extractor_version,
+            super::super::transfer_sql::MEDIA_METADATA_EXTRACTOR_VERSION
+        );
+        assert_eq!(cached.artist, "Example Artist");
     }
 
     #[test]

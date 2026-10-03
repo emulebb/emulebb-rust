@@ -20,7 +20,7 @@ pub(crate) async fn shared_files(
     State(state): State<RestState>,
     RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
-    let query = match parse_optional_query::<PageQuery>(raw_query.as_deref()) {
+    let query = match parse_optional_query::<SharedFilesQuery>(raw_query.as_deref()) {
         Ok(query) => query,
         Err(response) => return *response,
     };
@@ -28,13 +28,49 @@ pub(crate) async fn shared_files(
         Ok(bounds) => bounds,
         Err(response) => return *response,
     };
-    let (shares, total) = state.core.shares_page(offset, limit).await;
+    if query.after_hash.is_some() && offset != 0 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "afterHash cannot be combined with a non-zero offset",
+        )
+        .into_response();
+    }
+    let (shares, total, has_more) = if let Some(after_hash) = query.after_hash.as_deref() {
+        match state.core.shares_after(Some(after_hash), limit).await {
+            Ok(page) => page,
+            Err(error) => {
+                return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string())
+                    .into_response();
+            }
+        }
+    } else if query.after_hash.is_none() && query.offset.is_none() {
+        match state.core.shares_after(None, limit).await {
+            Ok(page) => page,
+            Err(error) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    error.to_string(),
+                )
+                .into_response();
+            }
+        }
+    } else {
+        let (shares, total) = state.core.shares_page(offset, limit).await;
+        let has_more = offset.saturating_add(shares.len()) < total;
+        (shares, total, has_more)
+    };
+    let next_after_hash = has_more
+        .then(|| shares.last().map(|share| share.hash.clone()))
+        .flatten();
     let items = shares.iter().map(shared_file_response).collect::<Vec<_>>();
     api_ok(json!({
         "items": items,
         "total": total,
         "offset": offset,
-        "limit": limit
+        "limit": limit,
+        "nextAfterHash": next_after_hash
     }))
     .into_response()
 }

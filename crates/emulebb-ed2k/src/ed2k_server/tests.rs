@@ -1,4 +1,5 @@
 use super::background::send_source_request_batch;
+use super::offer_policy::{OfferFilesCapabilityAdvertisement, OfferFilesPolicy};
 use super::{
     BackgroundServerSearchRequest, CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS,
     CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION, ConfiguredServerEntry, ED2K_FILETYPE_PROGRAM,
@@ -18,10 +19,11 @@ use super::{
     SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES,
     SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES, SERVER_UDP_FLAG_TCPOBFUSCATION,
     SERVER_UDP_FLAG_UDPOBFUSCATION, SOURCE_OBFUSCATION_USER_HASH_PRESENT, ST_DESCRIPTION,
-    ST_SERVERNAME, ServerSession, ServerTransportMode, ServerUdpPacket, TAG_SHORT_NAME_MASK,
-    TAGTYPE_STR1, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16, TAGTYPE_UINT32, TAGTYPE_UINT64,
-    biguint_to_fixed_be, decode_callback_request, decode_found_sources, decode_id_change_payload,
-    decode_search_result_page, decode_search_results, decode_server_ident, decode_server_payload,
+    ST_HARDFILES, ST_SERVERNAME, ST_SOFTFILES, ServerSession, ServerTransportMode, ServerUdpPacket,
+    TAG_SHORT_NAME_MASK, TAGTYPE_STR1, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16,
+    TAGTYPE_UINT32, TAGTYPE_UINT64, biguint_to_fixed_be, decode_callback_request,
+    decode_found_sources, decode_id_change_payload, decode_search_result_page,
+    decode_search_results, decode_server_ident, decode_server_ident_details, decode_server_payload,
     decode_server_udp_datagram, decode_server_udp_datagram_with_key, derive_server_cipher,
     derive_server_udp_cipher, ed2k_server_list_event_channel, encode_login_request,
     encode_offer_files_payload, encode_packet, encode_search_request, encode_server_udp_crypt_ping,

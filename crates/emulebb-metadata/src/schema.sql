@@ -73,6 +73,13 @@ CREATE TABLE known_files (
     auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
     comment TEXT NOT NULL DEFAULT '',
     rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
+    media_artist TEXT NOT NULL DEFAULT '',
+    media_album TEXT NOT NULL DEFAULT '',
+    media_title TEXT NOT NULL DEFAULT '',
+    media_length_seconds INTEGER NOT NULL DEFAULT 0 CHECK(media_length_seconds >= 0),
+    media_bitrate_kbps INTEGER NOT NULL DEFAULT 0 CHECK(media_bitrate_kbps >= 0),
+    media_codec TEXT NOT NULL DEFAULT '',
+    media_extractor_version INTEGER NOT NULL DEFAULT 0 CHECK(media_extractor_version >= 0),
     availability_score INTEGER NOT NULL DEFAULT 0 CHECK(availability_score >= 0),
     -- Lifetime bytes we have uploaded to other peers for this file (eMule
     -- CStatisticFile all-time transferred), used to derive the all-time upload

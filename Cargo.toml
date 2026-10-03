@@ -15,7 +15,6 @@ members = [
     "crates/emulebb-pcpnatpmp-sys",
     "crates/emulebb-settings",
     "crates/emulebb-rest",
-    "crates/emulebb-rust-ui",
     "crates/emulebb-tools",
 ]
 resolver = "2"
@@ -69,15 +68,6 @@ serde_urlencoded = "0.7"
 sha1 = { version = "0.11", features = ["oid"] }
 sha1-legacy = { package = "sha1", version = "0.10", features = ["oid"] }
 sha2 = "0.11"
-slint = { version = "1.18.1", default-features = false, features = [
-    "accessibility",
-    "backend-default",
-    "compat-1-2",
-    "renderer-femtovg",
-    "renderer-software",
-    "std",
-] }
-slint-build = "1.18.1"
 socket2 = "0.6"
 symphonia = { version = "0.6.1", default-features = false, features = [
     "aac",

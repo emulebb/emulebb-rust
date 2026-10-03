@@ -21,7 +21,7 @@ use super::{
     ResolvedServerEntry, SERVER_TCP_FLAG_LARGEFILES, SearchCriteria, ServerSession,
     ServerSessionPhase, ServerUdpPacket, decode_udp_found_source_sets,
     decode_udp_search_result_pages, encode_search_request_with_criteria, encode_source_request,
-    merge_found_sources, send_offer_files_advertisement, source_request_opcode,
+    merge_found_sources, send_due_offer_files_advertisement, source_request_opcode,
     validate_found_sources, wait_for_offer_files_settle,
 };
 use crate::ed2k_transfer::Ed2kSharedCatalog;
@@ -718,13 +718,20 @@ pub(super) async fn start_background_server_search(
             Ok(None)
         }
         BackgroundServerSearchRequest::Publish { response } => {
-            let stats = send_offer_files_advertisement(
+            session.request_offer_files_publish();
+            let stats = send_due_offer_files_advertisement(
                 session,
                 context.shared_catalog,
                 context.bind_ip,
                 context.tcp_port,
             )
-            .await?;
+            .await?
+            .unwrap_or_else(|| OfferFilesPublishStats {
+                total_entries: session.offer_files_published_hashes.len(),
+                published_entries: session.offer_files_published_hashes.len(),
+                skipped_duplicate_batch: true,
+                ..OfferFilesPublishStats::default()
+            });
             let _ = response.send(Ok(stats));
             Ok(None)
         }

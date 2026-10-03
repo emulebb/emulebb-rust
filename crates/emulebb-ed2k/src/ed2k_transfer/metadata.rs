@@ -53,6 +53,15 @@ impl Ed2kTransferRuntime {
             .map_err(anyhow::Error::from)?
     }
 
+    /// Return one REST shared-file summary by ED2K hash without scanning the catalog.
+    pub async fn share_entry(&self, file_hash: &str) -> Result<Option<MetadataTransferShareEntry>> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_owned();
+        tokio::task::spawn_blocking(move || metadata.completed_transfer_share_entry(&file_hash))
+            .await
+            .map_err(anyhow::Error::from)?
+    }
+
     /// Return one REST shared-file summary page without hydrating every manifest.
     pub async fn share_entries_page(
         &self,
@@ -73,6 +82,21 @@ impl Ed2kTransferRuntime {
         tokio::task::spawn_blocking(move || metadata.pending_completed_delivery_hashes())
             .await
             .map_err(anyhow::Error::from)?
+    }
+
+    /// Return a keyset page ordered by ED2K hash.
+    pub async fn share_entries_after(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<MetadataTransferShareEntry>, usize, bool)> {
+        let metadata = self.metadata.clone();
+        let after_hash = after_hash.map(str::to_owned);
+        tokio::task::spawn_blocking(move || {
+            metadata.completed_transfer_share_entries_after(after_hash.as_deref(), limit)
+        })
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     /// Ensure a transfer manifest exists for the provided job.

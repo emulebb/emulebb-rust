@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEBUG_BINARIES = ("emulebb-rust", "emulebb-rust-ui", "emulebb-nat-diagnostic")
+DEBUG_BINARIES = ("emulebb-rust", "emulebb-nat-diagnostic")
 RELEASE_BINARIES = (
     "emulebb-rust",
     "emulebb-rust-diagnostics",

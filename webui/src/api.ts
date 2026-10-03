@@ -206,6 +206,12 @@ export type ServerItem = {
   ip?: string;
   ping?: number;
   softFiles?: number;
+  offerFilesMode?: string;
+  offerFilesBatchMax?: number;
+  offerFilesMinIntervalMs?: number;
+  offerFilesFallbackReason?: string;
+  offerFilesPublishedEntries?: number;
+  offerFilesPendingEntries?: number;
   version?: string;
   obfuscationTcpPort?: number | null;
   udpFlags?: number | null;
@@ -522,6 +528,7 @@ export type Ed2kSettings = {
   downloadLimitBytesPerSec?: number;
   enableUdpReask?: boolean;
   publishEmuleRustIdentity?: boolean;
+  offerFilesCapabilityEnabled?: boolean;
   addServersFromServer?: boolean;
   deadServerRetries?: number;
   [key: string]: unknown;

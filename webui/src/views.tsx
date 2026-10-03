@@ -1686,6 +1686,10 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
             <span>Enabled/static</span><strong>{yesNo(selected.enabled !== false)} / {yesNo(selected.static)}</strong>
             <span>Current</span><strong>{yesNo(selected.current)}</strong>
             <span>Soft/hard files</span><strong>{selected.softFiles ?? 0} / {selected.hardFiles ?? 0}</strong>
+            <span>Offer publishing</span><strong>{selected.offerFilesMode ?? "unavailable"}</strong>
+            <span>Offer batch/interval</span><strong>{selected.offerFilesBatchMax ?? 0} / {selected.offerFilesMinIntervalMs ?? 0} ms</strong>
+            <span>Offer progress</span><strong>{selected.offerFilesPublishedEntries ?? 0} / {(selected.offerFilesPublishedEntries ?? 0) + (selected.offerFilesPendingEntries ?? 0)}</strong>
+            <span>Offer fallback</span><strong>{selected.offerFilesFallbackReason ?? ""}</strong>
             <span>Version</span><strong>{selected.version || ""}</strong>
             <span>Obfuscation/UDP flags</span><strong>{selected.obfuscationTcpPort ?? ""} / {selected.udpFlags ?? ""}</strong>
             <span>Failures</span><strong>{selected.failedCount ?? 0}</strong>
@@ -2264,6 +2268,7 @@ type SettingsForm = {
   autoConnectStaticOnly: boolean;
   enableUdpReask: boolean;
   publishEmuleRustIdentity: boolean;
+  offerFilesCapabilityEnabled: boolean;
   kadPublishSharedFilesEnabled: boolean;
   kadBootstrapMinRoutingContacts: string;
   kadLocalStoreEnabled: boolean;
@@ -2370,6 +2375,7 @@ const emptySettingsForm: SettingsForm = {
   autoConnectStaticOnly: false,
   enableUdpReask: false,
   publishEmuleRustIdentity: false,
+  offerFilesCapabilityEnabled: true,
   kadPublishSharedFilesEnabled: false,
   kadBootstrapMinRoutingContacts: "",
   kadLocalStoreEnabled: false,
@@ -2555,7 +2561,8 @@ export function SettingsView(props: {
           "ed2k.maxHalfOpenConnections",
           "kad.listenPort",
           "ed2k.obfuscationEnabled",
-          "ed2k.publishEmuleRustIdentity"
+          "ed2k.publishEmuleRustIdentity",
+          "ed2k.offerFilesCapabilityEnabled"
         ]) && (
           <SettingsControlSection title="Network">
             <section class="view-grid compact-grid">
@@ -2580,6 +2587,7 @@ export function SettingsView(props: {
               {renderToggle("core.networkKademlia", "networkKademlia", "Network Kad")}
               {renderToggle("ed2k.obfuscationEnabled", "obfuscationEnabled", "Obfuscation")}
               {renderToggle("ed2k.publishEmuleRustIdentity", "publishEmuleRustIdentity", "Publish Rust identity")}
+              {renderToggle("ed2k.offerFilesCapabilityEnabled", "offerFilesCapabilityEnabled", "Negotiated fast server publishing")}
             </div>
           </SettingsControlSection>
         )}
@@ -3196,6 +3204,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(ed2k, "autoConnectStaticOnly", form.autoConnectStaticOnly, baseline.autoConnectStaticOnly);
   putChanged(ed2k, "enableUdpReask", form.enableUdpReask, baseline.enableUdpReask);
   putChanged(ed2k, "publishEmuleRustIdentity", form.publishEmuleRustIdentity, baseline.publishEmuleRustIdentity);
+  putChanged(ed2k, "offerFilesCapabilityEnabled", form.offerFilesCapabilityEnabled, baseline.offerFilesCapabilityEnabled);
   putChanged(ed2k, "deadServerRetries", parseNumber(form.ed2kDeadServerRetries), parseNumber(baseline.ed2kDeadServerRetries));
   if (!isEmptyRecord(uploadQueue)) {
     ed2k.uploadQueue = uploadQueue;
@@ -3345,6 +3354,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     autoConnectStaticOnly: boolField(settings.ed2k, "autoConnectStaticOnly"),
     enableUdpReask: boolField(settings.ed2k, "enableUdpReask"),
     publishEmuleRustIdentity: boolField(settings.ed2k, "publishEmuleRustIdentity"),
+    offerFilesCapabilityEnabled: boolField(settings.ed2k, "offerFilesCapabilityEnabled"),
     kadBootstrapMinRoutingContacts: String(numberField(settings.kad, "bootstrapMinRoutingContacts") ?? ""),
     kadLocalStoreEnabled: boolField(settings.kad, "localStoreEnabled"),
     kadPublishSharedFilesEnabled: boolField(settings.kad, "publishSharedFilesEnabled"),

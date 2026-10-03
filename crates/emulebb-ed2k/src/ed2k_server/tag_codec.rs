@@ -17,6 +17,19 @@ pub(super) enum DecodedTagValue {
     BoolArray(Vec<u8>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DecodedTagName {
+    Numeric(u8),
+    Text(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DecodedTag {
+    pub(super) name: DecodedTagName,
+    pub(super) value: Option<DecodedTagValue>,
+    pub(super) base_type: u8,
+}
+
 pub(super) fn push_u32_tag(payload: &mut Vec<u8>, name: u8, value: u32) {
     payload.push(TAGTYPE_UINT32);
     payload.extend_from_slice(&1u16.to_le_bytes());
@@ -166,8 +179,17 @@ pub(super) fn decode_tag(bytes: &[u8]) -> Result<(Option<u8>, Option<String>, &[
 }
 
 pub(super) fn decode_tag_value(
-    mut bytes: &[u8],
+    bytes: &[u8],
 ) -> Result<(Option<u8>, Option<DecodedTagValue>, &[u8])> {
+    let (tag, rest) = decode_tag_details(bytes)?;
+    let numeric_name = match tag.name {
+        DecodedTagName::Numeric(name) => Some(name),
+        DecodedTagName::Text(_) => None,
+    };
+    Ok((numeric_name, tag.value, rest))
+}
+
+pub(super) fn decode_tag_details(mut bytes: &[u8]) -> Result<(DecodedTag, &[u8])> {
     if bytes.len() < 2 {
         anyhow::bail!("short ED2K tag header");
     }
@@ -177,9 +199,12 @@ pub(super) fn decode_tag_value(
     bytes = &bytes[1..];
 
     let tag_name = if short_name {
+        if bytes.is_empty() {
+            anyhow::bail!("short ED2K short-name tag");
+        }
         let name = bytes[0];
         bytes = &bytes[1..];
-        Some(name)
+        DecodedTagName::Numeric(name)
     } else {
         if bytes.len() < 2 {
             anyhow::bail!("short ED2K long-name length");
@@ -189,7 +214,11 @@ pub(super) fn decode_tag_value(
         if bytes.len() < name_len {
             anyhow::bail!("short ED2K long-name bytes");
         }
-        let name = if name_len == 1 { Some(bytes[0]) } else { None };
+        let name = if name_len == 1 {
+            DecodedTagName::Numeric(bytes[0])
+        } else {
+            DecodedTagName::Text(String::from_utf8_lossy(&bytes[..name_len]).into_owned())
+        };
         bytes = &bytes[name_len..];
         name
     };
@@ -300,5 +329,12 @@ pub(super) fn decode_tag_value(
         _ => anyhow::bail!("unsupported ED2K tag type 0x{base_type:02X}"),
     };
 
-    Ok((tag_name, decoded_value, bytes))
+    Ok((
+        DecodedTag {
+            name: tag_name,
+            value: decoded_value,
+            base_type,
+        },
+        bytes,
+    ))
 }

@@ -1,13 +1,16 @@
 use anyhow::Result;
 use emulebb_metadata::{
-    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferManifest, MetadataTransferPiece,
-    MetadataTransferRange, MetadataTransferSource,
+    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferManifest,
+    MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferRange,
+    MetadataTransferSource,
 };
 
 use super::{
     Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kSourceHint,
     Ed2kTransferState, catalog::Ed2kSharedPublishStats,
 };
+
+pub(super) const MEDIA_METADATA_EXTRACTOR_VERSION: u32 = 1;
 
 pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTransferManifest {
     MetadataTransferManifest {
@@ -145,24 +148,37 @@ pub(super) fn completed_catalog_from_metadata_store(
     metadata
         .completed_transfer_catalog_entries()?
         .into_iter()
-        .map(|entry| shared_entry_from_catalog_entry(entry, root_dir))
+        .map(|entry| shared_entry_from_catalog_entry(metadata, entry, root_dir))
         .collect()
 }
 
 fn shared_entry_from_catalog_entry(
+    metadata: &MetadataStore,
     entry: MetadataTransferCatalogEntry,
     root_dir: &std::path::Path,
 ) -> Result<Ed2kSharedEntry> {
-    let media_path = entry
-        .media_path
-        .as_deref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            root_dir
-                .join(&entry.file_hash)
-                .join(super::PAYLOAD_FILE_NAME)
-        });
-    let media = super::media_metadata::extract_media_metadata(&media_path, &entry.display_name);
+    let media = if entry.media.extractor_version == MEDIA_METADATA_EXTRACTOR_VERSION {
+        media_from_metadata(entry.media.clone())
+    } else {
+        let media_path = entry
+            .media_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                root_dir
+                    .join(&entry.file_hash)
+                    .join(super::PAYLOAD_FILE_NAME)
+            });
+        let media = super::media_metadata::extract_media_metadata(&media_path, &entry.display_name);
+        let persisted = media_to_metadata(&media, MEDIA_METADATA_EXTRACTOR_VERSION);
+        if let Err(error) = metadata.update_transfer_media_metadata(&entry.file_hash, &persisted) {
+            tracing::warn!(
+                file_hash = %entry.file_hash,
+                "failed to persist refreshed shared media metadata: {error:#}"
+            );
+        }
+        media
+    };
     Ok(Ed2kSharedEntry {
         file_hash: entry.file_hash,
         display_name: entry.display_name,
@@ -186,6 +202,34 @@ fn shared_entry_from_catalog_entry(
             ..Default::default()
         },
     })
+}
+
+pub(super) fn media_from_metadata(
+    media: MetadataTransferMediaMetadata,
+) -> super::Ed2kMediaMetadata {
+    super::Ed2kMediaMetadata {
+        artist: media.artist,
+        album: media.album,
+        title: media.title,
+        length_seconds: media.length_seconds,
+        bitrate_kbps: media.bitrate_kbps,
+        codec: media.codec,
+    }
+}
+
+pub(super) fn media_to_metadata(
+    media: &super::Ed2kMediaMetadata,
+    extractor_version: u32,
+) -> MetadataTransferMediaMetadata {
+    MetadataTransferMediaMetadata {
+        artist: media.artist.clone(),
+        album: media.album.clone(),
+        title: media.title.clone(),
+        length_seconds: media.length_seconds,
+        bitrate_kbps: media.bitrate_kbps,
+        codec: media.codec.clone(),
+        extractor_version,
+    }
 }
 
 fn transfer_state_to_sql(state: Ed2kTransferState) -> &'static str {

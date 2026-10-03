@@ -93,6 +93,25 @@ impl EmulebbCore {
         }
     }
 
+    pub async fn shares_after(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<LocalShare>, usize, bool)> {
+        let (entries, total, has_more) = self
+            .ed2k_transfers
+            .share_entries_after(after_hash, limit)
+            .await?;
+        Ok((
+            entries
+                .into_iter()
+                .map(|entry| self.local_share_from_entry(entry))
+                .collect(),
+            total,
+            has_more,
+        ))
+    }
+
     fn local_share_from_entry(&self, entry: MetadataTransferShareEntry) -> LocalShare {
         LocalShare {
             hash: entry.file_hash.clone(),
@@ -134,10 +153,14 @@ impl EmulebbCore {
     }
 
     pub async fn share(&self, hash: &str) -> Option<LocalShare> {
-        self.shares()
-            .await
-            .into_iter()
-            .find(|share| share.hash.eq_ignore_ascii_case(hash))
+        match self.ed2k_transfers.share_entry(hash).await {
+            Ok(Some(entry)) => Some(self.local_share_from_entry(entry)),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(hash, "failed to read ED2K shared-file summary: {error}");
+                None
+            }
+        }
     }
 
     pub async fn update_shared_file(

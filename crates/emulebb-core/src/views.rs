@@ -520,6 +520,12 @@ pub(crate) fn server_info_from_parts(
         ip: String::new(),
         ping: 0,
         soft_files: 0,
+        offer_files_mode: None,
+        offer_files_batch_max: None,
+        offer_files_min_interval_ms: None,
+        offer_files_fallback_reason: None,
+        offer_files_published_entries: 0,
+        offer_files_pending_entries: 0,
         version: String::new(),
         obfuscation_tcp_port: None,
         obfuscation_udp_port: None,
@@ -577,6 +583,12 @@ pub(crate) struct ServerLiveDetails {
     pub(crate) udp_flags: Option<u32>,
     pub(crate) soft_files: Option<u32>,
     pub(crate) hard_files: Option<u32>,
+    pub(crate) offer_files_mode: Option<String>,
+    pub(crate) offer_files_batch_max: Option<u32>,
+    pub(crate) offer_files_min_interval_ms: Option<u32>,
+    pub(crate) offer_files_fallback_reason: Option<String>,
+    pub(crate) offer_files_published_entries: usize,
+    pub(crate) offer_files_pending_entries: usize,
     pub(crate) obfuscation_tcp_port: Option<u16>,
     pub(crate) obfuscation_udp_port: Option<u16>,
     pub(crate) udp_key: Option<u32>,
@@ -623,6 +635,14 @@ pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLi
     if let Some(hard_files) = live.hard_files {
         server.hard_files = u64::from(hard_files);
     }
+    server.offer_files_mode.clone_from(&live.offer_files_mode);
+    server.offer_files_batch_max = live.offer_files_batch_max;
+    server.offer_files_min_interval_ms = live.offer_files_min_interval_ms;
+    server
+        .offer_files_fallback_reason
+        .clone_from(&live.offer_files_fallback_reason);
+    server.offer_files_published_entries = live.offer_files_published_entries;
+    server.offer_files_pending_entries = live.offer_files_pending_entries;
     if let Some(port) = live.obfuscation_tcp_port {
         server.obfuscation_tcp_port = Some(port);
     }

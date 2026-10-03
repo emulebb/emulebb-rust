@@ -2811,6 +2811,7 @@ impl EmulebbCore {
                             diagnostics.next_cursor = stats.next_cursor;
                             diagnostics.wrapped = stats.wrapped;
                             diagnostics.skipped_duplicate_batch = stats.skipped_duplicate_batch;
+                            diagnostics.session_pump_active = stats.session_pump_active;
                             diagnostics.last_error = None;
                             diagnostics.last_success_at_ms = Utc::now().timestamp_millis();
                         },
@@ -2823,9 +2824,13 @@ impl EmulebbCore {
                         next_cursor = stats.next_cursor,
                         wrapped = stats.wrapped,
                         skipped_duplicate_batch = stats.skipped_duplicate_batch,
+                        session_pump_active = stats.session_pump_active,
                         "refreshed ED2K shared catalog advertisement"
                     );
-                    if !stats.wrapped && !stats.skipped_duplicate_batch {
+                    if !stats.wrapped
+                        && !stats.skipped_duplicate_batch
+                        && !stats.session_pump_active
+                    {
                         self.shared_catalog_publish_dirty
                             .store(true, Ordering::Release);
                         ed2k_publish_diagnostics::record(
@@ -2965,6 +2970,12 @@ impl EmulebbCore {
             udp_flags: state.server_udp_flags,
             soft_files: state.server_soft_files,
             hard_files: state.server_hard_files,
+            offer_files_mode: state.offer_files_mode.clone(),
+            offer_files_batch_max: state.offer_files_batch_max,
+            offer_files_min_interval_ms: state.offer_files_min_interval_ms,
+            offer_files_fallback_reason: state.offer_files_fallback_reason.clone(),
+            offer_files_published_entries: state.offer_files_published_entries,
+            offer_files_pending_entries: state.offer_files_pending_entries,
             obfuscation_tcp_port: state.server_obfuscation_port_tcp,
             obfuscation_udp_port: state.server_obfuscation_port_udp,
             udp_key: state.server_udp_key,

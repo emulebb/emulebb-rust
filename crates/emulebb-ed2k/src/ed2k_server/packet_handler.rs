@@ -5,16 +5,19 @@ use tracing::{debug, error, info, warn};
 
 use crate::ed2k_tcp::{connect_callback_peer, enrich_hello_identity};
 
+use super::offer_policy::{OfferFilesCapabilityAdvertisement, OfferFilesPolicy};
 use super::server_description::valid_dynamic_host;
 use super::server_events::Ed2kServerListEvent;
+use super::tag_codec::{DecodedTag, DecodedTagName, DecodedTagValue, decode_tag_details};
 use super::types::{CallbackRequest, ServerSessionContext};
 use super::{
-    Ed2kPacket, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE, OP_QUERY_MORE_RESULT,
-    OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
-    OP_SERVERSTATUS, ST_DESCRIPTION, ST_SERVERNAME, ServerSession, ServerSessionPhase,
-    decode_ed2k_string, decode_search_result_page, decode_server_list, decode_tag,
-    encode_search_request, format_connect_options, format_server_flags, ipv4_from_client_id,
-    is_low_id, log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
+    Ed2kPacket, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE, OP_OFFERFILES,
+    OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT,
+    OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME,
+    ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32, decode_ed2k_string,
+    decode_search_result_page, decode_server_list, encode_search_request, format_connect_options,
+    format_server_flags, ipv4_from_client_id, is_low_id, log_search_result_page,
+    send_connected_server_startup, wait_for_offer_files_settle,
 };
 
 #[expect(
@@ -144,21 +147,25 @@ pub(super) async fn handle_server_packet(
             }
         }
         OP_SERVERIDENT => {
-            let (name, description) = decode_server_ident(&packet.payload)?;
+            let ident = decode_server_ident_details(&packet.payload)?;
             {
                 let mut guard = session.state.write().await;
-                if let Some(name) = &name {
+                if let Some(name) = &ident.name {
                     guard.server_name = Some(name.clone());
                 }
-                if let Some(description) = &description {
+                if let Some(description) = &ident.description {
                     guard.server_description = Some(description.clone());
                 }
             }
+            session
+                .observe_offer_files_capability(ident.offer_files_capability.clone())
+                .await;
             debug!(
-                "ED2K server ident from {}: name={} description={}",
+                "ED2K server ident from {}: name={} description={} offer_files_capability={:?}",
                 session.endpoint,
-                name.as_deref().unwrap_or("-"),
-                description.as_deref().unwrap_or("-")
+                ident.name.as_deref().unwrap_or("-"),
+                ident.description.as_deref().unwrap_or("-"),
+                ident.offer_files_capability,
             );
             if allow_probe_search {
                 maybe_send_probe_search(session, context).await?;
@@ -294,6 +301,16 @@ pub(super) async fn handle_server_packet(
             );
         }
         OP_REJECT => {
+            if session.last_tx_opcode == Some(OP_OFFERFILES) && session.offer_files_negotiated() {
+                warn!(
+                    "ED2K server {} rejected a negotiated OP_OFFERFILES batch; locking this connection to legacy pacing",
+                    session.endpoint
+                );
+                session
+                    .fallback_offer_files_to_legacy("server rejected negotiated OP_OFFERFILES")
+                    .await;
+                return Ok(());
+            }
             anyhow::bail!("ED2K server {} rejected the last command", session.endpoint);
         }
         opcode => {
@@ -456,24 +473,136 @@ pub(super) fn decode_callback_request(payload: &[u8]) -> Result<Option<CallbackR
     }))
 }
 
-pub(super) fn decode_server_ident(payload: &[u8]) -> Result<(Option<String>, Option<String>)> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct DecodedServerIdent {
+    pub(super) name: Option<String>,
+    pub(super) description: Option<String>,
+    pub(super) offer_files_capability: OfferFilesCapabilityAdvertisement,
+}
+
+fn exact_u32_tag(tag: &DecodedTag) -> Option<u32> {
+    if tag.base_type != TAGTYPE_UINT32 {
+        return None;
+    }
+    match tag.value {
+        Some(DecodedTagValue::Unsigned(value)) => u32::try_from(value).ok(),
+        _ => None,
+    }
+}
+
+fn set_capability_value(
+    slot: &mut Option<u32>,
+    tag: &DecodedTag,
+    label: &str,
+    errors: &mut Vec<String>,
+) {
+    if slot.is_some() {
+        errors.push(format!("duplicate {label}"));
+        return;
+    }
+    match exact_u32_tag(tag) {
+        Some(value) => *slot = Some(value),
+        None => errors.push(format!("{label} is not TAGTYPE_UINT32")),
+    }
+}
+
+pub(super) fn decode_server_ident_details(payload: &[u8]) -> Result<DecodedServerIdent> {
     if payload.len() < 26 {
-        return Ok((None, None));
+        return Ok(DecodedServerIdent {
+            name: None,
+            description: None,
+            offer_files_capability: OfferFilesCapabilityAdvertisement::Absent,
+        });
     }
     let tag_count = u32::from_le_bytes(payload[22..26].try_into().unwrap());
     let mut cursor = &payload[26..];
     let mut name = None;
     let mut description = None;
+    let mut capability_seen = false;
+    let mut capability_errors = Vec::new();
+    let mut version = None;
+    let mut batch_max = None;
+    let mut min_interval_ms = None;
+    let mut soft_files = None;
+    let mut hard_files = None;
     for _ in 0..tag_count {
-        let (tag_name, tag_value, rest) = decode_tag(cursor)?;
+        let (tag, rest) = decode_tag_details(cursor)?;
         cursor = rest;
-        match tag_name {
-            Some(ST_SERVERNAME) => name = tag_value,
-            Some(ST_DESCRIPTION) => description = tag_value,
+        match &tag.name {
+            DecodedTagName::Numeric(ST_SERVERNAME) => {
+                if let Some(DecodedTagValue::String(value)) = tag.value {
+                    name = Some(value);
+                }
+            }
+            DecodedTagName::Numeric(ST_DESCRIPTION) => {
+                if let Some(DecodedTagValue::String(value)) = tag.value {
+                    description = Some(value);
+                }
+            }
+            DecodedTagName::Numeric(ST_SOFTFILES) => set_capability_value(
+                &mut soft_files,
+                &tag,
+                "ST_SOFTFILES",
+                &mut capability_errors,
+            ),
+            DecodedTagName::Numeric(ST_HARDFILES) => set_capability_value(
+                &mut hard_files,
+                &tag,
+                "ST_HARDFILES",
+                &mut capability_errors,
+            ),
+            DecodedTagName::Text(tag_name) if tag_name == "offerfiles_v" => {
+                capability_seen = true;
+                set_capability_value(&mut version, &tag, "offerfiles_v", &mut capability_errors);
+            }
+            DecodedTagName::Text(tag_name) if tag_name == "offerfiles_batch_max" => {
+                capability_seen = true;
+                set_capability_value(
+                    &mut batch_max,
+                    &tag,
+                    "offerfiles_batch_max",
+                    &mut capability_errors,
+                );
+            }
+            DecodedTagName::Text(tag_name) if tag_name == "offerfiles_min_interval_ms" => {
+                capability_seen = true;
+                set_capability_value(
+                    &mut min_interval_ms,
+                    &tag,
+                    "offerfiles_min_interval_ms",
+                    &mut capability_errors,
+                );
+            }
             _ => {}
         }
     }
-    Ok((name, description))
+    let offer_files_capability = if !capability_seen {
+        OfferFilesCapabilityAdvertisement::Absent
+    } else if !capability_errors.is_empty() {
+        OfferFilesCapabilityAdvertisement::Invalid(capability_errors.join("; "))
+    } else {
+        match (version, batch_max, min_interval_ms, soft_files, hard_files) {
+            (Some(version), Some(batch_max), Some(min_interval_ms), Some(soft), Some(hard)) => {
+                match OfferFilesPolicy::validate(version, batch_max, min_interval_ms, soft, hard) {
+                    Ok(policy) => OfferFilesCapabilityAdvertisement::Supported(policy),
+                    Err(error) => OfferFilesCapabilityAdvertisement::Invalid(error.to_string()),
+                }
+            }
+            _ => OfferFilesCapabilityAdvertisement::Invalid(
+                "offerfiles_v capability is incomplete".to_string(),
+            ),
+        }
+    };
+    Ok(DecodedServerIdent {
+        name,
+        description,
+        offer_files_capability,
+    })
+}
+
+pub(super) fn decode_server_ident(payload: &[u8]) -> Result<(Option<String>, Option<String>)> {
+    let ident = decode_server_ident_details(payload)?;
+    Ok((ident.name, ident.description))
 }
 
 #[cfg(test)]

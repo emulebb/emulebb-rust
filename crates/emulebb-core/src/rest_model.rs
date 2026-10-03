@@ -104,6 +104,16 @@ pub struct ServerInfo {
     pub ip: String,
     pub ping: u32,
     pub soft_files: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_files_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_files_batch_max: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_files_min_interval_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_files_fallback_reason: Option<String>,
+    pub offer_files_published_entries: usize,
+    pub offer_files_pending_entries: usize,
     pub version: String,
     pub obfuscation_tcp_port: Option<u16>,
     pub udp_flags: Option<u32>,

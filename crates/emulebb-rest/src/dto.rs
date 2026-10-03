@@ -92,6 +92,14 @@ pub(crate) struct PageQuery {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SharedFilesQuery {
+    pub(crate) offset: Option<usize>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) after_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TransfersQuery {
     pub(crate) state: Option<String>,
     pub(crate) category_id: Option<u32>,

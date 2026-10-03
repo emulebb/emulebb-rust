@@ -48,7 +48,7 @@ const UDP_SOURCE_REQUEST_G1_BYTES_PER_FILE: usize = 16;
 const UDP_SOURCE_REQUEST_G2_BYTES_PER_FILE: usize = 20;
 const UDP_SOURCE_REQUEST_G2_LARGE_FILE_EXTRA_BYTES: usize = 8;
 
-type OfferedFileEntry = ([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata);
+pub(super) type OfferedFileEntry = ([u8; 16], String, u64, u8, bool, u8, Ed2kMediaMetadata);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Ed2kUdpSourceRequestTarget {
@@ -148,6 +148,15 @@ fn encode_offer_files_payload_at_cursor(
             server_supports_large_files,
         ),
     };
+    encode_offered_files_catalog(offered_files, client_id, tcp_port, server_flags)
+}
+
+fn encode_offered_files_catalog(
+    offered_files: OfferedFilesCatalog,
+    client_id: Option<u32>,
+    tcp_port: u16,
+    server_flags: Option<u32>,
+) -> EncodedOfferFilesPayload {
     let mut payload = Vec::with_capacity(80 * offered_files.entries.len());
     payload.extend_from_slice(
         &u32::try_from(offered_files.entries.len())
@@ -462,6 +471,7 @@ pub struct OfferFilesPublishStats {
     pub next_cursor: usize,
     pub wrapped: bool,
     pub skipped_duplicate_batch: bool,
+    pub session_pump_active: bool,
 }
 
 fn offered_files_catalog_at_cursor(
@@ -544,20 +554,45 @@ fn offered_files_catalog_at_cursor_skipping_published(
     }
 }
 
+fn ranked_offer_files_at_cursor_skipping_published(
+    ranked: &[OfferedFileEntry],
+    cursor: usize,
+    already_published: &HashSet<[u8; 16]>,
+    max_offer_files: usize,
+) -> OfferedFilesCatalog {
+    if ranked.is_empty() || max_offer_files == 0 {
+        return OfferedFilesCatalog {
+            entries: Vec::new(),
+            next_cursor: 0,
+            total_entries: ranked.len(),
+        };
+    }
+    let max_offer_files = max_offer_files.min(MAX_OFFER_FILES_PER_ADVERTISEMENT);
+    let total_entries = ranked.len();
+    let start = cursor % total_entries;
+    let mut entries = Vec::with_capacity(max_offer_files);
+    let mut scanned = 0usize;
+    while scanned < total_entries && entries.len() < max_offer_files {
+        let index = (start + scanned) % total_entries;
+        let entry = &ranked[index];
+        if !already_published.contains(&entry.0) {
+            entries.push(entry.clone());
+        }
+        scanned += 1;
+    }
+    OfferedFilesCatalog {
+        entries,
+        next_cursor: (start + scanned) % total_entries,
+        total_entries,
+    }
+}
+
 pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]) -> u64 {
     let mut hasher = DefaultHasher::new();
     // Change-detection hash over the full ranked share (server-independent): a
     // catalog edit must trigger a republish regardless of the connected server's
     // large-file support, so hash the unfiltered candidate set.
-    offered_files_catalog_at_cursor(shared_catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT, true)
-        .entries
-        .hash(&mut hasher);
-    hasher.finish()
-}
-
-fn offer_files_entries_fingerprint(entries: &[OfferedFileEntry]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    entries.hash(&mut hasher);
+    ranked_offer_files(shared_catalog, true).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -595,11 +630,16 @@ fn popular_hash_offer_file(hash: &Ed2kSharedEntry) -> Option<OfferedFileEntry> {
     ))
 }
 
-fn ranked_offer_files(
+pub(super) fn ranked_offer_files(
     shared_catalog: &[Ed2kSharedEntry],
     server_supports_large_files: bool,
 ) -> Vec<OfferedFileEntry> {
     let now_unix_ms = unix_time_ms();
+    let verified_hashes = shared_catalog
+        .iter()
+        .filter(|entry| !entry.compatibility_hint)
+        .filter_map(|entry| entry.parsed_hash().ok().map(|hash| hash.0))
+        .collect::<HashSet<_>>();
     let mut ranked = shared_catalog
         .iter()
         .enumerate()
@@ -617,6 +657,9 @@ fn ranked_offer_files(
                 return None;
             }
             let offered = popular_hash_offer_file(entry)?;
+            if entry.compatibility_hint && verified_hashes.contains(&offered.0) {
+                return None;
+            }
             let rank = shared_publish_rank(SharedPublishRankInput {
                 file_hash: &entry.file_hash,
                 file_size: entry.file_size,
@@ -638,7 +681,12 @@ fn ranked_offer_files(
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|(left, _), (right, _)| compare_shared_publish_rank(left, right));
-    ranked.into_iter().map(|(_, offered)| offered).collect()
+    let mut seen = HashSet::new();
+    ranked
+        .into_iter()
+        .map(|(_, offered)| offered)
+        .filter(|offered| seen.insert(offered.0))
+        .collect()
 }
 
 fn unix_time_ms() -> i64 {
@@ -715,28 +763,44 @@ fn emule_version_tag() -> u32 {
 pub(super) async fn send_offer_files_advertisement(
     session: &mut ServerSession,
     shared_catalog: &Ed2kSharedCatalog,
-    bind_ip: Ipv4Addr,
+    _bind_ip: Ipv4Addr,
     tcp_port: u16,
 ) -> Result<OfferFilesPublishStats> {
-    let shared_catalog_snapshot = shared_catalog.read().await.clone();
+    if session.offer_files_refresh_catalog {
+        let server_supports_large_files =
+            session.server_flags.unwrap_or_default() & SERVER_TCP_FLAG_LARGEFILES != 0;
+        let ranked = {
+            let catalog = shared_catalog.read().await;
+            ranked_offer_files(&catalog, server_supports_large_files)
+        };
+        let mut hasher = DefaultHasher::new();
+        ranked.hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        if session.offer_files_catalog_fingerprint != Some(fingerprint) {
+            session.offer_files_catalog_cursor = 0;
+            session.offer_files_published_hashes.clear();
+        }
+        session.offer_files_catalog_fingerprint = Some(fingerprint);
+        session.offer_files_ranked_catalog = ranked;
+        session.offer_files_refresh_catalog = false;
+    }
     let current_cursor = session.offer_files_catalog_cursor;
-    let encoded = encode_offer_files_payload_at_cursor(
-        &shared_catalog_snapshot,
+    let offered_files = ranked_offer_files_at_cursor_skipping_published(
+        &session.offer_files_ranked_catalog,
         current_cursor,
-        Some(&session.offer_files_published_hashes),
+        &session.offer_files_published_hashes,
+        session.offer_files_batch_limit(),
+    );
+    let encoded = encode_offered_files_catalog(
+        offered_files,
         session.assigned_client_id,
-        bind_ip,
         tcp_port,
         session.server_flags,
-        super::server_entry::server_offer_file_limit(session.server_soft_files),
     );
-    let wrapped =
-        offer_files_cursor_wrapped(encoded.total_entries, current_cursor, encoded.next_cursor);
-    let catalog_fingerprint = offer_files_entries_fingerprint(&encoded.entries);
-    let published_before = offer_files_published_count(
-        &shared_catalog_snapshot,
-        &session.offer_files_published_hashes,
-    );
+    let published_before = session
+        .offer_files_published_hashes
+        .len()
+        .min(encoded.total_entries);
     let sent_new_entries = encoded
         .entries
         .iter()
@@ -746,6 +810,7 @@ pub(super) async fn send_offer_files_advertisement(
         .saturating_add(sent_new_entries)
         .min(encoded.total_entries);
     let pending_after = encoded.total_entries.saturating_sub(published_after);
+    let wrapped = pending_after == 0;
     if encoded.entries.is_empty() {
         #[cfg(feature = "packet-diagnostics")]
         log_shared_publish_offer_batch(session, current_cursor, &encoded, true, true);
@@ -757,31 +822,19 @@ pub(super) async fn send_offer_files_advertisement(
             next_cursor: encoded.next_cursor,
             wrapped: true,
             skipped_duplicate_batch: true,
-        });
-    }
-    if session.offer_files_sent
-        && session.offer_files_catalog_fingerprint == Some(catalog_fingerprint)
-    {
-        #[cfg(feature = "packet-diagnostics")]
-        log_shared_publish_offer_batch(session, current_cursor, &encoded, wrapped, true);
-        return Ok(OfferFilesPublishStats {
-            entries_sent: encoded.entries.len(),
-            total_entries: encoded.total_entries,
-            published_entries: published_after,
-            pending_entries: pending_after,
-            next_cursor: encoded.next_cursor,
-            wrapped,
-            skipped_duplicate_batch: true,
+            session_pump_active: false,
         });
     }
     let was_sent = session.offer_files_sent;
     session.send_packet(OP_OFFERFILES, &encoded.payload).await?;
     session.offer_files_sent = true;
     session.offer_files_sent_at = Some(Instant::now());
-    session.offer_files_catalog_fingerprint = Some(catalog_fingerprint);
     session.offer_files_catalog_cursor = encoded.next_cursor;
     for (file_hash, _, _, _, _, _, _) in &encoded.entries {
         session.offer_files_published_hashes.insert(*file_hash);
+        session
+            .offer_files_distinct_published_hashes
+            .insert(*file_hash);
     }
     mark_offer_files_published(shared_catalog, &encoded.entries, unix_time_ms()).await;
     session.set_phase(
@@ -808,7 +861,31 @@ pub(super) async fn send_offer_files_advertisement(
         next_cursor: encoded.next_cursor,
         wrapped,
         skipped_duplicate_batch: false,
+        session_pump_active: false,
     })
+}
+
+pub(super) async fn send_due_offer_files_advertisement(
+    session: &mut ServerSession,
+    shared_catalog: &Ed2kSharedCatalog,
+    bind_ip: Ipv4Addr,
+    tcp_port: u16,
+) -> Result<Option<OfferFilesPublishStats>> {
+    if !session.offer_files_publish_due() {
+        return Ok(None);
+    }
+    let mut stats =
+        send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
+    session.finish_offer_files_batch(
+        stats.entries_sent,
+        stats.pending_entries,
+        stats.skipped_duplicate_batch,
+    );
+    stats.session_pump_active = session.offer_files_publish_requested;
+    session
+        .publish_offer_files_progress(stats.published_entries, stats.pending_entries)
+        .await;
+    Ok(Some(stats))
 }
 
 async fn mark_offer_files_published(
@@ -816,16 +893,12 @@ async fn mark_offer_files_published(
     entries: &[OfferedFileEntry],
     published_at_ms: i64,
 ) {
-    let published = entries
-        .iter()
-        .map(|(file_hash, _, _, _, _, _, _)| hex::encode(file_hash))
-        .collect::<HashSet<_>>();
     let mut catalog = shared_catalog.write().await;
-    catalog.mutate_all(|entry| {
-        if published.contains(&entry.file_hash.to_ascii_lowercase()) {
+    for (file_hash, _, _, _, _, _, _) in entries {
+        catalog.update_by_hash(&Ed2kHash(*file_hash), |entry| {
             entry.publish.last_ed2k_publish_unix_ms = published_at_ms;
-        }
-    });
+        });
+    }
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -866,7 +939,15 @@ pub(super) async fn send_connected_server_startup(
         ServerSessionPhase::Connected,
         "server session accepted after OP_IDCHANGE",
     );
-    let _ = send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
+    session.begin_offer_files_publishing().await;
+    if session.trace_role != "background" {
+        // Short-lived diagnostic/search sessions do not own the background
+        // pacing timer. Preserve their legacy startup advertisement while the
+        // long-lived background session performs the two-second negotiation.
+        session.resolve_offer_files_negotiation_timeout().await;
+        let _ =
+            send_due_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
+    }
     send_server_list_request(session, add_servers_from_server).await?;
     Ok(())
 }

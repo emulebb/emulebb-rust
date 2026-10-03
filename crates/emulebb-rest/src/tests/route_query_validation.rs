@@ -90,6 +90,35 @@ async fn all_limited_routes_reject_out_of_range_limit_with_canonical_bounds() {
 }
 
 #[tokio::test]
+async fn shared_files_keyset_cursor_is_validated_and_exclusive_with_offset() {
+    let (status, value) = query_error_value("/api/v1/shared-files?afterHash=abc&limit=10").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ED2K after hash")
+    );
+
+    let (status, value) = query_error_value(
+        "/api/v1/shared-files?afterHash=00112233445566778899aabbccddeeff&offset=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        value["error"]["message"],
+        "afterHash cannot be combined with a non-zero offset"
+    );
+
+    let (status, value) = query_error_value(
+        "/api/v1/shared-files?afterHash=00112233445566778899aabbccddeeff&limit=10",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["data"]["nextAfterHash"], Value::Null);
+}
+
+#[tokio::test]
 async fn transfers_category_id_query_uses_canonical_unsigned_validation() {
     let cases = [
         (
