@@ -150,9 +150,10 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
 
 /// Flatten a settled batch of debounced events into the ordered action list.
 pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction> {
-    let mut actions = events.iter().flat_map(classify_event).collect::<Vec<_>>();
+    let actions = events.iter().flat_map(classify_event).collect::<Vec<_>>();
     #[cfg(target_os = "windows")]
     {
+        let mut actions = actions;
         let catalog_action_count = actions
             .iter()
             .filter(|action| !matches!(action, MonitorAction::Reconcile))
@@ -160,8 +161,12 @@ pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction
         if catalog_action_count >= WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD {
             actions.push(MonitorAction::Reconcile);
         }
+        actions
     }
-    actions
+    #[cfg(not(target_os = "windows"))]
+    {
+        actions
+    }
 }
 
 /// Collapse a queued event burst to the final intent for each path.
