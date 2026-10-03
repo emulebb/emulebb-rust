@@ -470,6 +470,29 @@ impl EmulebbCore {
         transfer_root: impl AsRef<Path>,
         ed2k_network: Option<Ed2kNetworkConfig>,
     ) -> Result<Self> {
+        Self::new_with_network_catalog_mode(version, index, transfer_root, ed2k_network, false)
+    }
+
+    /// Construct the daemon-facing core after hydrating only one immediately
+    /// publishable persisted-catalog cohort. The daemon must schedule
+    /// [`Self::hydrate_shared_catalog`] after binding REST; ED2K/Kad startup can
+    /// then proceed while the remaining large-library pages load.
+    pub fn new_with_network_progressive_catalog(
+        version: impl Into<String>,
+        index: FileIndex,
+        transfer_root: impl AsRef<Path>,
+        ed2k_network: Option<Ed2kNetworkConfig>,
+    ) -> Result<Self> {
+        Self::new_with_network_catalog_mode(version, index, transfer_root, ed2k_network, true)
+    }
+
+    fn new_with_network_catalog_mode(
+        version: impl Into<String>,
+        index: FileIndex,
+        transfer_root: impl AsRef<Path>,
+        ed2k_network: Option<Ed2kNetworkConfig>,
+        progressive_catalog: bool,
+    ) -> Result<Self> {
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let metadata_store = index.metadata_store();
         let has_persisted_core_settings =
@@ -489,15 +512,24 @@ impl EmulebbCore {
         );
         let download_limit_bytes_per_sec =
             ed2k_download_limit_bytes_per_sec_from_core_settings(&core_state.core_settings);
-        let ed2k_transfers = Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
-            &transfer_root,
-            metadata_store.clone(),
-            &Ed2kRuntimeConfig {
-                upload_queue: upload_queue_policy,
-                download_limit_bytes_per_sec,
-                ..Ed2kRuntimeConfig::default()
-            },
-        )?;
+        let transfer_config = Ed2kRuntimeConfig {
+            upload_queue: upload_queue_policy,
+            download_limit_bytes_per_sec,
+            ..Ed2kRuntimeConfig::default()
+        };
+        let ed2k_transfers = if progressive_catalog {
+            Ed2kTransferRuntime::load_or_create_with_metadata_and_config_progressive_catalog(
+                &transfer_root,
+                metadata_store.clone(),
+                &transfer_config,
+            )?
+        } else {
+            Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
+                &transfer_root,
+                metadata_store.clone(),
+                &transfer_config,
+            )?
+        };
         // Drive the shared download coordinator from live REST settings.core
         // (maxConnections / maxConnectionsPerFiveSeconds / maxSourcesPerFile),
         // like the download throttle, so REST core setting changes apply to the

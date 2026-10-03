@@ -152,6 +152,19 @@ pub(super) fn completed_catalog_from_metadata_store(
         .collect()
 }
 
+pub(super) fn completed_catalog_page_from_metadata_store(
+    metadata: &MetadataStore,
+    root_dir: &std::path::Path,
+    after_hash: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Ed2kSharedEntry>> {
+    metadata
+        .completed_transfer_catalog_entries_after(after_hash, limit)?
+        .into_iter()
+        .map(|entry| shared_entry_from_catalog_entry(metadata, entry, root_dir))
+        .collect()
+}
+
 fn shared_entry_from_catalog_entry(
     metadata: &MetadataStore,
     entry: MetadataTransferCatalogEntry,

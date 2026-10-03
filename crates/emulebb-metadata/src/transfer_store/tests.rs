@@ -684,3 +684,66 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
     // The search result row is retained with its known-file link cleared.
     assert_eq!(store.table_count("search_results").unwrap(), 1);
 }
+
+#[test]
+fn completed_catalog_supports_hash_keyset_pages() {
+    let store = MetadataStore::in_memory().unwrap();
+    for sequence in 1..=3u128 {
+        let file_hash = format!("{sequence:032x}");
+        store
+            .upsert_transfer_manifest(&MetadataTransferManifest {
+                file_hash: file_hash.clone(),
+                display_name: format!("catalog-{sequence}.bin"),
+                file_size: sequence as u64,
+                piece_size: 1,
+                completed: true,
+                md4_hashset_acquired: true,
+                md4_hashset: Vec::new(),
+                aich_hashset_acquired: false,
+                aich_root: None,
+                aich_hashset: Vec::new(),
+                verified_ranges: vec![MetadataTransferRange {
+                    start: 0,
+                    end: sequence as u64,
+                }],
+                pieces: Vec::new(),
+                sources: Vec::new(),
+                upload_priority: "normal".to_string(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
+                category_id: 0,
+                control_state: None,
+                transfer_row_removed: false,
+                delivered_path: None,
+                source_path: Some(format!("/library/catalog-{sequence}.bin")),
+                source_mtime_ms: Some(sequence as i64),
+            })
+            .unwrap();
+    }
+
+    let first = store
+        .completed_transfer_catalog_entries_after(None, 2)
+        .unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|entry| entry.file_hash.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "00000000000000000000000000000001",
+            "00000000000000000000000000000002",
+        ]
+    );
+    let second = store
+        .completed_transfer_catalog_entries_after(Some(&first[1].file_hash), 2)
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].file_hash, "00000000000000000000000000000003");
+    assert!(
+        store
+            .completed_transfer_catalog_entries_after(Some(&second[0].file_hash), 2)
+            .unwrap()
+            .is_empty()
+    );
+}

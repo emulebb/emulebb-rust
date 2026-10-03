@@ -215,6 +215,13 @@ pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> Shared
 }
 
 const MAX_EMULE_FILE_SIZE: u64 = 0x4000000000;
+/// Bound the metadata work used to find a useful cold-start publish cohort.
+/// The exhaustive scan still follows; this pass exists only so a first-time
+/// 100k-file profile can hash and advertise files before that walk completes.
+const INITIAL_PUBLISH_SCAN_ENTRY_LIMIT: usize = 4_096;
+const INITIAL_PUBLISH_CANDIDATE_LIMIT: usize = 2_048;
+const INITIAL_PUBLISH_COHORT_FILE_LIMIT: usize = 200;
+const INITIAL_PUBLISH_COHORT_BYTE_LIMIT: u64 = 256 * 1024 * 1024;
 
 fn should_ignore_shared_file_candidate(path: &Path, metadata: &Metadata) -> bool {
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -388,6 +395,124 @@ pub(crate) fn collect_shared_directory_files(
         }
     }
     Ok(skipped_intake_count.get())
+}
+
+/// Collect a bounded candidate window for a cold profile's first publishable
+/// cohort. This deliberately repeats only a few thousand metadata entries; it
+/// never performs payload reads and cannot turn into a second full-tree walk.
+fn collect_initial_publish_candidates(
+    root: &Path,
+    output: &mut Vec<ScannedSharedFile>,
+) -> Result<usize> {
+    let disk_key = physical_disk_key(root);
+    let root = long_path(root);
+    let root = root.as_path();
+    let skipped_intake_count = Cell::new(0usize);
+    let starting_candidates = output.len();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            if should_ignore_shared_directory_name(&entry.file_name().to_string_lossy()) {
+                skipped_intake_count.set(skipped_intake_count.get() + 1);
+                return false;
+            }
+            true
+        })
+        .take(INITIAL_PUBLISH_SCAN_ENTRY_LIMIT)
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                skipped_intake_count.set(skipped_intake_count.get() + 1);
+                tracing::warn!(
+                    root = %root.display(),
+                    error = %error,
+                    "skipping unreadable initial-publish candidate",
+                );
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                skipped_intake_count.set(skipped_intake_count.get() + 1);
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    error = %error,
+                    "skipping unreadable initial-publish file candidate",
+                );
+                continue;
+            }
+        };
+        if should_ignore_shared_file_candidate(entry.path(), &metadata) {
+            skipped_intake_count.set(skipped_intake_count.get() + 1);
+            continue;
+        }
+        let path = entry.into_path();
+        let (key, file_size, source_mtime_ms) =
+            Ed2kTransferRuntime::scanned_source_identity_from_metadata(&path, &metadata);
+        output.push(ScannedSharedFile {
+            path,
+            key,
+            disk_key: disk_key.clone(),
+            file_size,
+            source_mtime_ms,
+        });
+        if output.len().saturating_sub(starting_candidates) >= INITIAL_PUBLISH_CANDIDATE_LIMIT {
+            break;
+        }
+    }
+    Ok(skipped_intake_count.get())
+}
+
+fn select_initial_publish_cohort(mut candidates: Vec<ScannedSharedFile>) -> Vec<ScannedSharedFile> {
+    candidates.sort_by(|left, right| left.path.cmp(&right.path));
+    candidates.dedup_by(|left, right| left.path == right.path);
+    candidates.sort_by(|left, right| {
+        left.file_size
+            .cmp(&right.file_size)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    let mut selected = Vec::new();
+    let mut selected_bytes = 0u64;
+    for candidate in candidates {
+        if selected.len() >= INITIAL_PUBLISH_COHORT_FILE_LIMIT {
+            break;
+        }
+        let next_bytes = selected_bytes.saturating_add(candidate.file_size);
+        // Always select the smallest candidate, even when a library contains
+        // only very large media. At least one completed hash is required before
+        // a cold profile has anything real to publish.
+        if !selected.is_empty() && next_bytes > INITIAL_PUBLISH_COHORT_BYTE_LIMIT {
+            continue;
+        }
+        selected_bytes = next_bytes;
+        selected.push(candidate);
+    }
+    selected
+}
+
+async fn scan_initial_publish_cohort(core: &EmulebbCore) -> Result<Vec<ScannedSharedFile>> {
+    let roots = core.state.lock().await.shared_directories.clone();
+    tokio::task::spawn_blocking(move || -> Result<Vec<ScannedSharedFile>> {
+        let mut candidates = Vec::new();
+        for root in roots {
+            collect_initial_publish_candidates(Path::new(&root.path), &mut candidates)
+                .with_context(|| {
+                    format!("failed to scan initial publish candidates in {}", root.path)
+                })?;
+        }
+        Ok(select_initial_publish_cohort(candidates))
+    })
+    .await?
 }
 
 /// Async-safe wrapper around [`collect_shared_directory_files`] for every root.
@@ -683,6 +808,14 @@ async fn plan_incremental_reload(
     core: &EmulebbCore,
     files: Vec<ScannedSharedFile>,
 ) -> Result<ReloadPlan> {
+    plan_incremental_reload_with_pruning(core, files, true).await
+}
+
+async fn plan_incremental_reload_with_pruning(
+    core: &EmulebbCore,
+    files: Vec<ScannedSharedFile>,
+    prune_missing_sources: bool,
+) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
     // Completed downloads delivered into a shared dir are reuse-only (never
     // pruned): recognized by delivered path + (size, mtime) so an unchanged
@@ -838,12 +971,16 @@ async fn plan_incremental_reload(
                     .map(|hash| hash.to_ascii_lowercase()),
             )
             .collect::<HashSet<_>>();
-        let pruned_hashes = index
-            .iter()
-            .filter(|(key, _)| !scanned_source_keys.contains(*key))
-            .flat_map(|(_, entries)| entries.iter().map(|entry| entry.file_hash.clone()))
-            .filter(|hash| !kept_hashes.contains(&hash.to_ascii_lowercase()))
-            .collect::<Vec<_>>();
+        let pruned_hashes = if prune_missing_sources {
+            index
+                .iter()
+                .filter(|(key, _)| !scanned_source_keys.contains(*key))
+                .flat_map(|(_, entries)| entries.iter().map(|entry| entry.file_hash.clone()))
+                .filter(|hash| !kept_hashes.contains(&hash.to_ascii_lowercase()))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         stats.pruned_count = pruned_hashes.len();
         stats.planned_hash_bytes = to_hash.iter().map(|target| target.file_size).sum();
         ReloadPlan {
@@ -1381,76 +1518,164 @@ pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Re
     Ok(0)
 }
 
-async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
-    record_reload_progress(&core, |diagnostics| {
-        diagnostics.phase = "scanning".to_string();
+/// Seed an empty, first-run catalog from a bounded small-first cohort before
+/// the exhaustive tree walk. Every successful hash enters the live catalog and
+/// queues ED2K publication immediately, while the normal Kad loop observes the
+/// same catalog on its next two-second tick.
+struct InitialPublishBootstrap {
+    progress: SharedDirectoryReloadProgress,
+}
+
+async fn bootstrap_initial_publish_catalog(
+    core: &EmulebbCore,
+) -> Result<Option<InitialPublishBootstrap>> {
+    if core.ed2k_transfers.shared_catalog_count().await > 0 {
+        return Ok(None);
+    }
+    record_reload_progress(core, |diagnostics| {
+        diagnostics.phase = "bootstrapScanning".to_string();
     });
-    let scan = scan_shared_files(&core).await?;
-    let scanned = scan.files.len();
-    let skipped_intake_count = scan.skipped_intake_count;
-    record_reload_progress(&core, |diagnostics| {
-        diagnostics.phase = "planning".to_string();
-        diagnostics.scanned_count = scanned;
-        diagnostics.skipped_intake_count = skipped_intake_count;
+    let cohort = scan_initial_publish_cohort(core).await?;
+    if cohort.is_empty() {
+        return Ok(None);
+    }
+    let cohort_size = cohort.len();
+    record_reload_progress(core, |diagnostics| {
+        diagnostics.phase = "bootstrapPlanning".to_string();
+        diagnostics.scanned_count = cohort_size;
     });
-    // Incremental skip: an unchanged file (same path + size + mtime as its
-    // persisted manifest) is NOT re-hashed, so a restart over an unchanged
-    // library finishes near-instantly and `hashingCount` stays ~0.
-    let mut plan = plan_incremental_reload(&core, scan.files).await?;
-    plan.stats.skipped_intake_count = skipped_intake_count;
-    record_reload_progress(&core, |diagnostics| {
-        *diagnostics = plan.stats.clone().into_diagnostics(
-            "hashing",
-            true,
-            core.shared_reload_pending.load(Ordering::Acquire),
-        );
-    });
+    // A bounded cohort is not authoritative for absence. Never prune persisted
+    // sources until the exhaustive scan has seen the complete configured tree.
+    let plan = plan_incremental_reload_with_pruning(core, cohort, false).await?;
     let queued = plan.to_hash.len();
     let reused = plan.reused_shares.len();
-    // Publish the pending count after scan/planning. It counts only the files
-    // actually being hashed, so an unchanged library reports ~0.
-    core.shared_hashing_count
-        .store(queued as i64, Ordering::Relaxed);
-    tracing::info!(
-        scanned,
-        to_hash = queued,
-        reused_unchanged = reused,
-        "shared-directory reload planned (incremental skip of unchanged files)"
-    );
+    record_reload_progress(core, |diagnostics| {
+        *diagnostics = plan
+            .stats
+            .clone()
+            .into_diagnostics("bootstrapHashing", true, false);
+    });
 
-    for reused in &plan.reused_shares {
+    for reused_share in &plan.reused_shares {
         register_monitor_shared_hash(
-            &core,
-            reused.source_path.clone(),
-            &reused.file_hash,
-            reused.file_size,
-            reused.source_mtime_ms,
+            core,
+            reused_share.source_path.clone(),
+            &reused_share.file_hash,
+            reused_share.file_size,
+            reused_share.source_mtime_ms,
         )
         .await;
-        forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
+        forget_stale_shares(core, &reused_share.stale_hashes, &reused_share.file_hash).await;
     }
     for promotion in plan.imported_known_promotions {
-        if let Err(error) = promote_imported_known_share(&core, promotion).await {
+        if let Err(error) = promote_imported_known_share(core, promotion).await {
             tracing::warn!(
                 error = %error,
-                "failed to promote imported stock known.met shared file (skipping)",
+                "failed to promote initial-publish imported shared file (skipping)",
             );
         }
     }
-    forget_stale_shares(&core, &plan.pruned_hashes, "").await;
+    hash_reload_targets(core, plan.to_hash).await;
+    core.queue_ed2k_shared_catalog_publish();
+    let published = core.ed2k_transfers.shared_catalog_count().await;
+    tracing::info!(
+        candidates = cohort_size,
+        to_hash = queued,
+        reused,
+        publishable = published,
+        "initial shared catalog cohort ready before exhaustive scan"
+    );
+    Ok(Some(InitialPublishBootstrap {
+        progress: reload_progress_snapshot(core),
+    }))
+}
 
-    let mut to_hash = plan.to_hash;
+fn merge_initial_publish_progress(
+    diagnostics: &mut SharedDirectoryReloadProgress,
+    bootstrap: &InitialPublishBootstrap,
+) {
+    let prior = &bootstrap.progress;
+    diagnostics.planned_hash_count = diagnostics
+        .planned_hash_count
+        .saturating_add(prior.planned_hash_count);
+    diagnostics.reused_count = diagnostics
+        .reused_count
+        .saturating_sub(prior.hashed_count.saturating_add(prior.reused_count));
+    diagnostics.new_count = diagnostics.new_count.saturating_add(prior.new_count);
+    diagnostics.changed_count = diagnostics
+        .changed_count
+        .saturating_add(prior.changed_count);
+    diagnostics.missing_mtime_count = diagnostics
+        .missing_mtime_count
+        .saturating_add(prior.missing_mtime_count);
+    diagnostics.hashed_count = diagnostics.hashed_count.saturating_add(prior.hashed_count);
+    diagnostics.failed_hash_count = diagnostics
+        .failed_hash_count
+        .saturating_add(prior.failed_hash_count);
+    diagnostics.planned_hash_bytes = diagnostics
+        .planned_hash_bytes
+        .saturating_add(prior.planned_hash_bytes);
+    diagnostics.completed_hash_bytes = diagnostics
+        .completed_hash_bytes
+        .saturating_add(prior.completed_hash_bytes);
+    diagnostics.planned_read_bytes = diagnostics
+        .planned_read_bytes
+        .saturating_add(prior.planned_read_bytes);
+    diagnostics.completed_read_bytes = diagnostics
+        .completed_read_bytes
+        .saturating_add(prior.completed_read_bytes);
+    diagnostics.started_at_ms = match (diagnostics.started_at_ms, prior.started_at_ms) {
+        (Some(current), Some(bootstrap)) => Some(current.min(bootstrap)),
+        (current, bootstrap) => current.or(bootstrap),
+    };
+    diagnostics.recent.extend(prior.recent.iter().cloned());
+    diagnostics.recent.sort_by(|left, right| {
+        right
+            .finished_at_ms
+            .cmp(&left.finished_at_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    diagnostics.recent.truncate(20);
+    for prior_disk in &prior.disks {
+        if let Some(disk) = diagnostics
+            .disks
+            .iter_mut()
+            .find(|disk| disk.disk_key == prior_disk.disk_key)
+        {
+            disk.planned_count = disk.planned_count.saturating_add(prior_disk.planned_count);
+            disk.completed_count = disk
+                .completed_count
+                .saturating_add(prior_disk.completed_count);
+            disk.failed_count = disk.failed_count.saturating_add(prior_disk.failed_count);
+            disk.planned_read_bytes = disk
+                .planned_read_bytes
+                .saturating_add(prior_disk.planned_read_bytes);
+            disk.completed_read_bytes = disk
+                .completed_read_bytes
+                .saturating_add(prior_disk.completed_read_bytes);
+        } else {
+            diagnostics.disks.push(prior_disk.clone());
+        }
+    }
+    diagnostics
+        .disks
+        .sort_by(|left, right| left.disk_key.cmp(&right.disk_key));
+    diagnostics.disk_count = diagnostics.disks.len();
+}
+
+async fn hash_reload_targets(core: &EmulebbCore, mut to_hash: Vec<ReloadHashTarget>) {
+    core.shared_hashing_count
+        .store(to_hash.len() as i64, Ordering::Relaxed);
     let _guard = HashingCountGuard(core.shared_hashing_count.clone());
     // Group the to-hash set by physical disk and run exactly one sequential
     // worker per disk. Distinct disks still hash concurrently, while serializing
-    // reads from one spindle avoids the seek thrashing that made multiple large
-    // files slower than one sequential stream on mechanical libraries.
+    // reads from one spindle avoids seek thrashing on mechanical libraries.
     let mut by_disk: HashMap<String, Vec<ReloadHashTarget>> = HashMap::new();
     for (order, target) in to_hash.iter_mut().enumerate() {
         target.order = order;
         target.id = format!("hash-{order:06}");
     }
-    record_hash_queue(&core, &to_hash);
+    record_hash_queue(core, &to_hash);
     for target in to_hash {
         by_disk
             .entry(target.disk_key.clone())
@@ -1458,7 +1683,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
             .push(target);
     }
     let disk_count = by_disk.len();
-    record_reload_progress(&core, |diagnostics| {
+    record_reload_progress(core, |diagnostics| {
         diagnostics.disk_count = disk_count;
     });
     tracing::info!(
@@ -1489,6 +1714,64 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         "background shared-directory reload hash workers started"
     );
     while workers.join_next().await.is_some() {}
+}
+
+async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
+    let bootstrap = bootstrap_initial_publish_catalog(&core).await?;
+    record_reload_progress(&core, |diagnostics| {
+        diagnostics.phase = "scanning".to_string();
+    });
+    let scan = scan_shared_files(&core).await?;
+    let scanned = scan.files.len();
+    let skipped_intake_count = scan.skipped_intake_count;
+    record_reload_progress(&core, |diagnostics| {
+        diagnostics.phase = "planning".to_string();
+        diagnostics.scanned_count = scanned;
+        diagnostics.skipped_intake_count = skipped_intake_count;
+    });
+    // Incremental skip: an unchanged file (same path + size + mtime as its
+    // persisted manifest) is NOT re-hashed, so a restart over an unchanged
+    // library finishes near-instantly and `hashingCount` stays ~0.
+    let mut plan = plan_incremental_reload(&core, scan.files).await?;
+    plan.stats.skipped_intake_count = skipped_intake_count;
+    record_reload_progress(&core, |diagnostics| {
+        *diagnostics = plan.stats.clone().into_diagnostics(
+            "hashing",
+            true,
+            core.shared_reload_pending.load(Ordering::Acquire),
+        );
+    });
+    let queued = plan.to_hash.len();
+    let reused = plan.reused_shares.len();
+    tracing::info!(
+        scanned,
+        to_hash = queued,
+        reused_unchanged = reused,
+        "shared-directory reload planned (incremental skip of unchanged files)"
+    );
+
+    for reused in &plan.reused_shares {
+        register_monitor_shared_hash(
+            &core,
+            reused.source_path.clone(),
+            &reused.file_hash,
+            reused.file_size,
+            reused.source_mtime_ms,
+        )
+        .await;
+        forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
+    }
+    for promotion in plan.imported_known_promotions {
+        if let Err(error) = promote_imported_known_share(&core, promotion).await {
+            tracing::warn!(
+                error = %error,
+                "failed to promote imported stock known.met shared file (skipping)",
+            );
+        }
+    }
+    forget_stale_shares(&core, &plan.pruned_hashes, "").await;
+
+    hash_reload_targets(&core, plan.to_hash).await;
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.active.clear();
@@ -1502,6 +1785,9 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
             disk.current_stage = None;
         }
         diagnostics.updated_at_ms = Some(current_time_ms());
+        if let Some(bootstrap) = bootstrap.as_ref() {
+            merge_initial_publish_progress(diagnostics, bootstrap);
+        }
     });
     // A reused-only reload does not pass through `share_local_file`, so queue a
     // final server offer refresh explicitly once the catalog is known complete.

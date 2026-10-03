@@ -161,6 +161,9 @@ pub fn ed2k_part_count(file_size: u64) -> u16 {
 /// Canonical eMule upload block size used inside one ED2K part request.
 pub(crate) const ED2K_EMBLOCK_SIZE: u64 = 184_320;
 const PAYLOAD_FILE_NAME: &str = "pieces.bin";
+/// One legacy ED2K offer packet's worth of persisted shares is enough to begin
+/// useful publishing while the rest of a very large catalog hydrates.
+const STARTUP_SHARED_CATALOG_BATCH: usize = 200;
 
 /// Cross-connection same-file upload-churn ledger: `(peer key, file hash) ->
 /// (repeat count, first-seen)`, bounded and window-pruned for MFC
@@ -181,6 +184,11 @@ pub struct Ed2kTransferRuntime {
     metadata: MetadataStore,
     shared_catalog: Ed2kSharedCatalog,
     shared_catalog_generation: AtomicU64,
+    /// Keyset cursor for a persisted catalog intentionally loaded only through
+    /// the first publishable startup cohort. `pending` is claimed atomically so
+    /// at most one background hydration pass can append the remaining pages.
+    shared_catalog_hydration_cursor: StdMutex<Option<String>>,
+    shared_catalog_hydration_pending: AtomicBool,
     servable_shared_hash_cache: Arc<StdMutex<ServableSharedHashCache>>,
     callback_intents: Arc<RwLock<Vec<Ed2kCallbackIntent>>>,
     /// Per-file-hash manifest IO locks (see [`Self::lock_manifest`]). Manifest
@@ -350,12 +358,41 @@ impl Ed2kTransferRuntime {
         metadata: MetadataStore,
         config: &Ed2kRuntimeConfig,
     ) -> Result<Self> {
-        Self::load_or_create_with_metadata_and_upload_queue(
+        Self::load_or_create_with_metadata_and_config_catalog_limit(
+            root_dir, metadata, config, None,
+        )
+    }
+
+    /// Load only one immediately publishable persisted-catalog cohort during
+    /// synchronous daemon construction. Call [`Self::hydrate_shared_catalog`]
+    /// from a detached startup worker to append the rest without delaying REST,
+    /// ED2K, or Kad connectivity.
+    pub fn load_or_create_with_metadata_and_config_progressive_catalog(
+        root_dir: &Path,
+        metadata: MetadataStore,
+        config: &Ed2kRuntimeConfig,
+    ) -> Result<Self> {
+        Self::load_or_create_with_metadata_and_config_catalog_limit(
+            root_dir,
+            metadata,
+            config,
+            Some(STARTUP_SHARED_CATALOG_BATCH),
+        )
+    }
+
+    fn load_or_create_with_metadata_and_config_catalog_limit(
+        root_dir: &Path,
+        metadata: MetadataStore,
+        config: &Ed2kRuntimeConfig,
+        initial_catalog_limit: Option<usize>,
+    ) -> Result<Self> {
+        Self::load_or_create_with_metadata_and_upload_queue_catalog_limit(
             root_dir,
             metadata,
             upload_queue_config_from_policy(&config.upload_queue),
             config.download_limit_bytes_per_sec,
             download_coordinator_config_from_policy(config),
+            initial_catalog_limit,
         )
     }
 
@@ -385,11 +422,46 @@ impl Ed2kTransferRuntime {
         download_limit_bytes_per_sec: u64,
         coordinator_config: Ed2kDownloadCoordinatorConfig,
     ) -> Result<Self> {
+        Self::load_or_create_with_metadata_and_upload_queue_catalog_limit(
+            root_dir,
+            metadata,
+            upload_queue_config,
+            download_limit_bytes_per_sec,
+            coordinator_config,
+            None,
+        )
+    }
+
+    fn load_or_create_with_metadata_and_upload_queue_catalog_limit(
+        root_dir: &Path,
+        metadata: MetadataStore,
+        upload_queue_config: Ed2kUploadQueueConfig,
+        download_limit_bytes_per_sec: u64,
+        coordinator_config: Ed2kDownloadCoordinatorConfig,
+        initial_catalog_limit: Option<usize>,
+    ) -> Result<Self> {
         fs::create_dir_all(root_dir).with_context(|| {
             format!("failed to create ED2K transfer root {}", root_dir.display())
         })?;
+        let (initial_catalog, hydration_cursor, hydration_pending) =
+            if let Some(limit) = initial_catalog_limit {
+                let entries = transfer_sql::completed_catalog_page_from_metadata_store(
+                    &metadata, root_dir, None, limit,
+                )?;
+                let pending = entries.len() == limit;
+                let cursor = pending
+                    .then(|| entries.last().map(|entry| entry.file_hash.clone()))
+                    .flatten();
+                (entries, cursor, pending)
+            } else {
+                (
+                    transfer_sql::completed_catalog_from_metadata_store(&metadata, root_dir)?,
+                    None,
+                    false,
+                )
+            };
         let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
-            transfer_sql::completed_catalog_from_metadata_store(&metadata, root_dir)?,
+            initial_catalog,
         )));
         // The ban store is built before the upload queue so the queue state can
         // hand a no-request repeat-offender straight to the shared ban list
@@ -402,6 +474,8 @@ impl Ed2kTransferRuntime {
             metadata,
             shared_catalog,
             shared_catalog_generation: AtomicU64::new(0),
+            shared_catalog_hydration_cursor: StdMutex::new(hydration_cursor),
+            shared_catalog_hydration_pending: AtomicBool::new(hydration_pending),
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_intents: Arc::new(RwLock::new(Vec::new())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),

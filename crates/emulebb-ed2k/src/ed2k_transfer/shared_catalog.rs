@@ -27,6 +27,87 @@ impl Ed2kTransferRuntime {
         self.shared_catalog.read().await.len()
     }
 
+    /// Append the persisted catalog pages deferred by the progressive daemon
+    /// constructor. The first legacy-sized offer cohort is already live; this
+    /// work runs off the async executor and yields between bounded pages so
+    /// network startup and publication can proceed concurrently.
+    pub async fn hydrate_shared_catalog(&self) -> anyhow::Result<usize> {
+        const HYDRATION_PAGE_SIZE: usize = 1_024;
+
+        if !self
+            .shared_catalog_hydration_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            return Ok(0);
+        }
+
+        let result = async {
+            let mut after_hash = self
+                .shared_catalog_hydration_cursor
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let mut hydrated = 0usize;
+            loop {
+                let metadata = self.metadata.clone();
+                let root_dir = self.root_dir.clone();
+                let page_after = after_hash.clone();
+                let entries = tokio::task::spawn_blocking(move || {
+                    super::transfer_sql::completed_catalog_page_from_metadata_store(
+                        &metadata,
+                        &root_dir,
+                        page_after.as_deref(),
+                        HYDRATION_PAGE_SIZE,
+                    )
+                })
+                .await??;
+                if entries.is_empty() {
+                    *self
+                        .shared_catalog_hydration_cursor
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                    break;
+                }
+
+                let page_len = entries.len();
+                let next_after = entries.last().map(|entry| entry.file_hash.clone());
+                {
+                    let mut catalog = self.shared_catalog.write().await;
+                    for entry in entries {
+                        if let Ok(hash) = Ed2kHash::from_str(&entry.file_hash) {
+                            catalog.upsert_verified(hash, Some(entry));
+                        }
+                    }
+                }
+                self.note_shared_catalog_entries_changed();
+                self.notify_shared_publish_demand_changed();
+                hydrated = hydrated.saturating_add(page_len);
+                after_hash = next_after;
+                *self
+                    .shared_catalog_hydration_cursor
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = after_hash.clone();
+
+                if page_len < HYDRATION_PAGE_SIZE {
+                    *self
+                        .shared_catalog_hydration_cursor
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            Ok(hydrated)
+        }
+        .await;
+
+        if result.is_err() {
+            self.shared_catalog_hydration_pending
+                .store(true, Ordering::Release);
+        }
+        result
+    }
+
     /// Replace compatibility-hint catalog entries while preserving verified
     /// local files loaded from manifests.
     pub async fn replace_catalog_hints(&self, hashes: &[PopularHash]) {

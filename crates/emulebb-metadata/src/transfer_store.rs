@@ -421,6 +421,31 @@ impl super::MetadataStore {
     }
 
     pub fn completed_transfer_catalog_entries(&self) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        self.completed_transfer_catalog_entries_filtered(None, usize::MAX)
+    }
+
+    /// Return one hash-keyset page of completed shared-catalog entries.
+    ///
+    /// Startup uses this to expose one publishable server batch without loading
+    /// a 100k-file catalog synchronously. The remaining pages can then hydrate
+    /// on a blocking worker while REST and network startup continue.
+    pub fn completed_transfer_catalog_entries_after(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        self.completed_transfer_catalog_entries_filtered(after_hash, limit)
+    }
+
+    fn completed_transfer_catalog_entries_filtered(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        let after_hash = after_hash
+            .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
+            .transpose()?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
@@ -450,10 +475,12 @@ impl super::MetadataStore {
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
               )
+              AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
             ORDER BY known_files.ed2k_hash
+            LIMIT ?2
             "#,
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![after_hash, limit], |row| {
             Ok(MetadataTransferCatalogEntry {
                 file_hash: row.get(0)?,
                 display_name: row.get(1)?,

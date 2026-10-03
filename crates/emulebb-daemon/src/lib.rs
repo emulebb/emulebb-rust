@@ -686,7 +686,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     fs::create_dir_all(&incoming_dir)
         .with_context(|| format!("failed to create incoming dir {}", incoming_dir.display()))?;
     let core = Arc::new(
-        EmulebbCore::new_with_network(
+        EmulebbCore::new_with_network_progressive_catalog(
             env!("CARGO_PKG_VERSION"),
             index,
             profile.transfer_root(),
@@ -709,14 +709,24 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
     spawn_regular_diagnostic_summary(Arc::clone(&core));
 
-    // Start the live auto-pickup monitor first. Most profiles also run the
-    // initial scan-on-demand pickup of files that are already present; imported
-    // stock profiles can disable that boot reload after seeding exact manifests
-    // from known.met/shareddir.dat so startup does not hash a large library.
+    // Start the live auto-pickup monitor first, then hydrate persisted shares in
+    // bounded pages before reconciling the directory tree. Core construction
+    // loaded one immediately publishable cohort only, so the independent
+    // network task below can connect and advertise useful files without waiting
+    // for a 100k-file catalog load or exhaustive filesystem scan.
     let sharing_core = Arc::clone(&core);
     let initial_shared_directory_reload = profile.initial_shared_directory_reload;
     tokio::spawn(async move {
         sharing_core.start_shared_directory_monitor().await;
+        match sharing_core.hydrate_shared_catalog().await {
+            Ok(hydrated) if hydrated > 0 => {
+                tracing::info!(hydrated, "background shared catalog hydration complete");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "background shared catalog hydration failed; continuing");
+            }
+        }
         if !initial_shared_directory_reload {
             tracing::info!("initial shared-directory reload disabled by daemon settings");
             return;

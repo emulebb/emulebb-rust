@@ -26,6 +26,7 @@ mod download_throttle;
 mod file_status_parts;
 mod ich_salvage;
 mod inbound_admission;
+mod progressive_catalog;
 mod reask_reciprocity;
 mod salvage;
 mod share_in_place;

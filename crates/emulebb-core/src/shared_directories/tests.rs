@@ -483,3 +483,84 @@ fn shared_file_name_policy_matches_mfc_affixes() {
     assert!(should_ignore_shared_file_name("~lock.document#"));
     assert!(!should_ignore_shared_file_name("sample.data"));
 }
+
+#[test]
+fn initial_publish_cohort_is_small_first_and_bounded() {
+    let candidates = (0..205)
+        .map(|sequence| ScannedSharedFile {
+            path: PathBuf::from(format!("file-{sequence:03}.bin")),
+            key: format!("key-{sequence:03}"),
+            disk_key: "disk:test".to_string(),
+            file_size: u64::try_from(sequence + 1).unwrap(),
+            source_mtime_ms: Some(sequence.into()),
+        })
+        .collect::<Vec<_>>();
+
+    let selected = select_initial_publish_cohort(candidates);
+
+    assert_eq!(selected.len(), INITIAL_PUBLISH_COHORT_FILE_LIMIT);
+    assert_eq!(selected.first().unwrap().file_size, 1);
+    assert_eq!(selected.last().unwrap().file_size, 200);
+
+    let byte_bounded = select_initial_publish_cohort(vec![
+        ScannedSharedFile {
+            path: PathBuf::from("smallest.bin"),
+            key: "smallest".to_string(),
+            disk_key: "disk:test".to_string(),
+            file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT / 2,
+            source_mtime_ms: Some(1),
+        },
+        ScannedSharedFile {
+            path: PathBuf::from("second.bin"),
+            key: "second".to_string(),
+            disk_key: "disk:test".to_string(),
+            file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT / 2,
+            source_mtime_ms: Some(2),
+        },
+        ScannedSharedFile {
+            path: PathBuf::from("over-budget.bin"),
+            key: "over-budget".to_string(),
+            disk_key: "disk:test".to_string(),
+            file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT,
+            source_mtime_ms: Some(3),
+        },
+    ]);
+    assert_eq!(byte_bounded.len(), 2);
+    assert_eq!(
+        byte_bounded.iter().map(|file| file.file_size).sum::<u64>(),
+        INITIAL_PUBLISH_COHORT_BYTE_LIMIT
+    );
+}
+
+#[tokio::test]
+async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
+    let root = scratch_dir("initial-publish");
+    for sequence in 0..3 {
+        fs::write(
+            root.join(format!("bootstrap-{sequence}.bin")),
+            format!("bootstrap payload {sequence}"),
+        )
+        .unwrap();
+    }
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
+        path: root.display().to_string(),
+        monitor_owned: false,
+        shareable: true,
+        accessible: true,
+    }];
+
+    let bootstrap = bootstrap_initial_publish_catalog(&core)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(bootstrap.progress.hashed_count, 3);
+    assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 3);
+    let progress = reload_progress_snapshot(&core);
+    assert_eq!(progress.phase, "bootstrapHashing");
+    assert_eq!(progress.hashed_count, 3);
+    assert_eq!(progress.scanned_count, 3);
+    fs::remove_dir_all(root).ok();
+}
