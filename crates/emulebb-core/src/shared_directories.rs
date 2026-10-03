@@ -12,8 +12,6 @@ use emulebb_metadata::MetadataImportedKnownFileEntry;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-const MAX_SHARED_RELOAD_HASH_WORKERS_PER_DISK: usize = 4;
-
 /// One configured shared-directory root exposed through the eMuleBB REST contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -609,27 +607,6 @@ fn current_time_ms() -> i64 {
 
 fn target_read_bytes_total(file_size: u64) -> u64 {
     file_size
-}
-
-fn shared_reload_hash_workers_per_disk() -> usize {
-    let cpu_bound = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .saturating_div(2)
-        .max(1);
-    cpu_bound.min(MAX_SHARED_RELOAD_HASH_WORKERS_PER_DISK)
-}
-
-fn split_hash_targets_by_worker<T>(targets: Vec<T>, max_workers: usize) -> Vec<Vec<T>> {
-    let worker_count = targets.len().min(max_workers.max(1));
-    if worker_count == 0 {
-        return Vec::new();
-    }
-    let mut lanes = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
-    for (index, target) in targets.into_iter().enumerate() {
-        lanes[index % worker_count].push(target);
-    }
-    lanes
 }
 
 fn target_name(path: &Path) -> String {
@@ -1409,11 +1386,10 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
 
     let mut to_hash = plan.to_hash;
     let _guard = HashingCountGuard(core.shared_hashing_count.clone());
-    // Group the to-hash set by physical disk, then fan out a bounded number of
-    // workers per disk. The hash itself already runs off the manifest lock and on a
-    // blocking thread (see `ingest_local_file`), and local ingest now reads each file
-    // once for both MD4 and AICH, so a small per-disk fanout keeps large SSD/NVMe
-    // startup libraries moving without unbounded HDD seek pressure.
+    // Group the to-hash set by physical disk and run exactly one sequential
+    // worker per disk. Distinct disks still hash concurrently, while serializing
+    // reads from one spindle avoids the seek thrashing that made multiple large
+    // files slower than one sequential stream on mechanical libraries.
     let mut by_disk: HashMap<String, Vec<ReloadHashTarget>> = HashMap::new();
     for (order, target) in to_hash.iter_mut().enumerate() {
         target.order = order;
@@ -1431,36 +1407,28 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     record_reload_progress(&core, |diagnostics| {
         diagnostics.disk_count = disk_count;
     });
-    let max_workers_per_disk = shared_reload_hash_workers_per_disk();
     tracing::info!(
         disks = disk_count,
-        max_workers_per_disk,
+        workers_per_disk = 1,
         "background shared-directory reload hashing across physical disks"
     );
     let mut workers = JoinSet::new();
     let mut worker_count = 0usize;
     for (disk, targets) in by_disk {
-        for (lane, targets) in split_hash_targets_by_worker(targets, max_workers_per_disk)
-            .into_iter()
-            .enumerate()
-        {
-            worker_count += 1;
-            let core = core.clone();
-            let disk = disk.clone();
-            workers.spawn(async move {
-                let files = targets.len();
-                for target in targets {
-                    hash_one_reload_target(&core, target).await;
-                    tokio::task::yield_now().await;
-                }
-                tracing::debug!(
-                    disk = %disk,
-                    lane,
-                    files,
-                    "shared-directory hashing worker finished"
-                );
-            });
-        }
+        worker_count += 1;
+        let core = core.clone();
+        workers.spawn(async move {
+            let files = targets.len();
+            for target in targets {
+                hash_one_reload_target(&core, target).await;
+                tokio::task::yield_now().await;
+            }
+            tracing::debug!(
+                disk = %disk,
+                files,
+                "shared-directory hashing worker finished"
+            );
+        });
     }
     tracing::info!(
         workers = worker_count,
