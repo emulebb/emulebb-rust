@@ -142,9 +142,16 @@ async fn live_monitor_auto_shares_relocates_and_removes_a_dropped_file() {
         shares[0].hash, share.hash,
         "rename must preserve content hash"
     );
+    let catalog_path = PathBuf::from(
+        shares[0]
+            .source_path
+            .as_deref()
+            .expect("renamed share must retain its source path"),
+    );
     assert_eq!(
-        shares[0].source_path.as_deref(),
-        Some(renamed_file.display().to_string().as_str()),
+        catalog_path.canonicalize().unwrap(),
+        renamed_file.canonicalize().unwrap(),
+        "renamed source path must identify the same file independent of Windows drive casing",
     );
 
     // --- auto-remove: delete the file from the watched dir ---
