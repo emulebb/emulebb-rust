@@ -318,7 +318,7 @@ fn ends_with_ascii_case_insensitive(value: &str, suffix: &str) -> bool {
 /// readable files are still collected.
 pub(crate) fn collect_shared_directory_files(
     root: &Path,
-    output: &mut Vec<PathBuf>,
+    output: &mut Vec<ScannedSharedFile>,
 ) -> Result<usize> {
     // Operator-facing shared-directory boundary: walk the root through the
     // long-path helper so a shared tree deeper than the legacy MAX_PATH (260)
@@ -371,7 +371,15 @@ pub(crate) fn collect_shared_directory_files(
                 skipped_intake_count.set(skipped_intake_count.get() + 1);
                 continue;
             }
-            output.push(entry.into_path());
+            let path = entry.into_path();
+            let (key, file_size, source_mtime_ms) =
+                Ed2kTransferRuntime::scanned_source_identity_from_metadata(&path, &metadata);
+            output.push(ScannedSharedFile {
+                path,
+                key,
+                file_size,
+                source_mtime_ms,
+            });
         }
     }
     Ok(skipped_intake_count.get())
@@ -386,15 +394,15 @@ pub(crate) async fn scan_shared_directory_roots(
     roots: Vec<SharedDirectoryRoot>,
 ) -> Result<SharedScanResult> {
     tokio::task::spawn_blocking(move || -> Result<SharedScanResult> {
-        let mut file_paths = Vec::new();
+        let mut files = Vec::new();
         let mut skipped_intake_count = 0;
         for root in roots {
             skipped_intake_count +=
-                collect_shared_directory_files(Path::new(&root.path), &mut file_paths)
+                collect_shared_directory_files(Path::new(&root.path), &mut files)
                     .with_context(|| format!("failed to scan shared directory {}", root.path))?;
         }
         Ok(SharedScanResult {
-            file_paths,
+            files,
             skipped_intake_count,
         })
     })
@@ -402,8 +410,16 @@ pub(crate) async fn scan_shared_directory_roots(
 }
 
 pub(crate) struct SharedScanResult {
-    file_paths: Vec<PathBuf>,
+    files: Vec<ScannedSharedFile>,
     skipped_intake_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScannedSharedFile {
+    path: PathBuf,
+    key: String,
+    file_size: u64,
+    source_mtime_ms: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -449,8 +465,10 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     // runs it off the async executor via spawn_blocking to avoid stalling a tokio
     // worker thread.
     let mut result = scan_shared_directory_roots(roots).await?;
-    result.file_paths.sort();
-    result.file_paths.dedup();
+    result
+        .files
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    result.files.dedup_by(|left, right| left.path == right.path);
     Ok(result)
 }
 
@@ -647,12 +665,12 @@ fn reload_hash_target(
 /// manifest predates the recorded-mtime column (mtime `None`) falls through to
 /// `to_hash` and is hashed exactly as before.
 ///
-/// The stat work runs on the blocking pool: statting every file in a large
-/// library is cheap relative to hashing but still touches the filesystem, so it
-/// must not run on a tokio worker thread.
+/// The directory walk supplies the normalized path, size, and mtime used here,
+/// avoiding a second metadata lookup for every file. Files selected for hashing
+/// are re-stat-ed by ingest immediately before their payload is read.
 async fn plan_incremental_reload(
     core: &EmulebbCore,
-    file_paths: Vec<PathBuf>,
+    files: Vec<ScannedSharedFile>,
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
     // Completed downloads delivered into a shared dir are reuse-only (never
@@ -670,145 +688,126 @@ async fn plan_incremental_reload(
             .map(|failure| (failure.source_path.clone(), failure))
             .collect::<HashMap<_, _>>();
         let mut stats = ReloadPlanStats {
-            scanned_count: file_paths.len(),
+            scanned_count: files.len(),
             ..ReloadPlanStats::default()
         };
         let mut to_hash = Vec::new();
         let mut reused_shares = Vec::new();
         let mut imported_known_promotions = Vec::new();
-        let mut scanned_source_keys = HashSet::with_capacity(file_paths.len());
-        for path in file_paths {
-            // Stat the scanned file with the same long-path normalization the
-            // persisted index keys use. A file that cannot be stat-ed is treated
-            // as needing a hash (the ingest path will surface the real error).
-            match Ed2kTransferRuntime::scanned_source_identity(&path) {
-                Some((key, size, mtime_ms)) => {
-                    scanned_source_keys.insert(key.clone());
-                    if unchanged_failure(&failures, &key, size, mtime_ms) {
-                        stats.skipped_failed_count += 1;
-                        continue;
-                    }
-                    match index.get(&key) {
-                        // Reuse only on an exact size + mtime match, and only when the
-                        // persisted manifest actually recorded an mtime (pre-v9 rows
-                        // store `None`, so they are rehashed once to backfill it).
-                        Some(entries) => {
-                            if let Some(entry) = entries.iter().find(|entry| {
-                                entry.file_size == size
-                                    && entry.source_mtime_ms.is_some()
-                                    && entry.source_mtime_ms == mtime_ms
-                            }) {
-                                stats.reused_count += 1;
-                                stats.stale_hash_count += entries.len().saturating_sub(1);
-                                reused_shares.push(ReusedReloadShare {
-                                    file_hash: entry.file_hash.clone(),
-                                    source_path: path.clone(),
-                                    stale_hashes: entries
-                                        .iter()
-                                        .filter(|stale| stale.file_hash != entry.file_hash)
-                                        .map(|stale| stale.file_hash.clone())
-                                        .collect(),
-                                });
-                            } else {
-                                stats.planned_hash_count += 1;
-                                stats.stale_hash_count += entries.len();
-                                if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
-                                    stats.missing_mtime_count += 1;
-                                } else {
-                                    stats.changed_count += 1;
-                                }
-                                to_hash.push(reload_hash_target(
-                                    path,
-                                    key,
-                                    size,
-                                    mtime_ms,
-                                    entries
-                                        .iter()
-                                        .map(|entry| entry.file_hash.clone())
-                                        .collect(),
-                                    if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
-                                        "missingMtime"
-                                    } else {
-                                        "changed"
-                                    },
-                                ));
-                            }
+        let mut scanned_source_keys = HashSet::with_capacity(files.len());
+        for file in files {
+            let ScannedSharedFile {
+                path,
+                key,
+                file_size: size,
+                source_mtime_ms: mtime_ms,
+            } = file;
+            scanned_source_keys.insert(key.clone());
+            if unchanged_failure(&failures, &key, size, mtime_ms) {
+                stats.skipped_failed_count += 1;
+                continue;
+            }
+            match index.get(&key) {
+                // Reuse only on an exact size + mtime match, and only when the
+                // persisted manifest actually recorded an mtime (pre-v9 rows
+                // store `None`, so they are rehashed once to backfill it).
+                Some(entries) => {
+                    if let Some(entry) = entries.iter().find(|entry| {
+                        entry.file_size == size
+                            && entry.source_mtime_ms.is_some()
+                            && entry.source_mtime_ms == mtime_ms
+                    }) {
+                        stats.reused_count += 1;
+                        stats.stale_hash_count += entries.len().saturating_sub(1);
+                        reused_shares.push(ReusedReloadShare {
+                            file_hash: entry.file_hash.clone(),
+                            source_path: path.clone(),
+                            stale_hashes: entries
+                                .iter()
+                                .filter(|stale| stale.file_hash != entry.file_hash)
+                                .map(|stale| stale.file_hash.clone())
+                                .collect(),
+                        });
+                    } else {
+                        stats.planned_hash_count += 1;
+                        stats.stale_hash_count += entries.len();
+                        if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
+                            stats.missing_mtime_count += 1;
+                        } else {
+                            stats.changed_count += 1;
                         }
-                        // Not a share-in-place source. Before treating it as a
-                        // brand-new file to hash, check whether it is a completed
-                        // download's delivered file re-found in a shared dir: if
-                        // its delivered identity (size + mtime) still matches, the
-                        // download already computed this hashset, so reuse it
-                        // (oracle FindKnownFile) rather than re-hashing the whole
-                        // payload. Reuse-only: this never contributes to pruning.
-                        None => match delivered_index.get(&key) {
-                            Some(entry)
-                                if entry.file_size == size
-                                    && entry.source_mtime_ms.is_some()
-                                    && entry.source_mtime_ms == mtime_ms =>
+                        to_hash.push(reload_hash_target(
+                            path,
+                            key,
+                            size,
+                            mtime_ms,
+                            entries
+                                .iter()
+                                .map(|entry| entry.file_hash.clone())
+                                .collect(),
+                            if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
+                                "missingMtime"
+                            } else {
+                                "changed"
+                            },
+                        ));
+                    }
+                }
+                // Not a share-in-place source. Before treating it as a
+                // brand-new file to hash, check whether it is a completed
+                // download's delivered file re-found in a shared dir: if
+                // its delivered identity (size + mtime) still matches, the
+                // download already computed this hashset, so reuse it
+                // (oracle FindKnownFile) rather than re-hashing the whole
+                // payload. Reuse-only: this never contributes to pruning.
+                None => match delivered_index.get(&key) {
+                    Some(entry)
+                        if entry.file_size == size
+                            && entry.source_mtime_ms.is_some()
+                            && entry.source_mtime_ms == mtime_ms =>
+                    {
+                        stats.reused_count += 1;
+                        reused_shares.push(ReusedReloadShare {
+                            file_hash: entry.file_hash.clone(),
+                            source_path: path.clone(),
+                            stale_hashes: Vec::new(),
+                        });
+                    }
+                    // Stock known.met has no paths. Promote only a
+                    // unique exact eMule identity match; duplicate
+                    // `(name, size, mtime_s)` rows deliberately fall
+                    // through to hashing.
+                    _ => {
+                        if let (Some(display_name), Some(mtime_ms)) =
+                            (path.file_name().and_then(|name| name.to_str()), mtime_ms)
+                        {
+                            let modified_s = mtime_ms / 1000;
+                            let identity = (display_name.to_string(), size, modified_s);
+                            if let Some(entries) = imported_known_index.get(&identity)
+                                && entries.len() == 1
                             {
                                 stats.reused_count += 1;
-                                reused_shares.push(ReusedReloadShare {
-                                    file_hash: entry.file_hash.clone(),
-                                    source_path: path.clone(),
-                                    stale_hashes: Vec::new(),
+                                imported_known_promotions.push(ImportedKnownPromotion {
+                                    entry: entries[0].clone(),
+                                    source_path: path,
+                                    source_mtime_ms: Some(mtime_ms),
                                 });
+                                continue;
                             }
-                            // Stock known.met has no paths. Promote only a
-                            // unique exact eMule identity match; duplicate
-                            // `(name, size, mtime_s)` rows deliberately fall
-                            // through to hashing.
-                            _ => {
-                                if let (Some(display_name), Some(mtime_ms)) =
-                                    (path.file_name().and_then(|name| name.to_str()), mtime_ms)
-                                {
-                                    let modified_s = mtime_ms / 1000;
-                                    let identity = (display_name.to_string(), size, modified_s);
-                                    if let Some(entries) = imported_known_index.get(&identity)
-                                        && entries.len() == 1
-                                    {
-                                        stats.reused_count += 1;
-                                        imported_known_promotions.push(ImportedKnownPromotion {
-                                            entry: entries[0].clone(),
-                                            source_path: path,
-                                            source_mtime_ms: Some(mtime_ms),
-                                        });
-                                        continue;
-                                    }
-                                }
-                                // Brand-new path: hash it, nothing stale to clean up.
-                                stats.planned_hash_count += 1;
-                                stats.new_count += 1;
-                                to_hash.push(reload_hash_target(
-                                    path,
-                                    key,
-                                    size,
-                                    mtime_ms,
-                                    Vec::new(),
-                                    "new",
-                                ));
-                            }
-                        },
+                        }
+                        // Brand-new path: hash it, nothing stale to clean up.
+                        stats.planned_hash_count += 1;
+                        stats.new_count += 1;
+                        to_hash.push(reload_hash_target(
+                            path,
+                            key,
+                            size,
+                            mtime_ms,
+                            Vec::new(),
+                            "new",
+                        ));
                     }
-                }
-                None => {
-                    let key = shared_source_key(&path);
-                    scanned_source_keys.insert(key.clone());
-                    if unchanged_failure(&failures, &key, 0, None) {
-                        stats.skipped_failed_count += 1;
-                        continue;
-                    }
-                    stats.planned_hash_count += 1;
-                    stats.stat_failed_count += 1;
-                    to_hash.push(reload_hash_target(
-                        path,
-                        key,
-                        0,
-                        None,
-                        Vec::new(),
-                        "statFailed",
-                    ));
-                }
+                },
             }
         }
         let kept_hashes = reused_shares
@@ -848,10 +847,6 @@ async fn load_shared_source_failures(
     tokio::task::spawn_blocking(move || metadata.shared_source_failures())
         .await
         .map_err(anyhow::Error::from)?
-}
-
-fn shared_source_key(path: &Path) -> String {
-    long_path(path).display().to_string()
 }
 
 fn unchanged_failure(
@@ -1149,12 +1144,12 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
     let scan = scan_shared_files(core).await?;
     record_reload_progress(core, |diagnostics| {
         diagnostics.phase = "planning".to_string();
-        diagnostics.scanned_count = scan.file_paths.len();
+        diagnostics.scanned_count = scan.files.len();
         diagnostics.skipped_intake_count = scan.skipped_intake_count;
     });
     // Incremental skip: only (re)hash files that are new or whose size/mtime
     // changed since the last index; unchanged files keep their persisted shares.
-    let mut plan = plan_incremental_reload(core, scan.file_paths).await?;
+    let mut plan = plan_incremental_reload(core, scan.files).await?;
     plan.stats.skipped_intake_count = scan.skipped_intake_count;
     record_reload_progress(core, |diagnostics| {
         *diagnostics = plan.stats.clone().into_diagnostics("hashing", true, false);
@@ -1339,7 +1334,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         diagnostics.phase = "scanning".to_string();
     });
     let scan = scan_shared_files(&core).await?;
-    let scanned = scan.file_paths.len();
+    let scanned = scan.files.len();
     let skipped_intake_count = scan.skipped_intake_count;
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "planning".to_string();
@@ -1349,7 +1344,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     // Incremental skip: an unchanged file (same path + size + mtime as its
     // persisted manifest) is NOT re-hashed, so a restart over an unchanged
     // library finishes near-instantly and `hashingCount` stays ~0.
-    let mut plan = plan_incremental_reload(&core, scan.file_paths).await?;
+    let mut plan = plan_incremental_reload(&core, scan.files).await?;
     plan.stats.skipped_intake_count = skipped_intake_count;
     record_reload_progress(&core, |diagnostics| {
         *diagnostics = plan.stats.clone().into_diagnostics(

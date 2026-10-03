@@ -8,6 +8,7 @@
 //! matches its persisted entry is reused as-is instead of being re-read/re-hashed.
 
 use std::collections::HashMap;
+use std::fs::Metadata;
 use std::path::Path;
 
 use anyhow::Result;
@@ -16,6 +17,22 @@ use emulebb_metadata::MetadataImportedKnownFileEntry;
 use super::{Ed2kReloadIndexEntry, Ed2kTransferRuntime};
 
 impl Ed2kTransferRuntime {
+    /// Build the normalized incremental-reload identity from metadata already
+    /// fetched by a directory walk. Reusing that metadata avoids a second
+    /// filesystem lookup for every file in large shared libraries.
+    #[must_use]
+    pub fn scanned_source_identity_from_metadata(
+        source_path: &Path,
+        metadata: &Metadata,
+    ) -> (String, u64, Option<i64>) {
+        let normalized = crate::long_path::long_path(source_path);
+        (
+            normalized.display().to_string(),
+            metadata.len(),
+            super::ingest::source_mtime_ms(metadata),
+        )
+    }
+
     /// Build the share-in-place reload index: a map from each persisted
     /// share-in-place source path (normalized to its long-path form, the same
     /// form the directory walk produces) to all recorded identities for that

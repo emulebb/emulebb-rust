@@ -14,12 +14,30 @@ fn scratch_dir(label: &str) -> PathBuf {
     dir
 }
 
-fn names(mut paths: Vec<PathBuf>) -> Vec<String> {
-    paths.sort();
-    paths
+fn names(mut files: Vec<ScannedSharedFile>) -> Vec<String> {
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files
         .into_iter()
-        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .map(|file| {
+            file.path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect()
+}
+
+fn scanned_file(path: &Path) -> ScannedSharedFile {
+    let metadata = fs::metadata(path).expect("stat scanned test file");
+    let (key, file_size, source_mtime_ms) =
+        Ed2kTransferRuntime::scanned_source_identity_from_metadata(path, &metadata);
+    ScannedSharedFile {
+        path: path.to_path_buf(),
+        key,
+        file_size,
+        source_mtime_ms,
+    }
 }
 
 #[tokio::test]
@@ -76,7 +94,7 @@ async fn incremental_reload_skips_unchanged_failed_source_and_retries_changed_id
         .upsert_shared_source_failure(&key, size, mtime_ms, "ingest failed")
         .unwrap();
 
-    let skipped = plan_incremental_reload(&core, vec![source.clone()])
+    let skipped = plan_incremental_reload(&core, vec![scanned_file(&source)])
         .await
         .unwrap();
 
@@ -85,7 +103,7 @@ async fn incremental_reload_skips_unchanged_failed_source_and_retries_changed_id
     assert_eq!(skipped.stats.skipped_failed_count, 1);
 
     fs::write(&source, b"changed payload with a different length").unwrap();
-    let retried = plan_incremental_reload(&core, vec![source.clone()])
+    let retried = plan_incremental_reload(&core, vec![scanned_file(&source)])
         .await
         .unwrap();
 
@@ -162,7 +180,7 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
         .unwrap();
     assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
 
-    let plan = plan_incremental_reload(&core, vec![source.clone()])
+    let plan = plan_incremental_reload(&core, vec![scanned_file(&source)])
         .await
         .unwrap();
 
@@ -201,7 +219,7 @@ async fn incremental_reload_promotes_unique_pathless_imported_known_file() {
         .upsert_imported_known_file(&imported)
         .unwrap();
 
-    let plan = plan_incremental_reload(&core, vec![source.clone()])
+    let plan = plan_incremental_reload(&core, vec![scanned_file(&source)])
         .await
         .unwrap();
 
@@ -259,7 +277,7 @@ async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() 
             .unwrap();
     }
 
-    let plan = plan_incremental_reload(&core, vec![source.clone()])
+    let plan = plan_incremental_reload(&core, vec![scanned_file(&source)])
         .await
         .unwrap();
 
@@ -321,7 +339,7 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
         .unwrap();
 
     // Unchanged delivered file: reuse HIT, no re-hash.
-    let plan = plan_incremental_reload(&core, vec![delivered.clone()])
+    let plan = plan_incremental_reload(&core, vec![scanned_file(&delivered)])
         .await
         .unwrap();
     assert!(
@@ -338,7 +356,7 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
     // baseline no longer matches, so it is (correctly) re-hashed as new.
     std::thread::sleep(std::time::Duration::from_millis(10));
     fs::write(&delivered, b"a different payload the operator dropped in").unwrap();
-    let replaced = plan_incremental_reload(&core, vec![delivered.clone()])
+    let replaced = plan_incremental_reload(&core, vec![scanned_file(&delivered)])
         .await
         .unwrap();
     assert_eq!(
@@ -376,7 +394,7 @@ async fn incremental_reload_keeps_hash_when_duplicate_source_remains_scanned() {
         .unwrap();
     assert_eq!(kept.hash, duplicate.hash);
 
-    let plan = plan_incremental_reload(&core, vec![kept_source.clone()])
+    let plan = plan_incremental_reload(&core, vec![scanned_file(&kept_source)])
         .await
         .unwrap();
 
