@@ -71,17 +71,23 @@ pub(crate) enum MonitorAction {
     /// A file moved within a watched tree. Content identity is preserved, so
     /// the applier can relocate the persisted source path without rehashing.
     Rename { from: PathBuf, to: PathBuf },
+    /// The backend reported only one side of a rename. Reconcile the complete
+    /// configured tree because an OS watcher buffer may have dropped adjacent
+    /// events from the same burst.
+    Reconcile,
 }
 
 /// Classify a single settled debounced event into zero or more actions.
 ///
 /// `notify`'s settled event kinds map cleanly onto our three intents:
-/// * `Create` / `Modify(Data|Any|Metadata)` / a rename *to* a path -> the path
-///   now holds content we should share.
-/// * `Remove` / a rename *from* a path -> the path no longer holds the content
-///   it had, so drop it.
+/// * `Create` / `Modify(Data|Any|Metadata)` -> the path now holds content we
+///   should share.
+/// * `Remove` -> the path no longer holds the content it had, so drop it.
 /// * A paired rename carries `[from, to]`: relocate the source identity without
 ///   rehashing unchanged content.
+/// * An unpaired rename requests one incremental reconciliation scan. It may be
+///   a legitimate move across the watch boundary, or evidence that the native
+///   watcher dropped the other side of a larger burst.
 ///
 /// We intentionally do not try to stat the path here (it may already be gone for
 /// a remove, or still settling); the consumer decides share-vs-skip when it
@@ -106,20 +112,20 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
                 }],
                 _ => Vec::new(),
             },
-            // A rename *to* a watched path makes it appear (auto-pickup).
-            RenameMode::To => map_paths(MonitorAction::Share),
-            // A rename *from* a watched path makes it disappear.
-            RenameMode::From => map_paths(MonitorAction::Remove),
+            // An unpaired rename is also the only portable signal left after
+            // a native watcher buffer overflow. A full incremental scan is
+            // required to discover every path the kernel could not report.
+            RenameMode::To | RenameMode::From => vec![MonitorAction::Reconcile],
             // Some backends label a paired [from, to] event as Any/Other. Keep
-            // that pair when present; a single ambiguous path remains a Share
-            // candidate and the applier reconciles a vanished path as removal.
+            // that pair when present; a single ambiguous path needs the same
+            // reconciliation safety net as an unpaired From/To event.
             RenameMode::Any | RenameMode::Other => {
                 match (event.paths.first(), event.paths.get(1)) {
                     (Some(from), Some(to)) => vec![MonitorAction::Rename {
                         from: from.clone(),
                         to: to.clone(),
                     }],
-                    _ => map_paths(MonitorAction::Share),
+                    _ => vec![MonitorAction::Reconcile],
                 }
             }
         },
@@ -140,10 +146,12 @@ pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction
 /// the same file while the serial hashing consumer is busy. Keeping only the
 /// last intent avoids redundant full-file reads and also bounds the pending
 /// work to the number of distinct paths. Paired renames remain atomic actions;
-/// duplicate pairs are collapsed independently from final per-path intents.
+/// duplicate pairs and reconciliation requests are collapsed independently
+/// from final per-path intents.
 fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
     let mut by_path: HashMap<PathBuf, (usize, MonitorAction)> = HashMap::new();
     let mut renames: HashMap<(PathBuf, PathBuf), (usize, MonitorAction)> = HashMap::new();
+    let mut reconcile = None;
     for (sequence, action) in actions.into_iter().enumerate() {
         match &action {
             MonitorAction::Share(path) | MonitorAction::Remove(path) => {
@@ -152,10 +160,12 @@ fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
             MonitorAction::Rename { from, to } => {
                 renames.insert((from.clone(), to.clone()), (sequence, action));
             }
+            MonitorAction::Reconcile => reconcile = Some((sequence, action)),
         }
     }
     let mut coalesced = by_path.into_values().collect::<Vec<_>>();
     coalesced.extend(renames.into_values());
+    coalesced.extend(reconcile);
     coalesced.sort_by_key(|(sequence, _)| *sequence);
     coalesced.into_iter().map(|(_, action)| action).collect()
 }
@@ -381,6 +391,14 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
                 MonitorAction::Remove(path) => auto_unshare_monitored_path(&applier, &path).await,
                 MonitorAction::Rename { from, to } => {
                     auto_relocate_monitored_path(&applier, &from, &to).await
+                }
+                MonitorAction::Reconcile => {
+                    if let Err(error) = applier.reload_shared_directories_detached().await {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to schedule shared-directory watcher reconciliation",
+                        );
+                    }
                 }
             }
         }
@@ -641,6 +659,9 @@ mod tests {
             to: PathBuf::from(to),
         }
     }
+    fn reconcile() -> MonitorAction {
+        MonitorAction::Reconcile
+    }
     fn name(mode: RenameMode) -> EventKind {
         EventKind::Modify(ModifyKind::Name(mode))
     }
@@ -667,11 +688,11 @@ mod tests {
     }
 
     #[test]
-    fn rename_to_classifies_as_share_rename_from_as_remove() {
+    fn unpaired_rename_requests_full_reconciliation() {
         let to = debounced(name(RenameMode::To), vec!["/share/new.dat"]);
-        assert_eq!(classify_event(&to), vec![share("/share/new.dat")]);
+        assert_eq!(classify_event(&to), vec![reconcile()]);
         let from = debounced(name(RenameMode::From), vec!["/share/old.dat"]);
-        assert_eq!(classify_event(&from), vec![remove("/share/old.dat")]);
+        assert_eq!(classify_event(&from), vec![reconcile()]);
     }
 
     #[test]
@@ -742,6 +763,19 @@ mod tests {
                 share("/s/b.dat"),
             ]),
             vec![rename("/s/a.dat", "/s/b.dat"), share("/s/b.dat")],
+        );
+    }
+
+    #[test]
+    fn coalesce_actions_schedules_only_one_reconciliation_per_burst() {
+        assert_eq!(
+            coalesce_actions(vec![
+                reconcile(),
+                share("/s/a.dat"),
+                reconcile(),
+                remove("/s/b.dat"),
+            ]),
+            vec![share("/s/a.dat"), reconcile(), remove("/s/b.dat")],
         );
     }
 
