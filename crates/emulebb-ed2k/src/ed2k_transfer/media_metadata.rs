@@ -28,6 +28,7 @@ use super::Ed2kMediaMetadata;
 const MAX_PREFIX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TEXT_CHARS: usize = 80;
 const MAGIC_SNIFF_BYTES: usize = 12;
+const MEDIA_MAGIC_SNIFF_BYTES: usize = 4 * 1024;
 
 pub(super) fn extract_media_metadata(path: &Path, display_name: &str) -> Ed2kMediaMetadata {
     let extension = display_name
@@ -40,28 +41,43 @@ pub(super) fn extract_media_metadata(path: &Path, display_name: &str) -> Ed2kMed
     let Ok(file_size) = file.metadata().map(|metadata| metadata.len()) else {
         return Ed2kMediaMetadata::default();
     };
-    if !extension_uses_media_parser(&extension) {
-        let mut signature = [0_u8; MAGIC_SNIFF_BYTES];
-        let Ok(read) = file.read(&mut signature) else {
-            return Ed2kMediaMetadata::default();
-        };
-        if !has_legacy_media_magic(&signature[..read]) {
-            // WHY: The common large-library case includes documents, archives, and
-            // arbitrary binary files. Reading up to 2 MiB from every one after
-            // the mandatory ED2K/AICH hash pass doubled physical I/O for those
-            // files without producing media fields. A tiny magic sniff preserves
-            // extensionless ID3/RIFF detection while making non-media a bounded
-            // metadata operation.
-            return Ed2kMediaMetadata::default();
-        }
-        if file.seek(SeekFrom::Start(0)).is_err() {
-            return Ed2kMediaMetadata::default();
-        }
-    }
+    let uses_media_parser = extension_uses_media_parser(&extension);
+    let sniff_bytes = if uses_media_parser {
+        MEDIA_MAGIC_SNIFF_BYTES
+    } else {
+        MAGIC_SNIFF_BYTES
+    };
     let mut prefix = Vec::with_capacity(file_size.min(MAX_PREFIX_BYTES) as usize);
     if file
         .by_ref()
-        .take(MAX_PREFIX_BYTES)
+        .take(sniff_bytes as u64)
+        .read_to_end(&mut prefix)
+        .is_err()
+    {
+        return Ed2kMediaMetadata::default();
+    }
+    if uses_media_parser {
+        if !extension_matches_media_magic(&extension, &prefix) {
+            // WHY: Real libraries contain mislabeled/corrupt files. Passing those
+            // into Symphonia makes it scan another 1 MiB and log an error after
+            // the mandatory whole-file ED2K/AICH pass. A 4 KiB signature gate
+            // preserves supported formats while bounding the false-extension
+            // path before the large prefix and demuxer probes.
+            return Ed2kMediaMetadata::default();
+        }
+    } else if !has_legacy_media_magic(&prefix) {
+        // WHY: The common large-library case includes documents, archives, and
+        // arbitrary binary files. Reading up to 2 MiB from every one after
+        // the mandatory ED2K/AICH hash pass doubled physical I/O for those
+        // files without producing media fields. A tiny magic sniff preserves
+        // extensionless ID3/RIFF detection while making non-media a bounded
+        // metadata operation.
+        return Ed2kMediaMetadata::default();
+    }
+    let remaining_prefix_bytes = MAX_PREFIX_BYTES.saturating_sub(prefix.len() as u64);
+    if file
+        .by_ref()
+        .take(remaining_prefix_bytes)
         .read_to_end(&mut prefix)
         .is_err()
     {
@@ -132,6 +148,29 @@ fn extension_uses_media_parser(extension: &str) -> bool {
 
 fn has_legacy_media_magic(prefix: &[u8]) -> bool {
     prefix.starts_with(b"ID3") || prefix.starts_with(b"RIFF")
+}
+
+fn extension_matches_media_magic(extension: &str, prefix: &[u8]) -> bool {
+    let contains = |needle: &[u8]| prefix.windows(needle.len()).any(|row| row == needle);
+    let has_mpeg_sync = prefix
+        .windows(2)
+        .any(|row| row[0] == 0xff && row[1] & 0xe0 == 0xe0);
+    match extension {
+        "aac" => prefix.starts_with(b"ID3") || prefix.starts_with(b"ADIF") || has_mpeg_sync,
+        "aif" | "aiff" => prefix.starts_with(b"FORM") && (contains(b"AIFF") || contains(b"AIFC")),
+        "ape" => prefix.starts_with(b"MAC "),
+        "avi" => prefix.starts_with(b"RIFF") && contains(b"AVI "),
+        "flac" => contains(b"fLaC"),
+        "m4a" | "m4b" | "m4v" | "mov" | "mp4" => contains(b"ftyp"),
+        "mp1" | "mp2" | "mp3" | "mpa" => prefix.starts_with(b"ID3") || has_mpeg_sync,
+        "mpc" => prefix.starts_with(b"MPCK") || prefix.starts_with(b"MP+"),
+        "oga" | "ogg" | "opus" | "spx" => prefix.starts_with(b"OggS"),
+        "ra" | "rm" | "rmvb" => prefix.starts_with(b".RMF"),
+        "wav" => prefix.starts_with(b"RIFF") && contains(b"WAVE"),
+        "wma" | "wmv" | "asf" => prefix.starts_with(&[0x30, 0x26, 0xb2, 0x75]),
+        "wv" => prefix.starts_with(b"wvpk"),
+        _ => false,
+    }
 }
 
 fn extract_symphonia_audio(
@@ -719,11 +758,18 @@ mod tests {
         assert!(has_legacy_media_magic(b"ID3 synthetic"));
         assert!(has_legacy_media_magic(b"RIFF synthetic"));
         assert!(!has_legacy_media_magic(b"not media"));
+        assert!(extension_matches_media_magic("mp3", b"ID3 synthetic"));
+        assert!(extension_matches_media_magic("mp4", b"\0\0\0\x18ftypisom"));
+        assert!(!extension_matches_media_magic("mp4", b"not media"));
 
         let opaque = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(opaque.path(), vec![0x5a; 3 * 1024 * 1024]).unwrap();
         assert_eq!(
             extract_media_metadata(opaque.path(), "opaque.bin"),
+            Ed2kMediaMetadata::default(),
+        );
+        assert_eq!(
+            extract_media_metadata(opaque.path(), "mislabeled.mp4"),
             Ed2kMediaMetadata::default(),
         );
 
