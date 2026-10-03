@@ -310,7 +310,7 @@ pub(crate) fn kad_response(
 }
 
 pub(crate) fn server_response(server: &ServerInfo) -> Value {
-    json!({
+    let mut response = json!({
         "address": server.address,
         "port": server.port,
         "name": server.name,
@@ -328,6 +328,8 @@ pub(crate) fn server_response(server: &ServerInfo) -> Value {
         "ip": server.ip,
         "ping": server.ping,
         "softFiles": server.soft_files,
+        "offerFilesPublishedEntries": server.offer_files_published_entries,
+        "offerFilesPendingEntries": server.offer_files_pending_entries,
         "version": server.version,
         "obfuscationTcpPort": server.obfuscation_tcp_port,
         "udpFlags": server.udp_flags,
@@ -337,7 +339,26 @@ pub(crate) fn server_response(server: &ServerInfo) -> Value {
         "hostNameStatus": server.host_name_status,
         "hostNameResolvedAt": server.host_name_resolved_at,
         "hostNameError": server.host_name_error
-    })
+    });
+    let object = response
+        .as_object_mut()
+        .expect("server response is always a JSON object");
+    if let Some(mode) = server.offer_files_mode.as_ref() {
+        object.insert("offerFilesMode".to_string(), json!(mode));
+    }
+    if let Some(batch_max) = server.offer_files_batch_max {
+        object.insert("offerFilesBatchMax".to_string(), json!(batch_max));
+    }
+    if let Some(min_interval_ms) = server.offer_files_min_interval_ms {
+        object.insert(
+            "offerFilesMinIntervalMs".to_string(),
+            json!(min_interval_ms),
+        );
+    }
+    if let Some(reason) = server.offer_files_fallback_reason.as_ref() {
+        object.insert("offerFilesFallbackReason".to_string(), json!(reason));
+    }
+    response
 }
 
 pub(crate) fn server_responses(servers: Vec<ServerInfo>) -> Vec<Value> {
@@ -887,12 +908,12 @@ mod tests {
             ip: String::new(),
             ping: 0,
             soft_files: 0,
-            offer_files_mode: None,
-            offer_files_batch_max: None,
-            offer_files_min_interval_ms: None,
-            offer_files_fallback_reason: None,
-            offer_files_published_entries: 0,
-            offer_files_pending_entries: 0,
+            offer_files_mode: Some("negotiatedV1".to_string()),
+            offer_files_batch_max: Some(300),
+            offer_files_min_interval_ms: Some(1_500),
+            offer_files_fallback_reason: Some("none".to_string()),
+            offer_files_published_entries: 400,
+            offer_files_pending_entries: 25,
             version: String::new(),
             obfuscation_tcp_port: Some(4665),
             obfuscation_udp_port: Some(4675),
@@ -917,6 +938,12 @@ mod tests {
         assert_eq!(value["currentServer"]["connected"], false);
         assert_eq!(value["currentServer"]["auxiliaryPorts"][0], 4662);
         assert_eq!(value["currentServer"]["auxiliaryPorts"][1], 4663);
+        assert_eq!(value["currentServer"]["offerFilesMode"], "negotiatedV1");
+        assert_eq!(value["currentServer"]["offerFilesBatchMax"], 300);
+        assert_eq!(value["currentServer"]["offerFilesMinIntervalMs"], 1_500);
+        assert_eq!(value["currentServer"]["offerFilesFallbackReason"], "none");
+        assert_eq!(value["currentServer"]["offerFilesPublishedEntries"], 400);
+        assert_eq!(value["currentServer"]["offerFilesPendingEntries"], 25);
         assert_eq!(value["currentServer"]["obfuscationTcpPort"], 4665);
         assert_eq!(value["currentServer"]["udpFlags"], 0x331);
         assert_eq!(value["ed2kIdState"], "unknown");
