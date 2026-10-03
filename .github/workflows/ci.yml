@@ -32,17 +32,17 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout emulebb-rust
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Checkout emulebb-miniupnp (native C source)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-miniupnp
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
 
       - name: Checkout emulebb-libpcpnatpmp (native C source)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-libpcpnatpmp
           ref: ${{ env.PCPNATPMP_REF }}
@@ -97,26 +97,26 @@ jobs:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
     steps:
       - name: Checkout emulebb-rust
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: repos/emulebb-rust
 
       - name: Checkout pinned live conformance harness
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build-tests
           ref: 4500288728da86123b46538e55fcf3976a5d5a48
           path: repos/emulebb-build-tests
 
       - name: Checkout pinned Rust OpenAPI contract
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-tooling
           ref: 4a466f4a7ff3ceee62993e2c150fef3e6e7d08fb
           path: repos/emulebb-tooling
 
       - name: Download tested Linux daemon
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: emulebb-rust-Linux-X64-${{ github.sha }}
           path: ${{ runner.temp }}/emulebb-rust-out/tools/emulebb-rust/bin
@@ -155,19 +155,19 @@ jobs:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
     steps:
       - name: Checkout emulebb-rust
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # clippy --workspace builds both native NAT sys crates; provide the same
       # pinned sources as the build-test job.
       - name: Checkout emulebb-miniupnp (native C source)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-miniupnp
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
 
       - name: Checkout emulebb-libpcpnatpmp (native C source)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-libpcpnatpmp
           ref: ${{ env.PCPNATPMP_REF }}
@@ -205,7 +205,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout emulebb-rust
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: cargo-deny — advisories, licenses, and sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
