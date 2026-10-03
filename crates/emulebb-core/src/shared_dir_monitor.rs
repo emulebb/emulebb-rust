@@ -60,9 +60,11 @@ const SETTLE_WINDOW: Duration = Duration::from_secs(2);
 /// recursive Windows watch. Even a modest settled mutation burst can mean an
 /// earlier buffer overflow was silently dropped (renames are especially costly
 /// because they contribute old-name and new-name records). Follow such a burst
-/// with one incremental scan.
+/// with one incremental scan. A single-file operation keeps the direct fast
+/// path; two settled actions are enough to protect against the very short tail
+/// that Windows can deliver after discarding an overflowed buffer.
 #[cfg(target_os = "windows")]
-const WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD: usize = 8;
+const WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD: usize = 2;
 
 /// The decision distilled from a settled debounced event: what the consumer
 /// should do with a given path. This is the pure, unit-testable core of the
@@ -184,6 +186,13 @@ fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
             }
             MonitorAction::Reconcile => reconcile = Some((sequence, action)),
         }
+    }
+    // Reconciliation is the sole authority for a burst. Running the individual
+    // actions beside a detached reload can interleave two catalog writers and
+    // leave the durable rows ahead of the in-memory catalog. The full scan sees
+    // the final settled filesystem state, so the per-path work is redundant.
+    if reconcile.is_some() {
+        return vec![MonitorAction::Reconcile];
     }
     // A backend can emit a paired rename plus a redundant destination Modify.
     // Relocation already compares the final destination identity and rehashes
@@ -437,6 +446,20 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
                             error = %error,
                             "failed to schedule shared-directory watcher reconciliation",
                         );
+                    } else {
+                        // Keep the serial watcher consumer behind the reload so
+                        // later event batches cannot mutate the catalog while
+                        // reconciliation is rebuilding it. The detached worker
+                        // still retains one hash worker per physical disk.
+                        while applier
+                            .shared_reload_running
+                            .load(std::sync::atomic::Ordering::Acquire)
+                            || applier
+                                .shared_reload_pending
+                                .load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
                     }
                 }
             }
@@ -783,10 +806,10 @@ mod tests {
             debounced(EventKind::Create(CreateKind::File), vec!["/s/a.dat"]),
             debounced(EventKind::Remove(RemoveKind::File), vec!["/s/b.dat"]),
         ];
-        assert_eq!(
-            actions_for_events(&events),
-            vec![share("/s/a.dat"), remove("/s/b.dat")]
-        );
+        let mut expected = vec![share("/s/a.dat"), remove("/s/b.dat")];
+        #[cfg(target_os = "windows")]
+        expected.push(reconcile());
+        assert_eq!(actions_for_events(&events), expected);
     }
 
     #[test]
@@ -901,7 +924,7 @@ mod tests {
                 reconcile(),
                 remove("/s/b.dat"),
             ]),
-            vec![share("/s/a.dat"), reconcile(), remove("/s/b.dat")],
+            vec![reconcile()],
         );
     }
 
