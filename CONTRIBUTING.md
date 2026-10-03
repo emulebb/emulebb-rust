@@ -55,3 +55,20 @@ python tools\rust_quality_gate.py webui-test
 
 All local Cargo work must use the workspace output root through
 `CARGO_TARGET_DIR`; never create a repo-local `target` directory.
+
+## Nightly Release Notes
+
+Automated nightly beta builds use commit subjects as their changelog source.
+Every commit added to `main` since the previous successful nightly can appear
+in the next prerelease notes, with a link to the exact commit and the full
+source comparison.
+
+Write a concise, user-readable subject that says what changed. The release-note
+generator understands work-item prefixes such as
+`RUST-CI-007: publish immutable nightly builds` and conventional prefixes such
+as `fix: reject an invalid server address`. It groups entries into `Added`,
+`Fixed`, `Changed`, and `Engineering`; contributors do not maintain a separate
+nightly changelog.
+
+See [Nightly beta builds](README.md#nightly-beta-builds) for the publishing,
+versioning, retention, and download policy.

@@ -19,6 +19,12 @@ local client product. The `0.1.0-beta.2` line does not expose a coordinator API.
 > evidence are tracked in
 > [RUST-BUG-101 / issue 19](https://github.com/emulebb/emulebb-rust/issues/19).
 
+> **Nightly beta channel:** Automated builds from `main` are enabled. A
+> scheduled run publishes a new prerelease only when the exact commit has
+> passed normal CI and differs from the previous nightly. See
+> [Nightly beta builds](#nightly-beta-builds) for downloads, container tags,
+> versioning, and generated changelog details.
+
 Rust development uses the exact toolchain declared in `rust-toolchain.toml`.
 Update that pin, the workspace `rust-version`, and CI together in a dedicated
 toolchain commit after each stable Rust release has passed the full quality
@@ -164,20 +170,41 @@ GHCR assets; the workflow does not publish a `latest` image.
 
 ## Nightly beta builds
 
-The scheduled [nightly workflow](.github/workflows/nightly.yml) packages the
-latest `main` commit only after the normal CI checks for that exact commit have
-passed. Each build is an immutable prerelease derived from the promoted beta,
-for example `0.1.0-beta.2.nightly.20261003.g9e43ea5e`, across the same Windows,
-Linux, macOS, x64, ARM64, and multi-architecture container matrix as a formal
-beta. Nightly binaries remain experimental and are not code-signed; GitHub
-build-provenance attestations and `SHA256SUMS` are published with them.
+The scheduled [nightly workflow](.github/workflows/nightly.yml) runs daily at
+02:17 UTC. It considers the latest `main` commit, verifies that the normal CI
+checks passed for that exact SHA, and skips publishing when that commit already
+has a nightly. A manual run builds candidates without publishing unless the
+operator explicitly enables its `publish` input.
 
-Release notes are generated from commit subjects since the previous successful
-nightly and include links to every commit plus the full GitHub comparison. The
-newest 14 nightly prereleases are retained. GHCR publishes both the immutable
-version tag and the moving `nightly` tag; formal betas remain version-only and
-the workflow never publishes `latest`. A manual run builds candidates without
-publishing unless the operator explicitly enables its `publish` input.
+Published nightlies appear as prereleases on the
+[GitHub Releases page](https://github.com/emulebb/emulebb-rust/releases). Each
+one has an immutable version and tag derived from the promoted beta, date, and
+source commit:
+
+```text
+0.1.0-beta.2.nightly.YYYYMMDD.g<8-character-commit>
+rust-v0.1.0-beta.2.nightly.YYYYMMDD.g<8-character-commit>
+```
+
+Nightlies use the same Windows, Linux, macOS, x64, ARM64, and
+multi-architecture container matrix as a formal beta. Download the native
+package for the target platform from its prerelease. Container users can pin
+the immutable `ghcr.io/emulebb/emulebb-rust:<version>` tag or follow the moving
+`ghcr.io/emulebb/emulebb-rust:nightly` tag. The workflow never publishes a
+`latest` tag, and formal betas remain version-only.
+
+The small changelog on each nightly is automatic. It groups commit subjects
+since the previous successful nightly into `Added`, `Fixed`, `Changed`, and
+`Engineering`, links every listed commit, and includes the full GitHub source
+comparison. No separate nightly changelog needs manual maintenance. Clear
+commit subjects therefore produce better release notes; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md#nightly-release-notes).
+
+Nightly binaries remain experimental and are not code-signed. Verify downloads
+against the published `SHA256SUMS`; GitHub build-provenance attestations are
+also published. The newest 14 nightly prereleases are retained, so use an
+immutable version rather than the moving container tag when reproducibility
+matters.
 
 The image uses LinuxServer's s6 base and supports `PUID`/`PGID`, `/config` for
 profile state, and `/data/ed2k` for completed downloads. It serves the WebUI
