@@ -811,9 +811,10 @@ mod tests {
             debounced(EventKind::Create(CreateKind::File), vec!["/s/a.dat"]),
             debounced(EventKind::Remove(RemoveKind::File), vec!["/s/b.dat"]),
         ];
-        let mut expected = vec![share("/s/a.dat"), remove("/s/b.dat")];
+        #[cfg(not(target_os = "windows"))]
+        let expected = vec![share("/s/a.dat"), remove("/s/b.dat")];
         #[cfg(target_os = "windows")]
-        expected.push(reconcile());
+        let expected = vec![share("/s/a.dat"), remove("/s/b.dat"), reconcile()];
         assert_eq!(actions_for_events(&events), expected);
     }
 
