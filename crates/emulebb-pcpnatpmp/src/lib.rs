@@ -308,7 +308,9 @@ fn cleanup_flow(flow: *mut sys::pcp_flow_t, timeout: Duration) {
 
 fn sockaddr(endpoint: SocketAddrV4) -> sys::sockaddr_in {
     sys::sockaddr_in {
-        sin_family: AF_INET,
+        #[cfg(target_vendor = "apple")]
+        sin_len: std::mem::size_of::<sys::sockaddr_in>() as u8,
+        sin_family: AF_INET as _,
         sin_port: endpoint.port().to_be(),
         sin_addr: sys::in_addr {
             s_addr: u32::from_ne_bytes(endpoint.ip().octets()),
@@ -370,6 +372,12 @@ mod tests {
     #[test]
     fn sockaddr_preserves_ipv4_network_bytes_and_port() {
         let address = sockaddr(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 7), 5351));
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(address.sin_len as usize, std::mem::size_of_val(&address));
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(address.sin_family, 2_u8);
+        #[cfg(not(target_vendor = "apple"))]
+        assert_eq!(address.sin_family, 2_u16);
         assert_eq!(address.sin_addr.s_addr.to_ne_bytes(), [192, 0, 2, 7]);
         assert_eq!(u16::from_be(address.sin_port), 5351);
     }

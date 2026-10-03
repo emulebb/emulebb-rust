@@ -32,6 +32,13 @@ pub struct in_addr {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct sockaddr_in {
+    // Darwin/BSD place an 8-bit length before the 8-bit address family.
+    // Linux and Windows expose the family as one 16-bit field instead.
+    #[cfg(target_vendor = "apple")]
+    pub sin_len: u8,
+    #[cfg(target_vendor = "apple")]
+    pub sin_family: u8,
+    #[cfg(not(target_vendor = "apple"))]
     pub sin_family: u16,
     pub sin_port: u16,
     pub sin_addr: in_addr,
