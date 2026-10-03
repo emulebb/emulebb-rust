@@ -57,11 +57,12 @@ use crate::shared_directories::SharedDirectoryRoot;
 const SETTLE_WINDOW: Duration = Duration::from_secs(2);
 
 /// `notify` 8.x uses one fixed 16 KiB `ReadDirectoryChangesW` buffer for a
-/// recursive Windows watch. A rename contributes both an old-name and new-name
-/// record, so even a modest settled burst can mean an earlier buffer overflow
-/// was silently dropped. Follow such a burst with one incremental scan.
+/// recursive Windows watch. Even a modest settled mutation burst can mean an
+/// earlier buffer overflow was silently dropped (renames are especially costly
+/// because they contribute old-name and new-name records). Follow such a burst
+/// with one incremental scan.
 #[cfg(target_os = "windows")]
-const WINDOWS_RENAME_BURST_RECONCILE_THRESHOLD: usize = 8;
+const WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD: usize = 8;
 
 /// The decision distilled from a settled debounced event: what the consumer
 /// should do with a given path. This is the pure, unit-testable core of the
@@ -150,11 +151,11 @@ pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction
     let mut actions = events.iter().flat_map(classify_event).collect::<Vec<_>>();
     #[cfg(target_os = "windows")]
     {
-        let rename_count = actions
+        let catalog_action_count = actions
             .iter()
-            .filter(|action| matches!(action, MonitorAction::Rename { .. }))
+            .filter(|action| !matches!(action, MonitorAction::Reconcile))
             .count();
-        if rename_count >= WINDOWS_RENAME_BURST_RECONCILE_THRESHOLD {
+        if catalog_action_count >= WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD {
             actions.push(MonitorAction::Reconcile);
         }
     }
@@ -825,7 +826,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_rename_burst_requests_follow_up_reconciliation() {
-        let events = (0..WINDOWS_RENAME_BURST_RECONCILE_THRESHOLD)
+        let events = (0..WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD)
             .map(|index| {
                 let event = Event {
                     kind: name(RenameMode::Both),
@@ -847,7 +848,40 @@ mod tests {
                 .iter()
                 .filter(|action| matches!(action, MonitorAction::Rename { .. }))
                 .count(),
-            WINDOWS_RENAME_BURST_RECONCILE_THRESHOLD,
+            WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD,
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, MonitorAction::Reconcile))
+                .count(),
+            1,
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_create_burst_requests_follow_up_reconciliation() {
+        let events = (0..WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD)
+            .map(|index| {
+                let event = Event {
+                    kind: EventKind::Create(CreateKind::File),
+                    paths: vec![PathBuf::from(format!("C:/share/new-{index}.bin"))],
+                    attrs: Default::default(),
+                };
+                DebouncedEvent {
+                    event,
+                    time: Instant::now(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let actions = actions_for_events(&events);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, MonitorAction::Share(_)))
+                .count(),
+            WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD,
         );
         assert_eq!(
             actions
