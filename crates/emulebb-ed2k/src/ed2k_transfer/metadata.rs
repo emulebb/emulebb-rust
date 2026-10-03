@@ -69,11 +69,13 @@ impl Ed2kTransferRuntime {
         limit: usize,
     ) -> Result<(Vec<MetadataTransferShareEntry>, usize)> {
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            metadata.completed_transfer_share_entries_page(offset, limit)
+        let entries = tokio::task::spawn_blocking(move || {
+            metadata.completed_transfer_share_entries_page_rows(offset, limit)
         })
         .await
-        .map_err(anyhow::Error::from)?
+        .map_err(anyhow::Error::from)??;
+        let total = self.shared_catalog.read().await.completed_verified_len();
+        Ok((entries, total))
     }
 
     /// Return completed download hashes that still need incoming delivery.
@@ -92,11 +94,71 @@ impl Ed2kTransferRuntime {
     ) -> Result<(Vec<MetadataTransferShareEntry>, usize, bool)> {
         let metadata = self.metadata.clone();
         let after_hash = after_hash.map(str::to_owned);
-        tokio::task::spawn_blocking(move || {
-            metadata.completed_transfer_share_entries_after(after_hash.as_deref(), limit)
+        let (entries, has_more) = tokio::task::spawn_blocking(move || {
+            metadata.completed_transfer_share_entries_after_rows(after_hash.as_deref(), limit)
         })
         .await
-        .map_err(anyhow::Error::from)?
+        .map_err(anyhow::Error::from)??;
+        let total = self.shared_catalog.read().await.completed_verified_len();
+        Ok((entries, total, has_more))
+    }
+
+    /// Relocate a share-in-place source after a filesystem rename without
+    /// re-reading its payload or rewriting its hashset children.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the old/new path and source identity are one relocation operation"
+    )]
+    pub async fn relocate_shared_source(
+        &self,
+        file_hash: &str,
+        old_source_path: &str,
+        new_source_path: &str,
+        file_size: u64,
+        source_mtime_ms: Option<i64>,
+        display_name: &str,
+        content_type: &str,
+    ) -> Result<bool> {
+        let parsed_hash: Ed2kHash = file_hash.parse()?;
+        let metadata = self.metadata.clone();
+        let file_hash_owned = file_hash.to_owned();
+        let old_source_path = old_source_path.to_owned();
+        let new_source_path = new_source_path.to_owned();
+        let display_name_owned = display_name.to_owned();
+        let persisted_display_name = display_name_owned.clone();
+        let content_type = content_type.to_owned();
+        let changed = tokio::task::spawn_blocking(move || {
+            metadata.relocate_shared_file_source(
+                &file_hash_owned,
+                &old_source_path,
+                &new_source_path,
+                file_size,
+                source_mtime_ms,
+                &persisted_display_name,
+                &content_type,
+            )
+        })
+        .await
+        .map_err(anyhow::Error::from)??;
+        if !changed {
+            return Ok(false);
+        }
+
+        self.invalidate_payload_handle(file_hash);
+        let mut display_name_changed = false;
+        self.shared_catalog
+            .write()
+            .await
+            .update_by_hash(&parsed_hash, |entry| {
+                if entry.display_name != display_name_owned {
+                    entry.display_name = display_name_owned;
+                    display_name_changed = true;
+                }
+            });
+        if display_name_changed {
+            self.note_shared_catalog_entries_changed();
+        }
+        Ok(true)
     }
 
     /// Ensure a transfer manifest exists for the provided job.

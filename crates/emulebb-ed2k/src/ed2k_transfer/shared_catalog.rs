@@ -204,6 +204,13 @@ mod upsert_collapse_tests {
         // of truth for cursor/rank/REST).
         assert_eq!(new.len(), old.len(), "entry count differs");
         assert_eq!(&new[..], &old[..], "entry contents or order differ");
+        assert_eq!(
+            new.completed_verified_len(),
+            new.iter()
+                .filter(|entry| !entry.compatibility_hint && entry.verified_complete)
+                .count(),
+            "cached completed count differs",
+        );
 
         // Index: both internally consistent, and every hash resolves to the same
         // slot (or to nothing) in both — hints excluded, first occurrence wins.

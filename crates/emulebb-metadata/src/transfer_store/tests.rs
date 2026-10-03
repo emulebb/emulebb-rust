@@ -14,7 +14,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
             color: None,
         })
         .unwrap();
-    let manifest = MetadataTransferManifest {
+    let mut manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Sample.Transfer.bin".to_string(),
         file_size: 1024,
@@ -209,6 +209,53 @@ fn transfer_manifest_roundtrips_sql_tables() {
             }],
             1
         )
+    );
+    let old_source_path = manifest.source_path.clone().unwrap();
+    let new_source_path = "/library/renamed/Renamed.Sample.bin";
+    assert!(
+        store
+            .relocate_shared_file_source(
+                &manifest.file_hash,
+                &old_source_path,
+                new_source_path,
+                manifest.file_size,
+                Some(1_700_000_123_000),
+                "Renamed.Sample.bin",
+                "document",
+            )
+            .unwrap()
+    );
+    manifest.source_path = Some(new_source_path.to_string());
+    manifest.source_mtime_ms = Some(1_700_000_123_000);
+    manifest.display_name = "Renamed.Sample.bin".to_string();
+    assert_eq!(
+        store.share_in_place_reload_entries().unwrap(),
+        vec![MetadataShareInPlaceReloadEntry {
+            file_hash: manifest.file_hash.clone(),
+            file_size: manifest.file_size,
+            source_path: new_source_path.to_string(),
+            source_mtime_ms: manifest.source_mtime_ms,
+        }]
+    );
+    let renamed_share = store
+        .completed_transfer_share_entry(&manifest.file_hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(renamed_share.source_path.as_deref(), Some(new_source_path));
+    assert_eq!(renamed_share.display_name, manifest.display_name);
+    assert!(
+        !store
+            .relocate_shared_file_source(
+                &manifest.file_hash,
+                &old_source_path,
+                "/library/unused.bin",
+                manifest.file_size,
+                manifest.source_mtime_ms,
+                "unused.bin",
+                "document",
+            )
+            .unwrap(),
+        "the old source row must be gone after relocation",
     );
     store
         .mark_unshared_file(&manifest.file_hash, "manual")

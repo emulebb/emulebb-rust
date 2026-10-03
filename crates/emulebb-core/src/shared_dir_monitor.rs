@@ -68,17 +68,20 @@ pub(crate) enum MonitorAction {
     /// A file was removed or renamed away from under a shared root -- drop it
     /// from the shared catalog.
     Remove(PathBuf),
+    /// A file moved within a watched tree. Content identity is preserved, so
+    /// the applier can relocate the persisted source path without rehashing.
+    Rename { from: PathBuf, to: PathBuf },
 }
 
 /// Classify a single settled debounced event into zero or more actions.
 ///
-/// `notify`'s settled event kinds map cleanly onto our two intents:
+/// `notify`'s settled event kinds map cleanly onto our three intents:
 /// * `Create` / `Modify(Data|Any|Metadata)` / a rename *to* a path -> the path
 ///   now holds content we should share.
 /// * `Remove` / a rename *from* a path -> the path no longer holds the content
 ///   it had, so drop it.
-/// * A `Both`-mode rename carries `[from, to]`: drop the old path, share the
-///   new one.
+/// * A paired rename carries `[from, to]`: relocate the source identity without
+///   rehashing unchanged content.
 ///
 /// We intentionally do not try to stat the path here (it may already be gone for
 /// a remove, or still settling); the consumer decides share-vs-skip when it
@@ -94,24 +97,31 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
             ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any | ModifyKind::Other,
         ) => map_paths(MonitorAction::Share),
         EventKind::Modify(ModifyKind::Name(rename_mode)) => match rename_mode {
-            // A both-leg rename carries [from, to]: drop the source, share the dest.
-            RenameMode::Both => {
-                let mut actions = Vec::new();
-                if let Some(from) = event.paths.first() {
-                    actions.push(MonitorAction::Remove(from.clone()));
-                }
-                if let Some(to) = event.paths.get(1) {
-                    actions.push(MonitorAction::Share(to.clone()));
-                }
-                actions
-            }
+            // A paired rename preserves file identity and must not be expanded
+            // into unshare + full re-ingest for a large library.
+            RenameMode::Both => match (event.paths.first(), event.paths.get(1)) {
+                (Some(from), Some(to)) => vec![MonitorAction::Rename {
+                    from: from.clone(),
+                    to: to.clone(),
+                }],
+                _ => Vec::new(),
+            },
             // A rename *to* a watched path makes it appear (auto-pickup).
             RenameMode::To => map_paths(MonitorAction::Share),
             // A rename *from* a watched path makes it disappear.
             RenameMode::From => map_paths(MonitorAction::Remove),
-            // Ambiguous rename: be conservative and treat each path as a share
-            // candidate (the consumer skips paths that are already gone).
-            RenameMode::Any | RenameMode::Other => map_paths(MonitorAction::Share),
+            // Some backends label a paired [from, to] event as Any/Other. Keep
+            // that pair when present; a single ambiguous path remains a Share
+            // candidate and the applier reconciles a vanished path as removal.
+            RenameMode::Any | RenameMode::Other => {
+                match (event.paths.first(), event.paths.get(1)) {
+                    (Some(from), Some(to)) => vec![MonitorAction::Rename {
+                        from: from.clone(),
+                        to: to.clone(),
+                    }],
+                    _ => map_paths(MonitorAction::Share),
+                }
+            }
         },
         EventKind::Remove(_) => map_paths(MonitorAction::Remove),
         // Access / Other / Any: no shared-catalog consequence.
@@ -124,25 +134,28 @@ pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction
     events.iter().flat_map(classify_event).collect()
 }
 
-fn action_path(action: &MonitorAction) -> &Path {
-    match action {
-        MonitorAction::Share(path) | MonitorAction::Remove(path) => path,
-    }
-}
-
 /// Collapse a queued event burst to the final intent for each path.
 ///
 /// Large copies and in-place rewrites can produce several settled events for
 /// the same file while the serial hashing consumer is busy. Keeping only the
 /// last intent avoids redundant full-file reads and also bounds the pending
-/// work to the number of distinct paths. Ordering follows each path's final
-/// event, preserving remove-before-share ordering for two-leg renames.
+/// work to the number of distinct paths. Paired renames remain atomic actions;
+/// duplicate pairs are collapsed independently from final per-path intents.
 fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
     let mut by_path: HashMap<PathBuf, (usize, MonitorAction)> = HashMap::new();
+    let mut renames: HashMap<(PathBuf, PathBuf), (usize, MonitorAction)> = HashMap::new();
     for (sequence, action) in actions.into_iter().enumerate() {
-        by_path.insert(action_path(&action).to_path_buf(), (sequence, action));
+        match &action {
+            MonitorAction::Share(path) | MonitorAction::Remove(path) => {
+                by_path.insert(path.clone(), (sequence, action));
+            }
+            MonitorAction::Rename { from, to } => {
+                renames.insert((from.clone(), to.clone()), (sequence, action));
+            }
+        }
     }
     let mut coalesced = by_path.into_values().collect::<Vec<_>>();
+    coalesced.extend(renames.into_values());
     coalesced.sort_by_key(|(sequence, _)| *sequence);
     coalesced.into_iter().map(|(_, action)| action).collect()
 }
@@ -281,8 +294,9 @@ where
 /// The consumer drains all immediately queued actions into one coalesced burst
 /// before forwarding the final intent for each distinct path to the applier.
 /// The applier is the single authority: a `Share` goes through the (cheap,
-/// hash-keyed) ingest path, and a `Remove` resolves the vanished path's hash
-/// from the core's `monitor_shared_hashes` map -- which now records BOTH files
+/// hash-keyed) ingest path, a `Remove` resolves the vanished path's hash, and a
+/// paired `Rename` moves the source identity without hashing. Resolution uses
+/// the core's `monitor_shared_hashes` map -- which records BOTH files
 /// the live monitor picked up AND the shares created by the initial startup
 /// reload -- and no-ops when the path was never shared.
 ///
@@ -365,11 +379,104 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
             match action {
                 MonitorAction::Share(path) => auto_share_monitored_path(&applier, &path).await,
                 MonitorAction::Remove(path) => auto_unshare_monitored_path(&applier, &path).await,
+                MonitorAction::Rename { from, to } => {
+                    auto_relocate_monitored_path(&applier, &from, &to).await
+                }
             }
         }
     });
 
     *core.shared_dir_monitor.lock().unwrap() = monitor;
+}
+
+/// Relocate an already-shared source after a paired filesystem rename.
+///
+/// Renaming a 100k-file library cohort must be metadata-only: unshare + ingest
+/// would reread unchanged payload bytes, churn the catalog, and briefly make the
+/// file unavailable. If size/mtime changed during the move, relocate first and
+/// then let the regular share path rehash exactly once from the destination.
+async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path) {
+    // WHY: expanding a paired rename into Remove + Share globally unshares the
+    // hash, rereads unchanged content, and leaves stale source rows when a large
+    // burst outruns the serial consumer. Preserve the source identity atomically.
+    let old_key = monitor_shared_key(from);
+    let new_key = monitor_shared_key(to);
+    let previous = core
+        .state
+        .lock()
+        .await
+        .monitor_shared_hashes
+        .get(&old_key)
+        .cloned();
+    let Some(previous) = previous else {
+        auto_share_monitored_path(core, to).await;
+        return;
+    };
+    let metadata = match tokio::fs::metadata(&new_key).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => {
+            auto_unshare_monitored_path(core, from).await;
+            return;
+        }
+    };
+    let (_, file_size, source_mtime_ms) =
+        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity_from_metadata(
+            &new_key, &metadata,
+        );
+    let Some(display_name) = new_key.file_name().and_then(|name| name.to_str()) else {
+        tracing::warn!(path = %to.display(), "renamed shared file has no valid file name");
+        return;
+    };
+    let content_type = crate::ed2k_file_type_search_term(display_name).unwrap_or("unknown");
+    match core
+        .ed2k_transfers
+        .relocate_shared_source(
+            &previous.hash,
+            &old_key.display().to_string(),
+            &new_key.display().to_string(),
+            file_size,
+            source_mtime_ms,
+            display_name,
+            content_type,
+        )
+        .await
+    {
+        Ok(true) => {
+            let identity_changed =
+                previous.file_size != file_size || previous.source_mtime_ms != source_mtime_ms;
+            let mut state = core.state.lock().await;
+            state.monitor_shared_hashes.remove(&old_key);
+            state.monitor_shared_hashes.insert(
+                new_key,
+                crate::core_state::MonitoredSharedFile {
+                    hash: previous.hash,
+                    file_size,
+                    source_mtime_ms,
+                },
+            );
+            drop(state);
+            core.queue_ed2k_shared_catalog_publish();
+            if identity_changed {
+                auto_share_monitored_path(core, to).await;
+            }
+        }
+        Ok(false) => {
+            tracing::warn!(
+                from = %from.display(),
+                to = %to.display(),
+                "monitored rename source was absent from persisted share metadata",
+            );
+            auto_share_monitored_path(core, to).await;
+        }
+        Err(error) => {
+            tracing::warn!(
+                from = %from.display(),
+                to = %to.display(),
+                error = %error,
+                "failed to relocate monitored shared file metadata",
+            );
+        }
+    }
 }
 
 /// Stop the live shared-directory monitor (if running). Idempotent.
@@ -528,6 +635,12 @@ mod tests {
     fn remove(path: &str) -> MonitorAction {
         MonitorAction::Remove(PathBuf::from(path))
     }
+    fn rename(from: &str, to: &str) -> MonitorAction {
+        MonitorAction::Rename {
+            from: PathBuf::from(from),
+            to: PathBuf::from(to),
+        }
+    }
     fn name(mode: RenameMode) -> EventKind {
         EventKind::Modify(ModifyKind::Name(mode))
     }
@@ -562,14 +675,26 @@ mod tests {
     }
 
     #[test]
-    fn both_rename_drops_source_and_shares_destination() {
+    fn both_rename_preserves_the_path_pair() {
         let event = debounced(
             name(RenameMode::Both),
             vec!["/share/old.dat", "/share/new.dat"],
         );
         assert_eq!(
             classify_event(&event),
-            vec![remove("/share/old.dat"), share("/share/new.dat")]
+            vec![rename("/share/old.dat", "/share/new.dat")]
+        );
+    }
+
+    #[test]
+    fn ambiguous_two_path_rename_preserves_the_path_pair() {
+        let event = debounced(
+            name(RenameMode::Any),
+            vec!["/share/old.dat", "/share/new.dat"],
+        );
+        assert_eq!(
+            classify_event(&event),
+            vec![rename("/share/old.dat", "/share/new.dat")]
         );
     }
 
@@ -605,6 +730,18 @@ mod tests {
                 remove("/s/b.dat"),
             ]),
             vec![share("/s/a.dat"), remove("/s/b.dat")]
+        );
+    }
+
+    #[test]
+    fn coalesce_actions_deduplicates_identical_rename_pairs() {
+        assert_eq!(
+            coalesce_actions(vec![
+                rename("/s/a.dat", "/s/b.dat"),
+                rename("/s/a.dat", "/s/b.dat"),
+                share("/s/b.dat"),
+            ]),
+            vec![rename("/s/a.dat", "/s/b.dat"), share("/s/b.dat")],
         );
     }
 
@@ -765,6 +902,62 @@ mod tests {
         std::fs::remove_file(&source).unwrap();
         auto_share_monitored_path(&core, &source).await;
         assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn monitored_rename_relocates_source_without_rehash_or_duplicate_row() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "emulebb-monitor-rename-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let renamed_dir = root.join("renamed");
+        std::fs::create_dir_all(&renamed_dir).unwrap();
+        let source = root.join("Before.bin");
+        let destination = renamed_dir.join("After.bin");
+        std::fs::write(&source, b"rename preserves this payload").unwrap();
+
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        auto_share_monitored_path(&core, &source).await;
+        let hash = core.shares().await[0].hash.clone();
+        std::fs::rename(&source, &destination).unwrap();
+
+        auto_relocate_monitored_path(&core, &source, &destination).await;
+
+        let shares = core.shares().await;
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].hash, hash);
+        assert_eq!(shares[0].name, "After.bin");
+        assert_eq!(
+            shares[0].source_path.as_deref(),
+            Some(destination.display().to_string().as_str()),
+        );
+        assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
+        assert_eq!(
+            core.metadata_store
+                .table_count("shared_file_sources")
+                .unwrap(),
+            1,
+        );
+        let state = core.state.lock().await;
+        assert!(
+            !state
+                .monitor_shared_hashes
+                .contains_key(&monitor_shared_key(&source))
+        );
+        assert_eq!(
+            state
+                .monitor_shared_hashes
+                .get(&monitor_shared_key(&destination))
+                .map(|entry| entry.hash.as_str()),
+            Some(hash.as_str()),
+        );
+        drop(state);
         std::fs::remove_dir_all(&root).ok();
     }
 }

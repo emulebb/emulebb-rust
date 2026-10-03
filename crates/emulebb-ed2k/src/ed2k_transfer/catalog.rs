@@ -41,6 +41,7 @@ pub type Ed2kSharedCatalog = Arc<RwLock<IndexedSharedCatalog>>;
 pub struct IndexedSharedCatalog {
     entries: Vec<Ed2kSharedEntry>,
     by_hash: HashMap<[u8; 16], usize>,
+    completed_verified_count: usize,
 }
 
 impl IndexedSharedCatalog {
@@ -50,6 +51,7 @@ impl IndexedSharedCatalog {
         let mut catalog = Self {
             entries,
             by_hash: HashMap::new(),
+            completed_verified_count: 0,
         };
         catalog.rebuild_index();
         catalog
@@ -68,10 +70,12 @@ impl IndexedSharedCatalog {
     fn rebuild_index(&mut self) {
         self.by_hash.clear();
         self.by_hash.reserve(self.entries.len());
+        self.completed_verified_count = 0;
         for (idx, entry) in self.entries.iter().enumerate() {
             if entry.compatibility_hint {
                 continue;
             }
+            self.completed_verified_count += usize::from(entry.verified_complete);
             if let Some(key) = Self::entry_hash_key(entry) {
                 self.by_hash.entry(key).or_insert(idx);
             }
@@ -90,11 +94,23 @@ impl IndexedSharedCatalog {
         self.entries.is_empty()
     }
 
+    /// Number of active, fully verified local files exposed by the shared-file
+    /// REST collection. This is maintained with the hash index so a UI/status
+    /// poll over a 100k-file library does not rescan SQLite merely to return its
+    /// `total` field.
+    #[must_use]
+    pub fn completed_verified_len(&self) -> usize {
+        self.completed_verified_count
+    }
+
     /// Append an entry, keeping the by-hash index in sync. A non-hint entry is
     /// indexed at its new tail position, first-occurrence-wins so an earlier
     /// duplicate keeps ownership (matching the old first-match scan).
     pub fn push(&mut self, entry: Ed2kSharedEntry) {
         let idx = self.entries.len();
+        if !entry.compatibility_hint && entry.verified_complete {
+            self.completed_verified_count += 1;
+        }
         if !entry.compatibility_hint
             && let Some(key) = Self::entry_hash_key(&entry)
         {
@@ -159,7 +175,14 @@ impl IndexedSharedCatalog {
         update: impl FnOnce(&mut Ed2kSharedEntry),
     ) -> bool {
         if let Some(&idx) = self.by_hash.get(&hash.0) {
+            let was_completed = self.entries[idx].verified_complete;
             update(&mut self.entries[idx]);
+            let is_completed = self.entries[idx].verified_complete;
+            match (was_completed, is_completed) {
+                (false, true) => self.completed_verified_count += 1,
+                (true, false) => self.completed_verified_count -= 1,
+                _ => {}
+            }
             true
         } else {
             false
@@ -189,14 +212,22 @@ impl IndexedSharedCatalog {
 
         match (self.by_hash.get(&hash.0).copied(), new_entry) {
             (Some(idx), Some(entry)) => {
+                self.completed_verified_count = self
+                    .completed_verified_count
+                    .saturating_sub(usize::from(self.entries[idx].verified_complete))
+                    .saturating_add(usize::from(entry.verified_complete));
                 self.entries[idx] = entry;
             }
             (None, Some(entry)) => {
                 let idx = self.entries.len();
+                self.completed_verified_count += usize::from(entry.verified_complete);
                 self.entries.push(entry);
                 self.by_hash.insert(hash.0, idx);
             }
             (Some(idx), None) => {
+                self.completed_verified_count = self
+                    .completed_verified_count
+                    .saturating_sub(usize::from(self.entries[idx].verified_complete));
                 self.by_hash.remove(&hash.0);
                 self.entries.swap_remove(idx);
                 if idx < self.entries.len() {
@@ -224,13 +255,22 @@ impl IndexedSharedCatalog {
         self.rebuild_index();
     }
 
-    /// Validate that the by-hash index is perfectly consistent with `entries`:
+    /// Validate that the by-hash index and completed counter are perfectly
+    /// consistent with `entries`:
     /// every indexed hash points to a non-hint entry actually carrying that hash,
     /// and every non-hint entry with a parseable hash is reachable via the index at
     /// its first occurrence. Used by tests (and debug builds) to assert the
     /// sync-on-every-mutator invariant.
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn assert_index_consistent(&self) {
+        assert_eq!(
+            self.completed_verified_count,
+            self.entries
+                .iter()
+                .filter(|entry| !entry.compatibility_hint && entry.verified_complete)
+                .count(),
+            "cached completed verified count does not match catalog entries",
+        );
         for (&key, &idx) in &self.by_hash {
             let entry = &self.entries[idx];
             assert!(

@@ -572,6 +572,104 @@ impl super::MetadataStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Move one share-in-place source to a new filesystem path without
+    /// rewriting its hashsets or transfer children.
+    ///
+    /// A filesystem rename preserves content identity. Routing it through the
+    /// full manifest upsert would needlessly rewrite every child row and, more
+    /// importantly, would leave the old `shared_file_sources` row beside the
+    /// new one. Keep the path move atomic and bounded to the indexed path rows.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the source identity and renamed catalog metadata form one atomic update"
+    )]
+    pub fn relocate_shared_file_source(
+        &self,
+        file_hash: &str,
+        old_source_path: &str,
+        new_source_path: &str,
+        file_size: u64,
+        source_mtime_ms: Option<i64>,
+        display_name: &str,
+        content_type: &str,
+    ) -> Result<bool> {
+        // WHY: a same-hash rename must replace the old path row instead of using
+        // manifest upsert, which intentionally permits duplicate source paths.
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let Some(old_path_id) = local_path_id(&tx, old_source_path)? else {
+            return Ok(false);
+        };
+        let new_path_id = upsert_local_path(&tx, new_source_path, now)?;
+        let Some(known_file_id) = tx
+            .query_row(
+                "SELECT id FROM known_files WHERE ed2k_hash = ?1",
+                params![hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+
+        let changed = tx.execute(
+            r#"
+            UPDATE shared_file_sources
+            SET path_id = ?3,
+                file_size = ?4,
+                source_mtime_ms = ?5,
+                updated_at_ms = ?6
+            WHERE known_file_id = ?1 AND path_id = ?2
+            "#,
+            params![
+                known_file_id,
+                old_path_id,
+                new_path_id,
+                file_size as i64,
+                source_mtime_ms,
+                now,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            r#"
+            UPDATE transfers
+            SET source_path_id = ?3,
+                source_mtime_ms = ?4,
+                updated_at_ms = ?5
+            WHERE known_file_id = ?1 AND source_path_id = ?2
+            "#,
+            params![
+                known_file_id,
+                old_path_id,
+                new_path_id,
+                source_mtime_ms,
+                now,
+            ],
+        )?;
+        tx.execute(
+            r#"
+            UPDATE known_files
+            SET display_name = ?2,
+                content_type = ?3,
+                last_seen_ms = ?4,
+                updated_at_ms = ?4
+            WHERE id = ?1
+            "#,
+            params![known_file_id, display_name, content_type, now],
+        )?;
+        tx.execute(
+            "DELETE FROM shared_file_scan_failures WHERE path_id IN (?1, ?2)",
+            params![old_path_id, new_path_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Completed downloads whose delivered file can be reused (not re-hashed) if
     /// a shared-directory rescan re-finds it in a configured shared dir. A real
     /// download has NO `shared_file_sources` row, so without this it looks
@@ -1121,21 +1219,20 @@ impl super::MetadataStore {
         offset: usize,
         limit: usize,
     ) -> Result<(Vec<MetadataTransferShareEntry>, usize)> {
+        let total = self.completed_transfer_share_count()?;
+        let entries = self.completed_transfer_share_entries_page_rows(offset, limit)?;
+        Ok((entries, total))
+    }
+
+    /// Read one shared-file page without rescanning the full persisted catalog
+    /// for its total. Runtime callers pair this with the in-memory catalog's
+    /// maintained completed count.
+    pub fn completed_transfer_share_entries_page_rows(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferShareEntry>> {
         let conn = self.connection()?;
-        let total = conn.query_row(
-            r#"
-            SELECT count(*)
-            FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE known_files.completed != 0
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
-            "#,
-            [],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
         let mut stmt = conn.prepare(
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
@@ -1186,8 +1283,7 @@ impl super::MetadataStore {
                 rating: row.get::<_, i64>(12)? as u8,
             })
         })?;
-        let entries = rows.collect::<Result<Vec<_>, _>>()?;
-        Ok((entries, total))
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn completed_transfer_share_entries_after(
@@ -1195,24 +1291,22 @@ impl super::MetadataStore {
         after_hash: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<MetadataTransferShareEntry>, usize, bool)> {
+        let total = self.completed_transfer_share_count()?;
+        let (entries, has_more) =
+            self.completed_transfer_share_entries_after_rows(after_hash, limit)?;
+        Ok((entries, total, has_more))
+    }
+
+    /// Read one keyset page without a full persisted count scan.
+    pub fn completed_transfer_share_entries_after_rows(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<MetadataTransferShareEntry>, bool)> {
         let after_hash = after_hash
             .map(|hash| decode_fixed_hex(hash, 16, "ED2K after hash"))
             .transpose()?;
         let conn = self.connection()?;
-        let total = conn.query_row(
-            r#"
-            SELECT count(*)
-            FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE known_files.completed != 0
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
-            "#,
-            [],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
         let mut stmt = conn.prepare(
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
@@ -1268,7 +1362,27 @@ impl super::MetadataStore {
         let mut entries = rows.collect::<Result<Vec<_>, _>>()?;
         let has_more = entries.len() > limit;
         entries.truncate(limit);
-        Ok((entries, total, has_more))
+        Ok((entries, has_more))
+    }
+
+    fn completed_transfer_share_count(&self) -> Result<usize> {
+        self.connection()?
+            .query_row(
+                r#"
+                SELECT count(*)
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.completed != 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM unshared_files
+                      WHERE unshared_files.known_file_id = known_files.id
+                  )
+                "#,
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count as usize)
+            .map_err(Into::into)
     }
 
     pub fn pending_completed_delivery_hashes(&self) -> Result<Vec<String>> {

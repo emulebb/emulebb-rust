@@ -4,9 +4,9 @@
 //! This drives the REAL OS file-system watcher (`notify` + the
 //! `notify-debouncer-full` settle window) end to end: it starts the monitor on
 //! a temp shared root, writes a new file into the watched directory, and asserts
-//! the file is auto-shared into the catalog after the settle window; then
-//! removes the file and asserts it is auto-unshared; then stops the monitor and
-//! asserts a clean teardown (no panic, idempotent stop).
+//! the file is auto-shared into the catalog after the settle window; renames it
+//! and proves content identity moved without duplication; then removes the file
+//! and asserts it is auto-unshared before clean teardown.
 //!
 //! It is a multi-thread tokio test because the watcher runs on its own thread
 //! and bridges to the async consumer over a channel. Timing is handled with a
@@ -61,7 +61,7 @@ async fn poll_share_presence(core: &EmulebbCore, name: &str, present: bool) -> b
     ignore = "macOS FSEvents delete-event latency; watcher is release-tested on Linux + Windows"
 )]
 #[tokio::test(flavor = "multi_thread")]
-async fn live_monitor_auto_shares_and_auto_removes_a_dropped_file() {
+async fn live_monitor_auto_shares_relocates_and_removes_a_dropped_file() {
     let runtime_dir = unique_test_dir("monitor-e2e");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -124,10 +124,33 @@ async fn live_monitor_auto_shares_and_auto_removes_a_dropped_file() {
         share.hash,
     );
 
-    // --- auto-remove: delete the file from the watched dir ---
-    fs::remove_file(&watched_file).unwrap();
+    // --- metadata-only rename: the same hash moves to one new source path ---
+    let renamed_file = shared_root.join("auto-renamed.bin");
+    fs::rename(&watched_file, &renamed_file).unwrap();
+    let renamed = poll_share_presence(&core, "auto-renamed.bin", true).await;
+    assert!(
+        renamed,
+        "the live monitor must relocate a renamed file within {CONDITION_TIMEOUT:?}",
+    );
+    assert!(
+        poll_share_presence(&core, "auto-pickup.bin", false).await,
+        "the old shared-file name must disappear after relocation",
+    );
+    let shares = core.shares().await;
+    assert_eq!(shares.len(), 1, "rename must not duplicate the shared row");
+    assert_eq!(
+        shares[0].hash, share.hash,
+        "rename must preserve content hash"
+    );
+    assert_eq!(
+        shares[0].source_path.as_deref(),
+        Some(renamed_file.display().to_string().as_str()),
+    );
 
-    let removed = poll_share_presence(&core, "auto-pickup.bin", false).await;
+    // --- auto-remove: delete the file from the watched dir ---
+    fs::remove_file(&renamed_file).unwrap();
+
+    let removed = poll_share_presence(&core, "auto-renamed.bin", false).await;
     assert!(
         removed,
         "the live monitor must auto-unshare a file removed from the watched dir within {CONDITION_TIMEOUT:?}; \
