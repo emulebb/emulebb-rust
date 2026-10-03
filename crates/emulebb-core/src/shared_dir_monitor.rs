@@ -56,6 +56,13 @@ use crate::shared_directories::SharedDirectoryRoot;
 /// that responsiveness while avoiding mid-write hashing.)
 const SETTLE_WINDOW: Duration = Duration::from_secs(2);
 
+/// `notify` 8.x uses one fixed 16 KiB `ReadDirectoryChangesW` buffer for a
+/// recursive Windows watch. A rename contributes both an old-name and new-name
+/// record, so even a modest settled burst can mean an earlier buffer overflow
+/// was silently dropped. Follow such a burst with one incremental scan.
+#[cfg(target_os = "windows")]
+const WINDOWS_RENAME_BURST_RECONCILE_THRESHOLD: usize = 8;
+
 /// The decision distilled from a settled debounced event: what the consumer
 /// should do with a given path. This is the pure, unit-testable core of the
 /// monitor (the OS watcher around it cannot be tested deterministically).
@@ -93,6 +100,9 @@ pub(crate) enum MonitorAction {
 /// a remove, or still settling); the consumer decides share-vs-skip when it
 /// actually touches the filesystem.
 pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
+    if event.need_rescan() {
+        return vec![MonitorAction::Reconcile];
+    }
     // Map every path of the event to the same action variant.
     let map_paths = |variant: fn(PathBuf) -> MonitorAction| -> Vec<MonitorAction> {
         event.paths.iter().cloned().map(variant).collect()
@@ -137,7 +147,18 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
 
 /// Flatten a settled batch of debounced events into the ordered action list.
 pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction> {
-    events.iter().flat_map(classify_event).collect()
+    let mut actions = events.iter().flat_map(classify_event).collect::<Vec<_>>();
+    #[cfg(target_os = "windows")]
+    {
+        let rename_count = actions
+            .iter()
+            .filter(|action| matches!(action, MonitorAction::Rename { .. }))
+            .count();
+        if rename_count >= WINDOWS_RENAME_BURST_RECONCILE_THRESHOLD {
+            actions.push(MonitorAction::Reconcile);
+        }
+    }
+    actions
 }
 
 /// Collapse a queued event burst to the final intent for each path.
@@ -161,6 +182,23 @@ fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
                 renames.insert((from.clone(), to.clone()), (sequence, action));
             }
             MonitorAction::Reconcile => reconcile = Some((sequence, action)),
+        }
+    }
+    // A backend can emit a paired rename plus a redundant destination Modify.
+    // Relocation already compares the final destination identity and rehashes
+    // it when needed, so a Share for either endpoint would only race relocation
+    // and create a duplicate source row. A final Remove for the destination is
+    // retained because rename-then-delete is a distinct settled outcome.
+    for (_, action) in renames.values() {
+        let MonitorAction::Rename { from, to } = action else {
+            unreachable!("rename map contains only rename actions");
+        };
+        by_path.remove(from);
+        if by_path
+            .get(to)
+            .is_some_and(|(_, action)| matches!(action, MonitorAction::Share(_)))
+        {
+            by_path.remove(to);
         }
     }
     let mut coalesced = by_path.into_values().collect::<Vec<_>>();
@@ -630,7 +668,7 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
 mod tests {
     use super::*;
     use notify_debouncer_full::notify::Event;
-    use notify_debouncer_full::notify::event::{CreateKind, RemoveKind};
+    use notify_debouncer_full::notify::event::{CreateKind, Flag, RemoveKind};
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Instant;
@@ -729,6 +767,16 @@ mod tests {
     }
 
     #[test]
+    fn backend_rescan_notice_requests_reconciliation() {
+        let event = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        let event = DebouncedEvent {
+            event,
+            time: Instant::now(),
+        };
+        assert_eq!(classify_event(&event), vec![reconcile()]);
+    }
+
+    #[test]
     fn actions_for_events_flattens_a_batch_in_order() {
         let events = vec![
             debounced(EventKind::Create(CreateKind::File), vec!["/s/a.dat"]),
@@ -755,14 +803,58 @@ mod tests {
     }
 
     #[test]
-    fn coalesce_actions_deduplicates_identical_rename_pairs() {
+    fn coalesce_actions_deduplicates_rename_and_suppresses_endpoint_share() {
         assert_eq!(
             coalesce_actions(vec![
                 rename("/s/a.dat", "/s/b.dat"),
                 rename("/s/a.dat", "/s/b.dat"),
                 share("/s/b.dat"),
             ]),
-            vec![rename("/s/a.dat", "/s/b.dat"), share("/s/b.dat")],
+            vec![rename("/s/a.dat", "/s/b.dat")],
+        );
+    }
+
+    #[test]
+    fn coalesce_actions_keeps_destination_remove_after_rename() {
+        assert_eq!(
+            coalesce_actions(vec![rename("/s/a.dat", "/s/b.dat"), remove("/s/b.dat"),]),
+            vec![rename("/s/a.dat", "/s/b.dat"), remove("/s/b.dat")],
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_rename_burst_requests_follow_up_reconciliation() {
+        let events = (0..WINDOWS_RENAME_BURST_RECONCILE_THRESHOLD)
+            .map(|index| {
+                let event = Event {
+                    kind: name(RenameMode::Both),
+                    paths: vec![
+                        PathBuf::from(format!("C:/share/old-{index}.bin")),
+                        PathBuf::from(format!("C:/share/new-{index}.bin")),
+                    ],
+                    attrs: Default::default(),
+                };
+                DebouncedEvent {
+                    event,
+                    time: Instant::now(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let actions = actions_for_events(&events);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, MonitorAction::Rename { .. }))
+                .count(),
+            WINDOWS_RENAME_BURST_RECONCILE_THRESHOLD,
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, MonitorAction::Reconcile))
+                .count(),
+            1,
         );
     }
 
