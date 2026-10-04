@@ -711,7 +711,9 @@ mod tests {
                     Err(error)
                         if matches!(
                             error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::ConnectionReset
                         ) => {}
                     Err(error) => panic!("mock PCP server receive failed: {error}"),
                 }
