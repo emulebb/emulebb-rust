@@ -5,7 +5,7 @@ use std::time::Duration;
 use emulebb_core::{
     LocalShare, SharedDirectoriesUpdate, SharedDirectoryRootUpdate, TransferCreate,
 };
-use emulebb_kad_proto::{Ed2kHash, Tag, TagValue, tag_name};
+use emulebb_kad_proto::{Ed2kHash, PublishEntry, Tag, TagValue, tag_name};
 use kad_swarm_support::{
     LocalKadSwarm, deterministic_payload, file_hash, free_lan_tcp_port, node_id, open_network_core,
     unique_test_dir, wait_for_completed_transfer, wait_for_kad_connected,
@@ -74,6 +74,91 @@ async fn local_kad_swarm_publishes_and_searches_keywords() {
             .iter()
             .any(|name| name == "Synthetic Unicode Sample äöü.txt")
     );
+}
+
+#[tokio::test]
+async fn local_kad_swarm_carries_aich_agreement_and_rejects_conflict() {
+    let swarm = LocalKadSwarm::with_star_topology(4).await;
+    let target = node_id(0x42);
+    let agreed_hash = file_hash(0x52);
+    let conflicted_hash = file_hash(0x53);
+    let agreed_root = [0xA1; 20];
+    let make_entry = |hash, name: &str, root| PublishEntry {
+        hash,
+        tags: vec![
+            Tag::filename(name),
+            Tag::filesize(FILE_SIZE),
+            Tag::sources(2),
+            Tag::kad_aich_hash_pub(root),
+        ],
+    };
+
+    for publisher_ip in [
+        std::net::Ipv4Addr::new(198, 51, 100, 7),
+        std::net::Ipv4Addr::new(203, 0, 113, 9),
+    ] {
+        swarm.nodes[0]
+            .inject_keyword_publish(
+                target,
+                &[make_entry(agreed_hash, "agreed-aich.iso", agreed_root)],
+                publisher_ip,
+            )
+            .await;
+    }
+    swarm.nodes[0]
+        .inject_keyword_publish(
+            target,
+            &[make_entry(
+                conflicted_hash,
+                "conflicted-aich.iso",
+                [0xB1; 20],
+            )],
+            std::net::Ipv4Addr::new(192, 0, 2, 3),
+        )
+        .await;
+    swarm.nodes[0]
+        .inject_keyword_publish(
+            target,
+            &[make_entry(
+                conflicted_hash,
+                "conflicted-aich.iso",
+                [0xB2; 20],
+            )],
+            std::net::Ipv4Addr::new(192, 0, 3, 4),
+        )
+        .await;
+
+    let cancel = CancellationToken::new();
+    let mut results = swarm.nodes[2]
+        .dht
+        .search_keywords_with_cancel(target, cancel.clone());
+    let (agreed, conflicted) = tokio::time::timeout(SEARCH_TIMEOUT, async {
+        let mut agreed = None;
+        let mut conflicted = None;
+        while let Some(result) = results.next().await {
+            if result.hash == agreed_hash {
+                agreed = Some(result);
+            } else if result.hash == conflicted_hash {
+                conflicted = Some(result);
+            }
+            if let (Some(agreed), Some(conflicted)) = (&agreed, &conflicted) {
+                return (agreed.clone(), conflicted.clone());
+            }
+        }
+        panic!("keyword search ended before both AICH fixtures arrived");
+    })
+    .await
+    .expect("AICH keyword search timed out");
+    cancel.cancel();
+
+    let candidate = agreed.aich_candidate.expect("agreed AICH candidate");
+    assert_eq!(candidate.root, agreed_root);
+    assert_eq!(candidate.responder_ip, swarm.bind_ip());
+    assert!(
+        conflicted.aich_candidate.is_none(),
+        "one storage responder reporting competing roots must not cast a vote"
+    );
+    assert_eq!(conflicted.size, Some(FILE_SIZE));
 }
 
 #[tokio::test]

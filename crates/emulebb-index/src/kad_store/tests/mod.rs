@@ -34,6 +34,28 @@ fn publisher_ip() -> Ipv4Addr {
     Ipv4Addr::new(198, 51, 100, 7)
 }
 
+fn aich_result_roots(tags: &[Tag]) -> Vec<(u8, [u8; 20])> {
+    let payload = tags.iter().find_map(|tag| match (&tag.name, &tag.value) {
+        (TagName::Short(name), TagValue::SmallBlob(payload))
+            if *name == tag_name::KADAICHHASHRESULT =>
+        {
+            Some(payload)
+        }
+        _ => None,
+    });
+    let Some(payload) = payload else {
+        return Vec::new();
+    };
+    let count = usize::from(payload[0]);
+    assert!(payload.len() > count * 21);
+    payload[1..1 + count * 21]
+        .as_chunks::<21>()
+        .0
+        .iter()
+        .map(|record| (record[0], record[1..].try_into().unwrap()))
+        .collect()
+}
+
 #[test]
 fn default_source_ttl_matches_master_kademliarepublishtimes() {
     // Master inbound source entry lifetime = KADEMLIAREPUBLISHTIMES (5h),
@@ -379,6 +401,253 @@ fn keyword_search_materializes_stock_publish_info_and_aich_result_tags() {
         TagValue::SmallBlob(value)
             if value.len() == 22 && value[0] == 1 && value[1] == 1 && value[2..] == aich_hash
     ));
+}
+
+#[test]
+fn keyword_aich_aggregation_counts_live_publishers_and_keeps_conflicts() {
+    let mut store = KadLocalStore::new(config());
+    let target = NodeId::from_bytes([1; 16]);
+    let file_hash = Ed2kHash::from_bytes([2; 16]);
+    let publish = |root| PublishEntry {
+        hash: file_hash,
+        tags: vec![
+            Tag::filename("consensus.iso"),
+            Tag::filesize(123),
+            Tag::kad_aich_hash_pub(root),
+        ],
+    };
+
+    store.record_keyword_publish_batch(
+        target,
+        &[publish([0xAA; 20])],
+        Ipv4Addr::new(198, 51, 100, 1),
+        ts(1),
+    );
+    store.record_keyword_publish_batch(
+        target,
+        &[publish([0xAA; 20])],
+        Ipv4Addr::new(203, 0, 113, 2),
+        ts(2),
+    );
+    store.record_keyword_publish_batch(
+        target,
+        &[publish([0xBB; 20])],
+        Ipv4Addr::new(192, 0, 2, 3),
+        ts(3),
+    );
+
+    let response = store
+        .keyword_search_response(
+            NodeId::from_bytes([9; 16]),
+            &SearchKeyReq {
+                target,
+                start_position: 0,
+                restrictive_payload: Vec::new(),
+            },
+            10,
+            ts(4),
+        )
+        .unwrap();
+    assert_eq!(
+        aich_result_roots(&response.results[0].tags),
+        vec![(2, [0xAA; 20]), (1, [0xBB; 20])]
+    );
+}
+
+#[test]
+fn keyword_aich_refresh_replaces_or_removes_the_publishers_old_root() {
+    let mut store = KadLocalStore::new(config());
+    let target = NodeId::from_bytes([1; 16]);
+    let file_hash = Ed2kHash::from_bytes([2; 16]);
+    let ip = publisher_ip();
+    let publish = |aich_tag: Option<Tag>| PublishEntry {
+        hash: file_hash,
+        tags: vec![Tag::filename("refresh.iso"), Tag::filesize(123)]
+            .into_iter()
+            .chain(aich_tag)
+            .collect(),
+    };
+    let request = SearchKeyReq {
+        target,
+        start_position: 0,
+        restrictive_payload: Vec::new(),
+    };
+
+    store.record_keyword_publish_batch(
+        target,
+        &[publish(Some(Tag::kad_aich_hash_pub([0xAA; 20])))],
+        ip,
+        ts(1),
+    );
+    store.record_keyword_publish_batch(
+        target,
+        &[publish(Some(Tag::kad_aich_hash_pub([0xBB; 20])))],
+        ip,
+        ts(2),
+    );
+    let changed = store
+        .keyword_search_response(NodeId::from_bytes([9; 16]), &request, 10, ts(3))
+        .unwrap();
+    assert_eq!(
+        aich_result_roots(&changed.results[0].tags),
+        vec![(1, [0xBB; 20])]
+    );
+
+    store.record_keyword_publish_batch(target, &[publish(None)], ip, ts(4));
+    let omitted = store
+        .keyword_search_response(NodeId::from_bytes([9; 16]), &request, 10, ts(5))
+        .unwrap();
+    assert!(aich_result_roots(&omitted.results[0].tags).is_empty());
+
+    store.record_keyword_publish_batch(
+        target,
+        &[publish(Some(Tag::new_short(
+            tag_name::KADAICHHASHPUB,
+            TagValue::SmallBlob(vec![0xCC; 19]),
+        )))],
+        ip,
+        ts(6),
+    );
+    let malformed = store
+        .keyword_search_response(NodeId::from_bytes([9; 16]), &request, 10, ts(7))
+        .unwrap();
+    assert!(aich_result_roots(&malformed.results[0].tags).is_empty());
+}
+
+#[test]
+fn keyword_aich_expires_publishers_independently_of_the_file_entry() {
+    let mut store = KadLocalStore::new(config());
+    let target = NodeId::from_bytes([1; 16]);
+    let file_hash = Ed2kHash::from_bytes([2; 16]);
+    let publish = |root| PublishEntry {
+        hash: file_hash,
+        tags: vec![
+            Tag::filename("expiry.iso"),
+            Tag::filesize(123),
+            Tag::kad_aich_hash_pub(root),
+        ],
+    };
+    let fresh_ip = Ipv4Addr::new(203, 0, 113, 2);
+    store.record_keyword_publish_batch(
+        target,
+        &[publish([0xAA; 20])],
+        Ipv4Addr::new(198, 51, 100, 1),
+        ts(0),
+    );
+    store.record_keyword_publish_batch(target, &[publish([0xBB; 20])], fresh_ip, ts(30));
+    store.record_keyword_publish_batch(target, &[publish([0xBB; 20])], fresh_ip, ts(61));
+
+    let response = store
+        .keyword_search_response(
+            NodeId::from_bytes([9; 16]),
+            &SearchKeyReq {
+                target,
+                start_position: 0,
+                restrictive_payload: Vec::new(),
+            },
+            10,
+            ts(61),
+        )
+        .unwrap();
+    assert_eq!(
+        aich_result_roots(&response.results[0].tags),
+        vec![(1, [0xBB; 20])]
+    );
+}
+
+#[test]
+fn keyword_aich_publisher_and_result_bounds_are_deterministic() {
+    let mut store = KadLocalStore::new(config());
+    let target = NodeId::from_bytes([1; 16]);
+    let file_hash = Ed2kHash::from_bytes([2; 16]);
+    for index in 0..101u8 {
+        store.record_keyword_publish_batch(
+            target,
+            &[PublishEntry {
+                hash: file_hash,
+                tags: vec![
+                    Tag::filename("bounded.iso"),
+                    Tag::filesize(123),
+                    Tag::kad_aich_hash_pub([index; 20]),
+                ],
+            }],
+            Ipv4Addr::new(10, 0, index, 1),
+            ts(1),
+        );
+    }
+
+    let response = store
+        .keyword_search_response(
+            NodeId::from_bytes([9; 16]),
+            &SearchKeyReq {
+                target,
+                start_position: 0,
+                restrictive_payload: Vec::new(),
+            },
+            10,
+            ts(2),
+        )
+        .unwrap();
+    let roots = aich_result_roots(&response.results[0].tags);
+    assert_eq!(roots.len(), 11);
+    assert_eq!(roots[0], (1, [1; 20]), "oldest publisher was evicted");
+    assert_eq!(roots[10], (1, [11; 20]));
+    let payload_len = response.results[0]
+        .tags
+        .iter()
+        .find_map(|tag| match (&tag.name, &tag.value) {
+            (TagName::Short(name), TagValue::SmallBlob(payload))
+                if *name == tag_name::KADAICHHASHRESULT =>
+            {
+                Some(payload.len())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(payload_len, 232);
+}
+
+#[test]
+fn keyword_aich_provenance_is_not_reconstructed_from_snapshot_tags() {
+    let mut store = KadLocalStore::new(config());
+    let target = NodeId::from_bytes([1; 16]);
+    let file_hash = Ed2kHash::from_bytes([2; 16]);
+    store.record_keyword_publish_batch(
+        target,
+        &[PublishEntry {
+            hash: file_hash,
+            tags: vec![
+                Tag::filename("restart.iso"),
+                Tag::filesize(123),
+                Tag::kad_aich_hash_pub([0xAA; 20]),
+            ],
+        }],
+        publisher_ip(),
+        ts(1),
+    );
+    let snapshot = store.publish_snapshot(ts(2));
+    assert!(
+        snapshot.keyword_publishes[0]
+            .tags
+            .iter()
+            .all(|tag| { tag.name != TagName::Short(tag_name::KADAICHHASHPUB) })
+    );
+    let mut restored = KadLocalStore::new(config());
+    restored.merge_publish_snapshot(snapshot, ts(2));
+
+    let response = restored
+        .keyword_search_response(
+            NodeId::from_bytes([9; 16]),
+            &SearchKeyReq {
+                target,
+                start_position: 0,
+                restrictive_payload: Vec::new(),
+            },
+            10,
+            ts(3),
+        )
+        .unwrap();
+    assert!(aich_result_roots(&response.results[0].tags).is_empty());
 }
 
 #[test]

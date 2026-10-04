@@ -63,6 +63,9 @@ pub(crate) fn load_core_state(
 
     Ok(CoreState {
         searches,
+        // Search-result responder provenance is session-local. A restored
+        // display row must never become a fresh network trust vote.
+        kad_aich_search_votes: HashMap::new(),
         next_search_id,
         transfers: HashMap::new(),
         core_settings,

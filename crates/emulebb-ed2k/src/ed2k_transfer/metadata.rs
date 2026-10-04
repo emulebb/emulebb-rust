@@ -329,19 +329,35 @@ impl Ed2kTransferRuntime {
     /// re-download.
     ///
     /// If `manifest.aich_root` is already populated (authoritative, or already
-    /// promoted) this is a no-op beyond tracking. The MD4 hashset backstop
-    /// independently prevents corruption, so this is defense-in-depth + parity.
+    /// promoted) this is a no-op. The MD4 hashset backstop independently
+    /// prevents corruption, so this is defense-in-depth + parity.
     pub async fn record_network_aich_root(
         &self,
         file_hash: &str,
         aich_root: Option<[u8; 20]>,
         from_ip: std::net::IpAddr,
     ) -> Result<Ed2kResumeManifest> {
+        let observations = aich_root
+            .map(|root| vec![(root, from_ip)])
+            .unwrap_or_default();
+        self.record_network_aich_observations(file_hash, &observations)
+            .await
+    }
+
+    /// Record a bounded batch of live, provenance-bearing AICH observations.
+    /// The manifest is locked and loaded once, and any resulting promotion is
+    /// persisted once. Reported Kad popularity never enters this interface;
+    /// every tuple represents one actual network responder.
+    pub async fn record_network_aich_observations(
+        &self,
+        file_hash: &str,
+        observations: &[([u8; 20], std::net::IpAddr)],
+    ) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let Some(aich_root) = aich_root else {
+        if observations.is_empty() {
             return Ok(manifest);
-        };
+        }
 
         // Already have a trusted root: nothing to promote. If a peer proposes a
         // root that conflicts with the trusted one, ignore it (the trusted root
@@ -350,19 +366,18 @@ impl Ed2kTransferRuntime {
             return Ok(manifest);
         }
 
-        let octets = match from_ip {
-            std::net::IpAddr::V4(v4) => v4.octets(),
-            // IPv4-only runtime; ignore any non-IPv4 proposer for signer counting.
-            _ => return Ok(manifest),
-        };
-
         let promoted = {
             let mut map = self
                 .aich_root_corroboration
                 .lock()
                 .expect("aich corroboration mutex poisoned");
             let accumulator = map.entry(file_hash.to_string()).or_default();
-            accumulator.record(aich_root, octets);
+            for (aich_root, from_ip) in observations {
+                let std::net::IpAddr::V4(from_ip) = from_ip else {
+                    continue;
+                };
+                accumulator.record(*aich_root, from_ip.octets());
+            }
             accumulator.trusted_root()
         };
 

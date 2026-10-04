@@ -1,4 +1,6 @@
-use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
+use emulebb_kad_proto::{
+    Ed2kHash, NodeId, Tag, TagName, TagValue, constants::KAD_VERSION_AICH_KEYWORD_PUBLISH, tag_name,
+};
 use std::net::Ipv4Addr;
 
 /// One peer chosen to run an outbound Kad UDP firewall check against us.
@@ -75,6 +77,16 @@ pub fn parse_hello_peer_metadata(tags: &[Tag]) -> HelloPeerMetadata {
     metadata
 }
 
+/// One plausible AICH root observation from the Kad storage contact that
+/// returned a keyword result. Reported publisher popularity is deliberately
+/// not retained as votes: the responder itself contributes exactly one
+/// observation to the transfer-time corroboration layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KadAichCandidate {
+    pub root: [u8; 20],
+    pub responder_ip: Ipv4Addr,
+}
+
 /// A file entry found by keyword search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -83,6 +95,7 @@ pub struct SearchResult {
     pub size: Option<u64>,
     /// Remote complete-source count parsed from the oracle `TAG_SOURCES` tag.
     pub source_count: Option<u32>,
+    pub aich_candidate: Option<KadAichCandidate>,
     pub tags: Vec<Tag>,
 }
 
@@ -139,9 +152,102 @@ impl SearchResult {
             names,
             size,
             source_count,
+            aich_candidate: None,
             tags,
         }
     }
+
+    pub(crate) fn from_observation(
+        hash: Ed2kHash,
+        tags: Vec<Tag>,
+        responder_ip: Ipv4Addr,
+        responder_version: u8,
+    ) -> Self {
+        let candidate = kad_aich_candidate(&tags, responder_ip, responder_version);
+        let mut result = Self::from_tags(hash, tags);
+        result.aich_candidate = candidate;
+        result
+    }
+}
+
+const MAX_AICH_RESULT_HASHES: usize = 11;
+
+fn kad_aich_candidate(
+    tags: &[Tag],
+    responder_ip: Ipv4Addr,
+    responder_version: u8,
+) -> Option<KadAichCandidate> {
+    if responder_version < KAD_VERSION_AICH_KEYWORD_PUBLISH {
+        return None;
+    }
+
+    let publishers_known = tags.iter().find_map(|tag| {
+        if tag.name != TagName::Short(tag_name::PUBLISHINFO) {
+            return None;
+        }
+        unsigned_u32(&tag.value).map(|value| ((value >> 16) & 0xFF) as u8)
+    })?;
+
+    let mut result_payload = None;
+    for tag in tags {
+        if tag.name != TagName::Short(tag_name::KADAICHHASHRESULT) {
+            continue;
+        }
+        if result_payload.is_some() {
+            return None;
+        }
+        let TagValue::SmallBlob(payload) = &tag.value else {
+            return None;
+        };
+        result_payload = Some(payload.as_slice());
+    }
+    let roots = decode_aich_result_payload(result_payload?)?;
+    let [(popularity, root)] = roots.as_slice() else {
+        return None;
+    };
+
+    // These unauthenticated counts are only a plausibility filter. They never
+    // become signer votes; this response is one observation from responder_ip.
+    if publishers_known < 2 || *popularity < 2 {
+        return None;
+    }
+    if publishers_known / *popularity > 3 {
+        return None;
+    }
+
+    Some(KadAichCandidate {
+        root: *root,
+        responder_ip,
+    })
+}
+
+fn unsigned_u32(value: &TagValue) -> Option<u32> {
+    match value {
+        TagValue::U8(value) => Some(u32::from(*value)),
+        TagValue::U16(value) => Some(u32::from(*value)),
+        TagValue::U32(value) => Some(*value),
+        TagValue::UInt(value) => u32::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn decode_aich_result_payload(payload: &[u8]) -> Option<Vec<(u8, [u8; 20])>> {
+    let (&count, body) = payload.split_first()?;
+    let count = usize::from(count);
+    if count > MAX_AICH_RESULT_HASHES || body.len() < count * 21 {
+        return None;
+    }
+
+    let mut roots = Vec::with_capacity(count);
+    for record in body[..count * 21].as_chunks::<21>().0 {
+        let popularity = record[0];
+        if popularity == 0 {
+            continue;
+        }
+        let root = record[1..].try_into().ok()?;
+        roots.push((popularity, root));
+    }
+    Some(roots)
 }
 
 /// A peer known to have a specific file (from source search).
@@ -363,6 +469,23 @@ mod tests {
     use super::*;
     use emulebb_kad_proto::{Ed2kHash, Tag};
 
+    fn aich_result_tags(publishers: u8, records: &[(u8, [u8; 20])]) -> Vec<Tag> {
+        let mut payload = vec![records.len() as u8];
+        for (popularity, root) in records {
+            payload.push(*popularity);
+            payload.extend_from_slice(root);
+        }
+        vec![
+            Tag::filename("candidate.iso"),
+            Tag::filesize(123),
+            Tag::new_short(
+                tag_name::PUBLISHINFO,
+                TagValue::U32((1 << 24) | (u32::from(publishers) << 16) | 1000),
+            ),
+            Tag::new_short(tag_name::KADAICHHASHRESULT, TagValue::SmallBlob(payload)),
+        ]
+    }
+
     #[test]
     fn hello_metadata_parses_source_udp_port_and_misc_bits() {
         let metadata = parse_hello_peer_metadata(&[
@@ -419,6 +542,98 @@ mod tests {
         ];
         let result = SearchResult::from_tags(hash, tags);
         assert_eq!(result.size, Some((2u64 << 32) | 1));
+    }
+
+    #[test]
+    fn kad_aich_candidate_requires_supported_responder_and_preserves_provenance() {
+        let hash = Ed2kHash::from_bytes([4u8; 16]);
+        let responder = Ipv4Addr::new(203, 0, 113, 9);
+        let root = [0xAB; 20];
+        let mut tags = aich_result_tags(3, &[(2, root)]);
+        let TagValue::SmallBlob(payload) = &mut tags[3].value else {
+            unreachable!();
+        };
+        payload.extend_from_slice(&[0xFE, 0xED]);
+
+        let result = SearchResult::from_observation(hash, tags.clone(), responder, 9);
+        assert_eq!(
+            result.aich_candidate,
+            Some(KadAichCandidate {
+                root,
+                responder_ip: responder,
+            })
+        );
+        assert_eq!(
+            SearchResult::from_observation(hash, tags.clone(), responder, 8).aich_candidate,
+            None
+        );
+        assert_eq!(
+            SearchResult::from_observation(hash, tags, responder, 0).aich_candidate,
+            None
+        );
+    }
+
+    #[test]
+    fn kad_aich_candidate_rejects_conflicts_and_implausible_counts() {
+        let hash = Ed2kHash::from_bytes([4u8; 16]);
+        let responder = Ipv4Addr::new(203, 0, 113, 9);
+        assert!(
+            SearchResult::from_observation(
+                hash,
+                aich_result_tags(4, &[(2, [0xAA; 20]), (2, [0xBB; 20])]),
+                responder,
+                9,
+            )
+            .aich_candidate
+            .is_none()
+        );
+        for (publishers, popularity) in [(1, 1), (2, 1), (8, 2), (0, 2)] {
+            assert!(
+                SearchResult::from_observation(
+                    hash,
+                    aich_result_tags(publishers, &[(popularity, [0xAA; 20])]),
+                    responder,
+                    9,
+                )
+                .aich_candidate
+                .is_none(),
+                "publishers={publishers} popularity={popularity}"
+            );
+        }
+        assert!(
+            SearchResult::from_observation(
+                hash,
+                aich_result_tags(7, &[(2, [0xAA; 20])]),
+                responder,
+                9,
+            )
+            .aich_candidate
+            .is_some(),
+            "integer ratio 7/2 matches current aMule"
+        );
+    }
+
+    #[test]
+    fn malformed_kad_aich_data_does_not_reject_the_search_result() {
+        let hash = Ed2kHash::from_bytes([4u8; 16]);
+        let responder = Ipv4Addr::new(203, 0, 113, 9);
+        let malformed_payloads = vec![Vec::new(), vec![12], vec![1, 2, 0xAA], {
+            let mut payload = vec![2, 2];
+            payload.extend_from_slice(&[0xAA; 20]);
+            payload
+        }];
+        for payload in malformed_payloads {
+            let tags = vec![
+                Tag::filename("still-usable.iso"),
+                Tag::filesize(123),
+                Tag::new_short(tag_name::PUBLISHINFO, TagValue::U32(0x0102_03E8)),
+                Tag::new_short(tag_name::KADAICHHASHRESULT, TagValue::SmallBlob(payload)),
+            ];
+            let result = SearchResult::from_observation(hash, tags, responder, 9);
+            assert_eq!(result.names, vec!["still-usable.iso"]);
+            assert_eq!(result.size, Some(123));
+            assert!(result.aich_candidate.is_none());
+        }
     }
 
     #[test]

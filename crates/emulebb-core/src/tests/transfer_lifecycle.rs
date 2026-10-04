@@ -110,6 +110,7 @@ fn kad_search_result_exposes_exact_hash_metadata() {
             names: vec!["resolved.bin".to_string()],
             size: Some(5_000),
             source_count: Some(3),
+            aich_candidate: None,
             tags: Vec::new(),
         },
         exact_hash,
@@ -153,6 +154,61 @@ async fn download_search_result_creates_transfer() {
         .unwrap();
     // A non-paused download starts immediately (eMule/aMule parity).
     assert_eq!(transfer.state, "downloading");
+}
+
+#[tokio::test]
+async fn download_search_result_replays_live_kad_aich_observations() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let file_hash = "11111111111111111111111111111111";
+    core.index_file(IndexedFile {
+        ed2k_hash: file_hash.to_string(),
+        name: "Kad.AICH.bin".to_string(),
+        size_bytes: 4096,
+        content_type: "archive".to_string(),
+        availability_score: 1,
+    })
+    .await
+    .unwrap();
+    let search = core
+        .create_search(SearchCreate {
+            query: "kad aich".to_string(),
+            method: "automatic".to_string(),
+            r#type: String::new(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        if core
+            .search(&search.id)
+            .await
+            .is_some_and(|search| search.status == "completed")
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let root = [0xAB; 20];
+    let mut votes = KadAichSearchVotes::default();
+    for index in 0..10u8 {
+        votes.record(std::net::Ipv4Addr::new(203, index, 0, 9), root);
+    }
+    core.state
+        .lock()
+        .await
+        .kad_aich_search_votes
+        .insert((search.id.clone(), file_hash.to_string()), votes);
+
+    core.download_search_result(&search.id, file_hash, SearchResultDownloadCreate::default())
+        .await
+        .unwrap()
+        .expect("transfer");
+    let manifest = core.ed2k_transfers.manifest(file_hash).await.unwrap();
+    assert_eq!(
+        manifest.aich_root.as_deref(),
+        Some(hex::encode(root).as_str())
+    );
 }
 
 #[tokio::test]

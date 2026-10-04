@@ -675,7 +675,9 @@ async fn test_run_search_phase_collects_results_after_query_timeout_until_deadli
         .recv()
         .await
         .expect("result collected after query_timeout");
-    assert_eq!(streamed.0, Ed2kHash::from_bytes([0x77; 16]));
+    assert_eq!(streamed.entry_id, Ed2kHash::from_bytes([0x77; 16]));
+    assert_eq!(streamed.responder_addr, contact.addr);
+    assert_eq!(streamed.responder_version, contact.version);
 }
 
 #[tokio::test]
@@ -731,7 +733,7 @@ async fn test_run_search_phase_collects_multiple_search_res_packets() {
     let search_entries = run_search_phase(
         &rpc,
         SearchPhaseConfig {
-            responded: &[contact],
+            responded: std::slice::from_ref(&contact),
             kind: TraversalKind::Keyword {
                 request: SearchKeyReq {
                     target,
@@ -760,8 +762,10 @@ async fn test_run_search_phase_collects_multiple_search_res_packets() {
     );
     let streamed_first = result_rx.recv().await.expect("first streamed result");
     let streamed_second = result_rx.recv().await.expect("second streamed result");
-    assert_eq!(streamed_first.0, Ed2kHash::from_bytes([1; 16]));
-    assert_eq!(streamed_second.0, Ed2kHash::from_bytes([2; 16]));
+    assert_eq!(streamed_first.entry_id, Ed2kHash::from_bytes([1; 16]));
+    assert_eq!(streamed_second.entry_id, Ed2kHash::from_bytes([2; 16]));
+    assert_eq!(streamed_first.responder_addr, contact.addr);
+    assert_eq!(streamed_first.responder_version, contact.version);
 }
 
 #[tokio::test]

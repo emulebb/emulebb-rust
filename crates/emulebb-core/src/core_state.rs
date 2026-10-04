@@ -1,9 +1,40 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
     path::PathBuf,
     time::Instant,
 };
+
+const MAX_KAD_AICH_VOTES_PER_RESULT: usize = 64;
+
+/// Live Kad AICH evidence for one search result. The first candidate from each
+/// actual responder wins, matching current aMule and preventing a responder
+/// from multiplying or changing its vote. This state is deliberately absent
+/// from persisted search metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KadAichSearchVotes {
+    votes: BTreeMap<Ipv4Addr, [u8; 20]>,
+}
+
+impl KadAichSearchVotes {
+    pub(crate) fn record(&mut self, responder_ip: Ipv4Addr, root: [u8; 20]) {
+        if self.votes.len() < MAX_KAD_AICH_VOTES_PER_RESULT {
+            self.votes.entry(responder_ip).or_insert(root);
+        }
+    }
+
+    pub(crate) fn observations(&self) -> Vec<([u8; 20], IpAddr)> {
+        self.votes
+            .iter()
+            .map(|(ip, root)| (*root, IpAddr::V4(*ip)))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.votes.len()
+    }
+}
 
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +60,7 @@ pub(crate) struct MonitoredSharedFile {
 #[derive(Debug)]
 pub(crate) struct CoreState {
     pub(crate) searches: HashMap<String, Search>,
+    pub(crate) kad_aich_search_votes: HashMap<(String, String), KadAichSearchVotes>,
     pub(crate) next_search_id: u32,
     pub(crate) transfers: HashMap<String, Transfer>,
     pub(crate) core_settings: CoreSettings,
@@ -78,4 +110,29 @@ pub(crate) struct CoreState {
     /// download-source picture is throttled to roughly the MFC snapshot cadence
     /// instead of firing on every source-acquisition round.
     pub(crate) last_source_count_emit_at: Option<Instant>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kad_aich_votes_keep_first_root_per_responder_and_cap_state() {
+        let mut votes = KadAichSearchVotes::default();
+        let first_responder = Ipv4Addr::new(10, 0, 0, 1);
+        votes.record(first_responder, [0xAA; 20]);
+        votes.record(first_responder, [0xBB; 20]);
+        for index in 1..80u8 {
+            votes.record(Ipv4Addr::new(10, index, 0, 1), [0xAA; 20]);
+        }
+
+        assert_eq!(votes.len(), MAX_KAD_AICH_VOTES_PER_RESULT);
+        assert_eq!(
+            votes
+                .observations()
+                .into_iter()
+                .find(|(_, ip)| *ip == IpAddr::V4(first_responder)),
+            Some(([0xAA; 20], IpAddr::V4(first_responder)))
+        );
+    }
 }

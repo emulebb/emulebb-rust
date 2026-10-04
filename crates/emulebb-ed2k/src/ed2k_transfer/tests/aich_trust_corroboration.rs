@@ -70,6 +70,23 @@ async fn ten_unique_ip_majority_root_is_promoted() {
 }
 
 #[tokio::test]
+async fn batched_independent_observations_promote_once() {
+    let (runtime, file_hash) = runtime_with_job().await;
+    let root = [0xCE; 20];
+    let observations = (0..10u8)
+        .map(|index| (root, ip(203, index, 0, 9)))
+        .collect::<Vec<_>>();
+    let manifest = runtime
+        .record_network_aich_observations(&file_hash, &observations)
+        .await
+        .unwrap();
+    assert_eq!(
+        manifest.aich_root.as_deref(),
+        Some(hex::encode(root).as_str())
+    );
+}
+
+#[tokio::test]
 async fn nine_unique_ips_below_threshold_not_trusted() {
     let (runtime, file_hash) = runtime_with_job().await;
     let root = [0x42; 20];

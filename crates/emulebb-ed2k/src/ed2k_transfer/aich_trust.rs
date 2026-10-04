@@ -39,40 +39,43 @@ fn mask_signer_ip(octets: [u8; 4]) -> [u8; 4] {
     [octets[0], octets[1], octets[2] & 0xF0, 0]
 }
 
-/// Per-file accumulator of network-proposed AICH roots and the distinct IPs
-/// that proposed each one. In-memory only (live session trust state, never
+/// Per-file accumulator of network-proposed AICH roots keyed by signer. Keeping
+/// one root per masked signer prevents one responder from inflating multiple
+/// conflicting candidates. In-memory only (live session trust state, never
 /// persisted): the durable trust decision lives in `manifest.aich_root`, which
 /// is only written once a root is promoted.
 #[derive(Debug, Default)]
 pub(super) struct AichRootCorroboration {
-    /// candidate root hash -> set of masked proposing IPs.
-    proposals: HashMap<[u8; 20], Vec<[u8; 4]>>,
+    /// Masked proposing IP -> first root proposed by that signer.
+    proposals: HashMap<[u8; 4], [u8; 20]>,
 }
 
 impl AichRootCorroboration {
-    /// Record that `from_ip` proposed `root`. Returns `true` if this proposal
-    /// (root, masked-IP pair) was new, i.e. it changed the accumulated state.
+    /// Record the first root proposed by `from_ip`'s masked signer identity.
+    /// Returns `true` only when that signer had not voted before.
     pub(super) fn record(&mut self, root: [u8; 20], from_ip: [u8; 4]) -> bool {
         let masked = mask_signer_ip(from_ip);
-        let signers = self.proposals.entry(root).or_default();
-        if signers.contains(&masked) {
-            return false;
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.proposals.entry(masked) {
+            entry.insert(root);
+            true
+        } else {
+            false
         }
-        signers.push(masked);
-        true
     }
 
     /// Return the leading root if it now satisfies the master's trust gate:
     /// `>= MINUNIQUEIPS_TOTRUST` distinct IPs AND `>= MINPERCENTAGE_TOTRUST`
     /// percent of all proposing IPs. Mirrors `SHAHashSet.cpp:998`.
     pub(super) fn trusted_root(&self) -> Option<[u8; 20]> {
-        let mut total_signers: usize = 0;
+        let total_signers = self.proposals.len();
+        let mut counts = HashMap::<[u8; 20], usize>::new();
+        for root in self.proposals.values() {
+            *counts.entry(*root).or_default() += 1;
+        }
         let mut leader: Option<([u8; 20], usize)> = None;
-        for (root, signers) in &self.proposals {
-            let count = signers.len();
-            total_signers += count;
+        for (root, count) in counts {
             if leader.is_none_or(|(_, best)| count > best) {
-                leader = Some((*root, count));
+                leader = Some((root, count));
             }
         }
         let (root, count) = leader?;
@@ -135,5 +138,18 @@ mod tests {
         acc.record([8u8; 20], ip(10, 0, 0, 1));
         acc.record([8u8; 20], ip(10, 16, 0, 1));
         assert_eq!(acc.trusted_root(), None);
+    }
+
+    #[test]
+    fn signer_cannot_vote_for_two_roots() {
+        let mut acc = AichRootCorroboration::default();
+        let signer = ip(203, 0, 113, 7);
+        assert!(acc.record([1u8; 20], signer));
+        assert!(!acc.record([2u8; 20], signer));
+
+        for i in 1..10u8 {
+            assert!(acc.record([1u8; 20], ip(203, i, 0, 7)));
+        }
+        assert_eq!(acc.trusted_root(), Some([1u8; 20]));
     }
 }

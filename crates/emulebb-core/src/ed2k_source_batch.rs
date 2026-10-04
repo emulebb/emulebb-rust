@@ -363,6 +363,7 @@ mod tests {
             .collect();
         CoreState {
             searches: HashMap::new(),
+            kad_aich_search_votes: HashMap::new(),
             next_search_id: 1,
             transfers,
             core_settings: default_core_settings(),

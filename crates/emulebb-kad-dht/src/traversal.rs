@@ -93,6 +93,17 @@ pub type KadIpFilter = Arc<dyn Fn(Ipv4Addr) -> bool + Send + Sync>;
 /// cannot be referenced here, so core bridges the live routing table behind it.
 pub type KadResContactSink = Arc<dyn Fn(&ContactEntry) + Send + Sync>;
 
+/// One SEARCH_RES entry plus the identity of the contact that actually sent
+/// it. The responder version comes from the queried contact, never from result
+/// payload data, so version-gated consumers can make a provenance-aware choice.
+#[derive(Debug, Clone)]
+pub struct SearchResultObservation {
+    pub entry_id: Ed2kHash,
+    pub tags: Vec<Tag>,
+    pub responder_addr: SocketAddr,
+    pub responder_version: u8,
+}
+
 /// Phase-2 behavior that should follow once the closest contacts are known.
 #[derive(Debug, Clone)]
 pub enum TraversalKind {
@@ -137,7 +148,7 @@ pub struct TraversalConfig {
     /// We keep `search_entries` in the final `TraversalResult` for callers that still
     /// want the collected batch, but the node/API path now consumes results
     /// incrementally from this channel as packets arrive.
-    pub result_tx: Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    pub result_tx: Option<mpsc::Sender<SearchResultObservation>>,
     /// Outbound budget class used by this traversal.
     pub work_class: RpcWorkClass,
     /// Optional IP-filter hook applied to each `RES`-returned contact (drops
@@ -192,7 +203,7 @@ struct SearchPhaseConfig<'a> {
     jumpstart_tick: Duration,
     work_class: RpcWorkClass,
     cancel: &'a CancellationToken,
-    result_tx: Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    result_tx: Option<mpsc::Sender<SearchResultObservation>>,
 }
 
 struct LookupPhaseConfig<'a> {
@@ -824,7 +835,7 @@ async fn run_search_phase(
     );
 
     let mut unsolicited = rpc.subscribe();
-    let mut queried_addrs = HashSet::new();
+    let mut queried_addrs = HashMap::new();
     let mut pending_contacts = send_to.into_iter().collect::<VecDeque<_>>();
     let mut search_entries = Vec::new();
     let should_collect_search_entries = result_tx.is_none();
@@ -909,7 +920,7 @@ async fn emit_next_search_packet(
     work_class: RpcWorkClass,
     jumpstart_tick: Duration,
     pending_contacts: &mut VecDeque<&TraversalContact>,
-    queried_addrs: &mut HashSet<SocketAddr>,
+    queried_addrs: &mut HashMap<SocketAddr, u8>,
 ) -> Option<Instant> {
     let contact = pending_contacts.pop_front()?;
     register_traversal_identity(rpc, contact);
@@ -923,7 +934,10 @@ async fn emit_next_search_packet(
     if let Err(err) = rpc.send_with_class(contact.addr, &packet, work_class).await {
         trace!("search phase send failed for {}: {}", contact.id, err);
     }
-    queried_addrs.insert(contact.addr);
+    queried_addrs
+        .entry(contact.addr)
+        .and_modify(|version| *version = (*version).max(contact.version))
+        .or_insert(contact.version);
     Some(Instant::now() + jumpstart_tick)
 }
 
@@ -993,8 +1007,8 @@ struct SearchResultDrain<'a> {
     cancel: &'a CancellationToken,
     receive_until: Instant,
     target: NodeId,
-    queried_addrs: &'a HashSet<SocketAddr>,
-    result_tx: &'a Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    queried_addrs: &'a HashMap<SocketAddr, u8>,
+    result_tx: &'a Option<mpsc::Sender<SearchResultObservation>>,
     collect_search_entries: bool,
     search_entries: &'a mut Vec<(Ed2kHash, Vec<Tag>)>,
 }
@@ -1048,8 +1062,8 @@ async fn collect_search_results_until(drain: SearchResultDrain<'_>) {
 async fn handle_search_phase_packet(
     packet: emulebb_kad_net::ReceivedKadPacket,
     target: NodeId,
-    queried_addrs: &HashSet<SocketAddr>,
-    result_tx: &Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    queried_addrs: &HashMap<SocketAddr, u8>,
+    result_tx: &Option<mpsc::Sender<SearchResultObservation>>,
     collect_search_entries: bool,
     search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
 ) {
@@ -1080,7 +1094,7 @@ async fn handle_search_phase_packet(
             )
             .await;
         }
-        other if queried_addrs.contains(&from) => {
+        other if queried_addrs.contains_key(&from) => {
             trace!(
                 "search phase unexpected packet opcode=0x{:02X} from {}",
                 other.opcode(),
@@ -1095,8 +1109,8 @@ async fn handle_search_response(
     response: emulebb_kad_proto::packet::SearchRes,
     from: SocketAddr,
     target: NodeId,
-    queried_addrs: &HashSet<SocketAddr>,
-    result_tx: &Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    queried_addrs: &HashMap<SocketAddr, u8>,
+    result_tx: &Option<mpsc::Sender<SearchResultObservation>>,
     collect_search_entries: bool,
     search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
 ) {
@@ -1127,16 +1141,25 @@ async fn handle_search_response_entries(
     results: Vec<emulebb_kad_proto::SearchResultEntry>,
     from: SocketAddr,
     target: NodeId,
-    queried_addrs: &HashSet<SocketAddr>,
-    result_tx: &Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    queried_addrs: &HashMap<SocketAddr, u8>,
+    result_tx: &Option<mpsc::Sender<SearchResultObservation>>,
     collect_search_entries: bool,
     search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
 ) {
     if !search_response_matches(response_target, from, target, queried_addrs) {
         return;
     }
+    let responder_version = queried_addrs.get(&from).copied().unwrap_or_default();
     for entry in results {
-        forward_search_result_entry(entry, result_tx, collect_search_entries, search_entries).await;
+        forward_search_result_entry(
+            entry,
+            from,
+            responder_version,
+            result_tx,
+            collect_search_entries,
+            search_entries,
+        )
+        .await;
     }
 }
 
@@ -1144,9 +1167,9 @@ fn search_response_matches(
     response_target: NodeId,
     from: SocketAddr,
     target: NodeId,
-    queried_addrs: &HashSet<SocketAddr>,
+    queried_addrs: &HashMap<SocketAddr, u8>,
 ) -> bool {
-    if !queried_addrs.contains(&from) {
+    if !queried_addrs.contains_key(&from) {
         trace!("ignoring SEARCH_RES from unqueried sender {}", from);
         return false;
     }
@@ -1162,12 +1185,21 @@ fn search_response_matches(
 
 async fn forward_search_result_entry(
     entry: emulebb_kad_proto::packet::SearchResultEntry,
-    result_tx: &Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    responder_addr: SocketAddr,
+    responder_version: u8,
+    result_tx: &Option<mpsc::Sender<SearchResultObservation>>,
     collect_search_entries: bool,
     search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
 ) {
     if let Some(tx) = result_tx.as_ref() {
-        let _ = tx.send((entry.entry_id, entry.tags.clone())).await;
+        let _ = tx
+            .send(SearchResultObservation {
+                entry_id: entry.entry_id,
+                tags: entry.tags.clone(),
+                responder_addr,
+                responder_version,
+            })
+            .await;
     }
     if collect_search_entries {
         search_entries.push((entry.entry_id, entry.tags));

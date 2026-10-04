@@ -132,6 +132,7 @@ impl EmulebbCore {
                     &entry.request,
                     method_token,
                     Some(results),
+                    None,
                 )
                 .await;
             }
@@ -201,13 +202,14 @@ impl EmulebbCore {
                 self.settle_retryable_dispatch(entry, lane, "kad", "kad-not-ready")
                     .await;
             }
-            Ok(Some(results)) => {
+            Ok(Some(outcome)) => {
                 self.search_queue.lock().finish(lane);
                 self.complete_search_with_results(
                     &entry.search_id,
                     &entry.request,
                     "kad",
-                    Some(results),
+                    Some(outcome.results),
+                    Some(outcome.aich_votes),
                 )
                 .await;
             }
@@ -308,29 +310,51 @@ impl EmulebbCore {
         request: &SearchCreate,
         method_token: &'static str,
         network_results: Option<Vec<SearchResult>>,
+        kad_aich_votes: Option<std::collections::HashMap<String, crate::KadAichSearchVotes>>,
     ) {
         let snapshot = {
             let mut state = self.state.lock().await;
-            let Some(search) = state.searches.get_mut(search_id) else {
-                return;
+            let mut network_results = network_results.unwrap_or_default();
+            crate::search_query::apply_search_filters(&mut network_results, request);
+            let accepted_hashes = network_results
+                .iter()
+                .map(|result| result.hash.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let snapshot = {
+                let Some(search) = state.searches.get_mut(search_id) else {
+                    return;
+                };
+                for result in network_results {
+                    if let Some(existing) = search
+                        .results
+                        .iter_mut()
+                        .find(|existing| existing.hash == result.hash)
+                    {
+                        if existing.aich_hash.is_empty() && !result.aich_hash.is_empty() {
+                            existing.aich_hash = result.aich_hash;
+                        }
+                    } else {
+                        search.results.push(result);
+                    }
+                }
+                search.status = "completed".to_string();
+                search.status_reason = None;
+                search.updated_at = Utc::now();
+                search.clone()
             };
-            if let Some(mut network_results) = network_results {
-                crate::search_query::apply_search_filters(&mut network_results, request);
-                let seen: std::collections::HashSet<String> = search
-                    .results
-                    .iter()
-                    .map(|result| result.hash.clone())
-                    .collect();
-                search.results.extend(
-                    network_results
-                        .into_iter()
-                        .filter(|result| !seen.contains(&result.hash)),
-                );
+            state
+                .kad_aich_search_votes
+                .retain(|(candidate_search_id, _), _| candidate_search_id != search_id);
+            if let Some(kad_aich_votes) = kad_aich_votes {
+                for (hash, votes) in kad_aich_votes {
+                    if accepted_hashes.contains(&hash) {
+                        state
+                            .kad_aich_search_votes
+                            .insert((search_id.to_string(), hash), votes);
+                    }
+                }
             }
-            search.status = "completed".to_string();
-            search.status_reason = None;
-            search.updated_at = Utc::now();
-            search.clone()
+            snapshot
         };
         crate::diag_sched::keyword_search(
             method_token,

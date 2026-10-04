@@ -1,6 +1,6 @@
 //! Public `/api/v1/searches` Kad keyword search helpers.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Result, ensure};
 use emulebb_kad_dht::{DhtNode, RpcWorkClass};
@@ -12,7 +12,7 @@ use md4::{Digest, Md4};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::{SearchCreate, SearchResult, search_query::search_result_from_kad};
+use crate::{KadAichSearchVotes, SearchCreate, SearchResult, search_query::search_result_from_kad};
 
 const INVALID_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
 const KAD_KEYWORD_SEARCH_RESULT_LIMIT: usize = 200;
@@ -22,11 +22,25 @@ const KAD_KEYWORD_SEARCH_RESULT_LIMIT: usize = 200;
 // oracle would delete the stopped search.
 const KAD_KEYWORD_SEARCH_TIMEOUT_SECS: u64 = SEARCH_TIMEOUT_SECS + SEARCH_RESULT_GRACE_SECS;
 
+pub(crate) struct KadKeywordSearchOutcome {
+    pub(crate) results: Vec<SearchResult>,
+    pub(crate) aich_votes: HashMap<String, KadAichSearchVotes>,
+}
+
+impl KadKeywordSearchOutcome {
+    pub(crate) fn without_aich(results: Vec<SearchResult>) -> Self {
+        Self {
+            results,
+            aich_votes: HashMap::new(),
+        }
+    }
+}
+
 pub(crate) async fn search_kad_keywords(
     dht: DhtNode,
     search_id: &str,
     request: &SearchCreate,
-) -> Result<Option<Vec<SearchResult>>> {
+) -> Result<Option<KadKeywordSearchOutcome>> {
     if !dht.is_bootstrapped() {
         return Ok(None);
     }
@@ -39,8 +53,9 @@ pub(crate) async fn search_kad_keywords(
     );
     let timeout = tokio::time::sleep(Duration::from_secs(KAD_KEYWORD_SEARCH_TIMEOUT_SECS));
     tokio::pin!(timeout);
-    let mut results = Vec::new();
-    let mut seen_hashes = HashSet::new();
+    let mut results = Vec::<SearchResult>::new();
+    let mut result_indexes = HashMap::<String, usize>::new();
+    let mut aich_votes = HashMap::<String, KadAichSearchVotes>::new();
 
     loop {
         tokio::select! {
@@ -49,17 +64,30 @@ pub(crate) async fn search_kad_keywords(
                 let Some(result) = result else {
                     break;
                 };
-                if seen_hashes.insert(result.hash) {
-                    results.push(search_result_from_kad(search_id, request, result));
-                    if results.len() >= KAD_KEYWORD_SEARCH_RESULT_LIMIT {
-                        break;
+                let hash = result.hash.to_string();
+                if let Some(candidate) = result.aich_candidate {
+                    aich_votes
+                        .entry(hash.clone())
+                        .or_default()
+                        .record(candidate.responder_ip, candidate.root);
+                }
+                let mapped = search_result_from_kad(search_id, request, result);
+                if let Some(index) = result_indexes.get(&hash).copied() {
+                    if results[index].aich_hash.is_empty() && !mapped.aich_hash.is_empty() {
+                        results[index].aich_hash = mapped.aich_hash;
                     }
+                } else if results.len() < KAD_KEYWORD_SEARCH_RESULT_LIMIT {
+                    result_indexes.insert(hash, results.len());
+                    results.push(mapped);
                 }
             }
         }
     }
     cancel.cancel();
-    Ok(Some(results))
+    Ok(Some(KadKeywordSearchOutcome {
+        results,
+        aich_votes,
+    }))
 }
 
 pub(crate) fn kad_public_search_keyword(query: &str) -> Result<String> {

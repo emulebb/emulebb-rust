@@ -8,7 +8,8 @@ use chrono::Utc;
 use emulebb_index::{KadLocalStore, KadLocalStoreConfig};
 use emulebb_kad_dht::{DhtConfig, DhtNode};
 use emulebb_kad_proto::{
-    BootstrapRes, ContactEntry, KAD_VERSION, KadPacket, NodeId, Pong, PublishRes, Res, constants::K,
+    BootstrapRes, ContactEntry, KAD_VERSION, KadPacket, NodeId, Pong, PublishEntry, PublishRes,
+    Res, constants::K,
 };
 use emulebb_kad_routing::Contact;
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -74,6 +75,7 @@ impl LocalKadSwarm {
 pub struct LocalKadNode {
     pub dht: DhtNode,
     pub addr: SocketAddr,
+    store: Arc<Mutex<KadLocalStore>>,
     rpc_task: JoinHandle<()>,
     handler_task: JoinHandle<()>,
 }
@@ -107,9 +109,26 @@ impl LocalKadNode {
         Self {
             dht,
             addr,
+            store,
             rpc_task,
             handler_task,
         }
+    }
+
+    /// Seed byte-exact stock/current-aMule publish tags under a chosen
+    /// publisher IP, then exercise the normal UDP search response path.
+    pub async fn inject_keyword_publish(
+        &self,
+        target: NodeId,
+        entries: &[PublishEntry],
+        publisher_ip: Ipv4Addr,
+    ) {
+        self.store.lock().await.record_keyword_publish_batch(
+            target,
+            entries,
+            publisher_ip,
+            Utc::now(),
+        );
     }
 
     fn contact(&self) -> Contact {

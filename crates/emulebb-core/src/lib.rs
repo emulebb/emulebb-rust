@@ -157,7 +157,7 @@ use core_settings::{
     ed2k_download_limit_bytes_per_sec_from_core_settings,
     ed2k_upload_queue_policy_from_core_settings, initial_ed2k_upload_queue_policy,
 };
-pub(crate) use core_state::CoreState;
+pub(crate) use core_state::{CoreState, KadAichSearchVotes};
 use direct_download_runtime::{parse_server_endpoint, run_ed2k_direct_downloads};
 use download_source_registry::DownloadSourceCandidate;
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;

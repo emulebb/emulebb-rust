@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
@@ -12,11 +13,29 @@ use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
 use crate::matches_restrictive_keyword_payload;
 
 use super::entry_store::{DedupEntry, TimedEntry};
-use super::size_tags::{stock_first_filename, stock_first_keyword_source_file_size};
+use super::size_tags::{
+    stock_first_filename, stock_first_keyword_source_file_size, stock_stored_publish_tags,
+};
 
 /// Anti-spam publish points per publishing /24 subnet (oracle
 /// `PUBLISHPOINTSSPERSUBNET`, Entry.cpp `RecalcualteTrustValue`).
 const PUBLISH_POINTS_PER_SUBNET: f32 = 10.0;
+
+/// Stock `CKeyEntry::MergeIPsAndFilenames` keeps at most 100 publishing IPs for
+/// one keyword/file entry.
+const STOCK_MAX_KEYWORD_PUBLISHERS: usize = 100;
+
+/// A Kad BSOB tag carries one byte of length. Stock keeps the AICH result body
+/// below 250 bytes, which permits eleven `<popularity, 20-byte-root>` records:
+/// `1 + 11 * 21 = 232`; twelve would require 253 bytes.
+const STOCK_MAX_AICH_RESULT_HASHES: usize = 11;
+
+#[derive(Debug, Clone)]
+struct KeywordPublisher {
+    last_seen: DateTime<Utc>,
+    file_name: Option<String>,
+    aich_root: Option<[u8; 20]>,
+}
 
 /// Per-keyword-entry publish diversity: the distinct publisher IPs and file
 /// names observed for one `(target, file_hash)` entry, mirroring the oracle
@@ -24,8 +43,7 @@ const PUBLISH_POINTS_PER_SUBNET: f32 = 10.0;
 /// rebuilt as republishes arrive.
 #[derive(Debug, Clone, Default)]
 struct KeywordDiversity {
-    publisher_ips: HashSet<Ipv4Addr>,
-    file_names: HashSet<String>,
+    publishers: HashMap<Ipv4Addr, KeywordPublisher>,
 }
 
 /// Tracks publish diversity per keyword entry plus a global per-/24 publish
@@ -50,27 +68,78 @@ fn subnet24(ip: Ipv4Addr) -> [u8; 3] {
 
 impl KeywordPublishTracker {
     /// Record one publish of `(target, file_hash)` from `publisher_ip` carrying
-    /// `file_name`. A publisher IP new to this entry bumps its /24's global
-    /// count (oracle `AdjustGlobalPublishTracking(ip, true)`); a repeat publish
-    /// only refreshes (deduped by exact IP, oracle `MergeIPsAndFilenames`).
+    /// its current filename and optional AICH root. A refresh replaces the
+    /// publisher's old claim, including removing an old root when the new
+    /// publish omits or malforms it.
     pub(super) fn record(
         &mut self,
         target: NodeId,
         file_hash: Ed2kHash,
         publisher_ip: Ipv4Addr,
         file_name: Option<String>,
+        aich_root: Option<[u8; 20]>,
+        observed_at: DateTime<Utc>,
     ) {
         let diversity = self.entries.entry((target, file_hash)).or_default();
-        if diversity.publisher_ips.insert(publisher_ip) {
+        if let Some(publisher) = diversity.publishers.get_mut(&publisher_ip) {
+            publisher.last_seen = observed_at;
+            publisher.file_name = file_name.filter(|name| !name.is_empty());
+            publisher.aich_root = aich_root;
+            return;
+        }
+
+        if diversity.publishers.len() >= STOCK_MAX_KEYWORD_PUBLISHERS
+            && let Some(evicted_ip) = diversity
+                .publishers
+                .iter()
+                .min_by_key(|(ip, publisher)| (publisher.last_seen, **ip))
+                .map(|(ip, _)| *ip)
+        {
+            diversity.publishers.remove(&evicted_ip);
+            decrement_subnet_count(&mut self.global_subnet_counts, evicted_ip);
+        }
+
+        if diversity
+            .publishers
+            .insert(
+                publisher_ip,
+                KeywordPublisher {
+                    last_seen: observed_at,
+                    file_name: file_name.filter(|name| !name.is_empty()),
+                    aich_root,
+                },
+            )
+            .is_none()
+        {
             *self
                 .global_subnet_counts
                 .entry(subnet24(publisher_ip))
                 .or_insert(0) += 1;
         }
-        if let Some(name) = file_name
-            && !name.is_empty()
-        {
-            diversity.file_names.insert(name);
+    }
+
+    /// Expire individual publishers even when another publisher refreshed the
+    /// enclosing stored file entry. This prevents stale AICH roots and
+    /// `PUBLISHINFO` counts surviving for the full lifetime of a newer publish.
+    pub(super) fn prune_expired(&mut self, ttl: Duration, now: DateTime<Utc>) {
+        let keys = self.entries.keys().copied().collect::<Vec<_>>();
+        for key in keys {
+            let expired = self
+                .entries
+                .get(&key)
+                .into_iter()
+                .flat_map(|entry| &entry.publishers)
+                .filter(|(_, publisher)| publisher.last_seen + ttl <= now)
+                .map(|(ip, _)| *ip)
+                .collect::<Vec<_>>();
+            if let Some(entry) = self.entries.get_mut(&key) {
+                for ip in &expired {
+                    entry.publishers.remove(ip);
+                }
+            }
+            for ip in expired {
+                decrement_subnet_count(&mut self.global_subnet_counts, ip);
+            }
         }
     }
 
@@ -87,13 +156,8 @@ impl KeywordPublishTracker {
             .collect();
         for key in dropped {
             if let Some(diversity) = self.entries.remove(&key) {
-                for ip in &diversity.publisher_ips {
-                    if let Some(count) = self.global_subnet_counts.get_mut(&subnet24(*ip)) {
-                        *count = count.saturating_sub(1);
-                        if *count == 0 {
-                            self.global_subnet_counts.remove(&subnet24(*ip));
-                        }
-                    }
+                for ip in diversity.publishers.keys() {
+                    decrement_subnet_count(&mut self.global_subnet_counts, *ip);
                 }
             }
         }
@@ -110,11 +174,11 @@ impl KeywordPublishTracker {
         let Some(diversity) = self.entries.get(&(target, file_hash)) else {
             return (1, 1, 1000);
         };
-        if diversity.publisher_ips.is_empty() {
+        if diversity.publishers.is_empty() {
             return (1, 1, 1000);
         }
         let mut trust = 0.0f32;
-        for ip in &diversity.publisher_ips {
+        for ip in diversity.publishers.keys() {
             let global = self
                 .global_subnet_counts
                 .get(&subnet24(*ip))
@@ -123,10 +187,50 @@ impl KeywordPublishTracker {
                 .max(1);
             trust += PUBLISH_POINTS_PER_SUBNET / global as f32;
         }
-        let names = (diversity.file_names.len().max(1) % 256) as u32;
-        let publishers = (diversity.publisher_ips.len() % 256) as u32;
+        let names = (diversity
+            .publishers
+            .values()
+            .filter_map(|publisher| publisher.file_name.as_deref())
+            .collect::<HashSet<_>>()
+            .len()
+            .max(1)
+            % 256) as u32;
+        let publishers = (diversity.publishers.len() % 256) as u32;
         let trust_times_100 = (trust * 100.0) as u32;
         (names, publishers, trust_times_100)
+    }
+
+    fn aich_roots(&self, target: NodeId, file_hash: Ed2kHash) -> Vec<([u8; 20], u8)> {
+        let Some(diversity) = self.entries.get(&(target, file_hash)) else {
+            return Vec::new();
+        };
+        let mut popularity = HashMap::<[u8; 20], u8>::new();
+        for root in diversity
+            .publishers
+            .values()
+            .filter_map(|publisher| publisher.aich_root)
+        {
+            let count = popularity.entry(root).or_default();
+            *count = count.saturating_add(1);
+        }
+        let mut roots = popularity.into_iter().collect::<Vec<_>>();
+        roots.sort_unstable_by(|(left_root, left_count), (right_root, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_root.cmp(right_root))
+        });
+        roots.truncate(STOCK_MAX_AICH_RESULT_HASHES);
+        roots
+    }
+}
+
+fn decrement_subnet_count(counts: &mut HashMap<[u8; 3], u32>, ip: Ipv4Addr) {
+    let subnet = subnet24(ip);
+    if let Some(count) = counts.get_mut(&subnet) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(&subnet);
+        }
     }
 }
 
@@ -188,15 +292,10 @@ pub(super) fn keyword_result_tags(
         tags.push(Tag::filesize(size));
     }
 
-    let mut aich_result_hash = None;
     for tag in &entry.tags {
         match tag.name {
             TagName::Short(name) if name == tag_name::FILENAME || name == tag_name::FILESIZE => {}
-            TagName::Short(name) if name == tag_name::KADAICHHASHPUB => {
-                if aich_result_hash.is_none() {
-                    aich_result_hash = stock_aich_publish_hash(tag);
-                }
-            }
+            TagName::Short(name) if name == tag_name::KADAICHHASHPUB => {}
             TagName::Short(name)
                 if name == tag_name::PUBLISHINFO || name == tag_name::KADAICHHASHRESULT => {}
             _ => tags.push(tag.clone()),
@@ -204,8 +303,9 @@ pub(super) fn keyword_result_tags(
     }
 
     tags.push(keyword_publish_info_tag(entry, tracker));
-    if let Some(hash) = aich_result_hash {
-        tags.push(keyword_aich_result_tag(hash));
+    let roots = tracker.aich_roots(entry.target, entry.file_hash);
+    if !roots.is_empty() {
+        tags.push(keyword_aich_result_tag(&roots));
     }
     tags
 }
@@ -221,19 +321,32 @@ fn keyword_publish_info_tag(entry: &StoredKeywordPublish, tracker: &KeywordPubli
     Tag::new_short(tag_name::PUBLISHINFO, TagValue::U32(value))
 }
 
-fn stock_aich_publish_hash(tag: &Tag) -> Option<[u8; 20]> {
-    let bytes = match &tag.value {
-        TagValue::SmallBlob(bytes) => bytes,
-        _ => return None,
-    };
-    bytes.as_slice().try_into().ok()
+pub(super) fn stock_aich_publish_hash(tags: &[Tag]) -> Option<[u8; 20]> {
+    tags.iter().find_map(|tag| {
+        if tag.name != TagName::Short(tag_name::KADAICHHASHPUB) {
+            return None;
+        }
+        let TagValue::SmallBlob(bytes) = &tag.value else {
+            return None;
+        };
+        bytes.as_slice().try_into().ok()
+    })
 }
 
-fn keyword_aich_result_tag(hash: [u8; 20]) -> Tag {
-    let mut payload = Vec::with_capacity(22);
-    payload.push(1);
-    payload.push(1);
-    payload.extend_from_slice(&hash);
+pub(super) fn stock_stored_keyword_publish_tags(tags: &[Tag]) -> Vec<Tag> {
+    stock_stored_publish_tags(tags)
+        .into_iter()
+        .filter(|tag| tag.name != TagName::Short(tag_name::KADAICHHASHPUB))
+        .collect()
+}
+
+fn keyword_aich_result_tag(roots: &[([u8; 20], u8)]) -> Tag {
+    let mut payload = Vec::with_capacity(1 + roots.len() * 21);
+    payload.push(roots.len() as u8);
+    for (root, popularity) in roots {
+        payload.push(*popularity);
+        payload.extend_from_slice(root);
+    }
     Tag::new_short(tag_name::KADAICHHASHRESULT, TagValue::SmallBlob(payload))
 }
 

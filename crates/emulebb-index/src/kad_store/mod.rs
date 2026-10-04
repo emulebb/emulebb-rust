@@ -27,8 +27,9 @@ use entry_store::{purge_expired, upsert_entry};
 use keyword::{
     KeywordPublishTracker, STOCK_MAX_KEYWORD_ENTRIES, StoredKeywordPublish,
     has_stock_keyword_filename, keyword_dedup_key, keyword_entry_matches_restrictive_payload,
-    keyword_result_tags, stock_keyword_file_size, stock_keyword_first_filename,
-    stock_keyword_publish_decision,
+    keyword_result_tags, stock_aich_publish_hash, stock_keyword_file_size,
+    stock_keyword_first_filename, stock_keyword_publish_decision,
+    stock_stored_keyword_publish_tags,
 };
 use notes::{
     StoredNotesPublish, has_stock_note_tags, notes_dedup_key, notes_result_tags,
@@ -150,6 +151,8 @@ impl KadLocalStore {
             self.config.keyword_ttl,
             observed_at,
         );
+        self.keyword_tracker
+            .prune_expired(self.config.keyword_ttl, observed_at);
         for entry in entries {
             let Some(size) = stock_keyword_file_size(&entry.tags) else {
                 continue;
@@ -172,7 +175,7 @@ impl KadLocalStore {
                     observed_at,
                     target,
                     file_hash: entry.hash,
-                    tags: stock_stored_publish_tags(&entry.tags),
+                    tags: stock_stored_keyword_publish_tags(&entry.tags),
                     dedup_key,
                 },
             );
@@ -183,6 +186,8 @@ impl KadLocalStore {
                 entry.hash,
                 publisher_ip,
                 stock_keyword_first_filename(&entry.tags),
+                stock_aich_publish_hash(&entry.tags),
+                observed_at,
             );
         }
         self.reconcile_keyword_tracker();
@@ -304,6 +309,8 @@ impl KadLocalStore {
         let restrictive_payload = ((request.start_position & 0x8000) != 0)
             .then_some(request.restrictive_payload.as_slice());
         purge_expired(&mut self.keyword_entries, self.config.keyword_ttl, now);
+        self.keyword_tracker
+            .prune_expired(self.config.keyword_ttl, now);
         // Keep the publish tracker consistent with entries dropped by the purge.
         self.reconcile_keyword_tracker();
         let offset = usize::from(request.start_position & 0x7FFF);
@@ -384,6 +391,9 @@ impl KadLocalStore {
             return KadPublishCacheSnapshot::default();
         }
         purge_expired(&mut self.keyword_entries, self.config.keyword_ttl, now);
+        self.keyword_tracker
+            .prune_expired(self.config.keyword_ttl, now);
+        self.reconcile_keyword_tracker();
         purge_expired(&mut self.source_entries, self.config.source_ttl, now);
         purge_expired(&mut self.notes_entries, self.config.notes_ttl, now);
         KadPublishCacheSnapshot {
@@ -451,7 +461,7 @@ impl KadLocalStore {
                     observed_at: entry.observed_at,
                     target: entry.target,
                     file_hash: entry.file_hash,
-                    tags: entry.tags,
+                    tags: stock_stored_keyword_publish_tags(&entry.tags),
                     dedup_key,
                 },
             );

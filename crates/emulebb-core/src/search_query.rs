@@ -180,6 +180,10 @@ pub(crate) fn search_result_from_kad(
         .into_iter()
         .find(|name| !name.trim().is_empty())
         .unwrap_or_else(|| hash.clone());
+    let aich_hash = result
+        .aich_candidate
+        .map(|candidate| hex::encode(candidate.root))
+        .unwrap_or_default();
     SearchResult {
         search_id: search_id.to_string(),
         method: request.method.clone(),
@@ -193,7 +197,7 @@ pub(crate) fn search_result_from_kad(
         source_client_port: None,
         file_type: "unknown".to_string(),
         rating: 0,
-        aich_hash: String::new(),
+        aich_hash,
         complete: false,
         directory: String::new(),
     }
@@ -202,7 +206,9 @@ pub(crate) fn search_result_from_kad(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emulebb_kad_dht::KadAichCandidate;
     use emulebb_kad_proto::Ed2kHash;
+    use std::net::Ipv4Addr;
 
     fn result(name: &str, size_bytes: u64, sources: u32) -> SearchResult {
         SearchResult {
@@ -348,6 +354,10 @@ mod tests {
                 names: vec!["Sample File.bin".to_string()],
                 size: Some(1234),
                 source_count: Some(9),
+                aich_candidate: Some(KadAichCandidate {
+                    root: [0xAB; 20],
+                    responder_ip: Ipv4Addr::new(203, 0, 113, 9),
+                }),
                 tags: Vec::new(),
             },
         );
@@ -359,6 +369,7 @@ mod tests {
         assert_eq!(result.sources, 9);
         assert_eq!(result.complete_sources, 9);
         assert_eq!(result.file_type, "unknown");
+        assert_eq!(result.aich_hash, hex::encode([0xAB; 20]));
     }
 
     #[test]

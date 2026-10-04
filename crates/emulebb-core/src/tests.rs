@@ -449,6 +449,7 @@ async fn passive_keyword_result_indexes_searchable_file_metadata() {
             names: vec!["Passive Replay Result.iso".to_string(), "   ".to_string()],
             size: Some(4096),
             source_count: Some(7),
+            aich_candidate: None,
             tags: vec![],
         },
     )

@@ -14,15 +14,23 @@ impl EmulebbCore {
         let category = self
             .resolve_transfer_category(request.category_id, request.category_name.as_deref())
             .await?;
-        let result = {
+        let result_and_aich = {
             let state = self.state.lock().await;
-            state
+            let result = state
                 .searches
                 .get(search_id)
                 .and_then(|search| search.results.iter().find(|result| result.hash == hash))
-                .cloned()
+                .cloned();
+            result.map(|result| {
+                let observations = state
+                    .kad_aich_search_votes
+                    .get(&(search_id.to_string(), result.hash.clone()))
+                    .map(crate::KadAichSearchVotes::observations)
+                    .unwrap_or_default();
+                (result, observations)
+            })
         };
-        let Some(result) = result else {
+        let Some((result, aich_observations)) = result_and_aich else {
             return Ok(None);
         };
         let source_hint = search_result_source_hint(&result);
@@ -35,6 +43,13 @@ impl EmulebbCore {
                 Some(category),
             )
             .await?;
+        if !aich_observations.is_empty() {
+            // The search row's hidden AICH string is display metadata only.
+            // Trust receives the actual live responder/root observations.
+            self.ed2k_transfers
+                .record_network_aich_observations(&transfer.hash, &aich_observations)
+                .await?;
+        }
         if let Some(source_hint) = source_hint {
             // WHY: server search entries carry an immediately usable source
             // endpoint. Dropping it forces a redundant source-discovery round

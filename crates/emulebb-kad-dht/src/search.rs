@@ -1,6 +1,7 @@
 use crate::node::concurrency::{SearchAcquireError, SearchConcurrency};
 use crate::traversal::{
-    KadIpFilter, KadResContactSink, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
+    KadIpFilter, KadResContactSink, SearchResultObservation, TraversalConfig, TraversalContact,
+    TraversalKind, run_traversal,
 };
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
@@ -99,7 +100,7 @@ pub(crate) fn search_keywords_by_request(
             AcquireOutcome::Unbounded => None,
         };
         let (raw_tx, mut raw_rx) =
-            mpsc::channel::<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>(SEARCH_RESULT_STREAM_BUFFER);
+            mpsc::channel::<SearchResultObservation>(SEARCH_RESULT_STREAM_BUFFER);
         let config = TraversalConfig {
             target: request.target,
             search_kind: TraversalKind::Keyword { request },
@@ -130,15 +131,19 @@ pub(crate) fn search_keywords_by_request(
                 _ = cancel.cancelled() => break,
                 next = raw_rx.recv() => next,
             };
-            let Some((hash, tags)) = next else {
+            let Some(observation) = next else {
                 break;
             };
             raw_entry_count += 1;
-            if seen_hashes.len() >= result_cap {
-                break;
-            }
-
-            let result = SearchResult::from_tags(hash, tags);
+            let std::net::IpAddr::V4(responder_ip) = observation.responder_addr.ip() else {
+                continue;
+            };
+            let result = SearchResult::from_observation(
+                observation.entry_id,
+                observation.tags,
+                responder_ip,
+                observation.responder_version,
+            );
             if result.names.is_empty() {
                 missing_name_count += 1;
                 if sample_rejection.is_none() {
@@ -166,14 +171,17 @@ pub(crate) fn search_keywords_by_request(
             if !is_acceptable_keyword_result(&result) {
                 continue;
             }
+            if !seen_hashes.contains(&result.hash) && seen_hashes.len() >= result_cap {
+                continue;
+            }
             if !seen_hashes.insert(result.hash) {
                 duplicate_count += 1;
-                continue;
+            } else {
+                accepted_count += 1;
             }
             if tx.send(result).await.is_err() {
                 break;
             }
-            accepted_count += 1;
         }
 
         drop(raw_rx);
@@ -222,7 +230,7 @@ pub(crate) fn search_sources_by_request(
             AcquireOutcome::Unbounded => None,
         };
         let (raw_tx, mut raw_rx) =
-            mpsc::channel::<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>(SEARCH_RESULT_STREAM_BUFFER);
+            mpsc::channel::<SearchResultObservation>(SEARCH_RESULT_STREAM_BUFFER);
         let config = TraversalConfig {
             target,
             search_kind: TraversalKind::Source { request },
@@ -247,15 +255,18 @@ pub(crate) fn search_sources_by_request(
                 _ = cancel.cancelled() => break,
                 next = raw_rx.recv() => next,
             };
-            let Some((source_id, tags)) = next else {
+            let Some(observation) = next else {
                 break;
             };
             if seen_sources.len() >= result_cap {
                 break;
             }
 
-            let Some(source) = map_source_search_result(requested_file_hash, source_id, tags)
-            else {
+            let Some(source) = map_source_search_result(
+                requested_file_hash,
+                observation.entry_id,
+                observation.tags,
+            ) else {
                 continue;
             };
             let source_key = (source.ip, source.tcp_port, source.udp_port);
@@ -301,7 +312,7 @@ pub(crate) fn search_notes(
             AcquireOutcome::Unbounded => None,
         };
         let (raw_tx, mut raw_rx) =
-            mpsc::channel::<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>(SEARCH_RESULT_STREAM_BUFFER);
+            mpsc::channel::<SearchResultObservation>(SEARCH_RESULT_STREAM_BUFFER);
         let config = TraversalConfig {
             target,
             search_kind: TraversalKind::Notes {
@@ -329,14 +340,16 @@ pub(crate) fn search_notes(
                 _ = cancel.cancelled() => break,
                 next = raw_rx.recv() => next,
             };
-            let Some((source_id, tags)) = next else {
+            let Some(observation) = next else {
                 break;
             };
             if seen_sources.len() >= result_cap {
                 break;
             }
 
-            let Some(note) = NoteResult::from_tags(request.file_hash, source_id, tags) else {
+            let Some(note) =
+                NoteResult::from_tags(request.file_hash, observation.entry_id, observation.tags)
+            else {
                 continue;
             };
             if !seen_sources.insert(note.source_id) {

@@ -115,7 +115,9 @@ impl EmulebbCore {
                 .search_ed2k_servers(&search_id, &request, network_method)
                 .await
                 .map(|outcome| match outcome {
-                    Ed2kServerSearchOutcome::Completed(results) => Some(results),
+                    Ed2kServerSearchOutcome::Completed(results) => Some(
+                        crate::kad_public_search::KadKeywordSearchOutcome::without_aich(results),
+                    ),
                     Ed2kServerSearchOutcome::Unavailable
                     | Ed2kServerSearchOutcome::NotConnected => None,
                 }),
@@ -126,12 +128,17 @@ impl EmulebbCore {
             None => Ok(None),
         };
         match outcome {
-            Ok(network_results) => {
+            Ok(network_outcome) => {
+                let (network_results, aich_votes) = match network_outcome {
+                    Some(outcome) => (Some(outcome.results), Some(outcome.aich_votes)),
+                    None => (None, None),
+                };
                 self.complete_search_with_results(
                     &search_id,
                     &request,
                     method_str,
                     network_results,
+                    aich_votes,
                 )
                 .await;
             }
@@ -153,13 +160,19 @@ impl EmulebbCore {
 
     pub async fn delete_search(&self, search_id: &str) -> Result<bool> {
         let persisted = self.metadata_store.delete_search(search_id)?;
-        let cached = self.state.lock().await.searches.remove(search_id).is_some();
+        let mut state = self.state.lock().await;
+        let cached = state.searches.remove(search_id).is_some();
+        state
+            .kad_aich_search_votes
+            .retain(|(candidate_search_id, _), _| candidate_search_id != search_id);
         Ok(persisted || cached)
     }
 
     pub async fn clear_searches(&self) -> Result<()> {
         self.metadata_store.clear_searches()?;
-        self.state.lock().await.searches.clear();
+        let mut state = self.state.lock().await;
+        state.searches.clear();
+        state.kad_aich_search_votes.clear();
         Ok(())
     }
 }
