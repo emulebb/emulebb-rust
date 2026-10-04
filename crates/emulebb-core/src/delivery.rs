@@ -59,7 +59,7 @@ impl EmulebbCore {
                 return;
             }
         };
-        if !manifest.completed {
+        if !manifest.completed || manifest.final_rehash_pending {
             return;
         }
         // A shared, already-complete file is seeded IN PLACE from its original

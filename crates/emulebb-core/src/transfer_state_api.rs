@@ -158,7 +158,10 @@ impl EmulebbCore {
             {
                 continue;
             }
-            let mut transfer = self.transfer_from_manifest(&manifest, "downloading");
+            let mut transfer = self.transfer_from_manifest(
+                &manifest,
+                crate::views::manifest_default_state_name(&manifest),
+            );
             {
                 let mut state = self.state.lock().await;
                 if state.transfers.contains_key(&transfer.hash) {

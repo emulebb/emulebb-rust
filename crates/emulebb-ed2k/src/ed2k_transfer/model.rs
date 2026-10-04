@@ -265,6 +265,12 @@ pub struct Ed2kResumeManifest {
     /// Whether the entire local payload has been structurally completed and
     /// verified for upload serving.
     pub completed: bool,
+    /// Whether every part is present but the mandatory whole-file ED2K MD4
+    /// completion rehash has not yet succeeded. This is persisted before the
+    /// rehash begins so a crash cannot turn individually verified parts into a
+    /// deliverable file without the final authority check.
+    #[serde(default)]
+    pub final_rehash_pending: bool,
     /// Whether the canonical ED2K MD4 hashset for this file has been learned
     /// and validated against the file hash.
     pub md4_hashset_acquired: bool,
@@ -348,6 +354,7 @@ impl Ed2kResumeManifest {
             file_size: job.file_size,
             piece_size: job.piece_size,
             completed: false,
+            final_rehash_pending: false,
             md4_hashset_acquired: false,
             md4_hashset: Vec::new(),
             aich_hashset_acquired: false,

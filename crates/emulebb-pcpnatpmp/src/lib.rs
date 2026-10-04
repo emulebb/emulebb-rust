@@ -1,10 +1,11 @@
 //! Safe IPv4 ownership wrapper around the shared eMuleBB libpcpnatpmp fork.
 
 use std::{
-    net::{Ipv4Addr, SocketAddrV4},
+    io,
+    net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     os::raw::c_void,
     ptr,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -85,10 +86,20 @@ struct ActiveFlow {
     request: MappingRequest,
 }
 
+struct NatPmpFallback {
+    socket: UdpSocket,
+    server: SocketAddrV4,
+    public_ip: Ipv4Addr,
+    flows: Vec<MappingRequest>,
+}
+
 /// Thread-confined libpcpnatpmp client context and its active flows.
 pub struct Client {
     raw: *mut sys::pcp_ctx_t,
     flows: Vec<ActiveFlow>,
+    source_ip: Ipv4Addr,
+    explicit_server: Option<SocketAddrV4>,
+    nat_pmp_fallback: Option<NatPmpFallback>,
 }
 
 impl Client {
@@ -117,6 +128,12 @@ impl Client {
         let client = Self {
             raw,
             flows: Vec::new(),
+            source_ip,
+            explicit_server: match selection {
+                ServerSelection::Automatic => None,
+                ServerSelection::Explicit(endpoint) => Some(endpoint),
+            },
+            nat_pmp_fallback: None,
         };
         if let ServerSelection::Explicit(endpoint) = selection {
             let mut server = sockaddr(endpoint);
@@ -143,6 +160,9 @@ impl Client {
 
     /// Creates one mapping and retains its flow for renewal and deletion.
     pub fn map(&mut self, request: MappingRequest, timeout: Duration) -> Result<MappingInfo> {
+        if let Some(fallback) = self.nat_pmp_fallback.as_mut() {
+            return fallback.map_and_retain(request, timeout);
+        }
         let mut source = sockaddr(request.internal_addr);
         let mut suggested_external = sockaddr(SocketAddrV4::new(
             Ipv4Addr::UNSPECIFIED,
@@ -173,13 +193,37 @@ impl Client {
             }
             Err(error) => {
                 cleanup_flow(flow, Duration::from_millis(250));
-                Err(error)
+                let Some(server) = self.explicit_server else {
+                    return Err(error);
+                };
+                if !self.flows.is_empty() {
+                    return Err(error).context(
+                        "direct NAT-PMP fallback is unsafe after a native mapping succeeded",
+                    );
+                }
+                let native_error = error.to_string();
+                let mut fallback = NatPmpFallback::connect(self.source_ip, server, timeout)
+                    .with_context(|| {
+                        format!(
+                            "native PCP/NAT-PMP failed ({native_error}); direct NAT-PMP fallback could not initialize"
+                        )
+                    })?;
+                let info = fallback.map_and_retain(request, timeout).with_context(|| {
+                    format!(
+                        "native PCP/NAT-PMP failed ({native_error}); direct NAT-PMP fallback also failed"
+                    )
+                })?;
+                self.nat_pmp_fallback = Some(fallback);
+                Ok(info)
             }
         }
     }
 
     /// Renews all retained mappings and returns their latest confirmed state.
     pub fn renew_all(&mut self, lifetime_secs: u32, timeout: Duration) -> Result<Vec<MappingInfo>> {
+        if let Some(fallback) = self.nat_pmp_fallback.as_mut() {
+            return fallback.renew_all(lifetime_secs, timeout);
+        }
         let mut renewed = Vec::with_capacity(self.flows.len());
         for flow in &mut self.flows {
             flow.request.lifetime_secs = lifetime_secs;
@@ -192,9 +236,175 @@ impl Client {
 
     /// Deletes every retained mapping and releases its native flow.
     pub fn release_all(&mut self, timeout: Duration) {
+        if let Some(mut fallback) = self.nat_pmp_fallback.take() {
+            fallback.release_all(timeout);
+        }
         for flow in self.flows.drain(..).rev() {
             cleanup_flow(flow.raw, timeout);
         }
+    }
+}
+
+impl NatPmpFallback {
+    fn connect(source_ip: Ipv4Addr, server: SocketAddrV4, timeout: Duration) -> Result<Self> {
+        let socket = UdpSocket::bind(SocketAddrV4::new(source_ip, 0)).with_context(|| {
+            format!("failed to bind direct NAT-PMP socket to source {source_ip}")
+        })?;
+        socket
+            .connect(server)
+            .with_context(|| format!("failed to connect direct NAT-PMP socket to {server}"))?;
+        let response = exchange(&socket, &[0, 0], timeout, |packet| {
+            if packet.len() < 12 || packet[0] != 0 || packet[1] != 0x80 {
+                return None;
+            }
+            let result = u16::from_be_bytes([packet[2], packet[3]]);
+            if result != 0 {
+                return Some(Err(anyhow!(
+                    "NAT-PMP public-address request failed with result code {result}"
+                )));
+            }
+            Some(Ok(Ipv4Addr::new(
+                packet[8], packet[9], packet[10], packet[11],
+            )))
+        })?;
+        Ok(Self {
+            socket,
+            server,
+            public_ip: response,
+            flows: Vec::new(),
+        })
+    }
+
+    fn map_and_retain(
+        &mut self,
+        request: MappingRequest,
+        timeout: Duration,
+    ) -> Result<MappingInfo> {
+        let info = self.map(request, timeout)?;
+        self.flows.push(request);
+        Ok(info)
+    }
+
+    fn map(&self, request: MappingRequest, timeout: Duration) -> Result<MappingInfo> {
+        let opcode = match request.protocol {
+            TransportProtocol::Udp => 1,
+            TransportProtocol::Tcp => 2,
+        };
+        let packet = nat_pmp_mapping_packet(request);
+        let response = exchange(&self.socket, &packet, timeout, |packet| {
+            if packet.len() < 16 || packet[0] != 0 || packet[1] != (opcode | 0x80) {
+                return None;
+            }
+            let internal_port = u16::from_be_bytes([packet[8], packet[9]]);
+            if internal_port != request.internal_addr.port() {
+                return None;
+            }
+            let result = u16::from_be_bytes([packet[2], packet[3]]);
+            if result != 0 {
+                return Some(Err(anyhow!(
+                    "NAT-PMP mapping failed with result code {result}"
+                )));
+            }
+            Some(Ok((
+                u16::from_be_bytes([packet[10], packet[11]]),
+                u32::from_be_bytes([packet[12], packet[13], packet[14], packet[15]]),
+            )))
+        })?;
+        Ok(MappingInfo {
+            server_ip: *self.server.ip(),
+            internal_addr: request.internal_addr,
+            external_addr: SocketAddrV4::new(self.public_ip, response.0),
+            protocol: request.protocol,
+            lifetime_secs: response.1,
+            protocol_version: ProtocolVersion::NatPmpV0,
+            result_code: 0,
+        })
+    }
+
+    fn renew_all(&mut self, lifetime_secs: u32, timeout: Duration) -> Result<Vec<MappingInfo>> {
+        let mut renewed = Vec::with_capacity(self.flows.len());
+        for index in 0..self.flows.len() {
+            self.flows[index].lifetime_secs = lifetime_secs;
+            renewed.push(self.map(self.flows[index], timeout)?);
+        }
+        Ok(renewed)
+    }
+
+    fn release_all(&mut self, timeout: Duration) {
+        let flows = self.flows.drain(..).rev().collect::<Vec<_>>();
+        for request in flows {
+            let _ = self.map(
+                MappingRequest {
+                    internal_addr: SocketAddrV4::new(*request.internal_addr.ip(), 0),
+                    lifetime_secs: 0,
+                    ..request
+                },
+                timeout,
+            );
+        }
+    }
+}
+
+fn nat_pmp_mapping_packet(request: MappingRequest) -> [u8; 12] {
+    let mut packet = [0_u8; 12];
+    packet[1] = match request.protocol {
+        TransportProtocol::Udp => 1,
+        TransportProtocol::Tcp => 2,
+    };
+    packet[4..6].copy_from_slice(&request.internal_addr.port().to_be_bytes());
+    packet[6..8].copy_from_slice(&request.preferred_external_port.to_be_bytes());
+    packet[8..12].copy_from_slice(&request.lifetime_secs.to_be_bytes());
+    packet
+}
+
+fn exchange<T>(
+    socket: &UdpSocket,
+    request: &[u8],
+    timeout: Duration,
+    mut parse: impl FnMut(&[u8]) -> Option<Result<T>>,
+) -> Result<T> {
+    let deadline = Instant::now() + timeout;
+    let mut retry = Duration::from_millis(250);
+    let mut buffer = [0_u8; 64];
+    loop {
+        socket
+            .send(request)
+            .context("failed to send direct NAT-PMP request")?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("direct NAT-PMP request timed out");
+        }
+        let wait = retry.min(remaining);
+        socket
+            .set_read_timeout(Some(wait))
+            .context("failed to set direct NAT-PMP receive timeout")?;
+        loop {
+            match socket.recv(&mut buffer) {
+                Ok(size) => {
+                    if let Some(result) = parse(&buffer[..size]) {
+                        return result;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => {
+                    return Err(error).context("failed to receive direct NAT-PMP response");
+                }
+            }
+            if Instant::now() >= deadline {
+                bail!("direct NAT-PMP request timed out");
+            }
+        }
+        if Instant::now() >= deadline {
+            bail!("direct NAT-PMP request timed out");
+        }
+        retry = (retry * 2).min(Duration::from_secs(2));
     }
 }
 
@@ -356,7 +566,7 @@ fn winsock_startup() -> Result<()> {
 mod tests {
     use super::{
         Client, MappingRequest, ProtocolVersion, ServerSelection, TransportProtocol, ipv4_from_in6,
-        sockaddr,
+        nat_pmp_mapping_packet, sockaddr,
     };
     use emulebb_pcpnatpmp_sys::in6_addr;
     use std::{
@@ -426,6 +636,41 @@ mod tests {
         });
     }
 
+    #[test]
+    fn deterministic_server_proves_direct_nat_pmp_fallback_after_pcp_timeout() {
+        with_mock_server(MockProtocol::NatPmpV0DirectOnly, |endpoint| {
+            let mut client =
+                Client::new(Ipv4Addr::LOCALHOST, ServerSelection::Explicit(endpoint)).unwrap();
+            let info = client
+                .map(mapping_request(), Duration::from_millis(300))
+                .unwrap();
+
+            assert_eq!(info.protocol_version, ProtocolVersion::NatPmpV0);
+            assert_eq!(info.server_ip, Ipv4Addr::LOCALHOST);
+            assert_eq!(*info.external_addr.ip(), Ipv4Addr::new(203, 0, 113, 9));
+            assert_eq!(info.external_addr.port(), 41_000);
+            client.release_all(Duration::from_millis(250));
+        });
+    }
+
+    #[test]
+    fn direct_nat_pmp_delete_matches_proven_helper_wire_shape() {
+        let original = mapping_request();
+        let delete = MappingRequest {
+            internal_addr: SocketAddrV4::new(*original.internal_addr.ip(), 0),
+            lifetime_secs: 0,
+            ..original
+        };
+        let packet = nat_pmp_mapping_packet(delete);
+
+        assert_eq!(u16::from_be_bytes([packet[4], packet[5]]), 0);
+        assert_eq!(
+            u16::from_be_bytes([packet[6], packet[7]]),
+            original.preferred_external_port
+        );
+        assert_eq!(u32::from_be_bytes(packet[8..12].try_into().unwrap()), 0);
+    }
+
     fn mapping_request() -> MappingRequest {
         MappingRequest {
             internal_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_000),
@@ -439,6 +684,7 @@ mod tests {
     enum MockProtocol {
         PcpV2,
         NatPmpV0,
+        NatPmpV0DirectOnly,
     }
 
     fn with_mock_server(test_protocol: MockProtocol, test: impl FnOnce(SocketAddrV4)) {
@@ -485,6 +731,13 @@ mod tests {
         match test_protocol {
             MockProtocol::PcpV2 => pcp_v2_response(request),
             MockProtocol::NatPmpV0 => nat_pmp_response(request),
+            MockProtocol::NatPmpV0DirectOnly => {
+                if request.first() == Some(&0) {
+                    nat_pmp_response(request)
+                } else {
+                    Vec::new()
+                }
+            }
         }
     }
 

@@ -241,7 +241,11 @@ CREATE TABLE unshared_files (
 CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    visible_state TEXT NOT NULL CHECK(visible_state IN ('completed', 'downloading', 'queued')),
+    visible_state TEXT NOT NULL CHECK(visible_state IN ('completed', 'completing', 'downloading', 'queued')),
+    -- Set after all parts verify and cleared only after the authoritative
+    -- whole-file ED2K MD4 completion rehash succeeds or demotes bad parts.
+    final_rehash_pending INTEGER NOT NULL DEFAULT 0
+        CHECK(final_rehash_pending IN (0, 1)),
     control_state TEXT CHECK(control_state IS NULL OR control_state IN ('paused', 'stopped')),
     category_id INTEGER REFERENCES categories(id),
     download_priority TEXT NOT NULL DEFAULT 'normal'

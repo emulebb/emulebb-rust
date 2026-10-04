@@ -20,6 +20,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         file_size: 1024,
         piece_size: 1024,
         completed: true,
+        final_rehash_pending: false,
         md4_hashset_acquired: true,
         md4_hashset: Vec::new(),
         aich_hashset_acquired: true,
@@ -269,7 +270,35 @@ fn transfer_manifest_roundtrips_sql_tables() {
         None
     );
     store.unmark_unshared_file(&manifest.file_hash).unwrap();
-    assert_eq!(store.transfer_manifests().unwrap(), vec![manifest]);
+    assert_eq!(store.transfer_manifests().unwrap(), vec![manifest.clone()]);
+
+    manifest.completed = false;
+    manifest.final_rehash_pending = true;
+    manifest.control_state = None;
+    manifest.delivered_path = None;
+    manifest.source_path = None;
+    manifest.source_mtime_ms = None;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
+    assert_eq!(
+        store.transfer_counts().unwrap(),
+        MetadataTransferCounts {
+            active: 1,
+            completed: 0,
+            total: 1,
+        }
+    );
+    assert!(
+        store
+            .completed_transfer_catalog_entries()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -281,6 +310,7 @@ fn upload_demand_counters_persist_on_known_files() {
         file_size: 1024,
         piece_size: 1024,
         completed: true,
+        final_rehash_pending: false,
         md4_hashset_acquired: false,
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
@@ -344,6 +374,7 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
         file_size: 1024,
         piece_size: 1024,
         completed: true,
+        final_rehash_pending: false,
         md4_hashset_acquired: true,
         md4_hashset: Vec::new(),
         aich_hashset_acquired: true,
@@ -461,6 +492,7 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
         file_size: 1024,
         piece_size: 1024,
         completed: true,
+        final_rehash_pending: false,
         md4_hashset_acquired: true,
         md4_hashset: Vec::new(),
         aich_hashset_acquired: true,
@@ -571,6 +603,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         file_size: 1,
         piece_size: 1,
         completed: false,
+        final_rehash_pending: false,
         md4_hashset_acquired: false,
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
@@ -624,6 +657,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         file_size: 1,
         piece_size: 1,
         completed: false,
+        final_rehash_pending: false,
         md4_hashset_acquired: false,
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
@@ -697,6 +731,7 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 file_size: sequence as u64,
                 piece_size: 1,
                 completed: true,
+                final_rehash_pending: false,
                 md4_hashset_acquired: true,
                 md4_hashset: Vec::new(),
                 aich_hashset_acquired: false,

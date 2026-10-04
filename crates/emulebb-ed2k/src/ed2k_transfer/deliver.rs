@@ -60,7 +60,7 @@ impl Ed2kTransferRuntime {
         let display_name = {
             let _guard = self.lock_manifest(file_hash).await;
             let manifest = self.load_manifest_unlocked(file_hash).await?;
-            if !manifest.completed {
+            if !manifest.completed || manifest.final_rehash_pending {
                 return Ok(Ed2kDeliveryOutcome::NotCompleted);
             }
             if let Some(recorded) = manifest.delivered_path.clone() {

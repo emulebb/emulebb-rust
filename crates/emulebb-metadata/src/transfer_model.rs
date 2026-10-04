@@ -5,6 +5,7 @@ pub struct MetadataTransferManifest {
     pub file_size: u64,
     pub piece_size: u64,
     pub completed: bool,
+    pub final_rehash_pending: bool,
     pub md4_hashset_acquired: bool,
     pub md4_hashset: Vec<String>,
     pub aich_hashset_acquired: bool,

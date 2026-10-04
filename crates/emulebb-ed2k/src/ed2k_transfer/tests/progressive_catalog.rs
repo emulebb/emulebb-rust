@@ -17,6 +17,7 @@ async fn progressive_catalog_exposes_first_cohort_before_full_hydration() {
                 file_size: sequence as u64,
                 piece_size: 1,
                 completed: true,
+                final_rehash_pending: false,
                 md4_hashset_acquired: true,
                 md4_hashset: Vec::new(),
                 aich_hashset_acquired: false,

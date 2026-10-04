@@ -34,6 +34,7 @@ mod aich_trust;
 mod block_bitmap;
 mod callback;
 mod catalog;
+mod completion_rehash;
 mod corruption_blackbox;
 mod credit_ledger;
 mod deliver;
@@ -68,6 +69,7 @@ mod upload_queue;
 pub use catalog::{
     Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange, IndexedSharedCatalog,
 };
+pub(crate) use completion_rehash::mark_final_rehash_pending;
 pub use deliver::Ed2kDeliveryOutcome;
 pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};

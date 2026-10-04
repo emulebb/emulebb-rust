@@ -612,6 +612,7 @@ mod tests {
                 file_size: 10,
                 piece_size: 10,
                 completed: true,
+                final_rehash_pending: false,
                 md4_hashset_acquired: false,
                 md4_hashset: Vec::new(),
                 aich_hashset_acquired: false,

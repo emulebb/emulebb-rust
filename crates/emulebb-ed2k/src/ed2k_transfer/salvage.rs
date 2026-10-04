@@ -169,6 +169,23 @@ impl Ed2kTransferRuntime {
         end: u64,
         data: &[u8],
     ) -> Result<PieceWriteOutcome> {
+        let outcome = self
+            .write_salvage_block_unfinalized(file_hash, part, start, end, data)
+            .await?;
+        if self.manifest(file_hash).await?.final_rehash_pending {
+            self.finalize_pending_transfer(file_hash).await?;
+        }
+        Ok(outcome)
+    }
+
+    async fn write_salvage_block_unfinalized(
+        &self,
+        file_hash: &str,
+        part: u16,
+        start: u64,
+        end: u64,
+        data: &[u8],
+    ) -> Result<PieceWriteOutcome> {
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let part_index = u32::from(part);
@@ -311,13 +328,7 @@ impl Ed2kTransferRuntime {
         }
 
         rebuild_verified_ranges(&mut manifest);
-        manifest.completed = manifest.is_fully_verified();
-        if manifest.completed {
-            super::hashset::refresh_completed_manifest_aich_hashset(
-                &self.transfer_dir(manifest.file_hash.as_str()),
-                &mut manifest,
-            )?;
-        }
+        super::mark_final_rehash_pending(&mut manifest);
         if verified {
             self.upsert_verified_catalog_entry(&manifest).await;
         }

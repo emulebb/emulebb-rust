@@ -682,7 +682,7 @@ impl EmulebbCore {
                 .set_category_id(&manifest.file_hash, *category_id)
                 .await?;
         }
-        let effective_state_name = if manifest.completed {
+        let effective_state_name = if manifest.completed || manifest.final_rehash_pending {
             manifest_default_state_name(&manifest)
         } else {
             state_name
@@ -1024,6 +1024,23 @@ impl EmulebbCore {
         // queue): do nothing, don't touch state, don't retry.
         if cancel.is_cancelled() {
             return Ok(None);
+        }
+        // A crash may leave every part verified with the durable completion
+        // barrier set. Finish that authoritative whole-file check before any
+        // network prerequisites so restart cannot bypass or unnecessarily
+        // delay delivery.
+        if let Ok(manifest) = self.ed2k_transfers.manifest(&transfer.hash).await
+            && manifest.final_rehash_pending
+        {
+            let completed = self
+                .ed2k_transfers
+                .finalize_pending_transfer(&transfer.hash)
+                .await?;
+            return Ok(Some(if completed {
+                "completed"
+            } else {
+                "downloading"
+            }));
         }
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(Some("queued"));
@@ -1471,7 +1488,15 @@ impl EmulebbCore {
                 // with additional A4AF file negotiations. Apply every per-file
                 // result above before ending this primary transfer driver.
                 if outcome.completed {
-                    return Ok(Some("completed"));
+                    let completed = self
+                        .ed2k_transfers
+                        .finalize_pending_transfer(&transfer.hash)
+                        .await?;
+                    return Ok(Some(if completed {
+                        "completed"
+                    } else {
+                        "downloading"
+                    }));
                 }
                 accepted_incomplete_peers =
                     accepted_incomplete_peers.saturating_add(outcome.accepted_incomplete_peers);
@@ -1508,6 +1533,17 @@ impl EmulebbCore {
             let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
             if manifest.completed {
                 return Ok(Some("completed"));
+            }
+            if manifest.final_rehash_pending {
+                let completed = self
+                    .ed2k_transfers
+                    .finalize_pending_transfer(&transfer.hash)
+                    .await?;
+                return Ok(Some(if completed {
+                    "completed"
+                } else {
+                    "downloading"
+                }));
             }
             if source_requery_round < ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS {
                 let known_new_direct_source_count =

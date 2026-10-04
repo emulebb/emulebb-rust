@@ -236,10 +236,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         peer_connect_options,
         connection_state.as_deref(),
     );
+    session_state.pending_aich_recovery_parts = initial_aich_recovery_parts(&manifest);
 
     let session_result = async {
         loop {
-            if manifest.completed {
+            if manifest.completed || manifest.final_rehash_pending {
                 return Ok(Ed2kPeerDownloadOutcome::Completed);
             }
 
@@ -1435,6 +1436,15 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
     session_result
 }
 
+fn initial_aich_recovery_parts(manifest: &Ed2kResumeManifest) -> Vec<u16> {
+    manifest
+        .pieces
+        .iter()
+        .filter(|piece| piece.ich_corrupted)
+        .filter_map(|piece| u16::try_from(piece.piece_index).ok())
+        .collect()
+}
+
 async fn remember_source_exchange_sources(
     transfer_runtime: &Ed2kTransferRuntime,
     expected_hash: Ed2kHash,
@@ -1545,7 +1555,9 @@ fn advertised_aich_root_conflicts(
 
 #[cfg(test)]
 mod tests {
-    use super::{Ed2kResumeManifest, Ed2kTransferState, peer_holds_needed_part};
+    use super::{
+        Ed2kResumeManifest, Ed2kTransferState, initial_aich_recovery_parts, peer_holds_needed_part,
+    };
     use crate::ed2k_transfer::{Ed2kPieceState, Ed2kTransferJob};
 
     fn manifest_with_states(states: &[Ed2kTransferState]) -> Ed2kResumeManifest {
@@ -1600,5 +1612,14 @@ mod tests {
             manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);
         let peer_bitmap = [true];
         assert!(!peer_holds_needed_part(&manifest, &peer_bitmap));
+    }
+
+    #[test]
+    fn persisted_corrupt_parts_seed_aich_recovery_on_the_next_session() {
+        let mut manifest =
+            manifest_with_states(&[Ed2kTransferState::Missing, Ed2kTransferState::Verified]);
+        manifest.pieces[0].ich_corrupted = true;
+
+        assert_eq!(initial_aich_recovery_parts(&manifest), vec![0]);
     }
 }

@@ -77,14 +77,15 @@ impl super::MetadataStore {
         tx.prepare_cached(
             r#"
             INSERT INTO transfers(
-                known_file_id, visible_state, control_state, download_priority,
+                known_file_id, visible_state, final_rehash_pending, control_state, download_priority,
                 category_id, payload_directory, delivered_path_id, source_path_id,
                 source_mtime_ms, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
-            VALUES (?1, ?2, ?3, 'normal', ?4, ?5, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?12, ?3, 'normal', ?4, ?5, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 visible_state = excluded.visible_state,
+                final_rehash_pending = excluded.final_rehash_pending,
                 control_state = excluded.control_state,
                 category_id = excluded.category_id,
                 payload_directory = excluded.payload_directory,
@@ -112,6 +113,7 @@ impl super::MetadataStore {
             },
             source_path_id,
             manifest.source_mtime_ms,
+            bool_to_i64(manifest.final_rehash_pending),
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
@@ -169,7 +171,7 @@ impl super::MetadataStore {
                        known_files.comment, known_files.rating,
                        transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                        delivered_paths.display_path, source_paths.display_path,
-                       transfers.source_mtime_ms
+                       transfers.source_mtime_ms, transfers.final_rehash_pending
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -199,6 +201,7 @@ impl super::MetadataStore {
                     delivered_path: row.get(17)?,
                     source_path: row.get(18)?,
                     source_mtime_ms: row.get(19)?,
+                    final_rehash_pending: row.get::<_, i64>(20)? != 0,
                 })
             })
             .optional()?;
@@ -382,7 +385,7 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating,
                    transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                    delivered_paths.display_path, source_paths.display_path,
-                   transfers.source_mtime_ms
+                   transfers.source_mtime_ms, transfers.final_rehash_pending
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -414,6 +417,7 @@ impl super::MetadataStore {
                 delivered_path: row.get(17)?,
                 source_path: row.get(18)?,
                 source_mtime_ms: row.get(19)?,
+                final_rehash_pending: row.get::<_, i64>(20)? != 0,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -1472,6 +1476,7 @@ struct TransferRow {
     file_size: u64,
     piece_size: u64,
     completed: bool,
+    final_rehash_pending: bool,
     md4_hashset_acquired: bool,
     aich_hashset_acquired: bool,
     aich_root: Option<String>,
@@ -1600,6 +1605,7 @@ fn manifest_from_row(
         file_size: row.file_size,
         piece_size: row.piece_size,
         completed: row.completed,
+        final_rehash_pending: row.final_rehash_pending,
         md4_hashset_acquired: row.md4_hashset_acquired,
         md4_hashset: read_hex_list(
             conn,
@@ -1636,7 +1642,7 @@ fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<Metada
                coalesce(sum(CASE
                    WHEN known_files.completed = 0
                         AND transfers.control_state IS NULL
-                        AND transfers.visible_state IN ('downloading', 'queued')
+                        AND transfers.visible_state IN ('completing', 'downloading', 'queued')
                    THEN 1 ELSE 0 END), 0),
                coalesce(sum(CASE
                    WHEN known_files.completed != 0 THEN 1 ELSE 0 END), 0)
@@ -1802,6 +1808,8 @@ fn local_path_id(conn: &rusqlite::Connection, path: &str) -> Result<Option<i64>>
 fn visible_state(manifest: &MetadataTransferManifest) -> &'static str {
     if manifest.completed {
         "completed"
+    } else if manifest.final_rehash_pending {
+        "completing"
     } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
         "downloading"
     } else {

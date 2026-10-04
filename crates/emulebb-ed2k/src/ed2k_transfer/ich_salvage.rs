@@ -158,13 +158,7 @@ impl Ed2kTransferRuntime {
         self.cbb_record_verified_data(&manifest.file_hash, part_start, part_end);
 
         rebuild_verified_ranges(manifest);
-        manifest.completed = manifest.is_fully_verified();
-        if manifest.completed {
-            super::hashset::refresh_completed_manifest_aich_hashset(
-                &self.transfer_dir(manifest.file_hash.as_str()),
-                manifest,
-            )?;
-        }
+        super::mark_final_rehash_pending(manifest);
         self.upsert_verified_catalog_entry(manifest).await;
         tracing::info!(
             file_hash = %manifest.file_hash,

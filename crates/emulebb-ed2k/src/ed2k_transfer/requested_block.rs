@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use super::hashset::refresh_completed_manifest_aich_hashset;
 use super::ich_salvage::IchRehashResult;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::piece_store::{AppendPieceBlockLog, log_append_piece_block};
@@ -160,14 +159,9 @@ impl Ed2kTransferRuntime {
         }
 
         rebuild_verified_ranges(manifest);
-        manifest.completed = manifest.is_fully_verified();
-        if manifest.completed {
-            refresh_completed_manifest_aich_hashset(
-                &self.transfer_dir(manifest.file_hash.as_str()),
-                manifest,
-            )?;
+        if super::mark_final_rehash_pending(manifest) {
             // No further appends will come: release the cached write handle
-            // so a completed payload holds no open handle.
+            // before the final whole-file reader opens the payload.
             self.invalidate_payload_handle(file_hash);
         }
         if outcome.is_completed() {

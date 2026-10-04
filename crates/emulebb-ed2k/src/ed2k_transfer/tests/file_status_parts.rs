@@ -51,6 +51,7 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         file_size,
         piece_size: ED2K_PART_SIZE,
         completed,
+        final_rehash_pending: false,
         md4_hashset_acquired: false,
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,

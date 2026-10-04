@@ -206,14 +206,40 @@ fn reconcile_blocking(
         // hide.me VPN gateway reject finite leases with 725
         // OnlyPermanentLeasesSupported, leaving eD2K stuck at LowID; an indefinite
         // lease is the proven shape that succeeds.
-        if let Err(add_error) = gateway.add_port_mapping(
+        let add_result = gateway.add_port_mapping(
             external_port,
             spec.local_addr.port(),
             &internal_ip,
             &spec.name,
             spec.protocol.as_upnp_token(),
             None,
-        ) {
+        );
+        // The hide.me IGD used by the operator has two deployed call shapes:
+        // some gateways require an indefinite lease (725 for a finite lease),
+        // while others answer the indefinite form with generic 501 but accept
+        // the finite shape used by hide-port-forward. Preserve MFC parity first,
+        // then retry only that ambiguous 501 with the configured lease duration.
+        let add_result = match add_result {
+            Err(error) if error.code == Some(501) => {
+                warn!(
+                    "UPnP backend {} gateway {} rejected permanent {} mapping with 501; retrying finite lease={}s",
+                    backend_name,
+                    gateway.control_url(),
+                    spec.name,
+                    config.lease_duration_secs
+                );
+                gateway.add_port_mapping(
+                    external_port,
+                    spec.local_addr.port(),
+                    &internal_ip,
+                    &spec.name,
+                    spec.protocol.as_upnp_token(),
+                    Some(config.lease_duration_secs),
+                )
+            }
+            result => result,
+        };
+        if let Err(add_error) = add_result {
             // Log the real IGD result code (e.g. 718/725/606), not a generic
             // "failed to add" message, so the rejection reason is diagnosable.
             warn!(

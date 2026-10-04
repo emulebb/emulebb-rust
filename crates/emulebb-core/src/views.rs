@@ -161,6 +161,8 @@ pub(crate) fn preserve_transfer_public_metadata(transfer: &mut Transfer, existin
 pub(crate) fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
     if manifest.completed {
         "completed"
+    } else if manifest.final_rehash_pending {
+        "completing"
     } else if let Some(control_state) = manifest.control_state.as_deref() {
         control_state
     } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
