@@ -12,6 +12,8 @@ use std::net::Ipv4Addr;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use super::Ed2kServerFailure;
+
 /// Maximum servers accepted from a single `OP_SERVERLIST` body. eMule itself
 /// imposes no fixed cap beyond the `count <= (size - 1) / 6` structural bound it
 /// validates, but a sane upper bound guards against a hostile server flooding the
@@ -24,9 +26,13 @@ pub enum Ed2kServerListEvent {
     /// New `(ip, port)` servers learned from an `OP_SERVERLIST` reply, to be
     /// merged into the server list (deduped against existing entries by the core).
     DiscoveredServers(Vec<(Ipv4Addr, u16)>),
-    /// A connect/ping attempt to `endpoint` failed (eMule `IncFailedCount`); the
-    /// core increments the fail-count and may drop a non-static dead server.
-    ConnectFailed { endpoint: String },
+    /// A connection attempt or established session failed. The core applies
+    /// dead-server accounting only when the classification proves a remote
+    /// refusal; local/VPN and ambiguous failures remain retryable.
+    ConnectionFailed {
+        endpoint: String,
+        failure: Ed2kServerFailure,
+    },
     /// A connect to `endpoint` succeeded (login accepted); the core clears the
     /// fail-count (eMule resets the count on a successful response/connect).
     ConnectSucceeded { endpoint: String },

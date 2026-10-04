@@ -11,13 +11,13 @@ use super::server_events::Ed2kServerListEvent;
 use super::tag_codec::{DecodedTag, DecodedTagName, DecodedTagValue, decode_tag_details};
 use super::types::{CallbackRequest, ServerSessionContext};
 use super::{
-    Ed2kPacket, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE, OP_OFFERFILES,
-    OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT,
-    OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME,
-    ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32, decode_ed2k_string,
-    decode_search_result_page, decode_server_list, encode_search_request, format_connect_options,
-    format_server_flags, ipv4_from_client_id, is_low_id, log_search_result_page,
-    send_connected_server_startup, wait_for_offer_files_settle,
+    Ed2kPacket, Ed2kServerFailure, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE,
+    OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT,
+    OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS, ST_DESCRIPTION, ST_HARDFILES,
+    ST_SERVERNAME, ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32,
+    decode_ed2k_string, decode_search_result_page, decode_server_list, encode_search_request,
+    format_connect_options, format_server_flags, ipv4_from_client_id, is_low_id,
+    log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
 };
 
 #[expect(
@@ -311,7 +311,11 @@ pub(super) async fn handle_server_packet(
                     .await;
                 return Ok(());
             }
-            anyhow::bail!("ED2K server {} rejected the last command", session.endpoint);
+            return Err(Ed2kServerFailure::protocol_rejection(format!(
+                "ED2K server {} rejected the last command",
+                session.endpoint
+            ))
+            .into());
         }
         opcode => {
             debug!(

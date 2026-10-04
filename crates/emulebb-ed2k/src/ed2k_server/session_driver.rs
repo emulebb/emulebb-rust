@@ -38,6 +38,7 @@ const SERVER_CRYPT_PING_FALLBACK_DELAY: std::time::Duration = std::time::Duratio
 pub(super) enum ServerSessionExit {
     ContinueOrder,
     RestartPreferredOrder,
+    IntentionalShutdown,
 }
 
 async fn connect_server_transport(
@@ -224,7 +225,7 @@ pub(super) async fn run_one_server_session(
                 ),
             );
             clear_server_connection_state(&context.state).await;
-            return Ok(ServerSessionExit::ContinueOrder);
+            return Ok(ServerSessionExit::IntentionalShutdown);
         }
 
         let offer_files_wakeup = session.offer_files_wakeup_at();

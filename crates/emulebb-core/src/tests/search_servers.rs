@@ -1,4 +1,7 @@
 use super::*;
+use emulebb_ed2k::ed2k_server::{
+    Ed2kServerFailure, Ed2kServerFailurePhase, Ed2kServerFailureReason,
+};
 
 #[test]
 fn split_stock_search_responses_keeps_pages_under_fragment_limit() {
@@ -674,7 +677,16 @@ async fn connect_failed_drops_non_static_dead_server_at_threshold() {
     let endpoint = "203.0.113.5:4661";
 
     // Default dead_server_retries = 1: first failure drops the server.
-    core.note_ed2k_server_connect_failed(endpoint, 1).await;
+    core.note_ed2k_server_connection_failed(
+        endpoint,
+        &Ed2kServerFailure::new(
+            Ed2kServerFailurePhase::Connect,
+            Ed2kServerFailureReason::ConnectionRefused,
+            "test refusal",
+        ),
+        1,
+    )
+    .await;
     let server = core
         .server(endpoint)
         .await
@@ -683,6 +695,102 @@ async fn connect_failed_drops_non_static_dead_server_at_threshold() {
         !server.enabled,
         "non-static dead server is disabled at the threshold"
     );
+}
+
+#[tokio::test]
+async fn classified_non_remote_failures_never_mutate_server_health() {
+    let failures = [
+        (
+            Ed2kServerFailurePhase::Resolve,
+            Ed2kServerFailureReason::DnsResolution,
+        ),
+        (
+            Ed2kServerFailurePhase::SocketSetup,
+            Ed2kServerFailureReason::LocalBindInterface,
+        ),
+        (
+            Ed2kServerFailurePhase::Connect,
+            Ed2kServerFailureReason::TimeoutUnreachable,
+        ),
+        (
+            Ed2kServerFailurePhase::Handshake,
+            Ed2kServerFailureReason::ProtocolRejection,
+        ),
+        (
+            Ed2kServerFailurePhase::Established,
+            Ed2kServerFailureReason::EstablishedDisconnect,
+        ),
+        (
+            Ed2kServerFailurePhase::Handshake,
+            Ed2kServerFailureReason::TransportOther,
+        ),
+    ];
+
+    for threshold in [1, 3] {
+        for (index, &(phase, reason)) in failures.iter().enumerate() {
+            let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+            let address = format!("203.0.113.{}", index + 20);
+            let endpoint = format!("{address}:4661");
+            core.add_server(ServerCreate {
+                address,
+                port: 4661,
+                name: None,
+                priority: None,
+                static_server: Some(false),
+                connect: None,
+            })
+            .await
+            .unwrap();
+
+            core.note_ed2k_server_connection_failed(
+                &endpoint,
+                &Ed2kServerFailure::new(phase, reason, "classified test failure"),
+                threshold,
+            )
+            .await;
+
+            let server = core.server(&endpoint).await.unwrap();
+            assert!(server.enabled, "{phase:?}/{reason:?} disabled the server");
+            assert_eq!(
+                server.failed_count, 0,
+                "{phase:?}/{reason:?} changed failedCount"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn classified_refusal_obeys_multi_failure_threshold() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let endpoint = "203.0.113.40:4661";
+    core.add_server(ServerCreate {
+        address: "203.0.113.40".to_string(),
+        port: 4661,
+        name: None,
+        priority: None,
+        static_server: Some(false),
+        connect: None,
+    })
+    .await
+    .unwrap();
+    let failure = Ed2kServerFailure::new(
+        Ed2kServerFailurePhase::Connect,
+        Ed2kServerFailureReason::ConnectionRefused,
+        "test refusal",
+    );
+
+    for expected in 1..3 {
+        core.note_ed2k_server_connection_failed(endpoint, &failure, 3)
+            .await;
+        let server = core.server(endpoint).await.unwrap();
+        assert!(server.enabled);
+        assert_eq!(server.failed_count, expected);
+    }
+    core.note_ed2k_server_connection_failed(endpoint, &failure, 3)
+        .await;
+    let server = core.server(endpoint).await.unwrap();
+    assert!(!server.enabled);
+    assert_eq!(server.failed_count, 3);
 }
 
 #[tokio::test]

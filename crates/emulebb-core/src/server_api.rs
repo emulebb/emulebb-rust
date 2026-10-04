@@ -181,16 +181,51 @@ impl EmulebbCore {
             .map(|server| server.endpoint)
     }
 
-    /// Increment a server's consecutive-failure count and drop a non-static dead
-    /// server at the `dead_server_retries` threshold (eMule
-    /// `CServerList::ServerStats`: `IncFailedCount` + RemoveServer when
-    /// `GetFailedCount() >= GetDeadServerRetries()`). Static servers are kept.
+    /// Apply classified failure policy before touching durable server health.
+    /// Unlike stock eMule's broad Winsock error bucket, local/VPN, timeout,
+    /// protocol, and established-session failures remain eligible for retry.
+    pub(crate) async fn note_ed2k_server_connection_failed(
+        &self,
+        endpoint: &str,
+        failure: &emulebb_ed2k::ed2k_server::Ed2kServerFailure,
+        dead_server_retries: u32,
+    ) {
+        if !failure.counts_toward_dead_server() {
+            tracing::info!(
+                endpoint,
+                phase = failure.phase.as_str(),
+                reason = failure.reason.as_str(),
+                action = "ignored",
+                detail = %failure.detail,
+                "ignored ED2K server failure for dead-server accounting"
+            );
+            return;
+        }
+        tracing::info!(
+            endpoint,
+            phase = failure.phase.as_str(),
+            reason = failure.reason.as_str(),
+            action = "account",
+            detail = %failure.detail,
+            "accounting ED2K server failure"
+        );
+        self.note_ed2k_server_connect_failed(endpoint, dead_server_retries)
+            .await;
+    }
+
+    /// Increment a confirmed-refusal count and drop a non-static dead server at
+    /// the configured threshold. Static servers are retained.
     pub(crate) async fn note_ed2k_server_connect_failed(
         &self,
         endpoint: &str,
         dead_server_retries: u32,
     ) {
         let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
+            tracing::debug!(
+                endpoint,
+                action = "unknown_endpoint",
+                "ED2K server failure ignored"
+            );
             return;
         };
         let Some(mut server_info) = self.server(&stored_endpoint).await else {
@@ -224,12 +259,20 @@ impl EmulebbCore {
             state.disabled_servers.insert(stored_endpoint.clone());
             drop(state);
             tracing::info!(
-                "dropped dead ED2K server {stored_endpoint} (fail_count={fail_count} >= dead_server_retries={threshold})"
+                endpoint = %stored_endpoint,
+                action = "disabled",
+                fail_count,
+                threshold,
+                "dropped dead ED2K server"
             );
         } else {
             tracing::debug!(
-                "ED2K server {stored_endpoint} connect failed (fail_count={fail_count}, static={})",
-                server_info.static_server
+                endpoint = %stored_endpoint,
+                action = if server_info.static_server { "counted_static" } else { "incremented" },
+                fail_count,
+                threshold,
+                static_server = server_info.static_server,
+                "recorded ED2K server refusal"
             );
         }
     }

@@ -19,7 +19,7 @@ use super::server_entry::{ConfiguredServerEntry, ResolvedServerEntry};
 use super::server_events::Ed2kServerListEvent;
 use super::types::{Ed2kServerState, ServerSessionContext};
 use super::{
-    Ed2kServerLoopOptions, Ed2kServerSearchInbox, clear_server_connection_state,
+    Ed2kServerFailure, Ed2kServerLoopOptions, Ed2kServerSearchInbox, clear_server_connection_state,
     configured_server_entries, dump_ed2k_server_loop_meta, resolve_server_entry,
     run_one_server_session, session_driver::ServerSessionExit,
 };
@@ -200,8 +200,11 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                             }
                             break;
                         }
+                        Ok(ServerSessionExit::IntentionalShutdown) => break,
                         Err(error) => {
                             let was_connected = state.read().await.connected;
+                            let failure =
+                                Ed2kServerFailure::from_session_error(&error, was_connected);
                             clear_server_connection_state(&state).await;
                             (retry_delay, retry_reason) = session_end_retry_delay(
                                 was_connected,
@@ -211,18 +214,13 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                             dump_ed2k_server_loop_meta(
                                 &endpoint,
                                 "session_error",
-                                format!("server session drop reason=session_error detail={error}"),
+                                format!("server session drop {failure}"),
                             );
-                            // eMule `CServerList::ServerStats`: a failed connect/session
-                            // increments the server's fail-count (the core drops a
-                            // non-static dead server at the threshold). A successful
-                            // login emits `ConnectSucceeded` from inside the session,
-                            // which resets the count.
-                            if let Some(sender) = session_context.server_list_events.as_ref() {
-                                let _ = sender.send(Ed2kServerListEvent::ConnectFailed {
-                                    endpoint: configured_server.base_endpoint_text(),
-                                });
-                            }
+                            report_server_failure(
+                                &session_context,
+                                configured_server.base_endpoint_text(),
+                                failure,
+                            );
                             warn!(
                                 "ED2K server session ended for {} name={}: {error}",
                                 server.base_endpoint(),
@@ -233,18 +231,13 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                 }
                 Err(error) => {
                     let endpoint = configured_server.base_endpoint_text();
+                    let failure = Ed2kServerFailure::dns(error.to_string());
                     dump_ed2k_server_loop_meta(
                         &endpoint,
                         "resolve_error",
-                        format!("server session drop reason=resolve_error detail={error}"),
+                        format!("server session drop {failure}"),
                     );
-                    // A resolve failure is also a connect failure for the dead-server
-                    // accounting (eMule treats a server it cannot reach as failed).
-                    if let Some(sender) = session_context.server_list_events.as_ref() {
-                        let _ = sender.send(Ed2kServerListEvent::ConnectFailed {
-                            endpoint: configured_server.base_endpoint_text(),
-                        });
-                    }
+                    report_server_failure(&session_context, endpoint, failure);
                     warn!(
                         "failed to resolve ED2K server endpoint {} name={}: {error}",
                         configured_server.base_endpoint_text(),
@@ -369,7 +362,12 @@ async fn run_parallel_server_cycle(
                         task,
                     });
                 }
-                Err(error) => report_parallel_attempt_failure(context, &configured, None, &error),
+                Err(error) => report_parallel_attempt_failure(
+                    context,
+                    &configured,
+                    None,
+                    Ed2kServerFailure::dns(error.to_string()),
+                ),
             }
         }
 
@@ -392,7 +390,7 @@ async fn run_parallel_server_cycle(
             for loser in active {
                 loser.task.abort();
             }
-            return mirror_winning_server_session(winner, public_state).await;
+            return mirror_winning_server_session(winner, public_state, context).await;
         }
 
         let mut index = 0;
@@ -402,16 +400,20 @@ async fn run_parallel_server_cycle(
                 continue;
             }
             let attempt = active.swap_remove(index);
+            let was_connected = attempt.state.read().await.connected;
             match attempt.task.await {
                 Ok(Ok(ServerSessionExit::RestartPreferredOrder)) => {
                     return ParallelServerCycleOutcome::RestartPreferredOrder;
+                }
+                Ok(Ok(ServerSessionExit::IntentionalShutdown)) => {
+                    return ParallelServerCycleOutcome::Shutdown;
                 }
                 Ok(Ok(ServerSessionExit::ContinueOrder)) => {}
                 Ok(Err(error)) => report_parallel_attempt_failure(
                     context,
                     &attempt.configured,
                     Some(&attempt.server),
-                    &error,
+                    Ed2kServerFailure::from_session_error(&error, was_connected),
                 ),
                 Err(error) if error.is_cancelled() => {}
                 Err(error) => warn!("ED2K parallel server attempt task failed: {error}"),
@@ -440,6 +442,7 @@ fn max_simultaneous_server_attempts(
 async fn mirror_winning_server_session(
     winner: ParallelServerAttempt,
     public_state: &Arc<RwLock<Ed2kServerState>>,
+    context: &ServerSessionContext,
 ) -> ParallelServerCycleOutcome {
     loop {
         *public_state.write().await = winner.state.read().await.clone();
@@ -448,7 +451,23 @@ async fn mirror_winning_server_session(
                 Ok(Ok(ServerSessionExit::RestartPreferredOrder)) => {
                     ParallelServerCycleOutcome::RestartPreferredOrder
                 }
-                Ok(Ok(ServerSessionExit::ContinueOrder)) | Ok(Err(_)) | Err(_) => {
+                Ok(Ok(ServerSessionExit::IntentionalShutdown)) => {
+                    ParallelServerCycleOutcome::Shutdown
+                }
+                Ok(Ok(ServerSessionExit::ContinueOrder)) => {
+                    ParallelServerCycleOutcome::SessionEnded
+                }
+                Ok(Err(error)) => {
+                    report_parallel_attempt_failure(
+                        context,
+                        &winner.configured,
+                        Some(&winner.server),
+                        Ed2kServerFailure::from_session_error(&error, true),
+                    );
+                    ParallelServerCycleOutcome::SessionEnded
+                }
+                Err(error) => {
+                    warn!("ED2K parallel winning server task failed: {error}");
                     ParallelServerCycleOutcome::SessionEnded
                 }
             };
@@ -463,20 +482,26 @@ fn report_parallel_attempt_failure(
     context: &ServerSessionContext,
     configured: &ConfiguredServerEntry,
     server: Option<&ResolvedServerEntry>,
-    error: &dyn std::fmt::Display,
+    failure: Ed2kServerFailure,
 ) {
-    if let Some(sender) = context.server_list_events.as_ref() {
-        let _ = sender.send(Ed2kServerListEvent::ConnectFailed {
-            endpoint: configured.base_endpoint_text(),
-        });
-    }
+    report_server_failure(context, configured.base_endpoint_text(), failure.clone());
     warn!(
-        "ED2K parallel server attempt failed for {} resolved={}: {error}",
+        "ED2K parallel server attempt failed for {} resolved={}: {failure}",
         configured.base_endpoint_text(),
         server
             .map(|entry| entry.base_endpoint().to_string())
             .unwrap_or_else(|| "unresolved".to_string())
     );
+}
+
+fn report_server_failure(
+    context: &ServerSessionContext,
+    endpoint: String,
+    failure: Ed2kServerFailure,
+) {
+    if let Some(sender) = context.server_list_events.as_ref() {
+        let _ = sender.send(Ed2kServerListEvent::ConnectionFailed { endpoint, failure });
+    }
 }
 
 fn selected_configured_servers(

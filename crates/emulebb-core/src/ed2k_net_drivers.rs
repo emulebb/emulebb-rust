@@ -420,8 +420,8 @@ pub(crate) async fn run_ed2k_server_list_events(
             Ed2kServerListEvent::DiscoveredServers(servers) => {
                 core.merge_discovered_ed2k_servers(servers).await;
             }
-            Ed2kServerListEvent::ConnectFailed { endpoint } => {
-                core.note_ed2k_server_connect_failed(&endpoint, dead_server_retries)
+            Ed2kServerListEvent::ConnectionFailed { endpoint, failure } => {
+                core.note_ed2k_server_connection_failed(&endpoint, &failure, dead_server_retries)
                     .await;
             }
             Ed2kServerListEvent::ConnectSucceeded { endpoint } => {

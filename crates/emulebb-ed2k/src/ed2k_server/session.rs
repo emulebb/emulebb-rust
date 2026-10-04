@@ -21,6 +21,7 @@ use tracing::debug;
 
 use crate::ed2k_tcp::MAX_ED2K_PACKET_LEN;
 
+use super::Ed2kServerFailure;
 use super::offer_policy::{
     OFFER_FILES_LEGACY_MIN_INTERVAL, OFFER_FILES_NEGOTIATION_WAIT,
     OfferFilesCapabilityAdvertisement, OfferFilesPolicy,
@@ -130,24 +131,54 @@ impl ServerSession {
             guard.endpoint = Some(endpoint);
         }
         let stream = match async {
-            let socket = TcpSocket::new_v4().context("failed to create ED2K server TCP socket")?;
+            let socket = TcpSocket::new_v4().map_err(|error| {
+                Ed2kServerFailure::local_socket(format!(
+                    "failed to create ED2K server TCP socket: {error}"
+                ))
+            })?;
             socket
                 .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
-                .with_context(|| format!("failed to bind ED2K server socket to {bind_ip}"))?;
+                .map_err(|error| {
+                    Ed2kServerFailure::local_socket(format!(
+                        "failed to bind ED2K server socket to {bind_ip}: {error}"
+                    ))
+                })?;
             let bind_if_index =
-                crate::networking::require_bind_if_index(bind_ip, "ED2K server TCP")?;
+                crate::networking::require_bind_if_index(bind_ip, "ED2K server TCP").map_err(
+                    |error| {
+                        Ed2kServerFailure::local_socket(format!(
+                            "failed to resolve ED2K server bind interface for {bind_ip}: {error}"
+                        ))
+                    },
+                )?;
             // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) before connect
             // so the server session leaves via the tunnel — solid VPN binding.
             emulebb_kad_dht::socket_opts::pin_egress_to_interface(
                 socket2::SockRef::from(&socket),
                 Some(bind_if_index),
             )
-            .with_context(|| format!("failed to pin ED2K server egress for {bind_ip}"))?;
-            let stream = tokio::time::timeout(timeout, socket.connect(endpoint))
-                .await
-                .with_context(|| format!("timed out connecting to ED2K server {endpoint}"))??;
-            stream.set_nodelay(true).with_context(|| {
-                format!("failed to enable TCP_NODELAY for ED2K server {endpoint}")
+            .map_err(|error| {
+                Ed2kServerFailure::local_socket(format!(
+                    "failed to pin ED2K server egress for {bind_ip}: {error}"
+                ))
+            })?;
+            let stream = match tokio::time::timeout(timeout, socket.connect(endpoint)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    return Err(anyhow::Error::new(Ed2kServerFailure::connect_io(
+                        endpoint, &error,
+                    )));
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
+                        format!("timed out connecting to ED2K server {endpoint}: {error}"),
+                    )));
+                }
+            };
+            stream.set_nodelay(true).map_err(|error| {
+                Ed2kServerFailure::local_socket(format!(
+                    "failed to enable TCP_NODELAY for ED2K server {endpoint}: {error}"
+                ))
             })?;
             Ok::<TcpStream, anyhow::Error>(stream)
         }
@@ -820,6 +851,20 @@ mod tests {
         .await
         .expect_err("non-local bind IP should fail before a session is established");
 
+        let failure = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Ed2kServerFailure>())
+            .expect("setup failure should retain its classification");
+        assert_eq!(
+            failure.phase,
+            crate::ed2k_server::Ed2kServerFailurePhase::SocketSetup
+        );
+        assert_eq!(
+            failure.reason,
+            crate::ed2k_server::Ed2kServerFailureReason::LocalBindInterface
+        );
+        assert!(!failure.counts_toward_dead_server());
+
         let guard = state.read().await;
         assert!(
             !guard.connecting,
@@ -827,6 +872,43 @@ mod tests {
         );
         assert!(!guard.connected);
         assert!(guard.endpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn server_connect_classifies_closed_local_port_without_string_matching() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        drop(listener);
+        let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+
+        let error = ServerSession::connect(
+            Ipv4Addr::LOCALHOST,
+            endpoint,
+            state,
+            "test",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("closed listener should refuse the connection");
+        let failure = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Ed2kServerFailure>())
+            .expect("connect failure should retain its classification");
+        assert_eq!(
+            failure.phase,
+            crate::ed2k_server::Ed2kServerFailurePhase::Connect
+        );
+        assert!(matches!(
+            failure.reason,
+            crate::ed2k_server::Ed2kServerFailureReason::ConnectionRefused
+                | crate::ed2k_server::Ed2kServerFailureReason::TimeoutUnreachable
+        ));
+        assert_eq!(
+            failure.counts_toward_dead_server(),
+            failure.reason == crate::ed2k_server::Ed2kServerFailureReason::ConnectionRefused
+        );
     }
 
     /// Establish a connected `ServerSession` (from the accepted end of a local

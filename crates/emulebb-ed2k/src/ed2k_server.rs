@@ -37,6 +37,7 @@ mod server_description;
 mod server_description_poll;
 mod server_entry;
 mod server_events;
+mod server_failure;
 mod server_met;
 mod server_status;
 mod session;
@@ -105,6 +106,7 @@ pub use server_events::{
     Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerListEventSender,
     MAX_SERVERS_FROM_ONE_LIST, ed2k_server_list_event_channel,
 };
+pub use server_failure::{Ed2kServerFailure, Ed2kServerFailurePhase, Ed2kServerFailureReason};
 pub use server_met::{ParsedServerMetEntry, parse_server_met};
 use session::{Ed2kPacket, ServerSession, ServerSessionPhase};
 use session_driver::{clear_server_connection_state, run_one_server_session};
