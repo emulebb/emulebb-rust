@@ -171,10 +171,12 @@ GHCR assets; the workflow does not publish a `latest` image.
 ## Nightly beta builds
 
 The scheduled [nightly workflow](.github/workflows/nightly.yml) runs daily at
-02:17 UTC. It considers the latest `main` commit, verifies that the normal CI
-checks passed for that exact SHA, and skips publishing when that commit already
-has a nightly. A manual run builds candidates without publishing unless the
-operator explicitly enables its `publish` input.
+02:17 UTC, with a 05:47 UTC fallback because GitHub schedules are best-effort.
+It considers the latest `main` commit, verifies that the normal CI checks passed
+for that exact SHA, and skips publishing when that commit already has a nightly,
+so the fallback does not duplicate a successful publication. A manual run builds
+candidates without publishing unless the operator explicitly enables its
+`publish` input.
 
 Published nightlies appear as prereleases on the
 [GitHub Releases page](https://github.com/emulebb/emulebb-rust/releases). Each

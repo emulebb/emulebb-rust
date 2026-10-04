@@ -2,7 +2,10 @@ name: Nightly
 
 on:
   schedule:
+    # GitHub schedules are best-effort. The later trigger retries a dropped or
+    # failed primary run; the immutable nightly tag gate prevents duplicates.
     - cron: "17 2 * * *"
+    - cron: "47 5 * * *"
   workflow_dispatch:
     inputs:
       publish:
