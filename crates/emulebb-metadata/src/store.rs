@@ -77,8 +77,8 @@ impl MetadataStore {
     ///
     /// Rust product code is current-schema-only: it creates a schema for an empty
     /// database, and otherwise requires the stored schema marker to match exactly.
-    /// Operator-local profile preservation belongs in explicit one-off
-    /// SQLite/Python updates outside this crate.
+    /// An incompatible product profile must be replaced with an entirely fresh
+    /// profile; this crate never migrates, repairs, or resets it.
     fn ensure_schema(&mut self) -> Result<()> {
         if self.table_exists("metadata_schema")? {
             let stored_version = self
@@ -86,7 +86,7 @@ impl MetadataStore {
                 .with_context(|| format!("metadata schema marker {SCHEMA_ID:?} is missing"))?;
             ensure!(
                 stored_version == SCHEMA_VERSION,
-                "metadata schema version {stored_version} is not current {SCHEMA_VERSION}; run the explicit Python soak-profile migration or use a fresh profile"
+                "metadata schema version {stored_version} is not current {SCHEMA_VERSION}; create an entirely fresh profile for this build"
             );
             self.prune_transfer_sources()?;
             return Ok(());
@@ -512,10 +512,17 @@ mod tests {
 
         let error = MetadataStore::from_connection(conn).unwrap_err();
 
+        let message = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("metadata schema version 1 is not current"),
+            message.contains("metadata schema version 1 is not current"),
             "unexpected error: {error:#}"
         );
+        assert!(
+            message.contains("create an entirely fresh profile"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!message.to_ascii_lowercase().contains("python"));
+        assert!(!message.to_ascii_lowercase().contains("migration"));
     }
 
     #[test]

@@ -90,7 +90,9 @@ fn open() {
 
         self.assertGreaterEqual(len(errors), 4)
         self.assertTrue(any("reset helper" in error for error in errors))
+        self.assertTrue(any("fresh profile" in error for error in errors))
         self.assertTrue(any("ALTER TABLE" in error for error in errors))
+        self.assertFalse(any("Python" in error for error in errors))
 
     def test_rejects_retired_recursive_schema_field(self) -> None:
         errors = CHECKER.check_current_only_metadata_schema(

@@ -245,11 +245,11 @@ def check_no_legacy_rust_native_surface() -> list[str]:
 METADATA_SCHEMA_FORBIDDEN_PATTERNS = (
     (
         re.compile(r"\bfn\s+reset_schema\b"),
-        "Rust metadata reset helper; stale databases must fail, not be recreated",
+        "Rust metadata reset helper; stale databases must fail and require a fresh profile",
     ),
     (
         re.compile(r"\breset_schema\s*\("),
-        "Rust metadata schema reset call; use explicit Python soak-profile migration instead",
+        "Rust metadata schema reset call; stale databases must require a fresh profile",
     ),
     (
         re.compile(r"\bALTER\s+TABLE\b", re.IGNORECASE),
@@ -257,7 +257,7 @@ METADATA_SCHEMA_FORBIDDEN_PATTERNS = (
     ),
     (
         re.compile(r"\bDROP\s+(?:TABLE|VIEW|TRIGGER)\b", re.IGNORECASE),
-        "Rust metadata drop/recreate migration; stale databases must fail visibly",
+        "Rust metadata drop/recreate migration; stale databases must require a fresh profile",
     ),
 )
 

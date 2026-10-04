@@ -34,17 +34,21 @@ and validation policy. Do not rewrite the published beta tag or artifacts.
   removal or revival work; do not spend UI feature effort there by default.
 - Keep the current-only model: do not add compatibility shims, legacy aliases,
   old-name remapping, compatibility readers, Rust schema migrations, or
-  speculative version bumps. When a local
-  persisted development profile must be preserved, use an explicit one-off
-  SQLite/Python update against that operator-local DB (for example a soak
-  `emulebb-rust-metadata.db`) instead of encoding the compatibility path in
-  product code.
+  speculative version bumps.
+- During the current experimental development phase, every change that touches
+  persisted data must review the metadata schema and evolve the clean current
+  model when warranted. Do not retain an inferior or legacy shape merely to
+  avoid recreating development profiles. This rule remains in force until an
+  explicit workspace-policy change.
 - Rust metadata DB schema is current-only. Product Rust code must require the
   checked-in schema exactly; do not add Rust-side schema migrations, fallback
-  reads for retired columns, legacy field support, or silent startup repair.
-  Persisted live-soak profiles may be repaired only by an explicit ad-hoc Python
-  migration in `repos\emulebb-build-tests`, with a backup, leaving the database
-  at the current schema. A stale unmigrated DB should fail visibly.
+  reads for retired columns, legacy field support, schema repair, profile-reset
+  logic, or silent startup repair. A stale schema must fail visibly and instruct
+  the user to create an entirely fresh profile; never direct an end user to the
+  internal Python harness migration.
+- `repos\emulebb-build-tests` may evolve persisted test and soak profiles with
+  explicit, backup-first Python migrations to accelerate engineering validation.
+  That harness-only capability is not a supported end-user migration path.
 - Retired Rust REST, settings, and metadata fields are hard errors. Do not
   deserialize-and-ignore, alias, remap, or bridge old field names in Rust code.
   If a persisted live-soak profile or harness still emits retired fields, fix it
