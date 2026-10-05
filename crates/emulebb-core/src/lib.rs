@@ -251,10 +251,11 @@ mod rest_model_serde;
 pub use emulebb_ed2k::NatStatusSnapshot;
 pub use emulebb_settings::{
     AppSettings, AppSettingsUpdate, CORE_SETTING_SPECS, CoreSettingFieldKind, CoreSettingSpec,
-    CoreSettings, CoreSettingsUpdate, SettingSurfaceClass, SettingSurfaceSpec,
-    SettingsSectionResourceSpec, app_settings_surface_inventory, app_settings_update_is_empty,
-    bootstrap_settings_surface_inventory, core_setting_field, core_settings_schema,
-    settings_section_resource_inventory,
+    CoreSettings, CoreSettingsUpdate, MAX_FREE_SPACE_BYTES, MIN_FREE_CONFIG_SPACE_BYTES,
+    MIN_FREE_INCOMING_SPACE_BYTES, MIN_FREE_TRANSFER_SPACE_BYTES, SettingSurfaceClass,
+    SettingSurfaceSpec, SettingsSectionResourceSpec, app_settings_surface_inventory,
+    app_settings_update_is_empty, bootstrap_settings_surface_inventory, core_setting_field,
+    core_settings_schema, settings_section_resource_inventory,
 };
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
@@ -380,6 +381,10 @@ pub struct EmulebbCore {
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
     transfer_root: PathBuf,
+    /// Profile/config directory whose volume must retain the MFC-compatible
+    /// config free-space floor. Defaults to the transfer root's parent; the
+    /// daemon supplies the exact profile directory via `with_profile_dir`.
+    profile_dir: PathBuf,
     /// Default destination for finished-file delivery: a completed transfer
     /// without a category path is materialized by name into this directory
     /// (eMule global Incoming folder). Defaults next to the transfer root; the
@@ -566,6 +571,10 @@ impl EmulebbCore {
             .parent()
             .map(|parent| parent.join("incoming"))
             .unwrap_or_else(|| transfer_root.join("incoming"));
+        let profile_dir = transfer_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| transfer_root.clone());
         let (transfer_events, _) = broadcast::channel(TRANSFER_EVENT_CHANNEL_CAPACITY);
         Ok(Self {
             started_at: Instant::now(),
@@ -574,6 +583,7 @@ impl EmulebbCore {
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
             transfer_root,
+            profile_dir,
             incoming_dir,
             delivery_failures: Arc::new(std::sync::Mutex::new(HashMap::new())),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)),

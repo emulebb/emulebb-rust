@@ -23,7 +23,7 @@ use emulebb_settings::{
     DaemonSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
     NatSettings, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT,
     SECTION_VPN_GUARD, VpnGuardSettings, reset_legacy_nat_backend_order,
-    section_settings_to_values,
+    section_settings_to_values, validate_ed2k_settings,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -435,6 +435,7 @@ fn load_settings(metadata: &MetadataStore) -> Result<LoadedSettings> {
         .context("failed to load Kad bootstrap endpoints")?;
     let ed2k_settings: Ed2kSettings =
         load_section_settings(metadata, SECTION_ED2K).context("failed to load ed2k settings")?;
+    validate_ed2k_settings(&ed2k_settings).context("invalid ed2k settings")?;
     let mut nat_settings: NatSettings =
         load_section_settings(metadata, SECTION_NAT).context("failed to load nat settings")?;
     if reset_legacy_nat_backend_order(&mut nat_settings) {
@@ -687,6 +688,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             profile.transfer_root(),
             ed2k_network,
         )?
+        .with_profile_dir(profile.profile_dir.clone())
         .with_incoming_dir(incoming_dir),
     );
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

@@ -483,6 +483,26 @@ fn default_ed2k_settings_match_runtime_config_defaults() {
 }
 
 #[test]
+fn load_rejects_out_of_range_ed2k_free_space_floor() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = write_bootstrap_settings(temp.path());
+    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
+        "minFreeTransferSpaceBytes",
+        serde_json::json!(5_368_709_119_u64),
+    );
+
+    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(
+            "minFreeTransferSpaceBytes must be an unsigned number in the range 5368709120..5497558138880"
+        )
+    );
+}
+
+#[test]
 fn configured_ed2k_nickname_reaches_runtime_config() {
     let settings = Ed2kSettings {
         nickname: "  Sample User  ".to_string(),

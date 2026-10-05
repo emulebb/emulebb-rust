@@ -4,8 +4,9 @@
 //! volume can hold the remaining payload. If it cannot, active downloads enter
 //! the explicit `insufficient` state
 //! instead of running and failing late mid-write with a disk-full error (which
-//! would otherwise churn-retry). Best-effort: an unknowable free space or
-//! manifest never pauses (the write path stays the final authority).
+//! would otherwise churn-retry). An unknowable free-space value fails closed;
+//! an unavailable manifest snapshot remains best-effort because there is no
+//! trustworthy reservation set to evaluate.
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -28,6 +29,16 @@ fn reserve_on_volume(
     floor: u64,
 ) {
     let key = volume_key(&path);
+    reserve_on_volume_key(volumes, key, path, bytes, floor);
+}
+
+fn reserve_on_volume_key(
+    volumes: &mut HashMap<String, ProtectedVolume>,
+    key: String,
+    path: PathBuf,
+    bytes: u64,
+    floor: u64,
+) {
     let volume = volumes.entry(key).or_insert_with(|| ProtectedVolume {
         probe_path: path,
         reserved_bytes: 0,
@@ -38,10 +49,18 @@ fn reserve_on_volume(
 }
 
 fn volume_is_insufficient(available: Option<u64>, reserved: u64, floor: u64) -> bool {
-    available.is_some_and(|available| available < reserved.saturating_add(floor))
+    available.is_none_or(|available| available < reserved.saturating_add(floor))
 }
 
 impl EmulebbCore {
+    /// Override the profile/config directory protected by the MFC-compatible
+    /// config-volume free-space floor.
+    #[must_use]
+    pub fn with_profile_dir(mut self, profile_dir: PathBuf) -> Self {
+        self.profile_dir = profile_dir;
+        self
+    }
+
     async fn mark_active_downloads_insufficient(&self) {
         let (updated, cancellations) = {
             let mut state = self.state.lock().await;
@@ -124,18 +143,7 @@ impl EmulebbCore {
                 Ed2kSettings::default()
             });
         let categories = self.state.lock().await.categories.clone();
-        let transfer_volume = volume_key(&self.transfer_root);
-        let mut volumes = HashMap::new();
-
-        for manifest in &manifests {
-            self.reserve_incomplete_manifest(
-                &mut volumes,
-                manifest,
-                &settings,
-                &categories,
-                &transfer_volume,
-            );
-        }
+        let volumes = self.protected_volumes(&manifests, &settings, &categories);
 
         let insufficient = volumes.into_iter().any(|(key, volume)| {
             let available = disk_space::available_space(&volume.probe_path);
@@ -144,6 +152,7 @@ impl EmulebbCore {
             if insufficient {
                 tracing::warn!(
                     volume = %key,
+                    probe_succeeded = available.is_some(),
                     available_bytes = available.unwrap_or(0),
                     reserved_bytes = volume.reserved_bytes,
                     free_floor_bytes = volume.free_floor_bytes,
@@ -156,6 +165,32 @@ impl EmulebbCore {
             self.mark_active_downloads_insufficient().await;
         }
         insufficient
+    }
+
+    fn protected_volumes(
+        &self,
+        manifests: &[Ed2kResumeManifest],
+        settings: &Ed2kSettings,
+        categories: &std::collections::BTreeMap<u32, crate::Category>,
+    ) -> HashMap<String, ProtectedVolume> {
+        let transfer_volume = volume_key(&self.transfer_root);
+        let mut volumes = HashMap::new();
+        reserve_on_volume(
+            &mut volumes,
+            self.profile_dir.clone(),
+            0,
+            settings.min_free_config_space_bytes,
+        );
+        for manifest in manifests {
+            self.reserve_incomplete_manifest(
+                &mut volumes,
+                manifest,
+                settings,
+                categories,
+                &transfer_volume,
+            );
+        }
+        volumes
     }
 
     fn reserve_incomplete_manifest(
@@ -210,19 +245,74 @@ impl EmulebbCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AppSettingsUpdate, FileIndex, TransferCreate, unique_runtime_dir};
-    use emulebb_settings::Ed2kSettingsUpdate;
+    use crate::{FileIndex, TransferCreate, unique_runtime_dir};
 
     #[test]
-    fn aggregate_reservation_honors_floor_and_unknown_space_is_best_effort() {
-        assert!(!volume_is_insufficient(None, u64::MAX, u64::MAX));
+    fn aggregate_reservation_honors_floor_and_unknown_space_fails_closed() {
+        assert!(volume_is_insufficient(None, u64::MAX, u64::MAX));
         assert!(!volume_is_insufficient(Some(150), 100, 50));
         assert!(volume_is_insufficient(Some(149), 100, 50));
         assert!(volume_is_insufficient(Some(u64::MAX - 1), u64::MAX, 1));
     }
 
+    #[test]
+    fn reservations_sum_payloads_and_keep_the_largest_shared_volume_floor() {
+        let mut volumes = HashMap::new();
+        reserve_on_volume_key(
+            &mut volumes,
+            "shared".to_string(),
+            PathBuf::from("profile"),
+            0,
+            10,
+        );
+        reserve_on_volume_key(
+            &mut volumes,
+            "shared".to_string(),
+            PathBuf::from("transfers"),
+            100,
+            50,
+        );
+        reserve_on_volume_key(
+            &mut volumes,
+            "incoming".to_string(),
+            PathBuf::from("incoming"),
+            200,
+            40,
+        );
+
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes["shared"].reserved_bytes, 100);
+        assert_eq!(volumes["shared"].free_floor_bytes, 50);
+        assert_eq!(volumes["incoming"].reserved_bytes, 200);
+        assert_eq!(volumes["incoming"].free_floor_bytes, 40);
+    }
+
+    #[test]
+    fn protected_volumes_always_include_the_profile_config_floor() {
+        let root = unique_runtime_dir("emulebb-config-volume-floor");
+        let profile_dir = root.join("profile");
+        let transfer_root = root.join("transfers");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::create_dir_all(&transfer_root).unwrap();
+        let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
+            .unwrap()
+            .with_profile_dir(profile_dir.clone());
+
+        let volumes = core.protected_volumes(
+            &[],
+            &Ed2kSettings::default(),
+            &std::collections::BTreeMap::new(),
+        );
+        let config_volume = &volumes[&volume_key(&profile_dir)];
+        assert_eq!(config_volume.reserved_bytes, 0);
+        assert_eq!(
+            config_volume.free_floor_bytes,
+            emulebb_settings::MIN_FREE_CONFIG_SPACE_BYTES
+        );
+    }
+
     #[tokio::test]
-    async fn insufficient_volume_stops_all_active_downloads() {
+    async fn marking_insufficient_stops_all_active_downloads() {
         let root = unique_runtime_dir("emulebb-disk-stop-all");
         let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &root).unwrap();
         let hashes = [
@@ -242,17 +332,7 @@ mod tests {
                 .unwrap();
             core.set_transfer_state(&transfer.hash, "downloading").await;
         }
-        core.update_app_settings(AppSettingsUpdate {
-            ed2k: Some(Ed2kSettingsUpdate {
-                min_free_transfer_space_bytes: Some(u64::MAX),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-        assert!(core.should_pause_download_for_disk_space(hashes[0]).await);
+        core.mark_active_downloads_insufficient().await;
         for hash in hashes {
             assert_eq!(core.transfer(hash).await.unwrap().state, "insufficient");
         }
