@@ -351,18 +351,25 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
         "Startup download byte budget before live core settings apply.",
     ),
     app_setting(
+        "ed2k.minFreeConfigSpaceBytes",
+        SettingSurfaceClass::NormalControl,
+        true,
+        "Transfers",
+        "Raw-byte free-space floor for the profile/config volume (1 GiB minimum, 5 TiB maximum).",
+    ),
+    app_setting(
         "ed2k.minFreeTransferSpaceBytes",
         SettingSurfaceClass::NormalControl,
         true,
         "Transfers",
-        "Free-space floor retained on incomplete-transfer volumes.",
+        "Raw-byte free-space floor for incomplete-transfer volumes (5 GiB minimum, 5 TiB maximum).",
     ),
     app_setting(
         "ed2k.minFreeIncomingSpaceBytes",
         SettingSurfaceClass::NormalControl,
         true,
         "Transfers",
-        "Free-space floor retained on finished-file destination volumes.",
+        "Raw-byte free-space floor for finished-file destination volumes (5 GiB minimum, 5 TiB maximum).",
     ),
     app_setting(
         "ed2k.enableUdpReask",

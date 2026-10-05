@@ -4,6 +4,10 @@ mod core_settings;
 mod search;
 
 use axum::response::Response;
+use emulebb_core::{
+    MAX_FREE_SPACE_BYTES, MIN_FREE_CONFIG_SPACE_BYTES, MIN_FREE_INCOMING_SPACE_BYTES,
+    MIN_FREE_TRANSFER_SPACE_BYTES,
+};
 use std::net::Ipv4Addr;
 
 use super::{JsonObject, invalid_body_error};
@@ -48,6 +52,9 @@ const ED2K_SETTINGS_FIELDS: &[&str] = &[
     "sourceServerAttemptBudget",
     "uploadQueue",
     "downloadLimitBytesPerSec",
+    "minFreeConfigSpaceBytes",
+    "minFreeTransferSpaceBytes",
+    "minFreeIncomingSpaceBytes",
     "enableUdpReask",
     "publishEmuleRustIdentity",
     "offerFilesCapabilityEnabled",
@@ -333,6 +340,27 @@ fn validate_ed2k_settings_patch_body_fields(object: &JsonObject) -> Result<(), B
         "sourceServerAttemptBudget",
         "settings.ed2k.sourceServerAttemptBudget",
         1,
+    )?;
+    validate_unsigned_number_range(
+        object,
+        "minFreeConfigSpaceBytes",
+        "settings.ed2k.minFreeConfigSpaceBytes",
+        MIN_FREE_CONFIG_SPACE_BYTES,
+        MAX_FREE_SPACE_BYTES,
+    )?;
+    validate_unsigned_number_range(
+        object,
+        "minFreeTransferSpaceBytes",
+        "settings.ed2k.minFreeTransferSpaceBytes",
+        MIN_FREE_TRANSFER_SPACE_BYTES,
+        MAX_FREE_SPACE_BYTES,
+    )?;
+    validate_unsigned_number_range(
+        object,
+        "minFreeIncomingSpaceBytes",
+        "settings.ed2k.minFreeIncomingSpaceBytes",
+        MIN_FREE_INCOMING_SPACE_BYTES,
+        MAX_FREE_SPACE_BYTES,
     )?;
     validate_unsigned_number_range(
         object,

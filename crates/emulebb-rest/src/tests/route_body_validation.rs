@@ -438,6 +438,22 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.ed2k.sourceServerAttemptBudget must be an unsigned number greater than or equal to 1",
         ),
         (
+            r#"{"ed2k":{"minFreeConfigSpaceBytes":1073741823}}"#,
+            "settings.ed2k.minFreeConfigSpaceBytes must be an unsigned number in the range 1073741824..5497558138880",
+        ),
+        (
+            r#"{"ed2k":{"minFreeTransferSpaceBytes":5368709119}}"#,
+            "settings.ed2k.minFreeTransferSpaceBytes must be an unsigned number in the range 5368709120..5497558138880",
+        ),
+        (
+            r#"{"ed2k":{"minFreeIncomingSpaceBytes":5497558138881}}"#,
+            "settings.ed2k.minFreeIncomingSpaceBytes must be an unsigned number in the range 5368709120..5497558138880",
+        ),
+        (
+            r#"{"ed2k":{"minFreeIncomingSpaceBytes":"5368709120"}}"#,
+            "settings.ed2k.minFreeIncomingSpaceBytes must be an unsigned number in the range 5368709120..5497558138880",
+        ),
+        (
             r#"{"ed2k":{"deadServerRetries":0}}"#,
             "settings.ed2k.deadServerRetries must be an unsigned number in the range 1..10",
         ),
