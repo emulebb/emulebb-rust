@@ -504,7 +504,7 @@ mod tests {
             );
             CREATE TABLE files(id INTEGER PRIMARY KEY);
             INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms)
-            VALUES ('emulebb.metadata.clean-v2', 1, 0);
+            VALUES ('emulebb.metadata.clean-v2', 24, 0);
             INSERT INTO files(id) VALUES (7);
             "#,
         )
@@ -514,7 +514,7 @@ mod tests {
 
         let message = format!("{error:#}");
         assert!(
-            message.contains("metadata schema version 1 is not current"),
+            message.contains("metadata schema version 24 is not current 25"),
             "unexpected error: {error:#}"
         );
         assert!(

@@ -1385,9 +1385,7 @@ fn apply_hostname_lookup_settings_update(
     }
 }
 
-pub fn validate_ed2k_settings(
-    settings: &Ed2kSettings,
-) -> Result<(), CoreSettingValidationError> {
+pub fn validate_ed2k_settings(settings: &Ed2kSettings) -> Result<(), CoreSettingValidationError> {
     validate_free_space_floor(
         "minFreeConfigSpaceBytes",
         settings.min_free_config_space_bytes,
@@ -1429,10 +1427,7 @@ pub fn apply_ed2k_settings_update(
     Ok(())
 }
 
-fn apply_ed2k_settings_update_unchecked(
-    settings: &mut Ed2kSettings,
-    update: Ed2kSettingsUpdate,
-) {
+fn apply_ed2k_settings_update_unchecked(settings: &mut Ed2kSettings, update: Ed2kSettingsUpdate) {
     apply_nullable_update(&mut settings.listen_port, update.listen_port);
     if let Some(value) = update.nickname {
         settings.nickname = value;
@@ -2064,6 +2059,71 @@ mod tests {
         assert!(settings.core.auto_connect);
         assert!(settings.nat.enabled);
         assert!(!settings.nat.require_initial_mapping);
+    }
+
+    #[test]
+    fn ed2k_free_space_defaults_match_mfc() {
+        let settings = Ed2kSettings::default();
+
+        assert_eq!(
+            settings.min_free_config_space_bytes,
+            MIN_FREE_CONFIG_SPACE_BYTES
+        );
+        assert_eq!(
+            settings.min_free_transfer_space_bytes,
+            MIN_FREE_TRANSFER_SPACE_BYTES
+        );
+        assert_eq!(
+            settings.min_free_incoming_space_bytes,
+            MIN_FREE_INCOMING_SPACE_BYTES
+        );
+        validate_ed2k_settings(&settings).unwrap();
+    }
+
+    #[test]
+    fn ed2k_free_space_update_enforces_inclusive_mfc_ranges_atomically() {
+        let mut settings = Ed2kSettings::default();
+        apply_ed2k_settings_update(
+            &mut settings,
+            Ed2kSettingsUpdate {
+                min_free_config_space_bytes: Some(MAX_FREE_SPACE_BYTES),
+                min_free_transfer_space_bytes: Some(MAX_FREE_SPACE_BYTES),
+                min_free_incoming_space_bytes: Some(MAX_FREE_SPACE_BYTES),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(settings.min_free_config_space_bytes, MAX_FREE_SPACE_BYTES);
+        assert_eq!(settings.min_free_transfer_space_bytes, MAX_FREE_SPACE_BYTES);
+        assert_eq!(settings.min_free_incoming_space_bytes, MAX_FREE_SPACE_BYTES);
+
+        let before = settings.clone();
+        let error = apply_ed2k_settings_update(
+            &mut settings,
+            Ed2kSettingsUpdate {
+                nickname: Some("must-not-apply".to_string()),
+                min_free_config_space_bytes: Some(MIN_FREE_CONFIG_SPACE_BYTES - 1),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(settings, before);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "minFreeConfigSpaceBytes must be an unsigned number in the range {}..{}",
+                MIN_FREE_CONFIG_SPACE_BYTES, MAX_FREE_SPACE_BYTES
+            )
+        );
+
+        for invalid in [MIN_FREE_TRANSFER_SPACE_BYTES - 1, MAX_FREE_SPACE_BYTES + 1] {
+            let mut candidate = Ed2kSettings::default();
+            candidate.min_free_transfer_space_bytes = invalid;
+            assert!(validate_ed2k_settings(&candidate).is_err());
+            candidate = Ed2kSettings::default();
+            candidate.min_free_incoming_space_bytes = invalid;
+            assert!(validate_ed2k_settings(&candidate).is_err());
+        }
     }
 
     #[test]
