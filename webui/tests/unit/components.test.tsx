@@ -10,6 +10,14 @@ describe("components", () => {
     expect(screen.getByText("Connected")).toHaveClass("status-pill", "badge", "bg-success-lt");
   });
 
+  it("distinguishes HighID and LowID connection quality", () => {
+    const { rerender } = render(<StatusPill value="HighID" />);
+    expect(screen.getByText("HighID")).toHaveClass("bg-success-lt");
+
+    rerender(<StatusPill value="LowID" />);
+    expect(screen.getByText("LowID")).toHaveClass("bg-warning-lt");
+  });
+
   it("marks error-style statuses as bad", () => {
     render(<StatusPill value="firewalled" />);
 

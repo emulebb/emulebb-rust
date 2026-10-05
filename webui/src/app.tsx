@@ -686,7 +686,26 @@ export function App() {
   const transfers = snapshot?.transfers ?? [];
   const servers = snapshot?.servers ?? [];
   const kad: KadStatus = snapshot?.kad ?? {};
-  const serverConnected = snapshot?.status?.serverConnected ?? servers.some((server) => server.connected);
+  const serverStatus = snapshot?.status?.servers;
+  const serverConnected = serverStatus?.connected ?? servers.some((server) => server.connected);
+  const serverConnecting = serverStatus?.connecting ?? servers.some((server) => server.connecting);
+  const serverIdState = serverConnected ? serverStatus?.ed2kIdState ?? "unknown" : "unknown";
+  const serverConnectionLabel = serverConnected
+    ? serverIdState === "high"
+      ? "HighID"
+      : serverIdState === "low"
+        ? "LowID"
+        : "Connected"
+    : serverConnecting
+      ? "Connecting"
+      : "Disconnected";
+  const serverConnectionStyle = serverIdState === "high"
+    ? "connected"
+    : serverIdState === "low" || serverConnecting
+      ? "warning"
+      : serverConnected
+        ? undefined
+        : "disconnected";
   const activeTransfers = transfers.filter((transfer) => transfer.state !== "completed" && transfer.stopped !== true).length;
   const downloadRate = formatRate(
     numberField(stats, "downloadRateBytesPerSec") ?? (numberField(stats, "downloadSpeedKiBps") ?? 0) * 1024
@@ -713,9 +732,9 @@ export function App() {
                 <div class="status-toolbar" role="toolbar" aria-label="Connection and transfer status">
                   <ToolbarButton
                     label="Server"
-                    value={serverConnected ? "Connected" : "Disconnected"}
+                    value={serverConnectionLabel}
                     icon={<Server size={17} />}
-                    state={serverConnected ? "connected" : "disconnected"}
+                    state={serverConnectionStyle}
                     onClick={() => navigateToTab("servers")}
                   />
                   <ToolbarButton
@@ -1014,7 +1033,7 @@ function ToolbarButton(props: {
   label: string;
   value: string;
   icon: ComponentChildren;
-  state?: "connected" | "disconnected";
+  state?: "connected" | "disconnected" | "warning";
   onClick: () => void;
 }) {
   return (

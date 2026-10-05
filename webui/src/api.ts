@@ -43,8 +43,7 @@ export type Stats = {
 export type Status = {
   lifecycle?: string | { state?: string; [key: string]: unknown };
   connected?: boolean;
-  serverConnected?: boolean;
-  firewalled?: boolean | null;
+  servers?: ServerStatus;
   stats?: Stats;
   sharedStartupCache?: {
     hashingCount?: number;
@@ -53,6 +52,17 @@ export type Status = {
     [key: string]: unknown;
   };
   runtimeDiagnostics?: RuntimeDiagnostics;
+  [key: string]: unknown;
+};
+
+export type Ed2kIdState = "unknown" | "low" | "high";
+
+export type ServerStatus = {
+  connected?: boolean;
+  connecting?: boolean;
+  currentServer?: ServerItem | null;
+  ed2kIdState?: Ed2kIdState;
+  serverCount?: number;
   [key: string]: unknown;
 };
 

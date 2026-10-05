@@ -1543,9 +1543,24 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
   const serverAddressError = endpointAddressError(address, "Address");
   const serverPortError = endpointPortError(port, "Port");
   const serverImportUrlError = urlImportError(importUrl, "server.met URL");
-  const connected = Boolean(props.status.serverConnected ?? props.servers.some((server) => server.connected));
-  const connecting = props.servers.some((server) => server.connecting);
-  const connectionLabel = connected ? "Connected" : connecting ? "Connecting" : "Disconnected";
+  const serverStatus = props.status.servers;
+  const connected = Boolean(serverStatus?.connected ?? props.servers.some((server) => server.connected));
+  const connecting = Boolean(serverStatus?.connecting ?? props.servers.some((server) => server.connecting));
+  const ed2kIdState = connected ? serverStatus?.ed2kIdState ?? "unknown" : "unknown";
+  const connectionLabel = connected
+    ? ed2kIdState === "high"
+      ? "HighID"
+      : ed2kIdState === "low"
+        ? "LowID"
+        : "Connected"
+    : connecting
+      ? "Connecting"
+      : "Disconnected";
+  const connectedEd2kId = ed2kIdState === "high"
+    ? "HighID"
+    : ed2kIdState === "low"
+      ? "LowID"
+      : "Connected";
 
   const filteredServers = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -1568,6 +1583,14 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
     }
     return props.servers.find((server) => serverEndpoint(server) === selectedEndpoint) ?? props.servers[0];
   }, [props.servers, selectedEndpoint]);
+  const selectedIsCurrent = selected != null && (
+    selected.connected === true
+    || selected.current === true
+    || serverEndpoint(serverStatus?.currentServer ?? {}) === serverEndpoint(selected)
+  );
+  const selectedEd2kId = selectedIsCurrent && connected
+    ? connectedEd2kId === "Connected" ? "Unknown" : connectedEd2kId
+    : "Not connected";
 
   const createServer = () => {
     const parsedPort = parseEndpointPort(port);
@@ -1594,8 +1617,9 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
       </div>
       <div class="notice alert alert-info" role="status">
         Server network: {connectionLabel}.
-        {connected && props.status.firewalled === true && " LowID: connected, but inbound TCP is not reachable; downloads and searches still work, while callbacks may be slower. Enable UPnP in Settings or forward the shown TCP/UDP ports to try for HighID."}
-        {connected && props.status.firewalled === false && " HighID: inbound TCP reachability is confirmed."}
+        {connected && ed2kIdState === "low" && " Connected, but inbound TCP is not reachable; downloads and searches still work, while callbacks may be slower. Enable UPnP in Settings or forward the shown TCP/UDP ports to try for HighID."}
+        {connected && ed2kIdState === "high" && " Inbound TCP reachability is confirmed."}
+        {connected && ed2kIdState === "unknown" && " The server has not supplied a usable eD2K ID state."}
         {!connected && props.servers.length === 0 && " Import server.met or add a server before connecting."}
       </div>
       <form class="form-row" onSubmit={(event) => {
@@ -1650,7 +1674,7 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
                   <td>{hostNameLabel(server)}</td>
                   <td>{server.ip || server.dynIp || ""}</td>
                   <td>{server.name ?? ""}</td>
-                  <td><StatusPill value={server.connected ? "connected" : server.connecting ? "connecting" : server.enabled === false ? "disabled" : server.current ? "current" : "idle"} /></td>
+                  <td><StatusPill value={server.connected ? connectedEd2kId : server.connecting ? "connecting" : server.enabled === false ? "disabled" : server.current ? "current" : "idle"} /></td>
                   <td>{server.users ?? 0}</td>
                   <td>{server.files ?? 0}</td>
                   <td>{server.ping ? `${server.ping} ms` : ""}</td>
@@ -1685,6 +1709,7 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
             <span>Priority</span><strong>{selected.priority ?? "normal"}</strong>
             <span>Enabled/static</span><strong>{yesNo(selected.enabled !== false)} / {yesNo(selected.static)}</strong>
             <span>Current</span><strong>{yesNo(selected.current)}</strong>
+            <span>eD2K ID</span><strong>{selectedEd2kId}</strong>
             <span>Soft/hard files</span><strong>{selected.softFiles ?? 0} / {selected.hardFiles ?? 0}</strong>
             <span>Offer publishing</span><strong>{selected.offerFilesMode ?? "unavailable"}</strong>
             <span>Offer batch/interval</span><strong>{selected.offerFilesBatchMax ?? 0} / {selected.offerFilesMinIntervalMs ?? 0} ms</strong>

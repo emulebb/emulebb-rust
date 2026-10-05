@@ -61,6 +61,13 @@ const snapshot = {
       uploadRateBytesPerSec: 1024,
       sharedFiles: 1,
       sharedBytes: 4096
+    },
+    servers: {
+      connected: true,
+      connecting: false,
+      currentServer: { endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true, current: true },
+      ed2kIdState: "high",
+      serverCount: 1
     }
   },
   stats: {

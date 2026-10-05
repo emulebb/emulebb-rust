@@ -24,7 +24,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   const topbar = page.locator("header .topbar");
   const primaryViews = topbar.getByRole("navigation", { name: "Primary views" });
   const statusToolbar = page.getByRole("toolbar", { name: "Connection and transfer status" });
-  await expect(statusToolbar.getByRole("button", { name: "Server: Connected", exact: true })).toBeVisible();
+  await expect(statusToolbar.getByRole("button", { name: "Server: HighID", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Kad: Connected", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Download: 2.0 KiB/s", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Upload: 1.0 KiB/s", exact: true })).toBeVisible();
@@ -71,6 +71,55 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.locator("body")).not.toContainText("\\\\?\\");
 
   expect(requests.some((request) => request.path === "snapshot")).toBe(true);
+});
+
+test("shows connecting and connected-with-unknown-ID server states explicitly", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  const state: any = mockSnapshotFixture();
+  state.status.servers = {
+    connected: false,
+    connecting: true,
+    currentServer: state.servers[0],
+    ed2kIdState: "unknown",
+    serverCount: 1
+  };
+  state.servers[0].connected = false;
+  state.servers[0].connecting = true;
+  const fallback = installMockApi(requests);
+  await page.route("**/api/v1/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname.replace(/^\/api\/v1\/?/, "");
+    if (route.request().method() === "GET" && path === "snapshot") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: state })
+      });
+      return;
+    }
+    await fallback(route);
+  });
+
+  await page.goto("/");
+  const statusToolbar = page.getByRole("toolbar", { name: "Connection and transfer status" });
+  await expect(statusToolbar.getByRole("button", { name: "Server: Connecting" })).toBeVisible();
+  await page.getByRole("link", { name: "Servers" }).click();
+  const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
+  await expect(serversPanel.getByText(/Server network: Connecting/)).toBeVisible();
+
+  state.status.servers = {
+    ...state.status.servers,
+    connected: true,
+    connecting: false,
+    ed2kIdState: "unknown"
+  };
+  state.servers[0].connected = true;
+  state.servers[0].connecting = false;
+  await page.reload();
+  await expect(statusToolbar.getByRole("button", { name: "Server: Connected" })).toBeVisible();
+  await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
+  await expect(serversPanel.getByText(/has not supplied a usable eD2K ID state/)).toBeVisible();
+  await expect(serversPanel.getByText("Unknown", { exact: true })).toBeVisible();
 });
 
 test("keeps the unified toolbar usable at a narrow viewport", async ({ page }) => {
@@ -278,8 +327,7 @@ test("loads a selected search session from a deep link", async ({ page }) => {
 test("runs the complete server, Kad, search, download, and reconnect workflow", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   const state: any = mockSnapshotFixture();
-  state.status.serverConnected = false;
-  state.status.firewalled = true;
+  state.status.servers = { connected: false, connecting: false, currentServer: null, ed2kIdState: "unknown", serverCount: 0 };
   state.servers = [];
   state.kad = { enabled: true, running: false, connected: false, firewalled: null, contactCount: 0 };
   state.searches = [{
@@ -324,28 +372,27 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     if (method === "POST" && path === "servers/operations/import-met-url") {
       record();
       state.servers = [{ endpoint: "192.0.2.10:4661", name: "Imported Server", connected: false, enabled: true }];
+      state.status.servers.serverCount = 1;
       await fulfill({ ok: true, imported: true });
       return;
     }
     if (method === "POST" && path === "servers/operations/connect") {
       record();
-      state.status.serverConnected = true;
-      state.status.firewalled = true;
+      state.status.servers = { connected: true, connecting: false, currentServer: state.servers[0], ed2kIdState: "low", serverCount: 1 };
       state.servers[0].connected = true;
       await fulfill({ running: true, connected: true, firewalled: true });
       return;
     }
     if (method === "POST" && path === "servers/192.0.2.10%3A4661/operations/connect") {
       record();
-      state.status.serverConnected = true;
-      state.status.firewalled = true;
+      state.status.servers = { connected: true, connecting: false, currentServer: state.servers[0], ed2kIdState: "low", serverCount: 1 };
       state.servers[0].connected = true;
       await fulfill({ running: true, connected: true, firewalled: true });
       return;
     }
     if (method === "POST" && path === "servers/operations/disconnect") {
       record();
-      state.status.serverConnected = false;
+      state.status.servers = { ...state.status.servers, connected: false, connecting: false, currentServer: null, ed2kIdState: "unknown" };
       state.servers[0].connected = false;
       await fulfill({ running: false, connected: false });
       return;
@@ -444,8 +491,8 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await serversPanel.getByRole("button", { name: "Import" }).click();
   await expect(page.getByText("server.met imported; the server list is ready")).toBeVisible();
   await serversPanel.locator("tbody tr", { hasText: "192.0.2.10:4661" }).getByTitle("Connect").click();
-  await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
-  await expect(serversPanel.getByText(/LowID: connected/)).toBeVisible();
+  await expect(serversPanel.getByText(/Server network: LowID/)).toBeVisible();
+  await expect(page.getByRole("toolbar", { name: "Connection and transfer status" }).getByRole("button", { name: "Server: LowID" })).toBeVisible();
 
   await page.getByRole("link", { name: "Kad", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
@@ -462,7 +509,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(kadPanel.getByText(/Kad network: Connected/)).toBeVisible();
   await page.getByRole("link", { name: "Servers" }).click();
   await serversPanel.locator("button.btn").filter({ hasText: /^Connect$/ }).click();
-  await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
+  await expect(serversPanel.getByText(/Server network: LowID/)).toBeVisible();
 
   await page.getByRole("link", { name: "Search" }).click();
   const searchPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Search" }) });
@@ -508,7 +555,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await kadPanel.getByRole("button", { name: "Stop" }).click();
   await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
   await page.getByRole("link", { name: "Servers" }).click();
-  await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
+  await expect(serversPanel.getByText(/Server network: LowID/)).toBeVisible();
 
   expect(requests.some((request) => request.path === "servers/operations/disconnect")).toBe(true);
   expect(requests.filter((request) => request.path === "servers/operations/connect")).toHaveLength(1);

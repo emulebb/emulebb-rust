@@ -175,6 +175,10 @@ td {
   color: var(--tblr-danger);
 }
 
+.toolbar-item.is-warning .toolbar-icon {
+  color: var(--tblr-warning);
+}
+
 .toolbar-copy {
   display: grid;
   line-height: 1.15;
