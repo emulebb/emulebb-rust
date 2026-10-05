@@ -191,7 +191,7 @@ impl EmulebbCore {
         dead_server_retries: u32,
     ) {
         if !failure.counts_toward_dead_server() {
-            tracing::info!(
+            tracing::debug!(
                 endpoint,
                 phase = failure.phase.as_str(),
                 reason = failure.reason.as_str(),
@@ -201,7 +201,7 @@ impl EmulebbCore {
             );
             return;
         }
-        tracing::info!(
+        tracing::debug!(
             endpoint,
             phase = failure.phase.as_str(),
             reason = failure.reason.as_str(),

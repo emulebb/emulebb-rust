@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::{
     config::Ed2kRuntimeConfig,
@@ -86,7 +86,7 @@ pub async fn search_source_servers(
                 || entry.port != excluded_endpoint.port()
         });
         if configured_servers.len() != before_len {
-            info!(
+            debug!(
                 "ED2K source search skipping currently connected background endpoint={} file_hash={}",
                 excluded_endpoint, file_hash
             );
@@ -123,7 +123,7 @@ pub async fn search_source_servers(
                 continue;
             }
         };
-        info!(
+        debug!(
             "ED2K source search attempt={}/{} endpoint={} name={} file_hash={}",
             attempt_index + 1,
             max_attempts.max(1),

@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::{
     config::Ed2kRuntimeConfig,
@@ -128,7 +128,7 @@ pub async fn search_keyword_udp_servers(
                 continue;
             }
         };
-        info!(
+        debug!(
             "ED2K UDP keyword search attempt={}/{} endpoint={} name={}",
             attempt_index + 1,
             max_attempts.max(1),
@@ -287,7 +287,7 @@ pub async fn search_keyword_servers(
                 continue;
             }
         };
-        info!(
+        debug!(
             "ED2K keyword search attempt={}/{} endpoint={} name={}",
             attempt_index + 1,
             max_attempts.max(1),
@@ -354,7 +354,7 @@ async fn search_keyword_on_server(
         idle_timeout,
     )
     .await?;
-    info!(
+    debug!(
         "ED2K active search session connected trace_id={} endpoint={} transport={} query_len={}",
         session.trace_id,
         transport_endpoint,

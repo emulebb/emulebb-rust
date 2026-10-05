@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpSocket;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::networking::require_bind_if_index;
 
@@ -86,12 +86,12 @@ pub async fn http_probe(bind_ip: Ipv4Addr, timeout: Duration) -> BoundProbeResul
     let mut attempts = Vec::new();
     for &(host, path) in HTTP_PROVIDERS {
         let provider = format!("http://{host}{path}");
-        info!(provider = %provider, bind_ip = %bind_ip, bind_if_index, "VPN Guard HTTP public IPv4 probe attempt");
+        debug!(provider = %provider, bind_ip = %bind_ip, bind_if_index, "VPN Guard HTTP public IPv4 probe attempt");
         match tokio::time::timeout(timeout, http_probe_one(bind_ip, bind_if_index, host, path))
             .await
         {
             Ok(Ok(ip)) => {
-                info!(provider = %provider, bind_ip = %bind_ip, bind_if_index, public_ip = %ip, "VPN Guard HTTP public IPv4 probe succeeded");
+                debug!(provider = %provider, bind_ip = %bind_ip, bind_if_index, public_ip = %ip, "VPN Guard HTTP public IPv4 probe succeeded");
                 return BoundProbeResult::success(ip, provider);
             }
             Ok(Err(err)) => {
@@ -174,7 +174,7 @@ async fn http_probe_one(
 
 /// UDP/STUN egress leg: delegate to the bound + egress-pinned STUN probe.
 pub async fn stun_probe_bound(bind_ip: Ipv4Addr, timeout: Duration) -> BoundProbeResult {
-    info!(bind_ip = %bind_ip, server_count = crate::stun::DEFAULT_STUN_SERVERS.len(), "VPN Guard STUN public IPv4 probe starting");
+    debug!(bind_ip = %bind_ip, server_count = crate::stun::DEFAULT_STUN_SERVERS.len(), "VPN Guard STUN public IPv4 probe starting");
     match crate::stun::stun_probe_servers_detailed(
         crate::stun::DEFAULT_STUN_SERVERS,
         bind_ip,
@@ -184,7 +184,7 @@ pub async fn stun_probe_bound(bind_ip: Ipv4Addr, timeout: Duration) -> BoundProb
     {
         Ok(outcome) => {
             let ip = *outcome.endpoint.ip();
-            info!(provider = %outcome.server, bind_ip = %bind_ip, public_ip = %ip, "VPN Guard STUN public IPv4 probe succeeded");
+            debug!(provider = %outcome.server, bind_ip = %bind_ip, public_ip = %ip, "VPN Guard STUN public IPv4 probe succeeded");
             BoundProbeResult::success(ip, outcome.server)
         }
         Err(err) => {

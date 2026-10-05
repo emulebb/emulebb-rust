@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use emulebb_miniupnpc::{DiscoveryOptions, Gateway, PortMappingEntry, gateway_from_url};
 use tokio::{sync::RwLock, task};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{
     MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatStatus, PortMappingProvider,
@@ -65,7 +65,7 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
         .await
         .context("miniupnpc reconcile task failed")??;
 
-        info!(
+        debug!(
             "UPnP backend {} selected gateway {} local_ip={} external_ip={}",
             self.name(),
             outcome.gateway.control_url,
@@ -154,7 +154,7 @@ fn reconcile_blocking(
         .or_else(|| gateway.fetch_external_ip().ok().flatten())
         .or_else(|| gateway.external_ip().map(ToString::to_string));
 
-    info!(
+    debug!(
         "UPnP backend {} using gateway {} gateway_ip={} local_ip={}",
         backend_name,
         gateway.control_url(),
@@ -195,7 +195,7 @@ fn reconcile_blocking(
                     backend_name, spec.name, previous_port, error
                 );
             } else {
-                info!(
+                debug!(
                     "UPnP backend {} deleted stale {} mapping external_port={} (remapped to {})",
                     backend_name, spec.name, previous_port, external_port
                 );
@@ -287,7 +287,7 @@ fn reconcile_blocking(
                 }
                 return Err(error);
             }
-            info!(
+            debug!(
                 "UPnP backend {} reused existing {} mapping {} external_port={} internal={}{}{}",
                 backend_name,
                 spec.name,
@@ -299,7 +299,7 @@ fn reconcile_blocking(
             );
         } else {
             applied.push((spec.protocol.as_upnp_token(), external_port));
-            info!(
+            debug!(
                 "UPnP backend {} added {} mapping {} external_port={} internal={}{}{}",
                 backend_name,
                 spec.name,
@@ -326,7 +326,7 @@ fn reconcile_blocking(
         });
     }
 
-    info!(
+    debug!(
         "UPnP backend {} reconcile succeeded for gateway {}: external_ip={} mappings={}",
         backend_name,
         gateway.control_url(),
@@ -350,13 +350,13 @@ fn reconcile_blocking(
 
 fn release_blocking(config: &NatConfig, mappings: &[MappedEndpoint]) -> Result<()> {
     let gateway = discover_gateway(config).context("gateway discovery failed during release")?;
-    info!(
+    debug!(
         "UPnP backend {} releasing mappings via gateway {}",
         UPNP_MINIUPNPC_BACKEND,
         gateway.control_url()
     );
     for mapping in mappings {
-        info!(
+        debug!(
             "UPnP backend {} releasing {} mapping {} external_port={}",
             UPNP_MINIUPNPC_BACKEND,
             mapping.name,
@@ -398,7 +398,7 @@ fn discovery_options(config: &NatConfig) -> DiscoveryOptions {
 }
 
 fn discover_gateway(config: &NatConfig) -> Result<Gateway> {
-    info!(
+    debug!(
         "UPnP backend {} discovery starting: bind_ip={} igd_ip={}",
         UPNP_MINIUPNPC_BACKEND,
         option_display(config.bind_ip.as_deref(), "auto"),
@@ -407,7 +407,7 @@ fn discover_gateway(config: &NatConfig) -> Result<Gateway> {
     if let Some(igd_ip) = config.igd_ip.as_deref() {
         for root_description_url in candidate_root_description_urls(igd_ip) {
             if let Some(gateway) = gateway_from_url(&root_description_url)? {
-                info!(
+                debug!(
                     "UPnP backend {} direct IGD probe succeeded for configured gateway {} via {}",
                     UPNP_MINIUPNPC_BACKEND, igd_ip, root_description_url
                 );
@@ -419,7 +419,7 @@ fn discover_gateway(config: &NatConfig) -> Result<Gateway> {
 
     let (discovery, gateway) = emulebb_miniupnpc::discover(&discovery_options(config))?;
 
-    info!(
+    debug!(
         "UPnP backend {} discovery found {} device(s); gateway discovered={}",
         UPNP_MINIUPNPC_BACKEND,
         discovery.devices.len(),

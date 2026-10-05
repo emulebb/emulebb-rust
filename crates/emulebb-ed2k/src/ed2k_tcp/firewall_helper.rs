@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::debug;
 
 use emulebb_kad_dht::DhtNode;
 
@@ -466,7 +466,7 @@ pub(crate) async fn complete_authorized_kad_callback(
         )
         .await
         {
-            Ok(mode) => info!(
+            Ok(mode) => debug!(
                 "Kad firewalled-callback connect-out to {requester} completed transport={}",
                 mode.as_str()
             ),

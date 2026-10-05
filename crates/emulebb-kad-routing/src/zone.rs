@@ -1,5 +1,5 @@
 use emulebb_kad_proto::{K, KBASE, KK, NodeId};
-use tracing::info;
+use tracing::debug;
 
 use crate::bin::RoutingBin;
 use crate::contact::Contact;
@@ -103,7 +103,7 @@ impl RoutingZone {
                         // Attempt to split.
                         let split_check = self.can_split(total_contacts, max_table_size);
                         if split_check.is_ok() {
-                            info!(
+                            debug!(
                                 target: "kad_routing",
                                 depth = self.depth,
                                 zone_index = self.zone_index,

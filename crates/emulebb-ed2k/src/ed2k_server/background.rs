@@ -11,7 +11,7 @@ use tokio::{
     time::Instant as TokioInstant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use emulebb_kad_proto::Ed2kHash;
 
@@ -380,9 +380,9 @@ pub(super) fn handle_background_udp_packet(
                     // WHY: public ED2K UDP search replies are untrusted. Keep the pending
                     // search alive so a later valid packet or the normal timeout decides it.
                     warn!(
-                        "discarding malformed ED2K background UDP keyword-search response query={:?} endpoint={}: {error}",
-                        query,
-                        server.base_endpoint()
+                        endpoint = %server.base_endpoint(),
+                        %error,
+                        "discarding malformed ED2K background UDP keyword-search response"
                     );
                     *pending_background_search = Some(Keyword {
                         query,
@@ -398,11 +398,11 @@ pub(super) fn handle_background_udp_packet(
                 log_search_result_page(server.base_endpoint(), &page.files);
                 results.extend(page.files);
             }
-            info!(
-                "completed ED2K background UDP keyword search query={:?} endpoint={} source=udp result_count={}",
-                query,
-                server.base_endpoint(),
-                results.len()
+            debug!(
+                endpoint = %server.base_endpoint(),
+                source = "udp",
+                result_count = results.len(),
+                "completed ED2K background UDP keyword search"
             );
             let _ = response.send(Ok(results));
         }
@@ -457,7 +457,7 @@ pub(super) fn handle_background_udp_packet(
                 }
                 merge_found_sources(&mut aggregated_results, results);
             }
-            info!(
+            debug!(
                 "completed ED2K background UDP source search file_hash={} endpoint={} source=udp source_count={}",
                 file_hash,
                 server.base_endpoint(),
@@ -628,9 +628,11 @@ pub(super) async fn start_background_server_search(
             session
                 .send_packet(OP_SEARCHREQUEST, &search_payload)
                 .await?;
-            info!(
-                "sent ED2K background keyword search query={:?} endpoint={} trace_id={} role={}",
-                query, session.endpoint, session.trace_id, session.trace_role
+            debug!(
+                endpoint = %session.endpoint,
+                trace_id = %session.trace_id,
+                role = %session.trace_role,
+                "sent ED2K background keyword search"
             );
             Ok(Some(Keyword {
                 query,
@@ -654,7 +656,7 @@ pub(super) async fn start_background_server_search(
             let source_request = encode_source_request(file_hash, file_size);
             let opcode = source_request_opcode(context.connect_options, session.server_flags);
             session.send_packet(opcode, &source_request).await?;
-            info!(
+            debug!(
                 "sent ED2K background source search file_hash={} endpoint={} trace_id={} role={} opcode=0x{:02X}",
                 file_hash, session.endpoint, session.trace_id, session.trace_role, opcode
             );
@@ -683,7 +685,7 @@ pub(super) async fn start_background_server_search(
             );
             let (opcode, pending_hashes) =
                 send_source_request_batch(session, &targets, context.connect_options).await?;
-            info!(
+            debug!(
                 "sent ED2K background source batch endpoint={} trace_id={} role={} opcode=0x{:02X} target_count={}",
                 session.endpoint,
                 session.trace_id,
@@ -710,7 +712,7 @@ pub(super) async fn start_background_server_search(
             session
                 .send_packet(OP_CALLBACKREQUEST, &client_id.to_le_bytes())
                 .await?;
-            info!(
+            debug!(
                 "sent ED2K background callback request client_id={} endpoint={} trace_id={} role={}",
                 client_id, session.endpoint, session.trace_id, session.trace_role
             );
@@ -757,26 +759,9 @@ pub(super) async fn send_source_request_batch(
 }
 
 pub(super) fn log_search_result_page(endpoint: SocketAddr, results: &[Ed2kSearchFile]) {
-    let sample_hits = results
-        .iter()
-        .take(5)
-        .map(|file| {
-            let file_name = file.file_name.as_deref().unwrap_or("-");
-            let file_size = file
-                .file_size
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            format!("{file_name} [hash={} size={}]", file.file_hash, file_size)
-        })
-        .collect::<Vec<_>>();
-    info!(
-        "ED2K search results from {}: count={} sample_hits={}",
-        endpoint,
-        results.len(),
-        if sample_hits.is_empty() {
-            "-".to_string()
-        } else {
-            sample_hits.join(" | ")
-        }
+    debug!(
+        %endpoint,
+        result_count = results.len(),
+        "received ED2K search result page"
     );
 }

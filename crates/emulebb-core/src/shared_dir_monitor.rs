@@ -646,7 +646,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
                     forget_stale_shares(core, &[replaced.hash], &share.hash).await;
                 }
             }
-            tracing::info!(path = %path.display(), hash = %share.hash, "auto-shared monitored file");
+            tracing::debug!(path = %path.display(), hash = %share.hash, "auto-shared monitored file");
         }
         Err(error) => {
             tracing::warn!(
@@ -678,7 +678,7 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
     let hash = shared_file.hash;
     match core.unshare_file(&hash).await {
         Ok(Some(_)) => {
-            tracing::info!(path = %path.display(), %hash, "auto-removed monitored file from shared catalog");
+            tracing::debug!(path = %path.display(), %hash, "auto-removed monitored file from shared catalog");
         }
         // Already gone from the catalog (e.g. manually un-shared) -- fine.
         Ok(None) => {}

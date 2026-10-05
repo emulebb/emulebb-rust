@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::debug;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(SEARCH_TIMEOUT_SECS);
@@ -186,7 +186,7 @@ pub(crate) fn search_keywords_by_request(
 
         drop(raw_rx);
         let _ = traversal.await;
-        info!(
+        debug!(
             "kad keyword search stream summary target={} raw_entries={} accepted={} duplicates={} missing_name={} missing_size={} result_cap={} sample_rejection={}",
             request_target,
             raw_entry_count,

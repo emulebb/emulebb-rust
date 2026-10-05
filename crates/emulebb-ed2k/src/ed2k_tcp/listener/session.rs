@@ -488,7 +488,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                                 callback_intent.file_hash, callback_intent.client_id
                             )
                         })?;
-                        info!(
+                        debug!(
                             "claimed inbound ED2K callback download file_hash={} client_id={} peer={peer_addr} a4af_file_index={file_index}",
                             callback_intent.file_hash, callback_intent.client_id
                         );

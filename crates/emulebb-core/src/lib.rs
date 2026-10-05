@@ -1257,7 +1257,7 @@ impl EmulebbCore {
                         },
                     })
                     .await;
-                tracing::info!(
+                tracing::debug!(
                     "ED2K callback requested file_hash={} client_id={} tcp_port={} source_server={} requery_round={}",
                     transfer.hash,
                     source.client_id,
@@ -1516,7 +1516,7 @@ impl EmulebbCore {
                 deferred_count,
             ) {
                 if let Some(delay) = deferred_retry_delay {
-                    tracing::info!(
+                    tracing::debug!(
                         "ED2K direct source retry deferred file_hash={} deferred_direct_sources={} retry_delay_ms={}",
                         transfer.hash,
                         deferred_count,
@@ -1554,7 +1554,7 @@ impl EmulebbCore {
                     known_new_direct_source_count,
                     source_requery_round,
                 ) {
-                    tracing::info!(
+                    tracing::debug!(
                         "ED2K source refresh skipped file_hash={} reason=no_progress_repeated_endpoints attempted_direct_endpoints={} known_new_direct_source_count={}",
                         transfer.hash,
                         attempted_direct_endpoints.len(),
@@ -1564,7 +1564,7 @@ impl EmulebbCore {
                 }
 
                 source_requery_round += 1;
-                tracing::info!(
+                tracing::debug!(
                     "ED2K source refresh starting file_hash={} requery_round={} attempted_direct_endpoints={}",
                     transfer.hash,
                     source_requery_round,
@@ -1597,7 +1597,7 @@ impl EmulebbCore {
                             sources.len().saturating_sub(previous_source_count);
                         let new_direct_source_count =
                             new_direct_ed2k_source_count(&sources, &attempted_direct_endpoints);
-                        tracing::info!(
+                        tracing::debug!(
                             "ED2K source refresh completed file_hash={} requery_round={} refreshed_source_count={} added_source_count={} aggregated_source_count={} new_direct_source_count={}",
                             transfer.hash,
                             source_requery_round,
@@ -2027,7 +2027,7 @@ impl EmulebbCore {
         }
         let swapped = swap_targets.len();
         for target in swap_targets {
-            tracing::info!(
+            tracing::debug!(
                 "ED2K A4AF swap source from file_hash={} to wanted file_hash={}",
                 current_file_hash,
                 target.hash
@@ -2279,10 +2279,9 @@ impl EmulebbCore {
                 Ok(results) => {
                     if let Some(candidate) = select_ed2k_keyword_metadata(&results, file_hash) {
                         learned.merge_missing_from(candidate);
-                        tracing::info!(
-                            "ED2K hash-only metadata learned from background search file_hash={} file_name={} file_size={}",
+                        tracing::debug!(
+                            "ED2K hash-only metadata learned from background search file_hash={} file_size={}",
                             file_hash,
-                            learned.display_name.as_deref().unwrap_or("-"),
                             learned.file_size.unwrap_or_default()
                         );
                     }
@@ -2300,10 +2299,9 @@ impl EmulebbCore {
                 collect_kad_ed2k_metadata(&dht, &query, file_hash, timeout).await
         {
             learned.merge_missing_from(candidate);
-            tracing::info!(
-                "ED2K hash-only metadata learned from Kad search file_hash={} file_name={} file_size={}",
+            tracing::debug!(
+                "ED2K hash-only metadata learned from Kad search file_hash={} file_size={}",
                 file_hash,
-                learned.display_name.as_deref().unwrap_or("-"),
                 learned.file_size.unwrap_or_default()
             );
         }
@@ -2467,7 +2465,7 @@ impl EmulebbCore {
             let kad_sources = collect_kad_ed2k_sources(&dht, file_hash, file_size, timeout).await;
             let kad_source_count = kad_sources.len();
             merge_download_sources(&mut sources, kad_sources);
-            tracing::info!(
+            tracing::debug!(
                 "ED2K Kad source supplement completed file_hash={} existing_source_count={} kad_source_count={} aggregated_source_count={}",
                 file_hash,
                 existing_source_count,
@@ -2769,7 +2767,7 @@ impl EmulebbCore {
                 obfuscate,
             });
             if queued {
-                tracing::info!(
+                tracing::debug!(
                     "sent OP_DIRECTCALLBACKREQ file_hash={} source={dest} our_tcp_port={our_tcp_port}",
                     transfer.hash
                 );
@@ -4329,7 +4327,7 @@ async fn publish_kad_due_shared_files(
     });
 
     if keyword_published > 0 || source_published > 0 || notes_published > 0 {
-        tracing::info!(
+        tracing::debug!(
             "Kad shared-file publish cycle items={} inspected={} attempted_files={} keyword_published={} keyword_acked={} source_published={} source_acked={} notes_published={} notes_acked={}",
             item_count,
             inspected,
@@ -5385,7 +5383,7 @@ async fn run_kad_buddy_search(runtime: &KadBuddyRuntime) -> Result<()> {
         client_hash: Ed2kHash::from_bytes(runtime.network.user_hash),
         tcp_port: our_tcp_port,
     };
-    tracing::info!(
+    tracing::debug!(
         "starting Kad FINDBUDDY walk near {target} (we are firewalled, seeking a buddy)"
     );
     runtime
@@ -6407,7 +6405,7 @@ async fn handle_kad_callback_req(
     let frame =
         encode_kad_callback_relay_frame(req.buddy_id.0, &req.file_hash, requester_ip, req.tcp_port);
     if buddy_registry.relay_to_inbound(req.buddy_id, frame) {
-        tracing::info!(
+        tracing::debug!(
             "relayed Kad OP_CALLBACK to buddied client {buddy_tcp_addr} for requester \
              {requester_ip}:{} (file_hash={})",
             req.tcp_port,

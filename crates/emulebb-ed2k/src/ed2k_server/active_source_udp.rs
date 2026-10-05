@@ -7,7 +7,7 @@ use std::{
 use anyhow::Result;
 use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::config::Ed2kRuntimeConfig;
 use emulebb_kad_proto::Ed2kHash;
@@ -152,14 +152,14 @@ pub async fn search_source_udp_servers(
             }
         };
         if resolved_server_matches_endpoint(&resolved_server, excluded_endpoint) {
-            info!(
+            debug!(
                 "skipping ED2K UDP source-search connected server endpoint={} file_hash={}",
                 resolved_server.base_endpoint(),
                 file_hash
             );
             continue;
         }
-        info!(
+        debug!(
             "ED2K UDP source search attempt={}/{} endpoint={} name={} file_hash={}",
             attempt_index + 1,
             max_attempts.max(1),
@@ -223,7 +223,7 @@ pub async fn search_source_udp_servers(
                         }
                         merge_found_sources(&mut aggregated_results, results);
                     }
-                    info!(
+                    debug!(
                         "completed ED2K UDP source search file_hash={} endpoint={} source_count={} aggregated_source_count={}",
                         file_hash,
                         resolved_server.base_endpoint(),
@@ -430,14 +430,14 @@ pub async fn search_source_udp_server_batches(
             }
         };
         if resolved_server_matches_endpoint(&resolved_server, excluded_endpoint) {
-            info!(
+            debug!(
                 "skipping ED2K UDP source batch-search connected server endpoint={} target_count={}",
                 resolved_server.base_endpoint(),
                 targets.len()
             );
             continue;
         }
-        info!(
+        debug!(
             "ED2K UDP source batch search attempt={}/{} endpoint={} name={} target_count={}",
             attempt_index + 1,
             max_attempts.max(1),

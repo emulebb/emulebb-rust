@@ -169,7 +169,7 @@ pub(super) async fn run_one_server_session(
     }
     let server_udp_socket = match bind_server_udp_socket(context.bind_ip).await {
         Ok(socket) => {
-            info!(
+            debug!(
                 "bound ED2K server UDP helper local={} remote={} trace_id={}",
                 socket.local_addr()?,
                 server_udp_endpoint(&live_server),
@@ -332,30 +332,30 @@ pub(super) async fn run_one_server_session(
                         }
                     } else {
                         match &request {
-                            BackgroundServerSearchRequest::Keyword { query, .. } => info!(
-                                "queued ED2K background keyword search query={query:?} endpoint={} trace_id={} awaiting login",
+                            BackgroundServerSearchRequest::Keyword { .. } => debug!(
+                                "queued ED2K background keyword search endpoint={} trace_id={} awaiting login",
                                 session.endpoint,
                                 session.trace_id
                             ),
-                            BackgroundServerSearchRequest::Source { file_hash, .. } => info!(
+                            BackgroundServerSearchRequest::Source { file_hash, .. } => debug!(
                                 "queued ED2K background source search file_hash={} endpoint={} trace_id={} awaiting login",
                                 file_hash,
                                 session.endpoint,
                                 session.trace_id
                             ),
-                            BackgroundServerSearchRequest::SourceBatch { targets, .. } => info!(
+                            BackgroundServerSearchRequest::SourceBatch { targets, .. } => debug!(
                                 "queued ED2K background source batch target_count={} endpoint={} trace_id={} awaiting login",
                                 targets.len(),
                                 session.endpoint,
                                 session.trace_id
                             ),
-                            BackgroundServerSearchRequest::Callback { client_id, .. } => info!(
+                            BackgroundServerSearchRequest::Callback { client_id, .. } => debug!(
                                 "queued ED2K background callback request client_id={} endpoint={} trace_id={} awaiting login",
                                 client_id,
                                 session.endpoint,
                                 session.trace_id
                             ),
-                            BackgroundServerSearchRequest::Publish { .. } => info!(
+                            BackgroundServerSearchRequest::Publish { .. } => debug!(
                                 "queued ED2K background publish refresh endpoint={} trace_id={} awaiting login",
                                 session.endpoint,
                                 session.trace_id
@@ -457,9 +457,8 @@ pub(super) async fn run_one_server_session(
                                     results.len()
                                 ),
                             );
-                            info!(
-                                "completed ED2K background keyword search query={:?} endpoint={} trace_id={} result_count={} pages={}",
-                                query,
+                            debug!(
+                                "completed ED2K background keyword search endpoint={} trace_id={} result_count={} pages={}",
                                 session.endpoint,
                                 session.trace_id,
                                 results.len(),
@@ -489,7 +488,7 @@ pub(super) async fn run_one_server_session(
                                     results.len()
                                 ),
                             );
-                            info!(
+                            debug!(
                                 "completed ED2K background source search file_hash={} endpoint={} trace_id={} source_count={} obfuscated={}",
                                 file_hash,
                                 session.endpoint,
@@ -543,7 +542,7 @@ pub(super) async fn run_one_server_session(
                                         results_by_hash.len()
                                     ),
                                 );
-                                info!(
+                                debug!(
                                     "completed ED2K background source batch endpoint={} trace_id={} result_sets={} obfuscated={}",
                                     session.endpoint,
                                     session.trace_id,

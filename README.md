@@ -137,6 +137,20 @@ already contain `emulebb-rust-settings.toml`; its SQLite repository is
 `bindAddr` is required there, while runtime/network settings live in the
 database and are exposed through `/api/v1/app/settings`.
 
+## Logging
+
+Regular daemon builds log `INFO` and above by default to the console, the
+bounded `GET /api/v1/logs` buffer, and daily JSON Lines files under
+`<profile>/logs`. The file logger retains the newest eight files. If its
+directory cannot be created or opened, startup continues with console and REST
+logging and reports a warning there.
+
+Set `RUST_LOG` to change all three outputs together. Standard tracing filter
+directives are supported, for example `RUST_LOG=warn` or
+`RUST_LOG=info,emulebb_core=debug`. The REST buffer keeps the newest 2,000
+entries and truncates individual rendered messages at 4 KiB; clearing the REST
+buffer does not delete the retained files.
+
 When an enabled server list or persisted Kad bootstrap file is empty, startup
 downloads and validates the same trusted defaults used by eMuleBB MFC. Existing
 server data and non-empty `nodes.dat` files are never replaced. An offline or

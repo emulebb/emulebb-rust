@@ -202,7 +202,7 @@ impl EmulebbCore {
                 let transfer_hash = transfer.hash.clone();
                 let buddy_id_hex = hex::encode(buddy_id);
                 tokio::spawn(async move {
-                    tracing::info!(
+                    tracing::debug!(
                         "starting Kad FINDSOURCE callback walk file_hash={transfer_hash} source={source_peer} buddy_id={buddy_id_hex}"
                     );
                     dht.find_source_search(request, RpcWorkClass::Interactive)
@@ -224,7 +224,7 @@ impl EmulebbCore {
             };
             crate::diag_kad_event::callback(milestone, buddy_peer, source_peer, &transfer.hash);
             match outcome {
-                Ok(()) => tracing::info!(
+                Ok(()) => tracing::debug!(
                     "sent Kad KADEMLIA_CALLBACK_REQ file_hash={} source={source_peer} buddy={buddy_peer} our_tcp_port={our_tcp_port}",
                     transfer.hash
                 ),

@@ -10,9 +10,8 @@ use crate::handlers::prelude::*;
 use crate::log_buffer;
 
 pub(crate) fn recent_log_values(limit: usize) -> Vec<Value> {
-    log_buffer::recent_logs()
+    log_buffer::recent_logs(limit)
         .into_iter()
-        .take(limit)
         .map(|record| {
             json!({
                 "timestamp": record.timestamp,

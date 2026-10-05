@@ -20,7 +20,7 @@ use std::{
 };
 
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, info};
+use tracing::debug;
 
 use emulebb_kad_dht::DhtNode;
 
@@ -158,7 +158,7 @@ impl UploadPromoteDriver {
             &target,
         );
         match self.dht.send_raw_datagram(dest, &datagram.bytes).await {
-            Ok(()) => info!(
+            Ok(()) => debug!(
                 "sent OP_DIRECTCALLBACKREQ to promote LowID waiter {dest} onto its granted slot"
             ),
             Err(error) => debug!("OP_DIRECTCALLBACKREQ to {dest} failed: {error:#}"),
@@ -206,7 +206,7 @@ impl UploadPromoteDriver {
             ED2K_CONNECTION_IDLE_TIMEOUT,
         )
         .await?;
-        info!(
+        debug!(
             "granting upload slot over outbound connect to {peer_endpoint} (file_hash={})",
             grant.file_hash
         );

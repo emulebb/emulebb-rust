@@ -199,7 +199,7 @@ impl DhtNode {
                 emulebb_kad_net::diag_event::kad_event_bootstrap_contact_added(contact_addr);
             }
         }
-        info!(
+        debug!(
             "bootstrap response from {} - routing table now {} contacts",
             addr,
             rt.len()

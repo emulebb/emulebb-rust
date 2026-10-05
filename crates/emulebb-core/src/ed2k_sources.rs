@@ -1519,7 +1519,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
                     );
                     if sources.len() >= ED2K_DOWNLOAD_KAD_SOURCE_CAP {
                         cancel.cancel();
-                        tracing::info!(
+                        tracing::debug!(
                             "ED2K Kad source lookup reached cap file_hash={} attempts={} source_count={}",
                             file_hash,
                             attempts,
@@ -1543,7 +1543,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
 
         cancel.cancel();
         if !sources.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 "ED2K Kad source lookup produced file_hash={} attempts={} source_count={}",
                 file_hash,
                 attempts,
@@ -1564,7 +1564,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
         tokio::time::sleep(retry_delay).await;
     }
 
-    tracing::info!(
+    tracing::debug!(
         "ED2K Kad source lookup exhausted file_hash={} attempts={} source_count=0",
         file_hash,
         attempts

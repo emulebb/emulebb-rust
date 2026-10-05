@@ -151,7 +151,7 @@ where
                         match file_result.outcome {
                             Ed2kPeerDownloadOutcome::Completed if is_primary => {
                                 let manifest = transfer_runtime.manifest(&file_hash_hex).await?;
-                                tracing::info!(
+                                tracing::debug!(
                                     "ED2K direct download peer completed file_hash={} peer={} manifest_completed={} verified_ranges={} file_size={}",
                                     file_hash_hex,
                                     peer_addr,
@@ -167,7 +167,7 @@ where
                                 }
                             }
                             Ed2kPeerDownloadOutcome::Completed => {
-                                tracing::info!(
+                                tracing::debug!(
                                     "ED2K A4AF-switched peer completed file_hash={} peer={}",
                                     result_file_hash,
                                     peer_addr
@@ -178,7 +178,7 @@ where
                                     accepted_incomplete_peers =
                                         accepted_incomplete_peers.saturating_add(1);
                                 }
-                                tracing::info!(
+                                tracing::debug!(
                                     "ED2K direct download peer accepted incomplete file_hash={} peer={}",
                                     result_file_hash,
                                     peer_addr
@@ -193,7 +193,7 @@ where
                                         accepted_incomplete_peers.saturating_add(1);
                                 }
                                 detached_reask_endpoints.push(source_endpoint_key(&source));
-                                tracing::info!(
+                                tracing::debug!(
                                     "ED2K direct download peer detached to UDP reask file_hash={} peer={}",
                                     result_file_hash,
                                     peer_addr
@@ -208,7 +208,7 @@ where
                                 if is_primary {
                                     no_needed_parts_sources.push(result_source);
                                 }
-                                tracing::info!(
+                                tracing::debug!(
                                     "ED2K direct download peer reported no needed parts file_hash={} peer={}",
                                     result_file_hash,
                                     peer_addr
@@ -221,7 +221,7 @@ where
                                 if is_primary {
                                     file_not_found_sources.push(result_source);
                                 }
-                                tracing::info!(
+                                tracing::debug!(
                                     "ED2K direct download peer answered file-not-found file_hash={} peer={}",
                                     result_file_hash,
                                     peer_addr
@@ -295,7 +295,7 @@ where
         }
 
         retry_round = retry_round.saturating_add(1);
-        tracing::info!(
+        tracing::debug!(
             "ED2K direct download retrying loopback sources file_hash={} retry_round={}",
             file_hash_hex,
             retry_round
@@ -354,7 +354,7 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
         let file_name = context.file_name.to_string();
         let file_hash_hex = context.file_hash_hex.to_string();
         let peer_addr = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
-        tracing::info!(
+        tracing::debug!(
             "ED2K direct download attempt file_hash={} peer={} client_id={} obfuscated={} has_user_hash={} retry_round={}",
             file_hash_hex,
             peer_addr,

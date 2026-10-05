@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateState {
@@ -778,7 +778,7 @@ fn log_lookup_phase_summary(candidates: &[TraversalCandidate], closest_count: us
         .iter()
         .filter(|candidate| candidate.state == CandidateState::Failed)
         .count();
-    info!(
+    debug!(
         "traversal phase1 done: {} responded, {} failed, {} total candidates, {} in closest set",
         responded_count,
         failed_count,
@@ -828,7 +828,7 @@ async fn run_search_phase(
 
     let send_to = select_phase2_contacts(responded, target, phase2_fanout);
 
-    info!(
+    debug!(
         "traversal phase2: walking search packets across {} nodes, qt={:.1}s",
         send_to.len(),
         qt.as_secs_f32()
@@ -905,7 +905,7 @@ async fn run_search_phase(
         }
     }
 
-    info!(
+    debug!(
         "traversal phase2 done: {} total search entries collected",
         search_entries.len()
     );

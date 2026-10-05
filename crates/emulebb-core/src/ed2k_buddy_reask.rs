@@ -76,7 +76,7 @@ pub(crate) fn detach_kad_buddy_sources_for_reask(
             buddy_endpoint: Some(buddy_endpoint),
             buddy_id: Some(buddy_id),
         });
-        tracing::info!(
+        tracing::debug!(
             "ED2K Kad buddy source detached onto UDP reask file_hash={} source={}:{} buddy={}:{} registered={registered}",
             file_hash,
             endpoint.0,

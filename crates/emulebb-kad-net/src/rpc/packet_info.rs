@@ -217,16 +217,6 @@ pub(super) fn opcode_name(opcode_value: u8) -> &'static str {
     }
 }
 
-pub(super) fn hex_prefix(bytes: &[u8], max_bytes: usize) -> String {
-    let prefix_len = bytes.len().min(max_bytes);
-    let mut out = String::with_capacity(prefix_len.saturating_mul(2));
-    for byte in &bytes[..prefix_len] {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
-
 pub(super) fn outbound_transport_reason(
     opcode_value: u8,
     outbound: OutboundKadEncryptionInfo,

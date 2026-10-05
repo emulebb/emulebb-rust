@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use emulebb_kad_proto::KadPacket;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, trace, warn};
 
 use super::packet_info::{
-    hex_prefix, inbound_transport_mode, inspect_inbound_packet, is_publish_opcode,
-    is_tracked_response_opcode, opcode_name, should_learn_sender_verify_key,
-    should_log_unsolicited_opcode, tracked_request_opcode_for_response,
+    inbound_transport_mode, inspect_inbound_packet, is_publish_opcode, is_tracked_response_opcode,
+    opcode_name, should_learn_sender_verify_key, should_log_unsolicited_opcode,
+    tracked_request_opcode_for_response,
 };
 use super::{ReceivedKadPacket, RpcManager};
 use crate::error::NetError;
@@ -85,17 +85,14 @@ impl RpcManager {
                                         tracker_max_packets: None,
                                     },
                                 );
-                                info!(
-                                    "kad recv decode-failed from={} obfuscated={} raw_len={} plain_len={} raw_prefix={} plain_prefix={} error={}",
-                                    from,
-                                    was_obfuscated,
-                                    data.len(),
-                                    plain.len(),
-                                    hex_prefix(&data, 16),
-                                    hex_prefix(&plain, 16),
-                                    e,
+                                trace!(
+                                    from = %from,
+                                    obfuscated = was_obfuscated,
+                                    raw_len = data.len(),
+                                    plain_len = plain.len(),
+                                    error = %e,
+                                    "dropped malformed Kad packet"
                                 );
-                                debug!("failed to decode packet from {}: {}", from, e);
                                 continue;
                             }
                         };

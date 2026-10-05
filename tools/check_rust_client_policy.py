@@ -80,6 +80,7 @@ def main() -> int:
     errors.extend(check_package_metadata())
     errors.extend(check_workspace_dependencies())
     errors.extend(check_tokio_features())
+    errors.extend(check_logging_policy())
     errors.extend(check_supply_chain_policy())
     errors.extend(check_github_action_pins())
     errors.extend(check_live_rest_openapi_ci())
@@ -432,6 +433,50 @@ def check_tokio_features() -> list[str]:
             if "full" in features:
                 rel = manifest_path.relative_to(ROOT).as_posix()
                 errors.append(f"{rel} must declare only the Tokio features it uses, not 'full'")
+    return errors
+
+
+def check_logging_policy() -> list[str]:
+    """Keep regular-daemon logging useful, bounded, and consistent by default."""
+    errors = []
+    workspace = read_toml(ROOT / "Cargo.toml")["workspace"]["dependencies"]
+    daemon = read_toml(ROOT / "crates" / "emulebb-daemon" / "Cargo.toml")
+    subscriber = workspace.get("tracing-subscriber", {})
+    subscriber_features = set(subscriber.get("features", []))
+    if not {"env-filter", "json"}.issubset(subscriber_features):
+        errors.append(
+            "tracing-subscriber must enable env-filter and json for regular logging"
+        )
+    if "tracing-appender" not in workspace:
+        errors.append("workspace dependencies must include tracing-appender")
+    if daemon.get("dependencies", {}).get("tracing-appender", {}).get("workspace") is not True:
+        errors.append("emulebb-daemon must inherit tracing-appender from the workspace")
+
+    source = (ROOT / "crates" / "emulebb-daemon" / "src" / "logging.rs").read_text(
+        encoding="utf-8"
+    )
+    required_fragments = {
+        "INFO default": "const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::INFO;",
+        "daily rotation": ".rotation(Rotation::DAILY)",
+        "eight-file retention": "const RETAINED_LOG_FILES: usize = 8;",
+        "JSONL suffix": 'const LOG_FILE_SUFFIX: &str = "jsonl";',
+        "bounded writer queue": "const FILE_BUFFERED_LINES: usize = 8192;",
+        "non-blocking lossy writer": ".lossy(true)",
+        "profile-local log directory": "profile_dir.join(LOG_DIRECTORY_NAME)",
+    }
+    for policy, fragment in required_fragments.items():
+        if fragment not in source:
+            errors.append(f"regular logging must retain its {policy}")
+    if source.count(".with_filter(build_filter(&filter_spec))") != 3:
+        errors.append("console, REST, and file logging must use the same RUST_LOG filter")
+
+    rest_source = (ROOT / "crates" / "emulebb-rest" / "src" / "log_buffer.rs").read_text(
+        encoding="utf-8"
+    )
+    if "const LOG_CAPACITY: usize = 2000;" not in rest_source:
+        errors.append("REST recent logs must retain the 2000-entry bound")
+    if "const MAX_LOG_MESSAGE_BYTES: usize = 4096;" not in rest_source:
+        errors.append("REST recent log messages must retain the 4 KiB bound")
     return errors
 
 

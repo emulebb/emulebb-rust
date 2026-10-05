@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::debug;
 
 use crate::{
     config::Ed2kRuntimeConfig,
@@ -122,7 +122,7 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
                 session
                     .send_packet(OP_CALLBACKREQUEST, &client_id.to_le_bytes())
                     .await?;
-                info!(
+                debug!(
                     "sent ED2K targeted callback request client_id={} endpoint={} trace_id={} transport={}",
                     client_id,
                     session.endpoint,

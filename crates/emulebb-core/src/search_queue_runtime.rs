@@ -161,7 +161,7 @@ impl EmulebbCore {
                 // handle / session dropped mid-flight). Reporting results now
                 // would be the silent completed-empty bug; requeue for a
                 // fresh session instead, bounded by the attempt budget.
-                tracing::info!(
+                tracing::debug!(
                     "queued server search interrupted mid-flight; re-queueing search_id={} attempt={} error={error:#}",
                     entry.search_id,
                     entry.send_attempts

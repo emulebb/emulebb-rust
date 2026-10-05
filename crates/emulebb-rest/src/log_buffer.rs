@@ -9,6 +9,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOG_CAPACITY: usize = 2000;
+const MAX_LOG_MESSAGE_BYTES: usize = 4096;
+const TRUNCATION_MARKER: &str = "... [truncated]";
 
 /// One captured log line in the eMuleBB `LogEntry` shape.
 #[derive(Debug, Clone)]
@@ -47,15 +49,29 @@ pub fn record_log(level: impl Into<String>, message: impl Into<String>, debug: b
     buf.push_back(LogRecord {
         timestamp,
         level: level.into(),
-        message: message.into(),
+        message: truncate_message(message.into()),
         debug,
     });
 }
 
-/// Returns the recent log records, newest first.
-pub fn recent_logs() -> Vec<LogRecord> {
+/// Returns at most `limit` recent log records, newest first.
+pub fn recent_logs(limit: usize) -> Vec<LogRecord> {
     let buf = buffer().lock().unwrap_or_else(|poison| poison.into_inner());
-    buf.iter().rev().cloned().collect()
+    buf.iter().rev().take(limit).cloned().collect()
+}
+
+fn truncate_message(mut message: String) -> String {
+    if message.len() <= MAX_LOG_MESSAGE_BYTES {
+        return message;
+    }
+
+    let mut truncate_at = MAX_LOG_MESSAGE_BYTES.saturating_sub(TRUNCATION_MARKER.len());
+    while !message.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    message.truncate(truncate_at);
+    message.push_str(TRUNCATION_MARKER);
+    message
 }
 
 /// Clears the recent-log buffer.
@@ -77,12 +93,40 @@ mod tests {
         for index in 0..(LOG_CAPACITY + 10) {
             record_log("info", format!("line {index}"), false);
         }
-        let logs = recent_logs();
+        let logs = recent_logs(LOG_CAPACITY);
         assert_eq!(logs.len(), LOG_CAPACITY);
         // Newest first.
         assert_eq!(logs[0].message, format!("line {}", LOG_CAPACITY + 9));
         assert!(logs[0].timestamp > 0);
         clear_logs();
-        assert!(recent_logs().is_empty());
+        assert!(recent_logs(LOG_CAPACITY).is_empty());
+    }
+
+    #[tokio::test]
+    async fn limits_without_cloning_the_whole_buffer() {
+        let _guard = test_log_guard().await;
+        clear_logs();
+        for index in 0..10 {
+            record_log("info", format!("line {index}"), false);
+        }
+
+        let logs = recent_logs(2);
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].message, "line 9");
+        assert_eq!(logs[1].message, "line 8");
+        clear_logs();
+    }
+
+    #[tokio::test]
+    async fn truncates_large_messages_on_a_unicode_boundary() {
+        let _guard = test_log_guard().await;
+        clear_logs();
+        record_log("info", "é".repeat(MAX_LOG_MESSAGE_BYTES), false);
+
+        let logs = recent_logs(1);
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].message.len() <= MAX_LOG_MESSAGE_BYTES);
+        assert!(logs[0].message.ends_with(TRUNCATION_MARKER));
+        clear_logs();
     }
 }

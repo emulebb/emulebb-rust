@@ -33,8 +33,7 @@ use tracing::{info, warn};
 
 mod bind_config;
 mod discovery_bootstrap;
-pub mod log_layer;
-pub use log_layer::LogBufferLayer;
+pub mod logging;
 mod vpn_guard_monitor;
 
 pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
@@ -897,13 +896,17 @@ fn ranked_popular_enabled_servers(servers: Vec<ServerInfo>) -> Vec<ServerInfo> {
 
 fn spawn_regular_diagnostic_summary(core: Arc<EmulebbCore>) {
     tokio::spawn(async move {
-        log_regular_diagnostic_summary(&core).await;
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            log_regular_diagnostic_summary(&core).await;
+        }
         let mut interval = tokio::time::interval(REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
             interval.tick().await;
-            log_regular_diagnostic_summary(&core).await;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                log_regular_diagnostic_summary(&core).await;
+            }
         }
     });
 }
@@ -914,7 +917,7 @@ async fn log_regular_diagnostic_summary(core: &EmulebbCore) {
     let throughput = core.transfer_throughput_stats();
     let shared_hashing_count = core.shared_directories().await.hashing_count;
     let vpn_guard = core.vpn_guard_status();
-    info!(
+    tracing::debug!(
         uptime_secs = status.uptime_secs,
         vpn_guard_enabled = vpn_guard.enabled,
         vpn_guard_startup_blocked = vpn_guard.startup_blocked,

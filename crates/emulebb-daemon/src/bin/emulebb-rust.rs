@@ -3,10 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use emulebb_daemon::{DaemonProfile, LogBufferLayer, run};
-use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::{EnvFilter, fmt};
+use emulebb_daemon::{DaemonProfile, logging, run};
 
 #[derive(Debug, Parser)]
 #[command(name = "emulebb-rust", about = "Rust headless eMuleBB client")]
@@ -26,12 +23,6 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Console output follows RUST_LOG; the REST log buffer captures INFO+ so
-    // GET /api/v1/logs is populated regardless of the console filter.
-    tracing_subscriber::registry()
-        .with(fmt::layer().with_filter(EnvFilter::from_default_env()))
-        .with(LogBufferLayer.with_filter(LevelFilter::INFO))
-        .init();
     let cli = Cli::parse();
     let mut profile = DaemonProfile::load(cli.profile)?;
     if let Some(bind_addr) = cli.rest_bind_addr {
@@ -43,5 +34,11 @@ async fn main() -> Result<()> {
     if let Some(interface) = cli.p2p_bind_interface {
         profile.p2p_bind_interface = Some(interface);
     }
-    run(profile).await
+    let logging_guard = logging::init(&profile.profile_dir)?;
+    let result = run(profile).await;
+    if let Err(error) = result.as_ref() {
+        tracing::error!(error = ?error, "daemon terminated with an error");
+    }
+    logging_guard.shutdown().await;
+    result
 }

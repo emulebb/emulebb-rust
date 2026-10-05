@@ -390,7 +390,7 @@ async fn handle_direct_callback_req(
         )
         .await
         {
-            Ok(mode) => tracing::info!(
+            Ok(mode) => tracing::debug!(
                 "direct-UDP-callback connect-out to {peer_addr} completed transport={}",
                 mode.as_str()
             ),

@@ -257,7 +257,7 @@ async fn handle_buddy_packet(
     match (packet.protocol, packet.opcode) {
         (OP_EMULEPROT, OP_CALLBACK) => {
             let callback = decode_kad_callback_payload(&packet.payload)?;
-            info!(
+            debug!(
                 "buddy {buddy_addr} relayed OP_CALLBACK file_hash={} requester={}:{}",
                 callback.file_hash, callback.peer_ip, callback.peer_tcp_port
             );

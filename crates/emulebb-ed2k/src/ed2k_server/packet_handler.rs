@@ -140,7 +140,7 @@ pub(super) async fn handle_server_packet(
                     guard.server_users = Some(users);
                     guard.server_files = Some(files);
                 }
-                info!(
+                debug!(
                     "ED2K server status from {}: users={} files={}",
                     session.endpoint, users, files
                 );
@@ -249,7 +249,7 @@ pub(super) async fn handle_server_packet(
         }
         OP_CALLBACKREQUESTED => {
             if let Some(callback) = decode_callback_request(&packet.payload)? {
-                info!(
+                debug!(
                     "ED2K server requested callback from peer {} transport_hint={} payload_len={}",
                     callback.peer_addr,
                     callback
@@ -278,7 +278,7 @@ pub(super) async fn handle_server_packet(
                     .await
                     {
                         Ok(mode) => {
-                            info!(
+                            debug!(
                                 "ED2K callback peer connect completed peer={} transport={}",
                                 callback.peer_addr,
                                 mode.as_str()
@@ -450,10 +450,7 @@ async fn maybe_send_probe_search(
         .send_packet(OP_SEARCHREQUEST, &search_payload)
         .await?;
     session.probe_search_sent = true;
-    info!(
-        "sent ED2K server search probe term={term:?} endpoint={}",
-        session.endpoint
-    );
+    debug!(endpoint = %session.endpoint, "sent ED2K server search probe");
     Ok(())
 }
 
