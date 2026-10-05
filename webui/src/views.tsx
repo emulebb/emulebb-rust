@@ -2276,6 +2276,7 @@ type SettingsForm = {
   ed2kMaxSourcesPerFile: string;
   ed2kMaxParallelDownloadPeers: string;
   ed2kDownloadLimitBytesPerSec: string;
+  ed2kMinFreeConfigSpaceBytes: string;
   ed2kMinFreeTransferSpaceBytes: string;
   ed2kMinFreeIncomingSpaceBytes: string;
   ed2kKeywordServerAttemptBudget: string;
@@ -2344,6 +2345,10 @@ const NAT_BACKEND_UPNP_MINIUPNPC = "upnp_miniupnpc";
 const CORE_I32_MAX = 2147483647;
 const CORE_U32_MAX = 4294967295;
 const CORE_U32_MAX_MINUS_ONE = 4294967294;
+const MIN_FREE_CONFIG_SPACE_BYTES = 1073741824;
+const MIN_FREE_TRANSFER_SPACE_BYTES = 5368709120;
+const MIN_FREE_INCOMING_SPACE_BYTES = 5368709120;
+const MAX_FREE_SPACE_BYTES = 5497558138880;
 
 const emptySettingsForm: SettingsForm = {
   uploadLimitKiBps: "",
@@ -2385,6 +2390,7 @@ const emptySettingsForm: SettingsForm = {
   ed2kMaxSourcesPerFile: "",
   ed2kMaxParallelDownloadPeers: "",
   ed2kDownloadLimitBytesPerSec: "",
+  ed2kMinFreeConfigSpaceBytes: "",
   ed2kMinFreeTransferSpaceBytes: "",
   ed2kMinFreeIncomingSpaceBytes: "",
   ed2kKeywordServerAttemptBudget: "",
@@ -2558,6 +2564,7 @@ export function SettingsView(props: {
           "ed2k.maxSourcesPerFile",
           "ed2k.maxParallelDownloadPeers",
           "ed2k.downloadLimitBytesPerSec",
+          "ed2k.minFreeConfigSpaceBytes",
           "ed2k.minFreeTransferSpaceBytes",
           "ed2k.minFreeIncomingSpaceBytes",
           "ed2k.enableUdpReask"
@@ -2577,6 +2584,7 @@ export function SettingsView(props: {
               {renderField("ed2k.maxSourcesPerFile", "ed2kMaxSourcesPerFile", "eD2K source cap")}
               {renderField("ed2k.maxParallelDownloadPeers", "ed2kMaxParallelDownloadPeers", "Parallel download peers")}
               {renderField("ed2k.downloadLimitBytesPerSec", "ed2kDownloadLimitBytesPerSec", "Download limit B/s")}
+              {renderField("ed2k.minFreeConfigSpaceBytes", "ed2kMinFreeConfigSpaceBytes", "Minimum free profile/config bytes")}
               {renderField("ed2k.minFreeTransferSpaceBytes", "ed2kMinFreeTransferSpaceBytes", "Minimum free transfer bytes")}
               {renderField("ed2k.minFreeIncomingSpaceBytes", "ed2kMinFreeIncomingSpaceBytes", "Minimum free incoming bytes")}
               {renderToggle("ed2k.enableUdpReask", "enableUdpReask", "UDP reask")}
@@ -3000,8 +3008,9 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kMaxSourcesPerFile", "eD2K source cap", {});
   validateUnsigned(errors, form, "ed2kMaxParallelDownloadPeers", "Parallel download peers", { min: 1 });
   validateUnsigned(errors, form, "ed2kDownloadLimitBytesPerSec", "Download limit B/s", {});
-  validateUnsigned(errors, form, "ed2kMinFreeTransferSpaceBytes", "Minimum free transfer bytes", {});
-  validateUnsigned(errors, form, "ed2kMinFreeIncomingSpaceBytes", "Minimum free incoming bytes", {});
+  validateUnsigned(errors, form, "ed2kMinFreeConfigSpaceBytes", "Minimum free profile/config bytes", { min: MIN_FREE_CONFIG_SPACE_BYTES, max: MAX_FREE_SPACE_BYTES });
+  validateUnsigned(errors, form, "ed2kMinFreeTransferSpaceBytes", "Minimum free transfer bytes", { min: MIN_FREE_TRANSFER_SPACE_BYTES, max: MAX_FREE_SPACE_BYTES });
+  validateUnsigned(errors, form, "ed2kMinFreeIncomingSpaceBytes", "Minimum free incoming bytes", { min: MIN_FREE_INCOMING_SPACE_BYTES, max: MAX_FREE_SPACE_BYTES });
   validateUnsigned(errors, form, "ed2kKeywordServerAttemptBudget", "Keyword server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kExactHashKeywordServerAttemptBudget", "Exact-hash server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kSourceServerAttemptBudget", "Source server attempts", { min: 1 });
@@ -3237,6 +3246,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(ed2k, "exactHashKeywordServerAttemptBudget", parseNumber(form.ed2kExactHashKeywordServerAttemptBudget), parseNumber(baseline.ed2kExactHashKeywordServerAttemptBudget));
   putChanged(ed2k, "sourceServerAttemptBudget", parseNumber(form.ed2kSourceServerAttemptBudget), parseNumber(baseline.ed2kSourceServerAttemptBudget));
   putChanged(ed2k, "downloadLimitBytesPerSec", parseNumber(form.ed2kDownloadLimitBytesPerSec), parseNumber(baseline.ed2kDownloadLimitBytesPerSec));
+  putChanged(ed2k, "minFreeConfigSpaceBytes", parseNumber(form.ed2kMinFreeConfigSpaceBytes), parseNumber(baseline.ed2kMinFreeConfigSpaceBytes));
   putChanged(ed2k, "minFreeTransferSpaceBytes", parseNumber(form.ed2kMinFreeTransferSpaceBytes), parseNumber(baseline.ed2kMinFreeTransferSpaceBytes));
   putChanged(ed2k, "minFreeIncomingSpaceBytes", parseNumber(form.ed2kMinFreeIncomingSpaceBytes), parseNumber(baseline.ed2kMinFreeIncomingSpaceBytes));
   putChanged(ed2k, "obfuscationEnabled", form.obfuscationEnabled, baseline.obfuscationEnabled);
@@ -3374,6 +3384,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kMaxSourcesPerFile: String(numberField(settings.ed2k, "maxSourcesPerFile") ?? ""),
     ed2kMaxParallelDownloadPeers: String(numberField(settings.ed2k, "maxParallelDownloadPeers") ?? ""),
     ed2kDownloadLimitBytesPerSec: String(numberField(settings.ed2k, "downloadLimitBytesPerSec") ?? ""),
+    ed2kMinFreeConfigSpaceBytes: String(numberField(settings.ed2k, "minFreeConfigSpaceBytes") ?? ""),
     ed2kMinFreeTransferSpaceBytes: String(numberField(settings.ed2k, "minFreeTransferSpaceBytes") ?? ""),
     ed2kMinFreeIncomingSpaceBytes: String(numberField(settings.ed2k, "minFreeIncomingSpaceBytes") ?? ""),
     ed2kKeywordServerAttemptBudget: String(numberField(settings.ed2k, "keywordServerAttemptBudget") ?? ""),

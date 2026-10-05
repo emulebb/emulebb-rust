@@ -910,6 +910,8 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
 
   const nickname = settingsPanel.getByLabel("eD2K nickname");
   await expect(nickname).toHaveValue("Sample Mule");
+  const configFloor = settingsPanel.getByLabel("Minimum free profile/config bytes");
+  await expect(configFloor).toHaveValue("1073741824");
   await nickname.fill("x".repeat(51));
   await expect(settingsPanel.getByText("eD2K nickname must be at most 50 characters.")).toBeVisible();
   await expect(save).toBeDisabled();
@@ -921,6 +923,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("Max connections").fill("500");
   await expect(settingsPanel.getByText("Max connections must be between 1 and 2147483647.")).toHaveCount(0);
+  await configFloor.fill("1073741823");
+  await expect(settingsPanel.getByText("Minimum free profile/config bytes must be between 1073741824 and 5497558138880.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await configFloor.fill("1073741824");
+  await expect(settingsPanel.getByText("Minimum free profile/config bytes must be between 1073741824 and 5497558138880.")).toHaveCount(0);
   await settingsPanel.getByLabel("eD2K listen port").fill("70000");
   await expect(settingsPanel.getByText("eD2K listen port must be between 1 and 65535.")).toBeVisible();
   await expect(save).toBeDisabled();
@@ -1003,6 +1010,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
 
   await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
   await settingsPanel.getByLabel("eD2K nickname").fill("Phase B Mule");
+  await configFloor.fill("2147483648");
   await settingsPanel.getByLabel("Use server priorities").uncheck();
   await settingsPanel.getByLabel("Auto-connect static servers only").check();
   await save.click();
@@ -1013,6 +1021,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
     daemon: { incomingDir: "C:\\Changed\\Incoming" },
     ed2k: {
       nickname: "Phase B Mule",
+      minFreeConfigSpaceBytes: 2147483648,
       useServerPriorities: false,
       autoConnectStaticOnly: true
     }

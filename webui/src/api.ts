@@ -537,6 +537,7 @@ export type Ed2kSettings = {
   sourceServerAttemptBudget?: number;
   uploadQueue?: Ed2kUploadQueueSettings;
   downloadLimitBytesPerSec?: number;
+  minFreeConfigSpaceBytes?: number;
   minFreeTransferSpaceBytes?: number;
   minFreeIncomingSpaceBytes?: number;
   enableUdpReask?: boolean;
