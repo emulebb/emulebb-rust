@@ -396,6 +396,33 @@ mod tests {
     }
 
     #[test]
+    fn retained_file_output_prunes_matching_history_to_eight_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join(LOG_DIRECTORY_NAME);
+        std::fs::create_dir_all(&directory).unwrap();
+        for day in 1..=10 {
+            std::fs::write(
+                directory.join(format!(
+                    "{LOG_FILE_PREFIX}.2020-01-{day:02}.{LOG_FILE_SUFFIX}"
+                )),
+                "old log\n",
+            )
+            .unwrap();
+        }
+
+        let FileOutput {
+            writer,
+            worker_guard,
+            ..
+        } = create_file_output(temp.path()).unwrap();
+        drop(writer);
+        drop(worker_guard);
+
+        let retained = std::fs::read_dir(directory).unwrap().count();
+        assert_eq!(retained, RETAINED_LOG_FILES);
+    }
+
+    #[test]
     fn retained_file_setup_failure_is_reportable() {
         let temp = tempfile::tempdir().unwrap();
         let profile_file = temp.path().join("not-a-directory");

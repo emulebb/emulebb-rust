@@ -129,4 +129,24 @@ mod tests {
         assert!(logs[0].message.ends_with(TRUNCATION_MARKER));
         clear_logs();
     }
+
+    #[tokio::test]
+    async fn accepts_concurrent_writers_without_exceeding_capacity() {
+        let _guard = test_log_guard().await;
+        clear_logs();
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                scope.spawn(move || {
+                    for line in 0..400 {
+                        record_log("debug", format!("worker={worker} line={line}"), true);
+                    }
+                });
+            }
+        });
+
+        let logs = recent_logs(LOG_CAPACITY + 1);
+        assert_eq!(logs.len(), LOG_CAPACITY);
+        assert!(logs.iter().all(|record| record.debug));
+        clear_logs();
+    }
 }
