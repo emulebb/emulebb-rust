@@ -180,6 +180,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             (*transport, Some(*grant))
         }
     };
+    let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
     let local_addr = transport
         .stream
         .local_addr()
@@ -791,6 +792,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         peer_accept_comment_version = 1;
                     }
                 }
+                let _ = upload_queue
+                    .refresh_peer_state(transfer_runtime, &peer_upload_identity)
+                    .await;
                 let reply = encode_emule_info_answer(reachability.advertised_udp_port(kad_udp_port));
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "emule_info_answer", &reply);
                 transport
@@ -835,6 +839,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     reachability.get(),
                     &packet.payload,
                 );
+                let _ = upload_queue
+                    .refresh_peer_state(transfer_runtime, &peer_upload_identity)
+                    .await;
             }
             (OP_EMULEPROT, OP_PUBLICIP_REQ) => {
                 debug!(

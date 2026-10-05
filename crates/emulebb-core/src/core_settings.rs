@@ -59,12 +59,8 @@ pub(crate) fn ed2k_download_coordinator_config_from_core_settings(
 
 pub(crate) fn initial_ed2k_upload_queue_policy(
     base: Option<&Ed2kUploadQueueRuntimeConfig>,
-    has_persisted_core_settings: bool,
+    _has_persisted_core_settings: bool,
     core_settings: &CoreSettings,
 ) -> Ed2kUploadQueueRuntimeConfig {
-    if has_persisted_core_settings || base.is_none() {
-        ed2k_upload_queue_policy_from_core_settings(base, core_settings)
-    } else {
-        base.cloned().unwrap_or_default()
-    }
+    ed2k_upload_queue_policy_from_core_settings(base, core_settings)
 }

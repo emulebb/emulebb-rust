@@ -1,6 +1,7 @@
 //! Runtime-facing upload queue methods.
 
 use std::{
+    str::FromStr,
     sync::atomic::Ordering,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -13,7 +14,7 @@ use crate::config::Ed2kUploadQueueRuntimeConfig;
 use super::{
     Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueCapacitySnapshot,
     Ed2kUploadQueueSnapshotEntry, Ed2kUploadRangeAdmission, Ed2kUploadSessionHandle,
-    Ed2kUploadSessionStatus, Ed2kUploadThrottleReservation,
+    Ed2kUploadSessionStatus, Ed2kUploadThrottleReservation, Ed2kUploadWorkGuard,
     upload_queue::{DEFAULT_CREDIT_SCORE_PERMILLE, credit_score_permille, upload_priority_score},
     upload_queue_config_from_policy, upload_queue_policy_from_config,
 };
@@ -56,6 +57,20 @@ impl Ed2kTransferRuntime {
             .await
     }
 
+    /// Admit another file request on an already-established transport without
+    /// making it look like a hash-colliding reconnect. The queue uses one
+    /// connection id for the lifetime of a TCP session, even when that peer
+    /// switches its requested upload file.
+    pub(crate) async fn begin_upload_session_on_connection(
+        &self,
+        peer: Ed2kUploadPeerIdentity,
+        file_hash: &Ed2kHash,
+        connection_id: u64,
+    ) -> (Ed2kUploadSessionHandle, Ed2kUploadSessionStatus) {
+        self.begin_upload_session_with_connection_at(peer, file_hash, connection_id, Instant::now())
+            .await
+    }
+
     /// Records a peer (re)starting an upload session for a file, returning the
     /// repeat count when the same `(peer, file)` restarted within the churn window
     /// (MFC repeat_file_request parity). `peer_key` is the peer user-hash hex when
@@ -85,6 +100,17 @@ impl Ed2kTransferRuntime {
         let connection_id = self
             .next_upload_connection_id
             .fetch_add(1, Ordering::Relaxed);
+        self.begin_upload_session_with_connection_at(peer, file_hash, connection_id, now)
+            .await
+    }
+
+    async fn begin_upload_session_with_connection_at(
+        &self,
+        peer: Ed2kUploadPeerIdentity,
+        file_hash: &Ed2kHash,
+        connection_id: u64,
+        now: Instant,
+    ) -> (Ed2kUploadSessionHandle, Ed2kUploadSessionStatus) {
         let credit_score_permille = self.peer_credit_score_permille(&peer);
         // MFC repeat_file_request parity: surface a peer that keeps (re)starting an
         // upload session for the same file (same-file churn, e.g. dropping and
@@ -104,7 +130,8 @@ impl Ed2kTransferRuntime {
                 );
             }
         }
-        let handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
+        let peer_ip = peer.ip;
+        let mut handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
         let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(file_hash);
         let file_size = self.shared_file_size(file_hash);
         // Resolve an auto-upload-priority file's dynamic tier from its live queue
@@ -116,16 +143,63 @@ impl Ed2kTransferRuntime {
             .await
             .upload_client_count_for_file(&file_hash.to_string());
         let file_priority_score = self.file_priority_score(file_hash, queued_count);
-        let status = self.upload_queue.lock().await.begin_session(
-            handle.key().clone(),
-            connection_id,
-            now,
+        let live_same_ip_connections = self.live_peer_connections_from(peer_ip);
+        let status = {
+            let mut queue = self.upload_queue.lock().await;
+            let status = queue.begin_session_with_live_connections(
+                handle.key().clone(),
+                connection_id,
+                now,
+                file_priority_score,
+                credit_score_permille,
+                all_time_upload_ratio_permille,
+                file_size,
+                live_same_ip_connections,
+            );
+            queue.bind_session_handle(&mut handle);
+            status
+        };
+        (handle, status)
+    }
+
+    /// Refresh mutable scheduling facts learned after initial admission without
+    /// resetting the peer's wait start or slot phase.
+    pub(crate) async fn refresh_upload_session_peer(
+        &self,
+        handle: &mut Ed2kUploadSessionHandle,
+        peer: Ed2kUploadPeerIdentity,
+    ) -> Ed2kUploadSessionStatus {
+        let Ok(file_hash) = Ed2kHash::from_str(handle.file_hash_hex()) else {
+            return Ed2kUploadSessionStatus::Stale;
+        };
+        let queued_count = self
+            .upload_queue
+            .lock()
+            .await
+            .upload_client_count_for_file(handle.file_hash_hex());
+        let file_priority_score = self.file_priority_score(&file_hash, queued_count);
+        let credit_score_permille = self.peer_credit_score_permille(&peer);
+        let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(&file_hash);
+        let file_size = self.shared_file_size(&file_hash);
+        self.upload_queue.lock().await.refresh_session_peer(
+            handle,
+            peer,
+            Instant::now(),
             file_priority_score,
             credit_score_permille,
             all_time_upload_ratio_permille,
             file_size,
-        );
-        (handle, status)
+        )
+    }
+
+    pub(crate) async fn begin_upload_work(
+        &self,
+        handle: &Ed2kUploadSessionHandle,
+    ) -> Option<Ed2kUploadWorkGuard> {
+        self.upload_queue
+            .lock()
+            .await
+            .begin_upload_work(handle, Instant::now())
     }
 
     /// Purge upload-queue waiters whose requested file is no longer shared
@@ -141,6 +215,14 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .purge_waiters_for_unshared_files(&shared_file_hashes)
+    }
+
+    pub(crate) async fn maintain_upload_queue(&self) {
+        let shared_file_hashes = self.servable_shared_file_hashes().await;
+        self.upload_queue
+            .lock()
+            .await
+            .maintain(&shared_file_hashes, Instant::now());
     }
 
     async fn servable_shared_file_hashes(
@@ -397,10 +479,22 @@ impl Ed2kTransferRuntime {
     pub(crate) async fn take_pending_upload_promotions(
         &self,
     ) -> Vec<super::Ed2kUploadPendingPromotion> {
-        self.upload_queue.lock().await.take_pending_promotions(|| {
-            self.next_upload_connection_id
-                .fetch_add(1, Ordering::Relaxed)
-        })
+        self.take_pending_upload_promotions_with_timeout(std::time::Duration::from_secs(30))
+            .await
+    }
+
+    pub(crate) async fn take_pending_upload_promotions_with_timeout(
+        &self,
+        connect_timeout: std::time::Duration,
+    ) -> Vec<super::Ed2kUploadPendingPromotion> {
+        self.upload_queue.lock().await.take_pending_promotions(
+            Instant::now(),
+            connect_timeout,
+            || {
+                self.next_upload_connection_id
+                    .fetch_add(1, Ordering::Relaxed)
+            },
+        )
     }
 
     /// Release one queue-visible upload client selected from REST management state.

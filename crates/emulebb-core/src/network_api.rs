@@ -477,6 +477,7 @@ impl EmulebbCore {
             reachability: self.ed2k_reachability.clone(),
             buddy_registry: buddy_registry.clone(),
             port_test_registry: port_test_registry.clone(),
+            callback_timeout: Duration::from_secs(network.ed2k.callback_timeout_secs.max(1)),
         })));
         // Learned public-IP cell (eMule theApp public IP), shared by the server
         // loop (sets it from OP_IDCHANGE) and the UDP reask loop (obfuscation key).

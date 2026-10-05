@@ -437,11 +437,7 @@ async fn upload_queue_classifies_queued_and_completed_duplicates_across_packets(
 
     let next_file_hash = Ed2kHash::from_bytes([0x36; 16]);
     let (next_handle, next_status) = runtime
-        .begin_upload_session_at(
-            peer,
-            &next_file_hash,
-            now + std::time::Duration::from_secs(4),
-        )
+        .begin_upload_session_on_connection(peer, &next_file_hash, handle.connection_id())
         .await;
     assert_eq!(next_status, Ed2kUploadSessionStatus::Granted);
     assert_eq!(
@@ -561,7 +557,7 @@ async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
             waiting_capacity: 8,
             soft_queue_size: 10_000,
             waiting_timeout: std::time::Duration::from_secs(60),
-            granted_timeout: std::time::Duration::from_secs(2),
+            granted_timeout: std::time::Duration::from_secs(100_000),
             upload_timeout: std::time::Duration::from_secs(5),
             session_transfer_percent: 0,
             session_time_limit: std::time::Duration::ZERO,
@@ -618,7 +614,17 @@ async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
             .poll_upload_session_at(
                 &active_handle,
                 false,
-                now + std::time::Duration::from_secs(7),
+                now + std::time::Duration::from_secs(31),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &active_handle,
+                false,
+                now + std::time::Duration::from_secs(36),
             )
             .await,
         Ed2kUploadSessionStatus::Waiting { rank: 1 }
@@ -628,7 +634,7 @@ async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
             .poll_upload_session_at(
                 &waiting_handle,
                 false,
-                now + std::time::Duration::from_secs(7),
+                now + std::time::Duration::from_secs(36),
             )
             .await,
         Ed2kUploadSessionStatus::Granted
@@ -666,25 +672,78 @@ async fn upload_queue_release_client_selects_waiter_or_active_slot() {
 }
 
 #[tokio::test]
-async fn upload_queue_reconnect_replaces_stale_connection() {
+async fn upload_queue_two_unverified_hash_claimants_invalidate_the_session() {
     let root = unique_test_dir("ed2k-upload-queue-reconnect");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0xA5; 16]);
-    let peer = upload_peer(9, 0x44, 9);
+    let mut peer = upload_peer(9, 0x44, 9);
+    peer.ident_verified = false;
 
     let (first_handle, first_status) = runtime.begin_upload_session(peer.clone(), &file_hash).await;
     assert_eq!(first_status, Ed2kUploadSessionStatus::Granted);
 
     let (second_handle, second_status) = runtime.begin_upload_session(peer, &file_hash).await;
-    assert_eq!(second_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(second_status, Ed2kUploadSessionStatus::Rejected);
     assert_eq!(
         runtime.poll_upload_session(&first_handle, true).await,
         Ed2kUploadSessionStatus::Stale
     );
-    runtime.release_upload_session(&first_handle).await;
     assert_eq!(
         runtime.poll_upload_session(&second_handle, true).await,
+        Ed2kUploadSessionStatus::Stale
+    );
+    assert!(runtime.upload_queue_snapshot().await.is_empty());
+}
+
+#[tokio::test]
+async fn upload_queue_verified_incumbent_rejects_an_unverified_hash_claimant() {
+    let root = unique_test_dir("ed2k-upload-queue-verified-incumbent");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0xA6; 16]);
+    let mut incumbent = upload_peer(9, 0x45, 9);
+    incumbent.ident_verified = true;
+
+    let (incumbent_handle, incumbent_status) = runtime
+        .begin_upload_session(incumbent.clone(), &file_hash)
+        .await;
+    assert_eq!(incumbent_status, Ed2kUploadSessionStatus::Granted);
+
+    incumbent.ident_verified = false;
+    let (_claimant_handle, claimant_status) =
+        runtime.begin_upload_session(incumbent, &file_hash).await;
+    assert_eq!(claimant_status, Ed2kUploadSessionStatus::Rejected);
+    assert_eq!(
+        runtime.poll_upload_session(&incumbent_handle, true).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
+#[tokio::test]
+async fn upload_queue_verified_newcomer_replaces_unverified_claimant_without_inheriting_lease() {
+    let root = unique_test_dir("ed2k-upload-queue-verified-newcomer");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0xA7; 16]);
+    let mut peer = upload_peer(9, 0x46, 9);
+    peer.ident_verified = false;
+
+    let (old_handle, old_status) = runtime.begin_upload_session(peer.clone(), &file_hash).await;
+    assert_eq!(old_status, Ed2kUploadSessionStatus::Granted);
+
+    let mut verified = peer;
+    verified.ident_verified = true;
+    let (verified_handle, verified_status) =
+        runtime.begin_upload_session(verified, &file_hash).await;
+    assert_eq!(verified_status, Ed2kUploadSessionStatus::Granted);
+    assert!(old_handle.is_cancelled());
+    assert_eq!(
+        runtime.poll_upload_session(&old_handle, true).await,
+        Ed2kUploadSessionStatus::Stale
+    );
+    assert_eq!(
+        runtime.poll_upload_session(&verified_handle, true).await,
         Ed2kUploadSessionStatus::Granted
     );
 }
@@ -718,7 +777,11 @@ async fn upload_queue_same_peer_different_file_preserves_waiting_rank() {
     );
 
     let (replacement_handle, replacement_status) = runtime
-        .begin_upload_session(waiting_peer, &second_file_hash)
+        .begin_upload_session_on_connection(
+            waiting_peer,
+            &second_file_hash,
+            waiting_handle.connection_id(),
+        )
         .await;
     assert_eq!(
         replacement_status,
@@ -879,6 +942,38 @@ async fn upload_queue_rejects_fourth_waiter_from_same_ip() {
         .begin_upload_session(same_ip_upload_peer(3), &file_hash)
         .await;
     assert_eq!(status, Ed2kUploadSessionStatus::Rejected);
+}
+
+#[tokio::test]
+async fn upload_queue_per_ip_cap_counts_non_upload_peer_connections() {
+    let root = unique_test_dir("ed2k-upload-queue-per-ip-live-connections");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x39; 16]);
+    let ip: std::net::IpAddr = "198.51.100.42".parse().unwrap();
+
+    // Three other live ED2K transports (for example download/control sessions)
+    // plus the candidate's transport make this the fourth client from the IP.
+    let first = runtime.register_peer_connection(ip);
+    let second = runtime.register_peer_connection(ip);
+    let third = runtime.register_peer_connection(ip);
+    let candidate_connection = runtime.register_peer_connection(ip);
+    let mut candidate = upload_peer(42, 0x39, 0x0A00_0039);
+    candidate.ip = ip;
+    let (_rejected_handle, rejected) = runtime
+        .begin_upload_session(candidate.clone(), &file_hash)
+        .await;
+    assert_eq!(rejected, Ed2kUploadSessionStatus::Rejected);
+
+    // Once one unrelated connection closes, the same candidate is within the
+    // three-client cap and can take the free slot.
+    drop(third);
+    let (_accepted_handle, accepted) = runtime.begin_upload_session(candidate, &file_hash).await;
+    assert_eq!(accepted, Ed2kUploadSessionStatus::Granted);
+
+    drop(first);
+    drop(second);
+    drop(candidate_connection);
 }
 
 #[tokio::test]
@@ -1089,6 +1184,37 @@ async fn upload_queue_slot_grant_to_disconnected_waiter_queues_outbound_promotio
         runtime.upload_queue_snapshot().await.is_empty(),
         "a dropped grant must not linger in the queue"
     );
+}
+
+#[tokio::test]
+async fn upload_queue_expired_promotion_revokes_its_lease_and_frees_the_slot() {
+    let root = unique_test_dir("ed2k-upload-queue-promotion-deadline");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x7F; 16]);
+
+    let (active, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x31, 0x0A00_0031), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (waiting, waiting_status) = runtime
+        .begin_upload_session(upload_peer(2, 0x32, 0x0A00_0032), &file_hash)
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    runtime.release_upload_session(&waiting).await;
+    runtime.release_upload_session(&active).await;
+
+    let grants = runtime
+        .take_pending_upload_promotions_with_timeout(std::time::Duration::ZERO)
+        .await;
+    assert_eq!(grants.len(), 1);
+    let grant = &grants[0];
+    assert_eq!(
+        runtime.poll_upload_session(&grant.handle, false).await,
+        Ed2kUploadSessionStatus::Stale
+    );
+    assert!(grant.handle.is_cancelled());
+    assert!(runtime.upload_queue_snapshot().await.is_empty());
 }
 
 #[tokio::test]

@@ -305,7 +305,7 @@ async fn listener_upload_queue_dials_disconnected_waiter_for_slot_grant() {
 }
 
 #[tokio::test]
-async fn listener_upload_queue_reconnects_waiter_by_hello_identity() {
+async fn listener_upload_queue_rejects_unverified_reconnect_claim() {
     let mut runtime = ListenerTestRuntime::new(
         "ed2k-upload-listener-queue-reconnect-hello",
         listener_test_identity(0x71, 0x4242_2424, 41002, 41003),
@@ -330,15 +330,36 @@ async fn listener_upload_queue_reconnects_waiter_by_hello_identity() {
     let queued_stream =
         connect_peer_until_queue_rank(runtime.peer_addr, queued_identity, &file.file_hash, 1).await;
     drop(queued_stream);
+    let detach_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = runtime.transfer_runtime.upload_queue_snapshot().await;
+        if snapshot
+            .iter()
+            .any(|entry| entry.user_hash == Some([0x91; 16]) && !entry.connected)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < detach_deadline,
+            "the waiter detach was never observed: {snapshot:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-    let mut reconnected_stream =
-        connect_peer_until_queue_rank(runtime.peer_addr, queued_identity, &file.file_hash, 1).await;
+    let mut claimant_stream =
+        connect_peer_and_request_upload(runtime.peer_addr, queued_identity, &file.file_hash).await;
+    assert_start_upload_silence(&mut claimant_stream, Duration::from_millis(250)).await;
+    let snapshot = runtime.transfer_runtime.upload_queue_snapshot().await;
+    assert!(
+        snapshot
+            .iter()
+            .all(|entry| entry.user_hash != Some([0x91; 16])),
+        "two unverified connections claiming one identity must invalidate the queued lease: {snapshot:?}"
+    );
 
     send_cancel_transfer(&mut first_stream).await;
     drop(first_stream);
-
-    wait_for_upload_accept_timeout(&mut reconnected_stream).await;
-    drop(reconnected_stream);
+    drop(claimant_stream);
     server.abort();
 }
 

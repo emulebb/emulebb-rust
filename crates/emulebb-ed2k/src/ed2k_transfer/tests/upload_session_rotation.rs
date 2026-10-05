@@ -87,6 +87,41 @@ fn transfer_cap_rotates_only_when_a_replacement_waits() {
 }
 
 #[test]
+fn in_flight_upload_work_holds_a_revocable_slot_lease_until_drop() {
+    let mut state = Ed2kUploadQueueState::new(rotation_config());
+    let t0 = Instant::now();
+    let (mut active, status) = begin(&mut state, 1, 0x23, 1, 1_000, t0);
+    assert_eq!(status, Ed2kUploadSessionStatus::Granted);
+    state.bind_session_handle(&mut active);
+    state.note_uploaded_bytes(&active, 950, t0 + Duration::from_secs(1));
+    let (waiter, waiter_status) = begin(&mut state, 2, 0x24, 2, 1_000, t0 + Duration::from_secs(2));
+    assert_eq!(waiter_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    let work = state
+        .begin_upload_work(&active, t0 + Duration::from_secs(3))
+        .expect("granted slot should acquire an upload-work lease");
+    assert_eq!(
+        state.poll_session(&active, t0 + Duration::from_secs(4), false),
+        Ed2kUploadSessionStatus::Granted,
+        "maintenance must not recycle a slot with disk/throttle/write work in flight"
+    );
+    assert!(matches!(
+        state.poll_session(&waiter, t0 + Duration::from_secs(4), false),
+        Ed2kUploadSessionStatus::Waiting { .. }
+    ));
+
+    drop(work);
+    assert_eq!(
+        state.poll_session(&active, t0 + Duration::from_secs(5), false),
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
+    assert_eq!(
+        state.poll_session(&waiter, t0 + Duration::from_secs(5), false),
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
+#[test]
 fn time_cap_rotates_only_when_a_replacement_waits() {
     let mut config = rotation_config();
     config.session_transfer_percent = 0; // isolate the time cap (no byte cap)
@@ -99,6 +134,7 @@ fn time_cap_rotates_only_when_a_replacement_waits() {
     // `upload_timeout` far out so only the 7200 s time branch can rotate here, the
     // same way the no-request/cooldown fixtures neutralize unrelated gates.
     config.upload_timeout = Duration::from_secs(100_000);
+    config.granted_timeout = Duration::from_secs(100_000);
     let mut state = Ed2kUploadQueueState::new(config);
     let t0 = Instant::now();
     let (active, status) = begin(&mut state, 1, 0x31, 1, 0, t0);

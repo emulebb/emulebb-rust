@@ -46,10 +46,9 @@ async fn upload_queue_scores_waiters_with_persisted_file_priority() {
     assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
     // Both registered files have an all-time upload ratio of 0 (< the 0.5
     // threshold), so the master low-ratio bonus applies to each. The additive
-    // bonus is scaled by file priority, so it exposes the priority ordering even
-    // at zero waiting time: the high-priority waiter outranks the normal one on
-    // arrival (master `GetScoreBreakdown` adds the bonus after the priority
-    // multiply).
+    // bonus is a fixed additive 50 seconds-equivalent after the priority
+    // multiply. At zero waiting time the two candidates therefore tie and FIFO
+    // wins; once waiting time accrues, high priority outranks normal.
     let (normal_handle, normal_status) = runtime
         .begin_upload_session_at(upload_peer(2, 0xB2, 0x0A00_0032), &normal_file, now)
         .await;
@@ -57,7 +56,7 @@ async fn upload_queue_scores_waiters_with_persisted_file_priority() {
     let (high_handle, high_status) = runtime
         .begin_upload_session_at(upload_peer(3, 0xC3, 0x0A00_0033), &high_file, now)
         .await;
-    assert_eq!(high_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    assert_eq!(high_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
 
     let scored_at = now + Duration::from_secs(1);
     assert_eq!(

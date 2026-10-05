@@ -169,6 +169,7 @@ pub async fn download_files_from_peer(
             timeout,
         )
         .await?;
+        let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
         dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "connect_ready", || {
             format!("file_hash={first_file_hash_hex}")
         });

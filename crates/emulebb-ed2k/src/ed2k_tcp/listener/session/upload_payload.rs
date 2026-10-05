@@ -281,6 +281,16 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             return Ok(UploadPayloadOutcome::Close);
         }
     }
+    let Some(work_guard) = upload_queue.begin_work(transfer_runtime).await else {
+        request_diag.note_skip("queueLeaseStale");
+        emit_upload_request_outcome(
+            &peer_upload_identity,
+            &requested,
+            "queueLeaseStale",
+            &request_diag,
+        );
+        return Ok(UploadPayloadOutcome::Close);
+    };
     transfer_runtime.note_file_upload_accept(&requested).await;
     let verified_reader_open_start = Instant::now();
     let Some(mut verified_reader) = upload_queue
@@ -403,6 +413,9 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         let mut fragment_start = start;
         let mut range_served = false;
         while fragment_start < end {
+            if work_guard.is_cancelled() {
+                return Ok(UploadPayloadOutcome::Close);
+            }
             let fragment_end = fragment_start.saturating_add(ED2K_EMBLOCK_SIZE).min(end);
             let next_range_is_contiguous_accepted = ranges
                 .get(range_index + 1)
@@ -417,9 +430,16 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 fragment_end.saturating_sub(fragment_start)
             };
             let payload_read_start = Instant::now();
-            let read_result = verified_reader
-                .read_range_with_read_ahead(fragment_start, fragment_end, read_ahead_bytes)
-                .await?;
+            let read_result = tokio::select! {
+                _ = work_guard.cancelled() => {
+                    return Ok(UploadPayloadOutcome::Close);
+                }
+                result = verified_reader.read_range_with_read_ahead(
+                    fragment_start,
+                    fragment_end,
+                    read_ahead_bytes,
+                ) => result?,
+            };
             request_diag.payload_read_ms = request_diag.payload_read_ms.saturating_add(
                 u64::try_from(payload_read_start.elapsed().as_millis()).unwrap_or(u64::MAX),
             );
@@ -457,11 +477,24 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                             u64::try_from(reservation.delay.as_millis()).unwrap_or(u64::MAX);
                         request_diag.throttle_delay_ms =
                             request_diag.throttle_delay_ms.saturating_add(delay_ms);
-                        tokio::time::sleep(reservation.delay).await;
+                        tokio::select! {
+                            _ = work_guard.cancelled() => {
+                                return Ok(UploadPayloadOutcome::Close);
+                            }
+                            () = tokio::time::sleep(reservation.delay) => {}
+                        }
                     }
-                    transport.write_all(chunk).await.with_context(|| {
-                        format!("failed to send ED2K upload payload to {peer_addr}")
-                    })?;
+                    tokio::select! {
+                        _ = work_guard.cancelled() => {
+                            return Ok(UploadPayloadOutcome::Close);
+                        }
+                        result = transport.write_all(chunk) => {
+                            result.with_context(|| {
+                                format!("failed to send ED2K upload payload to {peer_addr}")
+                            })?;
+                        }
+                    }
+                    work_guard.note_wire_progress(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
                 }
             }
             request_diag.served_bytes = request_diag.served_bytes.saturating_add(fragment_bytes);
@@ -480,9 +513,13 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             // mid-serve. `note_payload_sent` refreshes `last_activity` and adds
             // exactly the bytes just sent, so accounting stays correct (each
             // fragment is counted once).
-            upload_queue
+            if upload_queue
                 .note_payload_sent(transfer_runtime, fragment_bytes)
-                .await;
+                .await
+                != ListenerQueueDecision::Granted
+            {
+                return Ok(UploadPayloadOutcome::Close);
+            }
             fragment_start = fragment_end;
         }
         if range_served {

@@ -528,17 +528,13 @@ fn ed2k_upload_queue_runtime_config_from_settings(
     settings: Ed2kUploadQueueSettings,
 ) -> Ed2kUploadQueueRuntimeConfig {
     Ed2kUploadQueueRuntimeConfig {
-        active_slots: settings.active_slots,
-        elastic_percent: settings.elastic_percent,
-        upload_limit_bytes_per_sec: settings.upload_limit_bytes_per_sec,
-        elastic_underfill_bytes_per_sec: settings.elastic_underfill_bytes_per_sec,
         elastic_underfill_secs: settings.elastic_underfill_secs,
-        waiting_capacity: settings.waiting_capacity,
         waiting_timeout_secs: settings.waiting_timeout_secs,
         granted_timeout_secs: settings.granted_timeout_secs,
         upload_timeout_secs: settings.upload_timeout_secs,
         session_transfer_percent: settings.session_transfer_percent,
         session_time_limit_secs: settings.session_time_limit_secs,
+        ..Ed2kUploadQueueRuntimeConfig::default()
     }
 }
 

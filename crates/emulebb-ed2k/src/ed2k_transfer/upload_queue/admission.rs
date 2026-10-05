@@ -2,7 +2,7 @@
 //!
 //! Mirrors the queue-capping logic of the master `CUploadQueue::AddClientToQueue`
 //! (`UploadQueue.cpp`):
-//!  - per-IP cap: at most 3 waiting clients from the same IP (`cSameIP >= 3`),
+//!  - per-IP cap: at most 3 live client records from the same IP (`cSameIP >= 3`),
 //!  - soft/hard queue split: the configured queue size is a soft limit; the hard
 //!    limit is `soft + max(soft, 800) / 4`. Past the hard limit nobody is
 //!    admitted; between soft and hard only friend-slot clients or clients whose
@@ -12,8 +12,8 @@
 //! Already-granted/uploading peers and re-asks of an existing waiter bypass these
 //! gates (handled by the caller before admission).
 
-/// Per-IP waiting cap (master `cSameIP >= 3`).
-const MAX_WAITERS_PER_IP: usize = 3;
+/// Per-IP client cap (master `cSameIP >= 3`).
+const MAX_CLIENTS_PER_IP: usize = 3;
 /// Master waiting-queue length above which the firewalled-LowID callback guard
 /// engages (`GetWaitingUserCount() > 50`).
 const FIREWALLED_CALLBACK_QUEUE_THRESHOLD: u64 = 50;
@@ -23,7 +23,7 @@ const HARD_LIMIT_MARGIN_FLOOR: u64 = 800;
 /// Compute the hard queue limit from the soft limit
 /// (`softQueueLimit + max(softQueueLimit, 800) / 4`).
 #[must_use]
-pub(super) fn hard_queue_limit(soft_queue_size: u32) -> u64 {
+pub(in crate::ed2k_transfer) fn hard_queue_limit(soft_queue_size: u32) -> u64 {
     let soft = u64::from(soft_queue_size);
     soft + soft.max(HARD_LIMIT_MARGIN_FLOOR) / 4
 }
@@ -70,11 +70,11 @@ pub(super) fn combined_file_prio_and_credit(
     file_priority_score.saturating_mul(credit_score_permille)
 }
 
-/// Returns `true` when admitting another waiter from `candidate_ip` would exceed
-/// the per-IP cap, given how many waiters already share that IP.
+/// Returns `true` when admitting another client would exceed the per-IP cap,
+/// given how many live client records already share that IP.
 #[must_use]
-pub(super) fn reject_per_ip_cap(same_ip_waiters: usize) -> bool {
-    same_ip_waiters >= MAX_WAITERS_PER_IP
+pub(super) fn reject_per_ip_cap(existing_same_ip_clients: usize) -> bool {
+    existing_same_ip_clients >= MAX_CLIENTS_PER_IP
 }
 
 /// Inputs for the firewalled-LowID callback admission guard (master
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn per_ip_cap_blocks_fourth_waiter() {
+    fn per_ip_cap_blocks_fourth_client() {
         assert!(!reject_per_ip_cap(2));
         assert!(reject_per_ip_cap(3));
         assert!(reject_per_ip_cap(4));

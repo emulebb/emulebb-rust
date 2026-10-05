@@ -163,6 +163,7 @@ impl ListenerTestRuntime {
             buddy_registry: crate::buddy_socket::BuddySocketRegistry::new(),
             port_test_registry: crate::PortTestRegistry::new(),
             bind_ip: test_bind_ip(),
+            callback_timeout: crate::ed2k_tcp::ED2K_CONNECTION_IDLE_TIMEOUT,
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }

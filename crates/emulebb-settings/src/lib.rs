@@ -23,6 +23,15 @@ pub const DEFAULT_KAD_PUBLISH_CONTACT_FANOUT: usize = 10;
 pub const PCP_NATPMP_BACKEND: &str = "pcp_natpmp";
 pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
 
+/// MFC-compatible free-space floor for the profile/config volume (1 GiB).
+pub const MIN_FREE_CONFIG_SPACE_BYTES: u64 = 1024 * 1024 * 1024;
+/// MFC-compatible free-space floor for incomplete-transfer volumes (5 GiB).
+pub const MIN_FREE_TRANSFER_SPACE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+/// MFC-compatible free-space floor for incoming/destination volumes (5 GiB).
+pub const MIN_FREE_INCOMING_SPACE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+/// MFC-compatible upper bound for configured free-space floors (5 TiB).
+pub const MAX_FREE_SPACE_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+
 pub const FIELD_UPLOAD_LIMIT_KIBPS: &str = "uploadLimitKiBps";
 pub const FIELD_DOWNLOAD_LIMIT_KIBPS: &str = "downloadLimitKiBps";
 pub const FIELD_MAX_CONNECTIONS: &str = "maxConnections";
@@ -410,6 +419,8 @@ pub struct Ed2kSettings {
     pub source_server_attempt_budget: usize,
     pub upload_queue: Ed2kUploadQueueSettings,
     pub download_limit_bytes_per_sec: u64,
+    /// Minimum free bytes retained on the profile/config volume.
+    pub min_free_config_space_bytes: u64,
     /// Minimum free bytes retained on volumes holding incomplete part files.
     pub min_free_transfer_space_bytes: u64,
     /// Minimum free bytes retained on distinct finished-file destination volumes.
@@ -424,12 +435,7 @@ pub struct Ed2kSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Ed2kUploadQueueSettings {
-    pub active_slots: usize,
-    pub elastic_percent: u32,
-    pub upload_limit_bytes_per_sec: u64,
-    pub elastic_underfill_bytes_per_sec: u64,
     pub elastic_underfill_secs: u64,
-    pub waiting_capacity: usize,
     pub waiting_timeout_secs: u64,
     pub granted_timeout_secs: u64,
     pub upload_timeout_secs: u64,
@@ -687,6 +693,8 @@ pub struct Ed2kSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_limit_bytes_per_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_free_config_space_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_free_transfer_space_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_free_incoming_space_bytes: Option<u64>,
@@ -706,17 +714,7 @@ pub struct Ed2kSettingsUpdate {
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Ed2kUploadQueueSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_slots: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elastic_percent: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upload_limit_bytes_per_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elastic_underfill_bytes_per_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elastic_underfill_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub waiting_capacity: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -952,10 +950,9 @@ impl Default for Ed2kSettings {
             source_server_attempt_budget: 3,
             upload_queue: Ed2kUploadQueueSettings::default(),
             download_limit_bytes_per_sec: 0,
-            // One stock eD2K part (9.28 MB decimal), matching the MFC
-            // minimum-free-disk-space default.
-            min_free_transfer_space_bytes: 9_728_000,
-            min_free_incoming_space_bytes: 9_728_000,
+            min_free_config_space_bytes: MIN_FREE_CONFIG_SPACE_BYTES,
+            min_free_transfer_space_bytes: MIN_FREE_TRANSFER_SPACE_BYTES,
+            min_free_incoming_space_bytes: MIN_FREE_INCOMING_SPACE_BYTES,
             enable_udp_reask: true,
             publish_emule_rust_identity: false,
             offer_files_capability_enabled: true,
@@ -993,15 +990,10 @@ impl Default for HostnameLookupSettings {
 impl Default for Ed2kUploadQueueSettings {
     fn default() -> Self {
         Self {
-            active_slots: 3,
-            elastic_percent: 0,
-            upload_limit_bytes_per_sec: 0,
-            elastic_underfill_bytes_per_sec: 0,
             elastic_underfill_secs: 10,
-            waiting_capacity: 512,
             waiting_timeout_secs: 60 * 60,
-            granted_timeout_secs: 30,
-            upload_timeout_secs: 90,
+            granted_timeout_secs: 5,
+            upload_timeout_secs: 30,
             session_transfer_percent: 90,
             session_time_limit_secs: 7_200,
         }
@@ -1277,6 +1269,7 @@ impl Ed2kSettingsUpdate {
                 .as_ref()
                 .is_none_or(Ed2kUploadQueueSettingsUpdate::is_empty)
             && self.download_limit_bytes_per_sec.is_none()
+            && self.min_free_config_space_bytes.is_none()
             && self.min_free_transfer_space_bytes.is_none()
             && self.min_free_incoming_space_bytes.is_none()
             && self.enable_udp_reask.is_none()
@@ -1289,12 +1282,7 @@ impl Ed2kSettingsUpdate {
 
 impl Ed2kUploadQueueSettingsUpdate {
     pub fn is_empty(&self) -> bool {
-        self.active_slots.is_none()
-            && self.elastic_percent.is_none()
-            && self.upload_limit_bytes_per_sec.is_none()
-            && self.elastic_underfill_bytes_per_sec.is_none()
-            && self.elastic_underfill_secs.is_none()
-            && self.waiting_capacity.is_none()
+        self.elastic_underfill_secs.is_none()
             && self.waiting_timeout_secs.is_none()
             && self.granted_timeout_secs.is_none()
             && self.upload_timeout_secs.is_none()
@@ -1397,7 +1385,54 @@ fn apply_hostname_lookup_settings_update(
     }
 }
 
-pub fn apply_ed2k_settings_update(settings: &mut Ed2kSettings, update: Ed2kSettingsUpdate) {
+pub fn validate_ed2k_settings(
+    settings: &Ed2kSettings,
+) -> Result<(), CoreSettingValidationError> {
+    validate_free_space_floor(
+        "minFreeConfigSpaceBytes",
+        settings.min_free_config_space_bytes,
+        MIN_FREE_CONFIG_SPACE_BYTES,
+    )?;
+    validate_free_space_floor(
+        "minFreeTransferSpaceBytes",
+        settings.min_free_transfer_space_bytes,
+        MIN_FREE_TRANSFER_SPACE_BYTES,
+    )?;
+    validate_free_space_floor(
+        "minFreeIncomingSpaceBytes",
+        settings.min_free_incoming_space_bytes,
+        MIN_FREE_INCOMING_SPACE_BYTES,
+    )
+}
+
+fn validate_free_space_floor(
+    field_name: &str,
+    value: u64,
+    minimum: u64,
+) -> Result<(), CoreSettingValidationError> {
+    if !(minimum..=MAX_FREE_SPACE_BYTES).contains(&value) {
+        return Err(CoreSettingValidationError::new(format!(
+            "{field_name} must be an unsigned number in the range {minimum}..{MAX_FREE_SPACE_BYTES}"
+        )));
+    }
+    Ok(())
+}
+
+pub fn apply_ed2k_settings_update(
+    settings: &mut Ed2kSettings,
+    update: Ed2kSettingsUpdate,
+) -> Result<(), CoreSettingValidationError> {
+    let mut candidate = settings.clone();
+    apply_ed2k_settings_update_unchecked(&mut candidate, update);
+    validate_ed2k_settings(&candidate)?;
+    *settings = candidate;
+    Ok(())
+}
+
+fn apply_ed2k_settings_update_unchecked(
+    settings: &mut Ed2kSettings,
+    update: Ed2kSettingsUpdate,
+) {
     apply_nullable_update(&mut settings.listen_port, update.listen_port);
     if let Some(value) = update.nickname {
         settings.nickname = value;
@@ -1466,6 +1501,9 @@ pub fn apply_ed2k_settings_update(settings: &mut Ed2kSettings, update: Ed2kSetti
     if let Some(value) = update.download_limit_bytes_per_sec {
         settings.download_limit_bytes_per_sec = value;
     }
+    if let Some(value) = update.min_free_config_space_bytes {
+        settings.min_free_config_space_bytes = value;
+    }
     if let Some(value) = update.min_free_transfer_space_bytes {
         settings.min_free_transfer_space_bytes = value;
     }
@@ -1493,23 +1531,8 @@ fn apply_ed2k_upload_queue_settings_update(
     settings: &mut Ed2kUploadQueueSettings,
     update: Ed2kUploadQueueSettingsUpdate,
 ) {
-    if let Some(value) = update.active_slots {
-        settings.active_slots = value;
-    }
-    if let Some(value) = update.elastic_percent {
-        settings.elastic_percent = value;
-    }
-    if let Some(value) = update.upload_limit_bytes_per_sec {
-        settings.upload_limit_bytes_per_sec = value;
-    }
-    if let Some(value) = update.elastic_underfill_bytes_per_sec {
-        settings.elastic_underfill_bytes_per_sec = value;
-    }
     if let Some(value) = update.elastic_underfill_secs {
         settings.elastic_underfill_secs = value;
-    }
-    if let Some(value) = update.waiting_capacity {
-        settings.waiting_capacity = value;
     }
     if let Some(value) = update.waiting_timeout_secs {
         settings.waiting_timeout_secs = value;
@@ -1731,6 +1754,7 @@ impl From<Ed2kSettings> for Ed2kSettingsUpdate {
             source_server_attempt_budget: Some(settings.source_server_attempt_budget),
             upload_queue: Some(settings.upload_queue.into()),
             download_limit_bytes_per_sec: Some(settings.download_limit_bytes_per_sec),
+            min_free_config_space_bytes: Some(settings.min_free_config_space_bytes),
             min_free_transfer_space_bytes: Some(settings.min_free_transfer_space_bytes),
             min_free_incoming_space_bytes: Some(settings.min_free_incoming_space_bytes),
             enable_udp_reask: Some(settings.enable_udp_reask),
@@ -1745,12 +1769,7 @@ impl From<Ed2kSettings> for Ed2kSettingsUpdate {
 impl From<Ed2kUploadQueueSettings> for Ed2kUploadQueueSettingsUpdate {
     fn from(settings: Ed2kUploadQueueSettings) -> Self {
         Self {
-            active_slots: Some(settings.active_slots),
-            elastic_percent: Some(settings.elastic_percent),
-            upload_limit_bytes_per_sec: Some(settings.upload_limit_bytes_per_sec),
-            elastic_underfill_bytes_per_sec: Some(settings.elastic_underfill_bytes_per_sec),
             elastic_underfill_secs: Some(settings.elastic_underfill_secs),
-            waiting_capacity: Some(settings.waiting_capacity),
             waiting_timeout_secs: Some(settings.waiting_timeout_secs),
             granted_timeout_secs: Some(settings.granted_timeout_secs),
             upload_timeout_secs: Some(settings.upload_timeout_secs),

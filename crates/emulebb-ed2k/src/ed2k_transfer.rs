@@ -13,7 +13,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
@@ -54,6 +54,7 @@ mod manifest;
 mod media_metadata;
 mod metadata;
 mod model;
+mod peer_connections;
 mod piece_store;
 mod reask_reciprocity;
 mod reload_index;
@@ -99,13 +100,12 @@ pub use model::{
 };
 pub(crate) use piece_store::Ed2kVerifiedRangeReader;
 use source_exchange::SourceExchangeState;
-use upload_queue::DEFAULT_SOFT_QUEUE_SIZE;
 use upload_queue::Ed2kUploadQueueState;
 pub(crate) use upload_queue::is_low_id_client_id;
 pub(crate) use upload_queue::{
     Ed2kUploadFirewallContext, Ed2kUploadPeerIdentity, Ed2kUploadPendingPromotion,
     Ed2kUploadQueueConfig, Ed2kUploadRangeAdmission, Ed2kUploadSessionHandle,
-    Ed2kUploadSessionStatus,
+    Ed2kUploadSessionStatus, Ed2kUploadWorkGuard,
 };
 pub use upload_queue::{Ed2kUploadQueueCapacitySnapshot, Ed2kUploadThrottleReservation};
 pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot};
@@ -290,6 +290,10 @@ pub struct Ed2kTransferRuntime {
     /// every handler exit path. An `AtomicUsize` so the listener's accept loop
     /// can check/bump it without holding the coordinator mutex across an await.
     inbound_connections: Arc<AtomicUsize>,
+    /// Every established ED2K peer TCP connection, inbound or outbound and
+    /// independent of its current upload/download role. Upload per-IP admission
+    /// consults this registry instead of looking only at upload waiters.
+    peer_connections: peer_connections::Ed2kPeerConnectionRegistry,
     next_upload_connection_id: AtomicU64,
     /// Monotonic payload bytes received/sent since the runtime started, for the
     /// REST `sessionDownloadedBytes`/`sessionUploadedBytes` stats (oracle
@@ -519,6 +523,7 @@ impl Ed2kTransferRuntime {
                 coordinator_config,
             ))),
             inbound_connections: Arc::new(AtomicUsize::new(0)),
+            peer_connections: peer_connections::Ed2kPeerConnectionRegistry::default(),
             next_upload_connection_id: AtomicU64::new(1),
             session_downloaded_bytes: AtomicU64::new(0),
             session_uploaded_bytes: AtomicU64::new(0),
@@ -544,6 +549,19 @@ impl Ed2kTransferRuntime {
     #[must_use]
     pub fn ban_store(&self) -> Arc<crate::ban_store::BanStore> {
         Arc::clone(&self.ban_store)
+    }
+
+    /// Hold one live ED2K peer connection in the per-IP registry. The returned
+    /// guard releases the count on every normal, error, and cancellation exit.
+    pub(crate) fn register_peer_connection(
+        &self,
+        ip: IpAddr,
+    ) -> peer_connections::Ed2kPeerConnectionGuard {
+        self.peer_connections.register(ip)
+    }
+
+    pub(crate) fn live_peer_connections_from(&self, ip: IpAddr) -> usize {
+        self.peer_connections.count(ip)
     }
 
     /// Return a cloneable signal that fires when upload demand changes the
@@ -816,14 +834,16 @@ pub fn download_coordinator_config_from_policy(
 pub(super) fn upload_queue_config_from_policy(
     policy: &Ed2kUploadQueueRuntimeConfig,
 ) -> Ed2kUploadQueueConfig {
+    let soft_queue_size = u32::try_from(policy.waiting_capacity).unwrap_or(u32::MAX);
     Ed2kUploadQueueConfig {
         active_slots: policy.active_slots.max(1),
         elastic_percent: policy.elastic_percent.min(100),
         upload_limit_bytes_per_sec: policy.upload_limit_bytes_per_sec,
         elastic_underfill_bytes_per_sec: policy.elastic_underfill_bytes_per_sec,
         elastic_underfill: Duration::from_secs(policy.elastic_underfill_secs.max(1)),
-        waiting_capacity: policy.waiting_capacity,
-        soft_queue_size: DEFAULT_SOFT_QUEUE_SIZE,
+        waiting_capacity: usize::try_from(upload_queue::hard_queue_limit(soft_queue_size))
+            .unwrap_or(usize::MAX),
+        soft_queue_size,
         waiting_timeout: Duration::from_secs(policy.waiting_timeout_secs.max(1)),
         granted_timeout: Duration::from_secs(policy.granted_timeout_secs.max(1)),
         upload_timeout: Duration::from_secs(policy.upload_timeout_secs.max(1)),
@@ -843,7 +863,7 @@ pub(super) fn upload_queue_policy_from_config(
         upload_limit_bytes_per_sec: config.upload_limit_bytes_per_sec,
         elastic_underfill_bytes_per_sec: config.elastic_underfill_bytes_per_sec,
         elastic_underfill_secs: config.elastic_underfill.as_secs(),
-        waiting_capacity: config.waiting_capacity,
+        waiting_capacity: config.soft_queue_size as usize,
         waiting_timeout_secs: config.waiting_timeout.as_secs(),
         granted_timeout_secs: config.granted_timeout.as_secs(),
         upload_timeout_secs: config.upload_timeout.as_secs(),

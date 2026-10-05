@@ -300,15 +300,15 @@ impl Default for Ed2kRuntimeConfig {
 impl Default for Ed2kUploadQueueRuntimeConfig {
     fn default() -> Self {
         Self {
-            active_slots: 3,
-            elastic_percent: 0,
-            upload_limit_bytes_per_sec: 0,
-            elastic_underfill_bytes_per_sec: 0,
+            active_slots: 12,
+            elastic_percent: 80,
+            upload_limit_bytes_per_sec: 6_200 * 1024,
+            elastic_underfill_bytes_per_sec: 32 * 1024,
             elastic_underfill_secs: 10,
-            waiting_capacity: 512,
+            waiting_capacity: 10_000,
             waiting_timeout_secs: DEFAULT_UPLOAD_QUEUE_WAITING_TIMEOUT_SECS,
-            granted_timeout_secs: 30,
-            upload_timeout_secs: 90,
+            granted_timeout_secs: 5,
+            upload_timeout_secs: 30,
             session_transfer_percent: DEFAULT_UPLOAD_SESSION_TRANSFER_PERCENT,
             session_time_limit_secs: DEFAULT_UPLOAD_SESSION_TIME_LIMIT_SECS,
         }
@@ -416,5 +416,17 @@ mod tests {
         assert_eq!(config.server_connect_timeout_secs, 25);
         // eMule ClientList.cpp:1059 reaps a LowID callback wait at SEC2MS(45).
         assert_eq!(config.callback_timeout_secs, 45);
+    }
+
+    #[test]
+    fn default_upload_queue_policy_matches_core_owned_beta_defaults() {
+        let queue = Ed2kUploadQueueRuntimeConfig::default();
+        assert_eq!(queue.active_slots, 12);
+        assert_eq!(queue.elastic_percent, 80);
+        assert_eq!(queue.upload_limit_bytes_per_sec, 6_200 * 1024);
+        assert_eq!(queue.elastic_underfill_bytes_per_sec, 32 * 1024);
+        assert_eq!(queue.waiting_capacity, 10_000);
+        assert_eq!(queue.granted_timeout_secs, 5);
+        assert_eq!(queue.upload_timeout_secs, 30);
     }
 }

@@ -120,15 +120,13 @@ pub(super) fn waiting_score(inputs: UploadScoreInputs) -> i128 {
         inputs.waiting_seconds * inputs.file_priority_score * inputs.credit_score_permille
             / DEFAULT_CREDIT_SCORE_PERMILLE;
 
-    // Master step 4: additive low-ratio bonus. The master adds `uLowRatioBonus`
-    // (default 50) to a working score expressed in seconds-equivalent units, so
-    // we scale the bonus by the same `filePrio * permille / 1000` factor used
-    // above to keep its weight equivalent to ~50s of waiting at this peer's
-    // priority/credit.
+    // Master step 4: additive low-ratio bonus. Our integer working score is ten
+    // times the master's seconds-equivalent value because the constant `/10`
+    // priority scale was intentionally dropped above. The master's flat `+50`
+    // therefore becomes a flat `+500` here; it must not be multiplied by the
+    // candidate's priority or credit ratio.
     if inputs.modifiers.low_ratio_bonus {
-        score +=
-            DEFAULT_LOW_RATIO_BONUS * inputs.file_priority_score * inputs.credit_score_permille
-                / DEFAULT_CREDIT_SCORE_PERMILLE;
+        score += DEFAULT_LOW_RATIO_BONUS * 10;
     }
 
     // Master step 5: LowID divisor (below the friend-slot fast path).
@@ -232,8 +230,8 @@ mod tests {
     fn low_ratio_bonus_is_additive() {
         let mut inputs = base_inputs();
         inputs.modifiers.low_ratio_bonus = true;
-        // base 700 + bonus(50 * 7 * 1.0) = 700 + 350 = 1050.
-        assert_eq!(waiting_score(inputs), 1050);
+        // Rust keeps a ten-times score scale: master's flat +50 is +500.
+        assert_eq!(waiting_score(inputs), 1200);
     }
 
     #[test]

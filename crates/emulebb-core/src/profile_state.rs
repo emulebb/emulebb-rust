@@ -10,7 +10,7 @@ use emulebb_settings::{
     apply_daemon_settings_update, apply_ed2k_settings_update, apply_ip_filter_settings_update,
     apply_kad_settings_update, apply_nat_settings_update, apply_vpn_guard_settings_update,
     core_settings_from_values, core_settings_to_values, reset_legacy_nat_backend_order,
-    section_settings_from_values, section_settings_to_values,
+    section_settings_from_values, section_settings_to_values, validate_ed2k_settings,
 };
 
 use crate::{
@@ -120,6 +120,8 @@ pub(crate) fn persist_core_settings(
 pub(crate) fn load_app_settings(metadata: &MetadataStore) -> Result<AppSettings> {
     let mut daemon = load_settings_section(metadata, SECTION_DAEMON)?;
     normalize_daemon_settings_paths(&mut daemon);
+    let ed2k = load_settings_section(metadata, SECTION_ED2K)?;
+    validate_ed2k_settings(&ed2k)?;
     let mut nat = load_settings_section(metadata, SECTION_NAT)?;
     if reset_legacy_nat_backend_order(&mut nat) {
         persist_settings_section(metadata, SECTION_NAT, &nat)?;
@@ -127,7 +129,7 @@ pub(crate) fn load_app_settings(metadata: &MetadataStore) -> Result<AppSettings>
     Ok(AppSettings {
         core: load_core_settings(metadata)?,
         daemon,
-        ed2k: load_settings_section(metadata, SECTION_ED2K)?,
+        ed2k,
         kad: load_settings_section(metadata, SECTION_KAD)?,
         nat,
         vpn_guard: load_settings_section(metadata, SECTION_VPN_GUARD)?,
@@ -143,14 +145,19 @@ pub(crate) fn persist_app_settings_update(
         !app_settings_update_is_empty(&update),
         "settings PATCH requires at least one settings section"
     );
+    let ed2k_candidate = if let Some(ed2k_update) = update.ed2k.as_ref() {
+        let mut settings = load_settings_section(metadata, SECTION_ED2K)?;
+        apply_ed2k_settings_update(&mut settings, ed2k_update.clone())?;
+        Some(settings)
+    } else {
+        None
+    };
     if let Some(update) = update.daemon {
         let mut settings = load_settings_section(metadata, SECTION_DAEMON)?;
         apply_daemon_settings_update(&mut settings, update);
         persist_settings_section(metadata, SECTION_DAEMON, &settings)?;
     }
-    if let Some(update) = update.ed2k {
-        let mut settings = load_settings_section(metadata, SECTION_ED2K)?;
-        apply_ed2k_settings_update(&mut settings, update);
+    if let Some(settings) = ed2k_candidate {
         persist_settings_section(metadata, SECTION_ED2K, &settings)?;
     }
     if let Some(update) = update.kad {

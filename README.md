@@ -137,6 +137,25 @@ already contain `emulebb-rust-settings.toml`; its SQLite repository is
 `bindAddr` is required there, while runtime/network settings live in the
 database and are exposed through `/api/v1/app/settings`.
 
+### Upload queue settings migration
+
+The beta settings contract has one owner for each upload scheduling input. The
+following former `ed2k.uploadQueue` fields are no longer accepted; update saved
+API payloads or profile automation to use their `core` equivalents:
+
+| Removed field | Replacement |
+| --- | --- |
+| `ed2k.uploadQueue.activeSlots` | `core.maxUploadSlots` |
+| `ed2k.uploadQueue.elasticPercent` | `core.uploadSlotElasticPercent` |
+| `ed2k.uploadQueue.uploadLimitBytesPerSec` | `core.uploadLimitKiBps` |
+| `ed2k.uploadQueue.elasticUnderfillBytesPerSec` | `core.uploadClientDataRate` |
+| `ed2k.uploadQueue.waitingCapacity` | `core.queueSize` |
+
+The two rate replacements use KiB/s, while the removed fields used bytes/s.
+Because this is a beta contract cleanup, stale fields are rejected as unknown
+rather than silently migrated. Fresh profiles use a 5-second drained/zero-rate
+grace and a 30-second accumulated slow-rate grace after a 30-second warm-up.
+
 ## Logging
 
 Regular daemon builds log `INFO` and above by default to the console, the

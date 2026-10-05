@@ -103,17 +103,19 @@ fn elastic_slot_opening_still_waits_ten_seconds() {
     // Mark the base slot productive so it is never eligible for the slow/idle
     // recycle (uploaded_bytes > 0, and upload_timeout is far out): the only way
     // the waiter can activate is a NEWLY OPENED elastic slot.
-    state.note_uploaded_bytes(&active, 1, t0);
+    // One full eMule block clears the productive-burst floor, so the drained
+    // no-request path defers this peer through the 30 s warm-up.
+    state.note_uploaded_bytes(&active, crate::ed2k_transfer::ED2K_EMBLOCK_SIZE, t0);
     let (waiter, waiter_status) = begin(&mut state, 2, t0);
     assert!(matches!(
         waiter_status,
         Ed2kUploadSessionStatus::Waiting { .. }
     ));
 
-    // +3 s: past the 2 s recycle window but well short of the 10 s elastic-open
+    // +4 s: past the 2 s recycle window but well short of the 10 s elastic-open
     // window -> no elastic slot opens, the waiter stays queued.
     assert!(matches!(
-        state.poll_session(&waiter, t0 + Duration::from_secs(3), false),
+        state.poll_session(&waiter, t0 + Duration::from_secs(4), false),
         Ed2kUploadSessionStatus::Waiting { .. }
     ));
 
@@ -130,11 +132,10 @@ fn elastic_slot_opening_still_waits_ten_seconds() {
 }
 
 /// RUST-PAR-024 GAP-1: a slot that uploaded a fast BURST and then stalls is
-/// slow-recycled once its per-slot datarate meter decays below the slow bar --
-/// which now happens within the 10 s window (oracle `GetUploadDatarate` over the
-/// 10 s `m_AverageUDR_hist`, UploadClient.cpp:860-878). Under the OLD lifetime
-/// cumulative average the same slot read `bytes / elapsed` ~= 1 MB/s forever and
-/// would never fall under the slow bar, holding the slot for thousands of seconds.
+/// slow-recycled after the 30 s stabilization warm-up plus its configured
+/// accumulated slow grace. The 10 s datarate window still supplies the signal;
+/// the warm-up and accumulator prevent a single noisy sample from churning a
+/// useful slot.
 #[test]
 fn burst_then_stall_slot_is_slow_recycled_within_the_ten_second_window() {
     // Unlimited upload so the recycle signal is pure slot scarcity (no aggregate-
@@ -176,16 +177,21 @@ fn burst_then_stall_slot_is_slow_recycled_within_the_ten_second_window() {
         Ed2kUploadSessionStatus::Granted
     );
 
-    // +11 s: the burst has aged out of the 10 s window, so the per-slot datarate
-    // has decayed to 0 B/s (the lifetime meter would still read ~950 KB/s). Now
-    // below the slow bar and past the upload timeout -> the slot is slow-recycled
-    // and the waiter takes the freed slot.
+    // +31 s: the datarate has decayed to zero, but only one second of post-warmup
+    // zero-rate time has accumulated, so the slot remains.
+    assert_eq!(
+        state.poll_session(&active, t0 + Duration::from_secs(31), false),
+        Ed2kUploadSessionStatus::Granted
+    );
+
+    // +36 s: the 5 s configured zero/slow grace has accumulated after warm-up;
+    // recycle the stalled slot and let the waiter take it.
     assert!(matches!(
-        state.poll_session(&active, t0 + Duration::from_secs(11), false),
+        state.poll_session(&active, t0 + Duration::from_secs(36), false),
         Ed2kUploadSessionStatus::Waiting { .. }
     ));
     assert_eq!(
-        state.poll_session(&waiter, t0 + Duration::from_secs(11), false),
+        state.poll_session(&waiter, t0 + Duration::from_secs(36), false),
         Ed2kUploadSessionStatus::Granted
     );
 }

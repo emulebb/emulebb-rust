@@ -45,7 +45,7 @@ fn upload_queue_policy_uses_core_settings_for_slot_and_queue_limits() {
 }
 
 #[test]
-fn initial_upload_queue_policy_preserves_config_for_fresh_profiles() {
+fn initial_upload_queue_policy_always_derives_owned_fields_from_core_settings() {
     let core_settings = default_core_settings();
     let base = Ed2kUploadQueueRuntimeConfig {
         active_slots: 3,
@@ -63,7 +63,28 @@ fn initial_upload_queue_policy_preserves_config_for_fresh_profiles() {
 
     let policy = initial_ed2k_upload_queue_policy(Some(&base), false, &core_settings);
 
-    assert_eq!(policy, base);
+    assert_eq!(policy.active_slots, core_settings.max_upload_slots as usize);
+    assert_eq!(
+        policy.elastic_percent,
+        core_settings.upload_slot_elastic_percent
+    );
+    assert_eq!(
+        policy.upload_limit_bytes_per_sec,
+        u64::from(core_settings.upload_limit_ki_bps) * 1024
+    );
+    assert_eq!(
+        policy.elastic_underfill_bytes_per_sec,
+        u64::from(core_settings.upload_client_data_rate) * 1024
+    );
+    assert_eq!(policy.waiting_capacity, core_settings.queue_size as usize);
+    assert_eq!(policy.waiting_timeout_secs, base.waiting_timeout_secs);
+    assert_eq!(policy.granted_timeout_secs, base.granted_timeout_secs);
+    assert_eq!(policy.upload_timeout_secs, base.upload_timeout_secs);
+    assert_eq!(
+        policy.session_transfer_percent,
+        base.session_transfer_percent
+    );
+    assert_eq!(policy.session_time_limit_secs, base.session_time_limit_secs);
 }
 
 #[tokio::test]

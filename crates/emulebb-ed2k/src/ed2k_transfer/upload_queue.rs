@@ -2,9 +2,14 @@ use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
     net::IpAddr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
+
+use tokio_util::sync::CancellationToken;
 
 use super::upload_cooldown::{CooldownBan, UploadCooldownTracker};
 use crate::ban_store::BanStore;
@@ -59,6 +64,10 @@ const UPLOAD_SLOT_OPEN_BURST_DATARATE_BYTES_PER_SEC: u64 = 102_400;
 /// 10 s elastic slot-OPEN window (`HasSustainedElasticBroadbandUnderfill`,
 /// UploadQueue.cpp:1052-1055; the `elastic_underfill` config).
 const SLOW_RECYCLE_UNDERFILL_WINDOW: Duration = Duration::from_secs(2);
+/// Fresh slots are allowed to stabilize before accumulated slow-rate policy is
+/// applied. Drained, unproductive no-request slots use their shorter dedicated
+/// grace and do not need to consume the whole warm-up.
+const SLOW_UPLOAD_WARMUP: Duration = Duration::from_secs(30);
 
 /// Short-failed upload-slot churn thresholds (oracle
 /// `ShouldCooldownShortFailedUploadSlot`, UploadQueueSeams.h:644-659 with
@@ -87,18 +96,19 @@ pub(crate) struct Ed2kUploadQueueConfig {
     pub elastic_underfill_bytes_per_sec: u64,
     /// Sustained underfill window before elastic slots may open.
     pub elastic_underfill: Duration,
-    /// Maximum number of queued waiters retained at once (structural cap).
+    /// Derived hard queue bound (`soft + max(soft, 800) / 4`). This is a
+    /// structural safety bound, not a second operator-configured queue size.
     pub waiting_capacity: usize,
     /// Configured soft queue size (`thePrefs.GetQueueSize()`, eMule default
     /// 10000): the threshold the reask QUEUEFULL margin compares against
     /// (`GetWaitingUserCount() + 50 > GetQueueSize()`). Distinct from the
-    /// structural `waiting_capacity`, which is a much smaller retention bound.
+    /// structural `waiting_capacity`, which is derived from this value.
     pub soft_queue_size: u32,
     /// Maximum idle time for a queued waiter before it is discarded.
     pub waiting_timeout: Duration,
-    /// Maximum stall time after grant before the peer requests data.
+    /// Drained-slot no-request and accumulated zero-rate grace.
     pub granted_timeout: Duration,
-    /// Maximum idle time while a peer already has an active upload slot.
+    /// Accumulated slow-rate grace after the fixed warm-up.
     pub upload_timeout: Duration,
     /// Per-session transferred-bytes cap as a percent of the requested file's
     /// size (oracle session-transfer limit, percent-of-file mode,
@@ -114,16 +124,16 @@ pub(crate) struct Ed2kUploadQueueConfig {
 impl Default for Ed2kUploadQueueConfig {
     fn default() -> Self {
         Self {
-            active_slots: 3,
-            elastic_percent: 0,
-            upload_limit_bytes_per_sec: 0,
-            elastic_underfill_bytes_per_sec: 0,
+            active_slots: 12,
+            elastic_percent: 80,
+            upload_limit_bytes_per_sec: 6_200 * 1024,
+            elastic_underfill_bytes_per_sec: 32 * 1024,
             elastic_underfill: Duration::from_secs(10),
-            waiting_capacity: 512,
+            waiting_capacity: 12_500,
             soft_queue_size: DEFAULT_SOFT_QUEUE_SIZE,
             waiting_timeout: Duration::from_secs(DEFAULT_WAITING_TIMEOUT_SECS),
-            granted_timeout: Duration::from_secs(30),
-            upload_timeout: Duration::from_secs(90),
+            granted_timeout: Duration::from_secs(5),
+            upload_timeout: Duration::from_secs(30),
             session_transfer_percent: DEFAULT_SESSION_TRANSFER_PERCENT,
             session_time_limit: Duration::from_secs(DEFAULT_SESSION_TIME_LIMIT_SECS),
         }
@@ -225,17 +235,49 @@ pub(super) struct Ed2kUploadSessionKey {
 }
 
 /// Opaque handle bound to one live uploader transport session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default)]
+struct Ed2kUploadLeaseActivity {
+    in_flight_work: AtomicUsize,
+    wire_progress_bytes: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct Ed2kUploadSessionHandle {
     key: Ed2kUploadSessionKey,
     connection_id: u64,
+    cancel: CancellationToken,
+    activity: Arc<Ed2kUploadLeaseActivity>,
 }
+
+impl PartialEq for Ed2kUploadSessionHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.connection_id == other.connection_id
+    }
+}
+
+impl Eq for Ed2kUploadSessionHandle {}
 
 impl Ed2kUploadSessionHandle {
     pub(super) fn new(peer: Ed2kUploadPeerIdentity, file_hash: String, connection_id: u64) -> Self {
         Self {
             key: Ed2kUploadSessionKey { peer, file_hash },
             connection_id,
+            cancel: CancellationToken::new(),
+            activity: Arc::new(Ed2kUploadLeaseActivity::default()),
+        }
+    }
+
+    fn from_session(
+        key: Ed2kUploadSessionKey,
+        connection_id: u64,
+        cancel: CancellationToken,
+        activity: Arc<Ed2kUploadLeaseActivity>,
+    ) -> Self {
+        Self {
+            key,
+            connection_id,
+            cancel,
+            activity,
         }
     }
 
@@ -243,11 +285,61 @@ impl Ed2kUploadSessionHandle {
         &self.key
     }
 
+    pub(crate) const fn connection_id(&self) -> u64 {
+        self.connection_id
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.cancel.cancelled().await;
+    }
+
+    pub(crate) fn note_wire_progress(&self, byte_count: u64) {
+        self.activity
+            .wire_progress_bytes
+            .fetch_add(byte_count, Ordering::Release);
+    }
+
     /// Hex file-hash this session's slot/waiter is keyed on. Used at session
     /// release to drain any parked shared-catalog demand-upload bytes for the
     /// served file (RUST-PAR-025 Note-1).
     pub(super) fn file_hash_hex(&self) -> &str {
         &self.key.file_hash
+    }
+}
+
+/// RAII marker for one accepted upload request whose disk/network pipeline may
+/// still be active. Queue maintenance treats the owning slot as non-recyclable
+/// until this guard is dropped on every success and error path.
+#[derive(Debug)]
+pub(crate) struct Ed2kUploadWorkGuard {
+    activity: Arc<Ed2kUploadLeaseActivity>,
+    cancel: CancellationToken,
+}
+
+impl Ed2kUploadWorkGuard {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.cancel.cancelled().await;
+    }
+
+    pub(crate) fn note_wire_progress(&self, byte_count: u64) {
+        self.activity
+            .wire_progress_bytes
+            .fetch_add(byte_count, Ordering::Release);
+    }
+}
+
+impl Drop for Ed2kUploadWorkGuard {
+    fn drop(&mut self) {
+        let previous = self.activity.in_flight_work.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "upload work guard underflow");
     }
 }
 
@@ -366,8 +458,19 @@ struct Ed2kUploadSessionEntry {
     /// US_ONUPLOADQUEUE clients, BaseClient.cpp:1229) but is `connected = false`
     /// until it re-asks or the promote-connect driver dials it for a slot grant.
     connected: bool,
+    promotion_deadline: Option<Instant>,
+    cancel: CancellationToken,
+    activity: Arc<Ed2kUploadLeaseActivity>,
     queued_at: Instant,
     last_activity: Instant,
+    last_request_at: Option<Instant>,
+    observed_wire_progress_bytes: u64,
+    /// Hysteresis-backed weak-slot accounting. Slow and zero-rate time grows
+    /// only while the queue is full and materially underfilled, and decays by
+    /// the same elapsed amount once throughput recovers.
+    accumulated_slow_upload: Duration,
+    accumulated_zero_upload: Duration,
+    last_slow_upload_sample_at: Option<Instant>,
     waiting_sequence: u64,
     file_priority_score: i128,
     credit_score_permille: i128,
@@ -567,6 +670,33 @@ impl Ed2kUploadQueueState {
         all_time_upload_ratio_permille: i128,
         file_size: u64,
     ) -> Ed2kUploadSessionStatus {
+        self.begin_session_with_live_connections(
+            key,
+            connection_id,
+            now,
+            file_priority_score,
+            credit_score_permille,
+            all_time_upload_ratio_permille,
+            file_size,
+            0,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "flat protocol or runtime boundary"
+    )]
+    pub(super) fn begin_session_with_live_connections(
+        &mut self,
+        key: Ed2kUploadSessionKey,
+        connection_id: u64,
+        now: Instant,
+        file_priority_score: i128,
+        credit_score_permille: i128,
+        all_time_upload_ratio_permille: i128,
+        file_size: u64,
+        live_same_ip_connections: usize,
+    ) -> Ed2kUploadSessionStatus {
         self.reap_expired_sessions(now);
         // Banned-peer admission gate (master `AddClientToQueue`, UploadQueue.cpp:1854
         // `if (client->IsBanned()) return;`): a banned client is refused BEFORE any
@@ -582,30 +712,65 @@ impl Ed2kUploadQueueState {
         let score_modifiers =
             UploadScoreModifiers::from_peer(&key.peer, low_id, all_time_upload_ratio_permille);
         if let Some(existing_key) = self.session_key_for_peer(&key.peer) {
-            let Some(mut session) = self.sessions.remove(&existing_key) else {
-                unreachable!("existing peer queue key missing from session map");
-            };
-            if session.phase == Ed2kUploadSessionPhase::Waiting {
-                self.replace_waiting_key(&existing_key, &key);
+            let (existing_connection_id, existing_connected, existing_phase) = self
+                .sessions
+                .get(&existing_key)
+                .map(|session| (session.connection_id, session.connected, session.phase))
+                .expect("existing peer queue key missing from session map");
+            let attaching_expected_callback = !existing_connected
+                && existing_phase == Ed2kUploadSessionPhase::Granted
+                && existing_key.peer.ip == key.peer.ip
+                && existing_key.peer.tcp_port == key.peer.tcp_port;
+            if existing_connection_id != connection_id && !attaching_expected_callback {
+                // A matching hash or fallback endpoint on another TCP connection
+                // is an identity collision, not a reconnect permission. Match the
+                // maintained MFC trust matrix: a verified incumbent wins; a
+                // verified newcomer may replace an unverified incumbent but starts
+                // from a fresh admission; two unverified claimants invalidate one
+                // another so neither inherits queue time or an active grant.
+                if existing_key.peer.ident_verified {
+                    return Ed2kUploadSessionStatus::Rejected;
+                }
+                self.retire_session_key(&existing_key);
+                if !key.peer.ident_verified {
+                    self.promote_waiters(now);
+                    return Ed2kUploadSessionStatus::Rejected;
+                }
+            } else {
+                let Some(mut session) = self.sessions.remove(&existing_key) else {
+                    unreachable!("existing peer queue key missing from session map");
+                };
+                if session.phase == Ed2kUploadSessionPhase::Waiting {
+                    self.replace_waiting_key(&existing_key, &key);
+                }
+                if existing_key.file_hash != key.file_hash {
+                    session.queued_ranges.clear();
+                    session.request_generation = 0;
+                    session.served_ranges.clear();
+                }
+                session.connection_id = connection_id;
+                // Re-ask on a persisted entry: rebind the live connection and refresh
+                // the last-request time, but keep `queued_at` (wait-start) so the
+                // accumulated waiting score survives a reconnect (master re-ask on the
+                // same queue entry, UploadQueue.cpp:1865-1869).
+                session.connected = true;
+                session.promotion_deadline = None;
+                session.last_activity = now;
+                session.file_priority_score = file_priority_score;
+                session.credit_score_permille = credit_score_permille;
+                session.score_modifiers = score_modifiers;
+                session.file_size = file_size;
+                self.sessions.insert(key.clone(), session);
+                return self.status_for_key(&key, now);
             }
-            if existing_key.file_hash != key.file_hash {
-                session.queued_ranges.clear();
-                session.request_generation = 0;
-                session.served_ranges.clear();
-            }
-            session.connection_id = connection_id;
-            // Re-ask on a persisted entry: rebind the live connection and refresh
-            // the last-request time, but keep `queued_at` (wait-start) so the
-            // accumulated waiting score survives a reconnect (master re-ask on the
-            // same queue entry, UploadQueue.cpp:1865-1869).
-            session.connected = true;
-            session.last_activity = now;
-            session.file_priority_score = file_priority_score;
-            session.credit_score_permille = credit_score_permille;
-            session.score_modifiers = score_modifiers;
-            session.file_size = file_size;
-            self.sessions.insert(key.clone(), session);
-            return self.status_for_key(&key, now);
+        }
+
+        // The oracle's per-IP guard is a client-list guard, not a waiting-list
+        // guard. Count all live ED2K transports from this IP plus queued clients
+        // whose socket is currently detached. This also applies to an inline
+        // grant, so a free slot cannot bypass the abuse limit.
+        if self.reject_per_ip_session_admission(&key, live_same_ip_connections) {
+            return Ed2kUploadSessionStatus::Rejected;
         }
 
         self.refresh_elastic_underfill(now);
@@ -660,8 +825,16 @@ impl Ed2kUploadQueueState {
                 phase,
                 connection_id,
                 connected: true,
+                promotion_deadline: None,
+                cancel: CancellationToken::new(),
+                activity: Arc::new(Ed2kUploadLeaseActivity::default()),
                 queued_at: now,
                 last_activity: now,
+                last_request_at: None,
+                observed_wire_progress_bytes: 0,
+                accumulated_slow_upload: Duration::ZERO,
+                accumulated_zero_upload: Duration::ZERO,
+                last_slow_upload_sample_at: Some(now),
                 waiting_sequence,
                 file_priority_score,
                 credit_score_permille,
@@ -696,6 +869,45 @@ impl Ed2kUploadQueueState {
         self.status_for_key(&key, now)
     }
 
+    pub(super) fn bind_session_handle(&self, handle: &mut Ed2kUploadSessionHandle) {
+        let Some(session) = self.sessions.get(&handle.key) else {
+            return;
+        };
+        if session.connection_id != handle.connection_id {
+            return;
+        }
+        handle.cancel = session.cancel.clone();
+        handle.activity = Arc::clone(&session.activity);
+    }
+
+    pub(super) fn begin_upload_work(
+        &mut self,
+        handle: &Ed2kUploadSessionHandle,
+        now: Instant,
+    ) -> Option<Ed2kUploadWorkGuard> {
+        let session = self.sessions.get_mut(&handle.key)?;
+        if session.connection_id != handle.connection_id
+            || session.cancel.is_cancelled()
+            || !matches!(
+                session.phase,
+                Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
+            )
+        {
+            return None;
+        }
+        session.phase = Ed2kUploadSessionPhase::Uploading;
+        session.last_activity = now;
+        session.last_request_at = Some(now);
+        session
+            .activity
+            .in_flight_work
+            .fetch_add(1, Ordering::AcqRel);
+        Some(Ed2kUploadWorkGuard {
+            activity: Arc::clone(&session.activity),
+            cancel: session.cancel.clone(),
+        })
+    }
+
     pub(super) fn poll_session(
         &mut self,
         handle: &Ed2kUploadSessionHandle,
@@ -710,9 +922,85 @@ impl Ed2kUploadQueueState {
             return Ed2kUploadSessionStatus::Stale;
         }
         if refresh_activity {
+            session.connected = true;
+            session.promotion_deadline = None;
             session.last_activity = now;
         }
         self.status_for_key(&handle.key, now)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "flat mutable peer snapshot at the transfer-runtime boundary"
+    )]
+    pub(super) fn refresh_session_peer(
+        &mut self,
+        handle: &mut Ed2kUploadSessionHandle,
+        peer: Ed2kUploadPeerIdentity,
+        now: Instant,
+        file_priority_score: i128,
+        credit_score_permille: i128,
+        all_time_upload_ratio_permille: i128,
+        file_size: u64,
+    ) -> Ed2kUploadSessionStatus {
+        self.reap_expired_sessions(now);
+        let Some(current) = self.sessions.get(&handle.key) else {
+            return Ed2kUploadSessionStatus::Stale;
+        };
+        if current.connection_id != handle.connection_id {
+            return Ed2kUploadSessionStatus::Stale;
+        }
+
+        if let Some(collision) = self
+            .sessions
+            .keys()
+            .find(|candidate| {
+                **candidate != handle.key && same_upload_client(&candidate.peer, &peer)
+            })
+            .cloned()
+        {
+            if collision.peer.ident_verified {
+                self.retire_session_key(&handle.key);
+                self.promote_waiters(now);
+                return Ed2kUploadSessionStatus::Rejected;
+            }
+            if peer.ident_verified {
+                self.retire_session_key(&collision);
+            } else {
+                self.retire_session_key(&collision);
+                self.retire_session_key(&handle.key);
+                self.promote_waiters(now);
+                return Ed2kUploadSessionStatus::Rejected;
+            }
+        }
+
+        let old_key = handle.key.clone();
+        let Some(mut session) = self.sessions.remove(&old_key) else {
+            return Ed2kUploadSessionStatus::Stale;
+        };
+        let low_id = peer.client_id.is_some_and(is_low_id_client_id);
+        session.file_priority_score = file_priority_score;
+        session.credit_score_permille = credit_score_permille;
+        session.score_modifiers =
+            UploadScoreModifiers::from_peer(&peer, low_id, all_time_upload_ratio_permille);
+        session.file_size = file_size;
+        session.last_activity = now;
+
+        let new_key = Ed2kUploadSessionKey {
+            peer,
+            file_hash: old_key.file_hash.clone(),
+        };
+        if session.phase == Ed2kUploadSessionPhase::Waiting {
+            self.replace_waiting_key(&old_key, &new_key);
+        }
+        for pending in &mut self.pending_promotions {
+            if *pending == old_key {
+                *pending = new_key.clone();
+            }
+        }
+        self.sessions.insert(new_key.clone(), session);
+        handle.key = new_key.clone();
+        self.status_for_key(&new_key, now)
     }
 
     pub(super) fn note_request_parts(
@@ -913,6 +1201,7 @@ impl Ed2kUploadQueueState {
             // Waiter: keep the queue entry, drop only the connection binding. A
             // waiter never held a slot, so there is no short-failed slot to cool.
             session.connected = false;
+            session.promotion_deadline = None;
         } else {
             // RUST-PAR-021 GAP2: an ACTIVE upload slot torn down by a disconnect
             // that was young AND had served little payload is the "grabbed a slot
@@ -932,7 +1221,7 @@ impl Ed2kUploadQueueState {
                 && now.saturating_duration_since(session.queued_at)
                     <= SHORT_FAILED_UPLOAD_COOLDOWN_MAX_AGE
                 && session.uploaded_bytes <= SHORT_FAILED_UPLOAD_COOLDOWN_MAX_PAYLOAD_BYTES;
-            self.sessions.remove(&handle.key);
+            self.retire_session_key(&handle.key);
             // NAT-sibling guard: the churn cooldown is IP-scoped, so seeding it
             // while ANOTHER peer still shares the disconnecter's IP would suppress
             // an innocent sibling behind the same NAT (the failure the round-20
@@ -998,10 +1287,11 @@ impl Ed2kUploadQueueState {
         else {
             return false;
         };
-        let Some(session) = self.sessions.remove(&key) else {
+        let Some(phase) = self.sessions.get(&key).map(|session| session.phase) else {
             return false;
         };
-        if session.phase == Ed2kUploadSessionPhase::Waiting {
+        self.retire_session_key(&key);
+        if phase == Ed2kUploadSessionPhase::Waiting {
             self.waiting_order.retain(|queued| queued != &key);
         }
         self.reap_expired_sessions(now);
@@ -1041,6 +1331,8 @@ impl Ed2kUploadQueueState {
     /// is gone) is skipped: the inbound connection already owns the slot.
     pub(super) fn take_pending_promotions(
         &mut self,
+        now: Instant,
+        connect_timeout: Duration,
         mut next_connection_id: impl FnMut() -> u64,
     ) -> Vec<Ed2kUploadPendingPromotion> {
         if self.pending_promotions.is_empty() {
@@ -1057,14 +1349,16 @@ impl Ed2kUploadQueueState {
             }
             let connection_id = next_connection_id();
             session.connection_id = connection_id;
-            session.connected = true;
+            session.connected = false;
+            session.promotion_deadline = Some(now + connect_timeout);
             grants.push(Ed2kUploadPendingPromotion {
                 peer: key.peer.clone(),
                 file_hash: key.file_hash.clone(),
-                handle: Ed2kUploadSessionHandle::new(
-                    key.peer.clone(),
-                    key.file_hash.clone(),
+                handle: Ed2kUploadSessionHandle::from_session(
+                    key.clone(),
                     connection_id,
+                    session.cancel.clone(),
+                    Arc::clone(&session.activity),
                 ),
             });
         }
@@ -1215,6 +1509,14 @@ impl Ed2kUploadQueueState {
         }
     }
 
+    fn retire_session_key(&mut self, key: &Ed2kUploadSessionKey) {
+        if let Some(session) = self.sessions.remove(key) {
+            session.cancel.cancel();
+        }
+        self.waiting_order.retain(|queued| queued != key);
+        self.pending_promotions.retain(|queued| queued != key);
+    }
+
     /// Apply the master `AddClientToQueue` firewalled-LowID callback guard
     /// (`UploadQueue.cpp:1815-1825`): when we are connected and firewalled, reject
     /// a non-Kad, non-downloading, non-friend, different-server candidate once the
@@ -1234,9 +1536,8 @@ impl Ed2kUploadQueueState {
         })
     }
 
-    /// Apply the master `AddClientToQueue` waiting-admission gates: the per-IP
-    /// waiter cap and the soft/hard combined-score queue limit. Returns `true`
-    /// when the candidate must be refused.
+    /// Apply the master `AddClientToQueue` soft/hard combined-score queue limit.
+    /// Returns `true` when the candidate must be refused.
     fn reject_queue_admission(
         &self,
         key: &Ed2kUploadSessionKey,
@@ -1244,18 +1545,6 @@ impl Ed2kUploadQueueState {
         credit_score_permille: i128,
         now: Instant,
     ) -> bool {
-        // Per-IP cap: count existing waiters from the same IP (different
-        // port/hash), mirroring `cSameIP`.
-        let candidate_ip = key.peer.ip;
-        let same_ip_waiters = self
-            .waiting_order
-            .iter()
-            .filter(|queued| queued.peer.ip == candidate_ip && **queued != *key)
-            .count();
-        if admission::reject_per_ip_cap(same_ip_waiters) {
-            return true;
-        }
-
         let candidate_combined =
             admission::combined_file_prio_and_credit(file_priority_score, credit_score_permille);
         admission::reject_soft_queue_candidate(admission::SoftQueueAdmission {
@@ -1265,6 +1554,36 @@ impl Ed2kUploadQueueState {
             candidate_combined_score: candidate_combined,
             average_combined_score: self.average_combined_waiting_score(now),
         })
+    }
+
+    fn reject_per_ip_session_admission(
+        &self,
+        key: &Ed2kUploadSessionKey,
+        live_same_ip_connections: usize,
+    ) -> bool {
+        let candidate_ip = key.peer.ip;
+        let mut connected_upload_sessions = 0usize;
+        let mut disconnected_upload_sessions = 0usize;
+        for (queued_key, session) in &self.sessions {
+            if queued_key.peer.ip != candidate_ip || *queued_key == *key {
+                continue;
+            }
+            if session.connected {
+                connected_upload_sessions += 1;
+            } else {
+                disconnected_upload_sessions += 1;
+            }
+        }
+
+        // Production callers register the candidate transport before it can
+        // request a file, so remove that one connection. The max keeps direct
+        // queue tests and non-socket harnesses honest without double-counting
+        // connected upload sessions already represented by the registry.
+        let other_live_connections = live_same_ip_connections.saturating_sub(1);
+        let existing_same_ip_clients = other_live_connections
+            .max(connected_upload_sessions)
+            .saturating_add(disconnected_upload_sessions);
+        admission::reject_per_ip_cap(existing_same_ip_clients)
     }
 
     /// Average combined file-priority-and-credit score across current waiters
@@ -1312,12 +1631,22 @@ impl Ed2kUploadQueueState {
             .cloned()
             .collect();
         for key in &stale {
-            self.sessions.remove(key);
+            self.retire_session_key(key);
         }
         if !stale.is_empty() {
             self.waiting_order.retain(|key| !stale.contains(key));
         }
         stale.len()
+    }
+
+    pub(super) fn maintain(
+        &mut self,
+        shared_file_hashes: &std::collections::HashSet<String>,
+        now: Instant,
+    ) {
+        self.purge_waiters_for_unshared_files(shared_file_hashes);
+        self.reap_expired_sessions(now);
+        self.promote_waiters(now);
     }
 
     fn trim_waiting_queue(&mut self, now: Instant) {
@@ -1330,7 +1659,9 @@ impl Ed2kUploadQueueState {
     }
 
     fn reap_expired_sessions(&mut self, now: Instant) {
+        self.observe_wire_progress(now);
         self.refresh_elastic_underfill(now);
+        self.update_slow_upload_tracking(now);
         self.cooldown.purge_expired(now);
         let active_before = self.active_session_count();
         let waiting_before = self.waiting_session_count();
@@ -1349,8 +1680,11 @@ impl Ed2kUploadQueueState {
                         .saturating_duration_since(session.last_activity)
                         > self.config.waiting_timeout)
                         .then(|| (key.clone(), None)),
-                    Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading => self
-                        .underfilled_active_recycle_diagnostics(session, now)
+                    Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading => session
+                        .promotion_deadline
+                        .is_some_and(|deadline| deadline <= now)
+                        .then(|| self.recycle_diagnostics(session, now, "promotionTimeout"))
+                        .or_else(|| self.underfilled_active_recycle_diagnostics(session, now))
                         .or_else(|| self.session_cap_rotation_diagnostics(key, session, now))
                         .map(|diag| (key.clone(), Some(diag))),
                 }
@@ -1360,8 +1694,7 @@ impl Ed2kUploadQueueState {
             let Some(recycle) = recycle else {
                 // Waiting entry past the waiting timeout: a plain queue purge with no
                 // slot event (mirrors MFC RemoveFromWaitingQueue).
-                self.sessions.remove(&key);
-                self.waiting_order.retain(|queued| queued != &key);
+                self.retire_session_key(&key);
                 continue;
             };
             // An idle/slow active slot reclaimed under sustained underfill (MFC
@@ -1384,7 +1717,10 @@ impl Ed2kUploadQueueState {
             // Only the underfill recycles are bad-peer-shaped; a session-cap
             // rotation is fair scheduling of a productive slot (MFC logs those as
             // plain UlDl events, UploadQueue.cpp:2422/2452, with no bad-peer emit).
-            if matches!(recycle.reason, "noRequestUnderfill" | "slowUnderfill") {
+            if matches!(
+                recycle.reason,
+                "noRequestUnderfill" | "slowUnderfill" | "zeroUnderfill"
+            ) {
                 super::diag_bad_peer::upload_recycle(
                     &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
                     key.peer.user_hash,
@@ -1392,35 +1728,41 @@ impl Ed2kUploadQueueState {
                     recycle.reason,
                 );
             }
-            // RUST-PAR-020 U-GAP3: seed the upload anti-abuse cooldown for a
-            // recycled slot. A never-requested slot (noRequestUnderfill, 0 bytes
-            // served) accrues a rolling-window strike and either a bounded
-            // no-request cooldown or, past the threshold, a repeat-offender ban
-            // (TrackNoRequestRepeatOffender + client->Ban, UploadQueue.cpp:1586-1656);
-            // a productive-but-slow slot (slowUnderfill) gets the slow-upload
-            // retry cooldown only (UploadQueue.cpp:2358-2366). A session-cap
-            // rotation is fair scheduling and is never penalised.
+            // Seed upload anti-abuse cooldowns for reclaimed weak slots. A
+            // drained no-request peer gets a short productive cooldown after a
+            // useful burst, or strike escalation/ban when it never reached the
+            // productive payload floor. Slow and zero-rate slots get the normal
+            // slow-upload cooldown. Session-cap rotation is fair scheduling and
+            // is never penalised.
             let budget = self.config.upload_limit_bytes_per_sec;
             let mut force_drop = false;
             match recycle.reason {
+                "promotionTimeout" => {
+                    self.cooldown.set_churn_cooldown(
+                        key.peer.ip,
+                        key.peer.friend_slot,
+                        budget,
+                        now,
+                    );
+                    force_drop = true;
+                }
                 "noRequestUnderfill" => {
-                    // noRequestUnderfill fires only for a 0-byte slot, so the
-                    // recycle is always non-productive (the fork's productive
-                    // no-request path corresponds to slowUnderfill here).
+                    let productive =
+                        recycle.uploaded_bytes >= self.productive_no_request_payload_bytes();
                     let outcome = self.cooldown.register_no_request_recycle(
                         key.peer.ip,
                         key.peer.user_hash,
                         key.peer.friend_slot,
                         budget,
                         now,
-                        false,
+                        productive,
                     );
                     if outcome.ban != CooldownBan::None {
                         self.apply_cooldown_ban(&key.peer, outcome.ban, now);
                         force_drop = true;
                     }
                 }
-                "slowUnderfill" => {
+                "slowUnderfill" | "zeroUnderfill" => {
                     self.cooldown
                         .set_slow_cooldown(key.peer.ip, key.peer.friend_slot, budget, now);
                 }
@@ -1445,8 +1787,7 @@ impl Ed2kUploadQueueState {
                 )
                 && !self.reject_firewalled_callback_admission(&key);
             if !requeue {
-                self.sessions.remove(&key);
-                self.waiting_order.retain(|queued| queued != &key);
+                self.retire_session_key(&key);
                 continue;
             }
             // Demote to the BACK of the waiting queue (mirroring MFC
@@ -1468,14 +1809,19 @@ impl Ed2kUploadQueueState {
             let waiting_sequence = self.take_waiting_sequence();
             if let Some(session) = self.sessions.get_mut(&key) {
                 session.phase = Ed2kUploadSessionPhase::Waiting;
+                session.promotion_deadline = None;
                 session.queued_at = now;
                 session.last_activity = now;
+                session.last_request_at = None;
                 session.upload_started_at = None;
                 session.uploaded_bytes = 0;
                 session.queued_ranges.clear();
                 session.request_generation = 0;
                 session.served_ranges.clear();
                 session.rate_meter.reset();
+                session.accumulated_slow_upload = Duration::ZERO;
+                session.accumulated_zero_upload = Duration::ZERO;
+                session.last_slow_upload_sample_at = Some(now);
                 session.waiting_sequence = waiting_sequence;
             }
             self.waiting_order.push(key);
@@ -1517,6 +1863,14 @@ impl Ed2kUploadQueueState {
         ) {
             return None;
         }
+        if session.activity.in_flight_work.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        if !session.connected {
+            // A disconnected grant is waiting for the promote dial/callback
+            // deadline, not for payload requests on a socket it does not have.
+            return None;
+        }
         // The slow/idle recycle path keys off the 2 s sustained-underfill window
         // (oracle HasSustainedBroadbandUnderfill, UploadQueue.cpp:1047-1050 via
         // ShouldTrackSlowUploadSlots, :1114), NOT the 10 s elastic-open window: a
@@ -1541,28 +1895,35 @@ impl Ed2kUploadQueueState {
         if self.waiting_session_count() == 0 || !self.recycle_underfill_signal_ready(now) {
             return None;
         }
-        if session.uploaded_bytes == 0 {
-            // RUST-PAR-021 GAP3: strike + recycle a no-request idle slot only when
-            // a genuine replacement exists (oracle
-            // HasNoRequestUploadReplacementPressure, UploadQueue.cpp:1570 /
-            // UploadQueueSeams.h:162). When every waiter is cooled with a hard
-            // (churn/slow) cooldown and none is probeable, the oracle RETAINS the
-            // idle holder with NO strike (:1571-1584) rather than recycling it
-            // toward a repeat-offender ban. The outer `waiting_session_count() == 0`
-            // guard alone is coarser: it strikes even when no waiter can take the
-            // freed slot.
+        let rate = upload_speed_bytes_per_sec(session, now);
+        let request_idle_for = session.last_request_at.map_or_else(
+            || now.saturating_duration_since(session.queued_at),
+            |last_request| now.saturating_duration_since(last_request),
+        );
+        let drained_no_request = rate <= self.slow_upload_threshold_bytes_per_sec()
+            && request_idle_for >= self.config.granted_timeout
+            && now.saturating_duration_since(session.queued_at) >= self.config.granted_timeout;
+        if drained_no_request {
+            // A productive burst is allowed the normal warm-up before its
+            // drained pipeline is recycled. An unproductive grab-and-idle slot
+            // uses the shorter no-request grace immediately.
+            let productive = session.uploaded_bytes >= self.productive_no_request_payload_bytes();
+            if productive && now.saturating_duration_since(session.queued_at) < SLOW_UPLOAD_WARMUP {
+                return None;
+            }
             if !self.has_no_request_replacement_pressure(now) {
                 return None;
             }
-            return (now.saturating_duration_since(session.queued_at)
-                > self.config.granted_timeout)
-                .then(|| self.recycle_diagnostics(session, now, "noRequestUnderfill"));
+            return Some(self.recycle_diagnostics(session, now, "noRequestUnderfill"));
         }
-        let started_at = session.upload_started_at?;
-        if now.saturating_duration_since(started_at) < self.config.upload_timeout {
+
+        if now.saturating_duration_since(session.queued_at) < SLOW_UPLOAD_WARMUP {
             return None;
         }
-        (upload_speed_bytes_per_sec(session, now) < self.slow_upload_threshold_bytes_per_sec())
+        if session.accumulated_zero_upload >= self.config.granted_timeout {
+            return Some(self.recycle_diagnostics(session, now, "zeroUnderfill"));
+        }
+        (session.accumulated_slow_upload >= self.config.upload_timeout)
             .then(|| self.recycle_diagnostics(session, now, "slowUnderfill"))
     }
 
@@ -1602,6 +1963,9 @@ impl Ed2kUploadQueueState {
         session: &Ed2kUploadSessionEntry,
         now: Instant,
     ) -> Option<Ed2kUploadRecycleDiagnostics> {
+        if session.activity.in_flight_work.load(Ordering::Acquire) != 0 {
+            return None;
+        }
         // Friend slots are exempt from every session rotation (oracle
         // CheckForTimeOver early return, UploadQueue.cpp:2303-2304).
         if key.peer.friend_slot {
@@ -1671,20 +2035,7 @@ impl Ed2kUploadQueueState {
     /// UploadQueue.cpp:1070-1078: target-per-slot x the default slow-upload
     /// threshold factor 0.75, floored at 1 KiB/s).
     fn productive_upload_threshold_bytes_per_sec(&self) -> u64 {
-        // REG-7: with no configured upload budget the oracle returns a flat
-        // 3 KiB/s (`if (uTargetPerSlot == 0) return 3 * 1024;`,
-        // UploadQueue.cpp:1073-1074) -- NOT the 0.75-factored 2304 the general
-        // path would degenerate to. This arm is UNREACHABLE from the retention
-        // caller (it only fires under tracked underfill, which cannot occur at
-        // upload_limit 0, since `refresh_elastic_underfill` clears
-        // `underfill_since` there), but the constant is spelled to match the
-        // oracle. The nonzero path below is left exactly as before.
-        if self.config.upload_limit_bytes_per_sec == 0 {
-            return 3 * 1024;
-        }
-        let base_slots = self.config.active_slots.max(1) as u64;
-        let target_per_slot = (self.config.upload_limit_bytes_per_sec / base_slots).max(3 * 1024);
-        (target_per_slot.saturating_mul(3) / 4).max(1024)
+        self.slow_upload_threshold_bytes_per_sec()
     }
 
     fn timeout_recycle_diagnostics(
@@ -1741,6 +2092,7 @@ impl Ed2kUploadQueueState {
                 continue;
             };
             next_session.phase = Ed2kUploadSessionPhase::Granted;
+            next_session.promotion_deadline = None;
             next_session.last_activity = now;
             // Fresh granted window on promotion: without this a waiter promoted long
             // after it queued is immediately eligible for the no-request recycle
@@ -1748,6 +2100,10 @@ impl Ed2kUploadQueueState {
             // back to the queue rather than dropped — would thrash promote/recycle
             // between the two peers.
             next_session.queued_at = now;
+            next_session.last_request_at = None;
+            next_session.accumulated_slow_upload = Duration::ZERO;
+            next_session.accumulated_zero_upload = Duration::ZERO;
+            next_session.last_slow_upload_sample_at = Some(now);
             if !next_session.connected && !self.pending_promotions.contains(&next_key) {
                 // Slot granted to a waiter with no live connection: it needs an
                 // OUTBOUND connect + OP_ACCEPTUPLOADREQ (master AddUpNextClient
@@ -1876,8 +2232,7 @@ impl Ed2kUploadQueueState {
     }
 
     fn remove_waiting_key(&mut self, key: &Ed2kUploadSessionKey) {
-        self.sessions.remove(key);
-        self.waiting_order.retain(|queued| queued != key);
+        self.retire_session_key(key);
     }
 
     fn waiting_score(
@@ -2052,10 +2407,85 @@ impl Ed2kUploadQueueState {
         self.aggregate_rate_meter.rate_bytes_per_sec(now)
     }
 
+    fn observe_wire_progress(&mut self, now: Instant) {
+        for session in self.sessions.values_mut() {
+            let current = session.activity.wire_progress_bytes.load(Ordering::Acquire);
+            if current != session.observed_wire_progress_bytes {
+                session.observed_wire_progress_bytes = current;
+                session.last_activity = now;
+            }
+        }
+    }
+
+    fn update_slow_upload_tracking(&mut self, now: Instant) {
+        let should_track = self.waiting_session_count() != 0
+            && self.recycle_underfill_signal_ready(now)
+            && self.active_session_count() >= self.effective_active_slot_limit(now);
+        let threshold = self.slow_upload_threshold_bytes_per_sec();
+
+        for session in self.sessions.values_mut() {
+            if !matches!(
+                session.phase,
+                Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
+            ) || !should_track
+            {
+                session.accumulated_slow_upload = Duration::ZERO;
+                session.accumulated_zero_upload = Duration::ZERO;
+                session.last_slow_upload_sample_at = Some(now);
+                continue;
+            }
+
+            let warmup_ends = session.queued_at + SLOW_UPLOAD_WARMUP;
+            if now < warmup_ends {
+                session.accumulated_slow_upload = Duration::ZERO;
+                session.accumulated_zero_upload = Duration::ZERO;
+                session.last_slow_upload_sample_at = Some(now);
+                continue;
+            }
+
+            let sample_from = session
+                .last_slow_upload_sample_at
+                .unwrap_or(now)
+                .max(warmup_ends);
+            session.last_slow_upload_sample_at = Some(now);
+            let elapsed = now.saturating_duration_since(sample_from);
+            if elapsed.is_zero() {
+                continue;
+            }
+
+            let rate = upload_speed_bytes_per_sec(session, now);
+            if rate == 0 {
+                session.accumulated_zero_upload =
+                    session.accumulated_zero_upload.saturating_add(elapsed);
+                session.accumulated_slow_upload =
+                    session.accumulated_slow_upload.saturating_add(elapsed);
+            } else if rate < threshold {
+                session.accumulated_slow_upload =
+                    session.accumulated_slow_upload.saturating_add(elapsed);
+                session.accumulated_zero_upload =
+                    session.accumulated_zero_upload.saturating_sub(elapsed);
+            } else {
+                session.accumulated_slow_upload =
+                    session.accumulated_slow_upload.saturating_sub(elapsed);
+                session.accumulated_zero_upload =
+                    session.accumulated_zero_upload.saturating_sub(elapsed);
+            }
+        }
+    }
+
     fn slow_upload_threshold_bytes_per_sec(&self) -> u64 {
-        let base_slots = self.config.active_slots.max(1) as u64;
-        let target_per_slot = self.config.upload_limit_bytes_per_sec / base_slots;
-        target_per_slot.saturating_div(20).max(1024)
+        let target_per_slot = self.config.elastic_underfill_bytes_per_sec;
+        if target_per_slot == 0 {
+            return 3 * 1024;
+        }
+        target_per_slot
+            .saturating_mul(3)
+            .saturating_div(4)
+            .max(1024)
+    }
+
+    fn productive_no_request_payload_bytes(&self) -> u64 {
+        super::ED2K_EMBLOCK_SIZE.max(self.config.elastic_underfill_bytes_per_sec)
     }
 }
 
@@ -2098,6 +2528,7 @@ fn upload_payload_send_chunk_len(packet_len: usize, limit_bytes_per_sec: u64) ->
 }
 
 mod admission;
+pub(super) use admission::hard_queue_limit;
 mod helpers;
 mod rate_meter;
 mod score;
@@ -2155,6 +2586,24 @@ mod tests {
         let config = Ed2kUploadQueueConfig::default();
         assert_eq!(config.session_transfer_percent, 90);
         assert_eq!(config.session_time_limit.as_secs(), 7_200);
+    }
+
+    #[test]
+    fn slow_rate_policy_uses_client_target_and_master_defaults() {
+        let config = Ed2kUploadQueueConfig {
+            elastic_underfill_bytes_per_sec: 40 * 1024,
+            ..Ed2kUploadQueueConfig::default()
+        };
+        let queue = Ed2kUploadQueueState::new(config);
+        assert_eq!(queue.slow_upload_threshold_bytes_per_sec(), 30 * 1024);
+        assert_eq!(
+            queue.productive_no_request_payload_bytes(),
+            super::super::ED2K_EMBLOCK_SIZE
+        );
+
+        let defaults = Ed2kUploadQueueConfig::default();
+        assert_eq!(defaults.granted_timeout, Duration::from_secs(5));
+        assert_eq!(defaults.upload_timeout, Duration::from_secs(30));
     }
 
     #[test]

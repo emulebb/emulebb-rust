@@ -459,15 +459,15 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         ),
         (
             r#"{"ed2k":{"uploadQueue":{"activeSlots":0}}}"#,
-            "settings.ed2k.uploadQueue.activeSlots must be an unsigned number in the range 1..64",
-        ),
-        (
-            r#"{"ed2k":{"uploadQueue":{"activeSlots":65}}}"#,
-            "settings.ed2k.uploadQueue.activeSlots must be an unsigned number in the range 1..64",
+            "unknown settings.ed2k.uploadQueue field: activeSlots",
         ),
         (
             r#"{"ed2k":{"uploadQueue":{"elasticPercent":101}}}"#,
-            "settings.ed2k.uploadQueue.elasticPercent must be an unsigned number less than or equal to 100",
+            "unknown settings.ed2k.uploadQueue field: elasticPercent",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"waitingCapacity":100}}}"#,
+            "unknown settings.ed2k.uploadQueue field: waitingCapacity",
         ),
         (
             r#"{"ed2k":{"uploadQueue":{"elasticUnderfillSecs":0}}}"#,

@@ -55,12 +55,7 @@ const ED2K_SETTINGS_FIELDS: &[&str] = &[
     "deadServerRetries",
 ];
 const ED2K_UPLOAD_QUEUE_SETTINGS_FIELDS: &[&str] = &[
-    "activeSlots",
-    "elasticPercent",
-    "uploadLimitBytesPerSec",
-    "elasticUnderfillBytesPerSec",
     "elasticUnderfillSecs",
-    "waitingCapacity",
     "waitingTimeoutSecs",
     "grantedTimeoutSecs",
     "uploadTimeoutSecs",
@@ -357,19 +352,6 @@ fn validate_ed2k_upload_queue_settings_patch_body_fields(
     else {
         return Ok(());
     };
-    validate_unsigned_number_range(
-        object,
-        "activeSlots",
-        "settings.ed2k.uploadQueue.activeSlots",
-        1,
-        64,
-    )?;
-    validate_unsigned_number_max(
-        object,
-        "elasticPercent",
-        "settings.ed2k.uploadQueue.elasticPercent",
-        100,
-    )?;
     validate_unsigned_number_min(
         object,
         "elasticUnderfillSecs",

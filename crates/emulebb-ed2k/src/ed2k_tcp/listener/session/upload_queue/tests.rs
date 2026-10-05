@@ -142,9 +142,10 @@ async fn rejected_admission_sends_no_packet() {
     let file_hash = Ed2kHash::from_bytes([0x55; 16]);
     let shared_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
 
-    // Occupy the single slot, then fill the per-IP waiter cap (3).
+    // The cap covers all live ED2K client sessions from the IP, including the
+    // active slot holder; three total clients are admitted.
     let mut queues = Vec::new();
-    for (index, port) in [4661u16, 4662, 4663, 4664].into_iter().enumerate() {
+    for (index, port) in [4661u16, 4662, 4663].into_iter().enumerate() {
         let mut queue = ListenerUploadQueue::new();
         let reply = queue
             .start_upload_reply(
@@ -162,7 +163,7 @@ async fn rejected_admission_sends_no_packet() {
         queues.push(queue);
     }
 
-    // The 4th same-IP candidate is refused: silence on the wire, no
+    // The 4th same-IP client is refused: silence on the wire, no
     // retained session handle, and the queue is unchanged.
     let mut rejected = ListenerUploadQueue::new();
     let reply = rejected
@@ -174,7 +175,7 @@ async fn rejected_admission_sends_no_packet() {
         .await;
     assert_eq!(reply, None, "a rejected admission must stay silent");
     assert!(rejected.session.is_none());
-    assert_eq!(runtime.upload_queue_snapshot().await.len(), 4);
+    assert_eq!(runtime.upload_queue_snapshot().await.len(), 3);
 }
 
 /// REG-1: a BANNED peer's STARTUPLOADREQ is refused at admission (master

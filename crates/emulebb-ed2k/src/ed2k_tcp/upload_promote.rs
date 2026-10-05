@@ -17,6 +17,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use tokio::sync::{Mutex, RwLock};
@@ -56,6 +57,9 @@ pub(in crate::ed2k_tcp) struct UploadPromoteDriver {
     pub(in crate::ed2k_tcp) port_test_registry: crate::PortTestRegistry,
     /// Local bind address for outbound connects (the listener's VPN-pinned IP).
     pub(in crate::ed2k_tcp) bind_ip: Ipv4Addr,
+    /// Maximum time a granted disconnected waiter may take to attach a TCP
+    /// connection (direct dial or callback) before its revocable slot expires.
+    pub(in crate::ed2k_tcp) callback_timeout: Duration,
     pub(in crate::ed2k_tcp) shutdown: Arc<AtomicBool>,
 }
 
@@ -75,12 +79,14 @@ impl UploadPromoteDriver {
     /// unusable endpoint) is dropped immediately like the oracle's failed
     /// `TryToConnect` so the slot moves on to the next waiter.
     pub(in crate::ed2k_tcp) async fn promote_pending_once(self: &Arc<Self>) {
-        // Purge waiters whose requested file is no longer shared before handing
-        // out slots (master `FindBestClientInQueue` waiting-list purge,
-        // UploadQueue.cpp:223 `!GetFileByID(client->GetUploadFileID())`); this
-        // maintenance tick is rust's analog of the master upload timer walk.
-        self.transfer_runtime.purge_unshared_upload_waiters().await;
-        let grants = self.transfer_runtime.take_pending_upload_promotions().await;
+        // Run the complete queue maintenance pass before handing out slots:
+        // purge unshared files, expire dead/revoked leases, and promote waiters.
+        // This tick is Rust's analog of the master's upload timer walk.
+        self.transfer_runtime.maintain_upload_queue().await;
+        let grants = self
+            .transfer_runtime
+            .take_pending_upload_promotions_with_timeout(self.callback_timeout)
+            .await;
         if grants.is_empty() {
             return;
         }
@@ -103,7 +109,14 @@ impl UploadPromoteDriver {
                     // inbound connect-back is served, mirroring the master keeping the
                     // US_ONUPLOADQUEUE client through CCS_DIRECTCALLBACK
                     // (BaseClient.cpp:1478-1492).
-                    self.send_direct_callback_req(dest, &grant.peer).await;
+                    if !self.send_direct_callback_req(dest, &grant.peer).await {
+                        self.transfer_runtime
+                            .note_failed_upload_promotion(&grant.peer)
+                            .await;
+                        self.transfer_runtime
+                            .release_upload_session(&grant.handle)
+                            .await;
+                    }
                 }
                 PromoteAction::Drop => {
                     debug!(
@@ -139,7 +152,11 @@ impl UploadPromoteDriver {
     /// userhash + connect options, obfuscated toward the peer when its crypt key is
     /// known), reusing the client-UDP datagram builder that the type-6 download
     /// initiator uses.
-    async fn send_direct_callback_req(&self, dest: SocketAddr, peer: &Ed2kUploadPeerIdentity) {
+    async fn send_direct_callback_req(
+        &self,
+        dest: SocketAddr,
+        peer: &Ed2kUploadPeerIdentity,
+    ) -> bool {
         let our_tcp_port = self
             .reachability
             .advertised_tcp_port(self.hello_identity.tcp_port);
@@ -158,10 +175,16 @@ impl UploadPromoteDriver {
             &target,
         );
         match self.dht.send_raw_datagram(dest, &datagram.bytes).await {
-            Ok(()) => debug!(
-                "sent OP_DIRECTCALLBACKREQ to promote LowID waiter {dest} onto its granted slot"
-            ),
-            Err(error) => debug!("OP_DIRECTCALLBACKREQ to {dest} failed: {error:#}"),
+            Ok(()) => {
+                debug!(
+                    "sent OP_DIRECTCALLBACKREQ to promote LowID waiter {dest} onto its granted slot"
+                );
+                true
+            }
+            Err(error) => {
+                debug!("OP_DIRECTCALLBACKREQ to {dest} failed: {error:#}");
+                false
+            }
         }
     }
 
@@ -197,15 +220,19 @@ impl UploadPromoteDriver {
             .peer
             .should_crypt
             .then_some(EMULE_CRYPT_SUPPORTS | EMULE_CRYPT_REQUESTS);
-        let transport = Ed2kTransport::connect_outgoing(
-            self.bind_ip,
-            peer_endpoint,
-            self.hello_identity.connect_options,
-            grant.peer.user_hash,
-            peer_connect_options,
-            ED2K_CONNECTION_IDLE_TIMEOUT,
-        )
-        .await?;
+        let transport = tokio::select! {
+            _ = grant.handle.cancelled() => {
+                anyhow::bail!("upload promotion lease was revoked before connect completed");
+            }
+            result = Ed2kTransport::connect_outgoing(
+                self.bind_ip,
+                peer_endpoint,
+                self.hello_identity.connect_options,
+                grant.peer.user_hash,
+                peer_connect_options,
+                ED2K_CONNECTION_IDLE_TIMEOUT,
+            ) => result?,
+        };
         debug!(
             "granting upload slot over outbound connect to {peer_endpoint} (file_hash={})",
             grant.file_hash

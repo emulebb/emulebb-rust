@@ -10,7 +10,8 @@ use crate::{
     },
     ed2k_transfer::{
         Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadRangeAdmission,
-        Ed2kUploadSessionHandle, Ed2kUploadSessionStatus, Ed2kVerifiedRangeReader, diag_sched,
+        Ed2kUploadSessionHandle, Ed2kUploadSessionStatus, Ed2kUploadWorkGuard,
+        Ed2kVerifiedRangeReader, diag_sched,
     },
 };
 
@@ -24,6 +25,7 @@ pub(in crate::ed2k_tcp) enum ListenerQueuePoll {
     Close,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ed2k_tcp) enum ListenerQueueDecision {
     Granted,
     Waiting,
@@ -139,6 +141,27 @@ impl ListenerUploadQueue {
         self.peer_ext_protocol = peer_identity.is_emule_client;
     }
 
+    pub(in crate::ed2k_tcp) async fn refresh_peer_state(
+        &mut self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        peer_identity: &Ed2kUploadPeerIdentity,
+    ) -> Option<Ed2kUploadSessionStatus> {
+        let handle = self.session.as_mut()?;
+        let status = transfer_runtime
+            .refresh_upload_session_peer(handle, peer_identity.clone())
+            .await;
+        self.record_diag_peer(peer_identity);
+        if matches!(
+            status,
+            Ed2kUploadSessionStatus::Rejected | Ed2kUploadSessionStatus::Stale
+        ) {
+            self.session = None;
+            self.file_hash = None;
+            self.verified_reader = None;
+        }
+        Some(status)
+    }
+
     /// Whether a slot demotion/recycle owes the peer the OP_OUTOFPARTREQS
     /// courtesy packet: only a peer that actually saw OP_ACCEPTUPLOADREQ, and
     /// never a BANNED one (oracle bRequeue=false for `IsBanned()`,
@@ -193,6 +216,15 @@ impl ListenerUploadQueue {
         } else {
             ED2K_CONNECTION_IDLE_TIMEOUT
         }
+    }
+
+    pub(in crate::ed2k_tcp) async fn begin_work(
+        &self,
+        transfer_runtime: &Ed2kTransferRuntime,
+    ) -> Option<Ed2kUploadWorkGuard> {
+        transfer_runtime
+            .begin_upload_work(self.session.as_ref()?)
+            .await
     }
 
     pub(in crate::ed2k_tcp) async fn poll_on_timeout(
@@ -334,14 +366,9 @@ impl ListenerUploadQueue {
         // the rank-packet family gate on every ask.
         self.peer_ext_protocol = peer_identity.is_emule_client;
         let mut status = if self.file_hash.as_ref() == Some(requested) {
-            match self.session.as_ref() {
-                Some(upload_session_handle) => {
-                    transfer_runtime
-                        .poll_upload_session(upload_session_handle, true)
-                        .await
-                }
-                None => Ed2kUploadSessionStatus::Stale,
-            }
+            self.refresh_peer_state(transfer_runtime, &peer_identity)
+                .await
+                .unwrap_or(Ed2kUploadSessionStatus::Stale)
         } else {
             self.admit_fresh(transfer_runtime, peer_identity.clone(), requested)
                 .await
@@ -402,9 +429,23 @@ impl ListenerUploadQueue {
         requested: &Ed2kHash,
     ) -> Ed2kUploadSessionStatus {
         self.record_diag_peer(&peer_identity);
-        let (session_handle, status) = transfer_runtime
-            .begin_upload_session(peer_identity, requested)
-            .await;
+        let admission = match self.session.as_ref() {
+            Some(handle) => {
+                transfer_runtime
+                    .begin_upload_session_on_connection(
+                        peer_identity,
+                        requested,
+                        handle.connection_id(),
+                    )
+                    .await
+            }
+            None => {
+                transfer_runtime
+                    .begin_upload_session(peer_identity, requested)
+                    .await
+            }
+        };
+        let (session_handle, status) = admission;
         if status != Ed2kUploadSessionStatus::Rejected {
             self.session = Some(session_handle);
             self.file_hash = Some(*requested);
@@ -478,20 +519,30 @@ impl ListenerUploadQueue {
         if self.file_hash.as_ref() == Some(requested) {
             // WHY: queued peers remember the requested file before they own a slot; a later
             // OP_REQUESTPARTS must re-check the global queue state instead of bypassing limits.
-            let status = match self.session.as_ref() {
-                Some(upload_session_handle) => {
-                    transfer_runtime
-                        .poll_upload_session(upload_session_handle, true)
-                        .await
-                }
-                None => Ed2kUploadSessionStatus::Stale,
-            };
+            let status = self
+                .refresh_peer_state(transfer_runtime, &peer_identity)
+                .await
+                .unwrap_or(Ed2kUploadSessionStatus::Stale);
             return self.send_status(transport, peer_addr, status).await;
         }
         self.record_diag_peer(&peer_identity);
-        let (session_handle, status) = transfer_runtime
-            .begin_upload_session(peer_identity, requested)
-            .await;
+        let admission = match self.session.as_ref() {
+            Some(handle) => {
+                transfer_runtime
+                    .begin_upload_session_on_connection(
+                        peer_identity,
+                        requested,
+                        handle.connection_id(),
+                    )
+                    .await
+            }
+            None => {
+                transfer_runtime
+                    .begin_upload_session(peer_identity, requested)
+                    .await
+            }
+        };
+        let (session_handle, status) = admission;
         // A rejected candidate was never enqueued; do not retain a dangling
         // session handle for it.
         if status != Ed2kUploadSessionStatus::Rejected {
@@ -592,12 +643,15 @@ impl ListenerUploadQueue {
         &mut self,
         transfer_runtime: &Ed2kTransferRuntime,
         byte_count: u64,
-    ) {
-        if let Some(upload_session_handle) = self.session.as_ref() {
+    ) -> ListenerQueueDecision {
+        let Some(upload_session_handle) = self.session.as_ref() else {
+            return ListenerQueueDecision::Stale;
+        };
+        Self::decision_from_status(
             transfer_runtime
                 .note_upload_payload_sent(upload_session_handle, byte_count)
-                .await;
-        }
+                .await,
+        )
     }
 
     /// The file this connection currently holds an upload slot/waiting entry

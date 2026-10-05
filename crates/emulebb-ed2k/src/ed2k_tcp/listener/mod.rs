@@ -4,6 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use tokio::{
@@ -48,6 +49,8 @@ pub struct Ed2kListenerOptions {
     pub buddy_registry: BuddySocketRegistry,
     /// Cross-transport TCP/UDP external listener-test association.
     pub port_test_registry: crate::PortTestRegistry,
+    /// Maximum grant-to-connect time for disconnected upload waiters.
+    pub callback_timeout: Duration,
 }
 
 /// Run the minimal eD2k TCP listener needed for inbound hello parity and firewall checks.
@@ -65,6 +68,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         reachability,
         buddy_registry,
         port_test_registry,
+        callback_timeout,
     } = options;
     // Resolve the VPN bind interface index once (from the listener's local addr)
     // so each accepted socket can egress-pin to the tunnel (IP_UNICAST_IF) without
@@ -106,6 +110,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             buddy_registry: buddy_registry.clone(),
             port_test_registry: port_test_registry.clone(),
             bind_ip,
+            callback_timeout,
             shutdown: Arc::clone(&shutdown),
         }
         .run(),
