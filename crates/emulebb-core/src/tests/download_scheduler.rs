@@ -622,6 +622,7 @@ fn queued_active_download_attempts_remain_retryable() {
     assert!(should_retry_download_attempt_state("downloading"));
     assert!(should_retry_download_attempt_state("queued"));
     assert!(!should_retry_download_attempt_state("paused"));
+    assert!(!should_retry_download_attempt_state("insufficient"));
     assert!(!should_retry_download_attempt_state("stopped"));
     assert!(!should_retry_download_attempt_state("completed"));
     assert!(!should_retry_download_attempt_state("error"));

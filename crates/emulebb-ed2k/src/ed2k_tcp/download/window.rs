@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::ed2k_transfer::{
-    ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime,
+    ED2K_PART_SIZE, Ed2kDownloadBlockLease, Ed2kResumeManifest, Ed2kTransferRuntime,
     expected_piece_length,
 };
 
@@ -16,8 +16,6 @@ use super::super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ed2k_tcp) struct ActiveDownloadPiece {
     pub(in crate::ed2k_tcp) piece_index: u32,
-    pub(in crate::ed2k_tcp) next_offset: u64,
-    pub(in crate::ed2k_tcp) piece_end: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +26,7 @@ pub(in crate::ed2k_tcp) struct PendingPartRequest {
     pub(in crate::ed2k_tcp) queued: bool,
     pub(in crate::ed2k_tcp) received_end: u64,
     pub(in crate::ed2k_tcp) response_bytes: Vec<u8>,
+    pub(in crate::ed2k_tcp) lease: Option<Ed2kDownloadBlockLease>,
 }
 
 impl PendingPartRequest {
@@ -39,6 +38,19 @@ impl PendingPartRequest {
             queued: false,
             received_end: start,
             response_bytes: Vec::new(),
+            lease: None,
+        }
+    }
+
+    pub(in crate::ed2k_tcp) fn from_lease(lease: Ed2kDownloadBlockLease) -> Self {
+        Self {
+            piece_index: lease.piece_index(),
+            start: lease.start(),
+            end: lease.end(),
+            queued: false,
+            received_end: lease.start(),
+            response_bytes: Vec::new(),
+            lease: Some(lease),
         }
     }
 
@@ -64,6 +76,9 @@ impl PendingPartRequest {
         }
         self.response_bytes.extend_from_slice(bytes);
         self.received_end = end;
+        if let Some(lease) = &self.lease {
+            lease.note_payload(data_len);
+        }
         Ok(())
     }
 
@@ -82,7 +97,6 @@ pub(in crate::ed2k_tcp) struct DownloadRequestWindowState<'a> {
     pub(in crate::ed2k_tcp) transfer_runtime: &'a Ed2kTransferRuntime,
     pub(in crate::ed2k_tcp) file_hash: &'a Ed2kHash,
     pub(in crate::ed2k_tcp) file_hash_hex: &'a str,
-    pub(in crate::ed2k_tcp) file_size: u64,
     pub(in crate::ed2k_tcp) manifest: &'a Ed2kResumeManifest,
     pub(in crate::ed2k_tcp) active_piece_request: &'a mut Option<ActiveDownloadPiece>,
     pub(in crate::ed2k_tcp) pending_part_requests: &'a mut Vec<PendingPartRequest>,
@@ -111,7 +125,6 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         transfer_runtime,
         file_hash,
         file_hash_hex,
-        file_size,
         manifest,
         active_piece_request,
         pending_part_requests,
@@ -129,39 +142,25 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
     );
     if pending_part_requests.len() < window.min_pending_blocks {
         while pending_part_requests.len() < window.max_pending_blocks {
-            if active_piece_request.is_none() {
-                let Some(next_part) = transfer_runtime
-                    .claim_next_missing_part(file_hash_hex, peer_part_bitmap)
-                    .await?
-                else {
-                    break;
-                };
-                let piece_start = u64::from(next_part.piece_index) * ED2K_PART_SIZE;
-                let piece_end = (piece_start + ED2K_PART_SIZE).min(file_size);
-                *active_piece_request = Some(ActiveDownloadPiece {
-                    piece_index: next_part.piece_index,
-                    next_offset: piece_start + next_part.bytes_written,
-                    piece_end,
-                });
-            }
-            let Some(active_piece) = active_piece_request.as_mut() else {
+            let elapsed = upload_accepted_at.elapsed().as_secs_f64().max(0.001);
+            let peer_rate = (session_payload_down as f64 / elapsed).min(f64::from(u32::MAX)) as u32;
+            let Some(lease) = transfer_runtime
+                .lease_next_download_block(
+                    file_hash_hex,
+                    peer_addr,
+                    peer_part_bitmap,
+                    active_piece_request.as_ref().map(|piece| piece.piece_index),
+                    peer_rate,
+                )
+                .await?
+            else {
+                *active_piece_request = None;
                 break;
             };
-            // Skip over blocks already present in this part's salvage bitmap so
-            // an ICH-recovered part re-requests only the corrupt (gap) blocks.
-            // For a normal contiguous part the bitmap is the contiguous prefix
-            // up to `bytes_written`, so this advance is a no-op.
-            advance_over_present_blocks(manifest, active_piece);
-            if active_piece.next_offset >= active_piece.piece_end {
-                break;
-            }
-            let end = (active_piece.next_offset + ED2K_EMBLOCK_SIZE).min(active_piece.piece_end);
-            pending_part_requests.push(PendingPartRequest::new(
-                active_piece.piece_index,
-                active_piece.next_offset,
-                end,
-            ));
-            active_piece.next_offset = end;
+            *active_piece_request = Some(ActiveDownloadPiece {
+                piece_index: lease.piece_index(),
+            });
+            pending_part_requests.push(PendingPartRequest::from_lease(lease));
         }
     }
 
@@ -205,35 +204,6 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
     Ok(DownloadRequestWindowOutcome::RequestSent(
         tokio::time::Instant::now() + part_response_grace,
     ))
-}
-
-/// Advance `active_piece.next_offset` past any blocks already marked present in
-/// the part's salvage bitmap, so re-download targets only the missing (gap)
-/// blocks. A no-op for contiguous parts (the bitmap is the prefix up to
-/// `bytes_written`, which `next_offset` already starts beyond).
-fn advance_over_present_blocks(
-    manifest: &Ed2kResumeManifest,
-    active_piece: &mut ActiveDownloadPiece,
-) {
-    let Some(piece) = manifest
-        .pieces
-        .iter()
-        .find(|piece| piece.piece_index == active_piece.piece_index)
-    else {
-        return;
-    };
-    if !piece.has_block_bitmap() {
-        return;
-    }
-    let piece_start = u64::from(active_piece.piece_index) * ED2K_PART_SIZE;
-    let part_len = active_piece.piece_end - piece_start;
-    while active_piece.next_offset < active_piece.piece_end {
-        let rel = active_piece.next_offset - piece_start;
-        match piece.present_block_end(part_len, rel) {
-            Some(block_end_rel) => active_piece.next_offset = piece_start + block_end_rel,
-            None => break,
-        }
-    }
 }
 
 #[must_use]

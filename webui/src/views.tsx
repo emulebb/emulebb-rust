@@ -296,6 +296,7 @@ export function TransfersView(props: {
               <option value="">All states</option>
               <option value="downloading">Downloading</option>
               <option value="paused">Paused</option>
+              <option value="insufficient">Insufficient space</option>
               <option value="completed">Completed</option>
               <option value="error">Error</option>
             </select>
@@ -357,6 +358,9 @@ export function TransfersView(props: {
                     <button type="button" class="link-button" onClick={() => setSelectedHash(transfer.hash)}>
                       {transfer.name ?? transfer.hash}
                     </button>
+                    {transfer.deliveryError && (
+                      <small class="text-danger" title={transfer.deliveryError}>Delivery failed; retrying</small>
+                    )}
                   </td>
                   <td><StatusPill value={transfer.stopped ? "stopped" : transfer.state ?? "unknown"} /></td>
                   <td>{formatProgress(transfer)}</td>
@@ -392,7 +396,7 @@ export function TransfersView(props: {
                       <Action
                         title="Resume"
                         icon={<Play size={15} />}
-                        disabled={transfer.state !== "paused" || transfer.stopped === true}
+                        disabled={(transfer.state !== "paused" && transfer.state !== "insufficient") || transfer.stopped === true}
                         onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/resume`), "Transfer resumed")}
                       />
                       <Action title="Recheck" icon={<RefreshCw size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/recheck`), "Recheck queued")} />
@@ -2272,6 +2276,8 @@ type SettingsForm = {
   ed2kMaxSourcesPerFile: string;
   ed2kMaxParallelDownloadPeers: string;
   ed2kDownloadLimitBytesPerSec: string;
+  ed2kMinFreeTransferSpaceBytes: string;
+  ed2kMinFreeIncomingSpaceBytes: string;
   ed2kKeywordServerAttemptBudget: string;
   ed2kExactHashKeywordServerAttemptBudget: string;
   ed2kSourceServerAttemptBudget: string;
@@ -2379,6 +2385,8 @@ const emptySettingsForm: SettingsForm = {
   ed2kMaxSourcesPerFile: "",
   ed2kMaxParallelDownloadPeers: "",
   ed2kDownloadLimitBytesPerSec: "",
+  ed2kMinFreeTransferSpaceBytes: "",
+  ed2kMinFreeIncomingSpaceBytes: "",
   ed2kKeywordServerAttemptBudget: "",
   ed2kExactHashKeywordServerAttemptBudget: "",
   ed2kSourceServerAttemptBudget: "",
@@ -2550,6 +2558,8 @@ export function SettingsView(props: {
           "ed2k.maxSourcesPerFile",
           "ed2k.maxParallelDownloadPeers",
           "ed2k.downloadLimitBytesPerSec",
+          "ed2k.minFreeTransferSpaceBytes",
+          "ed2k.minFreeIncomingSpaceBytes",
           "ed2k.enableUdpReask"
         ]) && (
           <SettingsControlSection title="Transfers">
@@ -2567,6 +2577,8 @@ export function SettingsView(props: {
               {renderField("ed2k.maxSourcesPerFile", "ed2kMaxSourcesPerFile", "eD2K source cap")}
               {renderField("ed2k.maxParallelDownloadPeers", "ed2kMaxParallelDownloadPeers", "Parallel download peers")}
               {renderField("ed2k.downloadLimitBytesPerSec", "ed2kDownloadLimitBytesPerSec", "Download limit B/s")}
+              {renderField("ed2k.minFreeTransferSpaceBytes", "ed2kMinFreeTransferSpaceBytes", "Minimum free transfer bytes")}
+              {renderField("ed2k.minFreeIncomingSpaceBytes", "ed2kMinFreeIncomingSpaceBytes", "Minimum free incoming bytes")}
               {renderToggle("ed2k.enableUdpReask", "enableUdpReask", "UDP reask")}
             </div>
           </SettingsControlSection>
@@ -2988,6 +3000,8 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kMaxSourcesPerFile", "eD2K source cap", {});
   validateUnsigned(errors, form, "ed2kMaxParallelDownloadPeers", "Parallel download peers", { min: 1 });
   validateUnsigned(errors, form, "ed2kDownloadLimitBytesPerSec", "Download limit B/s", {});
+  validateUnsigned(errors, form, "ed2kMinFreeTransferSpaceBytes", "Minimum free transfer bytes", {});
+  validateUnsigned(errors, form, "ed2kMinFreeIncomingSpaceBytes", "Minimum free incoming bytes", {});
   validateUnsigned(errors, form, "ed2kKeywordServerAttemptBudget", "Keyword server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kExactHashKeywordServerAttemptBudget", "Exact-hash server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kSourceServerAttemptBudget", "Source server attempts", { min: 1 });
@@ -3223,6 +3237,8 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(ed2k, "exactHashKeywordServerAttemptBudget", parseNumber(form.ed2kExactHashKeywordServerAttemptBudget), parseNumber(baseline.ed2kExactHashKeywordServerAttemptBudget));
   putChanged(ed2k, "sourceServerAttemptBudget", parseNumber(form.ed2kSourceServerAttemptBudget), parseNumber(baseline.ed2kSourceServerAttemptBudget));
   putChanged(ed2k, "downloadLimitBytesPerSec", parseNumber(form.ed2kDownloadLimitBytesPerSec), parseNumber(baseline.ed2kDownloadLimitBytesPerSec));
+  putChanged(ed2k, "minFreeTransferSpaceBytes", parseNumber(form.ed2kMinFreeTransferSpaceBytes), parseNumber(baseline.ed2kMinFreeTransferSpaceBytes));
+  putChanged(ed2k, "minFreeIncomingSpaceBytes", parseNumber(form.ed2kMinFreeIncomingSpaceBytes), parseNumber(baseline.ed2kMinFreeIncomingSpaceBytes));
   putChanged(ed2k, "obfuscationEnabled", form.obfuscationEnabled, baseline.obfuscationEnabled);
   putChanged(ed2k, "reconnectEnabled", form.ed2kReconnectEnabled, baseline.ed2kReconnectEnabled);
   putChanged(ed2k, "useServerPriorities", form.useServerPriorities, baseline.useServerPriorities);
@@ -3358,6 +3374,8 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kMaxSourcesPerFile: String(numberField(settings.ed2k, "maxSourcesPerFile") ?? ""),
     ed2kMaxParallelDownloadPeers: String(numberField(settings.ed2k, "maxParallelDownloadPeers") ?? ""),
     ed2kDownloadLimitBytesPerSec: String(numberField(settings.ed2k, "downloadLimitBytesPerSec") ?? ""),
+    ed2kMinFreeTransferSpaceBytes: String(numberField(settings.ed2k, "minFreeTransferSpaceBytes") ?? ""),
+    ed2kMinFreeIncomingSpaceBytes: String(numberField(settings.ed2k, "minFreeIncomingSpaceBytes") ?? ""),
     ed2kKeywordServerAttemptBudget: String(numberField(settings.ed2k, "keywordServerAttemptBudget") ?? ""),
     ed2kExactHashKeywordServerAttemptBudget: String(numberField(settings.ed2k, "exactHashKeywordServerAttemptBudget") ?? ""),
     ed2kSourceServerAttemptBudget: String(numberField(settings.ed2k, "sourceServerAttemptBudget") ?? ""),

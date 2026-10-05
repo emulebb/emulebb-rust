@@ -99,6 +99,7 @@ export type Transfer = {
   name?: string;
   path?: string;
   deliveredPath?: string | null;
+  deliveryError?: string | null;
   state?: string;
   sizeBytes?: number;
   completedBytes?: number;
@@ -536,6 +537,8 @@ export type Ed2kSettings = {
   sourceServerAttemptBudget?: number;
   uploadQueue?: Ed2kUploadQueueSettings;
   downloadLimitBytesPerSec?: number;
+  minFreeTransferSpaceBytes?: number;
+  minFreeIncomingSpaceBytes?: number;
   enableUdpReask?: boolean;
   publishEmuleRustIdentity?: boolean;
   offerFilesCapabilityEnabled?: boolean;

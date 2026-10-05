@@ -31,6 +31,12 @@ impl EmulebbCore {
                 .live_download_sources(&manifest.file_hash)
                 .len() as u32,
         );
+        transfer.delivery_error = self
+            .delivery_failures
+            .lock()
+            .unwrap()
+            .get(&manifest.file_hash)
+            .map(|failure| failure.message.clone());
         // Surface persisted addedAt/completedAt from the metadata store.
         if let Ok(Some((created_ms, completed_ms))) = self
             .metadata_store

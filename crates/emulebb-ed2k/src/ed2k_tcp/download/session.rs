@@ -39,10 +39,10 @@ use super::super::{
     handle_aich_recovery_answer, is_connection_shutdown_error, validate_file_status_part_count,
 };
 use super::{
-    ActiveDownloadPiece, AichRecoveryRequestState, DownloadRequestWindowOutcome,
-    DownloadRequestWindowState, PendingCompressedPart, PendingPartRequest,
-    flush_buffered_download_prefixes, next_download_read_timeout, pump_aich_recovery_requests,
-    pump_download_request_window, reconcile_download_manifest_metadata,
+    AichRecoveryRequestState, DownloadRequestWindowOutcome, DownloadRequestWindowState,
+    PendingCompressedPart, PendingPartRequest, flush_buffered_download_prefixes,
+    next_download_read_timeout, pump_aich_recovery_requests, pump_download_request_window,
+    reconcile_download_manifest_metadata,
 };
 mod browse;
 mod notify;
@@ -266,7 +266,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         transfer_runtime,
                         file_hash: &file_hash,
                         file_hash_hex,
-                        file_size: manifest.file_size,
                         manifest: &manifest,
                         active_piece_request: &mut session_state.active_piece_request,
                         pending_part_requests: &mut pending_part_requests,
@@ -1417,20 +1416,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             &mut teardown_recovery_parts,
         )
         .await?;
-    }
-
-    if let Some(active_piece) = session_state.active_piece_request.or_else(|| {
-        pending_part_requests
-            .first()
-            .map(|request| ActiveDownloadPiece {
-                piece_index: request.piece_index,
-                next_offset: request.end,
-                piece_end: request.end,
-            })
-    }) {
-        transfer_runtime
-            .release_piece_request(file_hash_hex, active_piece.piece_index)
-            .await?;
     }
 
     session_result

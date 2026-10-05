@@ -505,6 +505,10 @@ pub struct Transfer {
     /// name (under a category path or the global incoming dir), or `None` until
     /// the transfer completes and is delivered.
     pub delivered_path: Option<String>,
+    /// Last finished-file delivery failure. Present while a verified download
+    /// remains in `completing`; cleared after a successful retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_error: Option<String>,
     pub size_bytes: u64,
     pub completed_bytes: u64,
     pub state: String,

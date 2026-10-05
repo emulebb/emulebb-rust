@@ -56,6 +56,7 @@ fn populated_transfer() -> Transfer {
         name: "Event Stream.bin".to_string(),
         path: "Event Stream.bin".to_string(),
         delivered_path: None,
+        delivery_error: None,
         size_bytes: 4096,
         completed_bytes: 0,
         state: "paused".to_string(),
@@ -171,6 +172,20 @@ fn transfer_events_serialize_as_variant_specific_contract_shapes() {
     assert_eq!(resumed["type"], json!("sync.reset"));
     assert_eq!(resumed["reason"], json!("last-event-id"));
     assert_eq!(resumed["lastEventId"], json!("4"));
+}
+
+#[test]
+fn transfer_delivery_error_is_optional_camel_case_contract_data() {
+    let mut transfer = populated_transfer();
+    let without_error = serde_json::to_value(&transfer).unwrap();
+    assert!(without_error.get("deliveryError").is_none());
+
+    transfer.delivery_error = Some("destination unavailable".to_string());
+    let with_error = serde_json::to_value(&transfer).unwrap();
+    assert_eq!(
+        with_error["deliveryError"],
+        json!("destination unavailable")
+    );
 }
 
 fn score_breakdown() -> UploadScoreBreakdown {

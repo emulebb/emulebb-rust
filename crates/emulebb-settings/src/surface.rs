@@ -386,6 +386,20 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
         "Startup download byte budget before live core settings apply.",
     ),
     app_setting(
+        "ed2k.minFreeTransferSpaceBytes",
+        SettingSurfaceClass::NormalControl,
+        true,
+        "Transfers",
+        "Free-space floor retained on incomplete-transfer volumes.",
+    ),
+    app_setting(
+        "ed2k.minFreeIncomingSpaceBytes",
+        SettingSurfaceClass::NormalControl,
+        true,
+        "Transfers",
+        "Free-space floor retained on finished-file destination volumes.",
+    ),
+    app_setting(
         "ed2k.enableUdpReask",
         SettingSurfaceClass::NormalControl,
         true,

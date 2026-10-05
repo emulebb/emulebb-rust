@@ -360,7 +360,7 @@ async fn out_of_order_requested_blocks_are_persisted_by_bitmap() {
         "a later block alone cannot complete the part"
     );
     let piece = &first_manifest.pieces[0];
-    assert_eq!(piece.state, Ed2kTransferState::Requested);
+    assert_eq!(piece.state, Ed2kTransferState::Missing);
     assert_eq!(
         piece.bytes_written, 0,
         "the contiguous prefix is still missing"

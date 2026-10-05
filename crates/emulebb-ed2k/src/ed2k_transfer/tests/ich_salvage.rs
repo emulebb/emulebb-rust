@@ -222,7 +222,7 @@ async fn ich_disabled_part_redownloads_fully() {
         "with ICH disabled a mid-part flush must not attempt the re-hash"
     );
     let manifest = runtime.manifest(&file_hash).await.unwrap();
-    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Requested);
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(manifest.pieces[0].bytes_written, BLOCK);
     assert!(manifest.pieces[0].ich_corrupted, "flag stays for later");
 

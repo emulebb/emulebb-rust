@@ -130,7 +130,7 @@ impl Ed2kTransferRuntime {
             checkpoint_reason = Some("piece_verification_failed");
         } else {
             piece.apply_block_bitmap(&bitmap);
-            piece.state = Ed2kTransferState::Requested;
+            piece.state = Ed2kTransferState::Missing;
             checkpoint_reason = Some("out_of_order_block");
         }
         // MD4-only ICH fallback on a mid-part flush into a corrupted part

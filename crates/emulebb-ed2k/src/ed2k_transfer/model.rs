@@ -80,15 +80,6 @@ impl PieceWriteOutcome {
     }
 }
 
-/// One claimed download piece plus the already persisted byte prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Ed2kClaimedPart {
-    /// Piece index inside the resume manifest.
-    pub piece_index: u32,
-    /// Number of contiguous bytes already persisted for this piece.
-    pub bytes_written: u64,
-}
-
 /// Per-piece status tracked by the resume manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ed2kPieceState {
@@ -144,21 +135,6 @@ impl Ed2kPieceState {
     /// re-requesting.
     pub(crate) fn has_block_bitmap(&self) -> bool {
         self.block_bitmap.is_some()
-    }
-
-    /// For a part of `part_len` bytes, return `Some(block_end_rel)` when the
-    /// block containing relative offset `rel_offset` is already present (so the
-    /// download window can skip it), or `None` when it is missing/needed.
-    /// `block_end_rel` is the part-relative end offset of that present block.
-    pub(crate) fn present_block_end(&self, part_len: u64, rel_offset: u64) -> Option<u64> {
-        let bitmap = self.resolve_block_bitmap(part_len);
-        let idx = usize::try_from(rel_offset / super::ED2K_EMBLOCK_SIZE).ok()?;
-        if bitmap.is_present(idx) {
-            let (_s, e) = bitmap.block_range(idx);
-            Some(e)
-        } else {
-            None
-        }
     }
 
     /// Persist `bitmap` into this piece and refresh `bytes_written` to the
@@ -344,6 +320,24 @@ pub struct Ed2kResumeManifest {
 }
 
 impl Ed2kResumeManifest {
+    /// Exact durable payload bytes represented by the per-part block maps.
+    ///
+    /// Unlike summing `bytes_written`, this includes non-contiguous blocks
+    /// retained by ICH salvage and is therefore suitable for disk reservation
+    /// and endgame decisions.
+    #[must_use]
+    pub fn durable_present_bytes(&self) -> u64 {
+        self.pieces
+            .iter()
+            .map(|piece| {
+                let start = u64::from(piece.piece_index).saturating_mul(self.piece_size);
+                let part_len = self.file_size.saturating_sub(start).min(self.piece_size);
+                piece.resolve_block_bitmap(part_len).present_bytes()
+            })
+            .sum::<u64>()
+            .min(self.file_size)
+    }
+
     /// Build an empty manifest for a new transfer.
     #[must_use]
     pub fn new(job: &Ed2kTransferJob) -> Self {

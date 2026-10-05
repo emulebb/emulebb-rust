@@ -31,7 +31,7 @@ export function StatusPill(props: { value: string }) {
     if (value.includes("error") || value.includes("firewall") || value.includes("banned") || value.includes("failed") || value.includes("blocked")) {
       return "status-pill badge bg-danger-lt";
     }
-    if (value === "lowid" || value.includes("connecting") || value.includes("paused") || value.includes("idle") || value.includes("queued") || value.includes("active")) {
+    if (value === "lowid" || value.includes("connecting") || value.includes("paused") || value.includes("insufficient") || value.includes("idle") || value.includes("queued") || value.includes("active")) {
       return "status-pill badge bg-warning-lt";
     }
     return "status-pill badge bg-secondary-lt";

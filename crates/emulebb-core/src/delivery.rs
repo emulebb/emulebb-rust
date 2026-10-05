@@ -8,11 +8,44 @@
 //! folder) — and drives delivery at completion, on a confirming recheck, and as
 //! a startup sweep for transfers that finished before delivery ran.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use emulebb_ed2k::ed2k_transfer::{Ed2kDeliveryOutcome, Ed2kResumeManifest};
 
 use crate::EmulebbCore;
+
+const DELIVERY_RETRY_INITIAL: Duration = Duration::from_secs(30);
+const DELIVERY_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeliveryFailure {
+    pub(crate) message: String,
+    attempts: u32,
+    retry_at: Instant,
+}
+
+impl DeliveryFailure {
+    fn next(message: String, previous: Option<&Self>) -> Self {
+        let attempts = previous.map_or(1, |failure| failure.attempts.saturating_add(1));
+        let shift = attempts.saturating_sub(1).min(5);
+        let delay = DELIVERY_RETRY_INITIAL
+            .checked_mul(1u32 << shift)
+            .unwrap_or(DELIVERY_RETRY_MAX)
+            .min(DELIVERY_RETRY_MAX);
+        Self {
+            message,
+            attempts,
+            retry_at: Instant::now() + delay,
+        }
+    }
+
+    fn is_due(&self) -> bool {
+        Instant::now() >= self.retry_at
+    }
+}
 
 impl EmulebbCore {
     /// Override the default finished-file delivery directory (eMule global
@@ -49,8 +82,8 @@ impl EmulebbCore {
 
     /// Materialize one completed transfer's payload into its destination by name
     /// (eMule move-to-Incoming). Idempotent: a no-op once delivered. Logs and
-    /// swallows errors so a delivery failure never aborts the download task; the
-    /// next completion/startup pass retries while `delivered_path` stays unset.
+    /// records errors so a delivery failure never aborts the verified payload;
+    /// the retry worker keeps the transfer in `completing` until it succeeds.
     pub(crate) async fn deliver_completed_transfer(&self, hash: &str) {
         let manifest = match self.ed2k_transfers.manifest(hash).await {
             Ok(manifest) => manifest,
@@ -75,11 +108,32 @@ impl EmulebbCore {
             .await
         {
             Ok(Ed2kDeliveryOutcome::Delivered(path)) => {
+                self.delivery_failures.lock().unwrap().remove(hash);
                 tracing::info!("delivered completed transfer {hash} to {}", path.display());
+                if let Ok(Some(transfer)) = self.refresh_transfer_from_manifest_default(hash).await
+                {
+                    self.publish_transfer_updated(transfer);
+                }
             }
-            Ok(Ed2kDeliveryOutcome::AlreadyDelivered(_) | Ed2kDeliveryOutcome::NotCompleted) => {}
+            Ok(Ed2kDeliveryOutcome::AlreadyDelivered(_)) => {
+                self.delivery_failures.lock().unwrap().remove(hash);
+                if let Ok(Some(transfer)) = self.refresh_transfer_from_manifest_default(hash).await
+                {
+                    self.publish_transfer_updated(transfer);
+                }
+            }
+            Ok(Ed2kDeliveryOutcome::NotCompleted) => {}
             Err(error) => {
+                let message = format!("{error:#}");
+                {
+                    let mut failures = self.delivery_failures.lock().unwrap();
+                    let failure = DeliveryFailure::next(message, failures.get(hash));
+                    failures.insert(hash.to_string(), failure);
+                }
                 tracing::warn!(%error, "failed to deliver completed transfer {hash}");
+                let _ = self
+                    .refresh_transfer_from_manifest(hash, "completing")
+                    .await;
             }
         }
     }
@@ -100,6 +154,15 @@ impl EmulebbCore {
             }
         };
         for hash in hashes {
+            let due = self
+                .delivery_failures
+                .lock()
+                .unwrap()
+                .get(&hash)
+                .is_none_or(DeliveryFailure::is_due);
+            if !due {
+                continue;
+            }
             self.deliver_completed_transfer(&hash).await;
             tokio::task::yield_now().await;
         }

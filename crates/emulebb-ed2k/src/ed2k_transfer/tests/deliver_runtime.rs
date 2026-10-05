@@ -112,6 +112,31 @@ async fn materialize_completed_payload_persists_across_reload() {
 }
 
 #[tokio::test]
+async fn concurrent_materialization_of_one_transfer_is_idempotent() {
+    let root = unique_test_dir("ed2k-deliver-concurrent");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Concurrent.mkv").await;
+    let incoming = root.join("incoming");
+
+    let (first, second) = tokio::join!(
+        runtime.materialize_completed_payload(&hash, &incoming),
+        runtime.materialize_completed_payload(&hash, &incoming)
+    );
+    let outcomes = [first.unwrap(), second.unwrap()];
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, Ed2kDeliveryOutcome::Delivered(_)))
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, Ed2kDeliveryOutcome::AlreadyDelivered(_)))
+    );
+    assert_eq!(fs::read_dir(&incoming).unwrap().count(), 1);
+}
+
+#[tokio::test]
 async fn materialize_records_delivered_mtime_for_reload_reuse() {
     let root = unique_test_dir("ed2k-deliver-mtime");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

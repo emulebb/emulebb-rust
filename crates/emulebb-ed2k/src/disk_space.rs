@@ -16,7 +16,14 @@ pub const DOWNLOAD_FREE_SPACE_MARGIN_BYTES: u64 = crate::ed2k_transfer::ED2K_PAR
 /// blocking a download on an unknowable value).
 #[must_use]
 pub fn available_space(path: &Path) -> Option<u64> {
-    fs4::available_space(path).ok()
+    let mut anchor = Some(path);
+    while let Some(candidate) = anchor {
+        if candidate.exists() {
+            return fs4::available_space(candidate).ok();
+        }
+        anchor = candidate.parent();
+    }
+    None
 }
 
 /// Whether a download needing `needed_bytes` should be paused because `available`

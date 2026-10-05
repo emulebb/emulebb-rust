@@ -802,7 +802,7 @@ async fn reconcile_job_metadata_adopts_unknown_size_and_name() {
 }
 
 #[tokio::test]
-async fn release_piece_request_preserves_partial_piece_progress() {
+async fn dropping_block_lease_preserves_partial_piece_progress() {
     let root = unique_test_dir("ed2k-transfer-release-request-progress");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5Au8; 32_768];
@@ -810,13 +810,19 @@ async fn release_piece_request_preserves_partial_piece_progress() {
     let job = new_transfer_job(file_hash, "resume.bin".to_string(), payload.len() as u64);
     runtime.ensure_job(&job).await.unwrap();
 
-    let claimed = runtime
-        .claim_next_missing_part(&job.file_hash, None)
+    let lease = runtime
+        .lease_next_download_block(
+            &job.file_hash,
+            "127.0.0.1:4662".parse().unwrap(),
+            None,
+            None,
+            1_000,
+        )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(claimed.piece_index, 0);
-    assert_eq!(claimed.bytes_written, 0);
+    assert_eq!(lease.piece_index(), 0);
+    assert_eq!(lease.start(), 0);
 
     let split = 8_192usize;
     let completed = runtime
@@ -825,22 +831,76 @@ async fn release_piece_request_preserves_partial_piece_progress() {
         .unwrap();
     assert!(!completed.is_completed());
 
-    runtime
-        .release_piece_request(&job.file_hash, 0)
-        .await
-        .unwrap();
+    drop(lease);
+    assert_eq!(runtime.active_download_block_lease_count(&job.file_hash), 0);
 
     let manifest = runtime.manifest(&job.file_hash).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(manifest.pieces[0].bytes_written, split as u64);
 
     let reclaimed = runtime
-        .claim_next_missing_part(&job.file_hash, None)
+        .lease_next_download_block(
+            &job.file_hash,
+            "127.0.0.2:4662".parse().unwrap(),
+            None,
+            None,
+            1_000,
+        )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reclaimed.piece_index, 0);
-    assert_eq!(reclaimed.bytes_written, split as u64);
+    assert_eq!(reclaimed.piece_index(), 0);
+    assert_eq!(reclaimed.start(), split as u64);
+}
+
+#[tokio::test]
+async fn two_peers_lease_distinct_blocks_from_the_same_part() {
+    let root = unique_test_dir("ed2k-transfer-multi-peer-same-part");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = new_transfer_job(
+        Ed2kHash::from_bytes([0x42; 16]),
+        "same-part.bin".to_string(),
+        ED2K_EMBLOCK_SIZE * 3,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+
+    let first = runtime
+        .lease_next_download_block(
+            &job.file_hash,
+            "127.0.0.1:4662".parse().unwrap(),
+            None,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let second = runtime
+        .lease_next_download_block(
+            &job.file_hash,
+            "127.0.0.2:4662".parse().unwrap(),
+            None,
+            Some(0),
+            1_000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first.piece_index(), 0);
+    assert_eq!(second.piece_index(), 0);
+    assert_eq!((first.start(), first.end()), (0, ED2K_EMBLOCK_SIZE));
+    assert_eq!(
+        (second.start(), second.end()),
+        (ED2K_EMBLOCK_SIZE, ED2K_EMBLOCK_SIZE * 2)
+    );
+    assert_eq!(runtime.active_download_block_lease_count(&job.file_hash), 2);
+    assert_eq!(
+        runtime.requested_download_parts(&job.file_hash),
+        std::collections::HashSet::from([0])
+    );
+    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
 }
 
 #[tokio::test]
@@ -859,12 +919,6 @@ async fn append_piece_block_keeps_subblock_progress_in_memory_until_checkpoint()
         .store_md4_hashset(&job.file_hash, Vec::new())
         .await
         .unwrap();
-    runtime
-        .claim_next_missing_part(&job.file_hash, None)
-        .await
-        .unwrap()
-        .unwrap();
-
     let split = 8_192usize;
     let piece_completed = runtime
         .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
@@ -873,17 +927,14 @@ async fn append_piece_block_keeps_subblock_progress_in_memory_until_checkpoint()
     assert!(!piece_completed.is_completed());
 
     let cached_manifest = runtime.manifest(&job.file_hash).await.unwrap();
-    assert_eq!(
-        cached_manifest.pieces[0].state,
-        Ed2kTransferState::Requested
-    );
+    assert_eq!(cached_manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(cached_manifest.pieces[0].bytes_written, split as u64);
 
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
     let persisted_manifest = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
     assert_eq!(
         persisted_manifest.pieces[0].state,
-        Ed2kTransferState::Requested
+        Ed2kTransferState::Missing
     );
     assert_eq!(persisted_manifest.pieces[0].bytes_written, 0);
 }
@@ -901,12 +952,6 @@ async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() 
         payload.len() as u64,
     );
     runtime.ensure_job(&job).await.unwrap();
-    runtime
-        .claim_next_missing_part(&job.file_hash, None)
-        .await
-        .unwrap()
-        .unwrap();
-
     // Eight full eMule blocks reach the batched checkpoint byte threshold, so
     // the progress checkpoint fires — via the piece-row UPDATE, never a full
     // child-table rewrite (no state transition happens here).
@@ -932,7 +977,7 @@ async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() 
     // checkpoint before the byte threshold.
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
     let persisted = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
-    assert_eq!(persisted.pieces[0].state, Ed2kTransferState::Requested);
+    assert_eq!(persisted.pieces[0].state, Ed2kTransferState::Missing);
     assert!(
         persisted.pieces[0].bytes_written >= ED2K_EMBLOCK_SIZE,
         "batched checkpoint must have durably persisted mid-piece progress, got {}",
@@ -995,16 +1040,19 @@ async fn reclaim_stale_piece_requests_restores_missing_state_with_progress() {
     let job = new_transfer_job(file_hash, "resume.bin".to_string(), payload.len() as u64);
     runtime.ensure_job(&job).await.unwrap();
 
-    runtime
-        .claim_next_missing_part(&job.file_hash, None)
-        .await
-        .unwrap()
-        .unwrap();
     let split = 8_192usize;
     runtime
         .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
+    // Simulate a legacy process which persisted network ownership after it
+    // had checkpointed useful bytes.
+    assert!(
+        runtime
+            .mark_piece_requested(&job.file_hash, 0)
+            .await
+            .unwrap()
+    );
 
     assert!(
         runtime
@@ -1034,12 +1082,6 @@ async fn append_piece_block_persists_piece_completion_after_cached_progress() {
         .store_md4_hashset(&job.file_hash, Vec::new())
         .await
         .unwrap();
-    runtime
-        .claim_next_missing_part(&job.file_hash, None)
-        .await
-        .unwrap()
-        .unwrap();
-
     let split = 8_192usize;
     let first_completed = runtime
         .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])

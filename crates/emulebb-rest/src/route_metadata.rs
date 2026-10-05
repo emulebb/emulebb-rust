@@ -64,7 +64,7 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             return api_error(
                     StatusCode::BAD_REQUEST,
                     "INVALID_ARGUMENT",
-                    "state must be one of downloading, paused, queued, checking, completing, completed, error, missingfiles",
+                    "state must be one of downloading, paused, queued, checking, completing, completed, insufficient, error, missingfiles",
                 )
                 .into_response();
         }
@@ -178,6 +178,7 @@ fn is_transfer_state_name(value: &str) -> bool {
             | "checking"
             | "completing"
             | "completed"
+            | "insufficient"
             | "error"
             | "missingfiles"
     )

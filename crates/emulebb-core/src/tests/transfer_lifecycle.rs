@@ -464,13 +464,14 @@ async fn delete_transfer_files_removes_delivered_completed_download() {
         .store_piece_data(&file_hash, 0, &payload)
         .await
         .unwrap();
-    let completed = core
+    let awaiting_delivery = core
         .refresh_transfer_from_manifest_default(&file_hash)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(completed.state, "completed");
+    assert_eq!(awaiting_delivery.state, "completing");
     core.deliver_completed_transfer(&file_hash).await;
+    assert_eq!(core.transfer(&file_hash).await.unwrap().state, "completed");
     let delivered_manifest = core.ed2k_transfers.manifest(&file_hash).await.unwrap();
     let delivered_path = PathBuf::from(delivered_manifest.delivered_path.as_deref().unwrap());
     assert_eq!(std::fs::read(&delivered_path).unwrap(), payload);
@@ -498,6 +499,53 @@ async fn delete_transfer_files_removes_delivered_completed_download() {
     );
     assert!(!transfer_root.join(&file_hash).exists());
     assert!(core.transfer(&file_hash).await.is_none());
+}
+
+#[tokio::test]
+async fn delivery_failure_stays_completing_and_clears_after_retry() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-delivery-retry-state");
+    let transfer_root = runtime_dir.join("transfers");
+    let blocked_incoming = runtime_dir.join("incoming-blocked");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    std::fs::write(&blocked_incoming, b"not a directory").unwrap();
+    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
+        .unwrap()
+        .with_incoming_dir(blocked_incoming.clone());
+    let payload = b"delivery retry payload".repeat(32);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
+    core.create_transfer(TransferCreate {
+        link: Some(format!(
+            "ed2k://|file|Retry.bin|{}|{}|/",
+            payload.len(),
+            file_hash
+        )),
+        links: None,
+        category_id: None,
+        category_name: None,
+        paused: Some(true),
+    })
+    .await
+    .unwrap();
+    core.ed2k_transfers
+        .store_md4_hashset(&file_hash, Vec::new())
+        .await
+        .unwrap();
+    core.ed2k_transfers
+        .store_piece_data(&file_hash, 0, &payload)
+        .await
+        .unwrap();
+
+    core.deliver_completed_transfer(&file_hash).await;
+    let failed = core.transfer(&file_hash).await.unwrap();
+    assert_eq!(failed.state, "completing");
+    assert!(failed.delivery_error.is_some());
+
+    std::fs::remove_file(&blocked_incoming).unwrap();
+    core.deliver_completed_transfer(&file_hash).await;
+    let recovered = core.transfer(&file_hash).await.unwrap();
+    assert_eq!(recovered.state, "completed");
+    assert!(recovered.delivery_error.is_none());
+    assert!(blocked_incoming.join("Retry.bin").exists());
 }
 
 #[tokio::test]

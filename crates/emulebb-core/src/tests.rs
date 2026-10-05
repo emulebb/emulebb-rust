@@ -666,6 +666,7 @@ fn a4af_test_transfer(hash: &str, state_name: &str) -> Transfer {
         name: "file".to_string(),
         path: String::new(),
         delivered_path: None,
+        delivery_error: None,
         size_bytes: 1,
         completed_bytes: 0,
         state: state_name.to_string(),

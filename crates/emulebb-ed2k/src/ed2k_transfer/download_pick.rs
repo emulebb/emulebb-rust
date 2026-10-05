@@ -82,7 +82,10 @@ pub(super) fn pick_next_missing_part(
     let part_total = pieces.len();
     let mut best: Option<(u32, u32)> = None; // (rank, piece_index)
     for (position, piece) in pieces.iter().enumerate() {
-        if piece.state != Ed2kTransferState::Missing {
+        // `Requested`/`Written` are legacy persisted transient states. Network
+        // ownership is process-local now, so any non-verified piece remains
+        // eligible and its block bitmap decides which ranges are still needed.
+        if piece.state == Ed2kTransferState::Verified {
             continue;
         }
         if let Some(bitmap) = peer_bitmap {

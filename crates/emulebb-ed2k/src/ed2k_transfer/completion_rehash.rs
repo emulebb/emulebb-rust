@@ -7,7 +7,7 @@
 //! nor a restart can skip the final MD4 pass.
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom},
     path::Path,
     str::FromStr,
@@ -90,7 +90,7 @@ impl Ed2kTransferRuntime {
         let computation =
             tokio::task::spawn_blocking(move || compute_final_rehash(&payload_path, expected_size))
                 .await
-                .context("ED2K final completion rehash task failed")?;
+                .context("ED2K final completion rehash task failed")??;
 
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
@@ -189,17 +189,39 @@ fn decode_md4(hash: &str) -> Result<[u8; 16]> {
         .map_err(|_| anyhow::anyhow!("invalid MD4 hash length {len}"))
 }
 
-fn compute_final_rehash(path: &Path, expected_size: u64) -> FinalRehashComputation {
-    let actual_len = path.metadata().map_or(0, |metadata| metadata.len());
+fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashComputation> {
+    let mut actual_len = path.metadata().map_or(0, |metadata| metadata.len());
+    if actual_len > expected_size {
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .with_context(|| format!("failed to open oversized ED2K payload {}", path.display()))?;
+        file.set_len(expected_size).with_context(|| {
+            format!(
+                "failed to truncate oversized ED2K payload {} from {actual_len} to {expected_size}",
+                path.display()
+            )
+        })?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync truncated ED2K payload {}", path.display()))?;
+        tracing::warn!(
+            event = "oversized_payload_truncated",
+            path = %path.display(),
+            previous_size = actual_len,
+            expected_size,
+            "truncated oversized ED2K payload before final rehash"
+        );
+        actual_len = expected_size;
+    }
     let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
     let mut part_hashes = Vec::with_capacity(usize::try_from(part_count).unwrap_or(0));
     let Ok(mut file) = File::open(path) else {
         part_hashes.resize(usize::try_from(part_count).unwrap_or(0), None);
-        return FinalRehashComputation {
+        return Ok(FinalRehashComputation {
             actual_len,
             file_hash: None,
             part_hashes,
-        };
+        });
     };
     let _ = file.seek(SeekFrom::Start(0));
     let mut remaining = expected_size;
@@ -243,9 +265,9 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> FinalRehashComputati
         }
         Some(hasher.finalize().into())
     };
-    FinalRehashComputation {
+    Ok(FinalRehashComputation {
         actual_len,
         file_hash,
         part_hashes,
-    }
+    })
 }

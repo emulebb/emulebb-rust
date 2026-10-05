@@ -106,6 +106,7 @@ pub(crate) fn transfer_from_manifest(
             .delivered_path
             .as_deref()
             .map(crate::normal_path_display),
+        delivery_error: None,
         size_bytes: manifest.file_size,
         completed_bytes,
         state: emitted_state.to_string(),
@@ -159,7 +160,9 @@ pub(crate) fn preserve_transfer_public_metadata(transfer: &mut Transfer, existin
 }
 
 pub(crate) fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
-    if manifest.completed {
+    if manifest.completed && manifest.source_path.is_none() && manifest.delivered_path.is_none() {
+        "completing"
+    } else if manifest.completed {
         "completed"
     } else if manifest.final_rehash_pending {
         "completing"
@@ -370,6 +373,7 @@ pub(crate) fn enrich_sources_with_live(
 pub(crate) fn transfer_parts_from_manifest(
     manifest: &Ed2kResumeManifest,
     available_sources_per_part: &[u32],
+    requested_parts: &std::collections::HashSet<u32>,
 ) -> Vec<TransferPart> {
     let part_size = manifest.piece_size.max(1);
     let file_size = manifest.file_size;
@@ -396,7 +400,7 @@ pub(crate) fn transfer_parts_from_manifest(
                 completed_bytes,
                 gap_bytes,
                 complete: size > 0 && gap_bytes == 0,
-                requested: matches!(piece.state, Ed2kTransferState::Requested),
+                requested: requested_parts.contains(&piece.piece_index),
                 corrupted: false,
                 available_sources: available_sources_per_part
                     .get(piece.piece_index as usize)

@@ -13,6 +13,42 @@
 
 use std::path::Path;
 
+/// Stable key for the filesystem volume containing `path` (or its nearest
+/// existing ancestor). Unlike [`physical_disk_key`], distinct volumes on one
+/// physical disk remain distinct because their free-space pools differ.
+pub(crate) fn volume_key(path: &Path) -> String {
+    let anchor = nearest_existing_ancestor(path).unwrap_or(path);
+    #[cfg(windows)]
+    {
+        windows_volume_mount_path(anchor)
+            .map(|mount| format!("vol:{}", mount.to_string_lossy().to_ascii_lowercase()))
+            .or_else(|| drive_letter(anchor).map(|letter| format!("vol:{letter}:")))
+            .unwrap_or_else(|| format!("vol:{}", anchor.to_string_lossy().to_ascii_lowercase()))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(anchor)
+            .map(|metadata| format!("dev:{}", metadata.dev()))
+            .unwrap_or_else(|_| format!("vol:{}", anchor.display()))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        format!("vol:{}", anchor.display())
+    }
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
+    let mut candidate = Some(path);
+    while let Some(current) = candidate {
+        if current.exists() {
+            return Some(current);
+        }
+        candidate = current.parent();
+    }
+    None
+}
+
 /// A stable, hashable key naming the physical disk a path primarily reads from.
 /// Equal keys mean "same spindle -> hash serially"; distinct keys hash in
 /// parallel. Never panics; resolution failures degrade to a volume-root key.

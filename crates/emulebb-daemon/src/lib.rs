@@ -734,18 +734,35 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             tracing::warn!(%error, "initial shared-directory scan failed; continuing");
         }
     });
-    // Deliver any completed-but-undelivered transfers from a previous run in
-    // the background. A persisted sharing profile can carry tens of thousands
-    // of manifests, so this sweep starts only after REST is bound and after the
-    // sharing workers have been scheduled.
+    // Deliver completed-but-undelivered transfers in the background. A
+    // persisted sharing profile can carry tens of thousands of manifests, so
+    // the first sweep starts only after REST is bound and sharing workers have
+    // been scheduled. Later sweeps honor core's per-transfer exponential
+    // backoff and recover transient destination failures without a restart.
     let delivery_core = Arc::clone(&core);
     tokio::spawn(async move {
-        delivery_core.deliver_pending_completed_transfers().await;
+        loop {
+            delivery_core.deliver_pending_completed_transfers().await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
     });
     if let Some(monitor) = vpn_guard_monitor {
         tokio::spawn(vpn_guard_monitor::run(Arc::clone(&core), monitor));
     }
     if ed2k_network_configured {
+        // MFC-style stop-all disk protection is re-evaluated on a deliberately
+        // slow cadence. Downloads in the public `insufficient` state do not
+        // participate in the ordinary seconds-scale source retry loop.
+        let disk_retry_core = Arc::clone(&core);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+                let requeued = disk_retry_core.retry_insufficient_downloads().await;
+                if requeued > 0 {
+                    tracing::info!(requeued, "requeued downloads after disk-space recovery");
+                }
+            }
+        });
         // Hydrate persisted downloads independently of server reachability. The
         // core applies its own startup delay before queueing them, which gives
         // ED2K/Kad initialization room to settle without making an unreachable

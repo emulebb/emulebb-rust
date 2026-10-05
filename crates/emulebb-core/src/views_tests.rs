@@ -1,7 +1,10 @@
 use super::{
     ServerLiveDetails, apply_server_connection_flags, apply_server_live_details,
     format_ed2k_file_link, kad_status_from_running, server_info_from_parts,
+    transfer_parts_from_manifest,
 };
+use emulebb_ed2k::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState, new_transfer_job};
+use emulebb_kad_proto::Ed2kHash;
 
 #[test]
 fn ed2k_link_escapes_stock_filename_bytes() {
@@ -9,6 +12,22 @@ fn ed2k_link_escapes_stock_filename_bytes() {
         format_ed2k_file_link("Linux Guide é%.pdf", 123, "aabb"),
         "ed2k://|file|Linux%20Guide%20%C3%A9%25.pdf|123|aabb|/",
     );
+}
+
+#[test]
+fn transfer_part_requested_is_derived_from_live_leases() {
+    let manifest = Ed2kResumeManifest::new(&new_transfer_job(
+        Ed2kHash::from_bytes([0x11; 16]),
+        "live-request.bin".to_string(),
+        1024,
+    ));
+    let idle = transfer_parts_from_manifest(&manifest, &[1], &Default::default());
+    assert!(!idle[0].requested);
+
+    let requested =
+        transfer_parts_from_manifest(&manifest, &[1], &std::collections::HashSet::from([0]));
+    assert!(requested[0].requested);
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
 }
 
 #[test]

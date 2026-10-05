@@ -200,14 +200,14 @@ fn was_recently_queried_on_connected_server(
 fn is_server_source_batch_transfer_candidate(transfer: &Transfer) -> bool {
     !matches!(
         transfer.state.as_str(),
-        "completed" | "completing" | "paused" | "stopped" | "hashing"
+        "completed" | "completing" | "paused" | "stopped" | "hashing" | "insufficient"
     )
 }
 
 fn is_ed2k_udp_source_batch_transfer_candidate(transfer: &Transfer) -> bool {
     !matches!(
         transfer.state.as_str(),
-        "completed" | "completing" | "paused" | "stopped" | "hashing"
+        "completed" | "completing" | "paused" | "stopped" | "hashing" | "insufficient"
     )
 }
 
@@ -244,9 +244,11 @@ mod tests {
         let now = Instant::now();
         let current_hash = Ed2kHash::from_bytes([0x33; 16]);
         let completed_hash = Ed2kHash::from_bytes([0x44; 16]);
+        let insufficient_hash = Ed2kHash::from_bytes([0x45; 16]);
         let current = transfer(current_hash, "downloading", 1024);
         let completed = transfer(completed_hash, "completed", 2048);
-        let mut state = core_state_with_transfers([current.clone(), completed]);
+        let insufficient = transfer(insufficient_hash, "insufficient", 2048);
+        let mut state = core_state_with_transfers([current.clone(), completed, insufficient]);
 
         let claimed = claim_ed2k_udp_source_batch(&mut state, &current, current_hash, 3, 2, now);
 
@@ -402,6 +404,7 @@ mod tests {
             name: "Sample File.bin".to_string(),
             path: String::new(),
             delivered_path: None,
+            delivery_error: None,
             size_bytes,
             completed_bytes: 0,
             state: state.to_string(),

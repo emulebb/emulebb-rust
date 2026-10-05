@@ -32,6 +32,7 @@ mod aich_recovery;
 mod aich_tree;
 mod aich_trust;
 mod block_bitmap;
+mod block_lease;
 mod callback;
 mod catalog;
 mod completion_rehash;
@@ -66,6 +67,7 @@ mod upload;
 mod upload_cooldown;
 mod upload_queue;
 
+pub(crate) use block_lease::Ed2kDownloadBlockLease;
 pub use catalog::{
     Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange, IndexedSharedCatalog,
 };
@@ -90,7 +92,7 @@ pub use ingest::{LocalIngestProgressEvent, LocalIngestProgressObserver, LocalIng
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
-pub(crate) use model::{Ed2kAichHashset, Ed2kClaimedPart, PieceWriteOutcome};
+pub(crate) use model::{Ed2kAichHashset, PieceWriteOutcome};
 pub use model::{
     Ed2kCallbackIntent, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry,
     Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
@@ -199,8 +201,17 @@ pub struct Ed2kTransferRuntime {
     /// block append of every concurrent download (and upload reader opens)
     /// behind one mutex.
     manifest_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Per-transfer delivery serialization. Unlike the manifest IO lock this
+    /// may be held across a cross-volume copy without delaying manifest reads.
+    delivery_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
     manifest_cache: Arc<Mutex<HashMap<String, Ed2kResumeManifest>>>,
     manifest_checkpoint_state: Arc<Mutex<HashMap<String, Ed2kManifestCheckpointState>>>,
+    /// Process-local download block reservations. Durable manifests describe
+    /// bytes which reached the piece store; they never own network work. This
+    /// registry therefore disappears on restart and its lease guards release
+    /// synchronously on cancellation or task drop.
+    download_block_leases: block_lease::DownloadBlockLeaseRegistry,
+    next_download_block_lease_id: Arc<AtomicU64>,
     /// Cached read+write payload handles, one per transfer with active piece
     /// writes, so the per-block download path does not re-open the piece
     /// store (a CreateFileW + blocking-pool hop) for every received block.
@@ -481,8 +492,11 @@ impl Ed2kTransferRuntime {
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_intents: Arc::new(RwLock::new(Vec::new())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            delivery_locks: Arc::new(StdMutex::new(HashMap::new())),
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
+            download_block_leases: block_lease::DownloadBlockLeaseRegistry::default(),
+            next_download_block_lease_id: Arc::new(AtomicU64::new(1)),
             payload_handles: Arc::new(StdMutex::new(HashMap::new())),
             source_exchange: SourceExchangeState::default(),
             aich_root_corroboration: Arc::new(StdMutex::new(HashMap::new())),

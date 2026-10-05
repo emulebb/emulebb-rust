@@ -144,7 +144,9 @@ impl EmulebbCore {
         let available_sources_per_part = self
             .ed2k_transfers
             .available_sources_per_part(hash, part_total);
-        let parts = transfer_parts_from_manifest(&manifest, &available_sources_per_part);
+        let requested_parts = self.ed2k_transfers.requested_download_parts(hash);
+        let parts =
+            transfer_parts_from_manifest(&manifest, &available_sources_per_part, &requested_parts);
         Ok(Some(TransferDetails {
             transfer,
             parts,
@@ -302,7 +304,7 @@ impl EmulebbCore {
                 // progress), re-engage the download so the demoted parts refetch.
                 if transfer.state == "downloading" {
                     self.queue_ed2k_download_attempt(transfer);
-                } else if transfer.state == "completed" {
+                } else if matches!(transfer.state.as_str(), "completed" | "completing") {
                     // A recheck that confirms a complete file delivers it by name
                     // (covers a manually-rechecked transfer that was never driven
                     // through the download-completion path).

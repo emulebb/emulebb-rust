@@ -301,7 +301,7 @@ impl Ed2kTransferRuntime {
                 outcome = PieceWriteOutcome::VerificationFailed { part_index };
                 Ed2kTransferState::Missing
             } else {
-                Ed2kTransferState::Requested
+                Ed2kTransferState::Missing
             };
         }
         // The MD4-only ICH re-hash also runs on a flush into a part mid AICH

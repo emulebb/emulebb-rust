@@ -101,12 +101,19 @@ async fn accepted_peer_without_claimable_blocks_is_cancelled_as_no_needed_parts(
         ))
         .await
         .unwrap();
-    assert!(
-        transfer_runtime
-            .mark_piece_requested(&file_hash_hex, 0)
-            .await
-            .unwrap()
-    );
+    // Hold the file's only block with another live peer. Persisted Requested
+    // markers are legacy state now and no longer suppress scheduling.
+    let _held_lease = transfer_runtime
+        .lease_next_download_block(
+            &file_hash_hex,
+            "127.0.0.9:4662".parse().unwrap(),
+            None,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();

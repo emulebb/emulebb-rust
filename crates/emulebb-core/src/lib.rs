@@ -385,6 +385,9 @@ pub struct EmulebbCore {
     /// (eMule global Incoming folder). Defaults next to the transfer root; the
     /// daemon overrides it from `incomingDir` config via [`with_incoming_dir`].
     incoming_dir: PathBuf,
+    /// Retry/backoff and operator-facing error state for verified downloads
+    /// whose finished-file materialization has not succeeded yet.
+    delivery_failures: Arc<std::sync::Mutex<HashMap<String, delivery::DeliveryFailure>>>,
     /// Process lifecycle state surfaced by `GET /api/v1/app` (the `lifecycle`
     /// module maps it to the REST token). Starts `running`; the daemon flips it
     /// to `stopping` when graceful teardown begins so a polling controller sees
@@ -572,6 +575,7 @@ impl EmulebbCore {
             ed2k_transfers: Arc::new(ed2k_transfers),
             transfer_root,
             incoming_dir,
+            delivery_failures: Arc::new(std::sync::Mutex::new(HashMap::new())),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             ed2k_network,
             kad_local_store,
@@ -1025,6 +1029,13 @@ impl EmulebbCore {
         if cancel.is_cancelled() {
             return Ok(None);
         }
+        // Network reservations are process-local block leases. Normalize
+        // manifests written by older builds before any completion or source
+        // decision so a crash cannot leave a durable `Requested`/`Written`
+        // marker that suppresses resume.
+        self.ed2k_transfers
+            .reclaim_stale_piece_requests(&transfer.hash)
+            .await?;
         // A crash may leave every part verified with the durable completion
         // barrier set. Finish that authoritative whole-file check before any
         // network prerequisites so restart cannot bypass or unnecessarily
@@ -1061,7 +1072,7 @@ impl EmulebbCore {
                 transfer.hash,
                 self.transfer_root.display()
             );
-            return Ok(Some("paused"));
+            return Ok(Some("insufficient"));
         }
         let file_hash: Ed2kHash = transfer
             .hash
@@ -2199,8 +2210,9 @@ impl EmulebbCore {
                 // surfaces the deliveredPath in the same step.
                 if next_state == "completed" {
                     core.deliver_completed_transfer(&hash).await;
-                }
-                if let Err(error) = core.refresh_transfer_from_manifest(&hash, next_state).await {
+                } else if let Err(error) =
+                    core.refresh_transfer_from_manifest(&hash, next_state).await
+                {
                     tracing::warn!(
                         "failed to refresh ED2K transfer {hash} after download attempt: {error}"
                     );

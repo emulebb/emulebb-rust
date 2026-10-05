@@ -558,13 +558,13 @@ async fn transfers_reject_unknown_state_query_values() {
     assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
     assert_eq!(
         value["error"]["message"],
-        "state must be one of downloading, paused, queued, checking, completing, completed, error, missingfiles"
+        "state must be one of downloading, paused, queued, checking, completing, completed, insufficient, error, missingfiles"
     );
 
     let accepted = test_router()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/transfers?state=paused")
+                .uri("/api/v1/transfers?state=insufficient")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),

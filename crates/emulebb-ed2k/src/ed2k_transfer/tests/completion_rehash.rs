@@ -127,3 +127,41 @@ async fn automatic_store_does_not_return_a_deliverable_file_before_final_rehash(
     assert!(manifest.completed);
     assert!(!manifest.final_rehash_pending);
 }
+
+#[tokio::test]
+async fn oversized_payload_is_truncated_once_and_completes() {
+    let root = unique_test_dir("ed2k-final-rehash-oversized");
+    let payload = b"authoritative expected payload";
+    let file_hash = Ed2kHash::from_bytes(md4(payload));
+    let job = new_transfer_job(file_hash, "oversized.bin".to_string(), payload.len() as u64);
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, Vec::new())
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data_unfinalized(&job.file_hash, 0, payload)
+        .await
+        .unwrap();
+
+    let payload_path = runtime.payload_path(&job.file_hash);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&payload_path)
+        .unwrap();
+    file.write_all(b"stale-tail").unwrap();
+    file.sync_all().unwrap();
+
+    assert!(
+        runtime
+            .finalize_pending_transfer(&job.file_hash)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        std::fs::metadata(payload_path).unwrap().len(),
+        payload.len() as u64
+    );
+    assert!(runtime.manifest(&job.file_hash).await.unwrap().completed);
+}

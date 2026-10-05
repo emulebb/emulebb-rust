@@ -410,6 +410,10 @@ pub struct Ed2kSettings {
     pub source_server_attempt_budget: usize,
     pub upload_queue: Ed2kUploadQueueSettings,
     pub download_limit_bytes_per_sec: u64,
+    /// Minimum free bytes retained on volumes holding incomplete part files.
+    pub min_free_transfer_space_bytes: u64,
+    /// Minimum free bytes retained on distinct finished-file destination volumes.
+    pub min_free_incoming_space_bytes: u64,
     pub enable_udp_reask: bool,
     pub publish_emule_rust_identity: bool,
     pub offer_files_capability_enabled: bool,
@@ -683,6 +687,10 @@ pub struct Ed2kSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_limit_bytes_per_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_free_transfer_space_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_free_incoming_space_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_udp_reask: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_emule_rust_identity: Option<bool>,
@@ -944,6 +952,10 @@ impl Default for Ed2kSettings {
             source_server_attempt_budget: 3,
             upload_queue: Ed2kUploadQueueSettings::default(),
             download_limit_bytes_per_sec: 0,
+            // One stock eD2K part (9.28 MB decimal), matching the MFC
+            // minimum-free-disk-space default.
+            min_free_transfer_space_bytes: 9_728_000,
+            min_free_incoming_space_bytes: 9_728_000,
             enable_udp_reask: true,
             publish_emule_rust_identity: false,
             offer_files_capability_enabled: true,
@@ -1265,6 +1277,8 @@ impl Ed2kSettingsUpdate {
                 .as_ref()
                 .is_none_or(Ed2kUploadQueueSettingsUpdate::is_empty)
             && self.download_limit_bytes_per_sec.is_none()
+            && self.min_free_transfer_space_bytes.is_none()
+            && self.min_free_incoming_space_bytes.is_none()
             && self.enable_udp_reask.is_none()
             && self.publish_emule_rust_identity.is_none()
             && self.offer_files_capability_enabled.is_none()
@@ -1451,6 +1465,12 @@ pub fn apply_ed2k_settings_update(settings: &mut Ed2kSettings, update: Ed2kSetti
     }
     if let Some(value) = update.download_limit_bytes_per_sec {
         settings.download_limit_bytes_per_sec = value;
+    }
+    if let Some(value) = update.min_free_transfer_space_bytes {
+        settings.min_free_transfer_space_bytes = value;
+    }
+    if let Some(value) = update.min_free_incoming_space_bytes {
+        settings.min_free_incoming_space_bytes = value;
     }
     if let Some(value) = update.enable_udp_reask {
         settings.enable_udp_reask = value;
@@ -1711,6 +1731,8 @@ impl From<Ed2kSettings> for Ed2kSettingsUpdate {
             source_server_attempt_budget: Some(settings.source_server_attempt_budget),
             upload_queue: Some(settings.upload_queue.into()),
             download_limit_bytes_per_sec: Some(settings.download_limit_bytes_per_sec),
+            min_free_transfer_space_bytes: Some(settings.min_free_transfer_space_bytes),
+            min_free_incoming_space_bytes: Some(settings.min_free_incoming_space_bytes),
             enable_udp_reask: Some(settings.enable_udp_reask),
             publish_emule_rust_identity: Some(settings.publish_emule_rust_identity),
             offer_files_capability_enabled: Some(settings.offer_files_capability_enabled),
