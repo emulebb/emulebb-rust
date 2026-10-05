@@ -551,7 +551,7 @@ fn global_udp_source_search_skips_connected_server_only_when_background_is_avail
 
 #[test]
 fn server_udp_source_supplement_runs_below_the_udp_source_cap() {
-    // Oracle: GetMaxSourcePerFileUDP() > GetSourceCount() (default cap 100).
+    // Stock-compatible gate with the eMuleBB MFC broadband default cap of 100.
     assert!(should_query_server_udp_source_supplement(0, 100));
     assert!(should_query_server_udp_source_supplement(99, 100));
     assert!(!should_query_server_udp_source_supplement(100, 100));

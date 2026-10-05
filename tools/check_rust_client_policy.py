@@ -58,6 +58,13 @@ LARGEST_FILES_REPORTED_PER_KIND = 5
 INLINE_TEST_MODULES_REPORTED = 10
 INLINE_TEST_ADVISORY_LINES = 200
 CHANGED_FILES_REPORTED = 20
+EXPECTED_BEHAVIOR_AUTHORITY = {
+    "wire_protocol": "stock-community-emule",
+    "operational_limits": "emulebb-mfc",
+    "io_behavior": "emulebb-mfc",
+    "implementation_model": "rust-native-async",
+    "conflict_precedence": "stock-wire-protocol",
+}
 
 
 def main() -> int:
@@ -65,6 +72,7 @@ def main() -> int:
     omissions = read_toml(OMISSIONS_PATH)
     omission_history = read_toml(OMISSIONS_HISTORY_PATH)
     errors: list[str] = []
+    errors.extend(check_behavior_authority(policy))
     errors.extend(check_omission_registry(policy, omissions))
     errors.extend(check_omission_history(omissions, omission_history))
     errors.extend(check_review_reporting(policy, omissions))
@@ -118,6 +126,24 @@ def tracked_files(pattern: str) -> list[str]:
 def count_lines(path: Path) -> int:
     with path.open("r", encoding="utf-8") as handle:
         return sum(1 for _ in handle)
+
+
+def check_behavior_authority(policy: dict) -> list[str]:
+    """Keep the stock-wire/MFC-operations authority split explicit."""
+    authority = policy.get("behavior_authority", {})
+    errors = []
+    for key, expected in EXPECTED_BEHAVIOR_AUTHORITY.items():
+        actual = authority.get(key)
+        if actual != expected:
+            errors.append(
+                f"behavior_authority.{key} is {actual!r}; expected {expected!r}"
+            )
+    unknown = sorted(set(authority).difference(EXPECTED_BEHAVIOR_AUTHORITY))
+    if unknown:
+        errors.append(
+            "behavior_authority contains unsupported fields: " + ", ".join(unknown)
+        )
+    return errors
 
 
 def check_omission_registry(policy: dict, omissions: dict) -> list[str]:

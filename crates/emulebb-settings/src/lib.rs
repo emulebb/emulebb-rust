@@ -139,7 +139,7 @@ pub const CORE_SETTING_SPECS: &[CoreSettingSpec] = &[
         default_value: 600,
         restart_required: false,
         advanced: true,
-        description: "Maximum tracked eD2K sources per transfer.",
+        description: "eMuleBB broadband source target; soft and UDP acquisition caps derive from it.",
     }),
     number(NumberSettingSpec {
         key: FIELD_UPLOAD_CLIENT_DATA_RATE,

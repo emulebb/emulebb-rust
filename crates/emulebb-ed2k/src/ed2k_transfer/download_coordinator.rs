@@ -53,11 +53,11 @@ pub const DEFAULT_MAX_HALF_OPEN_CONNECTIONS: usize = 50;
 /// Master `m_OpenSocketsInterval` window length for the new-connection rate.
 pub const DEFAULT_CONNECTION_WINDOW: Duration = Duration::from_secs(5);
 const CONNECTION_AVERAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
-/// Master `CPreferences::GetDefaultMaxSourcesPerFile()`: 600 sources/file.
+/// eMuleBB MFC broadband default: 600 sources/file.
 pub const DEFAULT_MAX_SOURCES_PER_FILE: usize = 600;
-/// Master `MAX_SOURCES_FILE_SOFT` clamp on the soft per-file source cap.
+/// eMuleBB MFC ceiling on the soft per-file source cap.
 pub const MAX_SOURCES_FILE_SOFT: usize = 1000;
-/// Master `MAX_SOURCES_FILE_UDP` clamp on the UDP per-file source cap.
+/// eMuleBB MFC ceiling on the UDP per-file source cap.
 pub const MAX_SOURCES_FILE_UDP: usize = 100;
 /// Minimum global interval between two outbound UDP source reasks. Derived from
 /// the master `m_udcounter` cadence: `Process` runs ~1Hz and only fires
@@ -68,7 +68,8 @@ pub const MAX_SOURCES_FILE_UDP: usize = 100;
 pub const DEFAULT_REASK_PACING_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Configuration for the shared download coordinator. All defaults mirror the
-/// master (`GetMaxConnections` / `GetMaxConperFive` / `GetDefaultMaxSourcesPerFile`).
+/// selected operational policy. Source limits follow the eMuleBB MFC broadband
+/// profile; the coordinator remains a Rust-native async implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ed2kDownloadCoordinatorConfig {
     /// Overall cap on concurrent outgoing source connections (0 = unlimited).
@@ -375,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn master_derived_per_file_caps_match_the_oracle_formula() {
+    fn mfc_broadband_source_caps_use_the_stock_derivation() {
         let config = Ed2kDownloadCoordinatorConfig::default();
         // GetMaxSourcePerFileSoft: 600*9/10 = 540 (< 1000 clamp).
         assert_eq!(config.max_source_per_file_soft(), 540);
@@ -384,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn per_file_caps_clamp_to_the_oracle_ceilings() {
+    fn per_file_caps_clamp_to_the_mfc_broadband_ceilings() {
         let config = Ed2kDownloadCoordinatorConfig {
             max_sources_per_file: 100_000,
             ..Ed2kDownloadCoordinatorConfig::default()

@@ -12,6 +12,29 @@ CHECKER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CHECKER)
 
 
+class TestBehaviorAuthority(unittest.TestCase):
+    def test_accepts_stock_wire_and_mfc_operational_authority(self) -> None:
+        policy = {"behavior_authority": dict(CHECKER.EXPECTED_BEHAVIOR_AUTHORITY)}
+
+        self.assertEqual(CHECKER.check_behavior_authority(policy), [])
+
+    def test_rejects_missing_or_changed_authority(self) -> None:
+        policy = {
+            "behavior_authority": {
+                **CHECKER.EXPECTED_BEHAVIOR_AUTHORITY,
+                "operational_limits": "stock-community-emule",
+                "extra": "unsupported",
+            }
+        }
+        del policy["behavior_authority"]["io_behavior"]
+
+        errors = CHECKER.check_behavior_authority(policy)
+
+        self.assertTrue(any("operational_limits" in error for error in errors))
+        self.assertTrue(any("io_behavior" in error for error in errors))
+        self.assertTrue(any("unsupported fields: extra" in error for error in errors))
+
+
 class TestMaintainabilityAdvisories(unittest.TestCase):
     def test_toolchain_version_matches_workspace_minor(self) -> None:
         self.assertTrue(CHECKER.toolchain_versions_match("1.97.0", "1.97"))

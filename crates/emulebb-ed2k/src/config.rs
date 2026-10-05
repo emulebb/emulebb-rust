@@ -79,9 +79,9 @@ pub struct Ed2kRuntimeConfig {
     /// term (eMule `thePrefs.GetMaxHalfConnections()`, default 50,
     /// `GetDefaultMaxHalfConnections`). 0 disables the half-open cap.
     pub max_half_open_connections: usize,
-    /// Configured `maxSources` per file; the soft (TCP) and UDP per-file source
-    /// caps derive from this like eMule (`GetDefaultMaxSourcesPerFile` = 600,
-    /// soft = `min(*9/10, 1000)`, UDP = `min(*3/4, 100)`). 0 disables the cap.
+    /// Configured `maxSources` per file. The eMuleBB MFC broadband policy sets
+    /// the default to 600 and the soft/UDP ceilings to 1,000/100; the caps use
+    /// the stock-compatible `*9/10` and `*3/4` derivation. 0 disables the cap.
     pub max_sources_per_file: usize,
     /// Maximum number of direct ED2K peers one download may keep in flight.
     pub max_parallel_download_peers: usize,
@@ -226,8 +226,9 @@ impl Ed2kRuntimeConfig {
         (self.keepalive_secs > 0).then(|| std::time::Duration::from_secs(self.keepalive_secs))
     }
 
-    /// Per-file UDP source cap (oracle `GetMaxSourcePerFileUDP` =
-    /// `min(maxSources * 3 / 4, MAX_SOURCES_FILE_UDP)`, default 100): global
+    /// Per-file UDP source cap (`GetMaxSourcePerFileUDP` =
+    /// `min(maxSources * 3 / 4, MAX_SOURCES_FILE_UDP)`, eMuleBB MFC default
+    /// 100): global
     /// UDP server walks and Kad source searches keep supplementing a file
     /// until it holds this many sources. 0 means uncapped (like the derived
     /// caps in `Ed2kDownloadCoordinatorConfig`).
@@ -270,8 +271,7 @@ impl Default for Ed2kRuntimeConfig {
             // still holding the operator-server soak session open.
             keepalive_secs: 20 * 60,
             session_rotation_secs: 0,
-            // eMule GetRecommendedMaxConnections default ceiling (500) /
-            // GetDefaultMaxConperFive (50) / GetDefaultMaxSourcesPerFile (600).
+            // eMuleBB MFC broadband connection/source defaults.
             max_concurrent_downloads: 500,
             max_new_connections_per_five_seconds: 50,
             // eMule GetDefaultMaxHalfConnections (Preferences.h:1132).
@@ -323,9 +323,8 @@ mod tests {
     fn default_ed2k_runtime_config_limits_active_download_fanout() {
         let config = Ed2kRuntimeConfig::default();
 
-        // Global download coordinator caps default to the eMule master values:
-        // GetRecommendedMaxConnections (500), GetDefaultMaxConperFive (50), and
-        // GetDefaultMaxSourcesPerFile (600).
+        // Global download coordinator caps follow the eMuleBB MFC broadband
+        // operational profile.
         assert_eq!(config.max_concurrent_downloads, 500);
         assert_eq!(config.max_new_connections_per_five_seconds, 50);
         // eMule GetDefaultMaxHalfConnections (Preferences.h:1132).
