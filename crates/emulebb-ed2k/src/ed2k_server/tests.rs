@@ -1,12 +1,16 @@
+use super::TCP_PACKET_HEADER_LEN;
 use super::background::send_source_request_batch;
 use super::offer_policy::{OfferFilesCapabilityAdvertisement, OfferFilesPolicy};
+use super::session_driver::ServerSessionExit;
+use super::types::ServerSessionContext;
 use super::{
     BackgroundServerSearchRequest, CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS,
     CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION, ConfiguredServerEntry, ED2K_FILETYPE_PROGRAM,
     EDONKEY_VERSION, EMULE_ENCRYPTION_METHOD_OBFUSCATION, EMULE_TCP_CRYPT_MAGIC_REQUESTER,
     EMULE_TCP_CRYPT_MAGIC_SERVER, EMULE_TCP_CRYPT_MAGIC_SYNC, EMULE_UDP_CRYPT_MAGIC_SERVER_CLIENT,
     EMULE_UDP_CRYPT_MAGIC_SYNC_SERVER, EMULE_VERSION_MAJOR, EMULE_VERSION_MINOR,
-    EMULE_VERSION_UPDATE, Ed2kFoundSource, Ed2kHash, Ed2kSearchFile, Ed2kServerListEvent,
+    EMULE_VERSION_UPDATE, Ed2kFoundSource, Ed2kHash, Ed2kSearchFile, Ed2kServerFailure,
+    Ed2kServerFailurePhase, Ed2kServerFailureReason, Ed2kServerListEvent,
     Ed2kServerSourceBatchTarget, Ed2kServerState, Ed2kUdpSourceRequestTarget, FT_AICH_HASH,
     FT_COMPLETE_SOURCES, FT_FILENAME, FT_FILERATING, FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE,
     FT_FOLDERNAME, FT_SOURCES, HELLO_NICKNAME, OFFER_FILE_SAMPLE_HASH, OFFER_FILE_SAMPLE_NAME,
@@ -30,15 +34,18 @@ use super::{
     encode_server_udp_datagram, encode_source_request, encode_udp_search_request,
     encode_udp_source_request_batch, format_server_flags, handle_background_udp_packet,
     ipv4_from_client_id, login_identity_for_server_transport, new_ed2k_server_search_channel,
-    offer_files_catalog_fingerprint, run_server_transport_attempts,
+    offer_files_catalog_fingerprint, run_one_server_session, run_server_transport_attempts,
     search_keyword_via_background_session, search_source_batch_via_background_session,
     search_source_via_background_session, server_capabilities, server_opcode_allows_compression,
     server_transport_attempts, server_udp_crypt_ping_endpoint, server_udp_endpoint,
     should_use_server_obfuscation, source_request_opcode, validate_found_sources,
 };
 use crate::{
+    NatManager,
     ed2k_tcp::{Ed2kHelloIdentity, emule_connect_options},
-    ed2k_transfer::Ed2kSharedEntry,
+    ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
+    kad_firewall::KadFirewallState,
+    reachability::ExternalReachability,
 };
 use flate2::{Compression, write::ZlibEncoder};
 use hex::decode;
@@ -46,13 +53,16 @@ use num_bigint::BigUint;
 use std::{
     io::Write,
     net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32},
+    },
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::RwLock,
+    sync::{Mutex, Notify, RwLock},
 };
 use tokio_util::sync::CancellationToken;
 

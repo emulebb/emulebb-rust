@@ -89,6 +89,10 @@ pub(super) struct ServerSession {
     pub(super) last_tx_opcode: Option<u8>,
     pub(super) receive_cipher: Option<Rc4KeyStream>,
     pub(super) send_cipher: Option<Rc4KeyStream>,
+    /// Absolute stock `CONSERVTIMEOUT` deadline for this pending transport
+    /// attempt. It starts before TCP connect and is cleared only after a valid,
+    /// non-zero `OP_IDCHANGE` accepts the login.
+    pub(super) pending_login_deadline: Option<Instant>,
     pub(super) login_accepted: bool,
     pub(super) probe_search_sent: bool,
     pub(super) offer_files_sent: bool,
@@ -123,6 +127,23 @@ impl ServerSession {
         state: Arc<RwLock<Ed2kServerState>>,
         trace_role: &'static str,
         timeout: Duration,
+    ) -> Result<Self> {
+        Self::connect_until(
+            bind_ip,
+            endpoint,
+            state,
+            trace_role,
+            Instant::now() + timeout,
+        )
+        .await
+    }
+
+    pub(super) async fn connect_until(
+        bind_ip: Ipv4Addr,
+        endpoint: SocketAddr,
+        state: Arc<RwLock<Ed2kServerState>>,
+        trace_role: &'static str,
+        pending_login_deadline: Instant,
     ) -> Result<Self> {
         {
             let mut guard = state.write().await;
@@ -162,7 +183,12 @@ impl ServerSession {
                     "failed to pin ED2K server egress for {bind_ip}: {error}"
                 ))
             })?;
-            let stream = match tokio::time::timeout(timeout, socket.connect(endpoint)).await {
+            let stream = match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(pending_login_deadline),
+                socket.connect(endpoint),
+            )
+            .await
+            {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
                     return Err(anyhow::Error::new(Ed2kServerFailure::connect_io(
@@ -205,6 +231,7 @@ impl ServerSession {
             last_tx_opcode: None,
             receive_cipher: None,
             send_cipher: None,
+            pending_login_deadline: Some(pending_login_deadline),
             login_accepted: false,
             probe_search_sent: false,
             offer_files_sent: false,
@@ -244,6 +271,7 @@ impl ServerSession {
             last_tx_opcode: None,
             receive_cipher: None,
             send_cipher: None,
+            pending_login_deadline: None,
             login_accepted: false,
             probe_search_sent: false,
             offer_files_sent: false,
@@ -297,6 +325,10 @@ impl ServerSession {
             self.offer_files_pacing = OfferFilesPacingMode::AwaitingCapability;
             self.offer_files_negotiation_deadline =
                 Some(Instant::now() + OFFER_FILES_NEGOTIATION_WAIT);
+            // Stock publishes immediately after OP_IDCHANGE. Capability
+            // discovery may accelerate later batches, but must never delay the
+            // first stock-shaped OP_OFFERFILES advertisement.
+            self.offer_files_next_publish_at = Some(Instant::now());
         }
         self.publish_offer_files_pacing_state().await;
     }
@@ -314,7 +346,7 @@ impl ServerSession {
         {
             self.lock_offer_files_capability(advertisement);
             if self.login_accepted && self.offer_files_publish_requested {
-                self.offer_files_next_publish_at = Some(Instant::now());
+                self.schedule_offer_files_after_pacing_resolution();
             }
         } else if self.login_accepted {
             debug!(
@@ -340,6 +372,33 @@ impl ServerSession {
         };
     }
 
+    fn schedule_offer_files_after_pacing_resolution(&mut self) {
+        if !self.offer_files_publish_requested {
+            self.offer_files_next_publish_at = None;
+            return;
+        }
+        let now = Instant::now();
+        let due = match (self.offer_files_sent_at, &self.offer_files_pacing) {
+            (Some(sent_at), OfferFilesPacingMode::Legacy { .. }) => {
+                sent_at + OFFER_FILES_LEGACY_MIN_INTERVAL
+            }
+            (Some(sent_at), OfferFilesPacingMode::Negotiated(policy)) => {
+                sent_at + policy.next_batch_delay(self.offer_files_last_batch_entries.max(1))
+            }
+            _ => now,
+        };
+        self.offer_files_next_publish_at = Some(due.max(now));
+    }
+
+    pub(super) fn offer_files_negotiation_timeout_due(&self) -> bool {
+        matches!(
+            self.offer_files_pacing,
+            OfferFilesPacingMode::AwaitingCapability
+        ) && self
+            .offer_files_negotiation_deadline
+            .is_some_and(|deadline| deadline <= Instant::now())
+    }
+
     pub(super) async fn resolve_offer_files_negotiation_timeout(&mut self) {
         if matches!(
             self.offer_files_pacing,
@@ -349,9 +408,7 @@ impl ServerSession {
                 reason: "OP_SERVERIDENT capability timeout".to_string(),
             };
             self.offer_files_negotiation_deadline = None;
-            if self.offer_files_publish_requested {
-                self.offer_files_next_publish_at = Some(Instant::now());
-            }
+            self.schedule_offer_files_after_pacing_resolution();
             self.publish_offer_files_pacing_state().await;
         }
     }
@@ -381,20 +438,31 @@ impl ServerSession {
     }
 
     pub(super) fn offer_files_wakeup_at(&self) -> Option<Instant> {
-        match self.offer_files_pacing {
-            OfferFilesPacingMode::AwaitingCapability => self.offer_files_negotiation_deadline,
-            _ if self.offer_files_publish_requested => self.offer_files_next_publish_at,
-            _ => None,
+        let publish_deadline = self
+            .offer_files_publish_requested
+            .then_some(self.offer_files_next_publish_at)
+            .flatten();
+        if matches!(
+            self.offer_files_pacing,
+            OfferFilesPacingMode::AwaitingCapability
+        ) {
+            match (publish_deadline, self.offer_files_negotiation_deadline) {
+                (Some(publish), Some(negotiation)) => Some(publish.min(negotiation)),
+                (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+                (None, None) => None,
+            }
+        } else {
+            publish_deadline
         }
     }
 
     pub(super) fn offer_files_publish_due(&self) -> bool {
         self.login_accepted
             && self.offer_files_publish_requested
-            && !matches!(
+            && (!matches!(
                 self.offer_files_pacing,
                 OfferFilesPacingMode::AwaitingCapability
-            )
+            ) || !self.offer_files_sent)
             && self
                 .offer_files_next_publish_at
                 .is_some_and(|due| due <= Instant::now())
@@ -418,15 +486,16 @@ impl ServerSession {
         if entries_sent > 0 {
             self.offer_files_last_batch_entries = entries_sent;
         }
-        let continue_pump = !matches!(
-            self.offer_files_pacing,
-            OfferFilesPacingMode::AwaitingCapability
-        ) && pending_entries > 0
+        let continue_pump = pending_entries > 0
             && self.offer_files_batch_limit() > 0
             && !skipped_duplicate_batch
             && entries_sent > 0;
         self.offer_files_publish_requested = continue_pump;
-        self.offer_files_next_publish_at = if continue_pump {
+        self.offer_files_next_publish_at = if continue_pump
+            && !matches!(
+                self.offer_files_pacing,
+                OfferFilesPacingMode::AwaitingCapability
+            ) {
             match self.offer_files_pacing {
                 OfferFilesPacingMode::Negotiated(policy) => {
                     Some(Instant::now() + policy.next_batch_delay(entries_sent))
@@ -919,6 +988,78 @@ mod tests {
         let peer = TcpStream::connect(addr).await.unwrap();
         let (stream, peer_addr) = listener.accept().await.unwrap();
         (ServerSession::from_stream_for_test(stream, peer_addr), peer)
+    }
+
+    #[tokio::test]
+    async fn capability_discovery_never_delays_first_stock_offer() {
+        let (mut session, _peer) = connected_test_session_with_peer().await;
+        session.login_accepted = true;
+        session.configure_offer_files_capability(true);
+
+        session.begin_offer_files_publishing().await;
+
+        assert!(matches!(
+            session.offer_files_pacing,
+            OfferFilesPacingMode::AwaitingCapability
+        ));
+        assert!(session.offer_files_publish_due());
+        assert_eq!(
+            session.offer_files_wakeup_at(),
+            session.offer_files_next_publish_at
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_observed_after_first_offer_preserves_rate_limit() {
+        let (mut session, _peer) = connected_test_session_with_peer().await;
+        session.login_accepted = true;
+        session.configure_offer_files_capability(true);
+        session.begin_offer_files_publishing().await;
+        let sent_at = Instant::now();
+        session.offer_files_sent = true;
+        session.offer_files_sent_at = Some(sent_at);
+        session.finish_offer_files_batch(200, 800, false);
+
+        assert!(session.offer_files_publish_requested);
+        assert_eq!(session.offer_files_next_publish_at, None);
+        assert!(!session.offer_files_publish_due());
+
+        session
+            .observe_offer_files_capability(OfferFilesCapabilityAdvertisement::Supported(
+                OfferFilesPolicy::validate(1, 200, 1, 1_000, 201).unwrap(),
+            ))
+            .await;
+
+        assert!(matches!(
+            session.offer_files_pacing,
+            OfferFilesPacingMode::Negotiated(_)
+        ));
+        assert!(
+            session.offer_files_next_publish_at.unwrap() >= sent_at + Duration::from_millis(500)
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_timeout_keeps_stock_sixty_second_pace_after_first_offer() {
+        let (mut session, _peer) = connected_test_session_with_peer().await;
+        session.login_accepted = true;
+        session.configure_offer_files_capability(true);
+        session.begin_offer_files_publishing().await;
+        let sent_at = Instant::now();
+        session.offer_files_sent = true;
+        session.offer_files_sent_at = Some(sent_at);
+        session.finish_offer_files_batch(200, 800, false);
+
+        session.resolve_offer_files_negotiation_timeout().await;
+
+        assert!(matches!(
+            session.offer_files_pacing,
+            OfferFilesPacingMode::Legacy { .. }
+        ));
+        assert_eq!(
+            session.offer_files_next_publish_at,
+            Some(sent_at + OFFER_FILES_LEGACY_MIN_INTERVAL)
+        );
     }
 
     #[tokio::test]

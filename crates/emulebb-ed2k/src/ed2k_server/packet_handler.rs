@@ -39,7 +39,9 @@ pub(super) async fn handle_server_packet(
                     .store(0, std::sync::atomic::Ordering::Relaxed);
                 {
                     let mut guard = session.state.write().await;
-                    guard.connecting = false;
+                    // Stock stays in CS_WAITFORLOGIN after a zero ID and lets
+                    // CONSERVTIMEOUT retire the pending attempt.
+                    guard.connecting = true;
                     guard.connected = false;
                     guard.client_id = None;
                     guard.server_flags = id_change.server_flags;
@@ -78,6 +80,7 @@ pub(super) async fn handle_server_packet(
                 .store(id_change.client_id, std::sync::atomic::Ordering::Relaxed);
             session.server_flags = id_change.server_flags;
             session.login_accepted = true;
+            session.pending_login_deadline = None;
             // eMule `CServerList::ServerStats`: a successful connect resets the
             // server's fail-count. Report the login so the core clears it.
             if let Some(sender) = context.server_list_events.as_ref() {

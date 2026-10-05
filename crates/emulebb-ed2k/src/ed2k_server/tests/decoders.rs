@@ -102,6 +102,28 @@ fn server_ident_parser_rejects_partial_or_compact_integer_capability() {
 }
 
 #[test]
+fn server_ident_parser_rejects_duplicate_capability_fields() {
+    let mut payload = vec![0u8; 22];
+    payload.extend_from_slice(&6u32.to_le_bytes());
+    push_exact_named_u32_tag(&mut payload, "offerfiles_v", 1);
+    push_exact_named_u32_tag(&mut payload, "offerfiles_v", 1);
+    push_exact_named_u32_tag(&mut payload, "offerfiles_batch_max", 200);
+    push_exact_named_u32_tag(&mut payload, "offerfiles_min_interval_ms", 500);
+    push_exact_numeric_u32_tag(&mut payload, ST_SOFTFILES, 100_000);
+    push_exact_numeric_u32_tag(&mut payload, ST_HARDFILES, 201);
+
+    let advertisement = decode_server_ident_details(&payload)
+        .unwrap()
+        .offer_files_capability;
+
+    assert!(matches!(
+        advertisement,
+        OfferFilesCapabilityAdvertisement::Invalid(reason)
+            if reason.contains("duplicate offerfiles_v")
+    ));
+}
+
+#[test]
 fn server_ident_parser_keeps_legacy_when_capability_is_absent() {
     let mut payload = vec![0u8; 22];
     payload.extend_from_slice(&2u32.to_le_bytes());

@@ -708,3 +708,238 @@ async fn server_obfuscation_handshake_encrypts_login_request() {
 
     server.await.unwrap();
 }
+
+fn background_test_context(
+    state: Arc<RwLock<Ed2kServerState>>,
+    connect_timeout: Duration,
+) -> ServerSessionContext {
+    ServerSessionContext {
+        bind_ip: crate::test_bind_ip(),
+        nat: Arc::new(NatManager::default()),
+        hello_identity: Ed2kHelloIdentity {
+            user_hash: [0x11; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: 0,
+            direct_udp_callback: false,
+        },
+        nickname: HELLO_NICKNAME.to_string(),
+        last_client_id: Arc::new(AtomicU32::new(0)),
+        probe_search_term: None,
+        shared_catalog: Arc::new(RwLock::new(IndexedSharedCatalog::default())),
+        state,
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        keepalive_interval: None,
+        connect_timeout,
+        rotation_interval: None,
+        shutdown: Arc::new(AtomicBool::new(false)),
+        public_ip: ExternalReachability::default(),
+        reconnect_signal: Arc::new(Notify::new()),
+        server_list_events: None,
+        add_servers_from_server: false,
+        offer_files_capability_enabled: true,
+    }
+}
+
+fn background_test_server(endpoint: SocketAddr) -> ResolvedServerEntry {
+    let SocketAddr::V4(endpoint_v4) = endpoint else {
+        panic!("ED2K test server must use IPv4");
+    };
+    let mut server = test_server(0, 0);
+    server.entry.host = endpoint_v4.ip().to_string();
+    server.entry.port = endpoint_v4.port();
+    server.ip = *endpoint_v4.ip();
+    server
+}
+
+async fn read_login_request(stream: &mut TcpStream) {
+    let mut header = [0u8; TCP_PACKET_HEADER_LEN];
+    stream.read_exact(&mut header).await.unwrap();
+    assert_eq!(header[0], OP_EDONKEYPROT);
+    assert_eq!(header[5], OP_LOGINREQUEST);
+    let payload_len =
+        u32::from_le_bytes(header[1..5].try_into().unwrap()).saturating_sub(1) as usize;
+    let mut payload = vec![0u8; payload_len];
+    stream.read_exact(&mut payload).await.unwrap();
+}
+
+#[tokio::test]
+async fn background_login_stall_expires_the_whole_pending_attempt() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_millis(75));
+    let (_, inbox) = new_ed2k_server_search_channel(1);
+
+    let error = run_one_server_session(
+        &background_test_server(endpoint),
+        &context,
+        &Arc::new(Mutex::new(inbox)),
+    )
+    .await
+    .expect_err("a server that never assigns an ID must time out");
+
+    let failure = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Ed2kServerFailure>())
+        .expect("login timeout should retain its classified failure");
+    assert_eq!(failure.phase, Ed2kServerFailurePhase::Connect);
+    assert_eq!(failure.reason, Ed2kServerFailureReason::TimeoutUnreachable);
+    assert!(!failure.counts_toward_dead_server());
+    let state = state.read().await;
+    assert!(!state.connecting);
+    assert!(!state.connected);
+    assert_eq!(state.endpoint, None);
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn zero_id_stays_connecting_until_the_pending_attempt_times_out() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let (zero_sent, zero_observed) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &0u32.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+        let _ = zero_sent.send(());
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_millis(150));
+    let (_, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+
+    let observe_pending = async {
+        zero_observed.await.unwrap();
+        tokio::time::timeout(Duration::from_millis(75), async {
+            loop {
+                let snapshot = state.read().await.clone();
+                if snapshot.connecting && !snapshot.connected && snapshot.client_id.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("zero ID should leave the session visibly pending");
+    };
+    let (result, ()) = tokio::join!(
+        run_one_server_session(&server, &context, &inbox),
+        observe_pending
+    );
+
+    let error = result.expect_err("zero ID must not accept the login");
+    let failure = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Ed2kServerFailure>())
+        .expect("zero-ID timeout should retain its classified failure");
+    assert_eq!(failure.reason, Ed2kServerFailureReason::TimeoutUnreachable);
+    let state = state.read().await;
+    assert!(!state.connecting);
+    assert!(!state.connected);
+    assert_eq!(state.client_id, None);
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn valid_id_after_zero_accepts_the_still_pending_login() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &0u32.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+        let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_millis(500));
+    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let (_, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+
+    let observe_connected = async {
+        let snapshot = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                let snapshot = state.read().await.clone();
+                if snapshot.connected {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a valid ID after zero should accept the pending login");
+        reconnect_signal.notify_one();
+        snapshot
+    };
+    let (result, snapshot) = tokio::join!(
+        run_one_server_session(&server, &context, &inbox),
+        observe_connected
+    );
+
+    assert_eq!(result.unwrap(), ServerSessionExit::RestartPreferredOrder);
+    assert!(!snapshot.connecting);
+    assert!(snapshot.connected);
+    assert_eq!(
+        snapshot.client_id,
+        Some(u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]))
+    );
+    assert_eq!(snapshot.tcp_firewalled(), Some(false));
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn shutdown_preempts_a_silent_pending_login() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let (login_sent, login_seen) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        let _ = login_sent.send(());
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_secs(5));
+    let shutdown = Arc::clone(&context.shutdown);
+    let (_, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+
+    let request_shutdown = async {
+        login_seen.await.unwrap();
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    };
+    let (result, ()) = tokio::join!(
+        run_one_server_session(&server, &context, &inbox),
+        request_shutdown
+    );
+
+    assert_eq!(result.unwrap(), ServerSessionExit::IntentionalShutdown);
+    let state = state.read().await;
+    assert!(!state.connecting);
+    assert!(!state.connected);
+    server_task.abort();
+}

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use emulebb_kad_proto::Ed2kHash;
 use tokio::{
     sync::{Mutex, RwLock},
@@ -16,16 +16,16 @@ use super::udp_runtime::{
 };
 use super::{
     BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
-    Ed2kServerSearchInbox, Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST,
-    OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT, PendingBackgroundServerSearch,
-    ResolvedServerEntry, ServerSession, ServerSessionPhase, ServerTransportMode,
-    annotate_found_sources_server, decode_found_sources, decode_search_result_page,
-    dump_ed2k_server_loop_meta, dump_ed2k_server_meta, encode_login_request, encode_packet,
-    fail_background_search_request, fail_pending_background_search, format_connect_options,
-    handle_background_udp_packet, handle_server_packet, log_search_result_page,
-    login_identity_for_server_transport, run_server_transport_attempts,
-    send_due_offer_files_advertisement, server_transport_attempts, server_udp_endpoint,
-    start_background_server_search, validate_found_sources,
+    Ed2kServerFailure, Ed2kServerSearchInbox, Ed2kServerState, OP_FOUNDSOURCES,
+    OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT,
+    PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession, ServerSessionPhase,
+    ServerTransportMode, annotate_found_sources_server, decode_found_sources,
+    decode_search_result_page, dump_ed2k_server_loop_meta, dump_ed2k_server_meta,
+    encode_login_request, encode_packet, fail_background_search_request,
+    fail_pending_background_search, format_connect_options, handle_background_udp_packet,
+    handle_server_packet, log_search_result_page, login_identity_for_server_transport,
+    run_server_transport_attempts, send_due_offer_files_advertisement, server_transport_attempts,
+    server_udp_endpoint, start_background_server_search, validate_found_sources,
 };
 
 /// Wakeup cadence used to drive the periodic UDP server-status ping when the
@@ -33,6 +33,8 @@ use super::{
 /// traffic; it only keeps the status-ping schedule alive.
 const KEEPALIVE_DISABLED_STATUS_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 const SERVER_CRYPT_PING_FALLBACK_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
+const PENDING_LOGIN_SHUTDOWN_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServerSessionExit {
@@ -84,6 +86,10 @@ async fn connect_server_transport_attempt(
     observed_external_ip: Option<&str>,
     mode: ServerTransportMode,
 ) -> Result<ServerSession> {
+    // Stock eMule's CONSERVTIMEOUT covers the whole pending connection attempt,
+    // including connect, crypt negotiation, and CS_WAITFORLOGIN. A transport
+    // fallback is a fresh attempt and therefore receives a fresh budget.
+    let pending_login_deadline = std::time::Instant::now() + context.connect_timeout;
     let use_server_obfuscation = mode.is_obfuscated();
     let mut login_identity =
         login_identity_for_server_transport(context.hello_identity, use_server_obfuscation);
@@ -97,12 +103,12 @@ async fn connect_server_transport_attempt(
         .public_ip
         .advertised_udp_port(login_identity.udp_port);
     let transport_endpoint = server.transport_endpoint(use_server_obfuscation);
-    let mut session = ServerSession::connect(
+    let mut session = ServerSession::connect_until(
         context.bind_ip,
         transport_endpoint,
         Arc::clone(&context.state),
         "background",
-        context.connect_timeout,
+        pending_login_deadline,
     )
     .await?;
     session.server_soft_files = server.entry.soft_files;
@@ -126,16 +132,37 @@ async fn connect_server_transport_attempt(
     );
     if use_server_obfuscation {
         let login_request = encode_packet(OP_LOGINREQUEST, &login_payload, false)?;
-        tokio::time::timeout(
-            context.connect_timeout,
+        match tokio::time::timeout_at(
+            TokioInstant::from_std(pending_login_deadline),
             session.negotiate_obfuscation_and_send(&login_request),
         )
         .await
-        .with_context(|| {
-            format!("timed out negotiating ED2K server obfuscation with {transport_endpoint}")
-        })??;
+        {
+            Ok(result) => result?,
+            Err(error) => {
+                return Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
+                    format!(
+                        "timed out negotiating ED2K server obfuscation with {transport_endpoint}: {error}"
+                    ),
+                )));
+            }
+        }
     } else {
-        session.send_packet(OP_LOGINREQUEST, &login_payload).await?;
+        match tokio::time::timeout_at(
+            TokioInstant::from_std(pending_login_deadline),
+            session.send_packet(OP_LOGINREQUEST, &login_payload),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(error) => {
+                return Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
+                    format!(
+                        "timed out sending ED2K server login request to {transport_endpoint}: {error}"
+                    ),
+                )));
+            }
+        }
     }
     session.set_phase(
         ServerSessionPhase::AwaitingIdChange,
@@ -229,7 +256,42 @@ pub(super) async fn run_one_server_session(
         }
 
         let offer_files_wakeup = session.offer_files_wakeup_at();
+        let pending_login_deadline = session.pending_login_deadline;
         tokio::select! {
+            _ = tokio::time::sleep(PENDING_LOGIN_SHUTDOWN_POLL_INTERVAL), if !session.login_accepted => {
+                // The shutdown flag is atomic rather than a Notify. Poll only
+                // while login is pending so shutdown cannot be held hostage by
+                // a silent server until the full connect deadline expires.
+                continue;
+            }
+            _ = async {
+                if let Some(deadline) = pending_login_deadline {
+                    tokio::time::sleep_until(TokioInstant::from_std(deadline)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if pending_login_deadline.is_some() && !session.login_accepted => {
+                let timeout_error = format!(
+                    "timed out waiting for OP_IDCHANGE from ED2K server {}",
+                    server.base_endpoint()
+                );
+                fail_background_search_request(
+                    &mut queued_background_search,
+                    &BackgroundSearchFailure::interrupted(format!(
+                        "{timeout_error} before search dispatch"
+                    )),
+                );
+                fail_pending_background_search(
+                    &mut pending_background_search,
+                    &BackgroundSearchFailure::interrupted(format!(
+                        "{timeout_error} before search completion"
+                    )),
+                );
+                clear_server_connection_state(&context.state).await;
+                return Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
+                    timeout_error,
+                )));
+            }
             _ = async {
                 if let Some(deadline) = rotation_deadline {
                     tokio::time::sleep_until(deadline).await;
@@ -292,7 +354,9 @@ pub(super) async fn run_one_server_session(
             }, if offer_files_wakeup.is_some()
                 && queued_background_search.is_none()
                 && pending_background_search.is_none() => {
-                session.resolve_offer_files_negotiation_timeout().await;
+                if session.offer_files_negotiation_timeout_due() {
+                    session.resolve_offer_files_negotiation_timeout().await;
+                }
                 if let Some(stats) = send_due_offer_files_advertisement(
                     &mut session,
                     &context.shared_catalog,
