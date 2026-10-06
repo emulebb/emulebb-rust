@@ -88,6 +88,17 @@ pub(crate) fn search_results_page(
                     left.complete_sources.cmp(&right.complete_sources)
                 }
                 SearchResultSort::Rating => left.rating.cmp(&right.rating),
+                SearchResultSort::FileType => left.file_type.cmp(&right.file_type),
+                SearchResultSort::Artist => left.media.artist.cmp(&right.media.artist),
+                SearchResultSort::Album => left.media.album.cmp(&right.media.album),
+                SearchResultSort::Title => left.media.title.cmp(&right.media.title),
+                SearchResultSort::LengthSeconds => {
+                    left.media.length_seconds.cmp(&right.media.length_seconds)
+                }
+                SearchResultSort::BitrateKbps => {
+                    left.media.bitrate_kbps.cmp(&right.media.bitrate_kbps)
+                }
+                SearchResultSort::Codec => left.media.codec.cmp(&right.media.codec),
             };
             let comparison = match order {
                 SearchSortOrder::Asc => comparison,

@@ -76,7 +76,7 @@ async fn search_result_sort_query_is_strict() {
     for (uri, expected_message) in [
         (
             "/api/v1/searches/1?sort=availability",
-            "sort must be one of name, sizeBytes, sources, completeSources, rating",
+            "sort must be one of name, sizeBytes, sources, completeSources, rating, fileType, artist, album, title, lengthSeconds, bitrateKbps, codec",
         ),
         (
             "/api/v1/searches/1?sort=sources&order=descending",
@@ -87,6 +87,20 @@ async fn search_result_sort_query_is_strict() {
         let (status, value) = query_error_value(uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
         assert_eq!(value["error"]["message"], expected_message);
+    }
+
+    for sort in [
+        "fileType",
+        "artist",
+        "album",
+        "title",
+        "lengthSeconds",
+        "bitrateKbps",
+        "codec",
+    ] {
+        let (status, value) =
+            query_error_value(&format!("/api/v1/searches/1?sort={sort}&order=asc")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{sort}: {value}");
     }
 }
 

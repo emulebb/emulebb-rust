@@ -72,7 +72,7 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "INVALID_ARGUMENT",
-                "sort must be one of name, sizeBytes, sources, completeSources, rating",
+                "sort must be one of name, sizeBytes, sources, completeSources, rating, fileType, artist, album, title, lengthSeconds, bitrateKbps, codec",
             )
             .into_response();
         }
@@ -213,7 +213,18 @@ fn is_transfer_state_name(value: &str) -> bool {
 fn is_search_result_sort(value: &str) -> bool {
     matches!(
         value,
-        "name" | "sizeBytes" | "sources" | "completeSources" | "rating"
+        "name"
+            | "sizeBytes"
+            | "sources"
+            | "completeSources"
+            | "rating"
+            | "fileType"
+            | "artist"
+            | "album"
+            | "title"
+            | "lengthSeconds"
+            | "bitrateKbps"
+            | "codec"
     )
 }
 

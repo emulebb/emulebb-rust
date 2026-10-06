@@ -155,6 +155,13 @@ pub(crate) enum SearchResultSort {
     Sources,
     CompleteSources,
     Rating,
+    FileType,
+    Artist,
+    Album,
+    Title,
+    LengthSeconds,
+    BitrateKbps,
+    Codec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
