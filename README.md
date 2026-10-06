@@ -210,9 +210,12 @@ are the version-specific operator and compatibility references.
 The manual [release workflow](.github/workflows/release.yml) retains unsigned
 candidate artifacts for Windows, Linux, and macOS on x64 and ARM64. Native ZIP,
 DEB/AppImage, and app-in-DMG packages include the daemon and browser WebUI. It
-also builds a Linux amd64/arm64 OCI image without publishing it. An approved
-`rust-v0.1.0-beta.2` tag is required to publish versioned GitHub Release and
-GHCR assets; the workflow does not publish a `latest` image.
+also builds and smoke-tests a Linux amd64/arm64 OCI image without publishing it.
+The container base is digest-pinned, and both variants must pass a scan for
+fixable high or critical vulnerabilities. Per-platform SPDX JSON SBOMs, scan
+reports, and their checksums are retained and attached to a published release.
+An approved `rust-v0.1.0-beta.2` tag is required to publish versioned GitHub
+Release and GHCR assets; the workflow does not publish a `latest` image.
 
 ## Nightly beta builds
 

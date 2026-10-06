@@ -268,6 +268,52 @@ class TestReleaseImagePromotion(unittest.TestCase):
         self.assertIn("full commit SHA", errors[0])
 
 
+class TestReleaseImageSecurity(unittest.TestCase):
+    def test_current_release_image_is_pinned_inventoried_and_scanned(self) -> None:
+        self.assertEqual(CHECKER.check_release_image_security(), [])
+
+    def test_rejects_mutable_unscanned_image(self) -> None:
+        errors = CHECKER.check_release_image_security(
+            "  image-candidate:\n    steps: []\n  publish-native:\n    steps: []\n",
+            "FROM lscr.io/linuxserver/baseimage-ubuntu:noble\n",
+            "version: 2\nupdates: []\n",
+        )
+
+        self.assertGreaterEqual(len(errors), 13)
+        self.assertTrue(any("SPDX JSON" in error for error in errors))
+        self.assertTrue(any("high and critical" in error for error in errors))
+        self.assertTrue(any("pin the LinuxServer" in error for error in errors))
+        self.assertTrue(any("dependabot" in error.lower() for error in errors))
+
+    def test_rejects_mutable_trivy_installer(self) -> None:
+        workflow = """
+  image-candidate:
+    steps:
+      - uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: v0.75.0
+      - run: |
+          trivy image --image-src docker --platform "$platform" --format spdx-json "$IMAGE"
+          trivy image --image-src docker --platform "$platform" --scanners vuln \
+            --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
+      - with:
+          name: emulebb-rust-image-security
+  publish-native:
+    steps:
+      - with:
+          name: emulebb-rust-image-security
+"""
+
+        errors = CHECKER.check_release_image_security(
+            workflow,
+            f"FROM lscr.io/linuxserver/baseimage-ubuntu:noble@sha256:{'a' * 64}\n",
+            "- package-ecosystem: docker\n  directory: /packaging/docker\n",
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("full commit SHA", errors[0])
+
+
 class TestReleaseBuildIdentity(unittest.TestCase):
     def test_current_workflow_injects_exact_runtime_identity(self) -> None:
         self.assertEqual(CHECKER.check_release_build_identity(), [])

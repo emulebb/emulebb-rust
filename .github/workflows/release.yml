@@ -266,6 +266,55 @@ jobs:
         run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
       - name: Smoke first-run LinuxServer image
         run: python .ci/emulebb-build-tests/scripts/smoke-rust-container.py --archive "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar" --image "ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}"
+      - name: Install pinned Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.75.0
+          cache: true
+      - name: Generate per-platform image SBOMs
+        shell: bash
+        env:
+          IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
+          SECURITY_DIR: ${{ runner.temp }}/emulebb-rust-out/image-security
+        run: |
+          set -euo pipefail
+          mkdir -p "$SECURITY_DIR"
+          for platform in linux/amd64 linux/arm64; do
+            architecture="${platform#linux/}"
+            trivy image --image-src docker --platform "$platform" --no-progress \
+              --format spdx-json \
+              --output "$SECURITY_DIR/emulebb-rust-v${RELEASE_VERSION}-image-${architecture}.sbom.spdx.json" \
+              "$IMAGE"
+          done
+      - name: Reject fixable high or critical image vulnerabilities
+        shell: bash
+        env:
+          IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
+          SECURITY_DIR: ${{ runner.temp }}/emulebb-rust-out/image-security
+        run: |
+          set -uo pipefail
+          scan_status=0
+          for platform in linux/amd64 linux/arm64; do
+            architecture="${platform#linux/}"
+            if ! trivy image --image-src docker --platform "$platform" --no-progress \
+              --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 \
+              "$IMAGE" | tee "$SECURITY_DIR/emulebb-rust-v${RELEASE_VERSION}-image-${architecture}.vulnerabilities.txt"; then
+              scan_status=1
+            fi
+          done
+          (
+            cd "$SECURITY_DIR"
+            sha256sum -- *.json *.txt > "emulebb-rust-v${RELEASE_VERSION}-image-security-SHA256SUMS"
+          )
+          exit "$scan_status"
+      - name: Retain image security evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emulebb-rust-image-security
+          path: ${{ runner.temp }}/emulebb-rust-out/image-security/*
+          if-no-files-found: error
+          retention-days: 30
       - name: Retain image candidate
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -374,6 +423,11 @@ jobs:
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
         run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
+      - name: Download image security evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: emulebb-rust-image-security
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Add versioned release documentation
         if: ${{ inputs.channel != 'nightly' }}
         shell: bash

@@ -88,6 +88,7 @@ def main() -> int:
     errors.extend(check_release_ci_gate())
     errors.extend(check_release_build_identity())
     errors.extend(check_release_image_promotion())
+    errors.extend(check_release_image_security())
     errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
@@ -631,6 +632,90 @@ def check_release_image_promotion(workflow_text: str | None = None) -> list[str]
         for fragment, description in forbidden.items()
         if fragment in body
     )
+    return errors
+
+
+def check_release_image_security(
+    workflow_text: str | None = None,
+    dockerfile_text: str | None = None,
+    dependabot_text: str | None = None,
+) -> list[str]:
+    """Keep the exact release image digest-pinned, inventoried, and gated."""
+
+    workflow = ROOT / ".github" / "workflows" / "release.yml"
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    image_job = re.search(
+        r"(?ms)^  image-candidate:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+        text,
+    )
+    errors: list[str] = []
+    if image_job is None:
+        errors.append(".github/workflows/release.yml is missing the image candidate job")
+    else:
+        body = image_job.group("body")
+        required = {
+            "aquasecurity/setup-trivy@": "Trivy installer",
+            "version: v0.75.0": "pinned Trivy release",
+            "--image-src docker": "scan of the loaded candidate image",
+            '--platform "$platform"': "per-platform image inspection",
+            "--format spdx-json": "SPDX JSON image SBOM generation",
+            "--scanners vuln": "image vulnerability scanner",
+            "--ignore-unfixed": "fixable-vulnerability filter",
+            "--severity HIGH,CRITICAL": "high and critical severity gate",
+            "--exit-code 1": "failing vulnerability result",
+            "name: emulebb-rust-image-security": "retained image security evidence",
+        }
+        errors.extend(
+            f".github/workflows/release.yml image-candidate is missing {description}"
+            for fragment, description in required.items()
+            if fragment not in body
+        )
+        installer = re.search(r"aquasecurity/setup-trivy@([^\s#]+)", body)
+        if installer is None or not action_ref_is_immutable(installer.group(1)):
+            errors.append(
+                ".github/workflows/release.yml must pin the Trivy installer by full commit SHA"
+            )
+
+    publish_job = re.search(
+        r"(?ms)^  publish-native:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+        text,
+    )
+    if publish_job is None or "name: emulebb-rust-image-security" not in publish_job.group(
+        "body"
+    ):
+        errors.append(
+            ".github/workflows/release.yml must attach image security evidence to the release"
+        )
+
+    dockerfile = ROOT / "packaging" / "docker" / "Dockerfile"
+    dockerfile_source = (
+        dockerfile.read_text(encoding="utf-8")
+        if dockerfile_text is None
+        else dockerfile_text
+    )
+    if not re.search(
+        r"(?m)^FROM\s+lscr\.io/linuxserver/baseimage-ubuntu:noble"
+        r"@sha256:[0-9a-f]{64}\s*$",
+        dockerfile_source,
+    ):
+        errors.append(
+            "packaging/docker/Dockerfile must pin the LinuxServer Noble base by digest"
+        )
+
+    dependabot = ROOT / ".github" / "dependabot.yml"
+    dependabot_source = (
+        dependabot.read_text(encoding="utf-8")
+        if dependabot_text is None
+        else dependabot_text
+    )
+    docker_updates = re.search(
+        r"(?ms)- package-ecosystem:\s*docker\s+directory:\s*/packaging/docker\b",
+        dependabot_source,
+    )
+    if docker_updates is None:
+        errors.append(
+            ".github/dependabot.yml must monitor the packaging/docker base image"
+        )
     return errors
 
 
