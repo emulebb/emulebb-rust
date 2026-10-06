@@ -7,7 +7,7 @@ use emulebb_metadata::{
     MetadataStore, normalized_search_query,
 };
 
-use crate::{Search, SearchResult, SearchResultObservation, SearchSpec};
+use crate::{Search, SearchResult, SearchResultMedia, SearchResultObservation, SearchSpec};
 
 pub(crate) fn next_numeric_search_id(searches: &HashMap<String, Search>) -> u32 {
     searches
@@ -97,6 +97,12 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
             source_client_id: result.source_client_id,
             source_client_port: result.source_client_port,
             file_type: result.file_type.clone(),
+            media_artist: result.media.artist.clone(),
+            media_album: result.media.album.clone(),
+            media_title: result.media.title.clone(),
+            media_length_seconds: result.media.length_seconds,
+            media_bitrate_kbps: result.media.bitrate_kbps,
+            media_codec: result.media.codec.clone(),
             rating: result.rating,
             aich_hash: result.aich_hash.clone(),
             complete: result.complete,
@@ -116,6 +122,12 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
                 source_client_id: observation.source_client_id,
                 source_client_port: observation.source_client_port,
                 file_type: observation.file_type.clone(),
+                media_artist: observation.media.artist.clone(),
+                media_album: observation.media.album.clone(),
+                media_title: observation.media.title.clone(),
+                media_length_seconds: observation.media.length_seconds,
+                media_bitrate_kbps: observation.media.bitrate_kbps,
+                media_codec: observation.media.codec.clone(),
                 rating: observation.rating,
                 aich_hash: observation.aich_hash.clone(),
                 complete: observation.complete,
@@ -131,6 +143,12 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
         source_count: result.sources,
         complete_source_count: result.complete_sources,
         file_type: result.file_type.clone(),
+        media_artist: result.media.artist.clone(),
+        media_album: result.media.album.clone(),
+        media_title: result.media.title.clone(),
+        media_length_seconds: result.media.length_seconds,
+        media_bitrate_kbps: result.media.bitrate_kbps,
+        media_codec: result.media.codec.clone(),
         rating: result.rating,
         aich_hash: result.aich_hash.clone(),
         complete: result.complete,
@@ -204,6 +222,14 @@ fn search_result_from_metadata(
                 source_client_id: observation.source_client_id,
                 source_client_port: observation.source_client_port,
                 file_type: observation.file_type,
+                media: SearchResultMedia {
+                    artist: observation.media_artist,
+                    album: observation.media_album,
+                    title: observation.media_title,
+                    length_seconds: observation.media_length_seconds,
+                    bitrate_kbps: observation.media_bitrate_kbps,
+                    codec: observation.media_codec,
+                },
                 rating: observation.rating,
                 aich_hash: observation.aich_hash,
                 complete: observation.complete,
@@ -231,6 +257,14 @@ fn search_result_from_metadata(
         source_client_id: source.map(|(client_id, _)| client_id),
         source_client_port: source.map(|(_, client_port)| client_port),
         file_type: result.file_type,
+        media: SearchResultMedia {
+            artist: result.media_artist,
+            album: result.media_album,
+            title: result.media_title,
+            length_seconds: result.media_length_seconds,
+            bitrate_kbps: result.media_bitrate_kbps,
+            codec: result.media_codec,
+        },
         rating: result.rating,
         aich_hash: result.aich_hash,
         complete: result.complete,
@@ -267,6 +301,34 @@ mod tests {
             artist: "Example Artist".to_string(),
         };
         let now = Utc::now();
+        let result = SearchResult::from_observation(
+            "91".to_string(),
+            "audio".to_string(),
+            "00112233445566778899aabbccddeeff".to_string(),
+            SearchResultObservation {
+                origin: "kad".to_string(),
+                name: "Example Track.flac".to_string(),
+                size_bytes: 8_192,
+                sources: 12,
+                complete_sources: 4,
+                source_client_id: None,
+                source_client_port: None,
+                file_type: "Audio".to_string(),
+                media: SearchResultMedia {
+                    artist: "Example Artist".to_string(),
+                    album: "Example Album".to_string(),
+                    title: "Example Title".to_string(),
+                    length_seconds: 240,
+                    bitrate_kbps: 1_411,
+                    codec: "flac".to_string(),
+                },
+                rating: 0,
+                aich_hash: String::new(),
+                complete: false,
+                directory: String::new(),
+                observed_at: now,
+            },
+        );
         let search = Search {
             id: "91".to_string(),
             spec: spec.clone(),
@@ -275,7 +337,7 @@ mod tests {
             status_reason: Some("network-search-failed".to_string()),
             created_at: now,
             updated_at: now,
-            results: Vec::new(),
+            results: vec![result],
         };
 
         persist_search(&metadata, &search).unwrap();
@@ -285,6 +347,14 @@ mod tests {
         let reloaded = searches.get("91").unwrap();
         assert_eq!(reloaded.spec, spec);
         assert_eq!(reloaded.resolved_method.as_deref(), Some("global"));
+        assert_eq!(reloaded.results.len(), 1);
+        assert_eq!(reloaded.results[0].media.artist, "Example Artist");
+        assert_eq!(reloaded.results[0].media.album, "Example Album");
+        assert_eq!(reloaded.results[0].media.title, "Example Title");
+        assert_eq!(reloaded.results[0].media.length_seconds, 240);
+        assert_eq!(reloaded.results[0].media.bitrate_kbps, 1_411);
+        assert_eq!(reloaded.results[0].media.codec, "flac");
+        assert_eq!(reloaded.results[0].observations[0].origin, "kad");
         assert_eq!(
             reloaded.status_reason.as_deref(),
             Some("network-search-failed")

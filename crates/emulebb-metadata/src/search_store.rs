@@ -97,10 +97,14 @@ impl super::MetadataStore {
                 r#"
                 INSERT INTO search_results(
                     session_id, known_file_id, file_hash, name, size_bytes,
-                    source_count, complete_source_count, file_type, rating, aich_hash,
-                    complete, directory
+                    source_count, complete_source_count, file_type, media_artist,
+                    media_album, media_title, media_length_seconds, media_bitrate_kbps,
+                    media_codec, rating, aich_hash, complete, directory
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                    ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                )
                 "#,
                 params![
                     session_id,
@@ -111,6 +115,12 @@ impl super::MetadataStore {
                     i64::from(result.source_count),
                     i64::from(result.complete_source_count),
                     result.file_type,
+                    result.media_artist,
+                    result.media_album,
+                    result.media_title,
+                    i64::from(result.media_length_seconds),
+                    i64::from(result.media_bitrate_kbps),
+                    result.media_codec,
                     i64::from(result.rating),
                     result.aich_hash,
                     bool_to_i64(result.complete),
@@ -124,9 +134,14 @@ impl super::MetadataStore {
                     INSERT INTO search_result_observations(
                         result_id, origin, name, size_bytes, source_count,
                         complete_source_count, source_client_id, source_client_port,
-                        file_type, rating, aich_hash, complete, directory, observed_at_ms
+                        file_type, media_artist, media_album, media_title,
+                        media_length_seconds, media_bitrate_kbps, media_codec,
+                        rating, aich_hash, complete, directory, observed_at_ms
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                    VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                    )
                     "#,
                     params![
                         result_id,
@@ -138,6 +153,12 @@ impl super::MetadataStore {
                         observation.source_client_id.map(i64::from),
                         observation.source_client_port.map(i64::from),
                         observation.file_type,
+                        observation.media_artist,
+                        observation.media_album,
+                        observation.media_title,
+                        i64::from(observation.media_length_seconds),
+                        i64::from(observation.media_bitrate_kbps),
+                        observation.media_codec,
                         i64::from(observation.rating),
                         observation.aich_hash,
                         bool_to_i64(observation.complete),
@@ -235,7 +256,8 @@ fn load_search_results(
         r#"
         SELECT id, lower(hex(file_hash)),
                name, size_bytes, source_count, complete_source_count, file_type,
-               rating, aich_hash, complete, directory
+               media_artist, media_album, media_title, media_length_seconds,
+               media_bitrate_kbps, media_codec, rating, aich_hash, complete, directory
         FROM search_results
         WHERE session_id = ?1
         ORDER BY id
@@ -251,10 +273,16 @@ fn load_search_results(
                 source_count: row.get::<_, i64>(4)? as u32,
                 complete_source_count: row.get::<_, i64>(5)? as u32,
                 file_type: row.get(6)?,
-                rating: row.get::<_, i64>(7)? as u8,
-                aich_hash: row.get(8)?,
-                complete: row.get::<_, i64>(9)? != 0,
-                directory: row.get(10)?,
+                media_artist: row.get(7)?,
+                media_album: row.get(8)?,
+                media_title: row.get(9)?,
+                media_length_seconds: row.get::<_, i64>(10)? as u32,
+                media_bitrate_kbps: row.get::<_, i64>(11)? as u32,
+                media_codec: row.get(12)?,
+                rating: row.get::<_, i64>(13)? as u8,
+                aich_hash: row.get(14)?,
+                complete: row.get::<_, i64>(15)? != 0,
+                directory: row.get(16)?,
                 observations: Vec::new(),
             },
         ))
@@ -275,8 +303,10 @@ fn load_search_result_observations(
     let mut stmt = conn.prepare(
         r#"
         SELECT origin, name, size_bytes, source_count, complete_source_count,
-               source_client_id, source_client_port, file_type, rating, aich_hash,
-               complete, directory, observed_at_ms
+               source_client_id, source_client_port, file_type, media_artist,
+               media_album, media_title, media_length_seconds,
+               media_bitrate_kbps, media_codec, rating, aich_hash, complete,
+               directory, observed_at_ms
         FROM search_result_observations
         WHERE result_id = ?1
         ORDER BY observed_at_ms, id
@@ -292,11 +322,17 @@ fn load_search_result_observations(
             source_client_id: row.get::<_, Option<i64>>(5)?.map(|value| value as u32),
             source_client_port: row.get::<_, Option<i64>>(6)?.map(|value| value as u16),
             file_type: row.get(7)?,
-            rating: row.get::<_, i64>(8)? as u8,
-            aich_hash: row.get(9)?,
-            complete: row.get::<_, i64>(10)? != 0,
-            directory: row.get(11)?,
-            observed_at_ms: row.get(12)?,
+            media_artist: row.get(8)?,
+            media_album: row.get(9)?,
+            media_title: row.get(10)?,
+            media_length_seconds: row.get::<_, i64>(11)? as u32,
+            media_bitrate_kbps: row.get::<_, i64>(12)? as u32,
+            media_codec: row.get(13)?,
+            rating: row.get::<_, i64>(14)? as u8,
+            aich_hash: row.get(15)?,
+            complete: row.get::<_, i64>(16)? != 0,
+            directory: row.get(17)?,
+            observed_at_ms: row.get(18)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -383,7 +419,15 @@ mod tests {
         );
         assert_eq!(searches[0].results[0].rating, 4);
         assert_eq!(searches[0].results[0].aich_hash, "A".repeat(32));
+        assert_eq!(searches[0].results[0].media_artist, "Example Artist");
+        assert_eq!(searches[0].results[0].media_length_seconds, 321);
+        assert_eq!(searches[0].results[0].media_bitrate_kbps, 192);
+        assert_eq!(searches[0].results[0].media_codec, "AV1");
         assert_eq!(searches[0].results[0].observations[0].origin, "server");
+        assert_eq!(
+            searches[0].results[0].observations[0].media_album,
+            "Example Album"
+        );
     }
 
     #[test]
@@ -434,6 +478,12 @@ mod tests {
                 source_count: 4,
                 complete_source_count: 3,
                 file_type: "video".to_string(),
+                media_artist: "Example Artist".to_string(),
+                media_album: "Example Album".to_string(),
+                media_title: "Example Title".to_string(),
+                media_length_seconds: 321,
+                media_bitrate_kbps: 192,
+                media_codec: "AV1".to_string(),
                 rating: 4,
                 aich_hash: "A".repeat(32),
                 complete: false,
@@ -447,6 +497,12 @@ mod tests {
                     source_client_id: Some(u32::from_le_bytes([10, 20, 30, 40])),
                     source_client_port: Some(4662),
                     file_type: "video".to_string(),
+                    media_artist: "Example Artist".to_string(),
+                    media_album: "Example Album".to_string(),
+                    media_title: "Example Title".to_string(),
+                    media_length_seconds: 321,
+                    media_bitrate_kbps: 192,
+                    media_codec: "AV1".to_string(),
                     rating: 4,
                     aich_hash: "A".repeat(32),
                     complete: false,

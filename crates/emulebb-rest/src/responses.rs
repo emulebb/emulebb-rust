@@ -757,6 +757,7 @@ mod tests {
             source_client_id: None,
             source_client_port: None,
             file_type: "doc".to_string(),
+            media: Default::default(),
             rating: 4,
             aich_hash: "A".repeat(32),
             complete: true,

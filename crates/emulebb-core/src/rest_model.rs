@@ -276,6 +276,17 @@ pub struct Search {
     pub results: Vec<SearchResult>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultMedia {
+    pub artist: String,
+    pub album: String,
+    pub title: String,
+    pub length_seconds: u32,
+    pub bitrate_kbps: u32,
+    pub codec: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
@@ -294,6 +305,8 @@ pub struct SearchResult {
     #[serde(default, skip_serializing)]
     pub source_client_port: Option<u16>,
     pub file_type: String,
+    #[serde(default)]
+    pub media: SearchResultMedia,
     #[serde(default)]
     pub rating: u8,
     /// AICH search-result metadata retained for integrity evidence and future
@@ -327,6 +340,8 @@ pub struct SearchResultObservation {
     pub source_client_port: Option<u16>,
     pub file_type: String,
     #[serde(default)]
+    pub media: SearchResultMedia,
+    #[serde(default)]
     pub rating: u8,
     #[serde(default, skip_serializing)]
     pub aich_hash: String,
@@ -353,6 +368,7 @@ impl SearchResult {
             source_client_id: observation.source_client_id,
             source_client_port: observation.source_client_port,
             file_type: observation.file_type.clone(),
+            media: observation.media.clone(),
             rating: observation.rating,
             aich_hash: observation.aich_hash.clone(),
             complete: observation.complete,
@@ -390,6 +406,7 @@ impl SearchResult {
             source_client_id: self.source_client_id,
             source_client_port: self.source_client_port,
             file_type: self.file_type.clone(),
+            media: self.media.clone(),
             rating: self.rating,
             aich_hash: self.aich_hash.clone(),
             complete: self.complete,
@@ -463,6 +480,37 @@ impl SearchResult {
         {
             self.file_type = file_type;
         }
+        self.media.artist = best_media_observation(&self.observations, &self.hash, |media| {
+            !media.artist.is_empty()
+        })
+        .map(|observation| observation.media.artist.clone())
+        .unwrap_or_default();
+        self.media.album = best_media_observation(&self.observations, &self.hash, |media| {
+            !media.album.is_empty()
+        })
+        .map(|observation| observation.media.album.clone())
+        .unwrap_or_default();
+        self.media.title = best_media_observation(&self.observations, &self.hash, |media| {
+            !media.title.is_empty()
+        })
+        .map(|observation| observation.media.title.clone())
+        .unwrap_or_default();
+        self.media.length_seconds =
+            best_media_observation(&self.observations, &self.hash, |media| {
+                media.length_seconds != 0
+            })
+            .map(|observation| observation.media.length_seconds)
+            .unwrap_or_default();
+        self.media.bitrate_kbps = best_media_observation(&self.observations, &self.hash, |media| {
+            media.bitrate_kbps != 0
+        })
+        .map(|observation| observation.media.bitrate_kbps)
+        .unwrap_or_default();
+        self.media.codec = best_media_observation(&self.observations, &self.hash, |media| {
+            !media.codec.is_empty()
+        })
+        .map(|observation| observation.media.codec.clone())
+        .unwrap_or_default();
         self.aich_hash = self
             .observations
             .iter()
@@ -478,6 +526,17 @@ impl SearchResult {
             .map(|observation| observation.directory.clone())
             .unwrap_or_default();
     }
+}
+
+fn best_media_observation<'a>(
+    observations: &'a [SearchResultObservation],
+    hash: &str,
+    has_value: impl Fn(&SearchResultMedia) -> bool,
+) -> Option<&'a SearchResultObservation> {
+    observations
+        .iter()
+        .filter(|observation| has_value(&observation.media))
+        .max_by_key(|observation| observation_quality(observation, hash))
 }
 
 fn observation_quality(
@@ -506,6 +565,7 @@ fn observations_are_equivalent(
         && left.source_client_id == right.source_client_id
         && left.source_client_port == right.source_client_port
         && left.file_type == right.file_type
+        && left.media == right.media
         && left.rating == right.rating
         && left.aich_hash == right.aich_hash
         && left.complete == right.complete

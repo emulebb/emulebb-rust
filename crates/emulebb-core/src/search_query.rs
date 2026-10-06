@@ -5,7 +5,7 @@ use emulebb_ed2k::ed2k_server::{Ed2kSearchFile, SearchCriteria};
 use emulebb_index::IndexedFile;
 use emulebb_kad_dht::SearchResult as KadSearchResult;
 
-use crate::{SearchCreate, SearchResult, SearchResultObservation};
+use crate::{SearchCreate, SearchResult, SearchResultMedia, SearchResultObservation};
 
 /// Build the server-side eD2k metatag search criteria from a `/api/v1/searches`
 /// request, so the constraints (type/size/extension/availability) are folded
@@ -159,6 +159,7 @@ pub(crate) fn search_result_from_indexed(
         source_client_id: None,
         source_client_port: None,
         file_type: file.content_type.clone(),
+        media: SearchResultMedia::default(),
         rating: 0,
         aich_hash: String::new(),
         complete: false,
@@ -191,6 +192,12 @@ pub(crate) fn search_result_from_ed2k(
         source_client_id,
         source_client_port,
         file_type: file_type.clone(),
+        media: SearchResultMedia {
+            length_seconds: file.media_length_seconds.unwrap_or_default(),
+            bitrate_kbps: file.media_bitrate_kbps.unwrap_or_default(),
+            codec: file.media_codec.unwrap_or_default(),
+            ..SearchResultMedia::default()
+        },
         rating: file.rating.unwrap_or_default(),
         aich_hash: file.aich_hash.unwrap_or_default(),
         complete: false,
@@ -228,7 +235,15 @@ pub(crate) fn search_result_from_kad(
         complete_sources: result.source_count.unwrap_or_default(),
         source_client_id: None,
         source_client_port: None,
-        file_type: "unknown".to_string(),
+        file_type: result.file_type.unwrap_or_else(|| "unknown".to_string()),
+        media: SearchResultMedia {
+            artist: result.media_artist.unwrap_or_default(),
+            album: result.media_album.unwrap_or_default(),
+            title: result.media_title.unwrap_or_default(),
+            length_seconds: result.media_length_seconds.unwrap_or_default(),
+            bitrate_kbps: result.media_bitrate_kbps.unwrap_or_default(),
+            codec: result.media_codec.unwrap_or_default(),
+        },
         rating: 0,
         aich_hash,
         complete: false,
@@ -264,6 +279,7 @@ mod tests {
                 source_client_id: None,
                 source_client_port: None,
                 file_type: String::new(),
+                media: SearchResultMedia::default(),
                 rating: 0,
                 aich_hash: String::new(),
                 complete: false,
@@ -404,8 +420,17 @@ mod tests {
         network.observations[0].origin = "global".to_string();
         network.observations[0].complete_sources = 4;
         network.observations[0].file_type = "Pro".to_string();
+        network.observations[0].media = SearchResultMedia {
+            artist: "Example Artist".to_string(),
+            album: "Example Album".to_string(),
+            title: "Example Title".to_string(),
+            length_seconds: 321,
+            bitrate_kbps: 192,
+            codec: "AV1".to_string(),
+        };
         network.observations[0].rating = 3;
         network.observations[0].aich_hash = "A".repeat(32);
+        let expected_media = network.observations[0].media.clone();
 
         local.merge_observations(network.clone());
         local.merge_observations(network);
@@ -416,6 +441,7 @@ mod tests {
         assert_eq!(local.sources, 12);
         assert_eq!(local.complete_sources, 4);
         assert_eq!(local.file_type, "Pro");
+        assert_eq!(local.media, expected_media);
         assert_eq!(local.rating, 3);
         assert_eq!(local.aich_hash, "A".repeat(32));
     }
@@ -463,14 +489,14 @@ mod tests {
                 hash: file_hash,
                 names: vec!["Sample File.bin".to_string()],
                 size: Some(1234),
-                file_type: None,
+                file_type: Some("Audio".to_string()),
                 source_count: Some(9),
-                media_artist: None,
-                media_album: None,
-                media_title: None,
-                media_length_seconds: None,
-                media_bitrate_kbps: None,
-                media_codec: None,
+                media_artist: Some("Example Artist".to_string()),
+                media_album: Some("Example Album".to_string()),
+                media_title: Some("Example Title".to_string()),
+                media_length_seconds: Some(321),
+                media_bitrate_kbps: Some(192),
+                media_codec: Some("MP3".to_string()),
                 aich_candidate: Some(KadAichCandidate {
                     root: [0xAB; 20],
                     responder_ip: Ipv4Addr::new(203, 0, 113, 9),
@@ -485,7 +511,13 @@ mod tests {
         assert_eq!(result.size_bytes, 1234);
         assert_eq!(result.sources, 9);
         assert_eq!(result.complete_sources, 9);
-        assert_eq!(result.file_type, "unknown");
+        assert_eq!(result.file_type, "Audio");
+        assert_eq!(result.media.artist, "Example Artist");
+        assert_eq!(result.media.album, "Example Album");
+        assert_eq!(result.media.title, "Example Title");
+        assert_eq!(result.media.length_seconds, 321);
+        assert_eq!(result.media.bitrate_kbps, 192);
+        assert_eq!(result.media.codec, "MP3");
         assert_eq!(result.aich_hash, hex::encode([0xAB; 20]));
     }
 
@@ -504,9 +536,9 @@ mod tests {
                 file_name: Some("Server Result.pdf".to_string()),
                 file_size: Some(4096),
                 file_type: Some("doc".to_string()),
-                media_length_seconds: None,
-                media_bitrate_kbps: None,
-                media_codec: None,
+                media_length_seconds: Some(245),
+                media_bitrate_kbps: Some(320),
+                media_codec: Some("AAC".to_string()),
                 source_count: Some(5),
                 complete_source_count: Some(3),
                 rating: Some(4),
@@ -525,6 +557,9 @@ mod tests {
         );
         assert_eq!(result.source_client_port, Some(4662));
         assert_eq!(result.file_type, "doc");
+        assert_eq!(result.media.length_seconds, 245);
+        assert_eq!(result.media.bitrate_kbps, 320);
+        assert_eq!(result.media.codec, "AAC");
         assert_eq!(result.rating, 4);
         assert_eq!(result.aich_hash, "A".repeat(32));
         assert_eq!(result.directory, "Synthetic Folder");
