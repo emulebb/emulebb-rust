@@ -3,10 +3,14 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use emulebb_daemon::{DaemonProfile, logging, run};
+use emulebb_daemon::{BUILD_VERSION, DaemonProfile, logging, run};
 
 #[derive(Debug, Parser)]
-#[command(name = "emulebb-rust", about = "Rust headless eMuleBB client")]
+#[command(
+    name = "emulebb-rust",
+    version = BUILD_VERSION,
+    about = "Rust headless eMuleBB client"
+)]
 struct Cli {
     #[arg(short, long)]
     profile: Option<PathBuf>,

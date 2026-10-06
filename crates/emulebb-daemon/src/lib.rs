@@ -17,7 +17,7 @@ use emulebb_ed2k::{
     ipfilter::IpFilter,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
-use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
+use emulebb_metadata::{MetadataLocalIdentity, MetadataStore, SCHEMA_VERSION};
 use emulebb_rest::{RestServerSettings, router_with_shutdown};
 use emulebb_settings::{
     DaemonSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
@@ -37,6 +37,18 @@ mod vpn_guard_monitor;
 
 pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
 pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
+pub const BUILD_VERSION: &str = match option_env!("EMULEBB_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+pub const BUILD_CHANNEL: &str = match option_env!("EMULEBB_RELEASE_CHANNEL") {
+    Some(channel) => channel,
+    None => "development",
+};
+pub const BUILD_SOURCE_REVISION: &str = match option_env!("EMULEBB_SOURCE_REVISION") {
+    Some(revision) => revision,
+    None => "unknown",
+};
 
 const REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);
 const AUTO_CONNECT_POPULARITY_WAIT: Duration = Duration::from_secs(60);
@@ -713,6 +725,13 @@ async fn graceful_teardown(core: &Arc<EmulebbCore>) {
 pub async fn run(profile: DaemonProfile) -> Result<()> {
     let rest_bind_addr = profile.rest_bind_addr()?;
     profile.validate_rest_api_key()?;
+    info!(
+        version = BUILD_VERSION,
+        release_channel = BUILD_CHANNEL,
+        source_revision = BUILD_SOURCE_REVISION,
+        metadata_schema_version = SCHEMA_VERSION,
+        "starting emulebb-rust"
+    );
     if !rest_bind_addr.ip().is_loopback() {
         warn!(
             %rest_bind_addr,
@@ -734,7 +753,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         .with_context(|| format!("failed to create incoming dir {}", incoming_dir.display()))?;
     let core = Arc::new(
         EmulebbCore::new_with_network_progressive_catalog(
-            env!("CARGO_PKG_VERSION"),
+            BUILD_VERSION,
             index,
             profile.transfer_root(),
             ed2k_network,

@@ -41,6 +41,7 @@ permissions:
 
 env:
   RELEASE_VERSION: ${{ inputs.release_version || '0.1.0-beta.2' }}
+  RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
@@ -48,6 +49,8 @@ jobs:
   verify-ci:
     name: Require green source CI
     runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     permissions:
       contents: read
       checks: read
@@ -87,6 +90,9 @@ jobs:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
       EMULEBB_RUST_REPO: ${{ github.workspace }}
       EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
+      EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+      EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}
+      EMULEBB_SOURCE_REVISION: ${{ needs.verify-ci.outputs.source_sha }}
       MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
       PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
     steps:

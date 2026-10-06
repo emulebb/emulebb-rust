@@ -86,6 +86,7 @@ def main() -> int:
     errors.extend(check_github_action_pins())
     errors.extend(check_live_rest_openapi_ci())
     errors.extend(check_release_ci_gate())
+    errors.extend(check_release_build_identity())
     errors.extend(check_release_image_promotion())
     errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
@@ -631,6 +632,26 @@ def check_release_image_promotion(workflow_text: str | None = None) -> list[str]
         if fragment in body
     )
     return errors
+
+
+def check_release_build_identity(workflow_text: str | None = None) -> list[str]:
+    """Require release binaries to receive exact distribution provenance."""
+
+    workflow = ROOT / ".github" / "workflows" / "release.yml"
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    required = {
+        "RELEASE_CHANNEL: ${{ inputs.channel ||": "derived release channel",
+        "source_sha: ${{ steps.source.outputs.sha }}": "resolved source output",
+        "EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}": "runtime distribution version",
+        "EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}": "runtime release channel",
+        "EMULEBB_SOURCE_REVISION: ${{ needs.verify-ci.outputs.source_sha }}":
+            "runtime source revision",
+    }
+    return [
+        f".github/workflows/release.yml is missing {description} configuration"
+        for fragment, description in required.items()
+        if fragment not in text
+    ]
 
 
 def check_lint_suppressions() -> list[str]:

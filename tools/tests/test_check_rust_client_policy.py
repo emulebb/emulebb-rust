@@ -268,6 +268,18 @@ class TestReleaseImagePromotion(unittest.TestCase):
         self.assertIn("full commit SHA", errors[0])
 
 
+class TestReleaseBuildIdentity(unittest.TestCase):
+    def test_current_workflow_injects_exact_runtime_identity(self) -> None:
+        self.assertEqual(CHECKER.check_release_build_identity(), [])
+
+    def test_rejects_release_without_runtime_identity(self) -> None:
+        errors = CHECKER.check_release_build_identity("jobs: {}\n")
+
+        self.assertEqual(len(errors), 5)
+        self.assertTrue(any("distribution version" in error for error in errors))
+        self.assertTrue(any("source revision" in error for error in errors))
+
+
 class TestOmissionRegistry(unittest.TestCase):
     def test_active_registry_rejects_fixed_entries(self) -> None:
         policy = {"protocol": {"omission_registry": "policy/rust-client-omissions.toml"}}

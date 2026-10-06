@@ -7,6 +7,22 @@ fn metadata_store(profile: &DaemonProfile) -> MetadataStore {
     MetadataStore::open(profile.metadata_path()).unwrap()
 }
 
+#[test]
+fn build_identity_is_well_formed() {
+    assert!(!BUILD_VERSION.is_empty());
+    assert!(matches!(
+        BUILD_CHANNEL,
+        "development" | "candidate" | "beta" | "nightly"
+    ));
+    assert!(
+        BUILD_SOURCE_REVISION == "unknown"
+            || (BUILD_SOURCE_REVISION.len() == 40
+                && BUILD_SOURCE_REVISION
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+    );
+}
+
 #[tokio::test]
 async fn automatic_server_selection_prefers_the_largest_enabled_population() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
