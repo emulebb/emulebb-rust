@@ -793,6 +793,88 @@ td {
   flex: 1 1 320px;
 }
 
+.search-session-inspector {
+  background: var(--tblr-bg-surface-secondary);
+  border: var(--tblr-border-width) solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius);
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(260px, 0.55fr) minmax(0, 1fr);
+  margin-bottom: 12px;
+  padding: 10px;
+}
+
+.search-session-kv {
+  margin: 0;
+}
+
+.search-session-kv strong {
+  overflow-wrap: anywhere;
+}
+
+.search-criteria {
+  align-content: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.search-criteria > strong {
+  flex-basis: 100%;
+}
+
+.search-criterion {
+  background: var(--tblr-bg-surface);
+  border: var(--tblr-border-width) solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius-pill);
+  font-size: 0.78rem;
+  padding: 3px 7px;
+}
+
+.search-sort-label {
+  color: var(--tblr-secondary);
+  font-size: 0.88rem;
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.search-result-name-cell {
+  min-width: 250px;
+}
+
+.search-result-name-cell > strong,
+.search-result-alternates,
+.search-complete-sources {
+  display: block;
+}
+
+.search-result-alternates,
+.search-complete-sources {
+  color: var(--tblr-secondary);
+  font-size: 0.78rem;
+  margin-top: 2px;
+}
+
+.search-observations {
+  font-size: 0.78rem;
+  margin-top: 5px;
+}
+
+.search-observations summary {
+  color: var(--tblr-link-color);
+  cursor: pointer;
+}
+
+.search-observations ul {
+  margin: 5px 0 0;
+  padding-left: 18px;
+}
+
+.search-result-hash {
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
 .danger-row {
   border-top: var(--tblr-border-width) solid var(--tblr-border-color);
   margin-top: 12px;
@@ -1118,7 +1200,8 @@ td {
   .network-summary,
   .split,
   .settings-grid,
-  .toggle-grid {
+  .toggle-grid,
+  .search-session-inspector {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1182,7 +1265,8 @@ td {
   .split,
   .editor-grid,
   .settings-grid,
-  .toggle-grid {
+  .toggle-grid,
+  .search-session-inspector {
     grid-template-columns: 1fr;
   }
 

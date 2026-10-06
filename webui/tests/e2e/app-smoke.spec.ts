@@ -298,6 +298,8 @@ test("loads a selected search session from a deep link", async ({ page }) => {
       expect(requestUrl.searchParams.get("offset")).toBe("0");
       expect(requestUrl.searchParams.get("limit")).toBe("100");
       expect(requestUrl.searchParams.get("exactTotal")).toBe("true");
+      expect(requestUrl.searchParams.get("sort")).toBe("sources");
+      expect(requestUrl.searchParams.get("order")).toBe("desc");
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -431,7 +433,8 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
         requestedMethod: "automatic",
         resolvedMethod: "global",
         status: "completed",
-        resultCount: 1
+        resultCount: 1,
+        criteria: { extension: "pdf", maxSizeBytes: 5_242_879 }
       };
       state.searches = [...state.searches, search];
       await fulfill({ ...search, total: 0, offset: 0, limit: 100, items: [] });
@@ -447,9 +450,34 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
         offset: 0,
         limit: 250,
         items: searchId === "2"
-          ? [{ hash: resultHash, name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 2, fileType: "doc" }]
+          ? [{
+              hash: resultHash,
+              name: "Linux Guide.pdf",
+              sizeBytes: 1_048_576,
+              sources: 5,
+              completeSources: 2,
+              rating: 4,
+              fileType: "doc",
+              observations: [
+                { origin: "server", name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 3, completeSources: 1, fileType: "doc", rating: 4, hasAichHash: true, complete: false, directory: "", observedAt: "2026-10-06T12:00:00Z" },
+                { origin: "global", name: "Linux Manual.pdf", sizeBytes: 1_048_576, sources: 5, completeSources: 2, fileType: "doc", rating: 3, hasAichHash: false, complete: false, directory: "", observedAt: "2026-10-06T12:00:01Z" }
+              ]
+            }]
           : [{ hash: "00112233445566778899AABBCCDDEEFF", name: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
       });
+      return;
+    }
+    if (method === "DELETE" && /^searches\/\d+$/.test(path)) {
+      record();
+      const searchId = path.split("/")[1];
+      state.searches = state.searches.filter((candidate: any) => candidate.id !== searchId);
+      await fulfill({ ok: true });
+      return;
+    }
+    if (method === "DELETE" && path === "searches" && url.searchParams.get("confirm") === "true") {
+      record();
+      state.searches = [];
+      await fulfill({ ok: true });
       return;
     }
     if (method === "POST" && path === `searches/2/results/${resultHash}/operations/download`) {
@@ -541,8 +569,38 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await page.goBack();
   await expect(page).toHaveURL(/\/searches\/2$/);
   await expect(resultRow).toBeVisible();
+  await expect(searchPanel.getByText("Resolved backend")).toBeVisible();
+  await expect(searchPanel.getByText("Extension: .pdf")).toBeVisible();
+  await expect(resultRow).toContainText("2 complete");
+  await expect(resultRow).toContainText("4/5");
+  await expect(resultRow).toContainText("server, global");
+  await expect(resultRow).toContainText("Linux Manual.pdf");
+  await expect(resultRow).toContainText(resultHash);
+  await searchPanel.getByRole("combobox", { name: "Sort search results" }).selectOption("rating:desc");
+  await expect.poll(() => requests.some((request) =>
+    request.method === "GET" &&
+    request.path === "searches/2" &&
+    new URLSearchParams(request.query).get("sort") === "rating" &&
+    new URLSearchParams(request.query).get("order") === "desc"
+  )).toBe(true);
   await resultRow.getByRole("button", { name: "Download" }).click();
   await expect(page.getByText("Download queued")).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Delete this search session");
+    await dialog.accept();
+  });
+  await searchPanel.getByRole("button", { name: "Delete session" }).click();
+  await expect(page.getByText("Search session deleted")).toBeVisible();
+  await expect(page).toHaveURL(/\/searches\/1$/);
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Clear every saved search session");
+    await dialog.accept();
+  });
+  await searchPanel.getByRole("button", { name: "Clear sessions" }).click();
+  await expect(page.getByText("Search sessions cleared")).toBeVisible();
+  await expect(page).toHaveURL(/\/searches$/);
 
   await page.getByRole("link", { name: "Transfers", exact: true }).click();
   const transferRow = page.locator("tr", { hasText: "Linux Guide.pdf" });
@@ -571,7 +629,19 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   expect(requests.filter((request) => request.path === "servers/192.0.2.10%3A4661/operations/connect")).toHaveLength(1);
   expect(requests.some((request) => request.method === "GET" && request.path === "searches")).toBe(true);
   expect(requests.some((request) => request.method === "GET" && request.path === "searches/2")).toBe(true);
+  expect(requests.some((request) =>
+    request.method === "GET" &&
+    request.path === "searches/2" &&
+    new URLSearchParams(request.query).get("sort") === "sources" &&
+    new URLSearchParams(request.query).get("order") === "desc"
+  )).toBe(true);
   expect(requests.some((request) => request.path === `searches/2/results/${resultHash}/operations/download`)).toBe(true);
+  expect(requests.some((request) => request.method === "DELETE" && request.path === "searches/2")).toBe(true);
+  expect(requests.some((request) =>
+    request.method === "DELETE" &&
+    request.path === "searches" &&
+    new URLSearchParams(request.query).get("confirm") === "true"
+  )).toBe(true);
   expect(requests.some((request) => request.path === `transfers/${resultHash}/operations/stop`)).toBe(true);
   expect(requests.some((request) =>
     request.method === "DELETE" &&

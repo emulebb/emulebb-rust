@@ -484,8 +484,13 @@ export function SearchView(props: {
   client: RestClient;
   run: RunFunction;
   selectSearch: (searchId: string) => void;
+  searchSort: string;
+  searchOrder: string;
+  selectSearchSort: (sort: string, order: string) => void;
   selectSearchPage: (offset: number) => void;
   onSearchCreated: (search: SearchItem) => void;
+  onSearchDeleted: (searchId: string) => void;
+  onSearchesCleared: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [method, setMethod] = useState("automatic");
@@ -516,6 +521,27 @@ export function SearchView(props: {
   const resultPageStart = results.length === 0 ? 0 : resultOffset + 1;
   const resultPageEnd = Math.min(resultOffset + results.length, resultTotal);
   const searchQueryError = searchQueryValidationError(query);
+  const displayedStatus = displayedSearch?.status ?? displayedSearch?.state ?? "unknown";
+  const resolvedMethodLabel = displayedSearch?.resolvedMethod
+    ?? (displayedStatus === "completed"
+      ? "none (local only)"
+      : displayedStatus === "queued" || displayedStatus === "running"
+        ? "pending"
+        : "none");
+  const criteria = displayedSearch?.criteria;
+  const criteriaRows = [
+    criteria?.extension ? ["Extension", `.${criteria.extension.replace(/^\./, "")}`] : null,
+    criteria?.minSizeBytes != null ? ["Minimum size", formatBytes(criteria.minSizeBytes)] : null,
+    criteria?.maxSizeBytes != null ? ["Maximum size", formatBytes(criteria.maxSizeBytes)] : null,
+    criteria?.minAvailability != null ? ["Minimum sources", String(criteria.minAvailability)] : null,
+    criteria?.minCompleteSources != null ? ["Minimum complete", String(criteria.minCompleteSources)] : null,
+    criteria?.minBitrateKbps != null ? ["Minimum bitrate", `${criteria.minBitrateKbps.toLocaleString()} kbps`] : null,
+    criteria?.minLengthSeconds != null ? ["Minimum length", `${criteria.minLengthSeconds.toLocaleString()} s`] : null,
+    criteria?.codec ? ["Codec", criteria.codec] : null,
+    criteria?.title ? ["Title", criteria.title] : null,
+    criteria?.album ? ["Album", criteria.album] : null,
+    criteria?.artist ? ["Artist", criteria.artist] : null
+  ].filter((row): row is string[] => row !== null);
 
   const startSearch = async () => {
     const normalizedQuery = normalizeSearchQuery(query);
@@ -540,6 +566,20 @@ export function SearchView(props: {
       ...(artist.trim() ? { artist: artist.trim() } : {})
     });
     props.onSearchCreated(next);
+  };
+
+  const deleteSelectedSearch = async () => {
+    const searchId = displayedSearch?.id;
+    if (!searchId) {
+      return;
+    }
+    await props.client.delete(`searches/${searchId}`);
+    props.onSearchDeleted(searchId);
+  };
+
+  const clearSearches = async () => {
+    await props.client.delete("searches?confirm=true");
+    props.onSearchesCleared();
   };
 
   return (
@@ -591,8 +631,54 @@ export function SearchView(props: {
               </option>
             ))}
           </select>
-          {displayedSearch && <StatusPill value={displayedSearch.status ?? displayedSearch.state ?? "unknown"} />}
+          {displayedSearch && <StatusPill value={displayedStatus} />}
+          <button
+            class="btn btn-outline-secondary"
+            type="button"
+            disabled={!displayedSearch}
+            onClick={() => {
+              if (window.confirm("Delete this search session and its saved results?")) {
+                void props.run(deleteSelectedSearch, "Search session deleted", { refresh: false });
+              }
+            }}
+          >
+            <Trash2 size={15} />
+            Delete session
+          </button>
+          <button
+            class="btn btn-outline-danger"
+            type="button"
+            disabled={props.searches.length === 0}
+            onClick={() => {
+              if (window.confirm("Clear every saved search session and result?")) {
+                void props.run(clearSearches, "Search sessions cleared", { refresh: false });
+              }
+            }}
+          >
+            <Trash2 size={15} />
+            Clear sessions
+          </button>
         </div>
+      )}
+      {displayedSearch && (
+        <section class="search-session-inspector" aria-label="Search session details">
+          <div class="kv search-session-kv">
+            <span>Requested backend</span>
+            <strong>{displayedSearch.requestedMethod ?? "unknown"}</strong>
+            <span>Resolved backend</span>
+            <strong>{resolvedMethodLabel}</strong>
+            <span>File type</span>
+            <strong>{displayedSearch.type || "any"}</strong>
+            <span>Status reason</span>
+            <strong>{displayedSearch.statusReason ?? "—"}</strong>
+          </div>
+          <div class="search-criteria" aria-label="Applied search criteria">
+            <strong>Applied criteria</strong>
+            {criteriaRows.length > 0 ? criteriaRows.map(([label, value]) => (
+              <span class="search-criterion" key={label}>{label}: {value}</span>
+            )) : <span class="text-secondary">No additional filters</span>}
+          </div>
+        </section>
       )}
       <details class="search-filters">
         <summary>Advanced search filters</summary>
@@ -621,6 +707,25 @@ export function SearchView(props: {
           <input class="form-check-input" type="checkbox" checked={paused} onInput={(event) => setPaused(event.currentTarget.checked)} />
           Queue paused
         </label>
+        <label class="search-sort-label" for="search-result-sort">Sort results</label>
+        <select
+          id="search-result-sort"
+          class="form-select"
+          aria-label="Sort search results"
+          value={`${props.searchSort}:${props.searchOrder}`}
+          onInput={(event) => {
+            const [sort, order] = event.currentTarget.value.split(":");
+            props.selectSearchSort(sort, order);
+          }}
+        >
+          <option value="sources:desc">Sources, most first</option>
+          <option value="completeSources:desc">Complete sources, most first</option>
+          <option value="rating:desc">Rating, highest first</option>
+          <option value="sizeBytes:desc">Size, largest first</option>
+          <option value="sizeBytes:asc">Size, smallest first</option>
+          <option value="name:asc">Name, A–Z</option>
+          <option value="name:desc">Name, Z–A</option>
+        </select>
       </div>
       <div class="table-wrap">
         <table class="table table-vcenter card-table">
@@ -629,17 +734,53 @@ export function SearchView(props: {
               <th>Name</th>
               <th>Size</th>
               <th>Sources</th>
+              <th>Rating</th>
               <th>Type</th>
+              <th>Origin</th>
+              <th>Hash</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody>
-            {results.map((result) => (
+            {results.map((result) => {
+              const observations = result.observations ?? [];
+              const origins = [...new Set(observations.map((observation) => observation.origin))];
+              const alternateNames = [...new Set(
+                observations
+                  .map((observation) => observation.name)
+                  .filter((name) => name && name !== result.name)
+              )];
+              return (
               <tr key={result.hash}>
-                <td>{result.name ?? result.hash}</td>
+                <td class="search-result-name-cell">
+                  <strong>{result.name ?? result.hash}</strong>
+                  {alternateNames.length > 0 && (
+                    <span class="search-result-alternates">Also seen as: {alternateNames.join(", ")}</span>
+                  )}
+                  {observations.length > 0 && (
+                    <details class="search-observations">
+                      <summary>{observations.length} observation{observations.length === 1 ? "" : "s"}</summary>
+                      <ul>
+                        {observations.map((observation, index) => (
+                          <li key={`${observation.origin}-${observation.name}-${index}`}>
+                            <strong>{observation.origin}</strong>: {observation.name} · {observation.sources} sources / {observation.completeSources} complete
+                            {observation.rating > 0 ? ` · rating ${observation.rating}/5` : ""}
+                            {observation.hasAichHash ? " · AICH" : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </td>
                 <td>{formatBytes(result.sizeBytes)}</td>
-                <td>{result.sources ?? result.availability ?? 0}</td>
+                <td>
+                  {result.sources ?? result.availability ?? 0}
+                  <span class="search-complete-sources">{result.completeSources ?? 0} complete</span>
+                </td>
+                <td>{(result.rating ?? 0) > 0 ? `${result.rating}/5` : "—"}</td>
                 <td>{result.fileType ?? ""}</td>
+                <td>{origins.length > 0 ? origins.join(", ") : "unknown"}</td>
+                <td><code class="search-result-hash">{result.hash}</code></td>
                 <td>
                   <button class="btn"
                     type="button"
@@ -656,8 +797,9 @@ export function SearchView(props: {
                   </button>
                 </td>
               </tr>
-            ))}
-            {results.length === 0 && <EmptyRow colSpan={5} text="No results." />}
+              );
+            })}
+            {results.length === 0 && <EmptyRow colSpan={8} text="No results." />}
           </tbody>
         </table>
       </div>

@@ -160,6 +160,8 @@ export function App() {
   const [searches, setSearches] = useState<SearchItem[]>([]);
   const [selectedSearch, setSelectedSearch] = useState<SearchItem | null>(null);
   const [searchPage, setSearchPage] = useState({ searchId: "", offset: 0 });
+  const [searchSort, setSearchSort] = useState("sources");
+  const [searchOrder, setSearchOrder] = useState("desc");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -187,6 +189,8 @@ export function App() {
     setSearches([]);
     setSelectedSearch(null);
     setSearchPage({ searchId: "", offset: 0 });
+    setSearchSort("sources");
+    setSearchOrder("desc");
   }, []);
 
   const navigate = useCallback((nextRoute: AppRoute, replace = false) => {
@@ -515,7 +519,7 @@ export function App() {
           return;
         }
         const search = await client.get<SearchItem>(
-          `searches/${selectedSearchId}?offset=${selectedSearchOffset}&limit=${SEARCH_RESULT_PAGE_SIZE}&includeEvidence=false&exactTotal=true`
+          `searches/${selectedSearchId}?offset=${selectedSearchOffset}&limit=${SEARCH_RESULT_PAGE_SIZE}&includeEvidence=false&exactTotal=true&sort=${searchSort}&order=${searchOrder}`
         );
         if (!cancelled) {
           setSelectedSearch(search);
@@ -530,7 +534,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, route.searchId, selectedSearchOffset, refreshGeneration, authState, navigateToSearch]);
+  }, [tab, route.searchId, selectedSearchOffset, searchSort, searchOrder, refreshGeneration, authState, navigateToSearch]);
 
   const transferSseEnabled = supportsTransferSse(appInfo) || supportsTransferSse(capabilities);
 
@@ -878,6 +882,13 @@ export function App() {
                 client={client}
                 run={run}
                 selectSearch={navigateToSearch}
+                searchSort={searchSort}
+                searchOrder={searchOrder}
+                selectSearchSort={(sort, order) => {
+                  setSearchSort(sort);
+                  setSearchOrder(order);
+                  setSearchPage({ searchId: route.searchId ?? "", offset: 0 });
+                }}
                 selectSearchPage={(offset) => {
                   if (route.searchId) {
                     setSearchPage({ searchId: route.searchId, offset: Math.max(0, offset) });
@@ -890,6 +901,17 @@ export function App() {
                   ]);
                   setSelectedSearch(search);
                   navigateToSearch(search.id);
+                }}
+                onSearchDeleted={() => {
+                  setSelectedSearch(null);
+                  setSearchPage({ searchId: "", offset: 0 });
+                  navigateToTab("search");
+                }}
+                onSearchesCleared={() => {
+                  setSearches([]);
+                  setSelectedSearch(null);
+                  setSearchPage({ searchId: "", offset: 0 });
+                  navigateToTab("search");
                 }}
               />
             )}

@@ -183,6 +183,8 @@ export type SearchResultObservation = {
 };
 
 export type SearchResult = {
+  searchId?: string;
+  type?: string;
   hash: string;
   name?: string;
   sizeBytes?: number;
@@ -191,7 +193,10 @@ export type SearchResult = {
   availability?: number;
   fileType?: string;
   knownType?: string;
+  extension?: string;
   directory?: string;
+  rating?: number;
+  complete?: boolean;
   observations?: SearchResultObservation[];
   evidence?: Record<string, unknown>;
   [key: string]: unknown;
@@ -226,6 +231,8 @@ export type SearchItem = {
   total?: number;
   offset?: number;
   limit?: number;
+  sort?: string | null;
+  order?: string | null;
   resultCount?: number;
   [key: string]: unknown;
 };
