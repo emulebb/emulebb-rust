@@ -377,6 +377,27 @@ impl SearchResult {
         }
     }
 
+    pub(crate) fn from_observations(
+        search_id: String,
+        r#type: String,
+        hash: String,
+        first: SearchResultObservation,
+        observations: impl IntoIterator<Item = SearchResultObservation>,
+    ) -> Self {
+        let mut result = Self::from_observation(search_id, r#type, hash, first);
+        for observation in observations {
+            if !result
+                .observations
+                .iter()
+                .any(|existing| observations_are_equivalent(existing, &observation))
+            {
+                result.observations.push(observation);
+            }
+        }
+        result.recompute_observation_aggregate();
+        result
+    }
+
     pub(crate) fn merge_observations(&mut self, mut other: SearchResult) {
         debug_assert_eq!(self.hash, other.hash);
         self.ensure_aggregate_observation();

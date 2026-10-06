@@ -247,43 +247,51 @@ pub(crate) fn search_result_from_kad(
     result: KadSearchResult,
 ) -> SearchResult {
     let hash = result.hash.to_string();
-    let name = result
-        .names
-        .into_iter()
-        .find(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| hash.clone());
+    let mut seen_names = std::collections::HashSet::new();
+    let mut names = result.names.into_iter().filter(|name| {
+        let normalized = name.trim().to_lowercase();
+        !normalized.is_empty() && seen_names.insert(normalized)
+    });
+    let first_name = names.next().unwrap_or_else(|| hash.clone());
     let aich_hash = result
         .aich_candidate
         .map(|candidate| hex::encode(candidate.root))
         .unwrap_or_default();
-    let observation = SearchResultObservation {
+    let size_bytes = result.size.unwrap_or_default();
+    let sources = result.source_count.unwrap_or_default();
+    let file_type = result.file_type.unwrap_or_else(|| "unknown".to_string());
+    let media = SearchResultMedia {
+        artist: result.media_artist.unwrap_or_default(),
+        album: result.media_album.unwrap_or_default(),
+        title: result.media_title.unwrap_or_default(),
+        length_seconds: result.media_length_seconds.unwrap_or_default(),
+        bitrate_kbps: result.media_bitrate_kbps.unwrap_or_default(),
+        codec: result.media_codec.unwrap_or_default(),
+    };
+    let observed_at = Utc::now();
+    let observation = |name| SearchResultObservation {
         origin: "kad".to_string(),
         name,
-        size_bytes: result.size.unwrap_or_default(),
-        sources: result.source_count.unwrap_or_default(),
-        complete_sources: result.source_count.unwrap_or_default(),
+        size_bytes,
+        sources,
+        complete_sources: sources,
         source_client_id: None,
         source_client_port: None,
-        file_type: result.file_type.unwrap_or_else(|| "unknown".to_string()),
-        media: SearchResultMedia {
-            artist: result.media_artist.unwrap_or_default(),
-            album: result.media_album.unwrap_or_default(),
-            title: result.media_title.unwrap_or_default(),
-            length_seconds: result.media_length_seconds.unwrap_or_default(),
-            bitrate_kbps: result.media_bitrate_kbps.unwrap_or_default(),
-            codec: result.media_codec.unwrap_or_default(),
-        },
+        file_type: file_type.clone(),
+        media: media.clone(),
         rating: 0,
-        aich_hash,
+        aich_hash: aich_hash.clone(),
         complete: false,
         directory: String::new(),
-        observed_at: Utc::now(),
+        observed_at,
     };
-    SearchResult::from_observation(
+    let first = observation(first_name);
+    SearchResult::from_observations(
         search_id.to_string(),
         request.r#type.clone(),
         hash,
-        observation,
+        first,
+        names.map(observation),
     )
 }
 
@@ -570,7 +578,12 @@ mod tests {
             &req,
             KadSearchResult {
                 hash: file_hash,
-                names: vec!["Sample File.bin".to_string()],
+                names: vec![
+                    "Sample File.bin".to_string(),
+                    "Alternate File.bin".to_string(),
+                    " sample file.BIN ".to_string(),
+                    "   ".to_string(),
+                ],
                 size: Some(1234),
                 file_type: Some("Audio".to_string()),
                 source_count: Some(9),
@@ -590,7 +603,7 @@ mod tests {
 
         assert_eq!(result.search_id, "42");
         assert_eq!(result.hash, file_hash.to_string());
-        assert_eq!(result.name, "Sample File.bin");
+        assert_eq!(result.name, "Alternate File.bin");
         assert_eq!(result.size_bytes, 1234);
         assert_eq!(result.sources, 9);
         assert_eq!(result.complete_sources, 9);
@@ -602,6 +615,19 @@ mod tests {
         assert_eq!(result.media.bitrate_kbps, 192);
         assert_eq!(result.media.codec, "MP3");
         assert_eq!(result.aich_hash, hex::encode([0xAB; 20]));
+        assert_eq!(result.observations.len(), 2);
+        assert!(
+            result
+                .observations
+                .iter()
+                .any(|observation| observation.name == "Sample File.bin")
+        );
+        assert!(
+            result
+                .observations
+                .iter()
+                .any(|observation| observation.name == "Alternate File.bin")
+        );
     }
 
     #[test]
