@@ -217,6 +217,51 @@ class TestReleaseCiGate(unittest.TestCase):
         self.assertIn("nightly.yml", errors[0])
 
 
+class TestReleaseImagePromotion(unittest.TestCase):
+    def test_current_workflow_promotes_smoke_tested_archive(self) -> None:
+        self.assertEqual(CHECKER.check_release_image_promotion(), [])
+
+    def test_rejects_rebuilding_the_image_for_publication(self) -> None:
+        workflow = f"""
+  publish-image:
+    steps:
+      - uses: regclient/actions/regctl-installer@{'a' * 40}
+        with:
+          release: v0.11.6
+      - run: python -m emule_workspace package-emulebb-rust-image-ci --push
+      - uses: docker/setup-buildx-action@{'b' * 40}
+      - with:
+          pattern: emulebb-rust-package-*
+"""
+
+        errors = CHECKER.check_release_image_promotion(workflow)
+
+        self.assertEqual(len(errors), 7)
+        self.assertTrue(any("exact OCI archive import" in error for error in errors))
+        self.assertTrue(any("rebuilds the image" in error for error in errors))
+
+    def test_rejects_mutable_registry_client_action_ref(self) -> None:
+        workflow = """
+  publish-image:
+    steps:
+      - name: Download image
+        with:
+          name: emulebb-rust-image-candidate
+      - uses: regclient/actions/regctl-installer@v0
+        with:
+          release: v0.11.6
+      - run: |
+          regctl image import "$VERSIONED_IMAGE" "$OCI_ARCHIVE"
+          regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"
+          regctl image digest "$CHANNEL_IMAGE"
+"""
+
+        errors = CHECKER.check_release_image_promotion(workflow)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("full commit SHA", errors[0])
+
+
 class TestOmissionRegistry(unittest.TestCase):
     def test_active_registry_rejects_fixed_entries(self) -> None:
         policy = {"protocol": {"omission_registry": "policy/rust-client-omissions.toml"}}

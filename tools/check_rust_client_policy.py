@@ -85,6 +85,7 @@ def main() -> int:
     errors.extend(check_github_action_pins())
     errors.extend(check_live_rest_openapi_ci())
     errors.extend(check_release_ci_gate())
+    errors.extend(check_release_image_promotion())
     errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
@@ -582,6 +583,52 @@ def check_release_ci_gate(
         errors.append(
             ".github/workflows/nightly.yml reusable release caller must grant checks: read"
         )
+    return errors
+
+
+def check_release_image_promotion(workflow_text: str | None = None) -> list[str]:
+    """Require GHCR publication to promote the candidate that passed smoke testing."""
+
+    workflow = ROOT / ".github" / "workflows" / "release.yml"
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    publish_job = re.search(
+        r"(?ms)^  publish-image:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+        text,
+    )
+    if publish_job is None:
+        return [".github/workflows/release.yml is missing the image publishing job"]
+
+    body = publish_job.group("body")
+    required = {
+        "name: emulebb-rust-image-candidate": "smoke-tested image artifact download",
+        "regclient/actions/regctl-installer@": "pinned registry client installer",
+        "release: v0.11.6": "pinned registry client release",
+        'regctl image import "$VERSIONED_IMAGE" "$OCI_ARCHIVE"':
+            "exact OCI archive import",
+        'regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"':
+            "floating-channel retag from the immutable image",
+        'regctl image digest "$CHANNEL_IMAGE"': "published-channel digest verification",
+    }
+    errors = [
+        f".github/workflows/release.yml is missing {description} configuration"
+        for fragment, description in required.items()
+        if fragment not in body
+    ]
+    installer = re.search(r"regclient/actions/regctl-installer@([^\s#]+)", body)
+    if installer is None or not action_ref_is_immutable(installer.group(1)):
+        errors.append(
+            ".github/workflows/release.yml must pin the registry client installer by full commit SHA"
+        )
+    forbidden = {
+        "package-emulebb-rust-image-ci": "rebuilds the image after smoke testing",
+        "docker/setup-buildx-action": "sets up an unnecessary publishing rebuild",
+        "pattern: emulebb-rust-package-*": "downloads native inputs instead of the tested image",
+    }
+    errors.extend(
+        f".github/workflows/release.yml publish-image {description}"
+        for fragment, description in forbidden.items()
+        if fragment in body
+    )
     return errors
 
 
