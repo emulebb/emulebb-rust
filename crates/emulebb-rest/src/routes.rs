@@ -41,6 +41,9 @@ pub fn router_with_shutdown(
         api_key: Arc::new(config.api_key),
         shutdown,
     };
+    let health_router = Router::new()
+        .route("/healthz", get(health))
+        .with_state(state.clone());
     let api_router = Router::new()
         .route("/api/v1/app", get(app))
         .route("/api/v1/capabilities", get(capabilities))
@@ -272,8 +275,16 @@ pub fn router_with_shutdown(
         .layer(middleware::map_response(add_contract_version_header))
         .with_state(state);
 
-    mount_webui(api_router, config.web_root_dir)
+    mount_webui(api_router.merge(health_router), config.web_root_dir)
         .layer(middleware::map_response(add_security_headers))
+}
+
+async fn health(State(state): State<RestState>) -> StatusCode {
+    if state.core.app_info().lifecycle.state == "running" {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
 }
 
 async fn require_api_key(

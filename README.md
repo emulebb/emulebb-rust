@@ -151,6 +151,12 @@ trusted TLS reverse proxy and emits a startup warning; independently restrict
 host/firewall exposure. The WebUI keeps its API key in per-tab session storage,
 so closing the tab clears the browser copy.
 
+`GET /healthz` is an unauthenticated operational readiness probe outside the
+versioned `/api/v1` contract. It returns an empty `204` only while the daemon is
+running and `503` during graceful shutdown; it exposes no profile, peer,
+network, or credential data. The OCI image uses this loopback-only probe for its
+built-in healthcheck.
+
 ### Upload queue settings migration
 
 The beta settings contract has one owner for each upload scheduling input. The

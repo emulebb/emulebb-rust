@@ -92,6 +92,7 @@ def main() -> int:
     errors.extend(check_release_build_identity())
     errors.extend(check_release_image_promotion())
     errors.extend(check_release_image_security())
+    errors.extend(check_container_health_contract())
     errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
@@ -824,6 +825,43 @@ def check_release_image_security(
             ".github/dependabot.yml must monitor the packaging/docker base image"
         )
     return errors
+
+
+def check_container_health_contract(
+    routes_text: str | None = None,
+    dockerfile_text: str | None = None,
+    probe_text: str | None = None,
+) -> list[str]:
+    """Keep the image readiness probe minimal, unauthenticated, and bounded."""
+
+    routes = ROOT / "crates" / "emulebb-rest" / "src" / "routes.rs"
+    routes_source = routes.read_text(encoding="utf-8") if routes_text is None else routes_text
+    dockerfile = ROOT / "packaging" / "docker" / "Dockerfile"
+    dockerfile_source = (
+        dockerfile.read_text(encoding="utf-8")
+        if dockerfile_text is None
+        else dockerfile_text
+    )
+    probe = ROOT / "packaging" / "docker" / "root" / "usr" / "local" / "bin" / "emulebb-rust-healthcheck"
+    probe_source = probe.read_text(encoding="utf-8") if probe_text is None else probe_text
+    required = {
+        '.route("/healthz", get(health))': (routes_source, "unauthenticated health route"),
+        "api_router.merge(health_router)": (routes_source, "health route outside API-key middleware"),
+        "StatusCode::NO_CONTENT": (routes_source, "ready response"),
+        "StatusCode::SERVICE_UNAVAILABLE": (routes_source, "shutdown response"),
+        "HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3":
+            (dockerfile_source, "bounded Docker healthcheck"),
+        'CMD ["/usr/local/bin/emulebb-rust-healthcheck"]':
+            (dockerfile_source, "exec-form healthcheck command"),
+        "/dev/tcp/127.0.0.1/4711": (probe_source, "loopback-only probe"),
+        "GET /healthz HTTP/1.1": (probe_source, "health endpoint request"),
+        "HTTP/1.1 204 No Content": (probe_source, "strict ready-status check"),
+    }
+    return [
+        f"container health contract is missing {description}"
+        for fragment, (source, description) in required.items()
+        if fragment not in source
+    ]
 
 
 def check_release_build_identity(workflow_text: str | None = None) -> list[str]:

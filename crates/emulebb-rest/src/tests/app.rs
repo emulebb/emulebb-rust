@@ -27,6 +27,53 @@ fn test_router() -> axum::Router {
 }
 
 #[tokio::test]
+async fn healthz_is_unauthenticated_and_tracks_readiness() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let router = router(
+        core.clone(),
+        RestServerSettings {
+            api_key: "secret".to_string(),
+            web_root_dir: None,
+        },
+    );
+
+    let ready = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        ready.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert!(
+        to_bytes(ready.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    core.begin_shutdown();
+    let shutting_down = router
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shutting_down.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn app_returns_evelope_with_capabilities() {
     let response = test_router()
         .oneshot(

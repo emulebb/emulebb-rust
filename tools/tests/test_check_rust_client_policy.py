@@ -371,6 +371,19 @@ class TestReleaseImageSecurity(unittest.TestCase):
         self.assertIn("full commit SHA", errors[0])
 
 
+class TestContainerHealthContract(unittest.TestCase):
+    def test_current_container_has_bounded_readiness_probe(self) -> None:
+        self.assertEqual(CHECKER.check_container_health_contract(), [])
+
+    def test_rejects_authenticated_or_unbounded_probe(self) -> None:
+        errors = CHECKER.check_container_health_contract("", "", "")
+
+        self.assertEqual(len(errors), 9)
+        self.assertTrue(any("outside API-key" in error for error in errors))
+        self.assertTrue(any("bounded Docker" in error for error in errors))
+        self.assertTrue(any("loopback-only" in error for error in errors))
+
+
 class TestReleaseBuildIdentity(unittest.TestCase):
     def test_current_workflow_injects_exact_runtime_identity(self) -> None:
         self.assertEqual(CHECKER.check_release_build_identity(), [])
