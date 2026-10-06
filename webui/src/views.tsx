@@ -484,6 +484,7 @@ export function SearchView(props: {
   client: RestClient;
   run: RunFunction;
   selectSearch: (searchId: string) => void;
+  selectSearchPage: (offset: number) => void;
   onSearchCreated: (search: SearchItem) => void;
 }) {
   const [query, setQuery] = useState("");
@@ -509,6 +510,11 @@ export function SearchView(props: {
   const selectedSummary = props.searches.find((search) => search.id === props.selectedSearchId);
   const displayedSearch = props.selectedSearch ?? selectedSummary;
   const results = props.selectedSearch?.items ?? props.selectedSearch?.results ?? [];
+  const resultTotal = props.selectedSearch?.total ?? displayedSearch?.resultCount ?? results.length;
+  const resultOffset = props.selectedSearch?.offset ?? 0;
+  const resultLimit = Math.max(1, (props.selectedSearch?.limit ?? results.length) || 1);
+  const resultPageStart = results.length === 0 ? 0 : resultOffset + 1;
+  const resultPageEnd = Math.min(resultOffset + results.length, resultTotal);
   const searchQueryError = searchQueryValidationError(query);
 
   const startSearch = async () => {
@@ -655,6 +661,31 @@ export function SearchView(props: {
           </tbody>
         </table>
       </div>
+      {props.selectedSearch && (
+        <div class="form-row subtle-row search-pagination" aria-label="Search result pages">
+          <span>
+            Showing {resultPageStart.toLocaleString()}–{resultPageEnd.toLocaleString()} of {resultTotal.toLocaleString()} results
+          </span>
+          <button
+            class="btn"
+            type="button"
+            disabled={resultOffset === 0}
+            aria-label="Previous search results page"
+            onClick={() => props.selectSearchPage(Math.max(0, resultOffset - resultLimit))}
+          >
+            Previous
+          </button>
+          <button
+            class="btn"
+            type="button"
+            disabled={resultPageEnd >= resultTotal}
+            aria-label="Next search results page"
+            onClick={() => props.selectSearchPage(resultOffset + resultLimit)}
+          >
+            Next
+          </button>
+        </div>
+      )}
     </section>
   );
 }

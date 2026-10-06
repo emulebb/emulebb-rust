@@ -275,7 +275,8 @@ test("loads a selected search session from a deep link", async ({ page }) => {
 
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
-    const path = new URL(request.url()).pathname.replace(/^\/api\/v1\/?/, "");
+    const requestUrl = new URL(request.url());
+    const path = requestUrl.pathname.replace(/^\/api\/v1\/?/, "");
     if (request.method() === "GET" && path === "snapshot") {
       await route.fulfill({
         status: 200,
@@ -293,6 +294,9 @@ test("loads a selected search session from a deep link", async ({ page }) => {
       return;
     }
     if (request.method() === "GET" && path === "searches/7") {
+      expect(requestUrl.searchParams.get("offset")).toBe("0");
+      expect(requestUrl.searchParams.get("limit")).toBe("100");
+      expect(requestUrl.searchParams.get("exactTotal")).toBe("true");
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -301,7 +305,7 @@ test("loads a selected search session from a deep link", async ({ page }) => {
             ...state.searches[0],
             total: 1,
             offset: 0,
-            limit: 250,
+            limit: 100,
             items: [{
               hash: "00112233445566778899AABBCCDDEEFF",
               name: "Synthetic Archive.bin",

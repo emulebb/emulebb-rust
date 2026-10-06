@@ -73,6 +73,7 @@ import "./styles.css";
 const API_KEY_STORAGE = "emulebb.webui.apiKey";
 const SNAPSHOT_LIMIT = 500;
 const LOG_LIMIT = 300;
+const SEARCH_RESULT_PAGE_SIZE = 100;
 const REFRESH_INTERVAL_MS = 3000;
 const EVENT_STREAM_RETRY_MS = 3000;
 const EVENT_STREAM_REFRESH_THROTTLE_MS = 1000;
@@ -158,6 +159,7 @@ export function App() {
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [searches, setSearches] = useState<SearchItem[]>([]);
   const [selectedSearch, setSelectedSearch] = useState<SearchItem | null>(null);
+  const [searchPage, setSearchPage] = useState({ searchId: "", offset: 0 });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -184,6 +186,7 @@ export function App() {
     setLogs([]);
     setSearches([]);
     setSelectedSearch(null);
+    setSearchPage({ searchId: "", offset: 0 });
   }, []);
 
   const navigate = useCallback((nextRoute: AppRoute, replace = false) => {
@@ -209,6 +212,7 @@ export function App() {
   }, []);
 
   const tab = route.tab;
+  const selectedSearchOffset = route.searchId === searchPage.searchId ? searchPage.offset : 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -511,7 +515,7 @@ export function App() {
           return;
         }
         const search = await client.get<SearchItem>(
-          `searches/${selectedSearchId}?limit=250&includeEvidence=false&exactTotal=true`
+          `searches/${selectedSearchId}?offset=${selectedSearchOffset}&limit=${SEARCH_RESULT_PAGE_SIZE}&includeEvidence=false&exactTotal=true`
         );
         if (!cancelled) {
           setSelectedSearch(search);
@@ -526,7 +530,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, route.searchId, refreshGeneration, authState, navigateToSearch]);
+  }, [tab, route.searchId, selectedSearchOffset, refreshGeneration, authState, navigateToSearch]);
 
   const transferSseEnabled = supportsTransferSse(appInfo) || supportsTransferSse(capabilities);
 
@@ -874,6 +878,11 @@ export function App() {
                 client={client}
                 run={run}
                 selectSearch={navigateToSearch}
+                selectSearchPage={(offset) => {
+                  if (route.searchId) {
+                    setSearchPage({ searchId: route.searchId, offset: Math.max(0, offset) });
+                  }
+                }}
                 onSearchCreated={(search) => {
                   setSearches((current) => [
                     ...current.filter((candidate) => candidate.id !== search.id),

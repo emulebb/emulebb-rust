@@ -208,6 +208,8 @@ export type SearchItem = {
   items?: SearchResult[];
   results?: SearchResult[];
   total?: number;
+  offset?: number;
+  limit?: number;
   resultCount?: number;
   [key: string]: unknown;
 };
