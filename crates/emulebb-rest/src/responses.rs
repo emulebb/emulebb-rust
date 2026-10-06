@@ -4,7 +4,7 @@
 //! JSON shapes the eMuleBB REST contract publishes. They were extracted verbatim
 //! from `lib.rs` during the maintainability restructuring; behavior is unchanged.
 
-use std::path::Path as FsPath;
+use std::{collections::BTreeSet, path::Path as FsPath};
 
 use emulebb_core::{
     AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
@@ -433,10 +433,6 @@ fn ed2k_id_state(connected: bool, firewalled: Option<bool>) -> &'static str {
     }
 }
 
-fn completion_state(complete: bool) -> &'static str {
-    if complete { "complete" } else { "incomplete" }
-}
-
 #[cfg(test)]
 fn search_result_response(result: &SearchResult) -> Value {
     search_result_response_with_options(result, true)
@@ -471,6 +467,42 @@ pub(crate) fn search_result_response_with_options(
             })
         })
         .collect::<Vec<_>>();
+    let observed_names = result
+        .observations
+        .iter()
+        .map(|observation| observation.name.clone())
+        .chain(std::iter::once(result.name.clone()))
+        .filter(|name| !name.trim().is_empty())
+        .collect::<BTreeSet<_>>();
+    let observed_extensions = observed_names
+        .iter()
+        .filter_map(|name| {
+            FsPath::new(name)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .filter(|extension| !extension.is_empty())
+                .map(str::to_ascii_lowercase)
+        })
+        .collect::<BTreeSet<_>>();
+    let aich_hashes = result
+        .observations
+        .iter()
+        .map(|observation| observation.aich_hash.as_str())
+        .chain(std::iter::once(result.aich_hash.as_str()))
+        .filter(|hash| !hash.is_empty())
+        .collect::<BTreeSet<_>>();
+    let observed_sources = result
+        .observations
+        .iter()
+        .filter_map(|observation| {
+            observation
+                .source_client_id
+                .zip(observation.source_client_port)
+        })
+        .collect::<BTreeSet<_>>();
+    let divergent_names = observed_names.len() > 1;
+    let has_aich_hash = !aich_hashes.is_empty();
+    let multiple_aich = aich_hashes.len() > 1;
     let mut response = json!({
         "searchId": result.search_id,
         "method": result.method,
@@ -483,56 +515,31 @@ pub(crate) fn search_result_response_with_options(
         "fileType": result.file_type,
         "extension": extension,
         "complete": result.complete,
-        "knownType": "unknown",
         "directory": result.directory,
-        "clientIp": "",
-        "clientPort": 0,
-        "serverIp": "",
-        "serverPort": 0,
-        "clientCount": 0,
-        "serverCount": 0,
-        "kadPublishInfo": 0,
         "rating": result.rating,
-        "hasComment": false,
-        "spam": false,
         "observations": observations,
     });
     if include_evidence {
+        let mut availability = json!({
+            "sources": result.sources,
+            "completeSources": result.complete_sources,
+        });
+        if result.complete {
+            availability["completionState"] = json!("complete");
+        }
+        if !observed_sources.is_empty() {
+            availability["observedSourceEndpoints"] = json!(observed_sources.len());
+        }
         response["evidence"] = json!({
-            "confidence": {
-                "band": "looks_good",
-                "score": 70,
-                "fakeScore": 0,
-                "severity": "none",
-                "spam": false,
-                "userRating": result.rating,
-                "kadBand": "unknown",
-                "reasons": []
-            },
-            "availabilityEvidence": {
-                "sources": result.sources,
-                "completeSources": result.complete_sources,
-                "completionState": completion_state(result.complete),
-                "clientCount": 0,
-                "serverCount": 0,
-                "kadPublishers": 0
-            },
+            "availabilityEvidence": availability,
             "nameEvidence": {
-                "observedNames": [result.name],
-                "observedExtensions": if extension.is_empty() { json!([]) } else { json!([extension]) },
-                "displayNames": [result.name],
-                "ignoredNameTokens": [],
-                "divergenceGroups": [],
-                "divergent": false
+                "observedNames": observed_names,
+                "observedExtensions": observed_extensions,
+                "divergent": divergent_names,
             },
             "integrityEvidence": {
-                "hasAichHash": !result.aich_hash.is_empty(),
-                "multipleAich": false,
-                "pendingHeaderCheck": false,
-                "cachedHeaderEvidence": false,
-                "claimedType": null,
-                "extensionType": null,
-                "detectedHeaderType": null
+                "hasAichHash": has_aich_hash,
+                "multipleAich": multiple_aich,
             }
         });
     }
@@ -715,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn search_result_response_reports_explicit_completion_state() {
+    fn search_result_response_emits_only_supported_evidence() {
         let mut result = SearchResult {
             search_id: "search-1".to_string(),
             method: "server".to_string(),
@@ -738,7 +745,10 @@ mod tests {
         let complete = search_result_response(&result);
         assert_eq!(complete["complete"], true);
         assert_eq!(complete["rating"], 4);
-        assert_eq!(complete["evidence"]["confidence"]["userRating"], 4);
+        assert!(complete.get("knownType").is_none());
+        assert!(complete.get("clientIp").is_none());
+        assert!(complete.get("serverCount").is_none());
+        assert!(complete["evidence"].get("confidence").is_none());
         assert_eq!(
             complete["evidence"]["integrityEvidence"]["hasAichHash"],
             true
@@ -755,9 +765,10 @@ mod tests {
 
         result.complete = false;
         let incomplete = search_result_response(&result);
-        assert_eq!(
-            incomplete["evidence"]["availabilityEvidence"]["completionState"],
-            "incomplete"
+        assert!(
+            incomplete["evidence"]["availabilityEvidence"]
+                .get("completionState")
+                .is_none()
         );
     }
 

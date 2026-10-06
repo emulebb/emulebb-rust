@@ -531,7 +531,7 @@ async fn search_results_use_canonical_paging_query() {
     assert_eq!(value["data"]["offset"], 1);
     assert_eq!(value["data"]["limit"], 1);
     assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
-    assert_eq!(value["data"]["items"][0]["knownType"], "unknown");
+    assert!(value["data"]["items"][0].get("knownType").is_none());
     assert!(value["data"]["items"][0].get("evidence").is_none());
 
     let estimated = app
