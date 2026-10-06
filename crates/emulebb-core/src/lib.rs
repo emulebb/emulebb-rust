@@ -930,6 +930,7 @@ impl EmulebbCore {
         request: &SearchCreate,
         network_method: Option<SearchNetworkMethod>,
         cancel: &CancellationToken,
+        incremental_results: Option<&tokio::sync::mpsc::UnboundedSender<SearchResult>>,
     ) -> Result<Ed2kServerSearchOutcome> {
         if !matches!(
             network_method,
@@ -974,11 +975,19 @@ impl EmulebbCore {
                         request.query
                     );
                 } else {
-                    files.extend(
-                        background_files
-                            .into_iter()
-                            .map(|file| ("server", connected_server_endpoint, file)),
-                    );
+                    for file in background_files {
+                        if let Some(incremental_results) = incremental_results {
+                            let mapped = search_result_from_ed2k(
+                                search_id,
+                                request,
+                                "server",
+                                connected_server_endpoint,
+                                file.clone(),
+                            );
+                            let _ = incremental_results.send(mapped);
+                        }
+                        files.push(("server", connected_server_endpoint, file));
+                    }
                 }
             }
             // WHY: an interrupted send (stale handle / session dropped before
@@ -997,6 +1006,19 @@ impl EmulebbCore {
             ),
         }
         if matches!(network_method, Some(SearchNetworkMethod::Ed2kGlobal)) {
+            let global_result_sink =
+                |observation: emulebb_ed2k::ed2k_server::Ed2kServerSearchObservation| {
+                    if let Some(incremental_results) = incremental_results {
+                        let mapped = search_result_from_ed2k(
+                            search_id,
+                            request,
+                            "global",
+                            Some(observation.server_endpoint),
+                            observation.file,
+                        );
+                        let _ = incremental_results.send(mapped);
+                    }
+                };
             let dead_server_endpoints = self
                 .ed2k_dead_server_endpoints(config.dead_server_retries)
                 .await;
@@ -1007,6 +1029,7 @@ impl EmulebbCore {
                 dead_server_endpoints: &dead_server_endpoints,
                 query: &request.query,
                 criteria: &criteria,
+                result_sink: incremental_results.is_some().then_some(&global_result_sink),
                 cancel,
             })
             .await

@@ -7,10 +7,11 @@
 //! nested order `state` -> brief queue lock; the drain path takes those locks
 //! only in disjoint scopes.
 
-use std::time::Instant;
+use std::{future::Future, time::Instant};
 
 use chrono::Utc;
 use emulebb_ed2k::ed2k_server::Ed2kBackgroundSearchInterrupted;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::search_query::SearchNetworkMethod;
@@ -158,12 +159,19 @@ impl EmulebbCore {
             SearchNetworkMethod::Ed2kServer => "server",
             _ => "global",
         };
+        let (incremental_tx, incremental_rx) = mpsc::unbounded_channel();
         let outcome = self
-            .search_ed2k_servers(
+            .await_with_incremental_results(
                 &entry.search_id,
                 &entry.request,
-                Some(network_method),
-                cancel,
+                incremental_rx,
+                self.search_ed2k_servers(
+                    &entry.search_id,
+                    &entry.request,
+                    Some(network_method),
+                    cancel,
+                    Some(&incremental_tx),
+                ),
             )
             .await;
         match outcome {
@@ -235,13 +243,20 @@ impl EmulebbCore {
         cancel: &CancellationToken,
     ) {
         let dht = self.ed2k_dht_node().await;
+        let (incremental_tx, incremental_rx) = mpsc::unbounded_channel();
         let outcome = match dht {
             Some(dht) => {
-                kad_public_search::search_kad_keywords(
-                    dht,
+                self.await_with_incremental_results(
                     &entry.search_id,
                     &entry.request,
-                    cancel,
+                    incremental_rx,
+                    kad_public_search::search_kad_keywords(
+                        dht,
+                        &entry.search_id,
+                        &entry.request,
+                        cancel,
+                        Some(&incremental_tx),
+                    ),
                 )
                 .await
             }
@@ -281,6 +296,62 @@ impl EmulebbCore {
                 .await;
             }
         }
+    }
+
+    async fn await_with_incremental_results<T>(
+        &self,
+        search_id: &str,
+        request: &SearchCreate,
+        mut incremental_rx: mpsc::UnboundedReceiver<SearchResult>,
+        operation: impl Future<Output = T>,
+    ) -> T {
+        tokio::pin!(operation);
+        loop {
+            tokio::select! {
+                output = &mut operation => {
+                    while let Ok(result) = incremental_rx.try_recv() {
+                        self.merge_incremental_search_result(search_id, request, result).await;
+                    }
+                    return output;
+                }
+                result = incremental_rx.recv() => {
+                    if let Some(result) = result {
+                        self.merge_incremental_search_result(search_id, request, result).await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Makes accepted network observations visible to REST/UI polling while a
+    /// long Kad traversal or global server sweep is still active. Durability
+    /// remains a terminal checkpoint in complete/fail, avoiding a full SQLite
+    /// rewrite for every wire result.
+    pub(crate) async fn merge_incremental_search_result(
+        &self,
+        search_id: &str,
+        request: &SearchCreate,
+        result: SearchResult,
+    ) {
+        let mut accepted = vec![result];
+        crate::search_query::apply_search_filters(&mut accepted, request);
+        let Some(result) = accepted.pop() else {
+            return;
+        };
+        let mut state = self.state.lock().await;
+        let Some(search) = state.searches.get_mut(search_id) else {
+            return;
+        };
+        if let Some(existing) = search
+            .results
+            .iter_mut()
+            .find(|existing| existing.hash == result.hash)
+        {
+            existing.merge_observations(result);
+        } else {
+            search.results.push(result);
+        }
+        search.updated_at = Utc::now();
     }
 
     /// Re-queues a dispatched-but-not-completed search (bounded retries) or

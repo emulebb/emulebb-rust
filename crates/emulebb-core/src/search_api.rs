@@ -149,7 +149,7 @@ impl EmulebbCore {
         };
         let outcome = match network_method {
             Some(SearchNetworkMethod::Ed2kServer | SearchNetworkMethod::Ed2kGlobal) => self
-                .search_ed2k_servers(&search_id, &request, network_method, &cancel)
+                .search_ed2k_servers(&search_id, &request, network_method, &cancel, None)
                 .await
                 .map(|outcome| match outcome {
                     Ed2kServerSearchOutcome::Completed(results) => Some(
@@ -159,7 +159,7 @@ impl EmulebbCore {
                     | Ed2kServerSearchOutcome::NotConnected => None,
                 }),
             Some(SearchNetworkMethod::Kad) => match self.ed2k_dht_node().await {
-                Some(dht) => search_kad_keywords(dht, &search_id, &request, &cancel).await,
+                Some(dht) => search_kad_keywords(dht, &search_id, &request, &cancel, None).await,
                 None => Ok(None),
             },
             None => Ok(None),

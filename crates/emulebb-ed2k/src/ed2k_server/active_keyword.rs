@@ -51,6 +51,9 @@ pub struct Ed2kUdpKeywordSearchOptions<'a> {
     pub dead_server_endpoints: &'a [SocketAddr],
     pub query: &'a str,
     pub criteria: &'a SearchCriteria,
+    /// Optional live-result sink. The terminal return value remains the full
+    /// result set; this sink lets callers present pages during a long sweep.
+    pub result_sink: Option<&'a (dyn Fn(Ed2kServerSearchObservation) + Send + Sync + 'a)>,
     pub cancel: &'a CancellationToken,
 }
 
@@ -107,6 +110,7 @@ pub async fn search_keyword_udp_servers(
         dead_server_endpoints,
         query,
         criteria,
+        result_sink,
         cancel,
     } = options;
     let configured_servers =
@@ -204,12 +208,16 @@ pub async fn search_keyword_udp_servers(
                         }
                     };
                     for page in pages {
-                        results.extend(page.files.into_iter().map(|file| {
-                            Ed2kServerSearchObservation {
+                        for file in page.files {
+                            let observation = Ed2kServerSearchObservation {
                                 server_endpoint: response_server.base_endpoint(),
                                 file,
+                            };
+                            if let Some(result_sink) = result_sink {
+                                result_sink(observation.clone());
                             }
-                        }));
+                            results.push(observation);
+                        }
                     }
                 }
                 Ok(Ok(None)) => continue,

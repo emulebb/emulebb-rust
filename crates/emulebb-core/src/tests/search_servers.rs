@@ -546,14 +546,12 @@ async fn deleting_searches_cancels_pending_network_work() {
     )
     .unwrap();
 
-    let first = core
-        .create_search(SearchCreate {
-            query: "first pending query".to_string(),
-            method: "server".to_string(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    let first_request = SearchCreate {
+        query: "first pending query".to_string(),
+        method: "server".to_string(),
+        ..Default::default()
+    };
+    let first = core.create_search(first_request.clone()).await.unwrap();
     let second = core
         .create_search(SearchCreate {
             query: "second pending query".to_string(),
@@ -570,6 +568,31 @@ async fn deleting_searches_cancels_pending_network_work() {
             state.search_cancels[&second.id].clone(),
         )
     };
+
+    core.merge_incremental_search_result(
+        &first.id,
+        &first_request,
+        SearchResult {
+            search_id: first.id.clone(),
+            r#type: String::new(),
+            hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: "Live Result.bin".to_string(),
+            size_bytes: 4_096,
+            sources: 7,
+            complete_sources: 2,
+            source_client_id: None,
+            source_client_port: None,
+            file_type: "Pro".to_string(),
+            media: SearchResultMedia::default(),
+            rating: 0,
+            aich_hash: String::new(),
+            complete: false,
+            directory: String::new(),
+            observations: Vec::new(),
+        },
+    )
+    .await;
+    assert_eq!(core.search(&first.id).await.unwrap().results.len(), 1);
 
     assert!(core.delete_search(&first.id).await.unwrap());
     assert_eq!(core.search_queue.lock().pending_len(), 1);

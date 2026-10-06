@@ -36,6 +36,7 @@ pub(crate) async fn search_kad_keywords(
     search_id: &str,
     request: &SearchCreate,
     cancel: &CancellationToken,
+    incremental_results: Option<&tokio::sync::mpsc::UnboundedSender<SearchResult>>,
 ) -> Result<Option<KadKeywordSearchOutcome>> {
     if !dht.is_bootstrapped() {
         return Ok(None);
@@ -68,6 +69,9 @@ pub(crate) async fn search_kad_keywords(
                 .record(candidate.responder_ip, candidate.root);
         }
         let mapped = search_result_from_kad(search_id, request, result);
+        if let Some(incremental_results) = incremental_results {
+            let _ = incremental_results.send(mapped.clone());
+        }
         merge_kad_search_result(&mut results, &mut result_indexes, hash, mapped);
     }
     Ok(Some(KadKeywordSearchOutcome {
