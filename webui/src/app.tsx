@@ -941,19 +941,21 @@ export function App() {
 }
 
 function readStoredApiKey(): string {
+  removeLegacyApiKey();
   try {
-    return window.localStorage.getItem(API_KEY_STORAGE) ?? "";
+    return window.sessionStorage.getItem(API_KEY_STORAGE) ?? "";
   } catch {
     return "";
   }
 }
 
 function storeApiKey(apiKey: string): boolean {
+  removeLegacyApiKey();
   try {
     if (apiKey) {
-      window.localStorage.setItem(API_KEY_STORAGE, apiKey);
+      window.sessionStorage.setItem(API_KEY_STORAGE, apiKey);
     } else {
-      window.localStorage.removeItem(API_KEY_STORAGE);
+      window.sessionStorage.removeItem(API_KEY_STORAGE);
     }
     return true;
   } catch {
@@ -962,10 +964,19 @@ function storeApiKey(apiKey: string): boolean {
 }
 
 function removeStoredApiKey(): void {
+  removeLegacyApiKey();
+  try {
+    window.sessionStorage.removeItem(API_KEY_STORAGE);
+  } catch {
+    // The in-memory key is still cleared when browser storage is unavailable.
+  }
+}
+
+function removeLegacyApiKey(): void {
   try {
     window.localStorage.removeItem(API_KEY_STORAGE);
   } catch {
-    // The in-memory key is still cleared when browser storage is unavailable.
+    // Ignore unavailable persistent storage; it is never read for credentials.
   }
 }
 

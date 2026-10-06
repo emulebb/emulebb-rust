@@ -171,16 +171,27 @@ fn write_bootstrap_settings(dir: &std::path::Path) -> PathBuf {
     let profile_dir = dir.join("profile");
     fs::create_dir_all(&profile_dir).unwrap();
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
-    fs::write(
+    write_private_settings(
         &settings_path,
         r#"
 [rest]
 bindAddr = "192.0.2.10:13301"
 apiKey = "secret"
 "#,
-    )
-    .unwrap();
+    );
     profile_dir
+}
+
+fn write_private_settings(path: &std::path::Path, contents: &str) {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).unwrap();
+    file.write_all(contents.as_bytes()).unwrap();
 }
 
 fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_json::Value) {
@@ -197,9 +208,22 @@ fn default_profile_bootstrap_creates_loopback_settings_and_network_ports() {
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
 
     create_default_profile_bootstrap(&profile_dir, &settings_path).unwrap();
-    let text = fs::read_to_string(settings_path).unwrap();
+    let text = fs::read_to_string(&settings_path).unwrap();
     assert!(text.contains("bindAddr = \"127.0.0.1:4711\""));
     assert!(text.contains("apiKey = \""));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(
+            fs::metadata(&profile_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&settings_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
     seed_default_profile_network_settings(&metadata).unwrap();
@@ -211,6 +235,26 @@ fn default_profile_bootstrap_creates_loopback_settings_and_network_ports() {
         metadata.load_settings_section(SECTION_KAD).unwrap(),
         vec![("listenPort".to_string(), "4672".to_string())]
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn load_rejects_group_or_world_readable_bootstrap_settings() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = write_bootstrap_settings(temp.path());
+    let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
+    fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o640)).unwrap();
+
+    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires owner-only permissions")
+    );
+    assert!(error.to_string().contains("chmod 600"));
 }
 
 #[test]
@@ -565,7 +609,7 @@ fn load_rejects_runtime_fields_in_bootstrap_toml() {
     let profile_dir = temp.path().join("profile");
     fs::create_dir_all(&profile_dir).unwrap();
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
-    fs::write(
+    write_private_settings(
         &settings_path,
         r#"
 p2pBindIp = "192.0.2.10"
@@ -577,8 +621,7 @@ apiKey = "secret"
 [ed2k]
 listenPort = 41001
 "#,
-    )
-    .unwrap();
+    );
 
     let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
     assert!(
@@ -666,7 +709,7 @@ fn load_rejects_retired_toml_preferences_section() {
     let profile_dir = temp.path().join("profile");
     fs::create_dir_all(&profile_dir).unwrap();
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
-    fs::write(
+    write_private_settings(
         &settings_path,
         r#"
 [rest]
@@ -676,8 +719,7 @@ apiKey = "secret"
 [preferences]
 autoConnect = false
 "#,
-    )
-    .unwrap();
+    );
 
     let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
     assert!(
@@ -808,6 +850,39 @@ fn rest_bind_addr_accepts_configured_non_loopback_address() {
         profile.rest_bind_addr().unwrap(),
         "192.0.2.10:13301".parse::<SocketAddr>().unwrap()
     );
+}
+
+#[test]
+fn rest_api_key_accepts_generated_length_secret() {
+    let mut profile = DaemonProfile::default();
+    profile.rest.api_key = "0123456789abcdef0123456789abcdef".to_string();
+
+    profile.validate_rest_api_key().unwrap();
+}
+
+#[test]
+fn rest_api_key_rejects_empty_placeholder_short_and_whitespace_values() {
+    for (api_key, expected) in [
+        ("", "must not be empty"),
+        ("change-me", "placeholder"),
+        ("REPLACE_WITH_32_OR_MORE_RANDOM_CHARACTERS", "placeholder"),
+        ("too-short", "at least 32 bytes"),
+        (
+            " 0123456789abcdef0123456789abcdef",
+            "leading or trailing whitespace",
+        ),
+        (
+            "0123456789abcdef 0123456789abcdef",
+            "printable ASCII characters without spaces",
+        ),
+    ] {
+        let mut profile = DaemonProfile::default();
+        profile.rest.api_key = api_key.to_string();
+
+        let error = profile.validate_rest_api_key().unwrap_err().to_string();
+
+        assert!(error.contains(expected), "{api_key:?}: {error}");
+    }
 }
 
 #[test]

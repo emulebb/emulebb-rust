@@ -137,6 +137,19 @@ already contain `emulebb-rust-settings.toml`; its SQLite repository is
 `bindAddr` is required there, while runtime/network settings live in the
 database and are exposed through `/api/v1/app/settings`.
 
+`apiKey` is also required. Startup rejects blank, known placeholder,
+whitespace-padded, non-printable, and shorter-than-32-byte values. The implicit
+first-run profile generates a 32-character random key and, on Unix, creates the
+profile directory and bootstrap file with modes `0700` and `0600`. Existing
+Unix bootstrap files with group or other access are rejected with a `chmod 600`
+remediation message because the file contains the REST credential.
+
+The daemon serves plain HTTP. Keep direct listeners on loopback whenever
+possible. A non-loopback listener is intended for a container network or a
+trusted TLS reverse proxy and emits a startup warning; independently restrict
+host/firewall exposure. The WebUI keeps its API key in per-tab session storage,
+so closing the tab clears the browser copy.
+
 ### Upload queue settings migration
 
 The beta settings contract has one owner for each upload scheduling input. The

@@ -44,6 +44,13 @@ const AUTO_CONNECT_POPULARITY_WAIT: Duration = Duration::from_secs(60);
 const AUTO_CONNECT_POPULARITY_POLL: Duration = Duration::from_millis(500);
 const AUTO_CONNECT_TARGET_VERIFY: Duration = Duration::from_secs(12);
 const AUTO_CONNECT_TARGET_STABLE: Duration = Duration::from_secs(2);
+const MIN_REST_API_KEY_BYTES: usize = 32;
+const UNSAFE_REST_API_KEYS: &[&str] = &[
+    "change-me",
+    "changeme",
+    "replace-me",
+    "replace_with_32_or_more_random_characters",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -72,7 +79,7 @@ struct DaemonBootstrapSettings {
     pub rest: RestBootstrapSettings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RestBootstrapSettings {
     pub bind_addr: Option<SocketAddr>,
@@ -101,16 +108,6 @@ impl Default for DaemonProfile {
     }
 }
 
-impl Default for RestBootstrapSettings {
-    fn default() -> Self {
-        Self {
-            bind_addr: None,
-            api_key: "change-me".to_string(),
-            web_root_dir: None,
-        }
-    }
-}
-
 impl DaemonProfile {
     pub fn load(profile_dir: Option<PathBuf>) -> Result<Self> {
         let implicit_profile = profile_dir.is_none();
@@ -131,6 +128,7 @@ impl DaemonProfile {
                 settings_path.display()
             );
         }
+        validate_profile_settings_permissions(&settings_path)?;
         let text = fs::read_to_string(&settings_path)
             .with_context(|| format!("failed to read settings {}", settings_path.display()))?;
         let bootstrap: DaemonBootstrapSettings = toml::from_str(&text)
@@ -310,6 +308,31 @@ impl DaemonProfile {
         Ok(candidate)
     }
 
+    pub fn validate_rest_api_key(&self) -> Result<()> {
+        let api_key = self.rest.api_key.as_str();
+        if api_key.is_empty() {
+            bail!("rest.apiKey is required and must not be empty");
+        }
+        if api_key.trim() != api_key {
+            bail!("rest.apiKey must not have leading or trailing whitespace");
+        }
+        if !api_key.bytes().all(|byte| byte.is_ascii_graphic()) {
+            bail!("rest.apiKey must contain only printable ASCII characters without spaces");
+        }
+        if UNSAFE_REST_API_KEYS
+            .iter()
+            .any(|placeholder| api_key.eq_ignore_ascii_case(placeholder))
+        {
+            bail!("rest.apiKey is a placeholder and must be replaced");
+        }
+        if api_key.len() < MIN_REST_API_KEY_BYTES {
+            bail!(
+                "rest.apiKey must contain at least {MIN_REST_API_KEY_BYTES} bytes of secret material"
+            );
+        }
+        Ok(())
+    }
+
     pub fn web_root_dir(&self) -> Result<Option<PathBuf>> {
         if let Some(configured) = &self.rest.web_root_dir {
             let resolved = if configured.is_absolute() {
@@ -376,12 +399,16 @@ fn create_default_profile_bootstrap(
     profile_dir: &std::path::Path,
     settings_path: &std::path::Path,
 ) -> Result<()> {
-    fs::create_dir_all(profile_dir)
-        .with_context(|| format!("failed to create default profile {}", profile_dir.display()))?;
+    create_private_profile_dir(profile_dir)?;
     let api_key = uuid::Uuid::new_v4().simple().to_string();
     let text = format!("[rest]\nbindAddr = \"127.0.0.1:4711\"\napiKey = \"{api_key}\"\n");
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     let mut file = options
         .open(settings_path)
         .with_context(|| format!("failed to create {}", settings_path.display()))?;
@@ -391,6 +418,42 @@ fn create_default_profile_bootstrap(
         .with_context(|| format!("failed to sync {}", settings_path.display()))?;
     eprintln!("Created eMuleBB profile at {}", profile_dir.display());
     eprintln!("WebUI: http://127.0.0.1:4711/  API key: {api_key}");
+    Ok(())
+}
+
+fn create_private_profile_dir(profile_dir: &std::path::Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(profile_dir)
+        .with_context(|| format!("failed to create default profile {}", profile_dir.display()))
+}
+
+#[cfg(unix)]
+fn validate_profile_settings_permissions(settings_path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = fs::metadata(settings_path)
+        .with_context(|| format!("failed to inspect settings {}", settings_path.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "profile settings {} have mode {mode:03o}; rest.apiKey requires owner-only permissions (chmod 600)",
+            settings_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_profile_settings_permissions(_settings_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
@@ -668,6 +731,14 @@ async fn graceful_teardown(core: &Arc<EmulebbCore>) {
 }
 
 pub async fn run(profile: DaemonProfile) -> Result<()> {
+    let rest_bind_addr = profile.rest_bind_addr()?;
+    profile.validate_rest_api_key()?;
+    if !rest_bind_addr.ip().is_loopback() {
+        warn!(
+            %rest_bind_addr,
+            "REST is listening beyond loopback over plaintext HTTP; restrict network exposure or terminate TLS at a trusted reverse proxy"
+        );
+    }
     fs::create_dir_all(&profile.profile_dir)
         .with_context(|| format!("failed to create {}", profile.profile_dir.display()))?;
     let index = FileIndex::open(profile.metadata_path())?;
@@ -701,7 +772,6 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         },
         Some(shutdown_tx.clone()),
     );
-    let rest_bind_addr = profile.rest_bind_addr()?;
     let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
     spawn_regular_diagnostic_summary(Arc::clone(&core));

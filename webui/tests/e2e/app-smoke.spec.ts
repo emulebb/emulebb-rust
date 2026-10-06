@@ -7,8 +7,9 @@ const longSharedRoot =
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    window.localStorage.clear();
-    window.localStorage.setItem("emulebb.webui.apiKey", "sample-key");
+    window.localStorage.setItem("emulebb.webui.apiKey", "legacy-persistent-key");
+    window.sessionStorage.clear();
+    window.sessionStorage.setItem("emulebb.webui.apiKey", "sample-key");
   });
 });
 
@@ -19,6 +20,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "eMuleBB WebUI" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("emulebb.webui.apiKey"))).toBeNull();
   await expect(page.getByText("0.1.0-beta.2")).toBeVisible();
   await expect(page.getByText("Sample Transfer.bin")).toBeVisible();
   const topbar = page.locator("header .topbar");
@@ -172,7 +174,7 @@ test("recovers from a stale API key without a manual refresh", async ({ page }) 
   await expect
     .poll(() => requests.some((request) => request.path === "snapshot" && request.headers["x-api-key"] === "fresh-key"))
     .toBe(true);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("emulebb.webui.apiKey"))).toBe("fresh-key");
+  await expect.poll(() => page.evaluate(() => window.sessionStorage.getItem("emulebb.webui.apiKey"))).toBe("fresh-key");
 
   await page.getByRole("link", { name: "Network" }).click();
   await expect(page.getByRole("heading", { name: "Network Health" })).toBeVisible();
@@ -182,7 +184,7 @@ test("recovers from a stale API key without a manual refresh", async ({ page }) 
 
   await page.getByTitle("Change API key").click();
   await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("emulebb.webui.apiKey"))).toBeNull();
+  await expect.poll(() => page.evaluate(() => window.sessionStorage.getItem("emulebb.webui.apiKey"))).toBeNull();
 });
 
 test("submits a synthetic transfer operation", async ({ page }) => {

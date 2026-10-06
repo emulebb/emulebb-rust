@@ -273,6 +273,7 @@ pub fn router_with_shutdown(
         .with_state(state);
 
     mount_webui(api_router, config.web_root_dir)
+        .layer(middleware::map_response(add_security_headers))
 }
 
 async fn require_api_key(
@@ -281,28 +282,75 @@ async fn require_api_key(
     next: Next,
 ) -> Response {
     if state.api_key.is_empty() {
-        return next.run(request).await;
+        return unauthorized_api_key();
     }
     let supplied = request
         .headers()
         .get("X-API-Key")
         .and_then(|value| value.to_str().ok());
-    if supplied == Some(state.api_key.as_str()) {
+    if supplied.is_some_and(|value| constant_time_eq(value, state.api_key.as_str())) {
         next.run(request).await
     } else {
-        api_error(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "missing or invalid API key",
-        )
-        .into_response()
+        unauthorized_api_key()
     }
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.bytes()
+        .zip(right.bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn unauthorized_api_key() -> Response {
+    api_error(
+        StatusCode::UNAUTHORIZED,
+        "UNAUTHORIZED",
+        "missing or invalid API key",
+    )
+    .into_response()
 }
 
 async fn add_contract_version_header(mut response: Response) -> Response {
     response.headers_mut().insert(
         HeaderName::from_static("x-contract-version"),
         HeaderValue::from_static(CONTRACT_VERSION),
+    );
+    response
+        .headers_mut()
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn add_security_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; base-uri 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+        ),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), geolocation=(), microphone=()"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
     );
     response
 }

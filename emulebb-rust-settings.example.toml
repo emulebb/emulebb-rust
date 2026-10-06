@@ -1,6 +1,8 @@
 [rest]
-bindAddr = "192.0.2.10:13301"
-apiKey = "change-me"
+bindAddr = "127.0.0.1:4711"
+# Replace this placeholder before startup with at least 32 random printable
+# ASCII characters. Keep this file private to the account running the daemon.
+apiKey = "REPLACE_WITH_32_OR_MORE_RANDOM_CHARACTERS"
 # Optional. When unset, the daemon serves `webui` beside emulebb-rust.exe if
 # that directory exists. Relative paths are resolved from the profile directory.
 # webRootDir = "webui"

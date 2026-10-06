@@ -411,6 +411,62 @@ async fn rejects_missing_api_key() {
 }
 
 #[tokio::test]
+async fn empty_api_key_never_disables_authentication() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: String::new(),
+            web_root_dir: None,
+        },
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/app")
+                .header("X-API-Key", "")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_responses_include_security_and_no_store_headers() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/app")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let headers = response.headers();
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["x-frame-options"], "DENY");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    assert_eq!(
+        headers["permissions-policy"],
+        "camera=(), geolocation=(), microphone=()"
+    );
+    assert!(
+        headers["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'")
+    );
+}
+
+#[tokio::test]
 async fn webui_serves_static_files_without_api_key() {
     let web_root = unique_test_dir("webui-static");
     std::fs::write(
@@ -430,6 +486,14 @@ async fn webui_serves_static_files_without_api_key() {
         .await
         .unwrap();
     assert_eq!(index.status(), StatusCode::OK);
+    assert_eq!(index.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(index.headers()["x-frame-options"], "DENY");
+    assert!(
+        index.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("default-src 'self'")
+    );
     let body = to_bytes(index.into_body(), usize::MAX).await.unwrap();
     assert!(String::from_utf8_lossy(&body).contains("eMuleBB"));
 
