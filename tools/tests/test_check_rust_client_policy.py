@@ -97,6 +97,12 @@ class TestLintSuppressions(unittest.TestCase):
 
 
 class TestCurrentOnlyMetadataSchema(unittest.TestCase):
+    def test_forbids_retired_nat_settings_repair_bridge(self) -> None:
+        self.assertEqual(
+            CHECKER.FORBIDDEN_RUST_NATIVE_SURFACE["reset_legacy_nat_backend_order"],
+            "retired NAT settings repair bridge",
+        )
+
     def test_rejects_rust_side_schema_repair_patterns(self) -> None:
         errors = CHECKER.check_current_only_metadata_schema(
             {

@@ -1058,22 +1058,6 @@ impl Default for NatSettings {
     }
 }
 
-/// Replaces the removed pure-Rust `upnp_igd` provider in persisted settings.
-///
-/// Returns `true` when the caller must persist the repaired NAT section.
-pub fn reset_legacy_nat_backend_order(settings: &mut NatSettings) -> bool {
-    if settings
-        .backend_order
-        .iter()
-        .any(|backend| backend == "upnp_igd")
-    {
-        settings.backend_order = NatSettings::default().backend_order;
-        true
-    } else {
-        false
-    }
-}
-
 impl Default for IpFilterSettings {
     fn default() -> Self {
         Self {

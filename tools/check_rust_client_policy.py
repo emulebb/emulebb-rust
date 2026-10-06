@@ -43,6 +43,7 @@ FORBIDDEN_RUST_NATIVE_SURFACE = {
     "operations/preview": "fake transfer preview REST operation",
     "preview_transfer": "fake transfer preview implementation",
     "transfer_preview": "fake transfer preview handler",
+    "reset_legacy_nat_backend_order": "retired NAT settings repair bridge",
 }
 P2P_BIND_FAIL_CLOSED_BOUNDARIES = (
     "crates/emulebb-core/src/lib.rs",
