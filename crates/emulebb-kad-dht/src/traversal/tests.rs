@@ -137,7 +137,7 @@ fn test_traversal_closest_limit_keeps_store_fanout_above_oracle_k() {
 }
 
 #[test]
-fn test_traversal_closest_limit_caps_non_store_walks_at_oracle_k() {
+fn test_traversal_closest_limit_honors_search_fanout_but_keeps_find_node_at_k() {
     assert_eq!(traversal_closest_limit(&TraversalKind::FindNode, 20), K);
     assert_eq!(
         traversal_closest_limit(
@@ -150,7 +150,48 @@ fn test_traversal_closest_limit_caps_non_store_walks_at_oracle_k() {
             },
             20,
         ),
+        20
+    );
+    assert_eq!(
+        traversal_closest_limit(
+            &TraversalKind::Keyword {
+                request: SearchKeyReq {
+                    target: NodeId::ZERO,
+                    start_position: 0,
+                    restrictive_payload: Vec::new(),
+                },
+            },
+            4,
+        ),
         K
+    );
+}
+
+#[test]
+fn search_lookup_deadline_reserves_the_configured_phase2_walk() {
+    let started_at = Instant::now();
+    let emit_deadline = started_at + Duration::from_secs(90);
+    let kind = TraversalKind::Keyword {
+        request: SearchKeyReq {
+            target: NodeId::ZERO,
+            start_position: 0,
+            restrictive_payload: Vec::new(),
+        },
+    };
+
+    let lookup_deadline = lookup_deadline_for_search(
+        &kind,
+        started_at,
+        emit_deadline,
+        Duration::from_secs(10),
+        50,
+    );
+
+    // 10s response window + 3s idle grace + 49 one-second walk slots leaves
+    // 28 seconds for the lookup half of the two-phase implementation.
+    assert_eq!(
+        lookup_deadline.duration_since(started_at),
+        Duration::from_secs(28)
     );
 }
 
@@ -569,7 +610,7 @@ fn test_keyword_lookup_still_waits_for_unfinished_closest_frontier() {
 }
 
 #[test]
-fn test_select_phase2_contacts_caps_fanout_at_oracle_k() {
+fn test_select_phase2_contacts_honors_configured_fanout_above_k() {
     let target = NodeId::ZERO;
     let responded: Vec<TraversalContact> = (1u8..=20)
         .map(|n| TraversalContact {
@@ -581,7 +622,7 @@ fn test_select_phase2_contacts_caps_fanout_at_oracle_k() {
         .collect();
 
     let selected = select_phase2_contacts(&responded, target, 15);
-    assert_eq!(selected.len(), K);
+    assert_eq!(selected.len(), 15);
 }
 
 #[test]

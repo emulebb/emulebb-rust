@@ -319,7 +319,7 @@ impl DhtNode {
         work_class: RpcWorkClass,
     ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
         let target = request.target;
-        let initial = self.closest_search_contacts(target);
+        let initial = self.closest_search_contacts(target, phase2_fanout);
         crate::search::search_keywords_by_request(
             self.inner.rpc.clone(),
             initial,
@@ -437,7 +437,7 @@ impl DhtNode {
         work_class: RpcWorkClass,
     ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
         let target = request.target;
-        let initial = self.closest_search_contacts(target);
+        let initial = self.closest_search_contacts(target, phase2_fanout);
         crate::search::search_sources_by_request(
             self.inner.rpc.clone(),
             initial,
@@ -538,7 +538,7 @@ impl DhtNode {
         work_class: RpcWorkClass,
     ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
         let target = NodeId::from_be_bytes(file_hash.0);
-        let initial = self.closest_search_contacts(target);
+        let initial = self.closest_search_contacts(target, phase2_fanout);
         crate::search::search_notes(
             self.inner.rpc.clone(),
             initial,
@@ -559,10 +559,17 @@ impl DhtNode {
     }
 
     /// Returns the routing-table contacts used to seed one Kad search walk.
-    fn closest_search_contacts(&self, target: NodeId) -> Vec<TraversalContact> {
+    fn closest_search_contacts(
+        &self,
+        target: NodeId,
+        phase2_fanout: usize,
+    ) -> Vec<TraversalContact> {
         match self.inner.routing_table.try_lock() {
             Ok(rt) => rt
-                .get_closest(&target, K)
+                // MFC seeds searches with up to 50 nearby routing contacts.
+                // Use the configured result-contact fanout while retaining K
+                // as the minimum convergence/failure fallback set.
+                .get_closest(&target, phase2_fanout.max(K))
                 .into_iter()
                 .map(|c| TraversalContact {
                     id: c.id,

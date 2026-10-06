@@ -175,8 +175,8 @@ pub struct TraversalResult {
 
 fn traversal_closest_limit(search_kind: &TraversalKind, phase2_fanout: usize) -> usize {
     match search_kind {
-        TraversalKind::Store => phase2_fanout.max(K),
-        _ => K,
+        TraversalKind::FindNode => K,
+        _ => phase2_fanout.max(K),
     }
 }
 
@@ -339,16 +339,18 @@ fn lookup_deadline_for_search(
     }
 
     let active_lifetime = emit_deadline.saturating_duration_since(started_at);
-    let selected_fanout = phase2_fanout.clamp(1, K);
+    let selected_fanout = phase2_fanout.max(1);
     let walk_spacing = SEARCH_JUMPSTART_TICK
         .saturating_mul(u32::try_from(selected_fanout.saturating_sub(1)).unwrap_or(u32::MAX));
     let desired_reserve = query_timeout
         .saturating_add(SEARCH_JUMPSTART_IDLE_GRACE)
         .saturating_add(walk_spacing);
-    // Tiny synthetic budgets still need enough time to discover a contact.
-    // The normal 45-second lifetime is large enough to reserve the complete
-    // idle grace + paced fanout + per-query response window.
-    let reserve = desired_reserve.min(active_lifetime / 2);
+    // Preserve at least one lookup response window (or half of a tiny
+    // synthetic lifetime) while reserving enough of normal search lifetimes to
+    // walk the configured fanout. Clamping this calculation to K made a
+    // configured 50-contact search reserve time for, and query, only 10 nodes.
+    let lookup_floor = query_timeout.min(active_lifetime / 2);
+    let reserve = desired_reserve.min(active_lifetime.saturating_sub(lookup_floor));
     emit_deadline.checked_sub(reserve).unwrap_or(started_at)
 }
 
@@ -1235,14 +1237,13 @@ fn select_phase2_contacts(
     target: NodeId,
     phase2_fanout: usize,
 ) -> Vec<&TraversalContact> {
-    // eMule stops phase 2 at the closest tolerated responders. We keep the
-    // configurable ceiling for tests or explicit tightening, but never exceed
-    // the oracle's closest-K contact window.
-    let oracle_ceiling = phase2_fanout.min(K);
+    // MFC starts with up to 50 possible contacts and walks each closest
+    // responder after the lookup stalls. The configured fanout is the explicit
+    // ceiling; K is a routing-table bucket size, not a search-result fanout.
     responded
         .iter()
         .filter(|contact| passes_search_tolerance(target, contact))
-        .take(oracle_ceiling)
+        .take(phase2_fanout)
         .collect()
 }
 
