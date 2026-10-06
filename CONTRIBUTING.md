@@ -4,22 +4,23 @@
 first useful contributions should stay small, preserve stock-compatible protocol
 behavior, and keep the embedded SPA WebUI, REST contract, and tests aligned.
 
-## Beta Change Policy
+## Change Policy
 
-The public beta remains experimental. Release-candidate changes are accepted
-only when they are one of the following:
+The public beta remains experimental, but the former pre-release freeze has
+ended. Every actionable change still needs a stable work-item ID and a public
+issue on the [eMuleBB Roadmap](https://github.com/orgs/emulebb/projects/3)
+before implementation. Keep each commit to one coherent change and include the
+stable ID in its subject.
 
-- a release blocker;
-- a test or evidence fix;
-- a documentation correction;
-- a packaging fix.
+Changes must preserve the stock-compatible wire protocol, the Rust-native async
+runtime model, and the current-only profile policy described in `AGENTS.md` and
+the routed product documentation. Do not add migration, repair, or reset paths
+for older Rust metadata schemas; an incompatible profile must fail with a clear
+fresh-profile instruction.
 
-Do not start indexer or Arr integration, major refactors, or new protocol
-features during the freeze. In particular, `RUST-FEAT-002`, `RUST-FEAT-004`,
-and `RUST-REF-005` through `RUST-REF-007` remain post-beta work. A test/evidence
-label does not authorize unrelated cleanup or feature work. Coordinate allowed
-work through [RUST-FEAT-033](https://github.com/emulebb/emulebb-rust/issues/20)
-and the public suite board before implementation.
+Large refactors, new integrations, and protocol changes remain separately
+scoped work. Do not fold unrelated cleanup into a bug fix, documentation
+change, test/evidence update, or packaging change.
 
 ## Start Here
 
@@ -28,9 +29,9 @@ and the public suite board before implementation.
   output rules.
 - Use the public suite board for workflow state:
   <https://github.com/orgs/emulebb/projects/3>
-- Confirm that proposed work satisfies one of the four freeze admission classes
-  before implementation. Older issue labels and starter suggestions do not
-  override the freeze.
+- Confirm that the issue states the intended compatibility and validation scope
+  before implementation. Older labels and starter suggestions do not broaden
+  that scope.
 
 ## Local Checks
 
