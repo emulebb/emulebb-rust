@@ -263,7 +263,12 @@ impl SearchSpec {
         if self.method.is_empty() {
             self.method = default_search_method();
         }
-        self.r#type = self.r#type.trim().to_ascii_lowercase();
+        self.r#type = match self.r#type.trim().to_ascii_lowercase().as_str() {
+            "archive" => "arc".to_string(),
+            "document" => "doc".to_string(),
+            "program" => "pro".to_string(),
+            canonical => canonical.to_string(),
+        };
         self.extension = self
             .extension
             .trim()

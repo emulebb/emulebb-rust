@@ -34,12 +34,12 @@ async fn search_state_survives_core_restart_and_downloads_result() {
                 max_size_bytes: Some(2_000),
                 min_availability: Some(5),
                 min_complete_sources: Some(0),
-                min_bitrate_kbps: Some(320),
-                min_length_seconds: Some(60),
-                codec: "binary".to_string(),
-                title: "Sample Title".to_string(),
-                album: "Sample Album".to_string(),
-                artist: "Sample Artist".to_string(),
+                min_bitrate_kbps: Some(0),
+                min_length_seconds: Some(0),
+                codec: String::new(),
+                title: String::new(),
+                album: String::new(),
+                artist: String::new(),
             })
             .await
             .unwrap();
@@ -52,21 +52,21 @@ async fn search_state_survives_core_restart_and_downloads_result() {
     assert_eq!(searches.len(), 1);
     assert_eq!(searches[0].id, search_id);
     assert_eq!(searches[0].spec.method, "automatic");
-    assert_eq!(searches[0].spec.r#type, "archive");
+    assert_eq!(searches[0].spec.r#type, "arc");
     assert_eq!(searches[0].spec.extension, "bin");
     assert_eq!(searches[0].spec.min_size_bytes, Some(1_000));
     assert_eq!(searches[0].spec.max_size_bytes, Some(2_000));
     assert_eq!(searches[0].spec.min_availability, Some(5));
-    assert_eq!(searches[0].spec.min_complete_sources, Some(0));
-    assert_eq!(searches[0].spec.min_bitrate_kbps, Some(320));
-    assert_eq!(searches[0].spec.min_length_seconds, Some(60));
-    assert_eq!(searches[0].spec.codec, "binary");
-    assert_eq!(searches[0].spec.title, "Sample Title");
-    assert_eq!(searches[0].spec.album, "Sample Album");
-    assert_eq!(searches[0].spec.artist, "Sample Artist");
+    assert_eq!(searches[0].spec.min_complete_sources, None);
+    assert_eq!(searches[0].spec.min_bitrate_kbps, None);
+    assert_eq!(searches[0].spec.min_length_seconds, None);
+    assert_eq!(searches[0].spec.codec, "");
+    assert_eq!(searches[0].spec.title, "");
+    assert_eq!(searches[0].spec.album, "");
+    assert_eq!(searches[0].spec.artist, "");
     assert_eq!(searches[0].resolved_method, None);
     assert_eq!(searches[0].results[0].name, "Sample Search Payload.bin");
-    assert_eq!(searches[0].results[0].r#type, "archive");
+    assert_eq!(searches[0].results[0].r#type, "arc");
 
     let search = reloaded.search(&search_id).await.unwrap();
     assert_eq!(search.results[0].hash, file_hash);
