@@ -147,6 +147,12 @@ pub struct Ed2kSearchFile {
     pub file_size: Option<u64>,
     /// ED2K file-type tag, when present.
     pub file_type: Option<String>,
+    /// Media artist from the stock `FT_MEDIA_ARTIST` tag.
+    pub media_artist: Option<String>,
+    /// Media album from the stock `FT_MEDIA_ALBUM` tag.
+    pub media_album: Option<String>,
+    /// Media title from the stock `FT_MEDIA_TITLE` tag.
+    pub media_title: Option<String>,
     /// Media duration from the stock `FT_MEDIA_LENGTH` tag, in seconds.
     pub media_length_seconds: Option<u32>,
     /// Media bitrate from the stock `FT_MEDIA_BITRATE` tag, in kbit/s.

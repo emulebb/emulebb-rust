@@ -222,10 +222,12 @@ pub(crate) fn search_result_from_ed2k(
         source_client_port,
         file_type: file_type.clone(),
         media: SearchResultMedia {
+            artist: file.media_artist.unwrap_or_default(),
+            album: file.media_album.unwrap_or_default(),
+            title: file.media_title.unwrap_or_default(),
             length_seconds: file.media_length_seconds.unwrap_or_default(),
             bitrate_kbps: file.media_bitrate_kbps.unwrap_or_default(),
             codec: file.media_codec.unwrap_or_default(),
-            ..SearchResultMedia::default()
         },
         rating: file.rating.unwrap_or_default(),
         aich_hash: file.aich_hash.unwrap_or_default(),
@@ -645,6 +647,9 @@ mod tests {
                 file_name: Some("Server Result.pdf".to_string()),
                 file_size: Some(4096),
                 file_type: Some("doc".to_string()),
+                media_artist: Some("Example Artist".to_string()),
+                media_album: Some("Example Album".to_string()),
+                media_title: Some("Example Title".to_string()),
                 media_length_seconds: Some(245),
                 media_bitrate_kbps: Some(320),
                 media_codec: Some("AAC".to_string()),
@@ -666,6 +671,9 @@ mod tests {
         );
         assert_eq!(result.source_client_port, Some(4662));
         assert_eq!(result.file_type, "doc");
+        assert_eq!(result.media.artist, "Example Artist");
+        assert_eq!(result.media.album, "Example Album");
+        assert_eq!(result.media.title, "Example Title");
         assert_eq!(result.media.length_seconds, 245);
         assert_eq!(result.media.bitrate_kbps, 320);
         assert_eq!(result.media.codec, "AAC");

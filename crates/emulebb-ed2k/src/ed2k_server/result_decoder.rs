@@ -5,9 +5,10 @@ use super::flags::is_low_id;
 use super::tag_codec::{DecodedTagName, DecodedTagValue, decode_tag_details};
 use super::{
     Ed2kFoundSource, Ed2kSearchFile, FT_AICH_HASH, FT_COMPLETE_SOURCES, FT_FILENAME, FT_FILERATING,
-    FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE, FT_FOLDERNAME, FT_MEDIA_BITRATE, FT_MEDIA_CODEC,
-    FT_MEDIA_LENGTH, FT_SOURCES, OP_EDONKEYPROT, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES,
-    SOURCE_OBFUSCATION_USER_HASH_PRESENT, ipv4_from_client_id,
+    FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE, FT_FOLDERNAME, FT_MEDIA_ALBUM, FT_MEDIA_ARTIST,
+    FT_MEDIA_BITRATE, FT_MEDIA_CODEC, FT_MEDIA_LENGTH, FT_MEDIA_TITLE, FT_SOURCES, OP_EDONKEYPROT,
+    OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES, SOURCE_OBFUSCATION_USER_HASH_PRESENT,
+    ipv4_from_client_id,
 };
 
 #[cfg(test)]
@@ -149,6 +150,9 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
     let mut size = None;
     let mut size_hi = None;
     let mut file_type = None;
+    let mut media_artist = None;
+    let mut media_album = None;
+    let mut media_title = None;
     let mut media_length_seconds = None;
     let mut media_bitrate_kbps = None;
     let mut media_codec = None;
@@ -176,6 +180,42 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
                 if file_type.is_none() =>
             {
                 file_type = Some(value.clone());
+            }
+            (DecodedTagName::Numeric(FT_MEDIA_ARTIST), Some(DecodedTagValue::String(value)))
+                if media_artist.is_none() && !value.is_empty() =>
+            {
+                media_artist = Some(value.clone());
+            }
+            (DecodedTagName::Text(tag_name), Some(DecodedTagValue::String(value)))
+                if tag_name.eq_ignore_ascii_case("artist")
+                    && media_artist.is_none()
+                    && !value.is_empty() =>
+            {
+                media_artist = Some(value.clone());
+            }
+            (DecodedTagName::Numeric(FT_MEDIA_ALBUM), Some(DecodedTagValue::String(value)))
+                if media_album.is_none() && !value.is_empty() =>
+            {
+                media_album = Some(value.clone());
+            }
+            (DecodedTagName::Text(tag_name), Some(DecodedTagValue::String(value)))
+                if tag_name.eq_ignore_ascii_case("album")
+                    && media_album.is_none()
+                    && !value.is_empty() =>
+            {
+                media_album = Some(value.clone());
+            }
+            (DecodedTagName::Numeric(FT_MEDIA_TITLE), Some(DecodedTagValue::String(value)))
+                if media_title.is_none() && !value.is_empty() =>
+            {
+                media_title = Some(value.clone());
+            }
+            (DecodedTagName::Text(tag_name), Some(DecodedTagValue::String(value)))
+                if tag_name.eq_ignore_ascii_case("title")
+                    && media_title.is_none()
+                    && !value.is_empty() =>
+            {
+                media_title = Some(value.clone());
             }
             (DecodedTagName::Numeric(FT_MEDIA_LENGTH), Some(value))
                 if media_length_seconds.is_none() =>
@@ -250,6 +290,9 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
             file_name: name,
             file_size,
             file_type,
+            media_artist,
+            media_album,
+            media_title,
             media_length_seconds,
             media_bitrate_kbps,
             media_codec,
@@ -442,8 +485,11 @@ mod tests {
         payload.extend_from_slice(&[0x22; 16]);
         payload.extend_from_slice(&[0u8; 4]);
         payload.extend_from_slice(&[0u8; 2]);
-        payload.extend_from_slice(&4u32.to_le_bytes());
+        payload.extend_from_slice(&7u32.to_le_bytes());
         push_short_string_tag(&mut payload, FT_FILENAME, "Example.mp3");
+        push_short_string_tag(&mut payload, FT_MEDIA_ARTIST, "Example Artist");
+        push_short_string_tag(&mut payload, FT_MEDIA_ALBUM, "Example Album");
+        push_short_string_tag(&mut payload, FT_MEDIA_TITLE, "Example Title");
         push_short_int_tag(&mut payload, FT_MEDIA_LENGTH, 321);
         push_short_int_tag(&mut payload, FT_MEDIA_BITRATE, 192);
         push_short_string_tag(&mut payload, FT_MEDIA_CODEC, "MP3");
@@ -451,6 +497,9 @@ mod tests {
 
         let page = decode_search_result_page(&payload).expect("media result decodes");
         let file = &page.files[0];
+        assert_eq!(file.media_artist.as_deref(), Some("Example Artist"));
+        assert_eq!(file.media_album.as_deref(), Some("Example Album"));
+        assert_eq!(file.media_title.as_deref(), Some("Example Title"));
         assert_eq!(file.media_length_seconds, Some(321));
         assert_eq!(file.media_bitrate_kbps, Some(192));
         assert_eq!(file.media_codec.as_deref(), Some("MP3"));
@@ -472,8 +521,11 @@ mod tests {
         payload.extend_from_slice(&[0x33; 16]);
         payload.extend_from_slice(&[0u8; 4]);
         payload.extend_from_slice(&[0u8; 2]);
-        payload.extend_from_slice(&4u32.to_le_bytes());
+        payload.extend_from_slice(&7u32.to_le_bytes());
         push_short_string_tag(&mut payload, FT_FILENAME, "Legacy.mp3");
+        push_named_string_tag(&mut payload, "artist", "Example Artist");
+        push_named_string_tag(&mut payload, "album", "Example Album");
+        push_named_string_tag(&mut payload, "title", "Example Title");
         push_named_string_tag(&mut payload, "length", "05:21");
         push_named_int_tag(&mut payload, "bitrate", 192);
         push_named_string_tag(&mut payload, "codec", "MP3");
@@ -481,6 +533,9 @@ mod tests {
 
         let page = decode_search_result_page(&payload).expect("legacy media result decodes");
         let file = &page.files[0];
+        assert_eq!(file.media_artist.as_deref(), Some("Example Artist"));
+        assert_eq!(file.media_album.as_deref(), Some("Example Album"));
+        assert_eq!(file.media_title.as_deref(), Some("Example Title"));
         assert_eq!(file.media_length_seconds, Some(321));
         assert_eq!(file.media_bitrate_kbps, Some(192));
         assert_eq!(file.media_codec.as_deref(), Some("MP3"));
