@@ -64,6 +64,16 @@ struct UdpKeywordSearchPayloads {
     large_file: Vec<u8>,
 }
 
+/// eMule advances the global UDP server walk every 750 ms
+/// (`SearchResultsWnd::TimerGlobalSearch`).
+const UDP_KEYWORD_SERVER_WALK_INTERVAL: Duration = Duration::from_millis(750);
+
+/// Keep the per-search socket alive briefly after the last paced send. Stock
+/// eMule's shared UDP listener continues accepting replies for the current
+/// search after the walk timer stops; a one-shot socket otherwise loses every
+/// reply which arrives after the final 750 ms pacing window.
+const UDP_KEYWORD_RESPONSE_GRACE: Duration = Duration::from_secs(5);
+
 fn encode_udp_keyword_search_payloads(
     query: &str,
     criteria: &SearchCriteria,
@@ -90,6 +100,66 @@ fn eligible_udp_keyword_search_servers(
         });
     }
     Ok(servers)
+}
+
+/// Drain global-search replies from any server already contacted until
+/// `deadline`. Returns a fatal socket error, if any; malformed or unrelated
+/// public datagrams are discarded without ending the search.
+async fn drain_keyword_udp_responses(
+    socket: &tokio::net::UdpSocket,
+    queried_servers: &[ResolvedServerEntry],
+    deadline: TokioInstant,
+    result_sink: Option<&(dyn Fn(Ed2kServerSearchObservation) + Send + Sync + '_)>,
+    results: &mut Vec<Ed2kServerSearchObservation>,
+    cancel: &CancellationToken,
+) -> Option<anyhow::Error> {
+    if queried_servers.is_empty() {
+        return None;
+    }
+    loop {
+        let remaining = deadline.checked_duration_since(TokioInstant::now())?;
+        let received = tokio::select! {
+            () = cancel.cancelled() => return None,
+            received = tokio::time::timeout(
+                remaining,
+                read_server_udp_packet_from_any(socket, queried_servers),
+            ) => received,
+        };
+        match received {
+            Ok(Ok(Some((response_server, packet)))) => {
+                if packet.opcode != OP_GLOBSEARCHRES {
+                    continue;
+                }
+                let pages = match decode_udp_search_result_pages(&packet.payload) {
+                    Ok(pages) => pages,
+                    Err(error) => {
+                        // WHY: public ED2K UDP search replies are untrusted. Stock eMule
+                        // drops malformed datagrams and continues the global server walk.
+                        warn!(
+                            "discarding malformed ED2K UDP keyword-search response endpoint={}: {error}",
+                            response_server.base_endpoint()
+                        );
+                        continue;
+                    }
+                };
+                for page in pages {
+                    for file in page.files {
+                        let observation = Ed2kServerSearchObservation {
+                            server_endpoint: response_server.base_endpoint(),
+                            file,
+                        };
+                        if let Some(result_sink) = result_sink {
+                            result_sink(observation.clone());
+                        }
+                        results.push(observation);
+                    }
+                }
+            }
+            Ok(Ok(None)) => continue,
+            Ok(Err(error)) => return Some(error),
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Executes ED2K global UDP keyword searches across configured servers.
@@ -137,7 +207,6 @@ pub async fn search_keyword_udp_servers(
     let mut results = Vec::new();
     let mut last_error = None;
     let mut queried_servers = Vec::new();
-    let per_server_timeout = Duration::from_millis(750);
     let server_count = configured_servers.len();
 
     for (attempt_index, configured_server) in configured_servers.into_iter().enumerate() {
@@ -182,65 +251,43 @@ pub async fn search_keyword_udp_servers(
         }
         queried_servers.push(resolved_server.clone());
 
-        let per_server_deadline = TokioInstant::now() + per_server_timeout;
-        loop {
-            if cancel.is_cancelled() {
-                return Ok(Vec::new());
-            }
-            let Some(remaining) = per_server_deadline.checked_duration_since(TokioInstant::now())
-            else {
-                break;
-            };
-            if remaining.is_zero() {
-                break;
-            }
-            match tokio::time::timeout(
-                remaining,
-                read_server_udp_packet_from_any(&socket, &queried_servers),
-            )
-            .await
-            {
-                Ok(Ok(Some((response_server, packet)))) => {
-                    if packet.opcode != OP_GLOBSEARCHRES {
-                        continue;
-                    }
-                    let pages = match decode_udp_search_result_pages(&packet.payload) {
-                        Ok(pages) => pages,
-                        Err(error) => {
-                            // WHY: public ED2K UDP search replies are untrusted. Stock eMule
-                            // drops malformed datagrams and continues the global server walk.
-                            warn!(
-                                "discarding malformed ED2K UDP keyword-search response endpoint={}: {error}",
-                                response_server.base_endpoint()
-                            );
-                            continue;
-                        }
-                    };
-                    for page in pages {
-                        for file in page.files {
-                            let observation = Ed2kServerSearchObservation {
-                                server_endpoint: response_server.base_endpoint(),
-                                file,
-                            };
-                            if let Some(result_sink) = result_sink {
-                                result_sink(observation.clone());
-                            }
-                            results.push(observation);
-                        }
-                    }
-                }
-                Ok(Ok(None)) => continue,
-                Ok(Err(error)) => {
-                    last_error = Some(error);
-                    break;
-                }
-                Err(_) => break,
-            }
+        let pacing_deadline = TokioInstant::now() + UDP_KEYWORD_SERVER_WALK_INTERVAL;
+        if let Some(error) = drain_keyword_udp_responses(
+            &socket,
+            &queried_servers,
+            pacing_deadline,
+            result_sink,
+            &mut results,
+            cancel,
+        )
+        .await
+        {
+            last_error = Some(error);
         }
     }
 
     if let Some(progress_sink) = progress_sink {
         progress_sink(server_count, server_count);
+    }
+
+    // The stock client leaves the current search's requested-server allowlist
+    // installed after its send timer stops. Preserve a bounded equivalent for
+    // this one-shot socket so slow replies from any contacted server still land.
+    let response_deadline = TokioInstant::now() + UDP_KEYWORD_RESPONSE_GRACE;
+    if let Some(error) = drain_keyword_udp_responses(
+        &socket,
+        &queried_servers,
+        response_deadline,
+        result_sink,
+        &mut results,
+        cancel,
+    )
+    .await
+    {
+        last_error = Some(error);
+    }
+    if cancel.is_cancelled() {
+        return Ok(Vec::new());
     }
 
     if results.is_empty()
@@ -516,13 +563,18 @@ async fn search_keyword_on_server(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
     use crate::config::Ed2kRuntimeConfig;
+    use tokio::{net::UdpSocket, time::Instant as TokioInstant};
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        SearchCriteria, eligible_udp_keyword_search_servers, encode_search_request_with_criteria,
-        encode_udp_keyword_search_payloads,
+        SearchCriteria, drain_keyword_udp_responses, eligible_udp_keyword_search_servers,
+        encode_search_request_with_criteria, encode_udp_keyword_search_payloads,
     };
 
     #[test]
@@ -549,10 +601,12 @@ mod tests {
 
     #[test]
     fn udp_keyword_search_walk_keeps_every_eligible_server() {
-        let mut config = Ed2kRuntimeConfig::default();
-        config.server_endpoints = (1_u8..=100)
-            .map(|host| format!("192.0.2.{host}:4661"))
-            .collect();
+        let config = Ed2kRuntimeConfig {
+            server_endpoints: (1_u8..=100)
+                .map(|host| format!("192.0.2.{host}:4661"))
+                .collect(),
+            ..Ed2kRuntimeConfig::default()
+        };
         let excluded = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 40), 4661));
         let dead = [SocketAddr::from((Ipv4Addr::new(192, 0, 2, 70), 4661))];
 
@@ -561,5 +615,44 @@ mod tests {
         assert_eq!(servers.len(), 98);
         assert_eq!(servers.first().unwrap().host, "192.0.2.1");
         assert_eq!(servers.last().unwrap().host, "192.0.2.100");
+    }
+
+    #[tokio::test]
+    async fn udp_keyword_search_tail_accepts_delayed_queried_server_reply() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let server = super::super::ResolvedServerEntry {
+            entry: super::super::ConfiguredServerEntry::from_endpoint_text("127.0.0.1:4661")
+                .unwrap(),
+            ip: Ipv4Addr::LOCALHOST,
+        };
+        let mut datagram = vec![super::super::OP_EDONKEYPROT, super::super::OP_GLOBSEARCHRES];
+        datagram.extend_from_slice(&[0x44; 16]);
+        datagram.extend_from_slice(&0x0102_0304_u32.to_le_bytes());
+        datagram.extend_from_slice(&4662_u16.to_le_bytes());
+        datagram.extend_from_slice(&0_u32.to_le_bytes());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            sender.send_to(&datagram, destination).await.unwrap();
+        });
+
+        let mut results = Vec::new();
+        let cancel = CancellationToken::new();
+        let error = drain_keyword_udp_responses(
+            &receiver,
+            &[server],
+            TokioInstant::now() + Duration::from_millis(100),
+            None,
+            &mut results,
+            &cancel,
+        )
+        .await;
+
+        assert!(error.is_none());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file.file_hash.0, [0x44; 16]);
+        assert_eq!(results[0].file.client_id, 0x0102_0304);
+        assert_eq!(results[0].file.client_port, 4662);
     }
 }
