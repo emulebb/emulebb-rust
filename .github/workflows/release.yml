@@ -163,9 +163,11 @@ jobs:
             --output "$tool"
           echo "$expected  $tool" | sha256sum --check
           chmod 755 "$tool"
-          echo "APPIMAGETOOL=$tool" >> "$GITHUB_ENV"
-          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
-          echo "ARCH=$tool_arch" >> "$GITHUB_ENV"
+          {
+            echo "APPIMAGETOOL=$tool"
+            echo "APPIMAGE_EXTRACT_AND_RUN=1"
+            echo "ARCH=$tool_arch"
+          } >> "$GITHUB_ENV"
       - name: Assert release build excludes test-only features
         run: python tools/check_rust_client_policy.py
       - name: Prepare inherited build output directory
