@@ -549,6 +549,51 @@ mod tests {
     }
 
     #[test]
+    fn availability_sums_distinct_ed2k_servers_and_maxes_over_kad() {
+        let observed =
+            |origin: &str, endpoint: Option<&str>, name: &str, sources, complete_sources| {
+                let mut observed = result(name, 4_096, sources);
+                observed.observations[0].origin = origin.to_string();
+                observed.observations[0].server_endpoint = endpoint.map(str::to_string);
+                observed.observations[0].complete_sources = complete_sources;
+                observed
+            };
+        let mut aggregate = observed(
+            "global",
+            Some("192.0.2.10:4661"),
+            "server-a-first.bin",
+            10,
+            3,
+        );
+
+        // A later connected-session observation from the same server replaces
+        // its count; it is not a second independent population.
+        aggregate.merge_observations(observed(
+            "server",
+            Some("192.0.2.10:4661"),
+            "server-a-later.bin",
+            12,
+            2,
+        ));
+        aggregate.merge_observations(observed(
+            "global",
+            Some("192.0.2.20:4661"),
+            "server-b.bin",
+            7,
+            4,
+        ));
+
+        assert_eq!(aggregate.sources, 19);
+        assert_eq!(aggregate.complete_sources, 7);
+
+        // Kad is an overlapping network estimate: select its stronger claim,
+        // but never add it to the independent ED2K server total.
+        aggregate.merge_observations(observed("kad", None, "kad.bin", 25, 0));
+        assert_eq!(aggregate.sources, 25);
+        assert_eq!(aggregate.complete_sources, 7);
+    }
+
+    #[test]
     fn media_search_fields_map_to_server_criteria() {
         let mut req = request();
         req.r#type = "audio".to_string();

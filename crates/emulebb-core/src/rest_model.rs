@@ -2,8 +2,11 @@
 //! Re-exported from the crate root so existing `emulebb_core::...` paths keep
 //! working unchanged.
 
-use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    collections::HashMap,
+    net::{Ipv4Addr, SocketAddr},
+};
 
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
@@ -561,18 +564,11 @@ impl SearchResult {
             .filter(|observation| observation.size_bytes != 0)
             .max_by_key(|observation| observation_quality(observation, &self.hash))
             .map_or(display.size_bytes, |observation| observation.size_bytes);
-        self.sources = self
-            .observations
-            .iter()
-            .map(|observation| observation.sources)
-            .max()
-            .unwrap_or_default();
-        self.complete_sources = self
-            .observations
-            .iter()
-            .map(|observation| observation.complete_sources)
-            .max()
-            .unwrap_or_default();
+        self.sources =
+            aggregate_observation_count(&self.observations, |observation| observation.sources);
+        self.complete_sources = aggregate_observation_count(&self.observations, |observation| {
+            observation.complete_sources
+        });
         self.rating = self
             .observations
             .iter()
@@ -655,6 +651,47 @@ impl SearchResult {
             .map(|observation| observation.directory.clone())
             .unwrap_or_default();
     }
+}
+
+/// Aggregate availability without conflating incompatible network estimates.
+///
+/// Each eD2K server reports its own independent population, so its strongest
+/// observation is summed with the strongest observation from every other
+/// server. Kad and local/index observations are estimates of an overlapping
+/// population; their strongest value competes with (rather than adds to) the
+/// eD2K total.
+fn aggregate_observation_count(
+    observations: &[SearchResultObservation],
+    count: impl Fn(&SearchResultObservation) -> u32,
+) -> u32 {
+    let mut ed2k_by_server = HashMap::<(bool, &str), u32>::new();
+    let mut non_ed2k_max = 0_u32;
+
+    for observation in observations {
+        let value = count(observation);
+        if matches!(observation.origin.as_str(), "server" | "global") {
+            // A canonical endpoint unifies connected and global observations
+            // from the same server. Legacy rows without provenance retain one
+            // conservative bucket per origin rather than being summed blindly.
+            let key = observation
+                .server_endpoint
+                .as_deref()
+                .map_or((false, observation.origin.as_str()), |endpoint| {
+                    (true, endpoint)
+                });
+            ed2k_by_server
+                .entry(key)
+                .and_modify(|current| *current = (*current).max(value))
+                .or_insert(value);
+        } else {
+            non_ed2k_max = non_ed2k_max.max(value);
+        }
+    }
+
+    ed2k_by_server
+        .into_values()
+        .fold(0_u32, u32::saturating_add)
+        .max(non_ed2k_max)
 }
 
 fn best_media_observation<'a>(
