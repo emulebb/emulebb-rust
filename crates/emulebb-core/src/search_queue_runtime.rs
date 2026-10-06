@@ -18,7 +18,14 @@ use crate::search_query::SearchNetworkMethod;
 use crate::search_queue::{
     ConcreteSearchLane, QueuedSearch, SEARCH_QUEUE_RECHECK, SearchBackendReadiness, SearchDispatch,
 };
-use crate::{EmulebbCore, SearchCreate, SearchResult, kad_public_search, search_state};
+use crate::{
+    EmulebbCore, SearchCreate, SearchProgress, SearchResult, kad_public_search, search_state,
+};
+
+pub(crate) enum SearchLiveUpdate {
+    Result(Box<SearchResult>),
+    Progress(SearchProgress),
+}
 
 /// Outcome of one eD2k server keyword-search execution
 /// (`EmulebbCore::search_ed2k_servers`).
@@ -159,6 +166,11 @@ impl EmulebbCore {
             SearchNetworkMethod::Ed2kServer => "server",
             _ => "global",
         };
+        self.update_search_progress(
+            &entry.search_id,
+            SearchProgress::new("connected-server", 0, Some(1), "servers"),
+        )
+        .await;
         let (incremental_tx, incremental_rx) = mpsc::unbounded_channel();
         let outcome = self
             .await_with_incremental_results(
@@ -243,6 +255,11 @@ impl EmulebbCore {
         cancel: &CancellationToken,
     ) {
         let dht = self.ed2k_dht_node().await;
+        self.update_search_progress(
+            &entry.search_id,
+            SearchProgress::new("kad-traversal", 0, None, ""),
+        )
+        .await;
         let (incremental_tx, incremental_rx) = mpsc::unbounded_channel();
         let outcome = match dht {
             Some(dht) => {
@@ -302,25 +319,51 @@ impl EmulebbCore {
         &self,
         search_id: &str,
         request: &SearchCreate,
-        mut incremental_rx: mpsc::UnboundedReceiver<SearchResult>,
+        mut incremental_rx: mpsc::UnboundedReceiver<SearchLiveUpdate>,
         operation: impl Future<Output = T>,
     ) -> T {
         tokio::pin!(operation);
         loop {
             tokio::select! {
                 output = &mut operation => {
-                    while let Ok(result) = incremental_rx.try_recv() {
-                        self.merge_incremental_search_result(search_id, request, result).await;
+                    while let Ok(update) = incremental_rx.try_recv() {
+                        self.apply_search_live_update(search_id, request, update).await;
                     }
                     return output;
                 }
-                result = incremental_rx.recv() => {
-                    if let Some(result) = result {
-                        self.merge_incremental_search_result(search_id, request, result).await;
+                update = incremental_rx.recv() => {
+                    if let Some(update) = update {
+                        self.apply_search_live_update(search_id, request, update).await;
                     }
                 }
             }
         }
+    }
+
+    async fn apply_search_live_update(
+        &self,
+        search_id: &str,
+        request: &SearchCreate,
+        update: SearchLiveUpdate,
+    ) {
+        match update {
+            SearchLiveUpdate::Result(result) => {
+                self.merge_incremental_search_result(search_id, request, *result)
+                    .await;
+            }
+            SearchLiveUpdate::Progress(progress) => {
+                self.update_search_progress(search_id, progress).await;
+            }
+        }
+    }
+
+    async fn update_search_progress(&self, search_id: &str, progress: SearchProgress) {
+        let mut state = self.state.lock().await;
+        let Some(search) = state.searches.get_mut(search_id) else {
+            return;
+        };
+        search.progress = progress;
+        search.updated_at = Utc::now();
     }
 
     /// Makes accepted network observations visible to REST/UI polling while a
@@ -430,6 +473,11 @@ impl EmulebbCore {
             if let Some(resolved_method) = resolved_method {
                 search.resolved_method = Some(resolved_method.to_string());
             }
+            match status {
+                "queued" => search.progress = SearchProgress::new("queued", 0, None, ""),
+                "running" => search.progress = SearchProgress::new("starting", 0, None, ""),
+                _ => {}
+            }
             search.updated_at = Utc::now();
             search.clone()
         };
@@ -476,6 +524,10 @@ impl EmulebbCore {
                 search.status = "completed".to_string();
                 search.status_reason = None;
                 search.resolved_method = concrete_method(method_token).map(str::to_string);
+                search.progress.phase = "completed".to_string();
+                if let Some(total_units) = search.progress.total_units {
+                    search.progress.completed_units = total_units;
+                }
                 search.updated_at = Utc::now();
                 search.clone()
             };
@@ -524,6 +576,7 @@ impl EmulebbCore {
             if let Some(method) = concrete_method(method_token) {
                 search.resolved_method = Some(method.to_string());
             }
+            search.progress.phase = "failed".to_string();
             search.updated_at = Utc::now();
             search.clone()
         };

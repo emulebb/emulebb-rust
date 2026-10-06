@@ -69,6 +69,12 @@ describe("SearchView", () => {
       type: "audio",
       status: "error",
       statusReason: "network-search-failed",
+      progress: {
+        phase: "failed",
+        completedUnits: 4,
+        totalUnits: 10,
+        unit: "servers"
+      },
       resultCount: 1,
       total: 1,
       offset: 0,
@@ -152,6 +158,8 @@ describe("SearchView", () => {
     );
 
     expect(screen.getByText("network-search-failed")).toBeInTheDocument();
+    expect(screen.getByText("failed")).toBeInTheDocument();
+    expect(screen.getByText("4 / 10 servers")).toBeInTheDocument();
     expect(screen.getByText("Extension: .flac")).toBeInTheDocument();
     expect(screen.getByText("Minimum complete: 2")).toBeInTheDocument();
     expect(screen.getByText("Also seen as: Alternate.flac")).toBeInTheDocument();

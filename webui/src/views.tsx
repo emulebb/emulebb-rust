@@ -524,6 +524,17 @@ export function SearchView(props: {
   const resultPageEnd = Math.min(resultOffset + results.length, resultTotal);
   const searchQueryError = searchQueryValidationError(query);
   const displayedStatus = displayedSearch?.status ?? displayedSearch?.state ?? "unknown";
+  const searchProgress = displayedSearch?.progress;
+  const searchPhaseLabel = searchProgress?.phase
+    ? searchProgress.phase.replace(/-/g, " ")
+    : "—";
+  const searchProgressLabel = searchProgress?.totalUnits != null
+    ? `${searchProgress.completedUnits.toLocaleString()} / ${searchProgress.totalUnits.toLocaleString()} ${searchProgress.unit}`.trim()
+    : displayedStatus === "running"
+      ? "Active · dynamic scope"
+      : displayedStatus === "queued"
+        ? "Waiting"
+        : "—";
   const resolvedMethodLabel = displayedSearch?.resolvedMethod
     ?? (displayedStatus === "completed"
       ? "none (local only)"
@@ -673,6 +684,10 @@ export function SearchView(props: {
             <strong>{displayedSearch.type || "any"}</strong>
             <span>Status reason</span>
             <strong>{displayedSearch.statusReason ?? "—"}</strong>
+            <span>Search phase</span>
+            <strong>{searchPhaseLabel}</strong>
+            <span>Phase progress</span>
+            <strong>{searchProgressLabel}</strong>
           </div>
           <div class="search-criteria" aria-label="Applied search criteria">
             <strong>Applied criteria</strong>

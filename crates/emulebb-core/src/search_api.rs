@@ -103,6 +103,16 @@ impl EmulebbCore {
             resolved_method: None,
             status: status.to_string(),
             status_reason,
+            progress: SearchProgress::new(
+                if queue_lane.is_some() {
+                    "queued"
+                } else {
+                    "local-index"
+                },
+                0,
+                None,
+                "",
+            ),
             created_at: now,
             updated_at: now,
             results,

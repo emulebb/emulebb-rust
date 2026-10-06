@@ -260,10 +260,10 @@ pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,
     HostNameResolution, IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate,
-    NetworkStatus, NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
-    SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation, SearchSpec,
-    ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status, Transfer, TransferComment,
-    TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
+    NetworkStatus, NullableStringField, NullableU32Field, Search, SearchCreate, SearchProgress,
+    SearchResult, SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation,
+    SearchSpec, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status, Transfer,
+    TransferComment, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
     TransferEventResetReason, TransferEventType, TransferPart, TransferSource, TransferStats,
     TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
     VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
@@ -930,7 +930,9 @@ impl EmulebbCore {
         request: &SearchCreate,
         network_method: Option<SearchNetworkMethod>,
         cancel: &CancellationToken,
-        incremental_results: Option<&tokio::sync::mpsc::UnboundedSender<SearchResult>>,
+        incremental_results: Option<
+            &tokio::sync::mpsc::UnboundedSender<search_queue_runtime::SearchLiveUpdate>,
+        >,
     ) -> Result<Ed2kServerSearchOutcome> {
         if !matches!(
             network_method,
@@ -984,7 +986,9 @@ impl EmulebbCore {
                                 connected_server_endpoint,
                                 file.clone(),
                             );
-                            let _ = incremental_results.send(mapped);
+                            let _ = incremental_results.send(
+                                search_queue_runtime::SearchLiveUpdate::Result(Box::new(mapped)),
+                            );
                         }
                         files.push(("server", connected_server_endpoint, file));
                     }
@@ -1005,6 +1009,11 @@ impl EmulebbCore {
                 request.query
             ),
         }
+        if let Some(incremental_results) = incremental_results {
+            let _ = incremental_results.send(search_queue_runtime::SearchLiveUpdate::Progress(
+                SearchProgress::new("connected-server", 1, Some(1), "servers"),
+            ));
+        }
         if matches!(network_method, Some(SearchNetworkMethod::Ed2kGlobal)) {
             let global_result_sink =
                 |observation: emulebb_ed2k::ed2k_server::Ed2kServerSearchObservation| {
@@ -1016,9 +1025,23 @@ impl EmulebbCore {
                             Some(observation.server_endpoint),
                             observation.file,
                         );
-                        let _ = incremental_results.send(mapped);
+                        let _ = incremental_results.send(
+                            search_queue_runtime::SearchLiveUpdate::Result(Box::new(mapped)),
+                        );
                     }
                 };
+            let global_progress_sink = |completed: usize, total: usize| {
+                if let Some(incremental_results) = incremental_results {
+                    let _ = incremental_results.send(
+                        search_queue_runtime::SearchLiveUpdate::Progress(SearchProgress::new(
+                            "global-server-sweep",
+                            completed,
+                            Some(total),
+                            "servers",
+                        )),
+                    );
+                }
+            };
             let dead_server_endpoints = self
                 .ed2k_dead_server_endpoints(config.dead_server_retries)
                 .await;
@@ -1030,6 +1053,9 @@ impl EmulebbCore {
                 query: &request.query,
                 criteria: &criteria,
                 result_sink: incremental_results.is_some().then_some(&global_result_sink),
+                progress_sink: incremental_results
+                    .is_some()
+                    .then_some(&global_progress_sink),
                 cancel,
             })
             .await

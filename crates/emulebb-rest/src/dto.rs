@@ -5,7 +5,7 @@
 //! `page()` projections onto the shared `PageQuery`. Extracted verbatim from
 //! `lib.rs` during the maintainability restructuring; behavior is unchanged.
 
-use emulebb_core::{SearchResult, SearchSpec};
+use emulebb_core::{SearchProgress, SearchResult, SearchSpec};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,6 +181,7 @@ pub(crate) struct SearchResultsPage {
     /// Additive REST field: honest reason for a non-completed status (e.g.
     /// `waiting-for-server-connection` while queued). `null` when absent.
     pub(crate) status_reason: Option<String>,
+    pub(crate) progress: SearchProgress,
     pub(crate) total: usize,
     pub(crate) offset: usize,
     pub(crate) limit: usize,

@@ -228,6 +228,13 @@ export type SearchCriteria = {
   artist?: string;
 };
 
+export type SearchProgress = {
+  phase: string;
+  completedUnits: number;
+  totalUnits?: number | null;
+  unit: string;
+};
+
 export type SearchItem = {
   id: string;
   query?: string;
@@ -238,6 +245,7 @@ export type SearchItem = {
   resolvedMethod?: string | null;
   type?: string;
   criteria?: SearchCriteria;
+  progress?: SearchProgress;
   items?: SearchResult[];
   results?: SearchResult[];
   total?: number;

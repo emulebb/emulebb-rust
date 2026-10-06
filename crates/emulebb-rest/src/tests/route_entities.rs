@@ -520,6 +520,10 @@ async fn search_results_use_canonical_paging_query() {
     assert_eq!(value["data"]["criteria"]["title"], "");
     assert_eq!(value["data"]["criteria"]["album"], "");
     assert_eq!(value["data"]["criteria"]["artist"], "");
+    assert_eq!(value["data"]["progress"]["phase"], "local-index");
+    assert_eq!(value["data"]["progress"]["completedUnits"], 0);
+    assert!(value["data"]["progress"].get("totalUnits").is_none());
+    assert_eq!(value["data"]["progress"]["unit"], "");
     let search_id = value["data"]["id"].as_str().unwrap();
 
     let response = app
@@ -544,6 +548,7 @@ async fn search_results_use_canonical_paging_query() {
     assert!(value["data"].get("method").is_none());
     assert_eq!(value["data"]["criteria"]["extension"], "iso");
     assert_eq!(value["data"]["criteria"]["artist"], "");
+    assert!(value["data"]["progress"].is_object());
     // The eMuleBB master returns paged search results under "items" with
     // total/offset/limit (search/results shares the common page shape).
     assert_eq!(value["data"]["total"], 3);

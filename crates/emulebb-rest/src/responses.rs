@@ -582,6 +582,7 @@ pub(crate) fn search_session_response(search: &Search) -> Value {
         "criteria": search_criteria_response(&search.spec),
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
+        "progress": search.progress,
         "resultCount": search.results.len()
     })
 }
@@ -599,6 +600,7 @@ pub(crate) fn search_response(search: &Search) -> Value {
         "criteria": search_criteria_response(&search.spec),
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
+        "progress": search.progress,
         "total": 0,
         "offset": 0,
         "limit": 100,
@@ -616,6 +618,7 @@ pub(crate) fn search_page_response(search: &SearchResultsPage) -> Value {
         "criteria": search_criteria_response(&search.spec),
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
+        "progress": search.progress,
         "total": search.total,
         "offset": search.offset,
         "limit": search.limit,

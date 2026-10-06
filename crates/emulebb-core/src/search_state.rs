@@ -7,7 +7,9 @@ use emulebb_metadata::{
     MetadataStore, normalized_search_query,
 };
 
-use crate::{Search, SearchResult, SearchResultMedia, SearchResultObservation, SearchSpec};
+use crate::{
+    Search, SearchProgress, SearchResult, SearchResultMedia, SearchResultObservation, SearchSpec,
+};
 
 pub(crate) fn next_numeric_search_id(searches: &HashMap<String, Search>) -> u32 {
     searches
@@ -190,12 +192,19 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
         artist: search.spec.artist,
     };
     let file_type_filter = spec.r#type.clone();
+    let progress_phase = match status.as_str() {
+        "completed" => "completed",
+        "error" => "failed",
+        "queued" => "queued",
+        _ => "interrupted",
+    };
     Ok(Search {
         id: search.public_id.clone(),
         spec,
         resolved_method: search.resolved_method,
         status,
         status_reason,
+        progress: SearchProgress::new(progress_phase, 0, None, ""),
         created_at,
         updated_at,
         results: search
@@ -339,6 +348,7 @@ mod tests {
             resolved_method: Some("global".to_string()),
             status: "error".to_string(),
             status_reason: Some("network-search-failed".to_string()),
+            progress: SearchProgress::new("failed", 0, None, ""),
             created_at: now,
             updated_at: now,
             results: vec![result],
@@ -363,5 +373,7 @@ mod tests {
             reloaded.status_reason.as_deref(),
             Some("network-search-failed")
         );
+        assert_eq!(reloaded.progress.phase, "failed");
+        assert_eq!(reloaded.progress.total_units, None);
     }
 }

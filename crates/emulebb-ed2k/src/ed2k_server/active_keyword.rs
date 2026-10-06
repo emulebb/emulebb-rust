@@ -54,6 +54,8 @@ pub struct Ed2kUdpKeywordSearchOptions<'a> {
     /// Optional live-result sink. The terminal return value remains the full
     /// result set; this sink lets callers present pages during a long sweep.
     pub result_sink: Option<&'a (dyn Fn(Ed2kServerSearchObservation) + Send + Sync + 'a)>,
+    /// Optional `(completed, total)` server-walk progress sink.
+    pub progress_sink: Option<&'a (dyn Fn(usize, usize) + Send + Sync + 'a)>,
     pub cancel: &'a CancellationToken,
 }
 
@@ -111,10 +113,14 @@ pub async fn search_keyword_udp_servers(
         query,
         criteria,
         result_sink,
+        progress_sink,
         cancel,
     } = options;
     let configured_servers =
         eligible_udp_keyword_search_servers(config, excluded_endpoint, dead_server_endpoints)?;
+    if let Some(progress_sink) = progress_sink {
+        progress_sink(0, configured_servers.len());
+    }
     if configured_servers.is_empty() {
         return Ok(Vec::new());
     }
@@ -135,6 +141,9 @@ pub async fn search_keyword_udp_servers(
     let server_count = configured_servers.len();
 
     for (attempt_index, configured_server) in configured_servers.into_iter().enumerate() {
+        if let Some(progress_sink) = progress_sink {
+            progress_sink(attempt_index, server_count);
+        }
         if cancel.is_cancelled() {
             return Ok(Vec::new());
         }
@@ -228,6 +237,10 @@ pub async fn search_keyword_udp_servers(
                 Err(_) => break,
             }
         }
+    }
+
+    if let Some(progress_sink) = progress_sink {
+        progress_sink(server_count, server_count);
     }
 
     if results.is_empty()

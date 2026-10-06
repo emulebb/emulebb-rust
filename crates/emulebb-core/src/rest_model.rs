@@ -360,6 +360,37 @@ impl SearchSpec {
 /// resulting search session.
 pub type SearchCreate = SearchSpec;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchProgress {
+    /// Stable machine-readable phase token.
+    pub phase: String,
+    /// Completed work units for phases with measurable progress.
+    pub completed_units: u32,
+    /// Total work units when knowable. Kad traversal intentionally leaves this
+    /// absent because its contact frontier changes as replies arrive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_units: Option<u32>,
+    /// Human-readable unit label such as `servers`; empty for unbounded phases.
+    pub unit: String,
+}
+
+impl SearchProgress {
+    pub(crate) fn new(
+        phase: impl Into<String>,
+        completed_units: usize,
+        total_units: Option<usize>,
+        unit: impl Into<String>,
+    ) -> Self {
+        Self {
+            phase: phase.into(),
+            completed_units: u32::try_from(completed_units).unwrap_or(u32::MAX),
+            total_units: total_units.map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            unit: unit.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Search {
@@ -377,6 +408,8 @@ pub struct Search {
     /// running normally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
+    #[serde(default)]
+    pub progress: SearchProgress,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub results: Vec<SearchResult>,

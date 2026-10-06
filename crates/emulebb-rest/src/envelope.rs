@@ -121,6 +121,7 @@ pub(crate) fn search_results_page(
         resolved_method: search.resolved_method,
         status: search.status,
         status_reason: search.status_reason,
+        progress: search.progress,
         total,
         offset,
         limit,
