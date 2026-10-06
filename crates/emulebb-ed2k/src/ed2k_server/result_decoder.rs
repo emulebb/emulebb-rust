@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
 use super::flags::is_low_id;
-use super::tag_codec::{DecodedTagValue, decode_tag_value};
+use super::tag_codec::{DecodedTagName, DecodedTagValue, decode_tag_details};
 use super::{
     Ed2kFoundSource, Ed2kSearchFile, FT_AICH_HASH, FT_COMPLETE_SOURCES, FT_FILENAME, FT_FILERATING,
-    FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE, FT_FOLDERNAME, FT_SOURCES, OP_EDONKEYPROT,
-    OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES, SOURCE_OBFUSCATION_USER_HASH_PRESENT,
-    ipv4_from_client_id,
+    FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE, FT_FOLDERNAME, FT_MEDIA_BITRATE, FT_MEDIA_CODEC,
+    FT_MEDIA_LENGTH, FT_SOURCES, OP_EDONKEYPROT, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES,
+    SOURCE_OBFUSCATION_USER_HASH_PRESENT, ipv4_from_client_id,
 };
 
 #[cfg(test)]
@@ -149,45 +149,87 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
     let mut size = None;
     let mut size_hi = None;
     let mut file_type = None;
+    let mut media_length_seconds = None;
+    let mut media_bitrate_kbps = None;
+    let mut media_codec = None;
     let mut source_count = None;
     let mut complete_source_count = None;
     let mut rating = None;
     let mut aich_hash = None;
     let mut directory = None;
     for _ in 0..tag_count {
-        let (tag_name, tag_value, rest) = decode_tag_value(cursor)?;
+        let (tag, rest) = decode_tag_details(cursor)?;
         cursor = rest;
-        match (tag_name, tag_value) {
-            (Some(FT_FILENAME), Some(DecodedTagValue::String(value))) if name.is_none() => {
-                name = Some(value);
+        match (&tag.name, &tag.value) {
+            (DecodedTagName::Numeric(FT_FILENAME), Some(DecodedTagValue::String(value)))
+                if name.is_none() =>
+            {
+                name = Some(value.clone());
             }
-            (Some(FT_FILESIZE), Some(DecodedTagValue::Unsigned(value))) => {
-                size = Some(value);
+            (DecodedTagName::Numeric(FT_FILESIZE), Some(DecodedTagValue::Unsigned(value))) => {
+                size = Some(*value);
             }
-            (Some(FT_FILESIZE_HI), Some(DecodedTagValue::Unsigned(value))) => {
-                size_hi = Some(value);
+            (DecodedTagName::Numeric(FT_FILESIZE_HI), Some(DecodedTagValue::Unsigned(value))) => {
+                size_hi = Some(*value);
             }
-            (Some(FT_FILETYPE), Some(DecodedTagValue::String(value))) if file_type.is_none() => {
-                file_type = Some(value);
+            (DecodedTagName::Numeric(FT_FILETYPE), Some(DecodedTagValue::String(value)))
+                if file_type.is_none() =>
+            {
+                file_type = Some(value.clone());
             }
-            (Some(FT_SOURCES), Some(DecodedTagValue::Unsigned(value))) => {
-                source_count = Some(u32::try_from(value).context("ED2K source count overflow")?);
+            (DecodedTagName::Numeric(FT_MEDIA_LENGTH), Some(value))
+                if media_length_seconds.is_none() =>
+            {
+                media_length_seconds = decode_media_length(value)?;
             }
-            (Some(FT_COMPLETE_SOURCES), Some(DecodedTagValue::Unsigned(value))) => {
+            (DecodedTagName::Text(tag_name), Some(value))
+                if tag_name.eq_ignore_ascii_case("length") && media_length_seconds.is_none() =>
+            {
+                media_length_seconds = decode_media_length(value)?;
+            }
+            (DecodedTagName::Numeric(FT_MEDIA_BITRATE), Some(value))
+                if media_bitrate_kbps.is_none() =>
+            {
+                media_bitrate_kbps = decode_media_u32(value, "bitrate")?;
+            }
+            (DecodedTagName::Text(tag_name), Some(value))
+                if tag_name.eq_ignore_ascii_case("bitrate") && media_bitrate_kbps.is_none() =>
+            {
+                media_bitrate_kbps = decode_media_u32(value, "bitrate")?;
+            }
+            (DecodedTagName::Numeric(FT_MEDIA_CODEC), Some(DecodedTagValue::String(value)))
+                if media_codec.is_none() && !value.is_empty() =>
+            {
+                media_codec = Some(value.clone());
+            }
+            (DecodedTagName::Text(tag_name), Some(DecodedTagValue::String(value)))
+                if tag_name.eq_ignore_ascii_case("codec")
+                    && media_codec.is_none()
+                    && !value.is_empty() =>
+            {
+                media_codec = Some(value.clone());
+            }
+            (DecodedTagName::Numeric(FT_SOURCES), Some(DecodedTagValue::Unsigned(value))) => {
+                source_count = Some(u32::try_from(*value).context("ED2K source count overflow")?);
+            }
+            (
+                DecodedTagName::Numeric(FT_COMPLETE_SOURCES),
+                Some(DecodedTagValue::Unsigned(value)),
+            ) => {
                 complete_source_count =
-                    Some(u32::try_from(value).context("ED2K complete source count overflow")?);
+                    Some(u32::try_from(*value).context("ED2K complete source count overflow")?);
             }
-            (Some(FT_FILERATING), Some(DecodedTagValue::Unsigned(value))) => {
-                let packed_average = (value & u64::from(u8::MAX)) as u8;
+            (DecodedTagName::Numeric(FT_FILERATING), Some(DecodedTagValue::Unsigned(value))) => {
+                let packed_average = (*value & u64::from(u8::MAX)) as u8;
                 rating = Some((packed_average / (u8::MAX / 5)).min(5));
             }
-            (Some(FT_AICH_HASH), Some(DecodedTagValue::String(value))) => {
-                aich_hash = canonical_aich_hash(&value);
+            (DecodedTagName::Numeric(FT_AICH_HASH), Some(DecodedTagValue::String(value))) => {
+                aich_hash = canonical_aich_hash(value);
             }
-            (Some(FT_FOLDERNAME), Some(DecodedTagValue::String(value)))
+            (DecodedTagName::Numeric(FT_FOLDERNAME), Some(DecodedTagValue::String(value)))
                 if directory.is_none() && !value.is_empty() =>
             {
-                directory = Some(value);
+                directory = Some(value.clone());
             }
             _ => {}
         }
@@ -208,6 +250,9 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
             file_name: name,
             file_size,
             file_type,
+            media_length_seconds,
+            media_bitrate_kbps,
+            media_codec,
             source_count,
             complete_source_count,
             rating,
@@ -216,6 +261,42 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
         },
         cursor,
     ))
+}
+
+fn decode_media_length(value: &DecodedTagValue) -> Result<Option<u32>> {
+    match value {
+        DecodedTagValue::Unsigned(_) => decode_media_u32(value, "length"),
+        DecodedTagValue::String(value) => Ok(parse_media_length(value)),
+        _ => Ok(None),
+    }
+}
+
+fn decode_media_u32(value: &DecodedTagValue, field: &str) -> Result<Option<u32>> {
+    match value {
+        DecodedTagValue::Unsigned(value) => Ok(Some(
+            u32::try_from(*value).with_context(|| format!("ED2K media {field} overflow"))?,
+        )),
+        DecodedTagValue::String(value) => Ok(value.trim().parse::<u32>().ok()),
+        _ => Ok(None),
+    }
+}
+
+fn parse_media_length(value: &str) -> Option<u32> {
+    let parts = value
+        .trim()
+        .split(':')
+        .map(str::parse::<u32>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()?;
+    match parts.as_slice() {
+        [seconds] => Some(*seconds),
+        [minutes, seconds] if *seconds < 60 => minutes.checked_mul(60)?.checked_add(*seconds),
+        [hours, minutes, seconds] if *minutes < 60 && *seconds < 60 => hours
+            .checked_mul(3_600)?
+            .checked_add(minutes.checked_mul(60)?)?
+            .checked_add(*seconds),
+        _ => None,
+    }
 }
 
 fn canonical_aich_hash(value: &str) -> Option<String> {
@@ -296,7 +377,9 @@ fn udp_chain_matches(payload: &[u8], opcode: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tag_codec::push_short_string_tag;
+    use super::super::tag_codec::{
+        push_named_int_tag, push_named_string_tag, push_short_int_tag, push_short_string_tag,
+    };
     use super::*;
 
     #[test]
@@ -350,5 +433,56 @@ mod tests {
             Some("Sample Payload.bin")
         );
         assert_eq!(pages[0].files[0].file_size, Some(12345));
+    }
+
+    #[test]
+    fn search_result_decodes_stock_media_tags() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&[0x22; 16]);
+        payload.extend_from_slice(&[0u8; 4]);
+        payload.extend_from_slice(&[0u8; 2]);
+        payload.extend_from_slice(&4u32.to_le_bytes());
+        push_short_string_tag(&mut payload, FT_FILENAME, "Example.mp3");
+        push_short_int_tag(&mut payload, FT_MEDIA_LENGTH, 321);
+        push_short_int_tag(&mut payload, FT_MEDIA_BITRATE, 192);
+        push_short_string_tag(&mut payload, FT_MEDIA_CODEC, "MP3");
+        payload.push(0x00);
+
+        let page = decode_search_result_page(&payload).expect("media result decodes");
+        let file = &page.files[0];
+        assert_eq!(file.media_length_seconds, Some(321));
+        assert_eq!(file.media_bitrate_kbps, Some(192));
+        assert_eq!(file.media_codec.as_deref(), Some("MP3"));
+    }
+
+    #[test]
+    fn legacy_media_length_text_parses_stock_clock_formats() {
+        assert_eq!(parse_media_length("321"), Some(321));
+        assert_eq!(parse_media_length("05:21"), Some(321));
+        assert_eq!(parse_media_length("01:05:21"), Some(3_921));
+        assert_eq!(parse_media_length("05:99"), None);
+        assert_eq!(parse_media_length("not-a-duration"), None);
+    }
+
+    #[test]
+    fn search_result_decodes_legacy_named_media_tags() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&[0x33; 16]);
+        payload.extend_from_slice(&[0u8; 4]);
+        payload.extend_from_slice(&[0u8; 2]);
+        payload.extend_from_slice(&4u32.to_le_bytes());
+        push_short_string_tag(&mut payload, FT_FILENAME, "Legacy.mp3");
+        push_named_string_tag(&mut payload, "length", "05:21");
+        push_named_int_tag(&mut payload, "bitrate", 192);
+        push_named_string_tag(&mut payload, "codec", "MP3");
+        payload.push(0x00);
+
+        let page = decode_search_result_page(&payload).expect("legacy media result decodes");
+        let file = &page.files[0];
+        assert_eq!(file.media_length_seconds, Some(321));
+        assert_eq!(file.media_bitrate_kbps, Some(192));
+        assert_eq!(file.media_codec.as_deref(), Some("MP3"));
     }
 }
