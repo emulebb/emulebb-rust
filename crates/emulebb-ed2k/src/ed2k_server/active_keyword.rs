@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::packet_handler::decode_id_change_payload;
+use super::server_entry::ConfiguredServerEntry;
 use super::{
     Ed2kSearchFile, Ed2kServerState, OP_GLOBSEARCHRES, OP_IDCHANGE, OP_LOGINREQUEST,
     OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, ResolvedServerEntry,
@@ -48,10 +49,8 @@ pub struct Ed2kUdpKeywordSearchOptions<'a> {
     /// Servers at/over the dead-server retry threshold, skipped like eMule's UDP
     /// keyword/stat walk (`GetFailedCount() >= GetDeadServerRetries()`).
     pub dead_server_endpoints: &'a [SocketAddr],
-    pub max_attempts: usize,
     pub query: &'a str,
     pub criteria: &'a SearchCriteria,
-    pub timeout: Duration,
     pub cancel: &'a CancellationToken,
 }
 
@@ -68,6 +67,24 @@ fn encode_udp_keyword_search_payloads(
         legacy: encode_search_request_with_criteria(query, criteria, false)?,
         large_file: encode_search_request_with_criteria(query, criteria, true)?,
     })
+}
+
+fn eligible_udp_keyword_search_servers(
+    config: &Ed2kRuntimeConfig,
+    excluded_endpoint: Option<SocketAddr>,
+    dead_server_endpoints: &[SocketAddr],
+) -> Result<Vec<ConfiguredServerEntry>> {
+    let mut servers = configured_server_entries(config)?;
+    // eMule skips servers at/over the dead-server retry threshold in the UDP
+    // keyword/stat walk (ServerList.cpp:265); drop them before the walk.
+    retain_live_servers(&mut servers, dead_server_endpoints);
+    if let Some(excluded_endpoint) = excluded_endpoint {
+        servers.retain(|entry| {
+            entry.host != excluded_endpoint.ip().to_string()
+                || entry.port != excluded_endpoint.port()
+        });
+    }
+    Ok(servers)
 }
 
 /// Executes ED2K global UDP keyword searches across configured servers.
@@ -88,22 +105,12 @@ pub async fn search_keyword_udp_servers(
         config,
         excluded_endpoint,
         dead_server_endpoints,
-        max_attempts,
         query,
         criteria,
-        timeout,
         cancel,
     } = options;
-    let mut configured_servers = configured_server_entries(config)?;
-    // eMule skips servers at/over the dead-server retry threshold in the UDP
-    // keyword/stat walk (ServerList.cpp:265); drop them before the walk.
-    retain_live_servers(&mut configured_servers, dead_server_endpoints);
-    if let Some(excluded_endpoint) = excluded_endpoint {
-        configured_servers.retain(|entry| {
-            entry.host != excluded_endpoint.ip().to_string()
-                || entry.port != excluded_endpoint.port()
-        });
-    }
+    let configured_servers =
+        eligible_udp_keyword_search_servers(config, excluded_endpoint, dead_server_endpoints)?;
     if configured_servers.is_empty() {
         return Ok(Vec::new());
     }
@@ -121,22 +128,11 @@ pub async fn search_keyword_udp_servers(
     let mut last_error = None;
     let mut queried_servers = Vec::new();
     let per_server_timeout = Duration::from_millis(750);
-    let overall_deadline = TokioInstant::now() + timeout.max(per_server_timeout);
+    let server_count = configured_servers.len();
 
-    for (attempt_index, configured_server) in configured_servers
-        .into_iter()
-        .take(max_attempts.max(1))
-        .enumerate()
-    {
+    for (attempt_index, configured_server) in configured_servers.into_iter().enumerate() {
         if cancel.is_cancelled() {
             return Ok(Vec::new());
-        }
-        let Some(overall_remaining) = overall_deadline.checked_duration_since(TokioInstant::now())
-        else {
-            break;
-        };
-        if overall_remaining.is_zero() {
-            break;
         }
         let resolved_server = match resolve_server_entry(&configured_server).await {
             Ok(server) => server,
@@ -153,7 +149,7 @@ pub async fn search_keyword_udp_servers(
         debug!(
             "ED2K UDP keyword search attempt={}/{} endpoint={} name={}",
             attempt_index + 1,
-            max_attempts.max(1),
+            server_count,
             resolved_server.base_endpoint(),
             resolved_server.entry.display_name()
         );
@@ -173,7 +169,7 @@ pub async fn search_keyword_udp_servers(
         }
         queried_servers.push(resolved_server.clone());
 
-        let per_server_deadline = TokioInstant::now() + overall_remaining.min(per_server_timeout);
+        let per_server_deadline = TokioInstant::now() + per_server_timeout;
         loop {
             if cancel.is_cancelled() {
                 return Ok(Vec::new());
@@ -510,10 +506,12 @@ async fn search_keyword_on_server(
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
+    use crate::config::Ed2kRuntimeConfig;
+
     use super::super::{ConfiguredServerEntry, ResolvedServerEntry};
     use super::{
-        SearchCriteria, encode_search_request_with_criteria, encode_udp_keyword_search_payloads,
-        queried_udp_response_server,
+        SearchCriteria, eligible_udp_keyword_search_servers, encode_search_request_with_criteria,
+        encode_udp_keyword_search_payloads, queried_udp_response_server,
     };
 
     fn resolved(ip: Ipv4Addr, port: u16) -> ResolvedServerEntry {
@@ -580,5 +578,21 @@ mod tests {
             encode_search_request_with_criteria("sample", &criteria, true).unwrap()
         );
         assert_ne!(payloads.legacy, payloads.large_file);
+    }
+
+    #[test]
+    fn udp_keyword_search_walk_keeps_every_eligible_server() {
+        let mut config = Ed2kRuntimeConfig::default();
+        config.server_endpoints = (1_u8..=100)
+            .map(|host| format!("192.0.2.{host}:4661"))
+            .collect();
+        let excluded = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 40), 4661));
+        let dead = [SocketAddr::from((Ipv4Addr::new(192, 0, 2, 70), 4661))];
+
+        let servers = eligible_udp_keyword_search_servers(&config, Some(excluded), &dead).unwrap();
+
+        assert_eq!(servers.len(), 98);
+        assert_eq!(servers.first().unwrap().host, "192.0.2.1");
+        assert_eq!(servers.last().unwrap().host, "192.0.2.100");
     }
 }

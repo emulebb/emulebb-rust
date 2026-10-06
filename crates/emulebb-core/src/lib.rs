@@ -176,12 +176,11 @@ use ed2k_source_batch::{
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity,
     claim_ed2k_server_callback_request, collect_kad_ed2k_metadata, collect_kad_ed2k_sources,
-    configured_server_attempts, direct_download_candidate_sources, drop_self_sources,
-    ed2k_server_callback_permitted, ed2k_server_callback_route, found_source_from_hint,
-    global_udp_source_batch_server_attempts, global_udp_source_search_excluded_endpoint,
-    hash_only_ed2k_search_query, kad_metadata_words, kad_source_result_to_ed2k_found_source,
-    keyword_target, manifest_has_ed2k_transfer_progress, merge_download_sources,
-    new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
+    direct_download_candidate_sources, drop_self_sources, ed2k_server_callback_permitted,
+    ed2k_server_callback_route, found_source_from_hint, global_udp_source_batch_server_attempts,
+    global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query, kad_metadata_words,
+    kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
+    merge_download_sources, new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
     should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
     should_query_server_udp_source_supplement, should_refresh_ed2k_server_sources,
     should_skip_no_progress_source_requery, significant_keyword_words_unique,
@@ -1002,10 +1001,8 @@ impl EmulebbCore {
                 config: &config,
                 excluded_endpoint: connected_server_endpoint,
                 dead_server_endpoints: &dead_server_endpoints,
-                max_attempts: configured_server_attempts(&config),
                 query: &request.query,
                 criteria: &criteria,
-                timeout,
                 cancel: &cancel,
             })
             .await
