@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, ensure};
-use emulebb_ed2k::ed2k_server::encode_kad_search_expression;
+use emulebb_ed2k::ed2k_server::{encode_kad_search_expression, flat_and_search_terms};
 use emulebb_index::matches_restrictive_keyword_payload;
 use emulebb_kad_dht::{DhtNode, RpcWorkClass};
 use emulebb_kad_proto::{NodeId, SearchKeyReq};
@@ -135,6 +135,24 @@ pub(crate) fn kad_public_search_keyword(query: &str) -> Result<String> {
             keyword = keyword[1..].to_string();
         }
     }
+    // Stock eMule enables RearrangeKadSearchKeywords by default. For a pure
+    // AND expression it chooses the longest valid unquoted term as the primary
+    // Kad lookup key, which avoids hammering common buckets such as "the" and
+    // normally yields a much more selective result set. OR and NOT trees must
+    // keep their original first term because changing their lookup bucket can
+    // make the boolean predicate incomplete.
+    if let Some(terms) = flat_and_search_terms(expression)? {
+        for candidate in terms {
+            if candidate.len() >= 3
+                && candidate.len() > keyword.len()
+                && !candidate
+                    .chars()
+                    .any(|character| INVALID_KAD_KEYWORD_CHARS.contains(character))
+            {
+                keyword = candidate;
+            }
+        }
+    }
     // Lower-case with the oracle's frozen keyword table (`KadTagStrMakeLower`),
     // not Rust's `str::to_lowercase()`, so the interactive search hashes the
     // primary keyword to the same md4 target eMule publishes it under — see
@@ -187,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn kad_public_search_keyword_matches_mfc_first_token_rules() {
+    fn kad_public_search_keyword_matches_mfc_selection_rules() {
         assert_eq!(
             kad_public_search_keyword("Alpha Beta").unwrap(),
             "alpha".to_string()
@@ -199,6 +217,26 @@ mod tests {
         assert_eq!(
             kad_public_search_keyword("\"Alpha\" beta").unwrap(),
             "alpha".to_string()
+        );
+        assert_eq!(
+            kad_public_search_keyword("the oxymoronaccelerator 2").unwrap(),
+            "oxymoronaccelerator".to_string()
+        );
+        assert_eq!(
+            kad_public_search_keyword("a selectivekeyword").unwrap(),
+            "selectivekeyword".to_string()
+        );
+        assert_eq!(
+            kad_public_search_keyword("short OR exceptionallylong").unwrap(),
+            "short".to_string()
+        );
+        assert_eq!(
+            kad_public_search_keyword("short NOT exceptionallylong").unwrap(),
+            "short".to_string()
+        );
+        assert_eq!(
+            kad_public_search_keyword("the \"exceptionally long phrase\"").unwrap(),
+            "the".to_string()
         );
     }
 

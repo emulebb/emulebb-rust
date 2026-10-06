@@ -111,6 +111,15 @@ pub fn encode_kad_search_expression(term: &str, criteria: &SearchCriteria) -> Re
     encode_search_request_with_criteria(term, criteria, true)
 }
 
+/// Return the filename terms when the parsed keyword expression is a pure AND
+/// tree. Kad uses this shape to choose a rarer primary lookup key without
+/// changing the full restrictive expression. OR/NOT expressions return
+/// `None`, matching eMule's refusal to rearrange those trees.
+pub fn flat_and_search_terms(term: &str) -> Result<Option<Vec<String>>> {
+    let expression = parse_search_expression(term)?;
+    Ok(expression.as_ref().and_then(flatten_and_terms))
+}
+
 /// Encode an OP_SEARCHREQUEST expression for `term` plus server-side metatag
 /// constraints, as `AND(keyword, criteria...)`. Matches eMule's node encoding:
 /// boolean = `00 <op>`; string = `01 <u16 len><bytes>`; string+metatag =
@@ -568,6 +577,26 @@ mod criteria_tests {
         assert_eq!(
             encoded,
             encode_search_request_with_criteria("linux iso", &criteria, true).unwrap()
+        );
+    }
+
+    #[test]
+    fn kad_keyword_rearrangement_terms_require_a_pure_and_tree() {
+        assert_eq!(
+            flat_and_search_terms("the (oxymoron accelerator)").unwrap(),
+            Some(vec![
+                "the".to_string(),
+                "oxymoron".to_string(),
+                "accelerator".to_string(),
+            ])
+        );
+        assert_eq!(
+            flat_and_search_terms("short OR exceptionallylong").unwrap(),
+            None
+        );
+        assert_eq!(
+            flat_and_search_terms("short NOT exceptionallylong").unwrap(),
+            None
         );
     }
 
