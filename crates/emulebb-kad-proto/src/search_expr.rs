@@ -247,16 +247,20 @@ fn tokenize_opt_quoted_search_term(value: &str) -> Vec<String> {
 
     while index < chars.len() {
         if chars[index] == '"' {
-            index += 1;
-            let start = index;
-            while index < chars.len() && chars[index] != '"' {
-                index += 1;
-            }
-            if index < chars.len() && index > start {
-                terms.push(chars[start..index].iter().collect());
-            }
-            if index < chars.len() {
-                index += 1;
+            let start = index + 1;
+            if let Some(relative_end) = chars[start..]
+                .iter()
+                .position(|character| *character == '"')
+            {
+                let end = start + relative_end;
+                if end > start {
+                    terms.push(chars[start..end].iter().collect());
+                }
+                index = end + 1;
+            } else {
+                // Stock eMule treats an unmatched opening quote as a skipped
+                // character, then tokenizes the remaining text normally.
+                index = start;
             }
             continue;
         }
@@ -349,6 +353,21 @@ mod tests {
         ));
         assert!(!matches_restrictive_keyword_payload(
             "artist live final set 2026.flac",
+            &[],
+            &payload
+        ));
+    }
+
+    #[test]
+    fn unmatched_opening_quote_is_skipped_like_stock() {
+        let payload = string_term("\"ubuntu linux");
+        assert!(matches_restrictive_keyword_payload(
+            "ubuntu-22.04-linux.iso",
+            &[],
+            &payload
+        ));
+        assert!(!matches_restrictive_keyword_payload(
+            "ubuntu-22.04.iso",
             &[],
             &payload
         ));
