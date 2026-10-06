@@ -99,6 +99,18 @@ pub(super) fn encode_search_request(term: &str) -> Result<Vec<u8>> {
     encode_search_request_with_criteria(term, &SearchCriteria::default(), false)
 }
 
+/// Encode the stock search-expression tree carried after a restrictive Kad
+/// keyword request. Kad v2 understands the same boolean/metatag tree as an
+/// ED2K server search, and always supports the 64-bit numeric leaf form.
+///
+/// The primary Kad keyword remains in the expression deliberately. It is
+/// redundant for the selected keyword bucket, but makes the payload an exact,
+/// self-contained predicate and lets the receiver and caller verify identical
+/// semantics for quoted and boolean expressions.
+pub fn encode_kad_search_expression(term: &str, criteria: &SearchCriteria) -> Result<Vec<u8>> {
+    encode_search_request_with_criteria(term, criteria, true)
+}
+
 /// Encode an OP_SEARCHREQUEST expression for `term` plus server-side metatag
 /// constraints, as `AND(keyword, criteria...)`. Matches eMule's node encoding:
 /// boolean = `00 <op>`; string = `01 <u16 len><bytes>`; string+metatag =
@@ -541,6 +553,22 @@ mod criteria_tests {
                 .unwrap();
         assert_eq!(only_kw, kw("linux"));
         assert_eq!(via_criteria, only_kw);
+    }
+
+    #[test]
+    fn kad_expression_is_self_contained_and_uses_64bit_numeric_leaves() {
+        let criteria = SearchCriteria {
+            min_size: Some(u64::from(u32::MAX) + 1),
+            ..SearchCriteria::default()
+        };
+        let encoded = encode_kad_search_expression("linux iso", &criteria).unwrap();
+
+        assert_eq!(&encoded[..2], &[0, 0]);
+        assert!(encoded.contains(&8), "Kad must use the uint64 leaf form");
+        assert_eq!(
+            encoded,
+            encode_search_request_with_criteria("linux iso", &criteria, true).unwrap()
+        );
     }
 
     #[test]

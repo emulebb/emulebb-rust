@@ -93,7 +93,7 @@ use result_decoder::{
     decode_found_sources, decode_search_result_page, decode_udp_found_source_sets,
     decode_udp_search_result_pages,
 };
-pub use search_expr::SearchCriteria;
+pub use search_expr::{SearchCriteria, encode_kad_search_expression};
 use search_expr::{encode_search_request, encode_search_request_with_criteria};
 #[cfg(test)]
 use server_entry::ConfiguredServerEntry;

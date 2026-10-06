@@ -3,16 +3,21 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Result, ensure};
+use emulebb_ed2k::ed2k_server::encode_kad_search_expression;
+use emulebb_index::matches_restrictive_keyword_payload;
 use emulebb_kad_dht::{DhtNode, RpcWorkClass};
 use emulebb_kad_proto::{
-    NodeId,
+    NodeId, SearchKeyReq,
     constants::{SEARCH_RESULT_GRACE_SECS, SEARCH_TIMEOUT_SECS},
 };
 use md4::{Digest, Md4};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::{KadAichSearchVotes, SearchCreate, SearchResult, search_query::search_result_from_kad};
+use crate::{
+    KadAichSearchVotes, SearchCreate, SearchResult,
+    search_query::{search_criteria_from_request, search_result_from_kad},
+};
 
 const INVALID_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
 const KAD_KEYWORD_SEARCH_RESULT_LIMIT: usize = 200;
@@ -46,8 +51,10 @@ pub(crate) async fn search_kad_keywords(
     }
 
     let cancel = CancellationToken::new();
-    let mut stream = dht.search_keywords_with_cancel_and_class(
-        kad_public_search_keyword_target(&request.query)?,
+    let search_request = kad_public_search_request(request)?;
+    let restrictive_payload = search_request.restrictive_payload.clone();
+    let mut stream = dht.search_keyword_request_with_cancel_and_class(
+        search_request,
         cancel.clone(),
         RpcWorkClass::Interactive,
     );
@@ -64,6 +71,16 @@ pub(crate) async fn search_kad_keywords(
                 let Some(result) = result else {
                     break;
                 };
+                let matches_request = result.names.iter().any(|name| {
+                    matches_restrictive_keyword_payload(
+                        name,
+                        &result.tags,
+                        &restrictive_payload,
+                    )
+                });
+                if !matches_request {
+                    continue;
+                }
                 let hash = result.hash.to_string();
                 if let Some(candidate) = result.aich_candidate {
                     aich_votes
@@ -88,6 +105,20 @@ pub(crate) async fn search_kad_keywords(
         results,
         aich_votes,
     }))
+}
+
+fn kad_public_search_request(request: &SearchCreate) -> Result<SearchKeyReq> {
+    let restrictive_payload =
+        encode_kad_search_expression(&request.query, &search_criteria_from_request(request))?;
+    Ok(SearchKeyReq {
+        target: kad_public_search_keyword_target(&request.query)?,
+        start_position: if restrictive_payload.is_empty() {
+            0
+        } else {
+            0x8000
+        },
+        restrictive_payload,
+    })
 }
 
 pub(crate) fn kad_public_search_keyword(query: &str) -> Result<String> {
@@ -139,6 +170,25 @@ fn keyword_hash_target(first_word: &str) -> NodeId {
 mod tests {
     use super::*;
 
+    fn request(query: &str) -> SearchCreate {
+        SearchCreate {
+            query: query.to_string(),
+            method: "kad".to_string(),
+            r#type: String::new(),
+            extension: String::new(),
+            min_size_bytes: None,
+            max_size_bytes: None,
+            min_availability: None,
+            min_complete_sources: None,
+            min_bitrate_kbps: None,
+            min_length_seconds: None,
+            codec: String::new(),
+            title: String::new(),
+            album: String::new(),
+            artist: String::new(),
+        }
+    }
+
     #[test]
     fn kad_public_search_keyword_matches_mfc_first_token_rules() {
         assert_eq!(
@@ -160,6 +210,33 @@ mod tests {
         assert!(kad_public_search_keyword("").is_err());
         assert!(kad_public_search_keyword("Alpha-Beta").is_err());
         assert!(kad_public_search_keyword("\"unterminated").is_err());
+    }
+
+    #[test]
+    fn kad_public_search_request_carries_query_and_filters() {
+        let mut request = request("Alpha Beta");
+        request.extension = "mp3".to_string();
+        request.min_size_bytes = Some(u64::from(u32::MAX) + 1);
+
+        let encoded = kad_public_search_request(&request).unwrap();
+
+        assert_eq!(encoded.start_position, 0x8000);
+        assert!(!encoded.restrictive_payload.is_empty());
+        assert!(matches_restrictive_keyword_payload(
+            "alpha beta.mp3",
+            &[emulebb_kad_proto::Tag::filesize(u64::from(u32::MAX) + 1),],
+            &encoded.restrictive_payload,
+        ));
+        assert!(!matches_restrictive_keyword_payload(
+            "alpha.mp3",
+            &[emulebb_kad_proto::Tag::filesize(u64::from(u32::MAX) + 1),],
+            &encoded.restrictive_payload,
+        ));
+        assert!(!matches_restrictive_keyword_payload(
+            "alpha beta.flac",
+            &[emulebb_kad_proto::Tag::filesize(u64::from(u32::MAX) + 1),],
+            &encoded.restrictive_payload,
+        ));
     }
 
     // Regression: the keyword-search outer timeout must cover both the active
