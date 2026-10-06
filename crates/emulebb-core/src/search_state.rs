@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use emulebb_metadata::{
-    MetadataSearch, MetadataSearchResult, MetadataStore, normalized_search_query,
+    MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataStore,
+    normalized_search_query,
 };
 
-use crate::{Search, SearchResult};
+use crate::{Search, SearchResult, SearchResultObservation};
 
 pub(crate) fn next_numeric_search_id(searches: &HashMap<String, Search>) -> u32 {
     searches
@@ -71,6 +72,43 @@ fn search_to_metadata(search: &Search) -> MetadataSearch {
 }
 
 fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> MetadataSearchResult {
+    let observations = if result.observations.is_empty() {
+        vec![MetadataSearchResultObservation {
+            origin: result.method.clone(),
+            name: result.name.clone(),
+            size_bytes: result.size_bytes,
+            source_count: result.sources,
+            complete_source_count: result.complete_sources,
+            source_client_id: result.source_client_id,
+            source_client_port: result.source_client_port,
+            file_type: result.file_type.clone(),
+            rating: result.rating,
+            aich_hash: result.aich_hash.clone(),
+            complete: result.complete,
+            directory: result.directory.clone(),
+            observed_at_ms,
+        }]
+    } else {
+        result
+            .observations
+            .iter()
+            .map(|observation| MetadataSearchResultObservation {
+                origin: observation.origin.clone(),
+                name: observation.name.clone(),
+                size_bytes: observation.size_bytes,
+                source_count: observation.sources,
+                complete_source_count: observation.complete_sources,
+                source_client_id: observation.source_client_id,
+                source_client_port: observation.source_client_port,
+                file_type: observation.file_type.clone(),
+                rating: observation.rating,
+                aich_hash: observation.aich_hash.clone(),
+                complete: observation.complete,
+                directory: observation.directory.clone(),
+                observed_at_ms: observation.observed_at.timestamp_millis(),
+            })
+            .collect()
+    };
     MetadataSearchResult {
         network: result.method.clone(),
         file_hash: result.hash.clone(),
@@ -78,14 +116,12 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
         size_bytes: result.size_bytes,
         source_count: result.sources,
         complete_source_count: result.complete_sources,
-        source_client_id: result.source_client_id,
-        source_client_port: result.source_client_port,
         file_type: result.file_type.clone(),
         rating: result.rating,
         aich_hash: result.aich_hash.clone(),
         complete: result.complete,
         directory: result.directory.clone(),
-        observed_at_ms,
+        observations,
     }
 }
 
@@ -118,7 +154,7 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
             .map(|result| {
                 search_result_from_metadata(&search.public_id, &search.file_type_filter, result)
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     })
 }
 
@@ -126,8 +162,37 @@ fn search_result_from_metadata(
     search_id: &str,
     file_type_filter: &str,
     result: MetadataSearchResult,
-) -> SearchResult {
-    SearchResult {
+) -> Result<SearchResult> {
+    let observations = result
+        .observations
+        .into_iter()
+        .map(|observation| {
+            Ok(SearchResultObservation {
+                origin: observation.origin,
+                name: observation.name,
+                size_bytes: observation.size_bytes,
+                sources: observation.source_count,
+                complete_sources: observation.complete_source_count,
+                source_client_id: observation.source_client_id,
+                source_client_port: observation.source_client_port,
+                file_type: observation.file_type,
+                rating: observation.rating,
+                aich_hash: observation.aich_hash,
+                complete: observation.complete,
+                directory: observation.directory,
+                observed_at: timestamp_ms(
+                    observation.observed_at_ms,
+                    "search result observation observed_at_ms",
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let source = observations.iter().find_map(|observation| {
+        observation
+            .source_client_id
+            .zip(observation.source_client_port)
+    });
+    Ok(SearchResult {
         search_id: search_id.to_string(),
         method: result.network,
         r#type: file_type_filter.to_string(),
@@ -136,14 +201,15 @@ fn search_result_from_metadata(
         size_bytes: result.size_bytes,
         sources: result.source_count,
         complete_sources: result.complete_source_count,
-        source_client_id: result.source_client_id,
-        source_client_port: result.source_client_port,
+        source_client_id: source.map(|(client_id, _)| client_id),
+        source_client_port: source.map(|(_, client_port)| client_port),
         file_type: result.file_type,
         rating: result.rating,
         aich_hash: result.aich_hash,
         complete: result.complete,
         directory: result.directory,
-    }
+        observations,
+    })
 }
 
 fn timestamp_ms(value: i64, label: &str) -> Result<DateTime<Utc>> {

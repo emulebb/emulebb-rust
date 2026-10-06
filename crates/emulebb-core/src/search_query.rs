@@ -1,10 +1,11 @@
 //! Search-result construction and request-side filtering for the `/api/v1/searches` surface.
 
+use chrono::Utc;
 use emulebb_ed2k::ed2k_server::{Ed2kSearchFile, SearchCriteria};
 use emulebb_index::IndexedFile;
 use emulebb_kad_dht::SearchResult as KadSearchResult;
 
-use crate::{SearchCreate, SearchResult};
+use crate::{SearchCreate, SearchResult, SearchResultObservation};
 
 /// Build the server-side eD2k metatag search criteria from a `/api/v1/searches`
 /// request, so the constraints (type/size/extension/availability) are folded
@@ -123,11 +124,8 @@ pub(crate) fn search_result_from_indexed(
     request: &SearchCreate,
     file: IndexedFile,
 ) -> SearchResult {
-    SearchResult {
-        search_id: search_id.to_string(),
-        method: request.method.clone(),
-        r#type: request.r#type.clone(),
-        hash: file.ed2k_hash,
+    let observation = SearchResultObservation {
+        origin: "local_index".to_string(),
         name: file.name,
         size_bytes: file.size_bytes,
         sources: file.availability_score.max(0) as u32,
@@ -139,7 +137,15 @@ pub(crate) fn search_result_from_indexed(
         aich_hash: String::new(),
         complete: false,
         directory: String::new(),
-    }
+        observed_at: Utc::now(),
+    };
+    SearchResult::from_observation(
+        search_id.to_string(),
+        request.method.clone(),
+        request.r#type.clone(),
+        file.ed2k_hash,
+        observation,
+    )
 }
 
 pub(crate) fn search_result_from_ed2k(
@@ -150,11 +156,8 @@ pub(crate) fn search_result_from_ed2k(
     let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
     let source_client_id = (file.client_id != 0).then_some(file.client_id);
     let source_client_port = (file.client_port != 0).then_some(file.client_port);
-    SearchResult {
-        search_id: search_id.to_string(),
-        method: request.method.clone(),
-        r#type: request.r#type.clone(),
-        hash: file.file_hash.to_string(),
+    let observation = SearchResultObservation {
+        origin: request.method.clone(),
         name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
         size_bytes: file.file_size.unwrap_or_default(),
         sources: file.source_count.unwrap_or_default(),
@@ -166,7 +169,15 @@ pub(crate) fn search_result_from_ed2k(
         aich_hash: file.aich_hash.unwrap_or_default(),
         complete: false,
         directory: file.directory.unwrap_or_default(),
-    }
+        observed_at: Utc::now(),
+    };
+    SearchResult::from_observation(
+        search_id.to_string(),
+        request.method.clone(),
+        request.r#type.clone(),
+        file.file_hash.to_string(),
+        observation,
+    )
 }
 
 pub(crate) fn search_result_from_kad(
@@ -184,11 +195,8 @@ pub(crate) fn search_result_from_kad(
         .aich_candidate
         .map(|candidate| hex::encode(candidate.root))
         .unwrap_or_default();
-    SearchResult {
-        search_id: search_id.to_string(),
-        method: request.method.clone(),
-        r#type: request.r#type.clone(),
-        hash,
+    let observation = SearchResultObservation {
+        origin: "kad".to_string(),
         name,
         size_bytes: result.size.unwrap_or_default(),
         sources: result.source_count.unwrap_or_default(),
@@ -200,7 +208,15 @@ pub(crate) fn search_result_from_kad(
         aich_hash,
         complete: false,
         directory: String::new(),
-    }
+        observed_at: Utc::now(),
+    };
+    SearchResult::from_observation(
+        search_id.to_string(),
+        request.method.clone(),
+        request.r#type.clone(),
+        hash,
+        observation,
+    )
 }
 
 #[cfg(test)]
@@ -227,6 +243,7 @@ mod tests {
             aich_hash: String::new(),
             complete: false,
             directory: String::new(),
+            observations: Vec::new(),
         }
     }
 

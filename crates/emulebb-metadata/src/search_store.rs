@@ -2,13 +2,10 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
-    search_model::{MetadataSearch, MetadataSearchResult},
+    search_model::{MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation},
     store::{bool_to_i64, decode_fixed_hex, unix_ms},
     text::normalize_search_text,
 };
-
-const ED2K_SEARCH_METADATA_V1_MAGIC: &[u8; 4] = b"ESR1";
-const ED2K_SEARCH_METADATA_V2_MAGIC: &[u8; 4] = b"ESR2";
 
 impl super::MetadataStore {
     pub fn upsert_search(&self, search: &MetadataSearch) -> Result<()> {
@@ -53,23 +50,20 @@ impl super::MetadataStore {
             params![session_id],
         )?;
         for result in &search.results {
-            let file_hash = optional_ed2k_hash(&result.file_hash)?;
-            let known_file_id = match file_hash.as_ref() {
-                Some(hash) => tx
-                    .query_row(
-                        "SELECT id FROM known_files WHERE ed2k_hash = ?1",
-                        params![hash],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()?,
-                None => None,
-            };
+            let file_hash = decode_fixed_hex(&result.file_hash, 16, "search result ED2K hash")?;
+            let known_file_id = tx
+                .query_row(
+                    "SELECT id FROM known_files WHERE ed2k_hash = ?1",
+                    params![file_hash],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
             tx.execute(
                 r#"
                 INSERT INTO search_results(
                     session_id, known_file_id, network, file_hash, name, size_bytes,
-                    source_count, complete_source_count, file_type, complete, directory,
-                    raw_metadata, observed_at_ms
+                    source_count, complete_source_count, file_type, rating, aich_hash,
+                    complete, directory
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 "#,
@@ -83,16 +77,45 @@ impl super::MetadataStore {
                     i64::from(result.source_count),
                     i64::from(result.complete_source_count),
                     result.file_type,
+                    i64::from(result.rating),
+                    result.aich_hash,
                     bool_to_i64(result.complete),
                     result.directory,
-                    encode_ed2k_search_source_metadata(result),
-                    if result.observed_at_ms > 0 {
-                        result.observed_at_ms
-                    } else {
-                        now
-                    },
                 ],
             )?;
+            let result_id = tx.last_insert_rowid();
+            for observation in &result.observations {
+                tx.execute(
+                    r#"
+                    INSERT INTO search_result_observations(
+                        result_id, origin, name, size_bytes, source_count,
+                        complete_source_count, source_client_id, source_client_port,
+                        file_type, rating, aich_hash, complete, directory, observed_at_ms
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                    "#,
+                    params![
+                        result_id,
+                        observation.origin,
+                        observation.name,
+                        observation.size_bytes as i64,
+                        i64::from(observation.source_count),
+                        i64::from(observation.complete_source_count),
+                        observation.source_client_id.map(i64::from),
+                        observation.source_client_port.map(i64::from),
+                        observation.file_type,
+                        i64::from(observation.rating),
+                        observation.aich_hash,
+                        bool_to_i64(observation.complete),
+                        observation.directory,
+                        if observation.observed_at_ms > 0 {
+                            observation.observed_at_ms
+                        } else {
+                            now
+                        },
+                    ],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -156,99 +179,75 @@ fn load_search_results(
 ) -> Result<Vec<MetadataSearchResult>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT network,
-               CASE WHEN file_hash IS NULL THEN '' ELSE lower(hex(file_hash)) END,
+        SELECT id, network, lower(hex(file_hash)),
                name, size_bytes, source_count, complete_source_count, file_type,
-               complete, directory, raw_metadata, observed_at_ms
+               rating, aich_hash, complete, directory
         FROM search_results
         WHERE session_id = ?1
         ORDER BY id
         "#,
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
-        let metadata = decode_ed2k_search_metadata(row.get::<_, Option<Vec<u8>>>(9)?);
-        Ok(MetadataSearchResult {
-            network: row.get(0)?,
-            file_hash: row.get(1)?,
-            name: row.get(2)?,
-            size_bytes: row.get::<_, Option<i64>>(3)?.unwrap_or_default() as u64,
-            source_count: row.get::<_, i64>(4)? as u32,
-            complete_source_count: row.get::<_, i64>(5)? as u32,
-            source_client_id: metadata.source_client_id,
-            source_client_port: metadata.source_client_port,
-            file_type: row.get(6)?,
-            rating: metadata.rating,
-            aich_hash: metadata.aich_hash,
-            complete: row.get::<_, i64>(7)? != 0,
-            directory: row.get(8)?,
-            observed_at_ms: row.get(10)?,
+        Ok((
+            row.get::<_, i64>(0)?,
+            MetadataSearchResult {
+                network: row.get(1)?,
+                file_hash: row.get(2)?,
+                name: row.get(3)?,
+                size_bytes: row.get::<_, i64>(4)? as u64,
+                source_count: row.get::<_, i64>(5)? as u32,
+                complete_source_count: row.get::<_, i64>(6)? as u32,
+                file_type: row.get(7)?,
+                rating: row.get::<_, i64>(8)? as u8,
+                aich_hash: row.get(9)?,
+                complete: row.get::<_, i64>(10)? != 0,
+                directory: row.get(11)?,
+                observations: Vec::new(),
+            },
+        ))
+    })?;
+    let mut results = Vec::new();
+    for row in rows {
+        let (result_id, mut result) = row?;
+        result.observations = load_search_result_observations(conn, result_id)?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
+fn load_search_result_observations(
+    conn: &rusqlite::Connection,
+    result_id: i64,
+) -> Result<Vec<MetadataSearchResultObservation>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT origin, name, size_bytes, source_count, complete_source_count,
+               source_client_id, source_client_port, file_type, rating, aich_hash,
+               complete, directory, observed_at_ms
+        FROM search_result_observations
+        WHERE result_id = ?1
+        ORDER BY observed_at_ms, id
+        "#,
+    )?;
+    let rows = stmt.query_map(params![result_id], |row| {
+        Ok(MetadataSearchResultObservation {
+            origin: row.get(0)?,
+            name: row.get(1)?,
+            size_bytes: row.get::<_, i64>(2)? as u64,
+            source_count: row.get::<_, i64>(3)? as u32,
+            complete_source_count: row.get::<_, i64>(4)? as u32,
+            source_client_id: row.get::<_, Option<i64>>(5)?.map(|value| value as u32),
+            source_client_port: row.get::<_, Option<i64>>(6)?.map(|value| value as u16),
+            file_type: row.get(7)?,
+            rating: row.get::<_, i64>(8)? as u8,
+            aich_hash: row.get(9)?,
+            complete: row.get::<_, i64>(10)? != 0,
+            directory: row.get(11)?,
+            observed_at_ms: row.get(12)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
-}
-
-fn encode_ed2k_search_source_metadata(result: &MetadataSearchResult) -> Option<Vec<u8>> {
-    let source = result.source_client_id.zip(result.source_client_port);
-    if source.is_none() && result.rating == 0 && result.aich_hash.is_empty() {
-        return None;
-    }
-    let aich_bytes = result.aich_hash.as_bytes();
-    let aich_len = u8::try_from(aich_bytes.len()).ok()?;
-    let mut encoded = Vec::with_capacity(12 + aich_bytes.len());
-    encoded.extend_from_slice(ED2K_SEARCH_METADATA_V2_MAGIC);
-    let (client_id, client_port) = source.unwrap_or_default();
-    encoded.extend_from_slice(&client_id.to_le_bytes());
-    encoded.extend_from_slice(&client_port.to_le_bytes());
-    encoded.push(result.rating.min(5));
-    encoded.push(aich_len);
-    encoded.extend_from_slice(aich_bytes);
-    Some(encoded)
-}
-
-#[derive(Default)]
-struct DecodedEd2kSearchMetadata {
-    source_client_id: Option<u32>,
-    source_client_port: Option<u16>,
-    rating: u8,
-    aich_hash: String,
-}
-
-fn decode_ed2k_search_metadata(raw_metadata: Option<Vec<u8>>) -> DecodedEd2kSearchMetadata {
-    let Some(raw_metadata) = raw_metadata else {
-        return DecodedEd2kSearchMetadata::default();
-    };
-    if raw_metadata.len() == 10 && &raw_metadata[..4] == ED2K_SEARCH_METADATA_V1_MAGIC {
-        return DecodedEd2kSearchMetadata {
-            source_client_id: Some(u32::from_le_bytes(raw_metadata[4..8].try_into().unwrap())),
-            source_client_port: Some(u16::from_le_bytes(raw_metadata[8..10].try_into().unwrap())),
-            ..DecodedEd2kSearchMetadata::default()
-        };
-    }
-    if raw_metadata.len() < 12 || &raw_metadata[..4] != ED2K_SEARCH_METADATA_V2_MAGIC {
-        return DecodedEd2kSearchMetadata::default();
-    }
-    let aich_len = usize::from(raw_metadata[11]);
-    if raw_metadata.len() != 12 + aich_len {
-        return DecodedEd2kSearchMetadata::default();
-    }
-    let client_id = u32::from_le_bytes(raw_metadata[4..8].try_into().unwrap());
-    let client_port = u16::from_le_bytes(raw_metadata[8..10].try_into().unwrap());
-    let aich_hash = String::from_utf8(raw_metadata[12..].to_vec()).unwrap_or_default();
-    DecodedEd2kSearchMetadata {
-        source_client_id: (client_id != 0 && client_port != 0).then_some(client_id),
-        source_client_port: (client_id != 0 && client_port != 0).then_some(client_port),
-        rating: raw_metadata[10].min(5),
-        aich_hash,
-    }
-}
-
-fn optional_ed2k_hash(value: &str) -> Result<Option<Vec<u8>>> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    decode_fixed_hex(value, 16, "search result ED2K hash").map(Some)
 }
 
 pub fn normalized_search_query(query: &str) -> String {
@@ -272,12 +271,16 @@ mod tests {
         assert_eq!(searches[0].results.len(), 1);
         assert_eq!(searches[0].results[0].name, "Zażółć Sample.bin");
         assert_eq!(
-            searches[0].results[0].source_client_id,
+            searches[0].results[0].observations[0].source_client_id,
             Some(u32::from_le_bytes([10, 20, 30, 40]))
         );
-        assert_eq!(searches[0].results[0].source_client_port, Some(4662));
+        assert_eq!(
+            searches[0].results[0].observations[0].source_client_port,
+            Some(4662)
+        );
         assert_eq!(searches[0].results[0].rating, 4);
         assert_eq!(searches[0].results[0].aich_hash, "A".repeat(32));
+        assert_eq!(searches[0].results[0].observations[0].origin, "server");
     }
 
     #[test]
@@ -293,21 +296,6 @@ mod tests {
         store.clear_searches().unwrap();
         assert!(store.load_searches().unwrap().is_empty());
         assert_eq!(store.table_count("search_results").unwrap(), 0);
-    }
-
-    #[test]
-    fn legacy_source_metadata_remains_readable() {
-        let client_id = u32::from_le_bytes([10, 20, 30, 40]);
-        let mut encoded = ED2K_SEARCH_METADATA_V1_MAGIC.to_vec();
-        encoded.extend_from_slice(&client_id.to_le_bytes());
-        encoded.extend_from_slice(&4662u16.to_le_bytes());
-
-        let decoded = decode_ed2k_search_metadata(Some(encoded));
-
-        assert_eq!(decoded.source_client_id, Some(client_id));
-        assert_eq!(decoded.source_client_port, Some(4662));
-        assert_eq!(decoded.rating, 0);
-        assert!(decoded.aich_hash.is_empty());
     }
 
     fn sample_search(public_id: &str) -> MetadataSearch {
@@ -328,14 +316,26 @@ mod tests {
                 size_bytes: 123,
                 source_count: 4,
                 complete_source_count: 3,
-                source_client_id: Some(u32::from_le_bytes([10, 20, 30, 40])),
-                source_client_port: Some(4662),
                 file_type: "video".to_string(),
                 rating: 4,
                 aich_hash: "A".repeat(32),
                 complete: false,
                 directory: String::new(),
-                observed_at_ms: 2,
+                observations: vec![MetadataSearchResultObservation {
+                    origin: "server".to_string(),
+                    name: "Zażółć Sample.bin".to_string(),
+                    size_bytes: 123,
+                    source_count: 4,
+                    complete_source_count: 3,
+                    source_client_id: Some(u32::from_le_bytes([10, 20, 30, 40])),
+                    source_client_port: Some(4662),
+                    file_type: "video".to_string(),
+                    rating: 4,
+                    aich_hash: "A".repeat(32),
+                    complete: false,
+                    directory: String::new(),
+                    observed_at_ms: 2,
+                }],
             }],
         }
     }

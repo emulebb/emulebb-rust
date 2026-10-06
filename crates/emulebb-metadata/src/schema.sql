@@ -456,16 +456,36 @@ CREATE TABLE search_results (
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,
     known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
     network TEXT NOT NULL CHECK(network IN ('automatic', 'server', 'global', 'kad')),
-    file_hash BLOB CHECK(file_hash IS NULL OR length(file_hash) = 16),
+    file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
     name TEXT NOT NULL,
-    size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count >= 0),
     complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(complete_source_count >= 0),
     file_type TEXT NOT NULL DEFAULT '',
+    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
+    aich_hash TEXT NOT NULL DEFAULT '',
     complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
     directory TEXT NOT NULL DEFAULT '',
-    raw_metadata BLOB,
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)
+    UNIQUE(session_id, file_hash)
+);
+
+CREATE TABLE search_result_observations (
+    id INTEGER PRIMARY KEY,
+    result_id INTEGER NOT NULL REFERENCES search_results(id) ON DELETE CASCADE,
+    origin TEXT NOT NULL,
+    name TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+    source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count >= 0),
+    complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(complete_source_count >= 0),
+    source_client_id INTEGER CHECK(source_client_id IS NULL OR source_client_id BETWEEN 0 AND 4294967295),
+    source_client_port INTEGER CHECK(source_client_port IS NULL OR source_client_port BETWEEN 1 AND 65535),
+    file_type TEXT NOT NULL DEFAULT '',
+    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
+    aich_hash TEXT NOT NULL DEFAULT '',
+    complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
+    directory TEXT NOT NULL DEFAULT '',
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    CHECK((source_client_id IS NULL) = (source_client_port IS NULL))
 );
 
 CREATE INDEX known_files_hash_idx ON known_files(ed2k_hash);
@@ -477,4 +497,6 @@ CREATE INDEX kad_source_file_idx ON kad_source_publishes(file_hash, observed_at_
 CREATE INDEX kad_note_file_idx ON kad_note_publishes(file_hash, observed_at_ms);
 CREATE INDEX kad_outbound_publish_file_idx
 ON kad_outbound_publish_schedule(file_hash, publish_kind);
-CREATE INDEX search_results_session_idx ON search_results(session_id, observed_at_ms);
+CREATE INDEX search_results_session_idx ON search_results(session_id, id);
+CREATE INDEX search_result_observations_result_idx
+ON search_result_observations(result_id, observed_at_ms, id);

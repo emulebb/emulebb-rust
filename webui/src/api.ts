@@ -166,6 +166,22 @@ export type TransferSource = {
   [key: string]: unknown;
 };
 
+export type SearchResultObservation = {
+  origin: string;
+  name: string;
+  sizeBytes: number;
+  sources: number;
+  completeSources: number;
+  sourceClientId?: number | null;
+  sourceClientPort?: number | null;
+  fileType: string;
+  rating: number;
+  hasAichHash: boolean;
+  complete: boolean;
+  directory: string;
+  observedAt: string;
+};
+
 export type SearchResult = {
   hash: string;
   name?: string;
@@ -176,6 +192,7 @@ export type SearchResult = {
   fileType?: string;
   knownType?: string;
   directory?: string;
+  observations?: SearchResultObservation[];
   evidence?: Record<string, unknown>;
   [key: string]: unknown;
 };

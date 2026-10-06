@@ -514,7 +514,9 @@ mod tests {
 
         let message = format!("{error:#}");
         assert!(
-            message.contains("metadata schema version 24 is not current 25"),
+            message.contains(&format!(
+                "metadata schema version 24 is not current {SCHEMA_VERSION}"
+            )),
             "unexpected error: {error:#}"
         );
         assert!(

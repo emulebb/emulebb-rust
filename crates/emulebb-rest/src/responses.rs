@@ -450,6 +450,27 @@ pub(crate) fn search_result_response_with_options(
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
+    let observations = result
+        .observations
+        .iter()
+        .map(|observation| {
+            json!({
+                "origin": observation.origin,
+                "name": observation.name,
+                "sizeBytes": observation.size_bytes,
+                "sources": observation.sources,
+                "completeSources": observation.complete_sources,
+                "sourceClientId": observation.source_client_id,
+                "sourceClientPort": observation.source_client_port,
+                "fileType": observation.file_type,
+                "rating": observation.rating,
+                "hasAichHash": !observation.aich_hash.is_empty(),
+                "complete": observation.complete,
+                "directory": observation.directory,
+                "observedAt": observation.observed_at,
+            })
+        })
+        .collect::<Vec<_>>();
     let mut response = json!({
         "searchId": result.search_id,
         "method": result.method,
@@ -473,7 +494,8 @@ pub(crate) fn search_result_response_with_options(
         "kadPublishInfo": 0,
         "rating": result.rating,
         "hasComment": false,
-        "spam": false
+        "spam": false,
+        "observations": observations,
     });
     if include_evidence {
         response["evidence"] = json!({
@@ -710,6 +732,7 @@ mod tests {
             aich_hash: "A".repeat(32),
             complete: true,
             directory: String::new(),
+            observations: Vec::new(),
         };
 
         let complete = search_result_response(&result);

@@ -197,6 +197,7 @@ mod tests {
             aich_hash: String::new(),
             complete: false,
             directory: String::new(),
+            observations: Vec::new(),
         }
     }
 

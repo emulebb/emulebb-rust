@@ -296,6 +296,66 @@ pub struct SearchResult {
     pub aich_hash: String,
     pub complete: bool,
     pub directory: String,
+    /// Every distinct observation that contributed to this hash-level result.
+    /// The top-level fields are a deterministic presentation aggregate; these
+    /// rows retain alternate names, availability claims, integrity metadata,
+    /// and immediately usable source identities without conflating them.
+    #[serde(default)]
+    pub observations: Vec<SearchResultObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultObservation {
+    /// Backend that produced this observation (`local_index`, `server`,
+    /// `global`, or `kad`). A later transport-specific locator can refine this
+    /// without changing the hash-level result identity.
+    pub origin: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub sources: u32,
+    pub complete_sources: u32,
+    #[serde(default, skip_serializing)]
+    pub source_client_id: Option<u32>,
+    #[serde(default, skip_serializing)]
+    pub source_client_port: Option<u16>,
+    pub file_type: String,
+    #[serde(default)]
+    pub rating: u8,
+    #[serde(default, skip_serializing)]
+    pub aich_hash: String,
+    pub complete: bool,
+    pub directory: String,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl SearchResult {
+    pub(crate) fn from_observation(
+        search_id: String,
+        method: String,
+        r#type: String,
+        hash: String,
+        observation: SearchResultObservation,
+    ) -> Self {
+        Self {
+            search_id,
+            method,
+            r#type,
+            hash,
+            name: observation.name.clone(),
+            size_bytes: observation.size_bytes,
+            sources: observation.sources,
+            complete_sources: observation.complete_sources,
+            source_client_id: observation.source_client_id,
+            source_client_port: observation.source_client_port,
+            file_type: observation.file_type.clone(),
+            rating: observation.rating,
+            aich_hash: observation.aich_hash.clone(),
+            complete: observation.complete,
+            directory: observation.directory.clone(),
+            observations: vec![observation],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

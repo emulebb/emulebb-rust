@@ -262,10 +262,10 @@ pub use rest_model::{
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,
     HostNameResolution, IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate,
     NetworkStatus, NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
-    SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
-    Transfer, TransferComment, TransferCreate, TransferDetails, TransferEvent,
-    TransferEventDiagnostics, TransferEventResetReason, TransferEventType, TransferPart,
-    TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
+    SearchResultDownloadCreate, SearchResultObservation, ServerCreate, ServerInfo, ServerUpdate,
+    SharedFileUpdate, Status, Transfer, TransferComment, TransferCreate, TransferDetails,
+    TransferEvent, TransferEventDiagnostics, TransferEventResetReason, TransferEventType,
+    TransferPart, TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
     UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
