@@ -8,16 +8,6 @@ impl EmulebbCore {
         // Local index results are cheap, so include them immediately.
         let indexed = self.index.lock().await.search(&request.query, 200)?;
         let mut state = self.state.lock().await;
-        let (search_id, next_search_id) =
-            search_state::allocate_search_id(&state.searches, state.next_search_id)?;
-        state.next_search_id = next_search_id;
-        let mut results = Vec::new();
-        results.extend(
-            indexed
-                .into_iter()
-                .map(|file| search_result_from_indexed(&search_id, &request, file)),
-        );
-        apply_search_filters(&mut results, &request);
         match request.method.as_str() {
             "server" | "global" => {
                 ensure!(
@@ -50,17 +40,26 @@ impl EmulebbCore {
         // immediate running->completed local-index path. Explicit network
         // methods were rejected above rather than misreported as local-only
         // completed searches.
-        let queue_lane = self.ed2k_network.as_ref().and_then(|_| {
-            let lane = SearchQueueLane::for_method(&request.method)?;
-            if lane == SearchQueueLane::Auto
-                && !state.core_settings.network_ed2k
-                && !state.core_settings.network_kademlia
-            {
-                None
-            } else {
-                Some(lane)
-            }
-        });
+        let queue_lane = automatic_search_queue_lane(
+            &request,
+            self.ed2k_network.is_some(),
+            state.core_settings.network_ed2k,
+            state.core_settings.network_kademlia,
+        )?;
+        if queue_lane.is_some() {
+            let _ = emulebb_ed2k::ed2k_server::encode_kad_search_expression(
+                &request.query,
+                &search_criteria_from_request(&request),
+            )?;
+        }
+        let (search_id, next_search_id) =
+            search_state::allocate_search_id(&state.searches, state.next_search_id)?;
+        state.next_search_id = next_search_id;
+        let mut results = indexed
+            .into_iter()
+            .map(|file| search_result_from_indexed(&search_id, &request, file))
+            .collect::<Vec<_>>();
+        apply_search_filters(&mut results, &request);
         let mut spawn_drain = false;
         if let Some(lane) = queue_lane {
             let mut queue = self.search_queue.lock();
@@ -124,12 +123,10 @@ impl EmulebbCore {
         Ok(search)
     }
 
-    /// Legacy immediate path for NON-QUEUED searches (unknown methods, or an
-    /// automatic search with no eD2k network configured): resolves the live
-    /// network method, runs any applicable network search, and completes the
-    /// search with whatever the local index already provided. Explicit network
-    /// methods never reach this path — they are either rejected or go through
-    /// the connection-aware queue (`search_queue_runtime`).
+    /// Immediate path for a local-only automatic search: resolves any live
+    /// backend defensively, then completes with the local-index results when no
+    /// network is enabled/configured. Explicit network methods never reach this
+    /// path — they are either rejected or use the connection-aware queue.
     async fn run_background_search(&self, search_id: String, request: SearchCreate) {
         let ed2k_connected = self.connected_ed2k_search_handle().await.is_some();
         let kad_connected = self
@@ -215,5 +212,39 @@ impl EmulebbCore {
         state.searches.clear();
         state.kad_aich_search_votes.clear();
         Ok(())
+    }
+}
+
+fn automatic_search_queue_lane(
+    request: &SearchCreate,
+    runtime_configured: bool,
+    ed2k_enabled: bool,
+    kad_enabled: bool,
+) -> Result<Option<SearchQueueLane>> {
+    if !runtime_configured {
+        return Ok(None);
+    }
+    match SearchQueueLane::for_method(&request.method) {
+        Some(SearchQueueLane::Server) => Ok(Some(SearchQueueLane::Server)),
+        Some(SearchQueueLane::Kad) => {
+            crate::kad_public_search::kad_public_search_keyword(&request.query)?;
+            Ok(Some(SearchQueueLane::Kad))
+        }
+        Some(SearchQueueLane::Auto) => match (ed2k_enabled, kad_enabled) {
+            (false, false) => Ok(None),
+            (true, false) => Ok(Some(SearchQueueLane::Server)),
+            (false, true) => {
+                crate::kad_public_search::kad_public_search_keyword(&request.query)?;
+                Ok(Some(SearchQueueLane::Kad))
+            }
+            (true, true) => Ok(Some(
+                if crate::kad_public_search::kad_public_search_keyword(&request.query).is_ok() {
+                    SearchQueueLane::Auto
+                } else {
+                    SearchQueueLane::Server
+                },
+            )),
+        },
+        None => Ok(None),
     }
 }

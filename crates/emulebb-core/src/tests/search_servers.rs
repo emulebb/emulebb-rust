@@ -363,6 +363,113 @@ async fn automatic_search_completes_locally_when_all_networks_are_disabled() {
     assert_eq!(completed.resolved_method, None);
 }
 
+#[tokio::test]
+async fn automatic_search_waits_only_for_compatible_enabled_backends() {
+    let transfer_root = unique_runtime_dir("emulebb-core-search-auto-compatible");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        transfer_root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+
+    let search = core
+        .create_search(SearchCreate {
+            query: "alpha-beta".to_string(),
+            method: "automatic".to_string(),
+            ..SearchCreate::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(search.status, "queued");
+    assert_eq!(
+        search.status_reason.as_deref(),
+        Some("waiting-for-server-connection")
+    );
+    assert_eq!(core.search_queue.lock().pending_len(), 1);
+}
+
+#[tokio::test]
+async fn kad_only_automatic_search_rejects_an_invalid_kad_keyword() {
+    let transfer_root = unique_runtime_dir("emulebb-core-search-auto-kad-invalid");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        transfer_root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+    core.update_core_settings(CoreSettingsUpdate {
+        network_ed2k: Some(false),
+        network_kademlia: Some(true),
+        ..CoreSettingsUpdate::default()
+    })
+    .await
+    .unwrap();
+
+    let error = core
+        .create_search(SearchCreate {
+            query: "alpha-beta".to_string(),
+            method: "automatic".to_string(),
+            ..SearchCreate::default()
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "invalid Kad search keyword");
+    assert!(core.searches().await.is_empty());
+    assert_eq!(core.search_queue.lock().pending_len(), 0);
+}
+
+#[tokio::test]
+async fn network_search_rejects_malformed_expression_before_allocating_an_id() {
+    let transfer_root = unique_runtime_dir("emulebb-core-search-invalid-expression");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        transfer_root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+
+    let error = core
+        .create_search(SearchCreate {
+            query: "alpha OR".to_string(),
+            method: "server".to_string(),
+            ..SearchCreate::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "invalid ED2K search expression");
+
+    let search = core
+        .create_search(SearchCreate {
+            query: "valid query".to_string(),
+            method: "server".to_string(),
+            ..SearchCreate::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(search.id, "1");
+}
+
 // Operator directive 2026-07-06: a network search submitted while the
 // backend is still connecting/absent must surface an honest "queued"
 // status with a reason and wait for readiness — never complete instantly
