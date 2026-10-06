@@ -83,6 +83,7 @@ def main() -> int:
     errors.extend(check_tokio_features())
     errors.extend(check_logging_policy())
     errors.extend(check_supply_chain_policy())
+    errors.extend(check_dependency_update_coverage())
     errors.extend(check_security_policy())
     errors.extend(check_github_action_pins())
     errors.extend(check_workflow_lint_ci())
@@ -504,6 +505,39 @@ def check_supply_chain_policy() -> list[str]:
     command = "command: check advisories licenses sources"
     if command not in workflow:
         errors.append(f".github/workflows/ci.yml is missing cargo-deny guard: {command}")
+    return errors
+
+
+def check_dependency_update_coverage(dependabot_text: str | None = None) -> list[str]:
+    """Require update coverage for every committed dependency authority."""
+
+    path = ROOT / ".github" / "dependabot.yml"
+    text = path.read_text(encoding="utf-8") if dependabot_text is None else dependabot_text
+    required = (
+        ("cargo", "/"),
+        ("cargo", "/fuzz"),
+        ("npm", "/webui"),
+        ("github-actions", "/"),
+        ("docker", "/packaging/docker"),
+    )
+    errors = []
+    for ecosystem, directory in required:
+        entry = re.search(
+            rf"(?m)^  - package-ecosystem:\s*{re.escape(ecosystem)}\s*$\n"
+            rf"^    directory:\s*{re.escape(directory)}\s*$",
+            text,
+        )
+        if entry is None:
+            errors.append(
+                f".github/dependabot.yml must monitor {ecosystem} dependencies in {directory}"
+            )
+    if dependabot_text is None:
+        lockfile = ROOT / "fuzz" / "Cargo.lock"
+        tracked_lockfiles = tracked_files("fuzz/Cargo.lock")
+        if not lockfile.is_file() or "fuzz/Cargo.lock" not in tracked_lockfiles:
+            errors.append(
+                "fuzz/Cargo.lock must be committed for reproducible sanitizer runs"
+            )
     return errors
 
 

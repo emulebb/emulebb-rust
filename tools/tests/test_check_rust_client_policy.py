@@ -180,6 +180,21 @@ class TestSecurityPolicy(unittest.TestCase):
         self.assertTrue(any("supported beta" in error for error in errors))
 
 
+class TestDependencyUpdateCoverage(unittest.TestCase):
+    def test_current_dependabot_covers_every_dependency_authority(self) -> None:
+        self.assertEqual(CHECKER.check_dependency_update_coverage(), [])
+
+    def test_rejects_missing_ecosystem_directories(self) -> None:
+        errors = CHECKER.check_dependency_update_coverage(
+            "  - package-ecosystem: cargo\n    directory: /\n"
+        )
+
+        self.assertEqual(len(errors), 4)
+        self.assertTrue(any("cargo dependencies in /fuzz" in error for error in errors))
+        self.assertTrue(any("npm dependencies in /webui" in error for error in errors))
+        self.assertTrue(any("docker dependencies" in error for error in errors))
+
+
 class TestWorkflowLintCi(unittest.TestCase):
     def test_current_ci_lints_workflows(self) -> None:
         self.assertEqual(CHECKER.check_workflow_lint_ci(), [])

@@ -15,7 +15,9 @@ used on untrusted ED2K/Kad traffic:
 Automation runs all four targets for a bounded interval every Wednesday and can
 also be started manually through the `Parser fuzz` GitHub Actions workflow. It
 pins `nightly-2026-07-15` and `cargo-fuzz` 0.13.2, keeps generated state outside
-the checkout, and retains logs and crashing inputs for 30 days.
+the checkout, and retains logs and crashing inputs for 30 days. The isolated
+fuzz application has a committed `Cargo.lock`; update it through review rather
+than deleting it or allowing scheduled runs to select an unrelated graph.
 
 Run the same toolchain locally from the repository root with `cargo-fuzz`:
 

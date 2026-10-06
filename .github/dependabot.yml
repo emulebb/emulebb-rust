@@ -18,6 +18,36 @@ updates:
         update-types:
           - major
 
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:15"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      fuzz-compatible:
+        update-types:
+          - patch
+          - minor
+      fuzz-major:
+        update-types:
+          - major
+
+  - package-ecosystem: npm
+    directory: /webui
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:20"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      webui:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
