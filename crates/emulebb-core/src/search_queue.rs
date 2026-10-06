@@ -107,11 +107,59 @@ pub(crate) enum ConcreteSearchLane {
 pub(crate) struct QueuedSearch {
     pub(crate) search_id: String,
     pub(crate) request: SearchCreate,
+    fingerprint: SearchQueueFingerprint,
     pub(crate) lane: SearchQueueLane,
     pub(crate) enqueued_at: Instant,
     /// Times this search has been dispatched to a backend (1 after the first
     /// dispatch). Bounded by [`SEARCH_QUEUE_MAX_SEND_ATTEMPTS`].
     pub(crate) send_attempts: u32,
+}
+
+/// Canonical identity of one queued wire search.
+///
+/// The method remains part of the identity even though `server` and `global`
+/// share a queue lane: they produce materially different eD2k traffic. Every
+/// request-side constraint is included so a broad search cannot suppress a
+/// distinct, more selective search for the same words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchQueueFingerprint {
+    lane: SearchQueueLane,
+    query: String,
+    method: String,
+    file_type: String,
+    extension: String,
+    min_size_bytes: Option<u64>,
+    max_size_bytes: Option<u64>,
+    min_availability: Option<u32>,
+    min_complete_sources: Option<u32>,
+    min_bitrate_kbps: Option<u32>,
+    min_length_seconds: Option<u32>,
+    codec: String,
+    title: String,
+    album: String,
+    artist: String,
+}
+
+impl SearchQueueFingerprint {
+    fn new(request: &SearchCreate, lane: SearchQueueLane) -> Self {
+        Self {
+            lane,
+            query: normalized_queue_query(&request.query),
+            method: normalized_token(&request.method),
+            file_type: normalized_token(&request.r#type),
+            extension: normalized_extension(&request.extension),
+            min_size_bytes: nonzero(request.min_size_bytes),
+            max_size_bytes: nonzero(request.max_size_bytes),
+            min_availability: nonzero(request.min_availability),
+            min_complete_sources: nonzero(request.min_complete_sources),
+            min_bitrate_kbps: nonzero(request.min_bitrate_kbps),
+            min_length_seconds: nonzero(request.min_length_seconds),
+            codec: normalized_text_filter(&request.codec),
+            title: normalized_text_filter(&request.title),
+            album: normalized_text_filter(&request.album),
+            artist: normalized_text_filter(&request.artist),
+        }
+    }
 }
 
 /// Explicit enqueue rejections surfaced as POST errors.
@@ -179,9 +227,9 @@ impl SearchQueue {
 
     /// Queues a search for dispatch when its backend becomes ready.
     ///
-    /// Rejects duplicates (same normalized query on the same lane) and
-    /// enforces [`SEARCH_QUEUE_CAP`]; both surface as explicit POST errors,
-    /// never silent drops.
+    /// Rejects semantically duplicate complete requests and enforces
+    /// [`SEARCH_QUEUE_CAP`]; both surface as explicit POST errors, never
+    /// silent drops.
     pub(crate) fn enqueue(
         &mut self,
         search_id: String,
@@ -192,15 +240,18 @@ impl SearchQueue {
         if self.pending.len() >= SEARCH_QUEUE_CAP {
             return Err(SearchEnqueueError::QueueFull);
         }
-        let normalized = normalized_queue_query(&request.query);
-        if self.pending.iter().any(|entry| {
-            entry.lane == lane && normalized_queue_query(&entry.request.query) == normalized
-        }) {
+        let fingerprint = SearchQueueFingerprint::new(&request, lane);
+        if self
+            .pending
+            .iter()
+            .any(|entry| entry.fingerprint == fingerprint)
+        {
             return Err(SearchEnqueueError::DuplicateQueued);
         }
         self.pending.push_back(QueuedSearch {
             search_id,
             request,
+            fingerprint,
             lane,
             enqueued_at: now,
             send_attempts: 0,
@@ -354,9 +405,33 @@ fn slot_elapsed(last_dispatch: Option<Instant>, now: Instant) -> bool {
     last_dispatch.is_none_or(|last| now.duration_since(last) >= SEARCH_QUEUE_DRAIN_SLOT)
 }
 
-/// Duplicate detection key: whitespace-trimmed, case-folded query text.
+/// Duplicate detection key for query text. REST already collapses ASCII
+/// whitespace; doing it here too keeps direct core callers equivalent.
 fn normalized_queue_query(query: &str) -> String {
-    query.trim().to_ascii_lowercase()
+    query
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn normalized_token(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn normalized_extension(value: &str) -> String {
+    value.trim().trim_start_matches('.').to_ascii_lowercase()
+}
+
+fn normalized_text_filter(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn nonzero<T>(value: Option<T>) -> Option<T>
+where
+    T: PartialEq + From<u8>,
+{
+    value.filter(|candidate| *candidate != T::from(0))
 }
 
 #[cfg(test)]

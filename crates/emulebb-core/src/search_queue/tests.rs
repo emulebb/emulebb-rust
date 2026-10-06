@@ -176,7 +176,7 @@ fn duplicate_queued_query_is_rejected_per_lane() {
     assert_eq!(
         queue.enqueue(
             "2".to_string(),
-            request("  alpha beta "),
+            request("  alpha   beta "),
             SearchQueueLane::Server,
             now
         ),
@@ -192,6 +192,100 @@ fn duplicate_queued_query_is_rejected_per_lane() {
                 now
             )
             .is_ok()
+    );
+}
+
+#[test]
+fn duplicate_fingerprint_includes_method_and_every_filter() {
+    let base = request("alpha");
+    let mut variants = Vec::new();
+
+    let mut variant = base.clone();
+    variant.method = "global".to_string();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.r#type = "audio".to_string();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.extension = "flac".to_string();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.min_size_bytes = Some(1);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.max_size_bytes = Some(2);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.min_availability = Some(3);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.min_complete_sources = Some(4);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.min_bitrate_kbps = Some(5);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.min_length_seconds = Some(6);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.codec = "flac".to_string();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.title = "title".to_string();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.album = "album".to_string();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.artist = "artist".to_string();
+    variants.push(variant);
+
+    for (index, variant) in variants.into_iter().enumerate() {
+        let now = Instant::now();
+        let mut queue = SearchQueue::new();
+        queue
+            .enqueue(
+                "base".to_string(),
+                base.clone(),
+                SearchQueueLane::Server,
+                now,
+            )
+            .expect("base request enqueues");
+        assert!(
+            queue
+                .enqueue(
+                    format!("variant-{index}"),
+                    variant,
+                    SearchQueueLane::Server,
+                    now,
+                )
+                .is_ok(),
+            "variant {index} must be a distinct queued search"
+        );
+    }
+}
+
+#[test]
+fn duplicate_fingerprint_normalizes_equivalent_filter_spellings() {
+    let now = Instant::now();
+    let mut queue = SearchQueue::new();
+    let mut first = request("Alpha Beta");
+    first.r#type = "audio".to_string();
+    first.extension = ".FLAC".to_string();
+    first.codec = " FLAC ".to_string();
+    first.min_availability = Some(0);
+    queue
+        .enqueue("1".to_string(), first, SearchQueueLane::Server, now)
+        .expect("first request enqueues");
+
+    let mut equivalent = request(" alpha   beta ");
+    equivalent.method = " SERVER ".to_string();
+    equivalent.r#type = " AUDIO ".to_string();
+    equivalent.extension = "flac".to_string();
+    equivalent.codec = "flac".to_string();
+    assert_eq!(
+        queue.enqueue("2".to_string(), equivalent, SearchQueueLane::Server, now,),
+        Err(SearchEnqueueError::DuplicateQueued)
     );
 }
 
