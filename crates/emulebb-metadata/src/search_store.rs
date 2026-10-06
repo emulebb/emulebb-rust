@@ -2,7 +2,9 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
-    search_model::{MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation},
+    search_model::{
+        MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,
+    },
     store::{bool_to_i64, decode_fixed_hex, unix_ms},
     text::normalize_search_text,
 };
@@ -16,27 +18,58 @@ impl super::MetadataStore {
             r#"
             INSERT INTO search_sessions(
                 public_id, query, normalized_query, requested_method, resolved_method,
-                file_type_filter, status, created_at_ms, updated_at_ms, completed_at_ms
+                file_type_filter, extension_filter, min_size_bytes, max_size_bytes,
+                min_availability, min_complete_sources, min_bitrate_kbps,
+                min_length_seconds, codec_filter, title_filter, album_filter,
+                artist_filter, status, status_reason, created_at_ms, updated_at_ms,
+                completed_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+            )
             ON CONFLICT(public_id) DO UPDATE SET
                 query = excluded.query,
                 normalized_query = excluded.normalized_query,
                 requested_method = excluded.requested_method,
                 resolved_method = excluded.resolved_method,
                 file_type_filter = excluded.file_type_filter,
+                extension_filter = excluded.extension_filter,
+                min_size_bytes = excluded.min_size_bytes,
+                max_size_bytes = excluded.max_size_bytes,
+                min_availability = excluded.min_availability,
+                min_complete_sources = excluded.min_complete_sources,
+                min_bitrate_kbps = excluded.min_bitrate_kbps,
+                min_length_seconds = excluded.min_length_seconds,
+                codec_filter = excluded.codec_filter,
+                title_filter = excluded.title_filter,
+                album_filter = excluded.album_filter,
+                artist_filter = excluded.artist_filter,
                 status = excluded.status,
+                status_reason = excluded.status_reason,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = excluded.completed_at_ms
             "#,
             params![
                 search.public_id,
-                search.query,
+                search.spec.query,
                 search.normalized_query,
-                search.requested_method,
+                search.spec.method,
                 search.resolved_method,
-                search.file_type_filter,
+                search.spec.file_type,
+                search.spec.extension,
+                encode_optional_u64(search.spec.min_size_bytes),
+                encode_optional_u64(search.spec.max_size_bytes),
+                search.spec.min_availability.map(i64::from),
+                search.spec.min_complete_sources.map(i64::from),
+                search.spec.min_bitrate_kbps.map(i64::from),
+                search.spec.min_length_seconds.map(i64::from),
+                search.spec.codec,
+                search.spec.title,
+                search.spec.album,
+                search.spec.artist,
                 search.status,
+                search.status_reason,
                 search.created_at_ms,
                 search.updated_at_ms,
                 search.completed_at_ms,
@@ -127,8 +160,12 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT id, public_id, query, normalized_query, requested_method,
-                   resolved_method, file_type_filter, status, created_at_ms,
-                   updated_at_ms, completed_at_ms
+                   resolved_method, file_type_filter, extension_filter,
+                   min_size_bytes, max_size_bytes, min_availability,
+                   min_complete_sources, min_bitrate_kbps, min_length_seconds,
+                   codec_filter, title_filter, album_filter, artist_filter,
+                   status, status_reason, created_at_ms, updated_at_ms,
+                   completed_at_ms
             FROM search_sessions
             ORDER BY created_at_ms, id
             "#,
@@ -139,15 +176,29 @@ impl super::MetadataStore {
                     row.get::<_, i64>(0)?,
                     MetadataSearch {
                         public_id: row.get(1)?,
-                        query: row.get(2)?,
                         normalized_query: row.get(3)?,
-                        requested_method: row.get(4)?,
+                        spec: MetadataSearchSpec {
+                            query: row.get(2)?,
+                            method: row.get(4)?,
+                            file_type: row.get(6)?,
+                            extension: row.get(7)?,
+                            min_size_bytes: decode_optional_u64(row.get(8)?, 8)?,
+                            max_size_bytes: decode_optional_u64(row.get(9)?, 9)?,
+                            min_availability: decode_optional_u32(row.get(10)?, 10)?,
+                            min_complete_sources: decode_optional_u32(row.get(11)?, 11)?,
+                            min_bitrate_kbps: decode_optional_u32(row.get(12)?, 12)?,
+                            min_length_seconds: decode_optional_u32(row.get(13)?, 13)?,
+                            codec: row.get(14)?,
+                            title: row.get(15)?,
+                            album: row.get(16)?,
+                            artist: row.get(17)?,
+                        },
                         resolved_method: row.get(5)?,
-                        file_type_filter: row.get(6)?,
-                        status: row.get(7)?,
-                        created_at_ms: row.get(8)?,
-                        updated_at_ms: row.get(9)?,
-                        completed_at_ms: row.get(10)?,
+                        status: row.get(18)?,
+                        status_reason: row.get(19)?,
+                        created_at_ms: row.get(20)?,
+                        updated_at_ms: row.get(21)?,
+                        completed_at_ms: row.get(22)?,
                         results: Vec::new(),
                     },
                 ))
@@ -252,6 +303,46 @@ fn load_search_result_observations(
         .map_err(Into::into)
 }
 
+fn encode_optional_u64(value: Option<u64>) -> Option<Vec<u8>> {
+    value.map(|value| value.to_le_bytes().to_vec())
+}
+
+fn decode_optional_u64(value: Option<Vec<u8>>, column: usize) -> rusqlite::Result<Option<u64>> {
+    value
+        .map(|value| {
+            let bytes: [u8; 8] = value.try_into().map_err(|value: Vec<u8>| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    column,
+                    rusqlite::types::Type::Blob,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "expected 8-byte unsigned integer, got {} bytes",
+                            value.len()
+                        ),
+                    )
+                    .into(),
+                )
+            })?;
+            Ok(u64::from_le_bytes(bytes))
+        })
+        .transpose()
+}
+
+fn decode_optional_u32(value: Option<i64>, column: usize) -> rusqlite::Result<Option<u32>> {
+    value
+        .map(|value| {
+            u32::try_from(value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    column,
+                    rusqlite::types::Type::Integer,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
+
 pub fn normalized_search_query(query: &str) -> String {
     normalize_search_text(query)
 }
@@ -270,8 +361,16 @@ mod tests {
         let searches = store.load_searches().unwrap();
         assert_eq!(searches.len(), 1);
         assert_eq!(searches[0].public_id, "search-one");
-        assert_eq!(searches[0].requested_method, "automatic");
+        assert_eq!(searches[0].spec.method, "automatic");
         assert_eq!(searches[0].resolved_method.as_deref(), Some("global"));
+        assert_eq!(searches[0].spec.min_size_bytes, Some(u64::MAX - 1));
+        assert_eq!(searches[0].spec.max_size_bytes, Some(u64::MAX));
+        assert_eq!(searches[0].spec.min_availability, Some(17));
+        assert_eq!(searches[0].spec.artist, "Example Artist");
+        assert_eq!(
+            searches[0].status_reason.as_deref(),
+            Some("synthetic-status-reason")
+        );
         assert_eq!(searches[0].results.len(), 1);
         assert_eq!(searches[0].results[0].name, "Zażółć Sample.bin");
         assert_eq!(
@@ -305,15 +404,29 @@ mod tests {
     fn sample_search(public_id: &str) -> MetadataSearch {
         MetadataSearch {
             public_id: public_id.to_string(),
-            query: "zażółć".to_string(),
             normalized_query: normalized_search_query("zażółć"),
-            requested_method: "automatic".to_string(),
+            spec: MetadataSearchSpec {
+                query: "zażółć".to_string(),
+                method: "automatic".to_string(),
+                file_type: "video".to_string(),
+                extension: "mkv".to_string(),
+                min_size_bytes: Some(u64::MAX - 1),
+                max_size_bytes: Some(u64::MAX),
+                min_availability: Some(17),
+                min_complete_sources: Some(5),
+                min_bitrate_kbps: Some(320),
+                min_length_seconds: Some(90),
+                codec: "av1".to_string(),
+                title: "Example Title".to_string(),
+                album: "Example Album".to_string(),
+                artist: "Example Artist".to_string(),
+            },
             resolved_method: Some("global".to_string()),
-            file_type_filter: "video".to_string(),
-            status: "completed".to_string(),
+            status: "error".to_string(),
+            status_reason: Some("synthetic-status-reason".to_string()),
             created_at_ms: 1,
             updated_at_ms: 2,
-            completed_at_ms: Some(2),
+            completed_at_ms: None,
             results: vec![MetadataSearchResult {
                 file_hash: "00112233445566778899aabbccddeeff".to_string(),
                 name: "Zażółć Sample.bin".to_string(),

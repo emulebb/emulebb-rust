@@ -262,11 +262,12 @@ pub use rest_model::{
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,
     HostNameResolution, IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate,
     NetworkStatus, NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
-    SearchResultDownloadCreate, SearchResultObservation, ServerCreate, ServerInfo, ServerUpdate,
-    SharedFileUpdate, Status, Transfer, TransferComment, TransferCreate, TransferDetails,
-    TransferEvent, TransferEventDiagnostics, TransferEventResetReason, TransferEventType,
-    TransferPart, TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
-    UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    SearchResultDownloadCreate, SearchResultObservation, SearchSpec, ServerCreate, ServerInfo,
+    ServerUpdate, SharedFileUpdate, Status, Transfer, TransferComment, TransferCreate,
+    TransferDetails, TransferEvent, TransferEventDiagnostics, TransferEventResetReason,
+    TransferEventType, TransferPart, TransferSource, TransferStats, TransferThroughputStats,
+    TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig,
+    VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,

@@ -1,16 +1,33 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearch {
     pub public_id: String,
-    pub query: String,
     pub normalized_query: String,
-    pub requested_method: String,
+    pub spec: MetadataSearchSpec,
     pub resolved_method: Option<String>,
-    pub file_type_filter: String,
     pub status: String,
+    pub status_reason: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub completed_at_ms: Option<i64>,
     pub results: Vec<MetadataSearchResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSearchSpec {
+    pub query: String,
+    pub method: String,
+    pub file_type: String,
+    pub extension: String,
+    pub min_size_bytes: Option<u64>,
+    pub max_size_bytes: Option<u64>,
+    pub min_availability: Option<u32>,
+    pub min_complete_sources: Option<u32>,
+    pub min_bitrate_kbps: Option<u32>,
+    pub min_length_seconds: Option<u32>,
+    pub codec: String,
+    pub title: String,
+    pub album: String,
+    pub artist: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

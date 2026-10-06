@@ -5,7 +5,7 @@
 //! `page()` projections onto the shared `PageQuery`. Extracted verbatim from
 //! `lib.rs` during the maintainability restructuring; behavior is unchanged.
 
-use emulebb_core::SearchResult;
+use emulebb_core::{SearchResult, SearchSpec};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,11 +149,8 @@ pub(crate) struct SearchResultsQuery {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SearchResultsPage {
     pub(crate) id: String,
-    pub(crate) query: String,
-    pub(crate) requested_method: String,
+    pub(crate) spec: SearchSpec,
     pub(crate) resolved_method: Option<String>,
-    #[serde(rename = "type")]
-    pub(crate) file_type: String,
     pub(crate) status: String,
     /// Additive REST field: honest reason for a non-completed status (e.g.
     /// `waiting-for-server-connection` while queued). `null` when absent.

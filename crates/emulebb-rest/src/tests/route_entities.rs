@@ -496,7 +496,7 @@ async fn search_results_use_canonical_paging_query() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"query":"  paged\tresult  ","method":"automatic","type":""}"#,
+                    r#"{"query":"  paged\tresult  ","method":"automatic","type":"","extension":"iso","minSizeBytes":1,"maxSizeBytes":1000,"minAvailability":2,"minCompleteSources":0,"minBitrateKbps":192,"minLengthSeconds":90,"codec":"av1","title":"Example Title","album":"Example Album","artist":"Example Artist"}"#,
                 ))
                 .unwrap(),
         )
@@ -509,6 +509,17 @@ async fn search_results_use_canonical_paging_query() {
     assert_eq!(value["data"]["requestedMethod"], "automatic");
     assert_eq!(value["data"]["resolvedMethod"], Value::Null);
     assert!(value["data"].get("method").is_none());
+    assert_eq!(value["data"]["criteria"]["extension"], "iso");
+    assert_eq!(value["data"]["criteria"]["minSizeBytes"], 1);
+    assert_eq!(value["data"]["criteria"]["maxSizeBytes"], 1000);
+    assert_eq!(value["data"]["criteria"]["minAvailability"], 2);
+    assert_eq!(value["data"]["criteria"]["minCompleteSources"], 0);
+    assert_eq!(value["data"]["criteria"]["minBitrateKbps"], 192);
+    assert_eq!(value["data"]["criteria"]["minLengthSeconds"], 90);
+    assert_eq!(value["data"]["criteria"]["codec"], "av1");
+    assert_eq!(value["data"]["criteria"]["title"], "Example Title");
+    assert_eq!(value["data"]["criteria"]["album"], "Example Album");
+    assert_eq!(value["data"]["criteria"]["artist"], "Example Artist");
     let search_id = value["data"]["id"].as_str().unwrap();
 
     let response = app
@@ -531,6 +542,8 @@ async fn search_results_use_canonical_paging_query() {
     assert_eq!(value["data"]["requestedMethod"], "automatic");
     assert_eq!(value["data"]["resolvedMethod"], Value::Null);
     assert!(value["data"].get("method").is_none());
+    assert_eq!(value["data"]["criteria"]["extension"], "iso");
+    assert_eq!(value["data"]["criteria"]["artist"], "Example Artist");
     // The eMuleBB master returns paged search results under "items" with
     // total/offset/limit (search/results shares the common page shape).
     assert_eq!(value["data"]["total"], 3);

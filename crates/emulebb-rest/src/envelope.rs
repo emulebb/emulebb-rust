@@ -76,10 +76,8 @@ pub(crate) fn search_results_page(
         .collect();
     Ok(SearchResultsPage {
         id: search.id,
-        query: search.query,
-        requested_method: search.requested_method,
+        spec: search.spec,
         resolved_method: search.resolved_method,
-        file_type: search.r#type,
         status: search.status,
         status_reason: search.status_reason,
         total,

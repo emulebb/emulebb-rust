@@ -218,9 +218,9 @@ pub struct TransferStats {
     pub total: usize,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SearchCreate {
+pub struct SearchSpec {
     pub query: String,
     #[serde(default = "default_search_method")]
     pub method: String,
@@ -250,20 +250,20 @@ pub struct SearchCreate {
     pub artist: String,
 }
 
+/// The create-search payload is the immutable specification stored with the
+/// resulting search session.
+pub type SearchCreate = SearchSpec;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Search {
     pub id: String,
-    pub query: String,
-    /// Method requested by the caller. This remains `automatic` when the
-    /// runtime selects a concrete backend.
-    pub requested_method: String,
+    pub spec: SearchSpec,
     /// Concrete backend selected for network execution. `None` means no
     /// network backend has been selected (yet, or because the search stayed
     /// local-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_method: Option<String>,
-    pub r#type: String,
     pub status: String,
     /// Honest reason for a non-completed status (additive REST field
     /// `statusReason`): e.g. `waiting-for-server-connection` while `queued`,

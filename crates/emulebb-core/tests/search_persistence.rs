@@ -29,7 +29,17 @@ async fn search_state_survives_core_restart_and_downloads_result() {
                 query: "sample payload".to_string(),
                 method: "automatic".to_string(),
                 r#type: "archive".to_string(),
-                ..Default::default()
+                extension: "bin".to_string(),
+                min_size_bytes: Some(1_000),
+                max_size_bytes: Some(2_000),
+                min_availability: Some(5),
+                min_complete_sources: Some(0),
+                min_bitrate_kbps: Some(320),
+                min_length_seconds: Some(60),
+                codec: "binary".to_string(),
+                title: "Sample Title".to_string(),
+                album: "Sample Album".to_string(),
+                artist: "Sample Artist".to_string(),
             })
             .await
             .unwrap();
@@ -41,7 +51,19 @@ async fn search_state_survives_core_restart_and_downloads_result() {
     let searches = reloaded.searches().await;
     assert_eq!(searches.len(), 1);
     assert_eq!(searches[0].id, search_id);
-    assert_eq!(searches[0].requested_method, "automatic");
+    assert_eq!(searches[0].spec.method, "automatic");
+    assert_eq!(searches[0].spec.r#type, "archive");
+    assert_eq!(searches[0].spec.extension, "bin");
+    assert_eq!(searches[0].spec.min_size_bytes, Some(1_000));
+    assert_eq!(searches[0].spec.max_size_bytes, Some(2_000));
+    assert_eq!(searches[0].spec.min_availability, Some(5));
+    assert_eq!(searches[0].spec.min_complete_sources, Some(0));
+    assert_eq!(searches[0].spec.min_bitrate_kbps, Some(320));
+    assert_eq!(searches[0].spec.min_length_seconds, Some(60));
+    assert_eq!(searches[0].spec.codec, "binary");
+    assert_eq!(searches[0].spec.title, "Sample Title");
+    assert_eq!(searches[0].spec.album, "Sample Album");
+    assert_eq!(searches[0].spec.artist, "Sample Artist");
     assert_eq!(searches[0].resolved_method, None);
     assert_eq!(searches[0].results[0].name, "Sample Search Payload.bin");
     assert_eq!(searches[0].results[0].r#type, "archive");

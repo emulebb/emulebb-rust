@@ -197,6 +197,20 @@ export type SearchResult = {
   [key: string]: unknown;
 };
 
+export type SearchCriteria = {
+  extension?: string;
+  minSizeBytes?: number | null;
+  maxSizeBytes?: number | null;
+  minAvailability?: number | null;
+  minCompleteSources?: number | null;
+  minBitrateKbps?: number | null;
+  minLengthSeconds?: number | null;
+  codec?: string;
+  title?: string;
+  album?: string;
+  artist?: string;
+};
+
 export type SearchItem = {
   id: string;
   query?: string;
@@ -206,6 +220,7 @@ export type SearchItem = {
   requestedMethod?: string;
   resolvedMethod?: string | null;
   type?: string;
+  criteria?: SearchCriteria;
   items?: SearchResult[];
   results?: SearchResult[];
   total?: number;

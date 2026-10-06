@@ -8,7 +8,7 @@ use std::{collections::BTreeSet, path::Path as FsPath};
 
 use emulebb_core::{
     AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
-    Search, SearchResult, ServerInfo, Status, Transfer, TransferEventDiagnostics,
+    Search, SearchResult, SearchSpec, ServerInfo, Status, Transfer, TransferEventDiagnostics,
     TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
     normal_path_display,
 };
@@ -558,10 +558,11 @@ pub(crate) fn search_results_response(
 pub(crate) fn search_session_response(search: &Search) -> Value {
     json!({
         "id": search.id,
-        "query": search.query,
-        "requestedMethod": search.requested_method,
+        "query": search.spec.query,
+        "requestedMethod": search.spec.method,
         "resolvedMethod": search.resolved_method,
-        "type": search.r#type,
+        "type": search.spec.r#type,
+        "criteria": search_criteria_response(&search.spec),
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
         "resultCount": search.results.len()
@@ -574,10 +575,11 @@ pub(crate) fn search_response(search: &Search) -> Value {
     // Results are fetched by polling GET /searches/{id}.
     json!({
         "id": search.id,
-        "query": search.query,
-        "requestedMethod": search.requested_method,
+        "query": search.spec.query,
+        "requestedMethod": search.spec.method,
         "resolvedMethod": search.resolved_method,
-        "type": search.r#type,
+        "type": search.spec.r#type,
+        "criteria": search_criteria_response(&search.spec),
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
         "total": 0,
@@ -590,16 +592,33 @@ pub(crate) fn search_response(search: &Search) -> Value {
 pub(crate) fn search_page_response(search: &SearchResultsPage) -> Value {
     json!({
         "id": search.id,
-        "query": search.query,
-        "requestedMethod": search.requested_method,
+        "query": search.spec.query,
+        "requestedMethod": search.spec.method,
         "resolvedMethod": search.resolved_method,
-        "type": search.file_type,
+        "type": search.spec.r#type,
+        "criteria": search_criteria_response(&search.spec),
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
         "total": search.total,
         "offset": search.offset,
         "limit": search.limit,
         "items": search_results_response(&search.results, search.include_evidence)
+    })
+}
+
+fn search_criteria_response(spec: &SearchSpec) -> Value {
+    json!({
+        "extension": spec.extension,
+        "minSizeBytes": spec.min_size_bytes,
+        "maxSizeBytes": spec.max_size_bytes,
+        "minAvailability": spec.min_availability,
+        "minCompleteSources": spec.min_complete_sources,
+        "minBitrateKbps": spec.min_bitrate_kbps,
+        "minLengthSeconds": spec.min_length_seconds,
+        "codec": spec.codec,
+        "title": spec.title,
+        "album": spec.album,
+        "artist": spec.artist,
     })
 }
 

@@ -27,7 +27,9 @@ pub use model::{MetadataIndexedFile, MetadataSharedDirectoryRoot};
 pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
-pub use search_model::{MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation};
+pub use search_model::{
+    MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,
+};
 pub use search_store::normalized_search_query;
 pub use store::MetadataStore;
 pub use text::normalize_search_text;
