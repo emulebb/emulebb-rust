@@ -85,8 +85,9 @@ pub(crate) fn resolve_search_network_method(
     }
 }
 
-/// Apply the optional `SearchCreateRequest` filters (extension, size bounds, and
-/// minimum availability) from the eMuleBB `/api/v1` contract to a result set.
+/// Apply the optional `SearchCreateRequest` filters for which every result has
+/// local evidence (extension, size bounds, and source counts). This defensive
+/// pass rejects replies that do not honor the constraints encoded on the wire.
 pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &SearchCreate) {
     let extension = request
         .extension
@@ -112,6 +113,11 @@ pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &Se
         }
         if let Some(min_availability) = request.min_availability
             && result.sources < min_availability
+        {
+            return false;
+        }
+        if let Some(min_complete_sources) = request.min_complete_sources
+            && result.complete_sources < min_complete_sources
         {
             return false;
         }
@@ -310,18 +316,24 @@ mod tests {
     }
 
     #[test]
-    fn extension_size_and_availability_filters_apply() {
+    fn extension_size_and_source_filters_apply() {
         let mut results = vec![
             result("Movie.One.mkv", 5_000, 8),
             result("Movie.Two.mkv", 50, 8),
             result("Movie.Three.avi", 5_000, 8),
             result("Movie.Four.mkv", 5_000, 1),
+            result("Movie.Five.mkv", 5_000, 8),
         ];
+        results[0].complete_sources = 3;
+        results[0].observations[0].complete_sources = 3;
+        results[4].complete_sources = 1;
+        results[4].observations[0].complete_sources = 1;
         let mut req = request();
         req.extension = "MKV".to_string();
         req.min_size_bytes = Some(1_000);
         req.max_size_bytes = Some(10_000);
         req.min_availability = Some(5);
+        req.min_complete_sources = Some(2);
         apply_search_filters(&mut results, &req);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Movie.One.mkv");
