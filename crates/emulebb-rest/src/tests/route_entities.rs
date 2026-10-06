@@ -506,6 +506,9 @@ async fn search_results_use_canonical_paging_query() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["query"], "paged result");
+    assert_eq!(value["data"]["requestedMethod"], "automatic");
+    assert_eq!(value["data"]["resolvedMethod"], Value::Null);
+    assert!(value["data"].get("method").is_none());
     let search_id = value["data"]["id"].as_str().unwrap();
 
     let response = app
@@ -525,12 +528,16 @@ async fn search_results_use_canonical_paging_query() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["id"], search_id);
+    assert_eq!(value["data"]["requestedMethod"], "automatic");
+    assert_eq!(value["data"]["resolvedMethod"], Value::Null);
+    assert!(value["data"].get("method").is_none());
     // The eMuleBB master returns paged search results under "items" with
     // total/offset/limit (search/results shares the common page shape).
     assert_eq!(value["data"]["total"], 3);
     assert_eq!(value["data"]["offset"], 1);
     assert_eq!(value["data"]["limit"], 1);
     assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
+    assert!(value["data"]["items"][0].get("method").is_none());
     assert!(value["data"]["items"][0].get("knownType").is_none());
     assert!(value["data"]["items"][0].get("evidence").is_none());
 

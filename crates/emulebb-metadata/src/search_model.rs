@@ -3,7 +3,8 @@ pub struct MetadataSearch {
     pub public_id: String,
     pub query: String,
     pub normalized_query: String,
-    pub method: String,
+    pub requested_method: String,
+    pub resolved_method: Option<String>,
     pub file_type_filter: String,
     pub status: String,
     pub created_at_ms: i64,
@@ -14,7 +15,6 @@ pub struct MetadataSearch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchResult {
-    pub network: String,
     pub file_hash: String,
     pub name: String,
     pub size_bytes: u64,

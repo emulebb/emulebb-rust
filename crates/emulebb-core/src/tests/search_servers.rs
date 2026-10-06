@@ -99,6 +99,8 @@ async fn search_uses_local_index() {
     // "running"; it flips to "completed" once the background pass finishes.
     assert_eq!(search.id, "1");
     assert_eq!(search.status, "running");
+    assert_eq!(search.requested_method, "automatic");
+    assert_eq!(search.resolved_method, None);
     assert_eq!(search.results.len(), 1);
     let mut completed = search;
     for _ in 0..100 {
@@ -109,6 +111,8 @@ async fn search_uses_local_index() {
         completed = core.search(&completed.id).await.unwrap();
     }
     assert_eq!(completed.status, "completed");
+    assert_eq!(completed.requested_method, "automatic");
+    assert_eq!(completed.resolved_method, None);
     assert_eq!(completed.results.len(), 1);
 }
 
@@ -140,6 +144,8 @@ async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
     };
     let search = core.create_search(request.clone()).await.unwrap();
     assert_eq!(search.status, "queued");
+    assert_eq!(search.requested_method, "server");
+    assert_eq!(search.resolved_method, None);
     assert_eq!(
         search.status_reason.as_deref(),
         Some("waiting-for-server-connection")

@@ -150,7 +150,8 @@ pub(crate) struct SearchResultsQuery {
 pub(crate) struct SearchResultsPage {
     pub(crate) id: String,
     pub(crate) query: String,
-    pub(crate) method: String,
+    pub(crate) requested_method: String,
+    pub(crate) resolved_method: Option<String>,
     #[serde(rename = "type")]
     pub(crate) file_type: String,
     pub(crate) status: String,

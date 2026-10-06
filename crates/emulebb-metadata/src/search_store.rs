@@ -15,14 +15,15 @@ impl super::MetadataStore {
         tx.execute(
             r#"
             INSERT INTO search_sessions(
-                public_id, query, normalized_query, method, file_type_filter, status,
-                created_at_ms, updated_at_ms, completed_at_ms
+                public_id, query, normalized_query, requested_method, resolved_method,
+                file_type_filter, status, created_at_ms, updated_at_ms, completed_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(public_id) DO UPDATE SET
                 query = excluded.query,
                 normalized_query = excluded.normalized_query,
-                method = excluded.method,
+                requested_method = excluded.requested_method,
+                resolved_method = excluded.resolved_method,
                 file_type_filter = excluded.file_type_filter,
                 status = excluded.status,
                 updated_at_ms = excluded.updated_at_ms,
@@ -32,7 +33,8 @@ impl super::MetadataStore {
                 search.public_id,
                 search.query,
                 search.normalized_query,
-                search.method,
+                search.requested_method,
+                search.resolved_method,
                 search.file_type_filter,
                 search.status,
                 search.created_at_ms,
@@ -61,16 +63,15 @@ impl super::MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO search_results(
-                    session_id, known_file_id, network, file_hash, name, size_bytes,
+                    session_id, known_file_id, file_hash, name, size_bytes,
                     source_count, complete_source_count, file_type, rating, aich_hash,
                     complete, directory
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 "#,
                 params![
                     session_id,
                     known_file_id,
-                    result.network,
                     file_hash,
                     result.name,
                     result.size_bytes as i64,
@@ -125,8 +126,9 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, public_id, query, normalized_query, method, file_type_filter,
-                   status, created_at_ms, updated_at_ms, completed_at_ms
+            SELECT id, public_id, query, normalized_query, requested_method,
+                   resolved_method, file_type_filter, status, created_at_ms,
+                   updated_at_ms, completed_at_ms
             FROM search_sessions
             ORDER BY created_at_ms, id
             "#,
@@ -139,12 +141,13 @@ impl super::MetadataStore {
                         public_id: row.get(1)?,
                         query: row.get(2)?,
                         normalized_query: row.get(3)?,
-                        method: row.get(4)?,
-                        file_type_filter: row.get(5)?,
-                        status: row.get(6)?,
-                        created_at_ms: row.get(7)?,
-                        updated_at_ms: row.get(8)?,
-                        completed_at_ms: row.get(9)?,
+                        requested_method: row.get(4)?,
+                        resolved_method: row.get(5)?,
+                        file_type_filter: row.get(6)?,
+                        status: row.get(7)?,
+                        created_at_ms: row.get(8)?,
+                        updated_at_ms: row.get(9)?,
+                        completed_at_ms: row.get(10)?,
                         results: Vec::new(),
                     },
                 ))
@@ -179,7 +182,7 @@ fn load_search_results(
 ) -> Result<Vec<MetadataSearchResult>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, network, lower(hex(file_hash)),
+        SELECT id, lower(hex(file_hash)),
                name, size_bytes, source_count, complete_source_count, file_type,
                rating, aich_hash, complete, directory
         FROM search_results
@@ -191,17 +194,16 @@ fn load_search_results(
         Ok((
             row.get::<_, i64>(0)?,
             MetadataSearchResult {
-                network: row.get(1)?,
-                file_hash: row.get(2)?,
-                name: row.get(3)?,
-                size_bytes: row.get::<_, i64>(4)? as u64,
-                source_count: row.get::<_, i64>(5)? as u32,
-                complete_source_count: row.get::<_, i64>(6)? as u32,
-                file_type: row.get(7)?,
-                rating: row.get::<_, i64>(8)? as u8,
-                aich_hash: row.get(9)?,
-                complete: row.get::<_, i64>(10)? != 0,
-                directory: row.get(11)?,
+                file_hash: row.get(1)?,
+                name: row.get(2)?,
+                size_bytes: row.get::<_, i64>(3)? as u64,
+                source_count: row.get::<_, i64>(4)? as u32,
+                complete_source_count: row.get::<_, i64>(5)? as u32,
+                file_type: row.get(6)?,
+                rating: row.get::<_, i64>(7)? as u8,
+                aich_hash: row.get(8)?,
+                complete: row.get::<_, i64>(9)? != 0,
+                directory: row.get(10)?,
                 observations: Vec::new(),
             },
         ))
@@ -268,6 +270,8 @@ mod tests {
         let searches = store.load_searches().unwrap();
         assert_eq!(searches.len(), 1);
         assert_eq!(searches[0].public_id, "search-one");
+        assert_eq!(searches[0].requested_method, "automatic");
+        assert_eq!(searches[0].resolved_method.as_deref(), Some("global"));
         assert_eq!(searches[0].results.len(), 1);
         assert_eq!(searches[0].results[0].name, "Zażółć Sample.bin");
         assert_eq!(
@@ -303,14 +307,14 @@ mod tests {
             public_id: public_id.to_string(),
             query: "zażółć".to_string(),
             normalized_query: normalized_search_query("zażółć"),
-            method: "automatic".to_string(),
+            requested_method: "automatic".to_string(),
+            resolved_method: Some("global".to_string()),
             file_type_filter: "video".to_string(),
             status: "completed".to_string(),
             created_at_ms: 1,
             updated_at_ms: 2,
             completed_at_ms: Some(2),
             results: vec![MetadataSearchResult {
-                network: "automatic".to_string(),
                 file_hash: "00112233445566778899aabbccddeeff".to_string(),
                 name: "Zażółć Sample.bin".to_string(),
                 size_bytes: 123,

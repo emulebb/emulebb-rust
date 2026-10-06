@@ -267,7 +267,8 @@ test("loads a selected search session from a deep link", async ({ page }) => {
   state.searches = [{
     id: "7",
     query: "synthetic archive",
-    method: "kad",
+    requestedMethod: "kad",
+    resolvedMethod: "kad",
     status: "completed",
     resultCount: 1
   }];
@@ -339,7 +340,8 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   state.searches = [{
     id: "1",
     query: "older search",
-    method: "server",
+    requestedMethod: "server",
+    resolvedMethod: "server",
     status: "completed",
     resultCount: 1
   }];
@@ -426,7 +428,8 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       const search = {
         id: "2",
         query: "linux",
-        method: "automatic",
+        requestedMethod: "automatic",
+        resolvedMethod: "global",
         status: "completed",
         resultCount: 1
       };

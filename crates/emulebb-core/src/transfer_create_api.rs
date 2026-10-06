@@ -204,7 +204,6 @@ mod tests {
     fn result(client_id: Option<u32>, client_port: Option<u16>) -> SearchResult {
         SearchResult {
             search_id: "1".to_string(),
-            method: "server".to_string(),
             r#type: String::new(),
             hash: "00112233445566778899aabbccddeeff".to_string(),
             name: "Synthetic.bin".to_string(),

@@ -77,8 +77,27 @@ impl EmulebbCore {
                     None,
                     dispatch.entry.send_attempts,
                 );
-                self.update_search_status(&dispatch.entry.search_id, "running", None)
-                    .await;
+                let resolved_method = match dispatch.lane {
+                    ConcreteSearchLane::Server
+                        if dispatch
+                            .entry
+                            .request
+                            .method
+                            .trim()
+                            .eq_ignore_ascii_case("server") =>
+                    {
+                        "server"
+                    }
+                    ConcreteSearchLane::Server => "global",
+                    ConcreteSearchLane::Kad => "kad",
+                };
+                self.update_search_status(
+                    &dispatch.entry.search_id,
+                    "running",
+                    None,
+                    Some(resolved_method),
+                )
+                .await;
                 let core = self.clone();
                 tokio::spawn(async move {
                     core.execute_queued_search(dispatch).await;
@@ -259,7 +278,7 @@ impl EmulebbCore {
                 Some(retry_reason),
                 attempts,
             );
-            self.update_search_status(&search_id, "queued", Some(waiting_reason))
+            self.update_search_status(&search_id, "queued", Some(waiting_reason), None)
                 .await;
         } else {
             crate::diag_sched::keyword_search_queue(
@@ -285,6 +304,7 @@ impl EmulebbCore {
         search_id: &str,
         status: &str,
         status_reason: Option<&str>,
+        resolved_method: Option<&str>,
     ) {
         let snapshot = {
             let mut state = self.state.lock().await;
@@ -293,6 +313,9 @@ impl EmulebbCore {
             };
             search.status = status.to_string();
             search.status_reason = status_reason.map(str::to_string);
+            if let Some(resolved_method) = resolved_method {
+                search.resolved_method = Some(resolved_method.to_string());
+            }
             search.updated_at = Utc::now();
             search.clone()
         };
@@ -337,6 +360,7 @@ impl EmulebbCore {
                 }
                 search.status = "completed".to_string();
                 search.status_reason = None;
+                search.resolved_method = concrete_method(method_token).map(str::to_string);
                 search.updated_at = Utc::now();
                 search.clone()
             };
@@ -381,6 +405,9 @@ impl EmulebbCore {
             };
             search.status = "error".to_string();
             search.status_reason = Some(reason.to_string());
+            if let Some(method) = concrete_method(method_token) {
+                search.resolved_method = Some(method.to_string());
+            }
             search.updated_at = Utc::now();
             search.clone()
         };
@@ -405,4 +432,8 @@ fn request_method_token(request: &SearchCreate) -> &'static str {
         "kad" => "kad",
         _ => "automatic",
     }
+}
+
+fn concrete_method(method: &str) -> Option<&str> {
+    matches!(method, "server" | "global" | "kad").then_some(method)
 }

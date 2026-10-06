@@ -57,7 +57,8 @@ fn search_to_metadata(search: &Search) -> MetadataSearch {
         public_id: search.id.clone(),
         query: search.query.clone(),
         normalized_query: normalized_search_query(&search.query),
-        method: search.method.clone(),
+        requested_method: search.requested_method.clone(),
+        resolved_method: search.resolved_method.clone(),
         file_type_filter: search.r#type.clone(),
         status: search.status.clone(),
         created_at_ms: search.created_at.timestamp_millis(),
@@ -74,7 +75,7 @@ fn search_to_metadata(search: &Search) -> MetadataSearch {
 fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> MetadataSearchResult {
     let observations = if result.observations.is_empty() {
         vec![MetadataSearchResultObservation {
-            origin: result.method.clone(),
+            origin: "unknown".to_string(),
             name: result.name.clone(),
             size_bytes: result.size_bytes,
             source_count: result.sources,
@@ -110,7 +111,6 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
             .collect()
     };
     MetadataSearchResult {
-        network: result.method.clone(),
         file_hash: result.hash.clone(),
         name: result.name.clone(),
         size_bytes: result.size_bytes,
@@ -142,7 +142,8 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
     Ok(Search {
         id: search.public_id.clone(),
         query: search.query,
-        method: search.method,
+        requested_method: search.requested_method,
+        resolved_method: search.resolved_method,
         r#type: search.file_type_filter.clone(),
         status,
         status_reason,
@@ -194,7 +195,6 @@ fn search_result_from_metadata(
     });
     Ok(SearchResult {
         search_id: search_id.to_string(),
-        method: result.network,
         r#type: file_type_filter.to_string(),
         hash: result.file_hash,
         name: result.name,

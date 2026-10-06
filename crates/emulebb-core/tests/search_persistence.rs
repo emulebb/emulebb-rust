@@ -41,6 +41,8 @@ async fn search_state_survives_core_restart_and_downloads_result() {
     let searches = reloaded.searches().await;
     assert_eq!(searches.len(), 1);
     assert_eq!(searches[0].id, search_id);
+    assert_eq!(searches[0].requested_method, "automatic");
+    assert_eq!(searches[0].resolved_method, None);
     assert_eq!(searches[0].results[0].name, "Sample Search Payload.bin");
     assert_eq!(searches[0].results[0].r#type, "archive");
 

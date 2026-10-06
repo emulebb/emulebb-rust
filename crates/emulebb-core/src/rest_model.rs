@@ -255,7 +255,14 @@ pub struct SearchCreate {
 pub struct Search {
     pub id: String,
     pub query: String,
-    pub method: String,
+    /// Method requested by the caller. This remains `automatic` when the
+    /// runtime selects a concrete backend.
+    pub requested_method: String,
+    /// Concrete backend selected for network execution. `None` means no
+    /// network backend has been selected (yet, or because the search stayed
+    /// local-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_method: Option<String>,
     pub r#type: String,
     pub status: String,
     /// Honest reason for a non-completed status (additive REST field
@@ -273,7 +280,6 @@ pub struct Search {
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
     pub search_id: String,
-    pub method: String,
     pub r#type: String,
     pub hash: String,
     pub name: String,
@@ -332,14 +338,12 @@ pub struct SearchResultObservation {
 impl SearchResult {
     pub(crate) fn from_observation(
         search_id: String,
-        method: String,
         r#type: String,
         hash: String,
         observation: SearchResultObservation,
     ) -> Self {
         Self {
             search_id,
-            method,
             r#type,
             hash,
             name: observation.name.clone(),
@@ -378,7 +382,7 @@ impl SearchResult {
             return;
         }
         self.observations.push(SearchResultObservation {
-            origin: self.method.clone(),
+            origin: "unknown".to_string(),
             name: self.name.clone(),
             size_bytes: self.size_bytes,
             sources: self.sources,

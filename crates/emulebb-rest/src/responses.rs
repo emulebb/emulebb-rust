@@ -505,7 +505,6 @@ pub(crate) fn search_result_response_with_options(
     let multiple_aich = aich_hashes.len() > 1;
     let mut response = json!({
         "searchId": result.search_id,
-        "method": result.method,
         "type": result.r#type,
         "hash": result.hash,
         "name": result.name,
@@ -560,7 +559,8 @@ pub(crate) fn search_session_response(search: &Search) -> Value {
     json!({
         "id": search.id,
         "query": search.query,
-        "method": search.method,
+        "requestedMethod": search.requested_method,
+        "resolvedMethod": search.resolved_method,
         "type": search.r#type,
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
@@ -575,7 +575,8 @@ pub(crate) fn search_response(search: &Search) -> Value {
     json!({
         "id": search.id,
         "query": search.query,
-        "method": search.method,
+        "requestedMethod": search.requested_method,
+        "resolvedMethod": search.resolved_method,
         "type": search.r#type,
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
@@ -590,7 +591,8 @@ pub(crate) fn search_page_response(search: &SearchResultsPage) -> Value {
     json!({
         "id": search.id,
         "query": search.query,
-        "method": search.method,
+        "requestedMethod": search.requested_method,
+        "resolvedMethod": search.resolved_method,
         "type": search.file_type,
         "status": search_status_token(&search.status),
         "statusReason": search.status_reason,
@@ -725,7 +727,6 @@ mod tests {
     fn search_result_response_emits_only_supported_evidence() {
         let mut result = SearchResult {
             search_id: "search-1".to_string(),
-            method: "server".to_string(),
             r#type: "doc".to_string(),
             hash: "00112233445566778899aabbccddeeff".to_string(),
             name: "sample.bin".to_string(),
@@ -745,6 +746,7 @@ mod tests {
         let complete = search_result_response(&result);
         assert_eq!(complete["complete"], true);
         assert_eq!(complete["rating"], 4);
+        assert!(complete.get("method").is_none());
         assert!(complete.get("knownType").is_none());
         assert!(complete.get("clientIp").is_none());
         assert!(complete.get("serverCount").is_none());

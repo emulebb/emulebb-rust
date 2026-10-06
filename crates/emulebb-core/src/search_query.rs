@@ -141,7 +141,6 @@ pub(crate) fn search_result_from_indexed(
     };
     SearchResult::from_observation(
         search_id.to_string(),
-        request.method.clone(),
         request.r#type.clone(),
         file.ed2k_hash,
         observation,
@@ -151,13 +150,14 @@ pub(crate) fn search_result_from_indexed(
 pub(crate) fn search_result_from_ed2k(
     search_id: &str,
     request: &SearchCreate,
+    origin: &str,
     file: Ed2kSearchFile,
 ) -> SearchResult {
     let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
     let source_client_id = (file.client_id != 0).then_some(file.client_id);
     let source_client_port = (file.client_port != 0).then_some(file.client_port);
     let observation = SearchResultObservation {
-        origin: request.method.clone(),
+        origin: origin.to_string(),
         name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
         size_bytes: file.file_size.unwrap_or_default(),
         sources: file.source_count.unwrap_or_default(),
@@ -173,7 +173,6 @@ pub(crate) fn search_result_from_ed2k(
     };
     SearchResult::from_observation(
         search_id.to_string(),
-        request.method.clone(),
         request.r#type.clone(),
         file.file_hash.to_string(),
         observation,
@@ -212,7 +211,6 @@ pub(crate) fn search_result_from_kad(
     };
     SearchResult::from_observation(
         search_id.to_string(),
-        request.method.clone(),
         request.r#type.clone(),
         hash,
         observation,
@@ -227,24 +225,26 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn result(name: &str, size_bytes: u64, sources: u32) -> SearchResult {
-        SearchResult {
-            search_id: "s".to_string(),
-            method: "automatic".to_string(),
-            r#type: String::new(),
-            hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: name.to_string(),
-            size_bytes,
-            sources,
-            complete_sources: 0,
-            source_client_id: None,
-            source_client_port: None,
-            file_type: String::new(),
-            rating: 0,
-            aich_hash: String::new(),
-            complete: false,
-            directory: String::new(),
-            observations: Vec::new(),
-        }
+        SearchResult::from_observation(
+            "s".to_string(),
+            String::new(),
+            "00112233445566778899aabbccddeeff".to_string(),
+            SearchResultObservation {
+                origin: "unknown".to_string(),
+                name: name.to_string(),
+                size_bytes,
+                sources,
+                complete_sources: 0,
+                source_client_id: None,
+                source_client_port: None,
+                file_type: String::new(),
+                rating: 0,
+                aich_hash: String::new(),
+                complete: false,
+                directory: String::new(),
+                observed_at: Utc::now(),
+            },
+        )
     }
 
     fn request() -> SearchCreate {
@@ -330,13 +330,13 @@ mod tests {
     #[test]
     fn hash_merge_retains_observations_and_recomputes_the_aggregate() {
         let mut local = result("local-name.bin", 0, 1);
-        local.method = "automatic".to_string();
         let mut network = result("network-name.bin", 4_096, 12);
-        network.method = "global".to_string();
-        network.complete_sources = 4;
-        network.file_type = "Pro".to_string();
-        network.rating = 3;
-        network.aich_hash = "A".repeat(32);
+        local.observations[0].origin = "local_index".to_string();
+        network.observations[0].origin = "global".to_string();
+        network.observations[0].complete_sources = 4;
+        network.observations[0].file_type = "Pro".to_string();
+        network.observations[0].rating = 3;
+        network.observations[0].aich_hash = "A".repeat(32);
 
         local.merge_observations(network.clone());
         local.merge_observations(network);
@@ -420,6 +420,7 @@ mod tests {
         let result = search_result_from_ed2k(
             "43",
             &req,
+            "global",
             Ed2kSearchFile {
                 file_hash,
                 client_id: u32::from_le_bytes([10, 20, 30, 40]),
@@ -448,5 +449,6 @@ mod tests {
         assert_eq!(result.rating, 4);
         assert_eq!(result.aich_hash, "A".repeat(32));
         assert_eq!(result.directory, "Synthetic Folder");
+        assert_eq!(result.observations[0].origin, "global");
     }
 }

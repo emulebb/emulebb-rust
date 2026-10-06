@@ -203,7 +203,8 @@ export type SearchItem = {
   state?: string;
   status?: string;
   statusReason?: string | null;
-  method?: string;
+  requestedMethod?: string;
+  resolvedMethod?: string | null;
   type?: string;
   items?: SearchResult[];
   results?: SearchResult[];

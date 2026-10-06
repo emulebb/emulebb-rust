@@ -67,7 +67,8 @@ impl EmulebbCore {
         let search = Search {
             id: search_id.clone(),
             query: request.query.clone(),
-            method: request.method.clone(),
+            requested_method: request.method.clone(),
+            resolved_method: None,
             r#type: request.r#type.clone(),
             status: status.to_string(),
             status_reason,
