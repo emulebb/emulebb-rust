@@ -125,7 +125,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build-tests
-          ref: 70e4ff8da819358d9dd4420cc683a3f2ebca6f0c
+          ref: 19b26181b42d5e2d1bfb44b301d8d2930f00ccf0
           path: .ci/emulebb-build-tests
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -232,7 +232,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build-tests
-          ref: 70e4ff8da819358d9dd4420cc683a3f2ebca6f0c
+          ref: 19b26181b42d5e2d1bfb44b301d8d2930f00ccf0
           path: .ci/emulebb-build-tests
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
