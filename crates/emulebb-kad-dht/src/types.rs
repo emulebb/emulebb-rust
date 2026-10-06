@@ -93,8 +93,15 @@ pub struct SearchResult {
     pub hash: Ed2kHash,
     pub names: Vec<String>,
     pub size: Option<u64>,
+    pub file_type: Option<String>,
     /// Remote complete-source count parsed from the oracle `TAG_SOURCES` tag.
     pub source_count: Option<u32>,
+    pub media_artist: Option<String>,
+    pub media_album: Option<String>,
+    pub media_title: Option<String>,
+    pub media_length_seconds: Option<u32>,
+    pub media_bitrate_kbps: Option<u32>,
+    pub media_codec: Option<String>,
     pub aich_candidate: Option<KadAichCandidate>,
     pub tags: Vec<Tag>,
 }
@@ -105,7 +112,14 @@ impl SearchResult {
         let mut size: Option<u64> = None;
         let mut size_low: Option<u32> = None;
         let mut size_high: Option<u32> = None;
+        let mut file_type = None;
         let mut source_count: Option<u32> = None;
+        let mut media_artist = None;
+        let mut media_album = None;
+        let mut media_title = None;
+        let mut media_length_seconds = None;
+        let mut media_bitrate_kbps = None;
+        let mut media_codec = None;
 
         for tag in &tags {
             match &tag.name {
@@ -129,13 +143,36 @@ impl SearchResult {
                     TagValue::U8(v) => size_high = Some((*v).into()),
                     _ => {}
                 },
-                TagName::Short(n) if *n == tag_name::SOURCES => match &tag.value {
-                    TagValue::UInt(v) => source_count = Some(*v as u32),
-                    TagValue::U32(v) => source_count = Some(*v),
-                    TagValue::U16(v) => source_count = Some((*v).into()),
-                    TagValue::U8(v) => source_count = Some((*v).into()),
-                    _ => {}
-                },
+                TagName::Short(n) if *n == tag_name::FILETYPE && file_type.is_none() => {
+                    file_type = nonempty_string(&tag.value);
+                }
+                TagName::Short(n) if *n == tag_name::SOURCES => {
+                    if let Some(value) = unsigned_u32(&tag.value) {
+                        source_count = Some(value);
+                    }
+                }
+                TagName::Short(n) if *n == tag_name::MEDIA_ARTIST && media_artist.is_none() => {
+                    media_artist = nonempty_string(&tag.value);
+                }
+                TagName::Short(n) if *n == tag_name::MEDIA_ALBUM && media_album.is_none() => {
+                    media_album = nonempty_string(&tag.value);
+                }
+                TagName::Short(n) if *n == tag_name::MEDIA_TITLE && media_title.is_none() => {
+                    media_title = nonempty_string(&tag.value);
+                }
+                TagName::Short(n)
+                    if *n == tag_name::MEDIA_LENGTH && media_length_seconds.is_none() =>
+                {
+                    media_length_seconds = unsigned_u32(&tag.value);
+                }
+                TagName::Short(n)
+                    if *n == tag_name::MEDIA_BITRATE && media_bitrate_kbps.is_none() =>
+                {
+                    media_bitrate_kbps = unsigned_u32(&tag.value);
+                }
+                TagName::Short(n) if *n == tag_name::MEDIA_CODEC && media_codec.is_none() => {
+                    media_codec = nonempty_string(&tag.value);
+                }
                 _ => {}
             }
         }
@@ -151,7 +188,14 @@ impl SearchResult {
             hash,
             names,
             size,
+            file_type,
             source_count,
+            media_artist,
+            media_album,
+            media_title,
+            media_length_seconds,
+            media_bitrate_kbps,
+            media_codec,
             aich_candidate: None,
             tags,
         }
@@ -229,6 +273,13 @@ fn unsigned_u32(value: &TagValue) -> Option<u32> {
         TagValue::UInt(value) => u32::try_from(*value).ok(),
         _ => None,
     }
+}
+
+fn nonempty_string(value: &TagValue) -> Option<String> {
+    let TagValue::String(value) = value else {
+        return None;
+    };
+    (!value.trim().is_empty()).then(|| value.clone())
 }
 
 fn decode_aich_result_payload(payload: &[u8]) -> Option<Vec<(u8, [u8; 20])>> {
@@ -516,12 +567,35 @@ mod tests {
         let tags = vec![
             Tag::filename("test.mp3"),
             Tag::filesize(1_000_000),
+            Tag::filetype("Audio"),
             Tag::sources(5),
+            Tag::new_short(
+                tag_name::MEDIA_ARTIST,
+                TagValue::String("Example Artist".to_string()),
+            ),
+            Tag::new_short(
+                tag_name::MEDIA_ALBUM,
+                TagValue::String("Example Album".to_string()),
+            ),
+            Tag::new_short(
+                tag_name::MEDIA_TITLE,
+                TagValue::String("Example Title".to_string()),
+            ),
+            Tag::new_short(tag_name::MEDIA_LENGTH, TagValue::UInt(321)),
+            Tag::new_short(tag_name::MEDIA_BITRATE, TagValue::UInt(192)),
+            Tag::new_short(tag_name::MEDIA_CODEC, TagValue::String("MP3".to_string())),
         ];
         let result = SearchResult::from_tags(hash, tags);
         assert_eq!(result.names, vec!["test.mp3".to_string()]);
         assert_eq!(result.size, Some(1_000_000));
+        assert_eq!(result.file_type.as_deref(), Some("Audio"));
         assert_eq!(result.source_count, Some(5));
+        assert_eq!(result.media_artist.as_deref(), Some("Example Artist"));
+        assert_eq!(result.media_album.as_deref(), Some("Example Album"));
+        assert_eq!(result.media_title.as_deref(), Some("Example Title"));
+        assert_eq!(result.media_length_seconds, Some(321));
+        assert_eq!(result.media_bitrate_kbps, Some(192));
+        assert_eq!(result.media_codec.as_deref(), Some("MP3"));
     }
 
     #[test]
