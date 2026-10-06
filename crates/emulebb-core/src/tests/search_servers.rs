@@ -177,6 +177,47 @@ async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
 }
 
 #[tokio::test]
+async fn deleting_searches_cancels_pending_network_work() {
+    let transfer_root = unique_runtime_dir("emulebb-core-search-queue-cancel");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        transfer_root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+
+    let first = core
+        .create_search(SearchCreate {
+            query: "first pending query".to_string(),
+            method: "server".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    core.create_search(SearchCreate {
+        query: "second pending query".to_string(),
+        method: "kad".to_string(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(core.search_queue.lock().pending_len(), 2);
+
+    assert!(core.delete_search(&first.id).await.unwrap());
+    assert_eq!(core.search_queue.lock().pending_len(), 1);
+
+    core.clear_searches().await.unwrap();
+    assert_eq!(core.search_queue.lock().pending_len(), 0);
+    assert!(core.searches().await.is_empty());
+}
+
+#[tokio::test]
 async fn import_server_met_bytes_adds_servers() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     // version 0x0E + count 1 + (ip 45.82.80.155, port 5687, 0 tags)

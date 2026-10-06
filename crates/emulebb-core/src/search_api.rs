@@ -158,18 +158,25 @@ impl EmulebbCore {
     }
 
     pub async fn delete_search(&self, search_id: &str) -> Result<bool> {
-        let persisted = self.metadata_store.delete_search(search_id)?;
+        // Serialize against create/retry while removing the durable record,
+        // pending wire work, and cached session. The shared lock order is
+        // state -> queue; the drain loop never holds both locks at once.
         let mut state = self.state.lock().await;
+        let persisted = self.metadata_store.delete_search(search_id)?;
+        let queued = self.search_queue.lock().remove_pending(search_id);
         let cached = state.searches.remove(search_id).is_some();
         state
             .kad_aich_search_votes
             .retain(|(candidate_search_id, _), _| candidate_search_id != search_id);
-        Ok(persisted || cached)
+        Ok(persisted || queued || cached)
     }
 
     pub async fn clear_searches(&self) -> Result<()> {
-        self.metadata_store.clear_searches()?;
+        // Keep creates and retry requeues outside the clear transaction so a
+        // deleted session cannot leave orphaned network work behind.
         let mut state = self.state.lock().await;
+        self.metadata_store.clear_searches()?;
+        self.search_queue.lock().clear_pending();
         state.searches.clear();
         state.kad_aich_search_votes.clear();
         Ok(())

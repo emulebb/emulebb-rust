@@ -2,10 +2,10 @@
 //!
 //! Owns the drain task (readiness probing + paced dispatch), the per-dispatch
 //! execution, and the shared search-completion helpers. Locking rule: the
-//! queue's `parking_lot::Mutex` guard is NEVER held across an `.await` and never
-//! while taking the core `state` lock, so the create path (state lock → brief
-//! queue lock) cannot deadlock against the drain path (brief queue lock →
-//! state lock, disjoint scopes).
+//! queue's `parking_lot::Mutex` guard is NEVER held across an `.await`. Paths
+//! that must atomically coordinate session state and queued work use the sole
+//! nested order `state` -> brief queue lock; the drain path takes those locks
+//! only in disjoint scopes.
 
 use std::time::Instant;
 
@@ -265,12 +265,21 @@ impl EmulebbCore {
         let request = entry.request.clone();
         let waiting_reason = entry.lane.waiting_reason();
         let attempts = entry.send_attempts;
-        let requeued = {
+        // Coordinate with delete/clear using the shared state -> queue lock
+        // order. If deletion wins, this dispatch can release its lane but
+        // must never resurrect itself as orphaned queued wire work. If retry
+        // wins, deletion will subsequently find and remove the pending entry.
+        let (search_exists, requeued) = {
+            let state = self.state.lock().await;
+            let search_exists = state.searches.contains_key(&search_id);
             let mut queue = self.search_queue.lock();
-            let requeued = queue.requeue_for_retry(entry);
+            let requeued = search_exists && queue.requeue_for_retry(entry);
             queue.finish(lane);
-            requeued
+            (search_exists, requeued)
         };
+        if !search_exists {
+            return;
+        }
         if requeued {
             crate::diag_sched::keyword_search_queue(
                 "retry",

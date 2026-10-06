@@ -225,6 +225,24 @@ impl SearchQueue {
         self.pending.len()
     }
 
+    /// Removes a search that has not been dispatched yet.
+    pub(crate) fn remove_pending(&mut self, search_id: &str) -> bool {
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|entry| entry.search_id == search_id)
+        else {
+            return false;
+        };
+        self.pending.remove(index);
+        true
+    }
+
+    /// Removes every search that has not been dispatched yet.
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending.clear();
+    }
+
     /// Queues a search for dispatch when its backend becomes ready.
     ///
     /// Rejects semantically duplicate complete requests and enforces

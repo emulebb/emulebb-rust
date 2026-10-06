@@ -290,6 +290,26 @@ fn duplicate_fingerprint_normalizes_equivalent_filter_spellings() {
 }
 
 #[test]
+fn pending_searches_can_be_removed_individually_or_together() {
+    let now = Instant::now();
+    let mut queue = SearchQueue::new();
+    enqueue(&mut queue, "1", "alpha", SearchQueueLane::Server, now);
+    enqueue(&mut queue, "2", "beta", SearchQueueLane::Kad, now);
+    enqueue(&mut queue, "3", "gamma", SearchQueueLane::Auto, now);
+
+    assert!(queue.remove_pending("2"));
+    assert!(!queue.remove_pending("missing"));
+    assert_eq!(queue.pending_len(), 2);
+
+    let tick = queue.tick(now, ready(true, false));
+    assert_eq!(tick.dispatches.len(), 1);
+    assert_eq!(tick.dispatches[0].entry.search_id, "1");
+
+    queue.clear_pending();
+    assert_eq!(queue.pending_len(), 0);
+}
+
+#[test]
 fn queue_cap_rejects_overflow_explicitly() {
     let now = Instant::now();
     let mut queue = SearchQueue::new();
