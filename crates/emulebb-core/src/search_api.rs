@@ -2,7 +2,8 @@ use super::*;
 
 impl EmulebbCore {
     pub async fn create_search(&self, mut request: SearchCreate) -> Result<Search> {
-        request.method = match request.method.trim().to_ascii_lowercase().as_str() {
+        request.canonicalize();
+        request.method = match request.method.as_str() {
             "" | "automatic" => "automatic".to_string(),
             "server" => "server".to_string(),
             "global" => "global".to_string(),

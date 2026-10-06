@@ -172,6 +172,49 @@ async fn invalid_search_method_is_rejected_before_creating_a_search() {
 }
 
 #[tokio::test]
+async fn search_spec_is_canonicalized_before_persistence() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+
+    let search = core
+        .create_search(SearchCreate {
+            query: "  alpha\t beta  ".to_string(),
+            method: " AUTOMATIC ".to_string(),
+            r#type: " AUDIO ".to_string(),
+            extension: " .MP3 ".to_string(),
+            min_size_bytes: Some(0),
+            max_size_bytes: Some(0),
+            min_availability: Some(0),
+            min_complete_sources: Some(0),
+            min_bitrate_kbps: Some(0),
+            min_length_seconds: Some(0),
+            codec: " MP3 ".to_string(),
+            title: " Example Title ".to_string(),
+            album: " Example Album ".to_string(),
+            artist: " Example Artist ".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(search.spec.query, "alpha beta");
+    assert_eq!(search.spec.method, "automatic");
+    assert_eq!(search.spec.r#type, "audio");
+    assert_eq!(search.spec.extension, "mp3");
+    assert_eq!(search.spec.min_size_bytes, None);
+    assert_eq!(search.spec.max_size_bytes, None);
+    assert_eq!(search.spec.min_availability, None);
+    assert_eq!(search.spec.min_complete_sources, None);
+    assert_eq!(search.spec.min_bitrate_kbps, None);
+    assert_eq!(search.spec.min_length_seconds, None);
+    assert_eq!(search.spec.codec, "MP3");
+    assert_eq!(search.spec.title, "Example Title");
+    assert_eq!(search.spec.album, "Example Album");
+    assert_eq!(search.spec.artist, "Example Artist");
+
+    let persisted = core.search(&search.id).await.unwrap();
+    assert_eq!(persisted.spec, search.spec);
+}
+
+#[tokio::test]
 async fn explicit_network_search_respects_disabled_network_settings() {
     let transfer_root = unique_runtime_dir("emulebb-core-search-disabled-network");
     let network = test_network_config_with_store(

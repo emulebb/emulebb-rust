@@ -250,6 +250,35 @@ pub struct SearchSpec {
     pub artist: String,
 }
 
+impl SearchSpec {
+    /// Canonicalize equivalent public search inputs before they are queued,
+    /// persisted, compared, or encoded for the wire.
+    pub fn canonicalize(&mut self) {
+        self.query = self
+            .query
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.method = self.method.trim().to_ascii_lowercase();
+        self.r#type = self.r#type.trim().to_ascii_lowercase();
+        self.extension = self
+            .extension
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        self.min_size_bytes = self.min_size_bytes.filter(|value| *value != 0);
+        self.max_size_bytes = self.max_size_bytes.filter(|value| *value != 0);
+        self.min_availability = self.min_availability.filter(|value| *value != 0);
+        self.min_complete_sources = self.min_complete_sources.filter(|value| *value != 0);
+        self.min_bitrate_kbps = self.min_bitrate_kbps.filter(|value| *value != 0);
+        self.min_length_seconds = self.min_length_seconds.filter(|value| *value != 0);
+        self.codec = self.codec.trim().to_string();
+        self.title = self.title.trim().to_string();
+        self.album = self.album.trim().to_string();
+        self.artist = self.artist.trim().to_string();
+    }
+}
+
 /// The create-search payload is the immutable specification stored with the
 /// resulting search session.
 pub type SearchCreate = SearchSpec;
