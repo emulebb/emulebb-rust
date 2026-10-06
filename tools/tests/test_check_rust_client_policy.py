@@ -194,6 +194,18 @@ ref: main
         self.assertTrue(any("must pin emulebb/emulebb-build-tests" in error for error in errors))
 
 
+class TestReleaseCiGate(unittest.TestCase):
+    def test_current_workflow_requires_green_source_ci(self) -> None:
+        self.assertEqual(CHECKER.check_release_ci_gate(), [])
+
+    def test_rejects_release_packaging_without_exact_source_gate(self) -> None:
+        errors = CHECKER.check_release_ci_gate("native-package:\n  runs-on: ubuntu-latest\n")
+
+        self.assertEqual(len(errors), 6)
+        self.assertTrue(any("source CI verification job" in error for error in errors))
+        self.assertTrue(any("packaging dependency" in error for error in errors))
+
+
 class TestOmissionRegistry(unittest.TestCase):
     def test_active_registry_rejects_fixed_entries(self) -> None:
         policy = {"protocol": {"omission_registry": "policy/rust-client-omissions.toml"}}

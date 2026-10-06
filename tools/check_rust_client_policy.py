@@ -84,6 +84,7 @@ def main() -> int:
     errors.extend(check_supply_chain_policy())
     errors.extend(check_github_action_pins())
     errors.extend(check_live_rest_openapi_ci())
+    errors.extend(check_release_ci_gate())
     errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
@@ -542,6 +543,27 @@ def check_live_rest_openapi_ci(workflow_text: str | None = None) -> list[str]:
                 f".github/workflows/ci.yml must pin {repository} by full commit SHA"
             )
     return errors
+
+
+def check_release_ci_gate(workflow_text: str | None = None) -> list[str]:
+    """Require release packaging to depend on green CI for the exact source commit."""
+
+    workflow = ROOT / ".github" / "workflows" / "release.yml"
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    required = {
+        "verify-ci:": "source CI verification job",
+        "name: Require green source CI": "named release CI gate",
+        "checks: read": "check-run read permission",
+        'echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"': "immutable source resolution",
+        'python tools/nightly_release.py verify-ci --sha "${{ steps.source.outputs.sha }}"':
+            "exact-source CI verification command",
+        "needs: verify-ci": "packaging dependency on the release CI gate",
+    }
+    return [
+        f".github/workflows/release.yml is missing {description} configuration"
+        for fragment, description in required.items()
+        if fragment not in text
+    ]
 
 
 def check_lint_suppressions() -> list[str]:
