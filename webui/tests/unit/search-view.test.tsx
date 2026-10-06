@@ -43,6 +43,9 @@ describe("SearchView", () => {
     );
 
     expect(screen.getByText("Showing 101–102 of 250 results")).toBeInTheDocument();
+    for (const button of screen.getAllByRole("button", { name: "Missing size" })) {
+      expect(button).toBeDisabled();
+    }
 
     fireEvent.click(screen.getByRole("button", { name: "Previous search results page" }));
     fireEvent.click(screen.getByRole("button", { name: "Next search results page" }));

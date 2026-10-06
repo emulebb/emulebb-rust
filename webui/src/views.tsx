@@ -753,6 +753,7 @@ export function SearchView(props: {
           <tbody>
             {results.map((result) => {
               const observations = result.observations ?? [];
+              const downloadable = (result.sizeBytes ?? 0) > 0;
               const mediaSummary = searchResultMediaSummary(result.media);
               const origins = [...new Set(observations.map((observation) => observation.origin))];
               const alternateNames = [...new Set(
@@ -799,6 +800,8 @@ export function SearchView(props: {
                 <td>
                   <button class="btn"
                     type="button"
+                    disabled={!downloadable}
+                    title={downloadable ? "Download this result" : "Download unavailable: file size was not reported"}
                     onClick={() => void props.run(
                       () => props.client.post(`searches/${props.selectedSearch?.id}/results/${result.hash}/operations/download`, {
                         paused,
@@ -808,7 +811,7 @@ export function SearchView(props: {
                     )}
                   >
                     <Download size={15} />
-                    Download
+                    {downloadable ? "Download" : "Missing size"}
                   </button>
                 </td>
               </tr>
