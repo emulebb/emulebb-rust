@@ -12,13 +12,18 @@ used on untrusted ED2K/Kad traffic:
 - `kad_packet_parser`: Kad v2 packet bodies including contact, search, publish,
   firewall, buddy, callback and tag paths.
 
-Run from the repository root with a nightly Rust toolchain and `cargo-fuzz`:
+Automation runs all four targets for a bounded interval every Wednesday and can
+also be started manually through the `Parser fuzz` GitHub Actions workflow. It
+pins `nightly-2026-07-15` and `cargo-fuzz` 0.13.2, keeps generated state outside
+the checkout, and retains logs and crashing inputs for 30 days.
+
+Run the same toolchain locally from the repository root with `cargo-fuzz`:
 
 ```text
-cargo +nightly fuzz run ed2k_server_parsers -- -max_total_time=60
-cargo +nightly fuzz run ed2k_peer_tcp_parsers -- -max_total_time=60
-cargo +nightly fuzz run ed2k_client_udp_parser -- -max_total_time=60
-cargo +nightly fuzz run kad_packet_parser -- -max_total_time=60
+cargo +nightly-2026-07-15 fuzz run ed2k_server_parsers -- -max_total_time=60
+cargo +nightly-2026-07-15 fuzz run ed2k_peer_tcp_parsers -- -max_total_time=60
+cargo +nightly-2026-07-15 fuzz run ed2k_client_udp_parser -- -max_total_time=60
+cargo +nightly-2026-07-15 fuzz run kad_packet_parser -- -max_total_time=60
 ```
 
 On Windows/MSVC the fuzz executable also needs the AddressSanitizer runtime
@@ -29,5 +34,5 @@ Rust's libFuzzer instrumentation. The similarly named standalone LLVM DLL may
 not include those exports, even when its LLVM version matches the toolchain.
 
 Corpus, artifacts and coverage output are intentionally ignored. Crashing
-inputs should be minimized with `cargo +nightly fuzz tmin`, converted into a
-deterministic regression test, and retained only in that test.
+inputs should be minimized with `cargo +nightly-2026-07-15 fuzz tmin`, converted
+into a deterministic regression test, and retained only in that test.

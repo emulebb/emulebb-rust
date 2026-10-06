@@ -197,6 +197,20 @@ run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
         self.assertTrue(any("actionlint" in error for error in errors))
 
 
+class TestScheduledFuzzCi(unittest.TestCase):
+    def test_current_ci_fuzzes_all_protocol_parsers(self) -> None:
+        self.assertEqual(CHECKER.check_scheduled_fuzz_ci(), [])
+
+    def test_rejects_missing_schedule_targets_and_bounds(self) -> None:
+        errors = CHECKER.check_scheduled_fuzz_ci("name: incomplete fuzzing\n")
+
+        self.assertGreaterEqual(len(errors), 18)
+        self.assertTrue(any("weekly schedule" in error for error in errors))
+        self.assertTrue(any("ed2k_server_parsers" in error for error in errors))
+        self.assertTrue(any("kad_packet_parser" in error for error in errors))
+        self.assertTrue(any("native source revisions" in error for error in errors))
+
+
 class TestLiveRestOpenApiCi(unittest.TestCase):
     def test_current_workflow_keeps_live_openapi_gate(self) -> None:
         self.assertEqual(CHECKER.check_live_rest_openapi_ci(), [])

@@ -85,6 +85,7 @@ def main() -> int:
     errors.extend(check_supply_chain_policy())
     errors.extend(check_github_action_pins())
     errors.extend(check_workflow_lint_ci())
+    errors.extend(check_scheduled_fuzz_ci())
     errors.extend(check_live_rest_openapi_ci())
     errors.extend(check_release_ci_gate())
     errors.extend(check_release_build_identity())
@@ -547,6 +548,56 @@ def check_workflow_lint_ci(workflow_text: str | None = None) -> list[str]:
     if actionlint is None or not action_ref_is_immutable(actionlint.group(1)):
         errors.append(
             ".github/workflows/ci.yml must pin actionlint by full commit SHA"
+        )
+    return errors
+
+
+def check_scheduled_fuzz_ci(workflow_text: str | None = None) -> list[str]:
+    """Keep every untrusted protocol parser under bounded scheduled fuzzing."""
+
+    workflow = ROOT / ".github" / "workflows" / "fuzz.yml"
+    if workflow_text is None and not workflow.is_file():
+        return [".github/workflows/fuzz.yml is missing"]
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    required = {
+        "schedule:": "weekly schedule",
+        "workflow_dispatch:": "manual dispatch",
+        "FUZZ_TOOLCHAIN: nightly-2026-07-15": "pinned nightly toolchain",
+        "cargo-fuzz --version 0.13.2 --locked": "pinned cargo-fuzz install",
+        "CARGO_TARGET_DIR: ${{ runner.temp }}/": "external Cargo target",
+        "FUZZ_OUTPUT: ${{ runner.temp }}/": "external fuzz output root",
+        "-max_total_time=60": "bounded per-target runtime",
+        "-timeout=10": "per-input timeout",
+        '-artifact_prefix="$artifacts/"': "external crash artifact path",
+        "if: always()": "failure evidence retention",
+        "name: parser-fuzz-${{ github.sha }}": "commit-specific evidence artifact",
+    }
+    errors = [
+        f".github/workflows/fuzz.yml is missing {description} configuration"
+        for fragment, description in required.items()
+        if fragment not in text
+    ]
+    for target in (
+        "ed2k_server_parsers",
+        "ed2k_peer_tcp_parsers",
+        "ed2k_client_udp_parser",
+        "kad_packet_parser",
+    ):
+        if target not in text:
+            errors.append(f".github/workflows/fuzz.yml is missing target {target}")
+    for repository in ("emulebb/emulebb-miniupnp", "emulebb/emulebb-libpcpnatpmp"):
+        checkout = re.compile(
+            rf"repository:\s*{re.escape(repository)}\s+ref:\s*\$\{{\{{\s*env\.([A-Z]+)_REF\s*\}}\}}",
+            re.MULTILINE,
+        ).search(text)
+        if checkout is None:
+            errors.append(
+                f".github/workflows/fuzz.yml must check out pinned {repository} source"
+            )
+    refs = re.findall(r"(?m)^\s+(?:MINIUPNP|PCPNATPMP)_REF:\s*([^\s]+)\s*$", text)
+    if len(refs) != 2 or any(not action_ref_is_immutable(ref) for ref in refs):
+        errors.append(
+            ".github/workflows/fuzz.yml must pin both native source revisions by full commit SHA"
         )
     return errors
 

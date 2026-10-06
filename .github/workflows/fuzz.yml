@@ -1,0 +1,85 @@
+name: Parser fuzz
+
+on:
+  schedule:
+    - cron: "23 3 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: parser-fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FUZZ_TOOLCHAIN: nightly-2026-07-15
+  MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
+  PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
+
+jobs:
+  parser-fuzz:
+    name: ED2K/Kad parser fuzzing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+    steps:
+      - name: Checkout emulebb-rust
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout emulebb-miniupnp (native C source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+
+      - name: Checkout emulebb-libpcpnatpmp (native C source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
+
+      - name: Install pinned fuzz toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --no-self-update
+          cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Run bounded parser fuzz targets
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/fuzz-target
+          FUZZ_OUTPUT: ${{ runner.temp }}/emulebb-rust-out/fuzz
+        run: |
+          set -euo pipefail
+          for target in \
+            ed2k_server_parsers \
+            ed2k_peer_tcp_parsers \
+            ed2k_client_udp_parser \
+            kad_packet_parser; do
+            corpus="$FUZZ_OUTPUT/corpus/$target"
+            artifacts="$FUZZ_OUTPUT/artifacts/$target"
+            reports="$FUZZ_OUTPUT/reports"
+            mkdir -p "$corpus" "$artifacts" "$reports"
+            cargo +"$FUZZ_TOOLCHAIN" fuzz run "$target" "$corpus" -- \
+              -max_total_time=60 \
+              -timeout=10 \
+              -artifact_prefix="$artifacts/" \
+              2>&1 | tee "$reports/$target.log"
+          done
+
+      - name: Retain fuzz logs and crashing inputs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: parser-fuzz-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/fuzz/reports/
+            ${{ runner.temp }}/emulebb-rust-out/fuzz/artifacts/
+          if-no-files-found: warn
+          retention-days: 30
