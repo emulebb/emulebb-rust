@@ -6,7 +6,9 @@ use crate::traversal::{
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::constants::SEARCH_RESULT_GRACE_SECS;
-use emulebb_kad_proto::{Ed2kHash, NodeId, SearchKeyReq, SearchSourceReq};
+use emulebb_kad_proto::{
+    Ed2kHash, NodeId, SearchKeyReq, SearchSourceReq, matches_restrictive_keyword_payload,
+};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -91,6 +93,8 @@ pub(crate) fn search_keywords_by_request(
 ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SearchResult>(SEARCH_RESULT_STREAM_BUFFER);
     let request_target = request.target;
+    let restrictive_payload =
+        ((request.start_position & 0x8000) != 0).then(|| request.restrictive_payload.clone());
     tokio::spawn(async move {
         // Oracle CSearchManager: drop a duplicate same-target keyword search and
         // cap concurrent traversals. Held for the lifetime of this stream task.
@@ -125,6 +129,7 @@ pub(crate) fn search_keywords_by_request(
         let mut duplicate_count = 0usize;
         let mut missing_name_count = 0usize;
         let mut missing_size_count = 0usize;
+        let mut restrictive_mismatch_count = 0usize;
         let mut sample_rejection = None::<String>;
         loop {
             let next = tokio::select! {
@@ -138,7 +143,7 @@ pub(crate) fn search_keywords_by_request(
             let std::net::IpAddr::V4(responder_ip) = observation.responder_addr.ip() else {
                 continue;
             };
-            let result = SearchResult::from_observation(
+            let mut result = SearchResult::from_observation(
                 observation.entry_id,
                 observation.tags,
                 responder_ip,
@@ -168,7 +173,8 @@ pub(crate) fn search_keywords_by_request(
                 }
                 continue;
             }
-            if !is_acceptable_keyword_result(&result) {
+            if !retain_matching_keyword_names(&mut result, restrictive_payload.as_deref()) {
+                restrictive_mismatch_count += 1;
                 continue;
             }
             if !seen_hashes.contains(&result.hash) && seen_hashes.len() >= result_cap {
@@ -187,13 +193,14 @@ pub(crate) fn search_keywords_by_request(
         drop(raw_rx);
         let _ = traversal.await;
         debug!(
-            "kad keyword search stream summary target={} raw_entries={} accepted={} duplicates={} missing_name={} missing_size={} result_cap={} sample_rejection={}",
+            "kad keyword search stream summary target={} raw_entries={} accepted={} duplicates={} missing_name={} missing_size={} restrictive_mismatch={} result_cap={} sample_rejection={}",
             request_target,
             raw_entry_count,
             accepted_count,
             duplicate_count,
             missing_name_count,
             missing_size_count,
+            restrictive_mismatch_count,
             result_cap,
             sample_rejection.unwrap_or_else(|| "-".to_string())
         );
@@ -368,11 +375,19 @@ pub(crate) fn search_notes(
     ReceiverStream::new(rx)
 }
 
-fn is_acceptable_keyword_result(result: &SearchResult) -> bool {
-    // Harvest-first repo policy: keep wire-compatible requests, but accept any
-    // keyword result which has the core fields needed for indexing. We
-    // intentionally do not apply eMule's local query-word filtering here,
-    // because this daemon is an indexer rather than a UI search client.
+fn retain_matching_keyword_names(
+    result: &mut SearchResult,
+    restrictive_payload: Option<&[u8]>,
+) -> bool {
+    // Unrestricted harvest/replay requests deliberately retain every usable
+    // result. Interactive restrictive requests must filter before the unique
+    // hash cap, otherwise unrelated or poisoned entries can consume the whole
+    // result budget before a matching publication arrives.
+    if let Some(payload) = restrictive_payload {
+        result
+            .names
+            .retain(|name| matches_restrictive_keyword_payload(name, &result.tags, payload));
+    }
     !result.names.is_empty() && result.size.is_some()
 }
 
@@ -383,36 +398,52 @@ mod tests {
 
     #[test]
     fn keyword_result_requires_filename_and_size() {
-        let missing_name =
+        let mut missing_name =
             SearchResult::from_tags(Ed2kHash::from_bytes([1; 16]), vec![Tag::filesize(42)]);
-        assert!(!is_acceptable_keyword_result(&missing_name));
+        assert!(!retain_matching_keyword_names(&mut missing_name, None));
 
-        let missing_size = SearchResult::from_tags(
+        let mut missing_size = SearchResult::from_tags(
             Ed2kHash::from_bytes([2; 16]),
             vec![Tag::filename("torino-trip.avi")],
         );
-        assert!(!is_acceptable_keyword_result(&missing_size));
+        assert!(!retain_matching_keyword_names(&mut missing_size, None));
     }
 
     #[test]
-    fn keyword_result_accepts_nonmatching_filename_when_core_fields_exist() {
-        let result = SearchResult::from_tags(
+    fn unrestricted_keyword_result_accepts_any_filename_with_core_fields() {
+        let mut result = SearchResult::from_tags(
             Ed2kHash::from_bytes([3; 16]),
             vec![Tag::filename("Torino Holiday.avi"), Tag::filesize(123)],
         );
-        assert!(is_acceptable_keyword_result(&result));
+        assert!(retain_matching_keyword_names(&mut result, None));
     }
 
     #[test]
-    fn keyword_result_accepts_matching_multiword_filename() {
-        let result = SearchResult::from_tags(
+    fn restrictive_keyword_result_keeps_only_matching_names() {
+        let mut result = SearchResult::from_tags(
             Ed2kHash::from_bytes([4; 16]),
             vec![
                 Tag::filename("Live In Torino Train Station.mkv"),
+                Tag::filename("Unrelated Alias.mkv"),
                 Tag::filesize(123),
             ],
         );
-        assert!(is_acceptable_keyword_result(&result));
+        let payload = restrictive_string_payload("torino train");
+
+        assert!(retain_matching_keyword_names(&mut result, Some(&payload)));
+        assert_eq!(result.names, vec!["Live In Torino Train Station.mkv"]);
+    }
+
+    #[test]
+    fn restrictive_keyword_result_rejects_nonmatching_hash_before_budgeting() {
+        let mut result = SearchResult::from_tags(
+            Ed2kHash::from_bytes([7; 16]),
+            vec![Tag::filename("Unrelated Alias.mkv"), Tag::filesize(123)],
+        );
+        let payload = restrictive_string_payload("torino train");
+
+        assert!(!retain_matching_keyword_names(&mut result, Some(&payload)));
+        assert!(result.names.is_empty());
     }
 
     #[test]
@@ -448,5 +479,12 @@ mod tests {
         assert_eq!(source.ip, std::net::Ipv4Addr::new(127, 0, 0, 1));
         assert_eq!(source.tcp_port, 42062);
         assert_eq!(source.udp_port, 42072);
+    }
+
+    fn restrictive_string_payload(value: &str) -> Vec<u8> {
+        let mut payload = vec![0x01];
+        payload.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        payload.extend_from_slice(value.as_bytes());
+        payload
     }
 }
