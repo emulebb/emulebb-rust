@@ -401,9 +401,12 @@ fn ed2k_file_type_search_term_matches_oracle_families() {
         Some("Pro")
     );
     assert_eq!(ed2k_file_type_search_term("album.flac"), Some("Audio"));
+    assert_eq!(ed2k_file_type_search_term("surround.ac3"), Some("Audio"));
     assert_eq!(ed2k_file_type_search_term("movie.mkv"), Some("Video"));
     assert_eq!(ed2k_file_type_search_term("scan.png"), Some("Image"));
     assert_eq!(ed2k_file_type_search_term("manual.pdf"), Some("Doc"));
+    assert_eq!(ed2k_file_type_search_term("bundle.cbz"), Some("Pro"));
+    assert_eq!(ed2k_file_type_search_term("disc.nrg"), Some("Pro"));
     assert_eq!(
         ed2k_file_type_search_term("bundle.emulecollection"),
         Some("EmuleCollection")

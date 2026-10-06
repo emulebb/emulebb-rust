@@ -6,7 +6,10 @@ use emulebb_index::IndexedFile;
 use emulebb_kad_dht::SearchResult as KadSearchResult;
 use std::net::SocketAddr;
 
-use crate::{SearchCreate, SearchResult, SearchResultMedia, SearchResultObservation};
+use crate::{
+    SearchCreate, SearchResult, SearchResultMedia, SearchResultObservation,
+    ed2k_file_type::{Ed2kFileType, ed2k_result_file_type},
+};
 
 /// Build the server-side eD2k metatag search criteria from a `/api/v1/searches`
 /// request, so the constraints (type/size/extension/availability) are folded
@@ -39,17 +42,7 @@ pub(crate) fn search_criteria_from_request(request: &SearchCreate) -> SearchCrit
 /// FT_FILETYPE wire string (ED2KFTSTR_*). "arc"/"iso" fold to "Pro" exactly as
 /// eMule's GetSearchPacket does. Empty/unknown -> None (no type constraint).
 fn ed2k_wire_file_type(token: &str) -> Option<String> {
-    let wire = match token.trim().to_ascii_lowercase().as_str() {
-        "" => return None,
-        "audio" => "Audio",
-        "video" => "Video",
-        "image" => "Image",
-        "doc" => "Doc",
-        "pro" | "arc" | "iso" => "Pro",
-        "emulecollection" => "EmuleCollection",
-        _ => return None,
-    };
-    Some(wire.to_string())
+    Ed2kFileType::from_public_token(token).map(|file_type| file_type.search_term().to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +84,7 @@ pub(crate) fn resolve_search_network_method(
 /// This defensive pass rejects replies that do not honor the constraints
 /// encoded on the wire.
 pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &SearchCreate) {
-    let file_type = ed2k_wire_file_type(&request.r#type);
+    let file_type = Ed2kFileType::from_public_token(&request.r#type);
     let extension = request
         .extension
         .trim()
@@ -102,7 +95,7 @@ pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &Se
     let album = normalized_media_filter(&request.album);
     let artist = normalized_media_filter(&request.artist);
     results.retain(|result| {
-        if let Some(file_type) = file_type.as_deref()
+        if let Some(file_type) = file_type
             && result_file_type(result) != Some(file_type)
         {
             return false;
@@ -162,17 +155,21 @@ fn normalized_media_filter(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-fn result_file_type(result: &SearchResult) -> Option<&'static str> {
-    let tagged = match result.file_type.trim().to_ascii_lowercase().as_str() {
-        "audio" => Some("Audio"),
-        "video" => Some("Video"),
-        "image" => Some("Image"),
-        "doc" | "document" => Some("Doc"),
-        "pro" | "program" | "arc" | "archive" | "iso" => Some("Pro"),
-        "emulecollection" => Some("EmuleCollection"),
-        _ => None,
-    };
-    tagged.or_else(|| crate::ed2k_file_type_search_term(&result.name))
+fn result_file_type(result: &SearchResult) -> Option<Ed2kFileType> {
+    ed2k_result_file_type(&result.file_type, &result.name)
+}
+
+fn refined_result_file_type(claimed: &str, name: &str) -> String {
+    ed2k_result_file_type(claimed, name)
+        .map(|file_type| file_type.internal_name().to_string())
+        .unwrap_or_else(|| {
+            let claimed = claimed.trim();
+            if claimed.is_empty() {
+                "unknown".to_string()
+            } else {
+                claimed.to_string()
+            }
+        })
 }
 
 pub(crate) fn search_result_from_indexed(
@@ -180,6 +177,7 @@ pub(crate) fn search_result_from_indexed(
     request: &SearchCreate,
     file: IndexedFile,
 ) -> SearchResult {
+    let file_type = refined_result_file_type(&file.content_type, &file.name);
     let observation = SearchResultObservation {
         origin: "local_index".to_string(),
         server_endpoint: None,
@@ -189,7 +187,7 @@ pub(crate) fn search_result_from_indexed(
         complete_sources: 0,
         source_client_id: None,
         source_client_port: None,
-        file_type: file.content_type.clone(),
+        file_type,
         media: SearchResultMedia::default(),
         rating: 0,
         aich_hash: String::new(),
@@ -212,13 +210,17 @@ pub(crate) fn search_result_from_ed2k(
     server_endpoint: Option<SocketAddr>,
     file: Ed2kSearchFile,
 ) -> SearchResult {
-    let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
+    let name = file
+        .file_name
+        .clone()
+        .unwrap_or_else(|| file.file_hash.to_string());
+    let file_type = refined_result_file_type(file.file_type.as_deref().unwrap_or_default(), &name);
     let source_client_id = (file.client_id != 0).then_some(file.client_id);
     let source_client_port = (file.client_port != 0).then_some(file.client_port);
     let observation = SearchResultObservation {
         origin: origin.to_string(),
         server_endpoint: server_endpoint.map(|endpoint| endpoint.to_string()),
-        name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
+        name,
         size_bytes: file.file_size.unwrap_or_default(),
         sources: file.source_count.unwrap_or_default(),
         complete_sources: file.complete_source_count.unwrap_or_default(),
@@ -265,7 +267,8 @@ pub(crate) fn search_result_from_kad(
         .unwrap_or_default();
     let size_bytes = result.size.unwrap_or_default();
     let sources = result.source_count.unwrap_or_default();
-    let file_type = result.file_type.unwrap_or_else(|| "unknown".to_string());
+    let file_type =
+        refined_result_file_type(result.file_type.as_deref().unwrap_or_default(), &first_name);
     let media = SearchResultMedia {
         artist: result.media_artist.unwrap_or_default(),
         album: result.media_album.unwrap_or_default(),
@@ -432,6 +435,7 @@ mod tests {
         let mut archive = result("Bundle.7z", 5_000, 8);
         archive.file_type = "archive".to_string();
         let unknown_iso = result("Disc.iso", 5_000, 8);
+        let program = result("Setup.exe", 5_000, 8);
 
         let mut req = request();
         req.r#type = "video".to_string();
@@ -440,24 +444,42 @@ mod tests {
             audio.clone(),
             archive.clone(),
             unknown_iso.clone(),
+            program.clone(),
         ];
         apply_search_filters(&mut results, &req);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Movie.mkv");
 
-        // Stock eMule folds archive, CD-image, and program searches into the
-        // same `Pro` wire family. An untagged result can be classified from
-        // its filename, as Kad/local observations commonly require.
+        // Stock eMule sends all three requests through the broad `Pro` wire
+        // family, then refines and filters received results by filename.
         req.r#type = "iso".to_string();
-        let mut results = vec![video, audio, archive, unknown_iso];
+        let mut results = vec![
+            video.clone(),
+            audio.clone(),
+            archive.clone(),
+            unknown_iso.clone(),
+            program.clone(),
+        ];
         apply_search_filters(&mut results, &req);
         assert_eq!(
             results
                 .iter()
                 .map(|result| result.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Bundle.7z", "Disc.iso"]
+            vec!["Disc.iso"]
         );
+
+        req.r#type = "arc".to_string();
+        let mut results = vec![archive.clone(), unknown_iso.clone(), program.clone()];
+        apply_search_filters(&mut results, &req);
+        assert_eq!(results[0].name, "Bundle.7z");
+        assert_eq!(results.len(), 1);
+
+        req.r#type = "pro".to_string();
+        let mut results = vec![archive, unknown_iso, program];
+        apply_search_filters(&mut results, &req);
+        assert_eq!(results[0].name, "Setup.exe");
+        assert_eq!(results.len(), 1);
     }
 
     #[test]
@@ -731,7 +753,7 @@ mod tests {
             Some(u32::from_le_bytes([10, 20, 30, 40]))
         );
         assert_eq!(result.source_client_port, Some(4662));
-        assert_eq!(result.file_type, "doc");
+        assert_eq!(result.file_type, "Doc");
         assert_eq!(result.media.artist, "Example Artist");
         assert_eq!(result.media.album, "Example Album");
         assert_eq!(result.media.title, "Example Title");

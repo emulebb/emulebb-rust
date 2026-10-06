@@ -106,6 +106,7 @@ mod ed2k_buddy_reask;
 mod ed2k_dead_source_list;
 mod ed2k_direct_download_types;
 mod ed2k_download_retry;
+mod ed2k_file_type;
 mod ed2k_net_drivers;
 mod ed2k_publish_diagnostics;
 mod ed2k_source_batch;
@@ -165,6 +166,7 @@ use ed2k_direct_download_types::{
     DirectDownloadAlternateOutcome, DirectDownloadJoin, DirectDownloadOptions,
     DirectDownloadOutcome, DirectDownloadSpawnContext,
 };
+use ed2k_file_type::ed2k_file_type_search_term;
 use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
     run_ed2k_public_ip_probe, run_ed2k_reask_reengage, run_ed2k_server_list_events,
@@ -6614,25 +6616,6 @@ fn ed2k_part_count(size_bytes: u64) -> u32 {
         0
     } else {
         size_bytes.div_ceil(ED2K_PART_SIZE) as u32
-    }
-}
-
-fn ed2k_file_type_search_term(name: &str) -> Option<&'static str> {
-    let extension = Path::new(name)
-        .extension()
-        .and_then(|extension| extension.to_str())?
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "aac" | "aif" | "aiff" | "ape" | "flac" | "m4a" | "mp3" | "ogg" | "opus" | "wav"
-        | "wma" => Some("Audio"),
-        "avi" | "flv" | "m2ts" | "m4v" | "mkv" | "mov" | "mp4" | "mpeg" | "mpg" | "ogm" | "ts"
-        | "vob" | "webm" | "wmv" => Some("Video"),
-        "bmp" | "gif" | "jpeg" | "jpg" | "png" | "svg" | "tif" | "tiff" | "webp" => Some("Image"),
-        "cbz" | "chm" | "doc" | "docx" | "epub" | "mobi" | "pdf" | "rtf" | "txt" => Some("Doc"),
-        "emulecollection" => Some("EmuleCollection"),
-        "7z" | "apk" | "appx" | "bin" | "deb" | "dmg" | "exe" | "iso" | "msi" | "rar" | "rpm"
-        | "tar" | "zip" => Some("Pro"),
-        _ => None,
     }
 }
 
