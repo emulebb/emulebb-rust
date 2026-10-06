@@ -469,7 +469,8 @@ pub(crate) fn search_result_response_with_options(
                     "codec": observation.media.codec,
                 },
                 "rating": observation.rating,
-                "hasAichHash": !observation.aich_hash.is_empty(),
+                "aichHash": (!observation.aich_hash.is_empty())
+                    .then_some(observation.aich_hash.as_str()),
                 "complete": observation.complete,
                 "directory": observation.directory,
                 "observedAt": observation.observed_at,
@@ -533,6 +534,7 @@ pub(crate) fn search_result_response_with_options(
         "complete": result.complete,
         "directory": result.directory,
         "rating": result.rating,
+        "aichHash": (!result.aich_hash.is_empty()).then_some(result.aich_hash.as_str()),
         "observations": observations,
     });
     if include_evidence {
@@ -556,6 +558,7 @@ pub(crate) fn search_result_response_with_options(
             "integrityEvidence": {
                 "hasAichHash": has_aich_hash,
                 "multipleAich": multiple_aich,
+                "aichHashes": aich_hashes,
             }
         });
     }
@@ -818,6 +821,8 @@ mod tests {
         assert_eq!(complete["media"]["lengthSeconds"], 321);
         assert_eq!(complete["media"]["bitrateKbps"], 192);
         assert_eq!(complete["media"]["codec"], "FLAC");
+        assert_eq!(complete["aichHash"], "A".repeat(32));
+        assert_eq!(complete["observations"][0]["aichHash"], "A".repeat(32));
         assert_eq!(
             complete["observations"][0]["serverEndpoint"],
             "192.0.2.10:4661"
@@ -830,6 +835,10 @@ mod tests {
         assert_eq!(
             complete["evidence"]["integrityEvidence"]["hasAichHash"],
             true
+        );
+        assert_eq!(
+            complete["evidence"]["integrityEvidence"]["aichHashes"],
+            serde_json::json!(["A".repeat(32)])
         );
         assert_eq!(
             complete["evidence"]["availabilityEvidence"]["completionState"],

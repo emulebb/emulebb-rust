@@ -178,7 +178,7 @@ export type SearchResultObservation = {
   fileType: string;
   media?: SearchResultMedia;
   rating: number;
-  hasAichHash: boolean;
+  aichHash?: string | null;
   complete: boolean;
   directory: string;
   observedAt: string;
@@ -208,6 +208,7 @@ export type SearchResult = {
   extension?: string;
   directory?: string;
   rating?: number;
+  aichHash?: string | null;
   complete?: boolean;
   observations?: SearchResultObservation[];
   evidence?: Record<string, unknown>;

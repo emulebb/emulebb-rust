@@ -845,12 +845,14 @@ td {
 .search-result-name-cell > strong,
 .search-result-alternates,
 .search-result-media,
+.search-result-aich,
 .search-complete-sources {
   display: block;
 }
 
 .search-result-alternates,
 .search-result-media,
+.search-result-aich,
 .search-complete-sources {
   color: var(--tblr-secondary);
   font-size: 0.78rem;
@@ -861,6 +863,15 @@ td {
   color: var(--tblr-body-color);
   font-size: 0.8rem;
   margin-top: 3px;
+}
+
+.search-result-aich {
+  overflow-wrap: anywhere;
+}
+
+.search-result-aich-conflict {
+  color: var(--tblr-danger);
+  font-weight: 600;
 }
 
 .search-observations {

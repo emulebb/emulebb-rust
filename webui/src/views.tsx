@@ -776,6 +776,12 @@ export function SearchView(props: {
                   .map((observation) => observation.name)
                   .filter((name) => name && name !== result.name)
               )];
+              const aichHashes = [...new Set(
+                observations
+                  .map((observation) => observation.aichHash)
+                  .concat(result.aichHash)
+                  .filter((hash): hash is string => Boolean(hash))
+              )];
               return (
               <tr key={result.hash}>
                 <td class="search-result-name-cell">
@@ -784,6 +790,11 @@ export function SearchView(props: {
                     <span class="search-result-alternates">Also seen as: {alternateNames.join(", ")}</span>
                   )}
                   {mediaSummary && <span class="search-result-media">{mediaSummary}</span>}
+                  {aichHashes.length > 0 && (
+                    <span class={`search-result-aich${aichHashes.length > 1 ? " search-result-aich-conflict" : ""}`}>
+                      {aichHashes.length === 1 ? "AICH" : "Conflicting AICH claims"}: {aichHashes.join(", ")}
+                    </span>
+                  )}
                   {observations.length > 0 && (
                     <details class="search-observations">
                       <summary>{observations.length} observation{observations.length === 1 ? "" : "s"}</summary>
@@ -794,7 +805,7 @@ export function SearchView(props: {
                             <li key={`${observation.origin}-${observation.name}-${index}`}>
                               <strong>{observation.origin}</strong>: {observation.name} · {searchResultObservationEvidence(observation)}
                               {observation.rating > 0 ? ` · rating ${observation.rating}/5` : ""}
-                              {observation.hasAichHash ? " · AICH" : ""}
+                              {observation.aichHash ? ` · AICH ${observation.aichHash}` : ""}
                               {observationMedia ? ` · ${observationMedia}` : ""}
                             </li>
                           );

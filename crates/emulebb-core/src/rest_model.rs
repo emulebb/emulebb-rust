@@ -449,7 +449,8 @@ pub struct SearchResult {
     #[serde(default)]
     pub rating: u8,
     /// AICH search-result metadata retained for integrity evidence and future
-    /// corroboration, but not exposed as an undocumented top-level REST key.
+    /// corroboration. The REST response projection exposes this deliberately
+    /// as `aichHash`; generic serialization remains private-by-default.
     #[serde(default, skip_serializing)]
     pub aich_hash: String,
     pub complete: bool,
@@ -486,6 +487,8 @@ pub struct SearchResultObservation {
     pub media: SearchResultMedia,
     #[serde(default)]
     pub rating: u8,
+    /// Exact AICH identity claimed by this observation. The REST projection
+    /// exposes it as `aichHash` so conflicting server claims stay inspectable.
     #[serde(default, skip_serializing)]
     pub aich_hash: String,
     pub complete: bool,

@@ -93,6 +93,7 @@ describe("SearchView", () => {
         sources: 12,
         completeSources: 5,
         rating: 4,
+        aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         fileType: "audio",
         media: {
           artist: "Example Artist",
@@ -112,7 +113,7 @@ describe("SearchView", () => {
             fileType: "audio",
             media: { artist: "", album: "", title: "", lengthSeconds: 321, bitrateKbps: 192, codec: "FLAC" },
             rating: 4,
-            hasAichHash: true,
+            aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             complete: false,
             sourceClientId: 16909060,
             sourceClientPort: 4662,
@@ -129,7 +130,7 @@ describe("SearchView", () => {
             fileType: "audio",
             media: { artist: "Example Artist", album: "Example Album", title: "Example Title", lengthSeconds: 321, bitrateKbps: 192, codec: "FLAC" },
             rating: 3,
-            hasAichHash: false,
+            aichHash: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
             complete: false,
             directory: "",
             observedAt: "2026-10-06T12:00:01Z"
@@ -166,6 +167,8 @@ describe("SearchView", () => {
     expect(screen.getByText("Title: Example Title · Artist: Example Artist · Album: Example Album · 5:21 · 192 kbps · Codec: FLAC")).toBeInTheDocument();
     expect(screen.getByText("5 complete")).toBeInTheDocument();
     expect(screen.getByText("4/5")).toBeInTheDocument();
+    expect(screen.getByText("Conflicting AICH claims: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")).toBeInTheDocument();
+    expect(screen.getByText(/AICH AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/)).toBeInTheDocument();
     expect(screen.getByText("server, global")).toBeInTheDocument();
     expect(screen.getAllByText("00112233445566778899aabbccddeeff").length).toBeGreaterThan(0);
     expect(screen.getByText(/4.0 KiB · type audio · 8 sources \/ 3 complete · client 16909060:4662 · folder Audio/)).toBeInTheDocument();
