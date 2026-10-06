@@ -244,8 +244,10 @@ the immutable `ghcr.io/emulebb/emulebb-rust:<version>` tag or follow the moving
 The small changelog on each nightly is automatic. It groups commit subjects
 since the previous successful nightly into `Added`, `Fixed`, `Changed`, and
 `Engineering`, links every listed commit, and includes the full GitHub source
-comparison. No separate nightly changelog needs manual maintenance. Clear
-commit subjects therefore produce better release notes; see
+comparison. It also compares the current-only metadata schema with the previous
+successful nightly and explicitly calls out when a fresh profile is required.
+No separate nightly changelog needs manual maintenance. Clear commit subjects
+therefore produce better release notes; see
 [`CONTRIBUTING.md`](CONTRIBUTING.md#nightly-release-notes).
 
 Nightly binaries remain experimental and are not code-signed. Verify downloads

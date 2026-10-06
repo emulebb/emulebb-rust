@@ -16,6 +16,14 @@ SPEC.loader.exec_module(NIGHTLY)
 
 
 class TestNightlyMetadata(unittest.TestCase):
+    def test_metadata_schema_version_requires_one_exact_declaration(self) -> None:
+        self.assertEqual(
+            NIGHTLY.metadata_schema_version("pub const SCHEMA_VERSION: i64 = 25;\n"),
+            25,
+        )
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            NIGHTLY.metadata_schema_version("const SCHEMA_VERSION: u32 = 25;\n")
+
     def test_version_is_derived_from_promoted_beta(self) -> None:
         self.assertEqual(
             NIGHTLY.nightly_version("0.1.0-beta.2", "20261003", "9E43EA5E"),
@@ -26,12 +34,13 @@ class TestNightlyMetadata(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid source commit"):
             NIGHTLY.nightly_version("0.1.0-beta.2", "20261003", "123")
 
-    def test_latest_tag_is_scoped_to_the_promoted_beta(self) -> None:
+    def test_latest_tag_is_scoped_to_beta_and_uses_newest_first_order(self) -> None:
         tags = [
-            "rust-v0.1.0-beta.2",
+            "rust-v0.1.0-beta.2.nightly.20261003.g2222222",
             "rust-v0.1.0-beta.1.nightly.20261005.gbbbbbbb",
             "rust-v0.1.0-beta.2.nightly.20261002.g1111111",
-            "rust-v0.1.0-beta.2.nightly.20261003.g2222222",
+            "rust-v0.1.0-beta.2.nightly.20261003.g9999999",
+            "rust-v0.1.0-beta.2",
             "rust-v0.1.0-beta.2.nightly.bad.g3333333",
         ]
         self.assertEqual(
@@ -61,6 +70,8 @@ class TestNightlyNotes(unittest.TestCase):
             version="0.1.0-beta.2.nightly.20261003.g9e43ea5e",
             previous_ref="rust-v0.1.0-beta.2",
             source_sha="9" * 40,
+            schema_version=25,
+            previous_schema_version=24,
             changes=changes,
         )
         self.assertIn("## Added", rendered)
@@ -68,7 +79,24 @@ class TestNightlyNotes(unittest.TestCase):
         self.assertIn("## Fixed", rendered)
         self.assertIn("## Changed", rendered)
         self.assertIn("## Engineering", rendered)
+        self.assertIn("Metadata schema: `25` (changed from `24`", rendered)
+        self.assertIn("Profile schema status: incompatible", rendered)
+        self.assertIn("does not migrate, repair, or reset", rendered)
         self.assertIn("compare/rust-v0.1.0-beta.2...", rendered)
+
+    def test_unchanged_schema_is_explicit(self) -> None:
+        rendered = NIGHTLY.render_notes(
+            version="0.1.0-beta.2.nightly.20261003.g9e43ea5e",
+            previous_ref="rust-v0.1.0-beta.2",
+            source_sha="9" * 40,
+            schema_version=25,
+            previous_schema_version=25,
+            changes=(),
+        )
+
+        self.assertIn("Metadata schema: `25` (unchanged", rendered)
+        self.assertIn("Profile schema status: unchanged", rendered)
+        self.assertNotIn("incompatible with the previous build", rendered)
 
 
 class TestNightlyGatesAndRetention(unittest.TestCase):

@@ -27,6 +27,8 @@ NIGHTLY_TAG_RE = re.compile(
     r"(?P<date>\d{8})\.g(?P<sha>[0-9a-f]{7,40}))"
 )
 SAFE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
+METADATA_SCHEMA_PATH = "crates/emulebb-metadata/src/schema.rs"
+METADATA_SCHEMA_RE = re.compile(r"^pub const SCHEMA_VERSION: i64 = (?P<version>\d+);$", re.MULTILINE)
 REQUIRED_CI_CHECKS = (
     "build+test (ubuntu-latest)",
     "build+test (macos-latest)",
@@ -88,6 +90,24 @@ def nightly_version(base_version: str, date: str, sha: str) -> str:
     return f"{base_version}.nightly.{date}.g{normalized_sha}"
 
 
+def metadata_schema_version(source: str) -> int:
+    """Extracts the single current-only metadata schema version declaration."""
+
+    matches = METADATA_SCHEMA_RE.findall(source)
+    if len(matches) != 1:
+        raise RuntimeError("metadata schema source must declare exactly one SCHEMA_VERSION")
+    return int(matches[0])
+
+
+def metadata_schema_version_at_ref(ref: str) -> int:
+    """Reads the metadata schema version from one validated Git ref."""
+
+    if not SAFE_REF_RE.fullmatch(ref):
+        raise RuntimeError(f"unsafe metadata schema ref: {ref}")
+    source = git_output("show", f"{ref}:{METADATA_SCHEMA_PATH}")
+    return metadata_schema_version(source)
+
+
 def matching_nightly_tags(base_version: str, tags: Sequence[str]) -> list[str]:
     """Returns well-formed nightly tags for the selected promoted beta."""
 
@@ -101,10 +121,10 @@ def matching_nightly_tags(base_version: str, tags: Sequence[str]) -> list[str]:
 
 
 def latest_nightly_tag(base_version: str, tags: Sequence[str]) -> str | None:
-    """Returns the lexically latest dated nightly tag for one beta."""
+    """Returns the first matching tag from a newest-first tag sequence."""
 
     matched = matching_nightly_tags(base_version, tags)
-    return max(matched) if matched else None
+    return matched[0] if matched else None
 
 
 def parse_bool(value: str) -> bool:
@@ -127,7 +147,12 @@ def metadata(*, date: str | None = None, force: bool = False) -> dict[str, str]:
     release_date = date or datetime.now(timezone.utc).strftime("%Y%m%d")
     version = nightly_version(base_version, release_date, short_sha)
     tag = f"rust-v{version}"
-    tags = git_output("tag", "--list", f"rust-v{base_version}.nightly.*").splitlines()
+    tags = git_output(
+        "tag",
+        "--list",
+        "--sort=-creatordate",
+        f"rust-v{base_version}.nightly.*",
+    ).splitlines()
     previous_ref = latest_nightly_tag(base_version, tags) or f"rust-v{base_version}"
     if not SAFE_REF_RE.fullmatch(previous_ref):
         raise RuntimeError(f"unsafe previous nightly ref: {previous_ref}")
@@ -137,6 +162,8 @@ def metadata(*, date: str | None = None, force: bool = False) -> dict[str, str]:
         previous_ref = f"rust-v{base_version}"
         run(("git", "merge-base", "--is-ancestor", previous_ref, source_sha))
     previous_sha = git_output("rev-parse", f"{previous_ref}^{{commit}}").lower()
+    schema_version = metadata_schema_version_at_ref(source_sha)
+    previous_schema_version = metadata_schema_version_at_ref(previous_ref)
     should_build = force or previous_sha != source_sha
     compare_url = f"https://github.com/{DEFAULT_REPOSITORY}/compare/{previous_ref}...{source_sha}"
     return {
@@ -147,6 +174,9 @@ def metadata(*, date: str | None = None, force: bool = False) -> dict[str, str]:
         "short_sha": short_sha,
         "release_date": release_date,
         "previous_ref": previous_ref,
+        "schema_version": str(schema_version),
+        "previous_schema_version": str(previous_schema_version),
+        "schema_changed": str(schema_version != previous_schema_version).lower(),
         "should_build": str(should_build).lower(),
         "compare_url": compare_url,
     }
@@ -227,6 +257,8 @@ def render_notes(
     version: str,
     previous_ref: str,
     source_sha: str,
+    schema_version: int,
+    previous_schema_version: int,
     changes: Sequence[Change],
     repository: str = DEFAULT_REPOSITORY,
 ) -> str:
@@ -246,7 +278,27 @@ def render_notes(
         f"- Source: [`{source_sha[:8]}`](https://github.com/{repository}/commit/{source_sha})",
         f"- Previous successful nightly: `{previous_ref}`",
         "",
+        "## Profile compatibility",
+        "",
     ]
+    if schema_version == previous_schema_version:
+        lines.extend(
+            (
+                f"- Metadata schema: `{schema_version}` (unchanged from `{previous_ref}`).",
+                "- Profile schema status: unchanged. Back up the profile before testing this experimental build.",
+                "",
+            )
+        )
+    else:
+        lines.extend(
+            (
+                f"- Metadata schema: `{schema_version}` (changed from `{previous_schema_version}` at `{previous_ref}`).",
+                "- Profile schema status: incompatible with the previous build.",
+                "",
+                "> Use a fresh profile. This build does not migrate, repair, or reset incompatible databases. Back up an existing profile before testing.",
+                "",
+            )
+        )
     for category in ("Added", "Fixed", "Changed", "Engineering"):
         entries = [change for change in changes if change.category == category]
         if not entries:
@@ -367,10 +419,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise RuntimeError(f"unsafe previous nightly ref: {args.previous_ref}")
         source_sha = git_output("rev-parse", "HEAD").lower()
         raw_log = git_output("log", "--reverse", "--format=%H%x09%s", f"{args.previous_ref}..{source_sha}")
+        schema_version = metadata_schema_version_at_ref(source_sha)
+        previous_schema_version = metadata_schema_version_at_ref(args.previous_ref)
         rendered = render_notes(
             version=args.version,
             previous_ref=args.previous_ref,
             source_sha=source_sha,
+            schema_version=schema_version,
+            previous_schema_version=previous_schema_version,
             changes=changes_from_log(raw_log),
             repository=args.repository,
         )
