@@ -459,6 +459,14 @@ pub(crate) fn search_result_response_with_options(
                 "sourceClientId": observation.source_client_id,
                 "sourceClientPort": observation.source_client_port,
                 "fileType": observation.file_type,
+                "media": {
+                    "artist": observation.media.artist,
+                    "album": observation.media.album,
+                    "title": observation.media.title,
+                    "lengthSeconds": observation.media.length_seconds,
+                    "bitrateKbps": observation.media.bitrate_kbps,
+                    "codec": observation.media.codec,
+                },
                 "rating": observation.rating,
                 "hasAichHash": !observation.aich_hash.is_empty(),
                 "complete": observation.complete,
@@ -512,6 +520,14 @@ pub(crate) fn search_result_response_with_options(
         "sources": result.sources,
         "completeSources": result.complete_sources,
         "fileType": result.file_type,
+        "media": {
+            "artist": result.media.artist,
+            "album": result.media.album,
+            "title": result.media.title,
+            "lengthSeconds": result.media.length_seconds,
+            "bitrateKbps": result.media.bitrate_kbps,
+            "codec": result.media.codec,
+        },
         "extension": extension,
         "complete": result.complete,
         "directory": result.directory,
@@ -757,7 +773,14 @@ mod tests {
             source_client_id: None,
             source_client_port: None,
             file_type: "doc".to_string(),
-            media: Default::default(),
+            media: emulebb_core::SearchResultMedia {
+                artist: "Example Artist".to_string(),
+                album: "Example Album".to_string(),
+                title: "Example Title".to_string(),
+                length_seconds: 321,
+                bitrate_kbps: 192,
+                codec: "FLAC".to_string(),
+            },
             rating: 4,
             aich_hash: "A".repeat(32),
             complete: true,
@@ -768,6 +791,12 @@ mod tests {
         let complete = search_result_response(&result);
         assert_eq!(complete["complete"], true);
         assert_eq!(complete["rating"], 4);
+        assert_eq!(complete["media"]["artist"], "Example Artist");
+        assert_eq!(complete["media"]["album"], "Example Album");
+        assert_eq!(complete["media"]["title"], "Example Title");
+        assert_eq!(complete["media"]["lengthSeconds"], 321);
+        assert_eq!(complete["media"]["bitrateKbps"], 192);
+        assert_eq!(complete["media"]["codec"], "FLAC");
         assert!(complete.get("method").is_none());
         assert!(complete.get("knownType").is_none());
         assert!(complete.get("clientIp").is_none());
