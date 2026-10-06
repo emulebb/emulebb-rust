@@ -175,11 +175,21 @@ export type SearchResultObservation = {
   sourceClientId?: number | null;
   sourceClientPort?: number | null;
   fileType: string;
+  media?: SearchResultMedia;
   rating: number;
   hasAichHash: boolean;
   complete: boolean;
   directory: string;
   observedAt: string;
+};
+
+export type SearchResultMedia = {
+  artist: string;
+  album: string;
+  title: string;
+  lengthSeconds: number;
+  bitrateKbps: number;
+  codec: string;
 };
 
 export type SearchResult = {
@@ -192,6 +202,7 @@ export type SearchResult = {
   completeSources?: number;
   availability?: number;
   fileType?: string;
+  media?: SearchResultMedia;
   knownType?: string;
   extension?: string;
   directory?: string;

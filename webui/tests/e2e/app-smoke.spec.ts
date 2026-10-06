@@ -458,9 +458,10 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
               completeSources: 2,
               rating: 4,
               fileType: "doc",
+              media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" },
               observations: [
-                { origin: "server", name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 3, completeSources: 1, fileType: "doc", rating: 4, hasAichHash: true, complete: false, directory: "", observedAt: "2026-10-06T12:00:00Z" },
-                { origin: "global", name: "Linux Manual.pdf", sizeBytes: 1_048_576, sources: 5, completeSources: 2, fileType: "doc", rating: 3, hasAichHash: false, complete: false, directory: "", observedAt: "2026-10-06T12:00:01Z" }
+                { origin: "server", name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 3, completeSources: 1, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 4, hasAichHash: true, complete: false, directory: "", observedAt: "2026-10-06T12:00:00Z" },
+                { origin: "global", name: "Linux Manual.pdf", sizeBytes: 1_048_576, sources: 5, completeSources: 2, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Manual", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 3, hasAichHash: false, complete: false, directory: "", observedAt: "2026-10-06T12:00:01Z" }
               ]
             }]
           : [{ hash: "00112233445566778899AABBCCDDEEFF", name: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
@@ -575,6 +576,9 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(resultRow).toContainText("4/5");
   await expect(resultRow).toContainText("server, global");
   await expect(resultRow).toContainText("Linux Manual.pdf");
+  await expect(resultRow).toContainText("Title: Linux Guide");
+  await expect(resultRow).toContainText("Artist: Example Author");
+  await expect(resultRow).toContainText("Codec: PDF");
   await expect(resultRow).toContainText(resultHash);
   await searchPanel.getByRole("combobox", { name: "Sort search results" }).selectOption("rating:desc");
   await expect.poll(() => requests.some((request) =>

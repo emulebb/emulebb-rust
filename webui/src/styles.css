@@ -844,15 +844,23 @@ td {
 
 .search-result-name-cell > strong,
 .search-result-alternates,
+.search-result-media,
 .search-complete-sources {
   display: block;
 }
 
 .search-result-alternates,
+.search-result-media,
 .search-complete-sources {
   color: var(--tblr-secondary);
   font-size: 0.78rem;
   margin-top: 2px;
+}
+
+.search-result-media {
+  color: var(--tblr-body-color);
+  font-size: 0.8rem;
+  margin-top: 3px;
 }
 
 .search-observations {

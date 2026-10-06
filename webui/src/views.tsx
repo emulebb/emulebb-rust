@@ -41,6 +41,7 @@ import {
   RestClient,
   RuntimeDiagnostics,
   SearchItem,
+  SearchResultMedia,
   ServerItem,
   SharedDirectories,
   SharedFile,
@@ -744,6 +745,7 @@ export function SearchView(props: {
           <tbody>
             {results.map((result) => {
               const observations = result.observations ?? [];
+              const mediaSummary = searchResultMediaSummary(result.media);
               const origins = [...new Set(observations.map((observation) => observation.origin))];
               const alternateNames = [...new Set(
                 observations
@@ -757,17 +759,22 @@ export function SearchView(props: {
                   {alternateNames.length > 0 && (
                     <span class="search-result-alternates">Also seen as: {alternateNames.join(", ")}</span>
                   )}
+                  {mediaSummary && <span class="search-result-media">{mediaSummary}</span>}
                   {observations.length > 0 && (
                     <details class="search-observations">
                       <summary>{observations.length} observation{observations.length === 1 ? "" : "s"}</summary>
                       <ul>
-                        {observations.map((observation, index) => (
-                          <li key={`${observation.origin}-${observation.name}-${index}`}>
-                            <strong>{observation.origin}</strong>: {observation.name} · {observation.sources} sources / {observation.completeSources} complete
-                            {observation.rating > 0 ? ` · rating ${observation.rating}/5` : ""}
-                            {observation.hasAichHash ? " · AICH" : ""}
-                          </li>
-                        ))}
+                        {observations.map((observation, index) => {
+                          const observationMedia = searchResultMediaSummary(observation.media);
+                          return (
+                            <li key={`${observation.origin}-${observation.name}-${index}`}>
+                              <strong>{observation.origin}</strong>: {observation.name} · {observation.sources} sources / {observation.completeSources} complete
+                              {observation.rating > 0 ? ` · rating ${observation.rating}/5` : ""}
+                              {observation.hasAichHash ? " · AICH" : ""}
+                              {observationMedia ? ` · ${observationMedia}` : ""}
+                            </li>
+                          );
+                        })}
                       </ul>
                     </details>
                   )}
@@ -830,6 +837,35 @@ export function SearchView(props: {
       )}
     </section>
   );
+}
+
+function searchResultMediaSummary(media?: SearchResultMedia): string {
+  if (!media) {
+    return "";
+  }
+  const title = media.title.trim();
+  const artist = media.artist.trim();
+  const album = media.album.trim();
+  const codec = media.codec.trim();
+  const fields = [
+    title ? `Title: ${title}` : "",
+    artist ? `Artist: ${artist}` : "",
+    album ? `Album: ${album}` : "",
+    media.lengthSeconds > 0 ? formatMediaDuration(media.lengthSeconds) : "",
+    media.bitrateKbps > 0 ? `${media.bitrateKbps.toLocaleString()} kbps` : "",
+    codec ? `Codec: ${codec}` : ""
+  ];
+  return fields.filter(Boolean).join(" · ");
+}
+
+function formatMediaDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.trunc(totalSeconds));
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
 export function SharingView(props: {

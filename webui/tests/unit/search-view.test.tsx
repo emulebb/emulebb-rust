@@ -85,6 +85,14 @@ describe("SearchView", () => {
         completeSources: 5,
         rating: 4,
         fileType: "audio",
+        media: {
+          artist: "Example Artist",
+          album: "Example Album",
+          title: "Example Title",
+          lengthSeconds: 321,
+          bitrateKbps: 192,
+          codec: "FLAC"
+        },
         observations: [
           {
             origin: "server",
@@ -93,6 +101,7 @@ describe("SearchView", () => {
             sources: 8,
             completeSources: 3,
             fileType: "audio",
+            media: { artist: "", album: "", title: "", lengthSeconds: 321, bitrateKbps: 192, codec: "FLAC" },
             rating: 4,
             hasAichHash: true,
             complete: false,
@@ -106,6 +115,7 @@ describe("SearchView", () => {
             sources: 12,
             completeSources: 5,
             fileType: "audio",
+            media: { artist: "Example Artist", album: "Example Album", title: "Example Title", lengthSeconds: 321, bitrateKbps: 192, codec: "FLAC" },
             rating: 3,
             hasAichHash: false,
             complete: false,
@@ -139,6 +149,7 @@ describe("SearchView", () => {
     expect(screen.getByText("Extension: .flac")).toBeInTheDocument();
     expect(screen.getByText("Minimum complete: 2")).toBeInTheDocument();
     expect(screen.getByText("Also seen as: Alternate.flac")).toBeInTheDocument();
+    expect(screen.getByText("Title: Example Title · Artist: Example Artist · Album: Example Album · 5:21 · 192 kbps · Codec: FLAC")).toBeInTheDocument();
     expect(screen.getByText("5 complete")).toBeInTheDocument();
     expect(screen.getByText("4/5")).toBeInTheDocument();
     expect(screen.getByText("server, global")).toBeInTheDocument();
