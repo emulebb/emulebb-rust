@@ -195,6 +195,56 @@ class TestDependencyUpdateCoverage(unittest.TestCase):
         self.assertTrue(any("docker dependencies" in error for error in errors))
 
 
+class TestCodeScanningCi(unittest.TestCase):
+    def test_current_workflow_scans_release_relevant_sources(self) -> None:
+        self.assertEqual(CHECKER.check_code_scanning_ci(), [])
+
+    def test_rejects_missing_languages_permissions_and_immutable_actions(self) -> None:
+        workflow = """
+schedule:
+workflow_dispatch:
+security-events: read
+- language: rust
+  build-mode: autobuild
+uses: github/codeql-action/init@v4
+uses: github/codeql-action/analyze@v4
+"""
+
+        errors = CHECKER.check_code_scanning_ci(workflow)
+
+        self.assertEqual(len(errors), 8)
+        self.assertTrue(any("security event upload permission" in error for error in errors))
+        self.assertTrue(any("actions with build-mode none" in error for error in errors))
+        self.assertTrue(any("rust with build-mode none" in error for error in errors))
+        self.assertTrue(any("full commit SHA" in error for error in errors))
+
+    def test_rejects_mixed_codeql_action_revisions(self) -> None:
+        workflow = f"""
+schedule:
+workflow_dispatch:
+security-events: write
+queries: security-extended
+category: /language:${{{{ matrix.language }}}}
+- language: actions
+  build-mode: none
+- language: javascript-typescript
+  build-mode: none
+- language: python
+  build-mode: none
+- language: rust
+  build-mode: none
+uses: github/codeql-action/init@{'a' * 40}
+uses: github/codeql-action/analyze@{'b' * 40}
+"""
+
+        errors = CHECKER.check_code_scanning_ci(workflow)
+
+        self.assertEqual(
+            errors,
+            [".github/workflows/codeql.yml must use one CodeQL action revision"],
+        )
+
+
 class TestWorkflowLintCi(unittest.TestCase):
     def test_current_ci_lints_workflows(self) -> None:
         self.assertEqual(CHECKER.check_workflow_lint_ci(), [])

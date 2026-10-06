@@ -86,6 +86,7 @@ def main() -> int:
     errors.extend(check_dependency_update_coverage())
     errors.extend(check_security_policy())
     errors.extend(check_github_action_pins())
+    errors.extend(check_code_scanning_ci())
     errors.extend(check_workflow_lint_ci())
     errors.extend(check_scheduled_fuzz_ci())
     errors.extend(check_live_rest_openapi_ci())
@@ -578,6 +579,52 @@ def check_github_action_pins() -> list[str]:
 
 def action_ref_is_immutable(reference: str) -> bool:
     return re.fullmatch(r"[0-9a-f]{40}", reference) is not None
+
+
+def check_code_scanning_ci(workflow_text: str | None = None) -> list[str]:
+    """Keep all release-relevant source surfaces under CodeQL analysis."""
+
+    workflow = ROOT / ".github" / "workflows" / "codeql.yml"
+    if workflow_text is None and not workflow.is_file():
+        return [".github/workflows/codeql.yml is missing"]
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    required = {
+        "schedule:": "weekly schedule",
+        "workflow_dispatch:": "manual dispatch",
+        "security-events: write": "security event upload permission",
+        "queries: security-extended": "extended security query suite",
+        "category: /language:${{ matrix.language }}": "per-language result category",
+    }
+    errors = [
+        f".github/workflows/codeql.yml is missing {description} configuration"
+        for fragment, description in required.items()
+        if fragment not in text
+    ]
+    for language in ("actions", "javascript-typescript", "python", "rust"):
+        entry = re.compile(
+            rf"- language:\s*{re.escape(language)}\s+build-mode:\s*none",
+            re.MULTILINE,
+        )
+        if entry.search(text) is None:
+            errors.append(
+                ".github/workflows/codeql.yml must scan "
+                f"{language} with build-mode none"
+            )
+    action_refs = re.findall(
+        r"github/codeql-action/(?:init|analyze)@([^\s#]+)", text
+    )
+    if len(action_refs) != 2 or any(
+        not action_ref_is_immutable(reference) for reference in action_refs
+    ):
+        errors.append(
+            ".github/workflows/codeql.yml must pin CodeQL init and analyze "
+            "by full commit SHA"
+        )
+    elif len(set(action_refs)) != 1:
+        errors.append(
+            ".github/workflows/codeql.yml must use one CodeQL action revision"
+        )
+    return errors
 
 
 def check_workflow_lint_ci(workflow_text: str | None = None) -> list[str]:

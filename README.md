@@ -212,6 +212,9 @@ write those fixed files, but the Rust client itself only consumes the profile.
 Report suspected vulnerabilities privately; do not place credentials, private
 peer data, or exploit details in a public issue. Supported versions, the private
 reporting link, and response expectations are in the [security policy](SECURITY.md).
+Committed CodeQL analysis covers the Rust daemon, browser WebUI, Python release
+tooling, and GitHub Actions workflows on every `main` change and on a weekly
+schedule using the extended security query suite.
 
 ## Beta.2 artifacts
 
