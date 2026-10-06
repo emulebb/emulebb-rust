@@ -16,13 +16,39 @@ impl EmulebbCore {
                 .map(|file| search_result_from_indexed(&search_id, &request, file)),
         );
         apply_search_filters(&mut results, &request);
+        let requested_method = request.method.trim().to_ascii_lowercase();
+        match requested_method.as_str() {
+            "server" | "global" => {
+                ensure!(
+                    self.ed2k_network.is_some(),
+                    "eD2k search network is not configured"
+                );
+                ensure!(
+                    state.core_settings.network_ed2k,
+                    "eD2k search network is disabled in settings.core (networkEd2k=false)"
+                );
+            }
+            "kad" => {
+                ensure!(
+                    self.ed2k_network.is_some(),
+                    "Kad search network is not configured"
+                );
+                ensure!(
+                    state.core_settings.network_kademlia,
+                    "Kad search network is disabled in settings.core (networkKademlia=false)"
+                );
+            }
+            _ => {}
+        }
         // Network methods go through the connection-aware queue (operator
         // directive 2026-07-06): a search submitted while its backend is still
         // connecting/absent is QUEUED with an honest status+reason and drains
         // automatically when the backend is ready — it is never fired into a
         // stale handle and never silently "completed" with local-only results.
-        // Non-network methods (or no eD2k network configured at all) keep the
-        // immediate running->completed local-index path.
+        // Automatic searches without an eD2k network runtime keep the
+        // immediate running->completed local-index path. Explicit network
+        // methods were rejected above rather than misreported as local-only
+        // completed searches.
         let queue_lane = self
             .ed2k_network
             .as_ref()
@@ -90,11 +116,12 @@ impl EmulebbCore {
         Ok(search)
     }
 
-    /// Legacy immediate path for NON-QUEUED searches (unknown methods, or no
-    /// eD2k network configured): resolves the live network method, runs any
-    /// applicable network search, and completes the search with whatever the
-    /// local index already provided. Network methods never reach this path —
-    /// they go through the connection-aware queue (`search_queue_runtime`).
+    /// Legacy immediate path for NON-QUEUED searches (unknown methods, or an
+    /// automatic search with no eD2k network configured): resolves the live
+    /// network method, runs any applicable network search, and completes the
+    /// search with whatever the local index already provided. Explicit network
+    /// methods never reach this path — they are either rejected or go through
+    /// the connection-aware queue (`search_queue_runtime`).
     async fn run_background_search(&self, search_id: String, request: SearchCreate) {
         let ed2k_connected = self.connected_ed2k_search_handle().await.is_some();
         let kad_connected = self

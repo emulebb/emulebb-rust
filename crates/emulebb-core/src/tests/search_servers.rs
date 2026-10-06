@@ -116,6 +116,72 @@ async fn search_uses_local_index() {
     assert_eq!(completed.results.len(), 1);
 }
 
+#[tokio::test]
+async fn explicit_network_search_without_runtime_is_rejected() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+
+    for method in ["server", "global", "kad"] {
+        let error = core
+            .create_search(SearchCreate {
+                query: "must use requested network".to_string(),
+                method: method.to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("explicit network search must not fall back to local-only");
+        assert!(
+            error
+                .to_string()
+                .contains("search network is not configured"),
+            "unexpected {method} error: {error:#}"
+        );
+    }
+
+    assert!(core.searches().await.is_empty());
+}
+
+#[tokio::test]
+async fn explicit_network_search_respects_disabled_network_settings() {
+    let transfer_root = unique_runtime_dir("emulebb-core-search-disabled-network");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        transfer_root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+    core.update_core_settings(CoreSettingsUpdate {
+        network_ed2k: Some(false),
+        network_kademlia: Some(false),
+        ..CoreSettingsUpdate::default()
+    })
+    .await
+    .unwrap();
+
+    for method in ["server", "global", "kad"] {
+        let error = core
+            .create_search(SearchCreate {
+                query: "disabled network".to_string(),
+                method: method.to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("disabled explicit network must reject search");
+        assert!(
+            error.to_string().contains("search network is disabled"),
+            "unexpected {method} error: {error:#}"
+        );
+    }
+
+    assert!(core.searches().await.is_empty());
+    assert_eq!(core.search_queue.lock().pending_len(), 0);
+}
+
 // Operator directive 2026-07-06: a network search submitted while the
 // backend is still connecting/absent must surface an honest "queued"
 // status with a reason and wait for readiness — never complete instantly
