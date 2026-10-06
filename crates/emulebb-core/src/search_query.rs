@@ -96,6 +96,10 @@ pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &Se
         .trim()
         .trim_start_matches('.')
         .to_ascii_lowercase();
+    let codec = normalized_media_filter(&request.codec);
+    let title = normalized_media_filter(&request.title);
+    let album = normalized_media_filter(&request.album);
+    let artist = normalized_media_filter(&request.artist);
     results.retain(|result| {
         if let Some(file_type) = file_type.as_deref()
             && result_file_type(result) != Some(file_type)
@@ -128,8 +132,33 @@ pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &Se
         {
             return false;
         }
+        if let Some(min_bitrate_kbps) = request.min_bitrate_kbps
+            && result.media.bitrate_kbps < min_bitrate_kbps
+        {
+            return false;
+        }
+        if let Some(min_length_seconds) = request.min_length_seconds
+            && result.media.length_seconds < min_length_seconds
+        {
+            return false;
+        }
+        if !media_text_matches(&result.media.codec, &codec)
+            || !media_text_matches(&result.media.title, &title)
+            || !media_text_matches(&result.media.album, &album)
+            || !media_text_matches(&result.media.artist, &artist)
+        {
+            return false;
+        }
         true
     });
+}
+
+fn media_text_matches(actual: &str, requested: &str) -> bool {
+    requested.is_empty() || actual.trim().to_lowercase() == requested
+}
+
+fn normalized_media_filter(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn result_file_type(result: &SearchResult) -> Option<&'static str> {
@@ -410,6 +439,60 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Bundle.7z", "Disc.iso"]
         );
+    }
+
+    #[test]
+    fn media_filters_require_matching_result_evidence() {
+        let media = SearchResultMedia {
+            artist: "Example Artist".to_string(),
+            album: "Example Album".to_string(),
+            title: "Example Title".to_string(),
+            length_seconds: 321,
+            bitrate_kbps: 192,
+            codec: "MP3".to_string(),
+        };
+        let candidate = |name: &str, media: SearchResultMedia| {
+            let mut result = result(name, 5_000, 8);
+            result.media = media.clone();
+            result.observations[0].media = media;
+            result
+        };
+        let good = candidate("good.mp3", media.clone());
+        let mut low_bitrate = media.clone();
+        low_bitrate.bitrate_kbps = 128;
+        let mut short = media.clone();
+        short.length_seconds = 120;
+        let mut wrong_codec = media.clone();
+        wrong_codec.codec = "AAC".to_string();
+        let mut wrong_title = media.clone();
+        wrong_title.title = "Other Title".to_string();
+        let mut wrong_album = media.clone();
+        wrong_album.album = "Other Album".to_string();
+        let mut wrong_artist = media.clone();
+        wrong_artist.artist = "Other Artist".to_string();
+
+        let mut results = vec![
+            good,
+            candidate("low-bitrate.mp3", low_bitrate),
+            candidate("short.mp3", short),
+            candidate("wrong-codec.mp3", wrong_codec),
+            candidate("wrong-title.mp3", wrong_title),
+            candidate("wrong-album.mp3", wrong_album),
+            candidate("wrong-artist.mp3", wrong_artist),
+            candidate("missing-media.mp3", SearchResultMedia::default()),
+        ];
+        let mut req = request();
+        req.min_bitrate_kbps = Some(192);
+        req.min_length_seconds = Some(300);
+        req.codec = " mp3 ".to_string();
+        req.title = "example title".to_string();
+        req.album = "example album".to_string();
+        req.artist = "example artist".to_string();
+
+        apply_search_filters(&mut results, &req);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "good.mp3");
     }
 
     #[test]
