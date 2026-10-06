@@ -90,9 +90,6 @@ jobs:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
       EMULEBB_RUST_REPO: ${{ github.workspace }}
       EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
-      EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
-      EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}
-      EMULEBB_SOURCE_REVISION: ${{ needs.verify-ci.outputs.source_sha }}
       MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
       PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
     steps:
@@ -180,6 +177,9 @@ jobs:
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+          EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}
+          EMULEBB_SOURCE_REVISION: ${{ needs.verify-ci.outputs.source_sha }}
           RUSTUP_TOOLCHAIN: "1.98.1"
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
       - name: Smoke native package and embedded WebUI
