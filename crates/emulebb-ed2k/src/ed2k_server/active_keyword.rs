@@ -68,10 +68,11 @@ struct UdpKeywordSearchPayloads {
 /// (`SearchResultsWnd::TimerGlobalSearch`).
 const UDP_KEYWORD_SERVER_WALK_INTERVAL: Duration = Duration::from_millis(750);
 
-/// Keep the per-search socket alive briefly after the last paced send. Stock
-/// eMule's shared UDP listener continues accepting replies for the current
-/// search after the walk timer stops; a one-shot socket otherwise loses every
-/// reply which arrives after the final 750 ms pacing window.
+/// Keep the per-search socket alive until replies have been quiet for this long
+/// after the last paced send. Stock eMule's shared UDP listener continues
+/// accepting replies for the current search after the walk timer stops; a
+/// one-shot socket otherwise loses late replies or the tail of a multi-datagram
+/// response.
 const UDP_KEYWORD_RESPONSE_GRACE: Duration = Duration::from_secs(5);
 
 fn encode_udp_keyword_search_payloads(
@@ -108,7 +109,8 @@ fn eligible_udp_keyword_search_servers(
 async fn drain_keyword_udp_responses(
     socket: &tokio::net::UdpSocket,
     queried_servers: &[ResolvedServerEntry],
-    deadline: TokioInstant,
+    mut deadline: TokioInstant,
+    response_quiet_grace: Option<Duration>,
     result_sink: Option<&(dyn Fn(Ed2kServerSearchObservation) + Send + Sync + '_)>,
     results: &mut Vec<Ed2kServerSearchObservation>,
     cancel: &CancellationToken,
@@ -142,6 +144,9 @@ async fn drain_keyword_udp_responses(
                         continue;
                     }
                 };
+                if let Some(response_quiet_grace) = response_quiet_grace {
+                    deadline = TokioInstant::now() + response_quiet_grace;
+                }
                 for page in pages {
                     for file in page.files {
                         let observation = Ed2kServerSearchObservation {
@@ -256,6 +261,7 @@ pub async fn search_keyword_udp_servers(
             &socket,
             &queried_servers,
             pacing_deadline,
+            None,
             result_sink,
             &mut results,
             cancel,
@@ -272,12 +278,14 @@ pub async fn search_keyword_udp_servers(
 
     // The stock client leaves the current search's requested-server allowlist
     // installed after its send timer stops. Preserve a bounded equivalent for
-    // this one-shot socket so slow replies from any contacted server still land.
+    // this one-shot socket, resetting the quiet window after every valid reply
+    // so the tail of a multi-datagram result train still lands.
     let response_deadline = TokioInstant::now() + UDP_KEYWORD_RESPONSE_GRACE;
     if let Some(error) = drain_keyword_udp_responses(
         &socket,
         &queried_servers,
         response_deadline,
+        Some(UDP_KEYWORD_RESPONSE_GRACE),
         result_sink,
         &mut results,
         cancel,
@@ -644,6 +652,7 @@ mod tests {
             &[server],
             TokioInstant::now() + Duration::from_millis(100),
             None,
+            None,
             &mut results,
             &cancel,
         )
@@ -654,5 +663,49 @@ mod tests {
         assert_eq!(results[0].file.file_hash.0, [0x44; 16]);
         assert_eq!(results[0].file.client_id, 0x0102_0304);
         assert_eq!(results[0].file.client_port, 4662);
+    }
+
+    #[tokio::test]
+    async fn udp_keyword_search_tail_resets_after_each_valid_reply() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let server = super::super::ResolvedServerEntry {
+            entry: super::super::ConfiguredServerEntry::from_endpoint_text("127.0.0.1:4661")
+                .unwrap(),
+            ip: Ipv4Addr::LOCALHOST,
+        };
+        let response = |hash_byte| {
+            let mut datagram = vec![super::super::OP_EDONKEYPROT, super::super::OP_GLOBSEARCHRES];
+            datagram.extend_from_slice(&[hash_byte; 16]);
+            datagram.extend_from_slice(&0x0102_0304_u32.to_le_bytes());
+            datagram.extend_from_slice(&4662_u16.to_le_bytes());
+            datagram.extend_from_slice(&0_u32.to_le_bytes());
+            datagram
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            sender.send_to(&response(0x44), destination).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(125)).await;
+            sender.send_to(&response(0x55), destination).await.unwrap();
+        });
+
+        let mut results = Vec::new();
+        let cancel = CancellationToken::new();
+        let error = drain_keyword_udp_responses(
+            &receiver,
+            &[server],
+            TokioInstant::now() + Duration::from_millis(100),
+            Some(Duration::from_millis(200)),
+            None,
+            &mut results,
+            &cancel,
+        )
+        .await;
+
+        assert!(error.is_none());
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].file.file_hash.0, [0x44; 16]);
+        assert_eq!(results[1].file.file_hash.0, [0x55; 16]);
     }
 }
