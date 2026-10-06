@@ -3,6 +3,10 @@ use emulebb_kad_proto::{
 };
 use std::net::Ipv4Addr;
 
+/// Highest plausible Kad keyword availability accepted by stock eMule.
+/// Larger values are treated as poisoned observations and reset to zero.
+const MAX_KAD_KEYWORD_AVAILABILITY: u32 = 65_500;
+
 /// One peer chosen to run an outbound Kad UDP firewall check against us.
 ///
 /// The oracle (`CUDPFirewallTester::QueryNextClient`) only asks contacts that
@@ -94,7 +98,7 @@ pub struct SearchResult {
     pub names: Vec<String>,
     pub size: Option<u64>,
     pub file_type: Option<String>,
-    /// Remote complete-source count parsed from the oracle `TAG_SOURCES` tag.
+    /// Remote availability parsed from the oracle `TAG_SOURCES` tag.
     pub source_count: Option<u32>,
     pub media_artist: Option<String>,
     pub media_album: Option<String>,
@@ -148,7 +152,11 @@ impl SearchResult {
                 }
                 TagName::Short(n) if *n == tag_name::SOURCES => {
                     if let Some(value) = unsigned_u32(&tag.value) {
-                        source_count = Some(value);
+                        source_count = Some(if value > MAX_KAD_KEYWORD_AVAILABILITY {
+                            0
+                        } else {
+                            value
+                        });
                     }
                 }
                 TagName::Short(n) if *n == tag_name::MEDIA_ARTIST && media_artist.is_none() => {
@@ -596,6 +604,29 @@ mod tests {
         assert_eq!(result.media_length_seconds, Some(321));
         assert_eq!(result.media_bitrate_kbps, Some(192));
         assert_eq!(result.media_codec.as_deref(), Some("MP3"));
+    }
+
+    #[test]
+    fn kad_keyword_availability_rejects_implausible_values() {
+        let hash = Ed2kHash::from_bytes([0x31; 16]);
+
+        let boundary = SearchResult::from_tags(
+            hash,
+            vec![Tag::new_short(
+                tag_name::SOURCES,
+                TagValue::U32(MAX_KAD_KEYWORD_AVAILABILITY),
+            )],
+        );
+        assert_eq!(boundary.source_count, Some(MAX_KAD_KEYWORD_AVAILABILITY));
+
+        let poisoned = SearchResult::from_tags(
+            hash,
+            vec![Tag::new_short(
+                tag_name::SOURCES,
+                TagValue::U32(MAX_KAD_KEYWORD_AVAILABILITY + 1),
+            )],
+        );
+        assert_eq!(poisoned.source_count, Some(0));
     }
 
     #[test]
