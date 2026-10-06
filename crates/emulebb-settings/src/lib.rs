@@ -2117,12 +2117,17 @@ mod tests {
         );
 
         for invalid in [MIN_FREE_TRANSFER_SPACE_BYTES - 1, MAX_FREE_SPACE_BYTES + 1] {
-            let mut candidate = Ed2kSettings::default();
-            candidate.min_free_transfer_space_bytes = invalid;
-            assert!(validate_ed2k_settings(&candidate).is_err());
-            candidate = Ed2kSettings::default();
-            candidate.min_free_incoming_space_bytes = invalid;
-            assert!(validate_ed2k_settings(&candidate).is_err());
+            let transfer_candidate = Ed2kSettings {
+                min_free_transfer_space_bytes: invalid,
+                ..Default::default()
+            };
+            assert!(validate_ed2k_settings(&transfer_candidate).is_err());
+
+            let incoming_candidate = Ed2kSettings {
+                min_free_incoming_space_bytes: invalid,
+                ..Default::default()
+            };
+            assert!(validate_ed2k_settings(&incoming_candidate).is_err());
         }
     }
 
