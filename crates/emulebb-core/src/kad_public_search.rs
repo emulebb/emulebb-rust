@@ -71,14 +71,11 @@ pub(crate) async fn search_kad_keywords(
                 let Some(result) = result else {
                     break;
                 };
-                let matches_request = result.names.iter().any(|name| {
-                    matches_restrictive_keyword_payload(
-                        name,
-                        &result.tags,
-                        &restrictive_payload,
-                    )
+                let mut result = result;
+                result.names.retain(|name| {
+                    matches_restrictive_keyword_payload(name, &result.tags, &restrictive_payload)
                 });
-                if !matches_request {
+                if result.names.is_empty() {
                     continue;
                 }
                 let hash = result.hash.to_string();
@@ -235,6 +232,29 @@ mod tests {
             &[emulebb_kad_proto::Tag::filesize(u64::from(u32::MAX) + 1),],
             &encoded.restrictive_payload,
         ));
+    }
+
+    #[test]
+    fn restrictive_payload_selects_only_matching_alternate_names() {
+        let mut request = request("Alpha Beta");
+        request.extension = "mp3".to_string();
+        let payload = kad_public_search_request(&request)
+            .unwrap()
+            .restrictive_payload;
+        let tags = vec![emulebb_kad_proto::Tag::filesize(1_024)];
+        let mut names = vec![
+            "alpha beta.mp3".to_string(),
+            "alpha beta.exe".to_string(),
+            "unrelated.mp3".to_string(),
+            "ALPHA BETA.MP3".to_string(),
+        ];
+
+        names.retain(|name| matches_restrictive_keyword_payload(name, &tags, &payload));
+
+        assert_eq!(
+            names,
+            vec!["alpha beta.mp3".to_string(), "ALPHA BETA.MP3".to_string()]
+        );
     }
 
     // Regression: the keyword-search outer timeout must cover both the active
