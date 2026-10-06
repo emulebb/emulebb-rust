@@ -49,10 +49,17 @@ impl EmulebbCore {
         // immediate running->completed local-index path. Explicit network
         // methods were rejected above rather than misreported as local-only
         // completed searches.
-        let queue_lane = self
-            .ed2k_network
-            .as_ref()
-            .and_then(|_| SearchQueueLane::for_method(&request.method));
+        let queue_lane = self.ed2k_network.as_ref().and_then(|_| {
+            let lane = SearchQueueLane::for_method(&request.method)?;
+            if lane == SearchQueueLane::Auto
+                && !state.core_settings.network_ed2k
+                && !state.core_settings.network_kademlia
+            {
+                None
+            } else {
+                Some(lane)
+            }
+        });
         let mut spawn_drain = false;
         if let Some(lane) = queue_lane {
             let mut queue = self.search_queue.lock();
