@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -24,7 +24,7 @@ use super::{
     ServerSessionPhase, bind_server_udp_socket, configured_server_entries,
     decode_search_result_page, decode_udp_search_result_pages, encode_login_request, encode_packet,
     encode_search_request, encode_search_request_with_criteria,
-    login_identity_for_server_transport, read_server_udp_packet, resolve_server_entry,
+    login_identity_for_server_transport, read_server_udp_packet_from_any, resolve_server_entry,
     retain_live_servers, send_connected_server_startup, send_udp_keyword_search,
     should_use_server_obfuscation, wait_for_offer_files_settle,
 };
@@ -181,15 +181,13 @@ pub async fn search_keyword_udp_servers(
             if remaining.is_zero() {
                 break;
             }
-            match tokio::time::timeout(remaining, read_server_udp_packet(&socket, &resolved_server))
-                .await
+            match tokio::time::timeout(
+                remaining,
+                read_server_udp_packet_from_any(&socket, &queried_servers),
+            )
+            .await
             {
-                Ok(Ok(Some(packet))) => {
-                    let Some(response_server) =
-                        queried_udp_response_server(&queried_servers, packet.from)
-                    else {
-                        continue;
-                    };
+                Ok(Ok(Some((response_server, packet)))) => {
                     if packet.opcode != OP_GLOBSEARCHRES {
                         continue;
                     }
@@ -230,18 +228,6 @@ pub async fn search_keyword_udp_servers(
         return Err(error);
     }
     Ok(results)
-}
-
-fn queried_udp_response_server(
-    queried_servers: &[ResolvedServerEntry],
-    response_endpoint: SocketAddr,
-) -> Option<&ResolvedServerEntry> {
-    // WHY: eMuleBB MFC accepts UDP search answers from any server IP that was
-    // requested for the active search, even after the timer has advanced to the
-    // next server. Do not tie valid late datagrams to only the current wait slot.
-    queried_servers
-        .iter()
-        .find(|server| response_endpoint.ip() == IpAddr::V4(server.ip))
 }
 
 /// Executes a one-shot ED2K keyword search against the configured servers.
@@ -513,55 +499,10 @@ mod tests {
 
     use crate::config::Ed2kRuntimeConfig;
 
-    use super::super::{ConfiguredServerEntry, ResolvedServerEntry};
     use super::{
         SearchCriteria, eligible_udp_keyword_search_servers, encode_search_request_with_criteria,
-        encode_udp_keyword_search_payloads, queried_udp_response_server,
+        encode_udp_keyword_search_payloads,
     };
-
-    fn resolved(ip: Ipv4Addr, port: u16) -> ResolvedServerEntry {
-        ResolvedServerEntry {
-            entry: ConfiguredServerEntry {
-                host: ip.to_string(),
-                port,
-                name: None,
-                description: None,
-                dynamic_host: None,
-                udp_flags: 0,
-                udp_key: 0,
-                udp_key_ip: 0,
-                obfuscation_port_tcp: 0,
-                obfuscation_port_udp: 0,
-                soft_files: 0,
-                hard_files: 0,
-                priority: "normal".to_string(),
-                static_server: false,
-            },
-            ip,
-        }
-    }
-
-    #[test]
-    fn udp_keyword_search_accepts_replies_from_any_queried_server_ip() {
-        let first = resolved(Ipv4Addr::new(192, 0, 2, 10), 4661);
-        let second = resolved(Ipv4Addr::new(192, 0, 2, 20), 4661);
-        let queried = vec![first, second];
-
-        let matched = queried_udp_response_server(
-            &queried,
-            SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10), 4665)),
-        )
-        .expect("queried server accepted");
-
-        assert_eq!(matched.ip, Ipv4Addr::new(192, 0, 2, 10));
-        assert!(
-            queried_udp_response_server(
-                &queried,
-                SocketAddr::from((Ipv4Addr::new(198, 51, 100, 10), 4665)),
-            )
-            .is_none()
-        );
-    }
 
     #[test]
     fn udp_keyword_search_builds_capability_specific_criteria_payloads() {
