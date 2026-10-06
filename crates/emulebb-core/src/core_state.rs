@@ -60,6 +60,9 @@ pub(crate) struct MonitoredSharedFile {
 #[derive(Debug)]
 pub(crate) struct CoreState {
     pub(crate) searches: HashMap<String, Search>,
+    /// Cancellation handles for queued or running network searches, keyed by
+    /// public search id. Terminal settlement and deletion remove the handle.
+    pub(crate) search_cancels: HashMap<String, CancellationToken>,
     pub(crate) kad_aich_search_votes: HashMap<(String, String), KadAichSearchVotes>,
     pub(crate) next_search_id: u32,
     pub(crate) transfers: HashMap<String, Transfer>,

@@ -346,6 +346,26 @@ pub(super) async fn run_one_server_session(
                 return Ok(ServerSessionExit::RestartPreferredOrder);
             }
             _ = async {
+                if let Some(cancel) = queued_background_search
+                    .as_ref()
+                    .and_then(BackgroundServerSearchRequest::keyword_cancel)
+                {
+                    cancel.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if queued_background_search
+                .as_ref()
+                .and_then(BackgroundServerSearchRequest::keyword_cancel)
+                .is_some() => {
+                debug!(
+                    endpoint = %session.endpoint,
+                    trace_id = %session.trace_id,
+                    "cancelled queued ED2K background keyword search"
+                );
+                queued_background_search.take();
+            }
+            _ = async {
                 if let Some(deadline) = offer_files_wakeup {
                     tokio::time::sleep_until(TokioInstant::from_std(deadline)).await;
                 } else {
@@ -430,6 +450,29 @@ pub(super) async fn run_one_server_session(
                 }
             }
             _ = async {
+                if let Some(PendingBackgroundServerSearch::Keyword { cancel, .. }) =
+                    pending_background_search.as_ref()
+                {
+                    cancel.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if matches!(
+                pending_background_search.as_ref(),
+                Some(PendingBackgroundServerSearch::Keyword { .. })
+            ) => {
+                debug!(
+                    endpoint = %session.endpoint,
+                    trace_id = %session.trace_id,
+                    "cancelled pending ED2K background keyword search"
+                );
+                pending_background_search.take();
+                session.set_phase(
+                    ServerSessionPhase::Completed,
+                    "cancelled background keyword search",
+                );
+            }
+            _ = async {
                 if let Some(pending) = pending_background_search.as_ref() {
                     let deadline = match pending {
                         PendingBackgroundServerSearch::Keyword { deadline, .. }
@@ -490,6 +533,7 @@ pub(super) async fn run_one_server_session(
                             deadline,
                             mut results,
                             mut page_count,
+                            cancel,
                             response,
                         }) => {
                             let page = decode_search_result_page(&packet.payload)?;
@@ -510,6 +554,7 @@ pub(super) async fn run_one_server_session(
                                     deadline,
                                     results,
                                     page_count,
+                                    cancel,
                                     response,
                                 });
                                 continue;

@@ -108,6 +108,11 @@ impl EmulebbCore {
             results,
         };
         search_state::persist_search(&self.metadata_store, &search)?;
+        if queue_lane.is_some() {
+            state
+                .search_cancels
+                .insert(search_id.clone(), CancellationToken::new());
+        }
         state.searches.insert(search_id.clone(), search.clone());
         drop(state);
         if queue_lane.is_some() {
@@ -128,6 +133,7 @@ impl EmulebbCore {
     /// network is enabled/configured. Explicit network methods never reach this
     /// path — they are either rejected or use the connection-aware queue.
     async fn run_background_search(&self, search_id: String, request: SearchCreate) {
+        let cancel = CancellationToken::new();
         let ed2k_connected = self.connected_ed2k_search_handle().await.is_some();
         let kad_connected = self
             .ed2k_dht_node()
@@ -143,7 +149,7 @@ impl EmulebbCore {
         };
         let outcome = match network_method {
             Some(SearchNetworkMethod::Ed2kServer | SearchNetworkMethod::Ed2kGlobal) => self
-                .search_ed2k_servers(&search_id, &request, network_method)
+                .search_ed2k_servers(&search_id, &request, network_method, &cancel)
                 .await
                 .map(|outcome| match outcome {
                     Ed2kServerSearchOutcome::Completed(results) => Some(
@@ -153,7 +159,7 @@ impl EmulebbCore {
                     | Ed2kServerSearchOutcome::NotConnected => None,
                 }),
             Some(SearchNetworkMethod::Kad) => match self.ed2k_dht_node().await {
-                Some(dht) => search_kad_keywords(dht, &search_id, &request).await,
+                Some(dht) => search_kad_keywords(dht, &search_id, &request, &cancel).await,
                 None => Ok(None),
             },
             None => Ok(None),
@@ -196,11 +202,18 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         let persisted = self.metadata_store.delete_search(search_id)?;
         let queued = self.search_queue.lock().remove_pending(search_id);
+        let cancelled = state
+            .search_cancels
+            .remove(search_id)
+            .is_some_and(|cancel| {
+                cancel.cancel();
+                true
+            });
         let cached = state.searches.remove(search_id).is_some();
         state
             .kad_aich_search_votes
             .retain(|(candidate_search_id, _), _| candidate_search_id != search_id);
-        Ok(persisted || queued || cached)
+        Ok(persisted || queued || cancelled || cached)
     }
 
     pub async fn clear_searches(&self) -> Result<()> {
@@ -209,6 +222,9 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         self.metadata_store.clear_searches()?;
         self.search_queue.lock().clear_pending();
+        for (_, cancel) in state.search_cancels.drain() {
+            cancel.cancel();
+        }
         state.searches.clear();
         state.kad_aich_search_votes.clear();
         Ok(())

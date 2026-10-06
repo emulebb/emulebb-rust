@@ -63,6 +63,9 @@ pub(crate) fn load_core_state(
 
     Ok(CoreState {
         searches,
+        // Persisted searches are terminal (in-flight states are converted to
+        // interrupted errors on load), so no cancellation handles survive.
+        search_cancels: HashMap::new(),
         // Search-result responder provenance is session-local. A restored
         // display row must never become a fresh network trust vote.
         kad_aich_search_votes: HashMap::new(),

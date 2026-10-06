@@ -365,6 +365,7 @@ mod tests {
             .collect();
         CoreState {
             searches: HashMap::new(),
+            search_cancels: HashMap::new(),
             kad_aich_search_votes: HashMap::new(),
             next_search_id: 1,
             transfers,

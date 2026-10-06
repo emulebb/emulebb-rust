@@ -929,6 +929,7 @@ impl EmulebbCore {
         search_id: &str,
         request: &SearchCreate,
         network_method: Option<SearchNetworkMethod>,
+        cancel: &CancellationToken,
     ) -> Result<Ed2kServerSearchOutcome> {
         if !matches!(
             network_method,
@@ -944,7 +945,6 @@ impl EmulebbCore {
             return Ok(Ed2kServerSearchOutcome::Unavailable);
         }
 
-        let cancel = CancellationToken::new();
         // WHY: stock eMule/eMuleBB sends keyword searches through the current
         // server connection; opening ad-hoc TCP logins here creates non-stock
         // public-server traffic and repeats the source-search storm pattern.
@@ -963,7 +963,7 @@ impl EmulebbCore {
             &request.query,
             criteria.clone(),
             timeout,
-            &cancel,
+            cancel,
         )
         .await
         {
@@ -1007,7 +1007,7 @@ impl EmulebbCore {
                 dead_server_endpoints: &dead_server_endpoints,
                 query: &request.query,
                 criteria: &criteria,
-                cancel: &cancel,
+                cancel,
             })
             .await
             {

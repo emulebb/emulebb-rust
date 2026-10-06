@@ -35,12 +35,12 @@ pub(crate) async fn search_kad_keywords(
     dht: DhtNode,
     search_id: &str,
     request: &SearchCreate,
+    cancel: &CancellationToken,
 ) -> Result<Option<KadKeywordSearchOutcome>> {
     if !dht.is_bootstrapped() {
         return Ok(None);
     }
 
-    let cancel = CancellationToken::new();
     let search_request = kad_public_search_request(request)?;
     let restrictive_payload = search_request.restrictive_payload.clone();
     let mut stream = dht.search_keyword_request_with_cancel_and_class(
@@ -70,7 +70,6 @@ pub(crate) async fn search_kad_keywords(
         let mapped = search_result_from_kad(search_id, request, result);
         merge_kad_search_result(&mut results, &mut result_indexes, hash, mapped);
     }
-    cancel.cancel();
     Ok(Some(KadKeywordSearchOutcome {
         results,
         aich_votes,

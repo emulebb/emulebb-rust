@@ -119,6 +119,7 @@ pub(super) enum BackgroundServerSearchRequest {
         query: String,
         criteria: Box<SearchCriteria>,
         timeout: Duration,
+        cancel: CancellationToken,
         response: oneshot::Sender<BackgroundKeywordSearchResponse>,
     },
     Source {
@@ -141,6 +142,15 @@ pub(super) enum BackgroundServerSearchRequest {
     },
 }
 
+impl BackgroundServerSearchRequest {
+    pub(super) fn keyword_cancel(&self) -> Option<&CancellationToken> {
+        match self {
+            Self::Keyword { cancel, .. } => Some(cancel),
+            _ => None,
+        }
+    }
+}
+
 pub(super) struct BackgroundServerSearchContext<'a> {
     pub(super) server: &'a ResolvedServerEntry,
     pub(super) connect_options: u8,
@@ -156,6 +166,7 @@ pub(super) enum PendingBackgroundServerSearch {
         deadline: TokioInstant,
         results: Vec<Ed2kSearchFile>,
         page_count: u32,
+        cancel: CancellationToken,
         response: oneshot::Sender<BackgroundKeywordSearchResponse>,
     },
     Source {
@@ -196,20 +207,26 @@ pub async fn search_keyword_via_background_session(
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Vec<Ed2kSearchFile>> {
+    if cancel.is_cancelled() {
+        return Ok(Vec::new());
+    }
     let (response, receive_response) = oneshot::channel();
-    handle
-        .sender
-        .send(BackgroundServerSearchRequest::Keyword {
-            query: query.to_string(),
-            criteria: Box::new(criteria),
-            timeout,
-            response,
-        })
-        .await
-        // WHY: a failed send means the background runtime is gone (stale
-        // handle) - the search never reached any session, so it must be
-        // retryable-interrupted, not a terminal search failure.
-        .map_err(|_| interrupted_error("ED2K background search channel is closed"))?;
+    let request = BackgroundServerSearchRequest::Keyword {
+        query: query.to_string(),
+        criteria: Box::new(criteria),
+        timeout,
+        cancel: cancel.clone(),
+        response,
+    };
+    tokio::select! {
+        _ = cancel.cancelled() => return Ok(Vec::new()),
+        sent = handle.sender.send(request) => {
+            // WHY: a failed send means the background runtime is gone (stale
+            // handle) - the search never reached any session, so it must be
+            // retryable-interrupted, not a terminal search failure.
+            sent.map_err(|_| interrupted_error("ED2K background search channel is closed"))?;
+        }
+    }
 
     tokio::select! {
         _ = cancel.cancelled() => Ok(Vec::new()),
@@ -369,6 +386,7 @@ pub(super) fn handle_background_udp_packet(
                 deadline,
                 mut results,
                 page_count,
+                cancel,
                 response,
             }) = pending_background_search.take()
             else {
@@ -388,6 +406,7 @@ pub(super) fn handle_background_udp_packet(
                         query,
                         deadline,
                         results,
+                        cancel,
                         response,
                         page_count,
                     });
@@ -607,8 +626,13 @@ pub(super) async fn start_background_server_search(
             query,
             criteria,
             timeout,
+            cancel,
             response,
         } => {
+            if cancel.is_cancelled() {
+                let _ = response.send(Ok(Vec::new()));
+                return Ok(None);
+            }
             let supports_64bit =
                 session.server_flags.unwrap_or_default() & SERVER_TCP_FLAG_LARGEFILES != 0;
             // WHY: legacy servers do not understand the 64-bit numeric search
@@ -639,6 +663,7 @@ pub(super) async fn start_background_server_search(
                 deadline: TokioInstant::now() + timeout,
                 results: Vec::new(),
                 page_count: 0,
+                cancel,
                 response,
             }))
         }

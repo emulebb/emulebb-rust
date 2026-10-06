@@ -139,6 +139,29 @@ async fn background_search_channel_round_trips_results() {
 }
 
 #[tokio::test]
+async fn cancelled_background_keyword_search_is_not_dispatched() {
+    let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let results = search_keyword_via_background_session(
+        &handle,
+        "cancelled query",
+        Default::default(),
+        Duration::from_secs(1),
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert!(results.is_empty());
+    assert!(matches!(
+        inbox.receiver.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn background_source_search_channel_round_trips_results() {
     let (handle, mut inbox) = new_ed2k_server_search_channel(1);
     let cancel = CancellationToken::new();
@@ -364,6 +387,7 @@ fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
         deadline,
         results: Vec::new(),
         page_count: 0,
+        cancel: CancellationToken::new(),
         response,
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));

@@ -554,21 +554,32 @@ async fn deleting_searches_cancels_pending_network_work() {
         })
         .await
         .unwrap();
-    core.create_search(SearchCreate {
-        query: "second pending query".to_string(),
-        method: "kad".to_string(),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    let second = core
+        .create_search(SearchCreate {
+            query: "second pending query".to_string(),
+            method: "kad".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     assert_eq!(core.search_queue.lock().pending_len(), 2);
+    let (first_cancel, second_cancel) = {
+        let state = core.state.lock().await;
+        (
+            state.search_cancels[&first.id].clone(),
+            state.search_cancels[&second.id].clone(),
+        )
+    };
 
     assert!(core.delete_search(&first.id).await.unwrap());
     assert_eq!(core.search_queue.lock().pending_len(), 1);
+    assert!(first_cancel.is_cancelled());
+    assert!(!second_cancel.is_cancelled());
 
     core.clear_searches().await.unwrap();
     assert_eq!(core.search_queue.lock().pending_len(), 0);
     assert!(core.searches().await.is_empty());
+    assert!(second_cancel.is_cancelled());
 }
 
 #[tokio::test]

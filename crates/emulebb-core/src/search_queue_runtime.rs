@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use emulebb_ed2k::ed2k_server::Ed2kBackgroundSearchInterrupted;
+use tokio_util::sync::CancellationToken;
 
 use crate::search_query::SearchNetworkMethod;
 use crate::search_queue::{
@@ -115,19 +116,36 @@ impl EmulebbCore {
     /// failed with an explicit error status — never silently completed-empty.
     async fn execute_queued_search(self, dispatch: SearchDispatch) {
         let SearchDispatch { entry, lane } = dispatch;
-        // The search may have been deleted while queued: don't put traffic on
-        // the wire for a result nobody can read.
-        if self.search(&entry.search_id).await.is_none() {
+        // The search may have been deleted while queued. Claim its registered
+        // cancellation handle under the same state lock used by delete/clear,
+        // so deletion either prevents dispatch or cancels it after this point.
+        let cancel = {
+            let state = self.state.lock().await;
+            state
+                .searches
+                .contains_key(&entry.search_id)
+                .then(|| state.search_cancels.get(&entry.search_id).cloned())
+                .flatten()
+        };
+        let Some(cancel) = cancel else {
             self.search_queue.lock().finish(lane);
             return;
-        }
+        };
         match lane {
-            ConcreteSearchLane::Server => self.execute_queued_server_search(entry, lane).await,
-            ConcreteSearchLane::Kad => self.execute_queued_kad_search(entry, lane).await,
+            ConcreteSearchLane::Server => {
+                self.execute_queued_server_search(entry, lane, &cancel)
+                    .await
+            }
+            ConcreteSearchLane::Kad => self.execute_queued_kad_search(entry, lane, &cancel).await,
         }
     }
 
-    async fn execute_queued_server_search(&self, entry: QueuedSearch, lane: ConcreteSearchLane) {
+    async fn execute_queued_server_search(
+        &self,
+        entry: QueuedSearch,
+        lane: ConcreteSearchLane,
+        cancel: &CancellationToken,
+    ) {
         // Explicit `server` keeps the connected-server-only search; `global`
         // and `automatic` add the UDP pass (automatic resolves like
         // resolve_search_network_method with the server connected).
@@ -141,7 +159,12 @@ impl EmulebbCore {
             _ => "global",
         };
         let outcome = self
-            .search_ed2k_servers(&entry.search_id, &entry.request, Some(network_method))
+            .search_ed2k_servers(
+                &entry.search_id,
+                &entry.request,
+                Some(network_method),
+                cancel,
+            )
             .await;
         match outcome {
             Ok(Ed2kServerSearchOutcome::Completed(results)) => {
@@ -205,11 +228,22 @@ impl EmulebbCore {
         }
     }
 
-    async fn execute_queued_kad_search(&self, entry: QueuedSearch, lane: ConcreteSearchLane) {
+    async fn execute_queued_kad_search(
+        &self,
+        entry: QueuedSearch,
+        lane: ConcreteSearchLane,
+        cancel: &CancellationToken,
+    ) {
         let dht = self.ed2k_dht_node().await;
         let outcome = match dht {
             Some(dht) => {
-                kad_public_search::search_kad_keywords(dht, &entry.search_id, &entry.request).await
+                kad_public_search::search_kad_keywords(
+                    dht,
+                    &entry.search_id,
+                    &entry.request,
+                    cancel,
+                )
+                .await
             }
             // Runtime torn down between dispatch and execution.
             None => Ok(None),
@@ -346,6 +380,7 @@ impl EmulebbCore {
     ) {
         let snapshot = {
             let mut state = self.state.lock().await;
+            state.search_cancels.remove(search_id);
             let mut network_results = network_results.unwrap_or_default();
             crate::search_query::apply_search_filters(&mut network_results, request);
             let accepted_hashes = network_results
@@ -409,6 +444,7 @@ impl EmulebbCore {
     ) {
         let snapshot = {
             let mut state = self.state.lock().await;
+            state.search_cancels.remove(search_id);
             let Some(search) = state.searches.get_mut(search_id) else {
                 return;
             };
