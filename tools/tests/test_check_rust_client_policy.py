@@ -167,6 +167,36 @@ class TestActionPins(unittest.TestCase):
         self.assertFalse(CHECKER.action_ref_is_immutable("a" * 39))
 
 
+class TestWorkflowLintCi(unittest.TestCase):
+    def test_current_ci_lints_workflows(self) -> None:
+        self.assertEqual(CHECKER.check_workflow_lint_ci(), [])
+
+    def test_accepts_immutable_workflow_tooling(self) -> None:
+        workflow = f"""
+workflow-lint:
+  name: GitHub Actions workflow lint
+  uses: actions/setup-go@{'a' * 40}
+  go-version: "1.27.1"
+  cache: false
+  run: go run github.com/rhysd/actionlint/cmd/actionlint@{'b' * 40}
+"""
+
+        self.assertEqual(CHECKER.check_workflow_lint_ci(workflow), [])
+
+    def test_rejects_missing_job_and_mutable_tooling(self) -> None:
+        workflow = """
+uses: actions/setup-go@v7
+run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+"""
+
+        errors = CHECKER.check_workflow_lint_ci(workflow)
+
+        self.assertEqual(len(errors), 6)
+        self.assertTrue(any("workflow lint job" in error for error in errors))
+        self.assertTrue(any("setup-go" in error for error in errors))
+        self.assertTrue(any("actionlint" in error for error in errors))
+
+
 class TestLiveRestOpenApiCi(unittest.TestCase):
     def test_current_workflow_keeps_live_openapi_gate(self) -> None:
         self.assertEqual(CHECKER.check_live_rest_openapi_ci(), [])

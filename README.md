@@ -85,7 +85,8 @@ authoritative rules live in
 `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\reference\CODE-QUALITY.md`.
 The policy checker reports maintainability signals as advisories while retaining
 hard failures for objective protocol, omission, binding, and release-safety
-violations.
+violations. Normal CI also validates every GitHub Actions workflow with a pinned
+actionlint revision so expression and context errors fail before release use.
 
 Run the local policy guard before policy-sensitive protocol or architecture
 changes:

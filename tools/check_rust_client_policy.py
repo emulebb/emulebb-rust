@@ -84,6 +84,7 @@ def main() -> int:
     errors.extend(check_logging_policy())
     errors.extend(check_supply_chain_policy())
     errors.extend(check_github_action_pins())
+    errors.extend(check_workflow_lint_ci())
     errors.extend(check_live_rest_openapi_ci())
     errors.extend(check_release_ci_gate())
     errors.extend(check_release_build_identity())
@@ -517,6 +518,37 @@ def check_github_action_pins() -> list[str]:
 
 def action_ref_is_immutable(reference: str) -> bool:
     return re.fullmatch(r"[0-9a-f]{40}", reference) is not None
+
+
+def check_workflow_lint_ci(workflow_text: str | None = None) -> list[str]:
+    """Require GitHub-aware workflow validation in normal CI."""
+
+    workflow = ROOT / ".github" / "workflows" / "ci.yml"
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    required = {
+        "workflow-lint:": "workflow lint job",
+        "name: GitHub Actions workflow lint": "named workflow lint check",
+        'go-version: "1.27.1"': "pinned Go toolchain",
+        "cache: false": "disabled Go cache for the tool-only job",
+    }
+    errors = [
+        f".github/workflows/ci.yml is missing {description} configuration"
+        for fragment, description in required.items()
+        if fragment not in text
+    ]
+    setup_go = re.search(r"actions/setup-go@([^\s#]+)", text)
+    if setup_go is None or not action_ref_is_immutable(setup_go.group(1)):
+        errors.append(
+            ".github/workflows/ci.yml must pin actions/setup-go by full commit SHA"
+        )
+    actionlint = re.search(
+        r"go run github\.com/rhysd/actionlint/cmd/actionlint@([^\s]+)", text
+    )
+    if actionlint is None or not action_ref_is_immutable(actionlint.group(1)):
+        errors.append(
+            ".github/workflows/ci.yml must pin actionlint by full commit SHA"
+        )
+    return errors
 
 
 def check_live_rest_openapi_ci(workflow_text: str | None = None) -> list[str]:
