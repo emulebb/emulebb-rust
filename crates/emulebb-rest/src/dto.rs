@@ -143,6 +143,25 @@ pub(crate) struct SearchResultsQuery {
     pub(crate) include_evidence: Option<bool>,
     #[serde(default)]
     pub(crate) exact_total: Option<bool>,
+    pub(crate) sort: Option<SearchResultSort>,
+    pub(crate) order: Option<SearchSortOrder>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SearchResultSort {
+    Name,
+    SizeBytes,
+    Sources,
+    CompleteSources,
+    Rating,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SearchSortOrder {
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,6 +178,8 @@ pub(crate) struct SearchResultsPage {
     pub(crate) offset: usize,
     pub(crate) limit: usize,
     pub(crate) include_evidence: bool,
+    pub(crate) sort: Option<SearchResultSort>,
+    pub(crate) order: Option<SearchSortOrder>,
     pub(crate) results: Vec<SearchResult>,
 }
 

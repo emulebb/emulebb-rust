@@ -72,6 +72,25 @@ async fn pagination_rejects_out_of_range_bounds_with_details() {
 }
 
 #[tokio::test]
+async fn search_result_sort_query_is_strict() {
+    for (uri, expected_message) in [
+        (
+            "/api/v1/searches/1?sort=availability",
+            "sort must be one of name, sizeBytes, sources, completeSources, rating",
+        ),
+        (
+            "/api/v1/searches/1?sort=sources&order=descending",
+            "order must be one of asc, desc",
+        ),
+        ("/api/v1/searches/1?order=desc", "order requires sort"),
+    ] {
+        let (status, value) = query_error_value(uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(value["error"]["message"], expected_message);
+    }
+}
+
+#[tokio::test]
 async fn all_limited_routes_reject_out_of_range_limit_with_canonical_bounds() {
     for uri in [
         "/api/v1/snapshot?limit=0",

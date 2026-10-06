@@ -554,6 +554,27 @@ async fn search_results_use_canonical_paging_query() {
     assert!(value["data"]["items"][0].get("knownType").is_none());
     assert!(value["data"]["items"][0].get("evidence").is_none());
 
+    let sorted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/searches/{search_id}?sort=sizeBytes&order=desc&offset=0&limit=2"
+                ))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted.status(), StatusCode::OK);
+    let body = to_bytes(sorted.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["sort"], "sizeBytes");
+    assert_eq!(value["data"]["order"], "desc");
+    assert_eq!(value["data"]["items"][0]["sizeBytes"], 126);
+    assert_eq!(value["data"]["items"][1]["sizeBytes"], 84);
+
     let estimated = app
         .clone()
         .oneshot(

@@ -13,7 +13,10 @@ use axum::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use crate::{BulkOperationResult, PageQuery, SearchResultsPage, SearchResultsQuery};
+use crate::{
+    BulkOperationResult, PageQuery, SearchResultSort, SearchResultsPage, SearchResultsQuery,
+    SearchSortOrder,
+};
 use emulebb_core::Search;
 
 pub(crate) fn api_ok<T: Serialize>(data: T) -> (StatusCode, Json<Value>) {
@@ -61,19 +64,46 @@ pub(crate) fn search_results_page(
     query: SearchResultsQuery,
 ) -> Result<SearchResultsPage, Box<Response>> {
     let (offset, limit) = resolve_page_bounds(query.offset, query.limit)?;
+    if query.sort.is_none() && query.order.is_some() {
+        return Err(Box::new(
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "order requires sort",
+            )
+            .into_response(),
+        ));
+    }
     let include_evidence = query.include_evidence.unwrap_or(true);
     let exact_total = query.exact_total.unwrap_or(true);
+    let mut results = search.results;
+    if let Some(sort) = query.sort {
+        let order = query.order.unwrap_or(SearchSortOrder::Asc);
+        results.sort_by(|left, right| {
+            let comparison = match sort {
+                SearchResultSort::Name => left.name.cmp(&right.name),
+                SearchResultSort::SizeBytes => left.size_bytes.cmp(&right.size_bytes),
+                SearchResultSort::Sources => left.sources.cmp(&right.sources),
+                SearchResultSort::CompleteSources => {
+                    left.complete_sources.cmp(&right.complete_sources)
+                }
+                SearchResultSort::Rating => left.rating.cmp(&right.rating),
+            };
+            let comparison = match order {
+                SearchSortOrder::Asc => comparison,
+                SearchSortOrder::Desc => comparison.reverse(),
+            };
+            comparison
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.hash.cmp(&right.hash))
+        });
+    }
     let total = if exact_total {
-        search.results.len()
+        results.len()
     } else {
-        estimated_total(search.results.len(), offset, limit)
+        estimated_total(results.len(), offset, limit)
     };
-    let results = search
-        .results
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect();
+    let results = results.into_iter().skip(offset).take(limit).collect();
     Ok(SearchResultsPage {
         id: search.id,
         spec: search.spec,
@@ -84,6 +114,8 @@ pub(crate) fn search_results_page(
         offset,
         limit,
         include_evidence,
+        sort: query.sort,
+        order: query.order,
         results,
     })
 }

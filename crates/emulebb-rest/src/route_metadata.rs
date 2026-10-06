@@ -68,6 +68,22 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
                 )
                 .into_response();
         }
+        if name == "sort" && !is_search_result_sort(value) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "sort must be one of name, sizeBytes, sources, completeSources, rating",
+            )
+            .into_response();
+        }
+        if name == "order" && !matches!(value.as_str(), "asc" | "desc") {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "order must be one of asc, desc",
+            )
+            .into_response();
+        }
         if is_boolean_query_field(name) && !is_boolean_query_value(value) {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -76,6 +92,16 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             )
             .into_response();
         }
+    }
+    if query_fields.iter().any(|(name, _)| name == "order")
+        && !query_fields.iter().any(|(name, _)| name == "sort")
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "order requires sort",
+        )
+        .into_response();
     }
     if let Err(response) = validate_destructive_query_confirmation(&method, &path, &query_fields) {
         return *response;
@@ -181,6 +207,13 @@ fn is_transfer_state_name(value: &str) -> bool {
             | "insufficient"
             | "error"
             | "missingfiles"
+    )
+}
+
+fn is_search_result_sort(value: &str) -> bool {
+    matches!(
+        value,
+        "name" | "sizeBytes" | "sources" | "completeSources" | "rating"
     )
 }
 
@@ -554,7 +587,14 @@ fn route_query_fields_for_parameterized(
 ) -> Option<&'static [&'static str]> {
     const NONE: &[&str] = &[];
     const CONFIRM: &[&str] = &["confirm"];
-    const SEARCH: &[&str] = &["offset", "limit", "includeEvidence", "exactTotal"];
+    const SEARCH: &[&str] = &[
+        "offset",
+        "limit",
+        "includeEvidence",
+        "exactTotal",
+        "sort",
+        "order",
+    ];
 
     let segments = path
         .strip_prefix("/api/v1/")?

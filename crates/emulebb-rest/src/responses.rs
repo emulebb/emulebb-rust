@@ -602,6 +602,8 @@ pub(crate) fn search_page_response(search: &SearchResultsPage) -> Value {
         "total": search.total,
         "offset": search.offset,
         "limit": search.limit,
+        "sort": search.sort,
+        "order": search.order,
         "items": search_results_response(&search.results, search.include_evidence)
     })
 }
