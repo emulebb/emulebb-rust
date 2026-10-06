@@ -141,6 +141,37 @@ async fn explicit_network_search_without_runtime_is_rejected() {
 }
 
 #[tokio::test]
+async fn invalid_search_method_is_rejected_before_creating_a_search() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+
+    let error = core
+        .create_search(SearchCreate {
+            query: "invalid method".to_string(),
+            method: "local-ish".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("unknown methods must not silently become local-only searches");
+
+    assert_eq!(
+        error.to_string(),
+        "search method must be one of automatic, server, global, kad"
+    );
+    assert!(core.searches().await.is_empty());
+
+    let search = core
+        .create_search(SearchCreate {
+            query: "valid method".to_string(),
+            method: " AUTOMATIC ".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(search.id, "1");
+    assert_eq!(search.spec.method, "automatic");
+}
+
+#[tokio::test]
 async fn explicit_network_search_respects_disabled_network_settings() {
     let transfer_root = unique_runtime_dir("emulebb-core-search-disabled-network");
     let network = test_network_config_with_store(
