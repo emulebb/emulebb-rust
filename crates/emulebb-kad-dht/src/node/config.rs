@@ -1,5 +1,8 @@
 use emulebb_kad_net::RpcClassBudgetConfig;
-use emulebb_kad_proto::{NodeId, constants::STORE_PUBLISH_TARGET_CONTACTS};
+use emulebb_kad_proto::{
+    NodeId,
+    constants::{SEARCH_TIMEOUT_SECS, STORE_PUBLISH_TARGET_CONTACTS},
+};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -16,8 +19,12 @@ pub struct DhtConfig {
     pub bootstrap_min_routing_contacts: usize,
     /// Max concurrent searches (semaphore).
     pub max_concurrent_searches: usize,
-    /// Search timeout.
-    pub search_timeout: Duration,
+    /// Active keyword-search lifetime before the result-only grace period.
+    pub keyword_search_timeout: Duration,
+    /// Active source-search lifetime before the result-only grace period.
+    pub source_search_timeout: Duration,
+    /// Active notes-search lifetime before the result-only grace period.
+    pub notes_search_timeout: Duration,
     /// Republish interval.
     pub republish_interval: Duration,
     /// Maximum number of closest contacts to publish to per publish round.
@@ -56,7 +63,11 @@ impl Default for DhtConfig {
             max_routing_table_size: 12000,
             bootstrap_min_routing_contacts: 10,
             max_concurrent_searches: 5,
-            search_timeout: Duration::from_secs(45),
+            // eMuleBB-MFC's enhanced defaults give file and keyword searches
+            // twice the stock active lifetime. Notes retain stock Kad timing.
+            keyword_search_timeout: Duration::from_secs(90),
+            source_search_timeout: Duration::from_secs(90),
+            notes_search_timeout: Duration::from_secs(SEARCH_TIMEOUT_SECS),
             republish_interval: Duration::from_secs(18000),
             publish_contact_fanout: STORE_PUBLISH_TARGET_CONTACTS,
             max_outbound_pps: 8,
@@ -81,5 +92,17 @@ mod tests {
     #[test]
     fn default_config_does_not_invent_bind_addr() {
         assert!(DhtConfig::default().bind_addr.is_none());
+    }
+
+    #[test]
+    fn default_search_lifetimes_match_enhanced_file_and_stock_notes_behavior() {
+        let config = DhtConfig::default();
+
+        assert_eq!(config.keyword_search_timeout, Duration::from_secs(90));
+        assert_eq!(config.source_search_timeout, Duration::from_secs(90));
+        assert_eq!(
+            config.notes_search_timeout,
+            Duration::from_secs(SEARCH_TIMEOUT_SECS)
+        );
     }
 }

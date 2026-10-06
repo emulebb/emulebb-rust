@@ -1,15 +1,12 @@
 //! Public `/api/v1/searches` Kad keyword search helpers.
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use anyhow::{Result, ensure};
 use emulebb_ed2k::ed2k_server::encode_kad_search_expression;
 use emulebb_index::matches_restrictive_keyword_payload;
 use emulebb_kad_dht::{DhtNode, RpcWorkClass};
-use emulebb_kad_proto::{
-    NodeId, SearchKeyReq,
-    constants::{SEARCH_RESULT_GRACE_SECS, SEARCH_TIMEOUT_SECS},
-};
+use emulebb_kad_proto::{NodeId, SearchKeyReq};
 use md4::{Digest, Md4};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -20,12 +17,6 @@ use crate::{
 };
 
 const INVALID_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
-// Keep the REST collector alive through both the active Kad lifetime and
-// eMule's result-only stop grace. Ending it at SEARCH_TIMEOUT dropped valid VPN
-// replies which arrived after the last-moment SEARCH_KEY_REQ but before the
-// oracle would delete the stopped search.
-const KAD_KEYWORD_SEARCH_TIMEOUT_SECS: u64 = SEARCH_TIMEOUT_SECS + SEARCH_RESULT_GRACE_SECS;
-
 pub(crate) struct KadKeywordSearchOutcome {
     pub(crate) results: Vec<SearchResult>,
     pub(crate) aich_votes: HashMap<String, KadAichSearchVotes>,
@@ -57,37 +48,27 @@ pub(crate) async fn search_kad_keywords(
         cancel.clone(),
         RpcWorkClass::Interactive,
     );
-    let timeout = tokio::time::sleep(Duration::from_secs(KAD_KEYWORD_SEARCH_TIMEOUT_SECS));
-    tokio::pin!(timeout);
     let mut results = Vec::<SearchResult>::new();
     let mut result_indexes = HashMap::<String, usize>::new();
     let mut aich_votes = HashMap::<String, KadAichSearchVotes>::new();
 
-    loop {
-        tokio::select! {
-            _ = &mut timeout => break,
-            result = stream.next() => {
-                let Some(result) = result else {
-                    break;
-                };
-                let mut result = result;
-                result.names.retain(|name| {
-                    matches_restrictive_keyword_payload(name, &result.tags, &restrictive_payload)
-                });
-                if result.names.is_empty() {
-                    continue;
-                }
-                let hash = result.hash.to_string();
-                if let Some(candidate) = result.aich_candidate {
-                    aich_votes
-                        .entry(hash.clone())
-                        .or_default()
-                        .record(candidate.responder_ip, candidate.root);
-                }
-                let mapped = search_result_from_kad(search_id, request, result);
-                merge_kad_search_result(&mut results, &mut result_indexes, hash, mapped);
-            }
+    while let Some(result) = stream.next().await {
+        let mut result = result;
+        result.names.retain(|name| {
+            matches_restrictive_keyword_payload(name, &result.tags, &restrictive_payload)
+        });
+        if result.names.is_empty() {
+            continue;
         }
+        let hash = result.hash.to_string();
+        if let Some(candidate) = result.aich_candidate {
+            aich_votes
+                .entry(hash.clone())
+                .or_default()
+                .record(candidate.responder_ip, candidate.root);
+        }
+        let mapped = search_result_from_kad(search_id, request, result);
+        merge_kad_search_result(&mut results, &mut result_indexes, hash, mapped);
     }
     cancel.cancel();
     Ok(Some(KadKeywordSearchOutcome {
@@ -308,22 +289,5 @@ mod tests {
 
         assert_eq!(results.len(), 750);
         assert_eq!(indexes.len(), 750);
-    }
-
-    // Regression: the keyword-search outer timeout must cover both the active
-    // traversal and the result-only stop grace, otherwise a valid late VPN
-    // response is discarded while the oracle search would still accept it.
-    #[test]
-    fn keyword_search_timeout_covers_traversal_lifetime() {
-        // Compile-time assertion: both operands are consts, so a const block fails
-        // the build (not just the test) if the invariant is ever broken. The const
-        // context cannot format the values, so the message is static; the exact
-        // numbers live in the regression comment above.
-        const {
-            assert!(
-                KAD_KEYWORD_SEARCH_TIMEOUT_SECS >= SEARCH_TIMEOUT_SECS + SEARCH_RESULT_GRACE_SECS,
-                "keyword search outer timeout must include active traversal and result grace"
-            )
-        };
     }
 }

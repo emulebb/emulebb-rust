@@ -5,7 +5,7 @@ use crate::traversal::{
 };
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
-use emulebb_kad_proto::constants::{SEARCH_RESULT_GRACE_SECS, SEARCH_TIMEOUT_SECS};
+use emulebb_kad_proto::constants::SEARCH_RESULT_GRACE_SECS;
 use emulebb_kad_proto::{Ed2kHash, NodeId, SearchKeyReq, SearchSourceReq};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -16,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
-const SEARCH_TIMEOUT: Duration = Duration::from_secs(SEARCH_TIMEOUT_SECS);
 const SEARCH_RESULT_GRACE: Duration = Duration::from_secs(SEARCH_RESULT_GRACE_SECS);
 /// Buffer used between traversal SEARCH_RES ingestion and higher-level search consumers.
 ///
@@ -81,6 +80,7 @@ pub(crate) fn search_keywords_by_request(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
     request: SearchKeyReq,
+    search_timeout: Duration,
     result_cap: usize,
     phase2_fanout: usize,
     cancel: CancellationToken,
@@ -104,7 +104,7 @@ pub(crate) fn search_keywords_by_request(
         let config = TraversalConfig {
             target: request.target,
             search_kind: TraversalKind::Keyword { request },
-            timeout: SEARCH_TIMEOUT,
+            timeout: search_timeout,
             response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
@@ -210,6 +210,7 @@ pub(crate) fn search_sources_by_request(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
     request: SearchSourceReq,
+    search_timeout: Duration,
     result_cap: usize,
     phase2_fanout: usize,
     cancel: CancellationToken,
@@ -234,7 +235,7 @@ pub(crate) fn search_sources_by_request(
         let config = TraversalConfig {
             target,
             search_kind: TraversalKind::Source { request },
-            timeout: SEARCH_TIMEOUT,
+            timeout: search_timeout,
             response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
@@ -293,6 +294,7 @@ pub(crate) fn search_notes(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
     request: NotesSearchRequest,
+    search_timeout: Duration,
     result_cap: usize,
     phase2_fanout: usize,
     cancel: CancellationToken,
@@ -319,7 +321,7 @@ pub(crate) fn search_notes(
                 size: request.file_size,
                 requester_id: request.requester_id,
             },
-            timeout: SEARCH_TIMEOUT,
+            timeout: search_timeout,
             response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
