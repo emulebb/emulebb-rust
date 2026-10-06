@@ -276,7 +276,10 @@ pub(crate) fn search_result_from_kad(
         name,
         size_bytes,
         sources,
-        complete_sources: sources,
+        // Kad keyword results publish availability through FT_SOURCES. Stock
+        // eMule does not treat that value as a complete-source count, so keep
+        // the unsupported field at zero instead of fabricating evidence.
+        complete_sources: 0,
         source_client_id: None,
         source_client_port: None,
         file_type: file_type.clone(),
@@ -608,7 +611,7 @@ mod tests {
         assert_eq!(result.name, "Alternate File.bin");
         assert_eq!(result.size_bytes, 1234);
         assert_eq!(result.sources, 9);
-        assert_eq!(result.complete_sources, 9);
+        assert_eq!(result.complete_sources, 0);
         assert_eq!(result.file_type, "Audio");
         assert_eq!(result.media.artist, "Example Artist");
         assert_eq!(result.media.album, "Example Album");
@@ -618,6 +621,12 @@ mod tests {
         assert_eq!(result.media.codec, "MP3");
         assert_eq!(result.aich_hash, hex::encode([0xAB; 20]));
         assert_eq!(result.observations.len(), 2);
+        assert!(
+            result
+                .observations
+                .iter()
+                .all(|observation| observation.complete_sources == 0)
+        );
         assert!(
             result
                 .observations
