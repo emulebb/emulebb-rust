@@ -182,6 +182,36 @@ async fn download_search_result_creates_transfer() {
 }
 
 #[tokio::test]
+async fn download_search_result_rejects_missing_file_size() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let file_hash = "ffeeddccbbaa99887766554433221100";
+    core.index_file(IndexedFile {
+        ed2k_hash: file_hash.to_string(),
+        name: "Missing.Size.bin".to_string(),
+        size_bytes: 0,
+        content_type: "archive".to_string(),
+        availability_score: 1,
+    })
+    .await
+    .unwrap();
+    let search = core
+        .create_search(SearchCreate {
+            query: "missing size".to_string(),
+            ..SearchCreate::default()
+        })
+        .await
+        .unwrap();
+
+    let error = core
+        .download_search_result(&search.id, file_hash, SearchResultDownloadCreate::default())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "search result has no usable file size");
+    assert!(core.transfer(file_hash).await.is_none());
+}
+
+#[tokio::test]
 async fn download_search_result_replays_live_kad_aich_observations() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let file_hash = "11111111111111111111111111111111";

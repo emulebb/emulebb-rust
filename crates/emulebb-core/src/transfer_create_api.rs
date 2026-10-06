@@ -33,6 +33,10 @@ impl EmulebbCore {
         let Some((result, aich_observations)) = result_and_aich else {
             return Ok(None);
         };
+        ensure!(
+            result.size_bytes != 0,
+            "search result has no usable file size"
+        );
         let source_hints = search_result_source_hints(&result);
         let transfer = self
             .upsert_transfer_from_parts(
