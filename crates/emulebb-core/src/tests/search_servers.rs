@@ -215,6 +215,67 @@ async fn search_spec_is_canonicalized_before_persistence() {
 }
 
 #[tokio::test]
+async fn invalid_search_spec_is_rejected_before_creating_a_search() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let invalid = [
+        (SearchCreate::default(), "query must not be empty"),
+        (
+            SearchCreate {
+                query: "bad type".to_string(),
+                r#type: "executable".to_string(),
+                ..SearchCreate::default()
+            },
+            "type is not supported",
+        ),
+        (
+            SearchCreate {
+                query: "bad range".to_string(),
+                min_size_bytes: Some(2),
+                max_size_bytes: Some(1),
+                ..SearchCreate::default()
+            },
+            "maxSizeBytes must be greater than or equal to minSizeBytes",
+        ),
+        (
+            SearchCreate {
+                query: "x".repeat(161),
+                ..SearchCreate::default()
+            },
+            "query must be at most 160 characters",
+        ),
+        (
+            SearchCreate {
+                query: "bad\0query".to_string(),
+                ..SearchCreate::default()
+            },
+            "query must be valid UTF-8 without control characters",
+        ),
+        (
+            SearchCreate {
+                query: "too many sources".to_string(),
+                min_availability: Some(1_000_001),
+                ..SearchCreate::default()
+            },
+            "minAvailability must be an unsigned number in the range 0..1000000",
+        ),
+        (
+            SearchCreate {
+                query: "bad codec".to_string(),
+                codec: "bad\0codec".to_string(),
+                ..SearchCreate::default()
+            },
+            "codec must not contain control characters",
+        ),
+    ];
+
+    for (request, expected) in invalid {
+        let error = core.create_search(request).await.unwrap_err();
+        assert_eq!(error.to_string(), expected);
+    }
+    assert!(core.searches().await.is_empty());
+}
+
+#[tokio::test]
 async fn explicit_network_search_respects_disabled_network_settings() {
     let transfer_root = unique_runtime_dir("emulebb-core-search-disabled-network");
     let network = test_network_config_with_store(

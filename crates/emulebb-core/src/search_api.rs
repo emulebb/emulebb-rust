@@ -3,13 +3,7 @@ use super::*;
 impl EmulebbCore {
     pub async fn create_search(&self, mut request: SearchCreate) -> Result<Search> {
         request.canonicalize();
-        request.method = match request.method.as_str() {
-            "" | "automatic" => "automatic".to_string(),
-            "server" => "server".to_string(),
-            "global" => "global".to_string(),
-            "kad" => "kad".to_string(),
-            _ => bail!("search method must be one of automatic, server, global, kad"),
-        };
+        request.validate()?;
         let now = Utc::now();
         // Local index results are cheap, so include them immediately.
         let indexed = self.index.lock().await.search(&request.query, 200)?;

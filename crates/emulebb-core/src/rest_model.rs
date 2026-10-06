@@ -260,6 +260,9 @@ impl SearchSpec {
             .collect::<Vec<_>>()
             .join(" ");
         self.method = self.method.trim().to_ascii_lowercase();
+        if self.method.is_empty() {
+            self.method = default_search_method();
+        }
         self.r#type = self.r#type.trim().to_ascii_lowercase();
         self.extension = self
             .extension
@@ -276,6 +279,72 @@ impl SearchSpec {
         self.title = self.title.trim().to_string();
         self.album = self.album.trim().to_string();
         self.artist = self.artist.trim().to_string();
+    }
+
+    /// Validate transport-independent search invariants at the core boundary.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.query.is_empty(), "query must not be empty");
+        anyhow::ensure!(
+            !self.query.chars().any(char::is_control),
+            "query must be valid UTF-8 without control characters"
+        );
+        anyhow::ensure!(
+            self.query.encode_utf16().count() <= 160,
+            "query must be at most 160 characters"
+        );
+        anyhow::ensure!(
+            matches!(
+                self.method.as_str(),
+                "automatic" | "server" | "global" | "kad"
+            ),
+            "search method must be one of automatic, server, global, kad"
+        );
+        anyhow::ensure!(
+            matches!(
+                self.r#type.as_str(),
+                "" | "arc"
+                    | "audio"
+                    | "iso"
+                    | "image"
+                    | "pro"
+                    | "video"
+                    | "doc"
+                    | "emulecollection"
+            ),
+            "type is not supported"
+        );
+        if let (Some(min_size), Some(max_size)) = (self.min_size_bytes, self.max_size_bytes) {
+            anyhow::ensure!(
+                max_size >= min_size,
+                "maxSizeBytes must be greater than or equal to minSizeBytes"
+            );
+        }
+        anyhow::ensure!(
+            self.min_availability.is_none_or(|value| value <= 1_000_000),
+            "minAvailability must be an unsigned number in the range 0..1000000"
+        );
+        anyhow::ensure!(
+            self.min_complete_sources
+                .is_none_or(|value| value <= 1_000_000),
+            "minCompleteSources must be an unsigned number in the range 0..1000000"
+        );
+        for (field, value) in [
+            ("extension", self.extension.as_str()),
+            ("codec", self.codec.as_str()),
+            ("title", self.title.as_str()),
+            ("album", self.album.as_str()),
+            ("artist", self.artist.as_str()),
+        ] {
+            anyhow::ensure!(
+                !value.chars().any(char::is_control),
+                "{field} must not contain control characters"
+            );
+            anyhow::ensure!(
+                value.chars().count() <= 256,
+                "{field} must be at most 256 characters"
+            );
+        }
+        Ok(())
     }
 }
 
