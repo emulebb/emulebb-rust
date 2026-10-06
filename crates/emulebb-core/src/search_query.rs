@@ -86,15 +86,22 @@ pub(crate) fn resolve_search_network_method(
 }
 
 /// Apply the optional `SearchCreateRequest` filters for which every result has
-/// local evidence (extension, size bounds, and source counts). This defensive
-/// pass rejects replies that do not honor the constraints encoded on the wire.
+/// local evidence (file family, extension, size bounds, and source counts).
+/// This defensive pass rejects replies that do not honor the constraints
+/// encoded on the wire.
 pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &SearchCreate) {
+    let file_type = ed2k_wire_file_type(&request.r#type);
     let extension = request
         .extension
         .trim()
         .trim_start_matches('.')
         .to_ascii_lowercase();
     results.retain(|result| {
+        if let Some(file_type) = file_type.as_deref()
+            && result_file_type(result) != Some(file_type)
+        {
+            return false;
+        }
         if !extension.is_empty() {
             let suffix = format!(".{extension}");
             if !result.name.to_ascii_lowercase().ends_with(&suffix) {
@@ -123,6 +130,19 @@ pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &Se
         }
         true
     });
+}
+
+fn result_file_type(result: &SearchResult) -> Option<&'static str> {
+    let tagged = match result.file_type.trim().to_ascii_lowercase().as_str() {
+        "audio" => Some("Audio"),
+        "video" => Some("Video"),
+        "image" => Some("Image"),
+        "doc" | "document" => Some("Doc"),
+        "pro" | "program" | "arc" | "archive" | "iso" => Some("Pro"),
+        "emulecollection" => Some("EmuleCollection"),
+        _ => None,
+    };
+    tagged.or_else(|| crate::ed2k_file_type_search_term(&result.name))
 }
 
 pub(crate) fn search_result_from_indexed(
@@ -337,6 +357,43 @@ mod tests {
         apply_search_filters(&mut results, &req);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Movie.One.mkv");
+    }
+
+    #[test]
+    fn file_type_filter_uses_stock_type_families_and_filename_fallback() {
+        let mut video = result("Movie.mkv", 5_000, 8);
+        video.file_type = "Video".to_string();
+        let mut audio = result("Track.flac", 5_000, 8);
+        audio.file_type = "audio".to_string();
+        let mut archive = result("Bundle.7z", 5_000, 8);
+        archive.file_type = "archive".to_string();
+        let unknown_iso = result("Disc.iso", 5_000, 8);
+
+        let mut req = request();
+        req.r#type = "video".to_string();
+        let mut results = vec![
+            video.clone(),
+            audio.clone(),
+            archive.clone(),
+            unknown_iso.clone(),
+        ];
+        apply_search_filters(&mut results, &req);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Movie.mkv");
+
+        // Stock eMule folds archive, CD-image, and program searches into the
+        // same `Pro` wire family. An untagged result can be classified from
+        // its filename, as Kad/local observations commonly require.
+        req.r#type = "iso".to_string();
+        let mut results = vec![video, audio, archive, unknown_iso];
+        apply_search_filters(&mut results, &req);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Bundle.7z", "Disc.iso"]
+        );
     }
 
     #[test]
