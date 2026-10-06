@@ -545,7 +545,10 @@ def check_live_rest_openapi_ci(workflow_text: str | None = None) -> list[str]:
     return errors
 
 
-def check_release_ci_gate(workflow_text: str | None = None) -> list[str]:
+def check_release_ci_gate(
+    workflow_text: str | None = None,
+    nightly_text: str | None = None,
+) -> list[str]:
     """Require release packaging to depend on green CI for the exact source commit."""
 
     workflow = ROOT / ".github" / "workflows" / "release.yml"
@@ -559,11 +562,27 @@ def check_release_ci_gate(workflow_text: str | None = None) -> list[str]:
             "exact-source CI verification command",
         "needs: verify-ci": "packaging dependency on the release CI gate",
     }
-    return [
+    errors = [
         f".github/workflows/release.yml is missing {description} configuration"
         for fragment, description in required.items()
         if fragment not in text
     ]
+    nightly = ROOT / ".github" / "workflows" / "nightly.yml"
+    nightly_source = (
+        nightly.read_text(encoding="utf-8") if nightly_text is None else nightly_text
+    )
+    package_job = re.search(
+        r"(?ms)^  package:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+        nightly_source,
+    )
+    if package_job is None or not re.search(
+        r"(?m)^      checks:\s*read\s*$",
+        package_job.group("body"),
+    ):
+        errors.append(
+            ".github/workflows/nightly.yml reusable release caller must grant checks: read"
+        )
+    return errors
 
 
 def check_lint_suppressions() -> list[str]:

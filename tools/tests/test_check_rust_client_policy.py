@@ -199,11 +199,22 @@ class TestReleaseCiGate(unittest.TestCase):
         self.assertEqual(CHECKER.check_release_ci_gate(), [])
 
     def test_rejects_release_packaging_without_exact_source_gate(self) -> None:
-        errors = CHECKER.check_release_ci_gate("native-package:\n  runs-on: ubuntu-latest\n")
+        errors = CHECKER.check_release_ci_gate(
+            "native-package:\n  runs-on: ubuntu-latest\n",
+            "  package:\n    permissions:\n      checks: read\n",
+        )
 
         self.assertEqual(len(errors), 6)
         self.assertTrue(any("source CI verification job" in error for error in errors))
         self.assertTrue(any("packaging dependency" in error for error in errors))
+
+    def test_rejects_nightly_caller_without_check_permission(self) -> None:
+        errors = CHECKER.check_release_ci_gate(
+            nightly_text="  package:\n    permissions:\n      contents: write\n"
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("nightly.yml", errors[0])
 
 
 class TestOmissionRegistry(unittest.TestCase):

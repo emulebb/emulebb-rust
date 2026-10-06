@@ -75,6 +75,7 @@ jobs:
     uses: ./.github/workflows/release.yml
     permissions:
       contents: write
+      checks: read
       packages: write
       attestations: write
       id-token: write
