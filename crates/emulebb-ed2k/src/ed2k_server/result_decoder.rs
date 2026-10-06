@@ -45,23 +45,27 @@ pub(super) fn decode_search_result_page(payload: &[u8]) -> Result<SearchResultPa
 }
 
 pub(super) fn decode_udp_search_result_pages(payload: &[u8]) -> Result<Vec<SearchResultPage>> {
-    let mut cursor = payload;
-    let mut files = Vec::new();
-    while !cursor.is_empty() {
-        if udp_chain_matches(cursor, OP_GLOBSEARCHRES) {
-            cursor = &cursor[2..];
-            continue;
-        }
-        let (file, rest) = decode_search_result_entry(cursor)?;
-        files.push(file);
-        cursor = if udp_chain_matches(rest, OP_GLOBSEARCHRES) {
-            &rest[2..]
-        } else {
-            rest
-        };
-    }
-    if files.is_empty() {
+    if payload.is_empty() {
         return Ok(Vec::new());
+    }
+    // Unlike TCP OP_SEARCHRESULT, each UDP response segment contains exactly
+    // one entry and no count prefix. Additional entries must be separated by
+    // an embedded OP_EDONKEYPROT/OP_GLOBSEARCHRES marker. Stock eMule commits
+    // each decoded entry before inspecting that marker and ignores an unknown
+    // tail, so valid prefix results survive server-specific add-data or a
+    // malformed later segment.
+    let (first, mut cursor) = decode_search_result_entry(payload)?;
+    let mut files = vec![first];
+    while udp_chain_matches(cursor, OP_GLOBSEARCHRES) {
+        cursor = &cursor[2..];
+        if cursor.is_empty() {
+            break;
+        }
+        let Ok((file, rest)) = decode_search_result_entry(cursor) else {
+            break;
+        };
+        files.push(file);
+        cursor = rest;
     }
     Ok(vec![SearchResultPage {
         files,
@@ -476,6 +480,48 @@ mod tests {
             Some("Sample Payload.bin")
         );
         assert_eq!(pages[0].files[0].file_size, Some(12345));
+    }
+
+    #[test]
+    fn udp_search_result_decodes_only_explicitly_chained_entries() {
+        fn entry(hash_byte: u8) -> Vec<u8> {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&[hash_byte; 16]);
+            payload.extend_from_slice(&[0u8; 4]);
+            payload.extend_from_slice(&[0u8; 2]);
+            payload.extend_from_slice(&0u32.to_le_bytes());
+            payload
+        }
+
+        let first = entry(0x11);
+        let second = entry(0x22);
+        let mut unmarked = first.clone();
+        unmarked.extend_from_slice(&second);
+        let pages = decode_udp_search_result_pages(&unmarked).expect("valid prefix decodes");
+        assert_eq!(pages[0].files.len(), 1);
+        assert_eq!(pages[0].files[0].file_hash, Ed2kHash([0x11; 16]));
+
+        let mut chained = first;
+        chained.extend_from_slice(&[OP_EDONKEYPROT, OP_GLOBSEARCHRES]);
+        chained.extend_from_slice(&second);
+        let pages = decode_udp_search_result_pages(&chained).expect("chained entries decode");
+        assert_eq!(pages[0].files.len(), 2);
+        assert_eq!(pages[0].files[1].file_hash, Ed2kHash([0x22; 16]));
+    }
+
+    #[test]
+    fn udp_search_result_preserves_valid_prefix_before_bad_tail() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0x33; 16]);
+        payload.extend_from_slice(&[0u8; 4]);
+        payload.extend_from_slice(&[0u8; 2]);
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&[OP_EDONKEYPROT, OP_GLOBSEARCHRES, 0xFF]);
+
+        let pages = decode_udp_search_result_pages(&payload).expect("valid prefix survives");
+
+        assert_eq!(pages[0].files.len(), 1);
+        assert_eq!(pages[0].files[0].file_hash, Ed2kHash([0x33; 16]));
     }
 
     #[test]
