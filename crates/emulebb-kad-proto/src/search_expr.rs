@@ -1,6 +1,8 @@
+//! Kad restrictive-search expression decoding and matching.
+
 use std::io::{Cursor, Read};
 
-use emulebb_kad_proto::{Tag, TagName, TagValue, tag_name};
+use crate::{Tag, TagName, TagValue, tag_name};
 
 const MAX_SEARCH_EXPR_DEPTH: u8 = 24;
 const INVALID_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
@@ -320,7 +322,7 @@ fn read_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64, ()> {
 #[cfg(test)]
 mod tests {
     use super::matches_restrictive_keyword_payload;
-    use emulebb_kad_proto::{Tag, TagValue, tag_name};
+    use crate::{Tag, TagValue, tag_name};
 
     #[test]
     fn string_terms_match_common_filename_like_stock() {

@@ -4,9 +4,8 @@ use std::collections::HashMap;
 
 use anyhow::{Result, ensure};
 use emulebb_ed2k::ed2k_server::{encode_kad_search_expression, flat_and_search_terms};
-use emulebb_index::matches_restrictive_keyword_payload;
 use emulebb_kad_dht::{DhtNode, RpcWorkClass};
-use emulebb_kad_proto::{NodeId, SearchKeyReq};
+use emulebb_kad_proto::{NodeId, SearchKeyReq, matches_restrictive_keyword_payload};
 use md4::{Digest, Md4};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;

@@ -10,7 +10,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
 
-use crate::matches_restrictive_keyword_payload;
+use emulebb_kad_proto::matches_restrictive_keyword_payload;
 
 use super::entry_store::{DedupEntry, TimedEntry};
 use super::size_tags::{

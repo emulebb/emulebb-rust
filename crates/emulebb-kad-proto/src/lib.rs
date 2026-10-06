@@ -10,6 +10,7 @@ pub mod error;
 pub mod hash;
 pub mod node_id;
 pub mod packet;
+mod search_expr;
 pub mod tag;
 
 pub use constants::{
@@ -30,4 +31,5 @@ pub use packet::{
     PublishRes, PublishResAck, PublishSourceReq, Req, Res, SearchKeyReq, SearchNotesReq, SearchRes,
     SearchResultEntry, SearchSourceReq, pack_kad_packet,
 };
+pub use search_expr::matches_restrictive_keyword_payload;
 pub use tag::{Tag, TagName, TagValue};
