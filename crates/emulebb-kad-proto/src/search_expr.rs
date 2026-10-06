@@ -2,7 +2,7 @@
 
 use std::io::{Cursor, Read};
 
-use crate::{Tag, TagName, TagValue, tag_name};
+use crate::{Tag, TagName, TagValue, kad_lowercase, tag_name};
 
 const MAX_SEARCH_EXPR_DEPTH: u8 = 24;
 const INVALID_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
@@ -44,7 +44,7 @@ pub fn matches_restrictive_keyword_payload(filename: &str, tags: &[Tag], payload
 
 impl SearchTerm {
     fn matches(&self, filename: &str, tags: &[Tag]) -> bool {
-        let filename_lower = filename.to_lowercase();
+        let filename_lower = kad_lowercase(filename);
         self.matches_with_lower_filename(&filename_lower, tags)
     }
 
@@ -144,7 +144,7 @@ fn meta_string_matches(filename_lower: &str, tags: &[Tag], name: &TagName, value
         tag.name == *name
             && matches!(
                 &tag.value,
-                TagValue::String(tag_value) if tag_value.to_lowercase() == value
+                TagValue::String(tag_value) if kad_lowercase(tag_value) == value
             )
     })
 }
@@ -292,7 +292,7 @@ fn read_lower_string(cursor: &mut Cursor<&[u8]>) -> Result<String, ()> {
     let len = usize::from(read_u16(cursor)?);
     let mut bytes = vec![0; len];
     cursor.read_exact(&mut bytes).map_err(|_| ())?;
-    Ok(String::from_utf8_lossy(&bytes).to_lowercase())
+    Ok(kad_lowercase(&String::from_utf8_lossy(&bytes)))
 }
 
 fn read_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8, ()> {
@@ -386,6 +386,51 @@ mod tests {
             "ubuntu-linux.iso.zip",
             &[],
             &payload
+        ));
+    }
+
+    #[test]
+    fn text_terms_use_the_frozen_kad_lowercase_table() {
+        let string_payload = string_term("K");
+        assert!(matches_restrictive_keyword_payload(
+            "release-K.bin",
+            &[],
+            &string_payload
+        ));
+        assert!(!matches_restrictive_keyword_payload(
+            "release-k.bin",
+            &[],
+            &string_payload
+        ));
+
+        let format_payload = meta_string_term(tag_name::FILEFORMAT, "K");
+        assert!(matches_restrictive_keyword_payload(
+            "release.K",
+            &[],
+            &format_payload
+        ));
+        assert!(!matches_restrictive_keyword_payload(
+            "release.k",
+            &[],
+            &format_payload
+        ));
+
+        let meta_payload = meta_string_term(tag_name::FILETYPE, "İ");
+        assert!(matches_restrictive_keyword_payload(
+            "release.bin",
+            &[Tag::new_short(
+                tag_name::FILETYPE,
+                TagValue::String("İ".to_string()),
+            )],
+            &meta_payload
+        ));
+        assert!(!matches_restrictive_keyword_payload(
+            "release.bin",
+            &[Tag::new_short(
+                tag_name::FILETYPE,
+                TagValue::String("i\u{307}".to_string()),
+            )],
+            &meta_payload
         ));
     }
 

@@ -8,6 +8,7 @@
 pub mod constants;
 pub mod error;
 pub mod hash;
+mod kad_text;
 pub mod node_id;
 pub mod packet;
 mod search_expr;
@@ -22,6 +23,7 @@ pub use constants::{
 };
 pub use error::ProtoError;
 pub use hash::{Ed2kHash, KadUdpKey};
+pub use kad_text::kad_lowercase;
 pub use node_id::NodeId;
 pub use packet::{
     BootstrapRes, CallbackReq, ContactEntry, FindBuddyReq, FindBuddyRes, FirewallUdp,
