@@ -961,7 +961,7 @@ impl EmulebbCore {
         match search_keyword_via_background_session(
             &handle,
             &request.query,
-            criteria,
+            criteria.clone(),
             timeout,
             &cancel,
         )
@@ -1003,6 +1003,7 @@ impl EmulebbCore {
                 dead_server_endpoints: &dead_server_endpoints,
                 max_attempts: configured_server_attempts(&config),
                 query: &request.query,
+                criteria: &criteria,
                 timeout,
                 cancel: &cancel,
             })

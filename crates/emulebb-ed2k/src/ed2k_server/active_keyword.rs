@@ -19,11 +19,13 @@ use super::packet_handler::decode_id_change_payload;
 use super::{
     Ed2kSearchFile, Ed2kServerState, OP_GLOBSEARCHRES, OP_IDCHANGE, OP_LOGINREQUEST,
     OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, ResolvedServerEntry,
-    ServerSession, ServerSessionPhase, bind_server_udp_socket, configured_server_entries,
-    decode_search_result_page, decode_udp_search_result_pages, encode_login_request, encode_packet,
-    encode_search_request, login_identity_for_server_transport, read_server_udp_packet,
-    resolve_server_entry, retain_live_servers, send_connected_server_startup,
-    send_udp_keyword_search, should_use_server_obfuscation, wait_for_offer_files_settle,
+    SERVER_UDP_FLAG_LARGEFILES, SearchCriteria, ServerSession, ServerSessionPhase,
+    bind_server_udp_socket, configured_server_entries, decode_search_result_page,
+    decode_udp_search_result_pages, encode_login_request, encode_packet, encode_search_request,
+    encode_search_request_with_criteria, login_identity_for_server_transport,
+    read_server_udp_packet, resolve_server_entry, retain_live_servers,
+    send_connected_server_startup, send_udp_keyword_search, should_use_server_obfuscation,
+    wait_for_offer_files_settle,
 };
 
 /// Inputs for a one-shot ED2K keyword search across configured servers.
@@ -48,8 +50,24 @@ pub struct Ed2kUdpKeywordSearchOptions<'a> {
     pub dead_server_endpoints: &'a [SocketAddr],
     pub max_attempts: usize,
     pub query: &'a str,
+    pub criteria: &'a SearchCriteria,
     pub timeout: Duration,
     pub cancel: &'a CancellationToken,
+}
+
+struct UdpKeywordSearchPayloads {
+    legacy: Vec<u8>,
+    large_file: Vec<u8>,
+}
+
+fn encode_udp_keyword_search_payloads(
+    query: &str,
+    criteria: &SearchCriteria,
+) -> Result<UdpKeywordSearchPayloads> {
+    Ok(UdpKeywordSearchPayloads {
+        legacy: encode_search_request_with_criteria(query, criteria, false)?,
+        large_file: encode_search_request_with_criteria(query, criteria, true)?,
+    })
 }
 
 /// Executes ED2K global UDP keyword searches across configured servers.
@@ -72,6 +90,7 @@ pub async fn search_keyword_udp_servers(
         dead_server_endpoints,
         max_attempts,
         query,
+        criteria,
         timeout,
         cancel,
     } = options;
@@ -89,8 +108,11 @@ pub async fn search_keyword_udp_servers(
         return Ok(Vec::new());
     }
 
-    let search_payload = encode_search_request(query)?;
-    if search_payload.is_empty() {
+    // The configured server list can mix legacy and LARGEFILES-capable nodes.
+    // Build both stock wire variants once, then select per destination instead
+    // of either dropping criteria or sending an unsupported uint64 leaf.
+    let search_payloads = encode_udp_keyword_search_payloads(query, criteria)?;
+    if search_payloads.legacy.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -135,8 +157,12 @@ pub async fn search_keyword_udp_servers(
             resolved_server.base_endpoint(),
             resolved_server.entry.display_name()
         );
-        if let Err(error) =
-            send_udp_keyword_search(&socket, &resolved_server, &search_payload).await
+        let search_payload = if resolved_server.entry.udp_flags & SERVER_UDP_FLAG_LARGEFILES != 0 {
+            &search_payloads.large_file
+        } else {
+            &search_payloads.legacy
+        };
+        if let Err(error) = send_udp_keyword_search(&socket, &resolved_server, search_payload).await
         {
             warn!(
                 "failed to send ED2K UDP keyword search endpoint={}: {error}",
@@ -485,7 +511,10 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use super::super::{ConfiguredServerEntry, ResolvedServerEntry};
-    use super::queried_udp_response_server;
+    use super::{
+        SearchCriteria, encode_search_request_with_criteria, encode_udp_keyword_search_payloads,
+        queried_udp_response_server,
+    };
 
     fn resolved(ip: Ipv4Addr, port: u16) -> ResolvedServerEntry {
         ResolvedServerEntry {
@@ -529,5 +558,27 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn udp_keyword_search_builds_capability_specific_criteria_payloads() {
+        let criteria = SearchCriteria {
+            file_type: Some("Video".to_string()),
+            min_size: Some(u64::from(u32::MAX) + 1),
+            min_complete_sources: Some(3),
+            ..SearchCriteria::default()
+        };
+
+        let payloads = encode_udp_keyword_search_payloads("sample", &criteria).unwrap();
+
+        assert_eq!(
+            payloads.legacy,
+            encode_search_request_with_criteria("sample", &criteria, false).unwrap()
+        );
+        assert_eq!(
+            payloads.large_file,
+            encode_search_request_with_criteria("sample", &criteria, true).unwrap()
+        );
+        assert_ne!(payloads.legacy, payloads.large_file);
     }
 }
