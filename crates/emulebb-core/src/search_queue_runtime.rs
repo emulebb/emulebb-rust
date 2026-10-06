@@ -330,9 +330,7 @@ impl EmulebbCore {
                         .iter_mut()
                         .find(|existing| existing.hash == result.hash)
                     {
-                        if existing.aich_hash.is_empty() && !result.aich_hash.is_empty() {
-                            existing.aich_hash = result.aich_hash;
-                        }
+                        existing.merge_observations(result);
                     } else {
                         search.results.push(result);
                     }

@@ -33,7 +33,7 @@ impl EmulebbCore {
         let Some((result, aich_observations)) = result_and_aich else {
             return Ok(None);
         };
-        let source_hint = search_result_source_hint(&result);
+        let source_hints = search_result_source_hints(&result);
         let transfer = self
             .upsert_transfer_from_parts(
                 result.hash,
@@ -50,10 +50,10 @@ impl EmulebbCore {
                 .record_network_aich_observations(&transfer.hash, &aich_observations)
                 .await?;
         }
-        if let Some(source_hint) = source_hint {
+        for source_hint in source_hints {
             // WHY: server search entries carry an immediately usable source
-            // endpoint. Dropping it forces a redundant source-discovery round
-            // after the operator starts the result download.
+            // endpoint. Retain every distinct observation so a hash-level
+            // result does not force redundant rediscovery after download starts.
             self.ed2k_transfers
                 .remember_source(&transfer.hash, source_hint)
                 .await?;
@@ -157,11 +157,30 @@ impl EmulebbCore {
     }
 }
 
-fn search_result_source_hint(result: &SearchResult) -> Option<Ed2kSourceHint> {
-    let (Some(client_id), Some(tcp_port)) = (result.source_client_id, result.source_client_port)
-    else {
-        return None;
-    };
+fn search_result_source_hints(result: &SearchResult) -> Vec<Ed2kSourceHint> {
+    let mut sources = result
+        .observations
+        .iter()
+        .filter_map(|observation| {
+            observation
+                .source_client_id
+                .zip(observation.source_client_port)
+        })
+        .collect::<Vec<_>>();
+    if sources.is_empty()
+        && let Some(source) = result.source_client_id.zip(result.source_client_port)
+    {
+        sources.push(source);
+    }
+    let mut seen = std::collections::HashSet::new();
+    sources
+        .into_iter()
+        .filter(|source| seen.insert(*source))
+        .filter_map(|(client_id, tcp_port)| search_source_hint(client_id, tcp_port))
+        .collect()
+}
+
+fn search_source_hint(client_id: u32, tcp_port: u16) -> Option<Ed2kSourceHint> {
     if client_id < 0x0100_0000 || tcp_port == 0 {
         return None;
     }
@@ -177,8 +196,10 @@ fn search_result_source_hint(result: &SearchResult) -> Option<Ed2kSourceHint> {
 
 #[cfg(test)]
 mod tests {
-    use super::search_result_source_hint;
-    use crate::SearchResult;
+    use chrono::Utc;
+
+    use super::search_result_source_hints;
+    use crate::{SearchResult, SearchResultObservation};
 
     fn result(client_id: Option<u32>, client_port: Option<u16>) -> SearchResult {
         SearchResult {
@@ -203,11 +224,11 @@ mod tests {
 
     #[test]
     fn high_id_search_source_becomes_immediate_transfer_hint() {
-        let hint = search_result_source_hint(&result(
+        let hints = search_result_source_hints(&result(
             Some(u32::from_le_bytes([10, 20, 30, 40])),
             Some(4662),
-        ))
-        .unwrap();
+        ));
+        let hint = &hints[0];
 
         assert_eq!(hint.ip, "10.20.30.40");
         assert_eq!(hint.tcp_port, 4662);
@@ -216,7 +237,40 @@ mod tests {
 
     #[test]
     fn low_id_or_incomplete_search_source_is_not_dialed_directly() {
-        assert!(search_result_source_hint(&result(Some(42), Some(4662))).is_none());
-        assert!(search_result_source_hint(&result(Some(0x2800_000A), None)).is_none());
+        assert!(search_result_source_hints(&result(Some(42), Some(4662))).is_empty());
+        assert!(search_result_source_hints(&result(Some(0x2800_000A), None)).is_empty());
+    }
+
+    #[test]
+    fn every_distinct_observed_high_id_becomes_a_transfer_hint() {
+        let mut result = result(None, None);
+        result.observations = [
+            ([10, 20, 30, 40], 4662),
+            ([10, 20, 30, 41], 4663),
+            ([10, 20, 30, 40], 4662),
+        ]
+        .into_iter()
+        .map(|(ip, port)| SearchResultObservation {
+            origin: "global".to_string(),
+            name: result.name.clone(),
+            size_bytes: result.size_bytes,
+            sources: 1,
+            complete_sources: 0,
+            source_client_id: Some(u32::from_le_bytes(ip)),
+            source_client_port: Some(port),
+            file_type: String::new(),
+            rating: 0,
+            aich_hash: String::new(),
+            complete: false,
+            directory: String::new(),
+            observed_at: Utc::now(),
+        })
+        .collect();
+
+        let hints = search_result_source_hints(&result);
+
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].ip, "10.20.30.40");
+        assert_eq!(hints[1].ip, "10.20.30.41");
     }
 }

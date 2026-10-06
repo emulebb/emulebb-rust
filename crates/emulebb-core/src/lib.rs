@@ -1016,11 +1016,9 @@ impl EmulebbCore {
                 ),
             }
         }
-        let mut seen_hashes = HashSet::new();
         Ok(Ed2kServerSearchOutcome::Completed(
             files
                 .into_iter()
-                .filter(|file| seen_hashes.insert(file.file_hash))
                 .map(|file| search_result_from_ed2k(search_id, request, file))
                 .collect(),
         ))

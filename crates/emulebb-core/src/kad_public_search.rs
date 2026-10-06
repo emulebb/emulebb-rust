@@ -90,9 +90,7 @@ pub(crate) async fn search_kad_keywords(
                 }
                 let mapped = search_result_from_kad(search_id, request, result);
                 if let Some(index) = result_indexes.get(&hash).copied() {
-                    if results[index].aich_hash.is_empty() && !mapped.aich_hash.is_empty() {
-                        results[index].aich_hash = mapped.aich_hash;
-                    }
+                    results[index].merge_observations(mapped);
                 } else if results.len() < KAD_KEYWORD_SEARCH_RESULT_LIMIT {
                     result_indexes.insert(hash, results.len());
                     results.push(mapped);

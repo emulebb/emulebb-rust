@@ -328,6 +328,30 @@ mod tests {
     }
 
     #[test]
+    fn hash_merge_retains_observations_and_recomputes_the_aggregate() {
+        let mut local = result("local-name.bin", 0, 1);
+        local.method = "automatic".to_string();
+        let mut network = result("network-name.bin", 4_096, 12);
+        network.method = "global".to_string();
+        network.complete_sources = 4;
+        network.file_type = "Pro".to_string();
+        network.rating = 3;
+        network.aich_hash = "A".repeat(32);
+
+        local.merge_observations(network.clone());
+        local.merge_observations(network);
+
+        assert_eq!(local.observations.len(), 2);
+        assert_eq!(local.name, "network-name.bin");
+        assert_eq!(local.size_bytes, 4_096);
+        assert_eq!(local.sources, 12);
+        assert_eq!(local.complete_sources, 4);
+        assert_eq!(local.file_type, "Pro");
+        assert_eq!(local.rating, 3);
+        assert_eq!(local.aich_hash, "A".repeat(32));
+    }
+
+    #[test]
     fn media_search_fields_map_to_server_criteria() {
         let mut req = request();
         req.r#type = "audio".to_string();

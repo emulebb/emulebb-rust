@@ -356,6 +356,156 @@ impl SearchResult {
             observations: vec![observation],
         }
     }
+
+    pub(crate) fn merge_observations(&mut self, mut other: SearchResult) {
+        debug_assert_eq!(self.hash, other.hash);
+        self.ensure_aggregate_observation();
+        other.ensure_aggregate_observation();
+        for observation in other.observations {
+            if !self
+                .observations
+                .iter()
+                .any(|existing| observations_are_equivalent(existing, &observation))
+            {
+                self.observations.push(observation);
+            }
+        }
+        self.recompute_observation_aggregate();
+    }
+
+    fn ensure_aggregate_observation(&mut self) {
+        if !self.observations.is_empty() {
+            return;
+        }
+        self.observations.push(SearchResultObservation {
+            origin: self.method.clone(),
+            name: self.name.clone(),
+            size_bytes: self.size_bytes,
+            sources: self.sources,
+            complete_sources: self.complete_sources,
+            source_client_id: self.source_client_id,
+            source_client_port: self.source_client_port,
+            file_type: self.file_type.clone(),
+            rating: self.rating,
+            aich_hash: self.aich_hash.clone(),
+            complete: self.complete,
+            directory: self.directory.clone(),
+            observed_at: Utc::now(),
+        });
+    }
+
+    fn recompute_observation_aggregate(&mut self) {
+        let Some(display) = self.observations.iter().max_by(|left, right| {
+            observation_quality(left, &self.hash)
+                .cmp(&observation_quality(right, &self.hash))
+                // Stable, arrival-order-independent tie breaker: prefer the
+                // lexicographically smaller case-folded display name.
+                .then_with(|| right.name.to_lowercase().cmp(&left.name.to_lowercase()))
+        }) else {
+            return;
+        };
+        self.name = display.name.clone();
+        self.size_bytes = self
+            .observations
+            .iter()
+            .filter(|observation| observation.size_bytes != 0)
+            .max_by_key(|observation| observation_quality(observation, &self.hash))
+            .map_or(display.size_bytes, |observation| observation.size_bytes);
+        self.sources = self
+            .observations
+            .iter()
+            .map(|observation| observation.sources)
+            .max()
+            .unwrap_or_default();
+        self.complete_sources = self
+            .observations
+            .iter()
+            .map(|observation| observation.complete_sources)
+            .max()
+            .unwrap_or_default();
+        self.rating = self
+            .observations
+            .iter()
+            .map(|observation| observation.rating)
+            .max()
+            .unwrap_or_default();
+        self.complete = self
+            .observations
+            .iter()
+            .any(|observation| observation.complete);
+
+        let source = self
+            .observations
+            .iter()
+            .filter(|observation| {
+                observation
+                    .source_client_id
+                    .zip(observation.source_client_port)
+                    .is_some()
+            })
+            .max_by_key(|observation| observation_quality(observation, &self.hash));
+        self.source_client_id = source.and_then(|observation| observation.source_client_id);
+        self.source_client_port = source.and_then(|observation| observation.source_client_port);
+
+        if let Some(file_type) = self
+            .observations
+            .iter()
+            .filter(|observation| {
+                !observation.file_type.is_empty()
+                    && !observation.file_type.eq_ignore_ascii_case("unknown")
+            })
+            .max_by_key(|observation| observation_quality(observation, &self.hash))
+            .map(|observation| observation.file_type.clone())
+        {
+            self.file_type = file_type;
+        }
+        self.aich_hash = self
+            .observations
+            .iter()
+            .filter(|observation| !observation.aich_hash.is_empty())
+            .max_by_key(|observation| observation_quality(observation, &self.hash))
+            .map(|observation| observation.aich_hash.clone())
+            .unwrap_or_default();
+        self.directory = self
+            .observations
+            .iter()
+            .filter(|observation| !observation.directory.is_empty())
+            .max_by_key(|observation| observation_quality(observation, &self.hash))
+            .map(|observation| observation.directory.clone())
+            .unwrap_or_default();
+    }
+}
+
+fn observation_quality(
+    observation: &SearchResultObservation,
+    hash: &str,
+) -> (bool, bool, u32, u32, bool, u8) {
+    (
+        !observation.name.trim().is_empty() && !observation.name.eq_ignore_ascii_case(hash),
+        observation.origin != "local_index",
+        observation.sources,
+        observation.complete_sources,
+        observation.size_bytes != 0,
+        observation.rating,
+    )
+}
+
+fn observations_are_equivalent(
+    left: &SearchResultObservation,
+    right: &SearchResultObservation,
+) -> bool {
+    left.origin == right.origin
+        && left.name == right.name
+        && left.size_bytes == right.size_bytes
+        && left.sources == right.sources
+        && left.complete_sources == right.complete_sources
+        && left.source_client_id == right.source_client_id
+        && left.source_client_port == right.source_client_port
+        && left.file_type == right.file_type
+        && left.rating == right.rating
+        && left.aich_hash == right.aich_hash
+        && left.complete == right.complete
+        && left.directory == right.directory
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
