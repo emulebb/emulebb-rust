@@ -121,7 +121,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build-tests
-          ref: 4500288728da86123b46538e55fcf3976a5d5a48
+          ref: f19c0f1d5e1cd4e757f1352d342f7f580dd9dd0b
           path: repos/emulebb-build-tests
 
       - name: Checkout pinned Rust OpenAPI contract
