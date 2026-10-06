@@ -105,7 +105,9 @@ describe("SearchView", () => {
             rating: 4,
             hasAichHash: true,
             complete: false,
-            directory: "",
+            sourceClientId: 16909060,
+            sourceClientPort: 4662,
+            directory: "Audio",
             observedAt: "2026-10-06T12:00:00Z"
           },
           {
@@ -154,6 +156,7 @@ describe("SearchView", () => {
     expect(screen.getByText("4/5")).toBeInTheDocument();
     expect(screen.getByText("server, global")).toBeInTheDocument();
     expect(screen.getAllByText("00112233445566778899aabbccddeeff").length).toBeGreaterThan(0);
+    expect(screen.getByText(/4.0 KiB · type audio · 8 sources \/ 3 complete · client 16909060:4662 · folder Audio/)).toBeInTheDocument();
 
     fireEvent.input(screen.getByRole("combobox", { name: "Sort search results" }), {
       target: { value: "bitrateKbps:desc" }

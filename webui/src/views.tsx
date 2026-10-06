@@ -41,6 +41,7 @@ import {
   RestClient,
   RuntimeDiagnostics,
   SearchItem,
+  SearchResultObservation,
   SearchResultMedia,
   ServerItem,
   SharedDirectories,
@@ -775,7 +776,7 @@ export function SearchView(props: {
                           const observationMedia = searchResultMediaSummary(observation.media);
                           return (
                             <li key={`${observation.origin}-${observation.name}-${index}`}>
-                              <strong>{observation.origin}</strong>: {observation.name} · {observation.sources} sources / {observation.completeSources} complete
+                              <strong>{observation.origin}</strong>: {observation.name} · {searchResultObservationEvidence(observation)}
                               {observation.rating > 0 ? ` · rating ${observation.rating}/5` : ""}
                               {observation.hasAichHash ? " · AICH" : ""}
                               {observationMedia ? ` · ${observationMedia}` : ""}
@@ -863,6 +864,20 @@ function searchResultMediaSummary(media?: SearchResultMedia): string {
     codec ? `Codec: ${codec}` : ""
   ];
   return fields.filter(Boolean).join(" · ");
+}
+
+function searchResultObservationEvidence(observation: SearchResultObservation): string {
+  const sourceEndpoint = observation.sourceClientId != null && observation.sourceClientPort != null
+    ? `client ${observation.sourceClientId}:${observation.sourceClientPort}`
+    : "";
+  return [
+    observation.sizeBytes > 0 ? formatBytes(observation.sizeBytes) : "",
+    observation.fileType && observation.fileType !== "unknown" ? `type ${observation.fileType}` : "",
+    `${observation.sources} sources / ${observation.completeSources} complete`,
+    sourceEndpoint,
+    observation.directory ? `folder ${observation.directory}` : "",
+    observation.observedAt ? `observed ${shortTime(observation.observedAt)}` : ""
+  ].filter(Boolean).join(" · ");
 }
 
 function formatMediaDuration(totalSeconds: number): string {
