@@ -167,6 +167,19 @@ class TestActionPins(unittest.TestCase):
         self.assertFalse(CHECKER.action_ref_is_immutable("a" * 39))
 
 
+class TestSecurityPolicy(unittest.TestCase):
+    def test_current_security_policy_has_private_intake_and_support_boundary(self) -> None:
+        self.assertEqual(CHECKER.check_security_policy(), [])
+
+    def test_rejects_public_or_ambiguous_security_intake(self) -> None:
+        errors = CHECKER.check_security_policy("Report security bugs in an issue.\n")
+
+        self.assertEqual(len(errors), 6)
+        self.assertTrue(any("private vulnerability" in error for error in errors))
+        self.assertTrue(any("response boundary" in error for error in errors))
+        self.assertTrue(any("supported beta" in error for error in errors))
+
+
 class TestWorkflowLintCi(unittest.TestCase):
     def test_current_ci_lints_workflows(self) -> None:
         self.assertEqual(CHECKER.check_workflow_lint_ci(), [])

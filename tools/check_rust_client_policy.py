@@ -83,6 +83,7 @@ def main() -> int:
     errors.extend(check_tokio_features())
     errors.extend(check_logging_policy())
     errors.extend(check_supply_chain_policy())
+    errors.extend(check_security_policy())
     errors.extend(check_github_action_pins())
     errors.extend(check_workflow_lint_ci())
     errors.extend(check_scheduled_fuzz_ci())
@@ -503,6 +504,29 @@ def check_supply_chain_policy() -> list[str]:
     if command not in workflow:
         errors.append(f".github/workflows/ci.yml is missing cargo-deny guard: {command}")
     return errors
+
+
+def check_security_policy(policy_text: str | None = None) -> list[str]:
+    """Keep a private vulnerability path and honest support boundary public."""
+
+    path = ROOT / "SECURITY.md"
+    if policy_text is None and not path.is_file():
+        return ["SECURITY.md is missing"]
+    text = path.read_text(encoding="utf-8") if policy_text is None else policy_text
+    required = {
+        "0.1.0-beta.2": "current supported beta",
+        "0.1.0-beta.1` and older": "unsupported older-release boundary",
+        "https://github.com/emulebb/emulebb-rust/security/advisories/new":
+            "private vulnerability reporting link",
+        "Do not open a public issue": "public-disclosure warning",
+        "no guaranteed response SLA": "honest response boundary",
+        "fresh profile": "current-only schema security guidance",
+    }
+    return [
+        f"SECURITY.md is missing {description}"
+        for fragment, description in required.items()
+        if fragment not in text
+    ]
 
 
 def check_github_action_pins() -> list[str]:

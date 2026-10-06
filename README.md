@@ -201,6 +201,12 @@ contract. Browser API calls use the existing `X-API-Key` header.
 Harnesses may use operator-local inputs to create the profile directory and
 write those fixed files, but the Rust client itself only consumes the profile.
 
+## Security
+
+Report suspected vulnerabilities privately; do not place credentials, private
+peer data, or exploit details in a public issue. Supported versions, the private
+reporting link, and response expectations are in the [security policy](SECURITY.md).
+
 ## Beta.2 artifacts
 
 The public [release notes](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md),
