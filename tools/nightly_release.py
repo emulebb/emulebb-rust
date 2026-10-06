@@ -30,7 +30,7 @@ SAFE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
 METADATA_SCHEMA_PATH = "crates/emulebb-metadata/src/schema.rs"
 METADATA_SCHEMA_RE = re.compile(r"^pub const SCHEMA_VERSION: i64 = (?P<version>\d+);$", re.MULTILINE)
 REQUIRED_CI_CHECKS = (
-    "build+test (ubuntu-latest)",
+    "build+test (ubuntu-24.04)",
     "build+test (macos-latest)",
     "build+test (windows-latest)",
     "live REST/OpenAPI conformance",

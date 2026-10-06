@@ -275,6 +275,16 @@ run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
         self.assertTrue(any("actionlint" in error for error in errors))
 
 
+class TestCiLinuxRunnerPin(unittest.TestCase):
+    def test_current_ci_pins_linux_runners(self) -> None:
+        self.assertEqual(CHECKER.check_ci_linux_runner_pin(), [])
+
+    def test_rejects_mutable_or_incomplete_linux_runner_pins(self) -> None:
+        workflow = "ubuntu-latest\nubuntu-24.04\n"
+
+        self.assertEqual(len(CHECKER.check_ci_linux_runner_pin(workflow)), 2)
+
+
 class TestScheduledFuzzCi(unittest.TestCase):
     def test_current_ci_fuzzes_all_protocol_parsers(self) -> None:
         self.assertEqual(CHECKER.check_scheduled_fuzz_ci(), [])

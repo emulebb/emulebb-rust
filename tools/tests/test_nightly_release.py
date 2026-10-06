@@ -100,6 +100,10 @@ class TestNightlyNotes(unittest.TestCase):
 
 
 class TestNightlyGatesAndRetention(unittest.TestCase):
+    def test_required_linux_check_uses_pinned_runner_name(self) -> None:
+        self.assertIn("build+test (ubuntu-24.04)", NIGHTLY.REQUIRED_CI_CHECKS)
+        self.assertNotIn("build+test (ubuntu-latest)", NIGHTLY.REQUIRED_CI_CHECKS)
+
     def test_required_checks_accept_one_success_per_name(self) -> None:
         check_runs = [
             {"name": name, "status": "completed", "conclusion": "success"}

@@ -45,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,7 +108,7 @@ jobs:
   rest-openapi:
     name: live REST/OpenAPI conformance
     needs: build-test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
     steps:
@@ -166,7 +166,7 @@ jobs:
 
   quality:
     name: policy + format + clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
     steps:
@@ -218,7 +218,7 @@ jobs:
 
   supply-chain:
     name: cargo-deny (advisories, licenses, sources)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

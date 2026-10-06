@@ -88,6 +88,7 @@ def main() -> int:
     errors.extend(check_github_action_pins())
     errors.extend(check_code_scanning_ci())
     errors.extend(check_workflow_lint_ci())
+    errors.extend(check_ci_linux_runner_pin())
     errors.extend(check_scheduled_fuzz_ci())
     errors.extend(check_live_rest_openapi_ci())
     errors.extend(check_release_ci_gate())
@@ -654,6 +655,23 @@ def check_workflow_lint_ci(workflow_text: str | None = None) -> list[str]:
     if actionlint is None or not action_ref_is_immutable(actionlint.group(1)):
         errors.append(
             ".github/workflows/ci.yml must pin actionlint by full commit SHA"
+        )
+    return errors
+
+
+def check_ci_linux_runner_pin(workflow_text: str | None = None) -> list[str]:
+    """Keep normal Linux CI on the repository's reviewed Ubuntu image."""
+
+    workflow = ROOT / ".github" / "workflows" / "ci.yml"
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    errors = []
+    if "ubuntu-latest" in text:
+        errors.append(
+            ".github/workflows/ci.yml must not use the mutable ubuntu-latest runner"
+        )
+    if text.count("ubuntu-24.04") < 5:
+        errors.append(
+            ".github/workflows/ci.yml must pin every Linux matrix and job runner to ubuntu-24.04"
         )
     return errors
 
