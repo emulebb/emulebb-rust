@@ -726,6 +726,13 @@ export function SearchView(props: {
           <option value="sizeBytes:asc">Size, smallest first</option>
           <option value="name:asc">Name, A–Z</option>
           <option value="name:desc">Name, Z–A</option>
+          <option value="fileType:asc">Type, A–Z</option>
+          <option value="title:asc">Media title, A–Z</option>
+          <option value="artist:asc">Artist, A–Z</option>
+          <option value="album:asc">Album, A–Z</option>
+          <option value="lengthSeconds:desc">Duration, longest first</option>
+          <option value="bitrateKbps:desc">Bitrate, highest first</option>
+          <option value="codec:asc">Codec, A–Z</option>
         </select>
       </div>
       <div class="table-wrap">

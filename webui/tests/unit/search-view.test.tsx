@@ -156,9 +156,9 @@ describe("SearchView", () => {
     expect(screen.getAllByText("00112233445566778899aabbccddeeff").length).toBeGreaterThan(0);
 
     fireEvent.input(screen.getByRole("combobox", { name: "Sort search results" }), {
-      target: { value: "rating:desc" }
+      target: { value: "bitrateKbps:desc" }
     });
-    expect(selectSearchSort).toHaveBeenCalledWith("rating", "desc");
+    expect(selectSearchSort).toHaveBeenCalledWith("bitrateKbps", "desc");
 
     fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
     await waitFor(() => expect(deleteRequest).toHaveBeenCalledWith("searches/9"));
