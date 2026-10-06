@@ -491,6 +491,7 @@ CREATE TABLE search_result_observations (
     id INTEGER PRIMARY KEY,
     result_id INTEGER NOT NULL REFERENCES search_results(id) ON DELETE CASCADE,
     origin TEXT NOT NULL,
+    server_endpoint TEXT,
     name TEXT NOT NULL,
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count >= 0),

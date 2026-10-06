@@ -168,6 +168,7 @@ export type TransferSource = {
 
 export type SearchResultObservation = {
   origin: string;
+  serverEndpoint?: string | null;
   name: string;
   sizeBytes: number;
   sources: number;

@@ -4,6 +4,7 @@ use chrono::Utc;
 use emulebb_ed2k::ed2k_server::{Ed2kSearchFile, SearchCriteria};
 use emulebb_index::IndexedFile;
 use emulebb_kad_dht::SearchResult as KadSearchResult;
+use std::net::SocketAddr;
 
 use crate::{SearchCreate, SearchResult, SearchResultMedia, SearchResultObservation};
 
@@ -181,6 +182,7 @@ pub(crate) fn search_result_from_indexed(
 ) -> SearchResult {
     let observation = SearchResultObservation {
         origin: "local_index".to_string(),
+        server_endpoint: None,
         name: file.name,
         size_bytes: file.size_bytes,
         sources: file.availability_score.max(0) as u32,
@@ -207,6 +209,7 @@ pub(crate) fn search_result_from_ed2k(
     search_id: &str,
     request: &SearchCreate,
     origin: &str,
+    server_endpoint: Option<SocketAddr>,
     file: Ed2kSearchFile,
 ) -> SearchResult {
     let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
@@ -214,6 +217,7 @@ pub(crate) fn search_result_from_ed2k(
     let source_client_port = (file.client_port != 0).then_some(file.client_port);
     let observation = SearchResultObservation {
         origin: origin.to_string(),
+        server_endpoint: server_endpoint.map(|endpoint| endpoint.to_string()),
         name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
         size_bytes: file.file_size.unwrap_or_default(),
         sources: file.source_count.unwrap_or_default(),
@@ -273,6 +277,7 @@ pub(crate) fn search_result_from_kad(
     let observed_at = Utc::now();
     let observation = |name| SearchResultObservation {
         origin: "kad".to_string(),
+        server_endpoint: None,
         name,
         size_bytes,
         sources,
@@ -314,6 +319,7 @@ mod tests {
             "00112233445566778899aabbccddeeff".to_string(),
             SearchResultObservation {
                 origin: "unknown".to_string(),
+                server_endpoint: None,
                 name: name.to_string(),
                 size_bytes,
                 sources,
@@ -649,6 +655,7 @@ mod tests {
             "43",
             &req,
             "global",
+            Some("192.0.2.10:4661".parse().unwrap()),
             Ed2kSearchFile {
                 file_hash,
                 client_id: u32::from_le_bytes([10, 20, 30, 40]),
@@ -690,5 +697,9 @@ mod tests {
         assert_eq!(result.aich_hash, "A".repeat(32));
         assert_eq!(result.directory, "Synthetic Folder");
         assert_eq!(result.observations[0].origin, "global");
+        assert_eq!(
+            result.observations[0].server_endpoint.as_deref(),
+            Some("192.0.2.10:4661")
+        );
     }
 }

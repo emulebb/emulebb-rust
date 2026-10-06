@@ -171,6 +171,15 @@ pub struct Ed2kSearchFile {
     pub directory: Option<String>,
 }
 
+/// One decoded global-search result together with the server that observed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kServerSearchObservation {
+    /// Configured base TCP endpoint identifying the responding server. The UDP
+    /// reply itself normally arrives from the server's derived UDP port.
+    pub server_endpoint: SocketAddr,
+    pub file: Ed2kSearchFile,
+}
+
 /// One decoded ED2K server source-search entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kFoundSource {

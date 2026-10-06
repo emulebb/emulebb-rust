@@ -132,7 +132,7 @@ impl super::MetadataStore {
                 tx.execute(
                     r#"
                     INSERT INTO search_result_observations(
-                        result_id, origin, name, size_bytes, source_count,
+                        result_id, origin, server_endpoint, name, size_bytes, source_count,
                         complete_source_count, source_client_id, source_client_port,
                         file_type, media_artist, media_album, media_title,
                         media_length_seconds, media_bitrate_kbps, media_codec,
@@ -140,12 +140,13 @@ impl super::MetadataStore {
                     )
                     VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
                     )
                     "#,
                     params![
                         result_id,
                         observation.origin,
+                        observation.server_endpoint,
                         observation.name,
                         observation.size_bytes as i64,
                         i64::from(observation.source_count),
@@ -302,7 +303,7 @@ fn load_search_result_observations(
 ) -> Result<Vec<MetadataSearchResultObservation>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT origin, name, size_bytes, source_count, complete_source_count,
+        SELECT origin, server_endpoint, name, size_bytes, source_count, complete_source_count,
                source_client_id, source_client_port, file_type, media_artist,
                media_album, media_title, media_length_seconds,
                media_bitrate_kbps, media_codec, rating, aich_hash, complete,
@@ -315,24 +316,25 @@ fn load_search_result_observations(
     let rows = stmt.query_map(params![result_id], |row| {
         Ok(MetadataSearchResultObservation {
             origin: row.get(0)?,
-            name: row.get(1)?,
-            size_bytes: row.get::<_, i64>(2)? as u64,
-            source_count: row.get::<_, i64>(3)? as u32,
-            complete_source_count: row.get::<_, i64>(4)? as u32,
-            source_client_id: row.get::<_, Option<i64>>(5)?.map(|value| value as u32),
-            source_client_port: row.get::<_, Option<i64>>(6)?.map(|value| value as u16),
-            file_type: row.get(7)?,
-            media_artist: row.get(8)?,
-            media_album: row.get(9)?,
-            media_title: row.get(10)?,
-            media_length_seconds: row.get::<_, i64>(11)? as u32,
-            media_bitrate_kbps: row.get::<_, i64>(12)? as u32,
-            media_codec: row.get(13)?,
-            rating: row.get::<_, i64>(14)? as u8,
-            aich_hash: row.get(15)?,
-            complete: row.get::<_, i64>(16)? != 0,
-            directory: row.get(17)?,
-            observed_at_ms: row.get(18)?,
+            server_endpoint: row.get(1)?,
+            name: row.get(2)?,
+            size_bytes: row.get::<_, i64>(3)? as u64,
+            source_count: row.get::<_, i64>(4)? as u32,
+            complete_source_count: row.get::<_, i64>(5)? as u32,
+            source_client_id: row.get::<_, Option<i64>>(6)?.map(|value| value as u32),
+            source_client_port: row.get::<_, Option<i64>>(7)?.map(|value| value as u16),
+            file_type: row.get(8)?,
+            media_artist: row.get(9)?,
+            media_album: row.get(10)?,
+            media_title: row.get(11)?,
+            media_length_seconds: row.get::<_, i64>(12)? as u32,
+            media_bitrate_kbps: row.get::<_, i64>(13)? as u32,
+            media_codec: row.get(14)?,
+            rating: row.get::<_, i64>(15)? as u8,
+            aich_hash: row.get(16)?,
+            complete: row.get::<_, i64>(17)? != 0,
+            directory: row.get(18)?,
+            observed_at_ms: row.get(19)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -425,6 +427,12 @@ mod tests {
         assert_eq!(searches[0].results[0].media_codec, "AV1");
         assert_eq!(searches[0].results[0].observations[0].origin, "server");
         assert_eq!(
+            searches[0].results[0].observations[0]
+                .server_endpoint
+                .as_deref(),
+            Some("192.0.2.10:4661")
+        );
+        assert_eq!(
             searches[0].results[0].observations[0].media_album,
             "Example Album"
         );
@@ -490,6 +498,7 @@ mod tests {
                 directory: String::new(),
                 observations: vec![MetadataSearchResultObservation {
                     origin: "server".to_string(),
+                    server_endpoint: Some("192.0.2.10:4661".to_string()),
                     name: "Zażółć Sample.bin".to_string(),
                     size_bytes: 123,
                     source_count: 4,

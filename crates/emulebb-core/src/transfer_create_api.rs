@@ -256,6 +256,7 @@ mod tests {
         .into_iter()
         .map(|(ip, port)| SearchResultObservation {
             origin: "global".to_string(),
+            server_endpoint: None,
             name: result.name.clone(),
             size_bytes: result.size_bytes,
             sources: 1,

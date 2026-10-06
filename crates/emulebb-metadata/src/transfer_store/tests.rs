@@ -729,6 +729,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
                 directory: String::new(),
                 observations: vec![crate::MetadataSearchResultObservation {
                     origin: "local_index".to_string(),
+                    server_endpoint: None,
                     name: "Scenario.File.bin".to_string(),
                     size_bytes: 1,
                     source_count: 1,

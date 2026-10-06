@@ -18,15 +18,15 @@ use crate::{
 use super::packet_handler::decode_id_change_payload;
 use super::server_entry::ConfiguredServerEntry;
 use super::{
-    Ed2kSearchFile, Ed2kServerState, OP_GLOBSEARCHRES, OP_IDCHANGE, OP_LOGINREQUEST,
-    OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, ResolvedServerEntry,
-    SERVER_UDP_FLAG_LARGEFILES, SearchCriteria, ServerSession, ServerSessionPhase,
-    bind_server_udp_socket, configured_server_entries, decode_search_result_page,
-    decode_udp_search_result_pages, encode_login_request, encode_packet, encode_search_request,
-    encode_search_request_with_criteria, login_identity_for_server_transport,
-    read_server_udp_packet, resolve_server_entry, retain_live_servers,
-    send_connected_server_startup, send_udp_keyword_search, should_use_server_obfuscation,
-    wait_for_offer_files_settle,
+    Ed2kSearchFile, Ed2kServerSearchObservation, Ed2kServerState, OP_GLOBSEARCHRES, OP_IDCHANGE,
+    OP_LOGINREQUEST, OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT,
+    ResolvedServerEntry, SERVER_UDP_FLAG_LARGEFILES, SearchCriteria, ServerSession,
+    ServerSessionPhase, bind_server_udp_socket, configured_server_entries,
+    decode_search_result_page, decode_udp_search_result_pages, encode_login_request, encode_packet,
+    encode_search_request, encode_search_request_with_criteria,
+    login_identity_for_server_transport, read_server_udp_packet, resolve_server_entry,
+    retain_live_servers, send_connected_server_startup, send_udp_keyword_search,
+    should_use_server_obfuscation, wait_for_offer_files_settle,
 };
 
 /// Inputs for a one-shot ED2K keyword search across configured servers.
@@ -99,7 +99,7 @@ fn eligible_udp_keyword_search_servers(
 )]
 pub async fn search_keyword_udp_servers(
     options: Ed2kUdpKeywordSearchOptions<'_>,
-) -> Result<Vec<Ed2kSearchFile>> {
+) -> Result<Vec<Ed2kServerSearchObservation>> {
     let Ed2kUdpKeywordSearchOptions {
         bind_ip,
         config,
@@ -206,7 +206,12 @@ pub async fn search_keyword_udp_servers(
                         }
                     };
                     for page in pages {
-                        results.extend(page.files);
+                        results.extend(page.files.into_iter().map(|file| {
+                            Ed2kServerSearchObservation {
+                                server_endpoint: response_server.base_endpoint(),
+                                file,
+                            }
+                        }));
                     }
                 }
                 Ok(Ok(None)) => continue,

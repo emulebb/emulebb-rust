@@ -264,6 +264,7 @@ mod tests {
             let hash = format!("{index:032x}");
             let observation = SearchResultObservation {
                 origin: "kad".to_string(),
+                server_endpoint: None,
                 name: format!("result-{index}.bin"),
                 size_bytes: u64::from(index) + 1,
                 sources: 1,

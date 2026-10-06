@@ -974,7 +974,11 @@ impl EmulebbCore {
                         request.query
                     );
                 } else {
-                    files.extend(background_files.into_iter().map(|file| ("server", file)));
+                    files.extend(
+                        background_files
+                            .into_iter()
+                            .map(|file| ("server", connected_server_endpoint, file)),
+                    );
                 }
             }
             // WHY: an interrupted send (stale handle / session dropped before
@@ -1007,9 +1011,13 @@ impl EmulebbCore {
             })
             .await
             {
-                Ok(global_files) => {
-                    files.extend(global_files.into_iter().map(|file| ("global", file)))
-                }
+                Ok(global_files) => files.extend(global_files.into_iter().map(|observation| {
+                    (
+                        "global",
+                        Some(observation.server_endpoint),
+                        observation.file,
+                    )
+                })),
                 Err(error) => tracing::warn!(
                     "ED2K global UDP keyword search failed query={:?} error={error}",
                     request.query
@@ -1019,7 +1027,9 @@ impl EmulebbCore {
         Ok(Ed2kServerSearchOutcome::Completed(
             files
                 .into_iter()
-                .map(|(origin, file)| search_result_from_ed2k(search_id, request, origin, file))
+                .map(|(origin, server_endpoint, file)| {
+                    search_result_from_ed2k(search_id, request, origin, server_endpoint, file)
+                })
                 .collect(),
         ))
     }

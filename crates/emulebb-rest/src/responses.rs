@@ -452,6 +452,7 @@ pub(crate) fn search_result_response_with_options(
         .map(|observation| {
             json!({
                 "origin": observation.origin,
+                "serverEndpoint": observation.server_endpoint,
                 "name": observation.name,
                 "sizeBytes": observation.size_bytes,
                 "sources": observation.sources,
@@ -715,8 +716,8 @@ mod tests {
     use std::sync::Arc;
 
     use emulebb_core::{
-        EmulebbCore, LocalShare, NetworkBindingStatus, NetworkStatus, SearchResult, ServerInfo,
-        TransferThroughputStats, VpnGuardStatus,
+        EmulebbCore, LocalShare, NetworkBindingStatus, NetworkStatus, SearchResult,
+        SearchResultObservation, ServerInfo, TransferThroughputStats, VpnGuardStatus,
     };
     use emulebb_index::FileIndex;
 
@@ -787,6 +788,23 @@ mod tests {
             directory: String::new(),
             observations: Vec::new(),
         };
+        result.observations.push(SearchResultObservation {
+            origin: "global".to_string(),
+            server_endpoint: Some("192.0.2.10:4661".to_string()),
+            name: result.name.clone(),
+            size_bytes: result.size_bytes,
+            sources: result.sources,
+            complete_sources: result.complete_sources,
+            source_client_id: None,
+            source_client_port: None,
+            file_type: result.file_type.clone(),
+            media: result.media.clone(),
+            rating: result.rating,
+            aich_hash: result.aich_hash.clone(),
+            complete: result.complete,
+            directory: result.directory.clone(),
+            observed_at: Default::default(),
+        });
 
         let complete = search_result_response(&result);
         assert_eq!(complete["complete"], true);
@@ -797,6 +815,10 @@ mod tests {
         assert_eq!(complete["media"]["lengthSeconds"], 321);
         assert_eq!(complete["media"]["bitrateKbps"], 192);
         assert_eq!(complete["media"]["codec"], "FLAC");
+        assert_eq!(
+            complete["observations"][0]["serverEndpoint"],
+            "192.0.2.10:4661"
+        );
         assert!(complete.get("method").is_none());
         assert!(complete.get("knownType").is_none());
         assert!(complete.get("clientIp").is_none());

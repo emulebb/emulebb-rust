@@ -433,6 +433,10 @@ pub struct SearchResultObservation {
     /// `global`, or `kad`). A later transport-specific locator can refine this
     /// without changing the hash-level result identity.
     pub origin: String,
+    /// ED2K server base endpoint that supplied this observation. Absent for
+    /// Kad, local-index, and legacy persisted observations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_endpoint: Option<String>,
     pub name: String,
     pub size_bytes: u64,
     pub sources: u32,
@@ -523,6 +527,7 @@ impl SearchResult {
         }
         self.observations.push(SearchResultObservation {
             origin: "unknown".to_string(),
+            server_endpoint: None,
             name: self.name.clone(),
             size_bytes: self.size_bytes,
             sources: self.sources,
@@ -682,6 +687,7 @@ fn observations_are_equivalent(
     right: &SearchResultObservation,
 ) -> bool {
     left.origin == right.origin
+        && left.server_endpoint == right.server_endpoint
         && left.name == right.name
         && left.size_bytes == right.size_bytes
         && left.sources == right.sources
