@@ -789,6 +789,8 @@ export function SearchView(props: {
                   {alternateNames.length > 0 && (
                     <span class="search-result-alternates">Also seen as: {alternateNames.join(", ")}</span>
                   )}
+                  {result.complete && <span class="search-result-complete">Complete file</span>}
+                  {result.directory && <span class="search-result-directory">Folder: {result.directory}</span>}
                   {mediaSummary && <span class="search-result-media">{mediaSummary}</span>}
                   {aichHashes.length > 0 && (
                     <span class={`search-result-aich${aichHashes.length > 1 ? " search-result-aich-conflict" : ""}`}>
@@ -905,6 +907,7 @@ function searchResultObservationEvidence(observation: SearchResultObservation): 
     `${observation.sources} sources / ${observation.completeSources} complete`,
     observation.serverEndpoint ? `server ${observation.serverEndpoint}` : "",
     sourceEndpoint,
+    observation.complete ? "complete file" : "",
     observation.directory ? `folder ${observation.directory}` : "",
     observation.observedAt ? `observed ${shortTime(observation.observedAt)}` : ""
   ].filter(Boolean).join(" · ");

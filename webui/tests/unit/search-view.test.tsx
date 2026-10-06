@@ -94,6 +94,8 @@ describe("SearchView", () => {
         completeSources: 5,
         rating: 4,
         aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        complete: true,
+        directory: "Curated Audio",
         fileType: "audio",
         media: {
           artist: "Example Artist",
@@ -114,7 +116,7 @@ describe("SearchView", () => {
             media: { artist: "", album: "", title: "", lengthSeconds: 321, bitrateKbps: 192, codec: "FLAC" },
             rating: 4,
             aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            complete: false,
+            complete: true,
             sourceClientId: 16909060,
             sourceClientPort: 4662,
             directory: "Audio",
@@ -164,6 +166,8 @@ describe("SearchView", () => {
     expect(screen.getByText("Extension: .flac")).toBeInTheDocument();
     expect(screen.getByText("Minimum complete: 2")).toBeInTheDocument();
     expect(screen.getByText("Also seen as: Alternate.flac")).toBeInTheDocument();
+    expect(screen.getByText("Complete file")).toBeInTheDocument();
+    expect(screen.getByText("Folder: Curated Audio")).toBeInTheDocument();
     expect(screen.getByText("Title: Example Title · Artist: Example Artist · Album: Example Album · 5:21 · 192 kbps · Codec: FLAC")).toBeInTheDocument();
     expect(screen.getByText("5 complete")).toBeInTheDocument();
     expect(screen.getByText("4/5")).toBeInTheDocument();
@@ -171,7 +175,7 @@ describe("SearchView", () => {
     expect(screen.getByText(/AICH AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/)).toBeInTheDocument();
     expect(screen.getByText("server, global")).toBeInTheDocument();
     expect(screen.getAllByText("00112233445566778899aabbccddeeff").length).toBeGreaterThan(0);
-    expect(screen.getByText(/4.0 KiB · type audio · 8 sources \/ 3 complete · client 16909060:4662 · folder Audio/)).toBeInTheDocument();
+    expect(screen.getByText(/4.0 KiB · type audio · 8 sources \/ 3 complete · client 16909060:4662 · complete file · folder Audio/)).toBeInTheDocument();
     expect(screen.getByText(/12 sources \/ 5 complete · server 192.0.2.10:4661/)).toBeInTheDocument();
 
     fireEvent.input(screen.getByRole("combobox", { name: "Sort search results" }), {

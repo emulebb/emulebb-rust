@@ -844,6 +844,8 @@ td {
 
 .search-result-name-cell > strong,
 .search-result-alternates,
+.search-result-complete,
+.search-result-directory,
 .search-result-media,
 .search-result-aich,
 .search-complete-sources {
@@ -851,11 +853,19 @@ td {
 }
 
 .search-result-alternates,
+.search-result-directory,
 .search-result-media,
 .search-result-aich,
 .search-complete-sources {
   color: var(--tblr-secondary);
   font-size: 0.78rem;
+  margin-top: 2px;
+}
+
+.search-result-complete {
+  color: var(--tblr-success);
+  font-size: 0.78rem;
+  font-weight: 600;
   margin-top: 2px;
 }
 
