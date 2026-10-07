@@ -48,6 +48,7 @@ jobs:
   prepare:
     name: Prepare release identity
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       release_version: ${{ steps.identity.outputs.version }}
       source_sha: ${{ steps.source.outputs.sha }}
@@ -74,6 +75,7 @@ jobs:
     name: Require green source checks
     needs: prepare
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       checks: read
@@ -95,6 +97,7 @@ jobs:
     name: ${{ matrix.os }}-${{ matrix.arch }} package
     needs: [prepare, verify-source]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -235,6 +238,7 @@ jobs:
     name: Build multiarch image candidate
     needs: [prepare, native-package]
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
       EMULEBB_RUST_REPO: ${{ github.workspace }}
@@ -356,6 +360,7 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
     needs: [prepare, image-candidate]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
     permissions:
@@ -409,6 +414,7 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
     needs: [prepare, publish-image]
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
     permissions:
@@ -495,6 +501,7 @@ jobs:
     if: ${{ inputs.publish && inputs.channel == 'nightly' }}
     needs: [prepare, publish-native]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
     permissions:
@@ -527,6 +534,7 @@ jobs:
     if: ${{ always() && inputs.publish && inputs.channel == 'nightly' && needs.publish-native.result == 'success' && needs.publish-nightly-channel.result == 'success' }}
     needs: [publish-native, publish-nightly-channel]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
