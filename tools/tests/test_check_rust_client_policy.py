@@ -529,9 +529,23 @@ class TestReleaseBuildIdentity(unittest.TestCase):
     def test_rejects_release_without_runtime_identity(self) -> None:
         errors = CHECKER.check_release_build_identity("jobs: {}\n")
 
-        self.assertEqual(len(errors), 5)
+        self.assertEqual(len(errors), 10)
         self.assertTrue(any("distribution version" in error for error in errors))
         self.assertTrue(any("source revision" in error for error in errors))
+
+    def test_rejects_hardcoded_release_version_fallback(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        ).replace(
+            "env:\n",
+            "env:\n  RELEASE_VERSION: ${{ inputs.release_version || '0.1.0-beta.2' }}\n",
+            1,
+        )
+
+        errors = CHECKER.check_release_build_identity(workflow)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("hardcoded release-version fallback", errors[0])
 
 
 class TestOmissionRegistry(unittest.TestCase):

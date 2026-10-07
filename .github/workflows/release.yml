@@ -40,20 +40,17 @@ permissions:
   contents: read
 
 env:
-  RELEASE_VERSION: ${{ inputs.release_version || '0.1.0-beta.2' }}
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
 jobs:
-  verify-source:
-    name: Require green source checks
+  prepare:
+    name: Prepare release identity
     runs-on: ubuntu-24.04
     outputs:
+      release_version: ${{ steps.identity.outputs.version }}
       source_sha: ${{ steps.source.outputs.sha }}
-    permissions:
-      contents: read
-      checks: read
     steps:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,14 +64,36 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+      - name: Derive and validate release version
+        id: identity
+        env:
+          REQUESTED_VERSION: ${{ inputs.release_version }}
+        run: python tools/release_publish.py release-identity --requested-version "$REQUESTED_VERSION" --channel "$RELEASE_CHANNEL" --ref-name "$GITHUB_REF_NAME" --ref-type "$GITHUB_REF_TYPE" --github-output "$GITHUB_OUTPUT"
+
+  verify-source:
+    name: Require green source checks
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       - name: Verify required checks on the exact source commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python tools/nightly_release.py verify-source --sha "${{ steps.source.outputs.sha }}"
+        run: python tools/nightly_release.py verify-source --sha "${{ needs.prepare.outputs.source_sha }}"
 
   native-package:
     name: ${{ matrix.os }}-${{ matrix.arch }} package
-    needs: verify-source
+    needs: [prepare, verify-source]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -87,6 +106,7 @@ jobs:
           - {os: macos, arch: x64, runner: macos-15-intel}
           - {os: macos, arch: ARM64, runner: macos-15}
     env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
       EMULEBB_RUST_REPO: ${{ github.workspace }}
       EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
@@ -96,7 +116,7 @@ jobs:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_ref || github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
       - name: Checkout native MiniUPnP source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -181,7 +201,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
           EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
           EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}
-          EMULEBB_SOURCE_REVISION: ${{ needs.verify-source.outputs.source_sha }}
+          EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
           RUSTUP_TOOLCHAIN: "1.98.1"
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
       - name: Smoke native package and embedded WebUI
@@ -213,15 +233,16 @@ jobs:
 
   image-candidate:
     name: Build multiarch image candidate
-    needs: native-package
+    needs: [prepare, native-package]
     runs-on: ubuntu-24.04
     env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
       EMULEBB_RUST_REPO: ${{ github.workspace }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_ref || github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
       - name: Checkout pinned workspace packaging
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -333,16 +354,14 @@ jobs:
   publish-image:
     name: Publish verified GHCR image
     if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
-    needs: image-candidate
+    needs: [prepare, image-candidate]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
     permissions:
       contents: read
       packages: write
     steps:
-      - name: Require the approved beta tag
-        if: ${{ startsWith(github.ref, 'refs/tags/rust-v') }}
-        shell: bash
-        run: test "$GITHUB_REF_NAME" = "rust-v${RELEASE_VERSION}"
       - name: Download smoke-tested image candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -388,21 +407,19 @@ jobs:
   publish-native:
     name: Publish verified native assets
     if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
-    needs: publish-image
+    needs: [prepare, publish-image]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
     permissions:
       contents: write
       attestations: write
       id-token: write
     steps:
-      - name: Require the approved beta tag
-        if: ${{ startsWith(github.ref, 'refs/tags/rust-v') }}
-        shell: bash
-        run: test "$GITHUB_REF_NAME" = "rust-v${RELEASE_VERSION}"
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_ref || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           fetch-depth: 0
           path: emulebb-rust
       - name: Checkout pinned workspace packaging
@@ -458,12 +475,12 @@ jobs:
         id: draft-release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          tag_name: ${{ inputs.channel == 'nightly' && format('rust-v{0}', inputs.release_version) || github.ref_name }}
-          target_commitish: ${{ inputs.source_ref || github.sha }}
+          tag_name: ${{ inputs.channel == 'nightly' && format('rust-v{0}', needs.prepare.outputs.release_version) || github.ref_name }}
+          target_commitish: ${{ needs.prepare.outputs.source_sha }}
           draft: true
           prerelease: true
           make_latest: false
-          body_path: ${{ inputs.channel == 'nightly' && format('{0}/nightly-release-notes.md', runner.temp) || 'emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md' }}
+          body_path: ${{ inputs.channel == 'nightly' && format('{0}/nightly-release-notes.md', runner.temp) || format('emulebb-tooling/docs/products/emulebb-rust/RELEASE-{0}-NOTES.md', needs.prepare.outputs.release_version) }}
           files: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
           fail_on_unmatched_files: true
           overwrite_files: false
@@ -476,8 +493,10 @@ jobs:
   publish-nightly-channel:
     name: Advance the nightly image channel
     if: ${{ inputs.publish && inputs.channel == 'nightly' }}
-    needs: publish-native
+    needs: [prepare, publish-native]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
     permissions:
       contents: read
       packages: write

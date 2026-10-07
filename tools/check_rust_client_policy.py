@@ -772,9 +772,9 @@ def check_release_ci_gate(
         "name: Require green source checks": "named release source gate",
         "checks: read": "check-run read permission",
         'echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"': "immutable source resolution",
-        'python tools/nightly_release.py verify-source --sha "${{ steps.source.outputs.sha }}"':
+        'python tools/nightly_release.py verify-source --sha "${{ needs.prepare.outputs.source_sha }}"':
             "exact-source verification command",
-        "needs: verify-source": "packaging dependency on the release source gate",
+        "needs: [prepare, verify-source]": "packaging dependency on the release source gate",
     }
     errors = [
         f".github/workflows/release.yml is missing {description} configuration"
@@ -930,7 +930,7 @@ def check_release_image_promotion(workflow_text: str | None = None) -> list[str]
         errors.append(".github/workflows/release.yml is missing the native publishing job")
     else:
         native_required = {
-            "needs: publish-image": "image-before-release ordering",
+            "needs: [prepare, publish-image]": "image-before-release ordering",
             "id: draft-release": "draft release output",
             "draft: true": "draft-first release creation",
             "overwrite_files: false": "write-once release assets",
@@ -950,7 +950,7 @@ def check_release_image_promotion(workflow_text: str | None = None) -> list[str]
         )
     else:
         channel_required = {
-            "needs: publish-native": "release-before-channel ordering",
+            "needs: [prepare, publish-native]": "release-before-channel ordering",
             "inputs.channel == 'nightly'": "nightly-only channel gate",
             "regclient/actions/regctl-installer@": "pinned channel registry client installer",
             "release: v0.11.6": "pinned channel registry client release",
@@ -1115,23 +1115,35 @@ def check_container_health_contract(
 
 
 def check_release_build_identity(workflow_text: str | None = None) -> list[str]:
-    """Require release binaries to receive exact distribution provenance."""
+    """Require one validated release identity to feed every build stage."""
 
     workflow = ROOT / ".github" / "workflows" / "release.yml"
     text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
     required = {
         "RELEASE_CHANNEL: ${{ inputs.channel ||": "derived release channel",
+        "name: Prepare release identity": "release identity preparation job",
         "source_sha: ${{ steps.source.outputs.sha }}": "resolved source output",
+        "release_version: ${{ steps.identity.outputs.version }}": "prepared version output",
+        "release_publish.py release-identity": "Cargo-backed version validation",
+        "RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}":
+            "prepared version propagation",
         "EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}": "runtime distribution version",
         "EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}": "runtime release channel",
-        "EMULEBB_SOURCE_REVISION: ${{ needs.verify-source.outputs.source_sha }}":
+        "EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}":
             "runtime source revision",
+        "RELEASE-{0}-NOTES.md', needs.prepare.outputs.release_version":
+            "prepared version release notes selection",
     }
-    return [
+    errors = [
         f".github/workflows/release.yml is missing {description} configuration"
         for fragment, description in required.items()
         if fragment not in text
     ]
+    if "RELEASE_VERSION: ${{ inputs.release_version ||" in text:
+        errors.append(
+            ".github/workflows/release.yml must not use a hardcoded release-version fallback"
+        )
+    return errors
 
 
 def check_lint_suppressions() -> list[str]:
