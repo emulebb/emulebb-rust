@@ -24,6 +24,7 @@ jobs:
   workflow-lint:
     name: GitHub Actions workflow lint
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,6 +41,7 @@ jobs:
   build-test:
     name: build+test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
     strategy:
@@ -109,6 +111,7 @@ jobs:
     name: live REST/OpenAPI conformance
     needs: build-test
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
     steps:
@@ -167,6 +170,7 @@ jobs:
   quality:
     name: policy + format + clippy
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
     steps:
@@ -219,6 +223,7 @@ jobs:
   supply-chain:
     name: cargo-deny (advisories, licenses, sources)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

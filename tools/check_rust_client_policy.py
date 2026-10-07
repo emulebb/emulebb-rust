@@ -91,6 +91,7 @@ def main() -> int:
     errors.extend(check_workflow_lint_ci())
     errors.extend(check_required_ci_gates())
     errors.extend(check_default_branch_policy())
+    errors.extend(check_workflow_job_timeouts())
     errors.extend(check_ci_linux_runner_pin())
     errors.extend(check_scheduled_fuzz_ci())
     errors.extend(check_live_rest_openapi_ci())
@@ -777,6 +778,63 @@ def check_default_branch_policy(
             errors.append(
                 f".github/DEFAULT_BRANCH_POLICY.md is missing {description}"
             )
+    return errors
+
+
+def check_workflow_job_timeouts(
+    workflow_texts: dict[str, str] | None = None,
+) -> list[str]:
+    """Require explicit workload-sized time budgets for every runnable job."""
+
+    expected = {
+        "ci.yml": {
+            "workflow-lint": 10,
+            "build-test": 45,
+            "rest-openapi": 15,
+            "quality": 30,
+            "supply-chain": 10,
+            "required-ci": 5,
+        },
+        "codeql.yml": {"analyze": 30, "required-codeql": 5},
+        "fuzz.yml": {"parser-fuzz": 30},
+        "nightly.yml": {"prepare": 10, "verify-source": 10},
+        "release.yml": {
+            "prepare": 10,
+            "verify-source": 10,
+            "native-package": 45,
+            "image-candidate": 45,
+            "publish-image": 15,
+            "publish-native": 20,
+            "publish-nightly-channel": 10,
+            "cleanup-nightlies": 10,
+        },
+    }
+    texts = {
+        filename: (ROOT / ".github" / "workflows" / filename).read_text(
+            encoding="utf-8"
+        )
+        for filename in expected
+    }
+    if workflow_texts is not None:
+        texts.update(workflow_texts)
+
+    errors = []
+    for filename, jobs in expected.items():
+        text = texts[filename]
+        for job, timeout in jobs.items():
+            match = re.search(
+                rf"(?ms)^  {re.escape(job)}:\s*$\n"
+                r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+                text,
+            )
+            if match is None or re.search(
+                rf"(?m)^    timeout-minutes:\s*{timeout}\s*$",
+                match.group("body"),
+            ) is None:
+                errors.append(
+                    f".github/workflows/{filename} job {job} must set "
+                    f"timeout-minutes: {timeout}"
+                )
     return errors
 
 

@@ -301,6 +301,29 @@ class TestDefaultBranchPolicy(unittest.TestCase):
         self.assertTrue(any("break-glass" in error for error in errors))
 
 
+class TestWorkflowJobTimeouts(unittest.TestCase):
+    def test_current_workflows_bound_every_runnable_job(self) -> None:
+        self.assertEqual(CHECKER.check_workflow_job_timeouts(), [])
+
+    def test_rejects_missing_timeout_budgets(self) -> None:
+        incomplete = {
+            filename: "jobs: {}\n"
+            for filename in (
+                "ci.yml",
+                "codeql.yml",
+                "fuzz.yml",
+                "nightly.yml",
+                "release.yml",
+            )
+        }
+
+        errors = CHECKER.check_workflow_job_timeouts(incomplete)
+
+        self.assertEqual(len(errors), 19)
+        self.assertTrue(any("ci.yml job build-test" in error for error in errors))
+        self.assertTrue(any("release.yml job publish-native" in error for error in errors))
+
+
 class TestCiLinuxRunnerPin(unittest.TestCase):
     def test_current_ci_pins_linux_runners(self) -> None:
         self.assertEqual(CHECKER.check_ci_linux_runner_pin(), [])
