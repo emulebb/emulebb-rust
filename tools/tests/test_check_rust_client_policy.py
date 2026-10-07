@@ -212,8 +212,9 @@ uses: github/codeql-action/analyze@v4
 
         errors = CHECKER.check_code_scanning_ci(workflow)
 
-        self.assertEqual(len(errors), 8)
+        self.assertEqual(len(errors), 9)
         self.assertTrue(any("security event upload permission" in error for error in errors))
+        self.assertTrue(any("stable per-language check name" in error for error in errors))
         self.assertTrue(any("actions with build-mode none" in error for error in errors))
         self.assertTrue(any("rust with build-mode none" in error for error in errors))
         self.assertTrue(any("full commit SHA" in error for error in errors))
@@ -223,6 +224,7 @@ uses: github/codeql-action/analyze@v4
 schedule:
 workflow_dispatch:
 security-events: write
+name: CodeQL (${{{{ matrix.language }}}})
 queries: security-extended
 category: /language:${{{{ matrix.language }}}}
 - language: actions
@@ -333,7 +335,7 @@ ref: main
 
 
 class TestReleaseCiGate(unittest.TestCase):
-    def test_current_workflow_requires_green_source_ci(self) -> None:
+    def test_current_workflow_requires_all_green_source_checks(self) -> None:
         self.assertEqual(CHECKER.check_release_ci_gate(), [])
 
     def test_rejects_release_packaging_without_exact_source_gate(self) -> None:
@@ -343,7 +345,7 @@ class TestReleaseCiGate(unittest.TestCase):
         )
 
         self.assertEqual(len(errors), 6)
-        self.assertTrue(any("source CI verification job" in error for error in errors))
+        self.assertTrue(any("source-check verification job" in error for error in errors))
         self.assertTrue(any("packaging dependency" in error for error in errors))
 
     def test_rejects_nightly_caller_without_check_permission(self) -> None:
@@ -353,6 +355,13 @@ class TestReleaseCiGate(unittest.TestCase):
 
         self.assertEqual(len(errors), 1)
         self.assertIn("nightly.yml", errors[0])
+
+    def test_rejects_source_gate_without_each_codeql_language(self) -> None:
+        errors = CHECKER.check_release_ci_gate(helper_text="REQUIRED_SOURCE_CHECKS = ()\n")
+
+        self.assertEqual(len(errors), 4)
+        self.assertTrue(any("CodeQL (actions)" in error for error in errors))
+        self.assertTrue(any("CodeQL (rust)" in error for error in errors))
 
 
 class TestNightlyCoordination(unittest.TestCase):

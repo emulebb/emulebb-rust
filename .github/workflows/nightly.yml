@@ -52,8 +52,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python tools/nightly_release.py metadata --force "${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}" --publish "${{ github.event_name == 'schedule' || inputs.publish }}" --scheduled "${{ github.event_name == 'schedule' }}" --github-output "$GITHUB_OUTPUT"
 
-  verify-ci:
-    name: Require green main CI
+  verify-source:
+    name: Require green main source checks
     needs: prepare
     if: ${{ needs.prepare.outputs.should_build == 'true' }}
     runs-on: ubuntu-24.04
@@ -69,12 +69,12 @@ jobs:
       - name: Verify required checks on the exact source commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python tools/nightly_release.py verify-ci --sha "${{ needs.prepare.outputs.sha }}"
+        run: python tools/nightly_release.py verify-source --sha "${{ needs.prepare.outputs.sha }}"
 
   package:
     name: Build and optionally publish nightly
-    needs: [prepare, verify-ci]
-    if: ${{ needs.prepare.outputs.should_build == 'true' && needs.verify-ci.result == 'success' }}
+    needs: [prepare, verify-source]
+    if: ${{ needs.prepare.outputs.should_build == 'true' && needs.verify-source.result == 'success' }}
     uses: ./.github/workflows/release.yml
     permissions:
       contents: write

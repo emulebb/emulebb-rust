@@ -594,6 +594,7 @@ def check_code_scanning_ci(workflow_text: str | None = None) -> list[str]:
         "schedule:": "weekly schedule",
         "workflow_dispatch:": "manual dispatch",
         "security-events: write": "security event upload permission",
+        "name: CodeQL (${{ matrix.language }})": "stable per-language check name",
         "queries: security-extended": "extended security query suite",
         "category: /language:${{ matrix.language }}": "per-language result category",
     }
@@ -760,19 +761,20 @@ def check_live_rest_openapi_ci(workflow_text: str | None = None) -> list[str]:
 def check_release_ci_gate(
     workflow_text: str | None = None,
     nightly_text: str | None = None,
+    helper_text: str | None = None,
 ) -> list[str]:
-    """Require release packaging to depend on green CI for the exact source commit."""
+    """Require release packaging to depend on all source checks for the exact commit."""
 
     workflow = ROOT / ".github" / "workflows" / "release.yml"
     text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
     required = {
-        "verify-ci:": "source CI verification job",
-        "name: Require green source CI": "named release CI gate",
+        "verify-source:": "source-check verification job",
+        "name: Require green source checks": "named release source gate",
         "checks: read": "check-run read permission",
         'echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"': "immutable source resolution",
-        'python tools/nightly_release.py verify-ci --sha "${{ steps.source.outputs.sha }}"':
-            "exact-source CI verification command",
-        "needs: verify-ci": "packaging dependency on the release CI gate",
+        'python tools/nightly_release.py verify-source --sha "${{ steps.source.outputs.sha }}"':
+            "exact-source verification command",
+        "needs: verify-source": "packaging dependency on the release source gate",
     }
     errors = [
         f".github/workflows/release.yml is missing {description} configuration"
@@ -794,6 +796,15 @@ def check_release_ci_gate(
         errors.append(
             ".github/workflows/nightly.yml reusable release caller must grant checks: read"
         )
+    helper_path = ROOT / "tools" / "nightly_release.py"
+    helper = helper_path.read_text(encoding="utf-8") if helper_text is None else helper_text
+    for language in ("actions", "javascript-typescript", "python", "rust"):
+        check_name = f'"CodeQL ({language})"'
+        if check_name not in helper:
+            errors.append(
+                "tools/nightly_release.py must require the exact-source "
+                f"CodeQL ({language}) check"
+            )
     return errors
 
 
@@ -1113,7 +1124,7 @@ def check_release_build_identity(workflow_text: str | None = None) -> list[str]:
         "source_sha: ${{ steps.source.outputs.sha }}": "resolved source output",
         "EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}": "runtime distribution version",
         "EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}": "runtime release channel",
-        "EMULEBB_SOURCE_REVISION: ${{ needs.verify-ci.outputs.source_sha }}":
+        "EMULEBB_SOURCE_REVISION: ${{ needs.verify-source.outputs.source_sha }}":
             "runtime source revision",
     }
     return [

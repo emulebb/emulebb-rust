@@ -46,8 +46,8 @@ env:
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
 jobs:
-  verify-ci:
-    name: Require green source CI
+  verify-source:
+    name: Require green source checks
     runs-on: ubuntu-24.04
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
@@ -70,11 +70,11 @@ jobs:
       - name: Verify required checks on the exact source commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python tools/nightly_release.py verify-ci --sha "${{ steps.source.outputs.sha }}"
+        run: python tools/nightly_release.py verify-source --sha "${{ steps.source.outputs.sha }}"
 
   native-package:
     name: ${{ matrix.os }}-${{ matrix.arch }} package
-    needs: verify-ci
+    needs: verify-source
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -181,7 +181,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
           EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
           EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}
-          EMULEBB_SOURCE_REVISION: ${{ needs.verify-ci.outputs.source_sha }}
+          EMULEBB_SOURCE_REVISION: ${{ needs.verify-source.outputs.source_sha }}
           RUSTUP_TOOLCHAIN: "1.98.1"
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
       - name: Smoke native package and embedded WebUI

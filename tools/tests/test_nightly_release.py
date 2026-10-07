@@ -204,27 +204,44 @@ class TestNightlyNotes(unittest.TestCase):
 
 class TestNightlyGatesAndRetention(unittest.TestCase):
     def test_required_checks_include_workflow_lint(self) -> None:
-        self.assertIn("GitHub Actions workflow lint", NIGHTLY.REQUIRED_CI_CHECKS)
+        self.assertIn("GitHub Actions workflow lint", NIGHTLY.REQUIRED_SOURCE_CHECKS)
 
     def test_required_linux_check_uses_pinned_runner_name(self) -> None:
-        self.assertIn("build+test (ubuntu-24.04)", NIGHTLY.REQUIRED_CI_CHECKS)
-        self.assertNotIn("build+test (ubuntu-latest)", NIGHTLY.REQUIRED_CI_CHECKS)
+        self.assertIn("build+test (ubuntu-24.04)", NIGHTLY.REQUIRED_SOURCE_CHECKS)
+        self.assertNotIn("build+test (ubuntu-latest)", NIGHTLY.REQUIRED_SOURCE_CHECKS)
+
+    def test_required_checks_include_every_codeql_language(self) -> None:
+        self.assertEqual(
+            NIGHTLY.REQUIRED_CODEQL_CHECKS,
+            (
+                "CodeQL (actions)",
+                "CodeQL (javascript-typescript)",
+                "CodeQL (python)",
+                "CodeQL (rust)",
+            ),
+        )
+        self.assertTrue(
+            set(NIGHTLY.REQUIRED_CODEQL_CHECKS).issubset(NIGHTLY.REQUIRED_SOURCE_CHECKS)
+        )
 
     def test_required_checks_accept_one_success_per_name(self) -> None:
         check_runs = [
             {"name": name, "status": "completed", "conclusion": "success"}
-            for name in NIGHTLY.REQUIRED_CI_CHECKS
+            for name in NIGHTLY.REQUIRED_SOURCE_CHECKS
         ]
-        check_runs.append({"name": NIGHTLY.REQUIRED_CI_CHECKS[0], "status": "completed", "conclusion": "skipped"})
+        check_runs.append({"name": NIGHTLY.REQUIRED_SOURCE_CHECKS[0], "status": "completed", "conclusion": "skipped"})
         self.assertEqual(NIGHTLY.successful_required_checks({"check_runs": check_runs}), ())
 
     def test_required_checks_report_missing_or_failed_names(self) -> None:
         payload = {
             "check_runs": [
-                {"name": NIGHTLY.REQUIRED_CI_CHECKS[0], "status": "completed", "conclusion": "failure"}
+                {"name": NIGHTLY.REQUIRED_SOURCE_CHECKS[0], "status": "completed", "conclusion": "failure"}
             ]
         }
-        self.assertEqual(NIGHTLY.successful_required_checks(payload), NIGHTLY.REQUIRED_CI_CHECKS)
+        self.assertEqual(
+            NIGHTLY.successful_required_checks(payload),
+            NIGHTLY.REQUIRED_SOURCE_CHECKS,
+        )
 
     def test_pruning_never_selects_formal_or_non_prerelease_tags(self) -> None:
         releases = [

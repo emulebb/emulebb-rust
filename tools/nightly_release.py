@@ -29,7 +29,7 @@ NIGHTLY_TAG_RE = re.compile(
 SAFE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
 METADATA_SCHEMA_PATH = "crates/emulebb-metadata/src/schema.rs"
 METADATA_SCHEMA_RE = re.compile(r"^pub const SCHEMA_VERSION: i64 = (?P<version>\d+);$", re.MULTILINE)
-REQUIRED_CI_CHECKS = (
+REQUIRED_BUILD_CHECKS = (
     "GitHub Actions workflow lint",
     "build+test (ubuntu-24.04)",
     "build+test (macos-latest)",
@@ -38,6 +38,13 @@ REQUIRED_CI_CHECKS = (
     "policy + format + clippy",
     "cargo-deny (advisories, licenses, sources)",
 )
+REQUIRED_CODEQL_CHECKS = (
+    "CodeQL (actions)",
+    "CodeQL (javascript-typescript)",
+    "CodeQL (python)",
+    "CodeQL (rust)",
+)
+REQUIRED_SOURCE_CHECKS = REQUIRED_BUILD_CHECKS + REQUIRED_CODEQL_CHECKS
 
 
 @dataclass(frozen=True)
@@ -338,7 +345,7 @@ def metadata(
         version=version,
     )
     if scheduled and should_build:
-        verify_ci(repository, source_sha)
+        verify_source_checks(repository, source_sha)
     compare_url = f"https://github.com/{repository}/compare/{previous_ref}...{source_sha}"
     return {
         "base_version": base_version,
@@ -495,22 +502,22 @@ def successful_required_checks(payload: dict[str, object]) -> tuple[str, ...]:
 
     runs = payload.get("check_runs", [])
     if not isinstance(runs, list):
-        return REQUIRED_CI_CHECKS
+        return REQUIRED_SOURCE_CHECKS
     successes = {
         str(run.get("name"))
         for run in runs
         if isinstance(run, dict) and run.get("status") == "completed" and run.get("conclusion") == "success"
     }
-    return tuple(name for name in REQUIRED_CI_CHECKS if name not in successes)
+    return tuple(name for name in REQUIRED_SOURCE_CHECKS if name not in successes)
 
 
-def verify_ci(repository: str, sha: str) -> None:
-    """Requires the normal default-branch CI checks to be green for the source SHA."""
+def verify_source_checks(repository: str, sha: str) -> None:
+    """Require build, conformance, policy, and CodeQL checks for the source SHA."""
 
     response = run(("gh", "api", f"repos/{repository}/commits/{sha}/check-runs?per_page=100"))
     missing = successful_required_checks(json.loads(response.stdout))
     if missing:
-        raise RuntimeError("required CI checks are not successful: " + ", ".join(missing))
+        raise RuntimeError("required source checks are not successful: " + ", ".join(missing))
 
 
 def nightly_tags_to_prune(releases: Sequence[dict[str, object]], keep: int) -> list[str]:
@@ -572,7 +579,10 @@ def build_parser() -> argparse.ArgumentParser:
     notes_parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     notes_parser.add_argument("--output", type=Path, required=True)
 
-    verify_parser = subparsers.add_parser("verify-ci", help="Require normal CI checks for one commit.")
+    verify_parser = subparsers.add_parser(
+        "verify-source",
+        help="Require build, conformance, policy, and CodeQL checks for one commit.",
+    )
     verify_parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     verify_parser.add_argument("--sha", required=True)
 
@@ -619,9 +629,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output.write_text(rendered, encoding="utf-8", newline="\n")
         print(args.output)
         return 0
-    if args.command == "verify-ci":
-        verify_ci(args.repository, args.sha)
-        print(f"required CI checks passed for {args.sha}")
+    if args.command == "verify-source":
+        verify_source_checks(args.repository, args.sha)
+        print(f"required source checks passed for {args.sha}")
         return 0
     if args.command == "prune":
         selected = prune(args.repository, args.keep, dry_run=args.dry_run)
