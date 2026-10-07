@@ -203,25 +203,10 @@ class TestNightlyNotes(unittest.TestCase):
 
 
 class TestNightlyGatesAndRetention(unittest.TestCase):
-    def test_required_checks_include_workflow_lint(self) -> None:
-        self.assertIn("GitHub Actions workflow lint", NIGHTLY.REQUIRED_SOURCE_CHECKS)
-
-    def test_required_linux_check_uses_pinned_runner_name(self) -> None:
-        self.assertIn("build+test (ubuntu-24.04)", NIGHTLY.REQUIRED_SOURCE_CHECKS)
-        self.assertNotIn("build+test (ubuntu-latest)", NIGHTLY.REQUIRED_SOURCE_CHECKS)
-
-    def test_required_checks_include_every_codeql_language(self) -> None:
+    def test_required_checks_use_stable_aggregate_names(self) -> None:
         self.assertEqual(
-            NIGHTLY.REQUIRED_CODEQL_CHECKS,
-            (
-                "CodeQL (actions)",
-                "CodeQL (javascript-typescript)",
-                "CodeQL (python)",
-                "CodeQL (rust)",
-            ),
-        )
-        self.assertTrue(
-            set(NIGHTLY.REQUIRED_CODEQL_CHECKS).issubset(NIGHTLY.REQUIRED_SOURCE_CHECKS)
+            NIGHTLY.REQUIRED_SOURCE_CHECKS,
+            ("Required CI", "Required CodeQL"),
         )
 
     def test_required_checks_accept_one_success_per_name(self) -> None:
