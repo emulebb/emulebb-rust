@@ -92,6 +92,7 @@ def main() -> int:
     errors.extend(check_scheduled_fuzz_ci())
     errors.extend(check_live_rest_openapi_ci())
     errors.extend(check_release_ci_gate())
+    errors.extend(check_nightly_coordination())
     errors.extend(check_release_build_identity())
     errors.extend(check_release_image_promotion())
     errors.extend(check_release_image_security())
@@ -794,6 +795,45 @@ def check_release_ci_gate(
             ".github/workflows/nightly.yml reusable release caller must grant checks: read"
         )
     return errors
+
+
+def check_nightly_coordination(
+    workflow_text: str | None = None,
+    helper_text: str | None = None,
+) -> list[str]:
+    """Keep scheduled nightlies attached to green main and one daily publication."""
+
+    workflow_path = ROOT / ".github" / "workflows" / "nightly.yml"
+    workflow = (
+        workflow_path.read_text(encoding="utf-8")
+        if workflow_text is None
+        else workflow_text
+    )
+    helper_path = ROOT / "tools" / "nightly_release.py"
+    helper = helper_path.read_text(encoding="utf-8") if helper_text is None else helper_text
+    required = {
+        "actions: read": (workflow, "workflow-run read permission"),
+        '--scheduled "${{ github.event_name == \'schedule\' }}"': (
+            workflow,
+            "scheduled source-selection mode",
+        ),
+        '--publish "${{ github.event_name == \'schedule\' || inputs.publish }}"': (
+            workflow,
+            "publication-aware metadata mode",
+        ),
+        "def latest_green_main_sha(": (helper, "latest-green-main selection"),
+        "event=push&status=success": (helper, "successful push CI query"),
+        "def published_nightly_for_date(": (helper, "daily publication guard"),
+        "refusing to republish existing nightly version": (
+            helper,
+            "existing-version publication rejection",
+        ),
+    }
+    return [
+        f"nightly coordination is missing {description}"
+        for fragment, (source, description) in required.items()
+        if fragment not in source
+    ]
 
 
 def check_release_image_promotion(workflow_text: str | None = None) -> list[str]:

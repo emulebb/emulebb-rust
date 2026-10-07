@@ -355,6 +355,21 @@ class TestReleaseCiGate(unittest.TestCase):
         self.assertIn("nightly.yml", errors[0])
 
 
+class TestNightlyCoordination(unittest.TestCase):
+    def test_current_workflow_selects_one_daily_green_main_nightly(self) -> None:
+        self.assertEqual(CHECKER.check_nightly_coordination(), [])
+
+    def test_rejects_unwired_or_unbounded_nightly_coordination(self) -> None:
+        errors = CHECKER.check_nightly_coordination(
+            workflow_text="name: Nightly\n",
+            helper_text="def metadata(): pass\n",
+        )
+
+        self.assertEqual(len(errors), 7)
+        self.assertTrue(any("latest-green-main" in error for error in errors))
+        self.assertTrue(any("daily publication guard" in error for error in errors))
+
+
 class TestReleaseImagePromotion(unittest.TestCase):
     def test_current_workflow_promotes_smoke_tested_archive(self) -> None:
         self.assertEqual(CHECKER.check_release_image_promotion(), [])

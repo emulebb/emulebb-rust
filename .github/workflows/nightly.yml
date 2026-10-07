@@ -24,6 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
   checks: read
 
@@ -47,7 +48,9 @@ jobs:
           python-version: "3.12"
       - name: Compute version and source range
         id: metadata
-        run: python tools/nightly_release.py metadata --force "${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}" --github-output "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/nightly_release.py metadata --force "${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}" --publish "${{ github.event_name == 'schedule' || inputs.publish }}" --scheduled "${{ github.event_name == 'schedule' }}" --github-output "$GITHUB_OUTPUT"
 
   verify-ci:
     name: Require green main CI

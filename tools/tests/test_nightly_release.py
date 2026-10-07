@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "nightly_release.py"
@@ -54,6 +55,108 @@ class TestNightlyMetadata(unittest.TestCase):
             NIGHTLY.write_github_output(output, {"version": "0.1.0", "should_build": "true"})
             self.assertEqual(output.read_text(encoding="utf-8"), "version=0.1.0\nshould_build=true\n")
 
+    def test_successful_ci_shas_accept_only_completed_main_pushes(self) -> None:
+        valid_sha = "1" * 40
+        payload = {
+            "workflow_runs": [
+                {
+                    "head_sha": valid_sha,
+                    "head_branch": "main",
+                    "event": "push",
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+                {
+                    "head_sha": "2" * 40,
+                    "head_branch": "main",
+                    "event": "push",
+                    "status": "in_progress",
+                    "conclusion": None,
+                },
+                {
+                    "head_sha": "3" * 40,
+                    "head_branch": "topic",
+                    "event": "push",
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+            ]
+        }
+        self.assertEqual(NIGHTLY.successful_ci_shas(payload, "main"), [valid_sha])
+
+    def test_latest_green_main_skips_newer_commit_outside_checkout_lineage(self) -> None:
+        newer_sha = "1" * 40
+        selected_sha = "2" * 40
+        response = mock.Mock(
+            stdout=(
+                '{"workflow_runs":['
+                f'{{"head_sha":"{newer_sha}","head_branch":"main","event":"push",'
+                '"status":"completed","conclusion":"success"},'
+                f'{{"head_sha":"{selected_sha}","head_branch":"main","event":"push",'
+                '"status":"completed","conclusion":"success"}'
+                "]}"
+            )
+        )
+        with (
+            mock.patch.object(NIGHTLY, "run", return_value=response),
+            mock.patch.object(NIGHTLY, "is_ancestor", side_effect=[False, True]),
+        ):
+            self.assertEqual(NIGHTLY.latest_green_main_sha("emulebb/emulebb-rust"), selected_sha)
+
+    def test_published_nightly_is_scoped_to_beta_and_date(self) -> None:
+        releases = [
+            {
+                "tagName": "rust-v0.1.0-beta.2.nightly.20261005.g1111111",
+                "publishedAt": "2026-10-05T09:00:00Z",
+                "isPrerelease": True,
+                "isDraft": False,
+            },
+            {
+                "tagName": "rust-v0.1.0-beta.1.nightly.20261006.g2222222",
+                "publishedAt": "2026-10-06T09:00:00Z",
+                "isPrerelease": True,
+                "isDraft": False,
+            },
+            {
+                "tagName": "rust-v0.1.0-beta.2.nightly.20261006.g3333333",
+                "publishedAt": "2026-10-06T09:00:00Z",
+                "isPrerelease": True,
+                "isDraft": True,
+            },
+        ]
+        self.assertTrue(
+            NIGHTLY.published_nightly_for_date("0.1.0-beta.2", "20261005", releases)
+        )
+        self.assertFalse(
+            NIGHTLY.published_nightly_for_date("0.1.0-beta.2", "20261006", releases)
+        )
+
+    def test_scheduled_retry_stops_after_one_published_nightly_per_date(self) -> None:
+        self.assertFalse(
+            NIGHTLY.should_build_nightly(
+                force=False,
+                publish=True,
+                scheduled=True,
+                tag_exists=False,
+                published_for_date=True,
+                source_changed=True,
+                version="0.1.0-beta.2.nightly.20261006.g1111111",
+            )
+        )
+
+    def test_manual_force_can_rebuild_candidate_but_not_republish_version(self) -> None:
+        arguments = {
+            "force": True,
+            "scheduled": False,
+            "tag_exists": True,
+            "published_for_date": True,
+            "source_changed": False,
+            "version": "0.1.0-beta.2.nightly.20261006.g1111111",
+        }
+        self.assertTrue(NIGHTLY.should_build_nightly(publish=False, **arguments))
+        with self.assertRaisesRegex(RuntimeError, "refusing to republish"):
+            NIGHTLY.should_build_nightly(publish=True, **arguments)
+
 
 class TestNightlyNotes(unittest.TestCase):
     def test_commit_subjects_are_grouped_and_linked(self) -> None:
@@ -100,6 +203,9 @@ class TestNightlyNotes(unittest.TestCase):
 
 
 class TestNightlyGatesAndRetention(unittest.TestCase):
+    def test_required_checks_include_workflow_lint(self) -> None:
+        self.assertIn("GitHub Actions workflow lint", NIGHTLY.REQUIRED_CI_CHECKS)
+
     def test_required_linux_check_uses_pinned_runner_name(self) -> None:
         self.assertIn("build+test (ubuntu-24.04)", NIGHTLY.REQUIRED_CI_CHECKS)
         self.assertNotIn("build+test (ubuntu-latest)", NIGHTLY.REQUIRED_CI_CHECKS)

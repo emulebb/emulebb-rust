@@ -30,6 +30,7 @@ SAFE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
 METADATA_SCHEMA_PATH = "crates/emulebb-metadata/src/schema.rs"
 METADATA_SCHEMA_RE = re.compile(r"^pub const SCHEMA_VERSION: i64 = (?P<version>\d+);$", re.MULTILINE)
 REQUIRED_CI_CHECKS = (
+    "GitHub Actions workflow lint",
     "build+test (ubuntu-24.04)",
     "build+test (macos-latest)",
     "build+test (windows-latest)",
@@ -72,6 +73,22 @@ def workspace_version(root: Path = ROOT) -> str:
 
     with (root / "Cargo.toml").open("rb") as stream:
         value = str(tomllib.load(stream)["workspace"]["package"]["version"])
+    return validate_workspace_version(value)
+
+
+def workspace_version_at_ref(ref: str) -> str:
+    """Returns the promoted Cargo workspace beta version at one Git ref."""
+
+    if not SAFE_REF_RE.fullmatch(ref):
+        raise RuntimeError(f"unsafe Cargo version ref: {ref}")
+    source = git_output("show", f"{ref}:Cargo.toml")
+    value = str(tomllib.loads(source)["workspace"]["package"]["version"])
+    return validate_workspace_version(value)
+
+
+def validate_workspace_version(value: str) -> str:
+    """Requires one promoted beta version suitable for nightly derivation."""
+
     if not PROMOTED_BETA_RE.fullmatch(value):
         raise RuntimeError(f"nightly builds require a promoted beta Cargo version, got {value!r}")
     return value
@@ -127,6 +144,130 @@ def latest_nightly_tag(base_version: str, tags: Sequence[str]) -> str | None:
     return matched[0] if matched else None
 
 
+def successful_ci_shas(payload: dict[str, object], branch: str) -> list[str]:
+    """Returns newest-first successful push CI SHAs for one branch."""
+
+    runs = payload.get("workflow_runs", [])
+    if not isinstance(runs, list):
+        return []
+    shas: list[str] = []
+    for run_data in runs:
+        if not isinstance(run_data, dict):
+            continue
+        sha = str(run_data.get("head_sha", "")).lower()
+        if (
+            run_data.get("head_branch") == branch
+            and run_data.get("event") == "push"
+            and run_data.get("status") == "completed"
+            and run_data.get("conclusion") == "success"
+            and re.fullmatch(r"[0-9a-f]{40}", sha)
+        ):
+            shas.append(sha)
+    return shas
+
+
+def is_ancestor(ancestor: str, descendant: str) -> bool:
+    """Reports whether one validated commit is an ancestor of another."""
+
+    for ref in (ancestor, descendant):
+        if not SAFE_REF_RE.fullmatch(ref):
+            raise RuntimeError(f"unsafe ancestry ref: {ref}")
+    try:
+        run(("git", "merge-base", "--is-ancestor", ancestor, descendant))
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
+def latest_green_main_sha(repository: str, branch: str = "main") -> str:
+    """Selects the newest successful normal-CI commit in the checkout lineage."""
+
+    response = run(
+        (
+            "gh",
+            "api",
+            f"repos/{repository}/actions/workflows/ci.yml/runs"
+            f"?branch={branch}&event=push&status=success&per_page=20",
+        )
+    )
+    candidates = successful_ci_shas(json.loads(response.stdout), branch)
+    for candidate in candidates:
+        if is_ancestor(candidate, "HEAD"):
+            return candidate
+    raise RuntimeError(f"no successful {branch} CI commit is available in the current checkout lineage")
+
+
+def published_nightly_releases(
+    base_version: str,
+    releases: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Returns newest-first published nightly prereleases for one beta."""
+
+    matching = [
+        release
+        for release in releases
+        if release.get("isPrerelease") is True
+        and release.get("isDraft") is False
+        and isinstance(release.get("publishedAt"), str)
+        and NIGHTLY_TAG_RE.fullmatch(str(release.get("tagName", "")))
+        and str(release["tagName"]).startswith(f"rust-v{base_version}.nightly.")
+    ]
+    matching.sort(key=lambda release: str(release["publishedAt"]), reverse=True)
+    return matching
+
+
+def published_nightly_for_date(
+    base_version: str,
+    release_date: str,
+    releases: Sequence[dict[str, object]],
+) -> bool:
+    """Reports whether one beta already has a published nightly for a UTC date."""
+
+    return any(
+        NIGHTLY_TAG_RE.fullmatch(str(release["tagName"])).group("date") == release_date
+        for release in published_nightly_releases(base_version, releases)
+    )
+
+
+def github_releases(repository: str) -> list[dict[str, object]]:
+    """Loads the bounded release history used by nightly coordination."""
+
+    response = run(
+        (
+            "gh",
+            "release",
+            "list",
+            "--repo",
+            repository,
+            "--limit",
+            "100",
+            "--json",
+            "tagName,publishedAt,isPrerelease,isDraft",
+        )
+    )
+    payload = json.loads(response.stdout)
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        raise RuntimeError("GitHub release history returned an invalid payload")
+    return payload
+
+
+def should_build_nightly(
+    *,
+    force: bool,
+    publish: bool,
+    scheduled: bool,
+    tag_exists: bool,
+    published_for_date: bool,
+    source_changed: bool,
+    version: str,
+) -> bool:
+    """Applies retry, daily publication, and immutable-version rules."""
+
+    if publish and force and tag_exists:
+        raise RuntimeError(f"refusing to republish existing nightly version {version}")
+    return (force or source_changed) and not (scheduled and published_for_date)
+
+
 def parse_bool(value: str) -> bool:
     """Parses a workflow-friendly boolean string."""
 
@@ -138,11 +279,22 @@ def parse_bool(value: str) -> bool:
     raise argparse.ArgumentTypeError(f"expected a boolean value, got {value!r}")
 
 
-def metadata(*, date: str | None = None, force: bool = False) -> dict[str, str]:
+def metadata(
+    *,
+    date: str | None = None,
+    force: bool = False,
+    publish: bool = False,
+    scheduled: bool = False,
+    repository: str = DEFAULT_REPOSITORY,
+) -> dict[str, str]:
     """Computes immutable nightly metadata from the current checkout and tags."""
 
-    base_version = workspace_version()
-    source_sha = git_output("rev-parse", "HEAD").lower()
+    source_sha = (
+        latest_green_main_sha(repository)
+        if scheduled
+        else git_output("rev-parse", "HEAD").lower()
+    )
+    base_version = workspace_version_at_ref(source_sha)
     short_sha = source_sha[:8]
     release_date = date or datetime.now(timezone.utc).strftime("%Y%m%d")
     version = nightly_version(base_version, release_date, short_sha)
@@ -153,7 +305,13 @@ def metadata(*, date: str | None = None, force: bool = False) -> dict[str, str]:
         "--sort=-creatordate",
         f"rust-v{base_version}.nightly.*",
     ).splitlines()
-    previous_ref = latest_nightly_tag(base_version, tags) or f"rust-v{base_version}"
+    releases = github_releases(repository)
+    published_releases = published_nightly_releases(base_version, releases)
+    previous_ref = (
+        str(published_releases[0]["tagName"])
+        if published_releases
+        else f"rust-v{base_version}"
+    )
     if not SAFE_REF_RE.fullmatch(previous_ref):
         raise RuntimeError(f"unsafe previous nightly ref: {previous_ref}")
     try:
@@ -164,8 +322,24 @@ def metadata(*, date: str | None = None, force: bool = False) -> dict[str, str]:
     previous_sha = git_output("rev-parse", f"{previous_ref}^{{commit}}").lower()
     schema_version = metadata_schema_version_at_ref(source_sha)
     previous_schema_version = metadata_schema_version_at_ref(previous_ref)
-    should_build = force or previous_sha != source_sha
-    compare_url = f"https://github.com/{DEFAULT_REPOSITORY}/compare/{previous_ref}...{source_sha}"
+    tag_exists = tag in tags
+    already_published_today = published_nightly_for_date(
+        base_version,
+        release_date,
+        releases,
+    )
+    should_build = should_build_nightly(
+        force=force,
+        publish=publish,
+        scheduled=scheduled,
+        tag_exists=tag_exists,
+        published_for_date=already_published_today,
+        source_changed=previous_sha != source_sha,
+        version=version,
+    )
+    if scheduled and should_build:
+        verify_ci(repository, source_sha)
+    compare_url = f"https://github.com/{repository}/compare/{previous_ref}...{source_sha}"
     return {
         "base_version": base_version,
         "version": version,
@@ -177,6 +351,8 @@ def metadata(*, date: str | None = None, force: bool = False) -> dict[str, str]:
         "schema_version": str(schema_version),
         "previous_schema_version": str(previous_schema_version),
         "schema_changed": str(schema_version != previous_schema_version).lower(),
+        "published_for_date": str(already_published_today).lower(),
+        "tag_exists": str(tag_exists).lower(),
         "should_build": str(should_build).lower(),
         "compare_url": compare_url,
     }
@@ -385,6 +561,9 @@ def build_parser() -> argparse.ArgumentParser:
     metadata_parser = subparsers.add_parser("metadata", help="Compute the nightly version and source range.")
     metadata_parser.add_argument("--date", help="UTC YYYYMMDD override used by deterministic tests.")
     metadata_parser.add_argument("--force", type=parse_bool, default=False)
+    metadata_parser.add_argument("--publish", type=parse_bool, default=False)
+    metadata_parser.add_argument("--scheduled", type=parse_bool, default=False)
+    metadata_parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     metadata_parser.add_argument("--github-output", type=Path)
 
     notes_parser = subparsers.add_parser("notes", help="Write compact nightly release notes.")
@@ -409,7 +588,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     if args.command == "metadata":
-        values = metadata(date=args.date, force=args.force)
+        values = metadata(
+            date=args.date,
+            force=args.force,
+            publish=args.publish,
+            scheduled=args.scheduled,
+            repository=args.repository,
+        )
         if args.github_output:
             write_github_output(args.github_output, values)
         print(json.dumps(values, indent=2))
