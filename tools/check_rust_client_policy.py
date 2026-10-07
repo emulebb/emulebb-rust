@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -88,6 +89,8 @@ def main() -> int:
     errors.extend(check_github_action_pins())
     errors.extend(check_code_scanning_ci())
     errors.extend(check_workflow_lint_ci())
+    errors.extend(check_required_ci_gates())
+    errors.extend(check_default_branch_policy())
     errors.extend(check_ci_linux_runner_pin())
     errors.extend(check_scheduled_fuzz_ci())
     errors.extend(check_live_rest_openapi_ci())
@@ -661,6 +664,122 @@ def check_workflow_lint_ci(workflow_text: str | None = None) -> list[str]:
     return errors
 
 
+def check_required_ci_gates(
+    ci_text: str | None = None,
+    codeql_text: str | None = None,
+) -> list[str]:
+    """Require stable aggregate checks for default-branch and release gates."""
+
+    ci_path = ROOT / ".github" / "workflows" / "ci.yml"
+    ci = ci_path.read_text(encoding="utf-8") if ci_text is None else ci_text
+    codeql_path = ROOT / ".github" / "workflows" / "codeql.yml"
+    codeql = (
+        codeql_path.read_text(encoding="utf-8")
+        if codeql_text is None
+        else codeql_text
+    )
+    required = {
+        "required-ci:": (ci, "CI aggregate job"),
+        "name: Required CI": (ci, "stable CI check name"),
+        "needs: [workflow-lint, build-test, rest-openapi, quality, supply-chain]": (
+            ci,
+            "complete CI aggregate dependency set",
+        ),
+        "if: ${{ always() }}": (ci, "failure-aware CI aggregate evaluation"),
+        'test "$result" = success': (ci, "strict CI result verification"),
+        "required-codeql:": (codeql, "CodeQL aggregate job"),
+        "name: Required CodeQL": (codeql, "stable CodeQL check name"),
+        "needs: analyze": (codeql, "complete CodeQL matrix dependency"),
+        'test "$ANALYZE_RESULT" = success': (
+            codeql,
+            "strict CodeQL result verification",
+        ),
+    }
+    return [
+        f"required branch gate is missing {description}"
+        for fragment, (source, description) in required.items()
+        if fragment not in source
+    ]
+
+
+def check_default_branch_policy(
+    ruleset_text: str | None = None,
+    policy_text: str | None = None,
+) -> list[str]:
+    """Keep the reviewed default-branch ruleset and operator policy in sync."""
+
+    ruleset_path = ROOT / ".github" / "rulesets" / "main.json"
+    raw_ruleset = (
+        ruleset_path.read_text(encoding="utf-8")
+        if ruleset_text is None
+        else ruleset_text
+    )
+    try:
+        ruleset = json.loads(raw_ruleset)
+    except json.JSONDecodeError as error:
+        return [f".github/rulesets/main.json is invalid JSON: {error}"]
+
+    expected = {
+        "name": "Default branch policy",
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": [],
+        "conditions": {
+            "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}
+        },
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "required_linear_history"},
+            {
+                "type": "pull_request",
+                "parameters": {
+                    "allowed_merge_methods": ["squash", "rebase"],
+                    "dismiss_stale_reviews_on_push": False,
+                    "require_code_owner_review": False,
+                    "require_last_push_approval": False,
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": True,
+                },
+            },
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "do_not_enforce_on_create": False,
+                    "required_status_checks": [
+                        {"context": "Required CI", "integration_id": 15368},
+                        {"context": "Required CodeQL", "integration_id": 15368},
+                    ],
+                    "strict_required_status_checks_policy": True,
+                },
+            },
+        ],
+    }
+    errors = []
+    if ruleset != expected:
+        errors.append(
+            ".github/rulesets/main.json must retain the reviewed pull-request, "
+            "linear-history, no-bypass, and stable-check policy"
+        )
+
+    policy_path = ROOT / ".github" / "DEFAULT_BRANCH_POLICY.md"
+    policy = policy_path.read_text(encoding="utf-8") if policy_text is None else policy_text
+    normalized_policy = " ".join(policy.split())
+    for fragment, description in {
+        "zero approvals": "single-maintainer review policy",
+        "There are no standing bypass actors": "normal bypass policy",
+        "emergency security update": "break-glass procedure",
+        "Restore active enforcement immediately": "enforcement restoration step",
+        "Required CI": "required CI check documentation",
+        "Required CodeQL": "required CodeQL check documentation",
+    }.items():
+        if fragment not in normalized_policy:
+            errors.append(
+                f".github/DEFAULT_BRANCH_POLICY.md is missing {description}"
+            )
+    return errors
+
+
 def check_ci_linux_runner_pin(workflow_text: str | None = None) -> list[str]:
     """Keep normal Linux CI on the repository's reviewed Ubuntu image."""
 
@@ -798,12 +917,12 @@ def check_release_ci_gate(
         )
     helper_path = ROOT / "tools" / "nightly_release.py"
     helper = helper_path.read_text(encoding="utf-8") if helper_text is None else helper_text
-    for language in ("actions", "javascript-typescript", "python", "rust"):
-        check_name = f'"CodeQL ({language})"'
+    for name in ("Required CI", "Required CodeQL"):
+        check_name = f'"{name}"'
         if check_name not in helper:
             errors.append(
                 "tools/nightly_release.py must require the exact-source "
-                f"CodeQL ({language}) check"
+                f"{name} aggregate check"
             )
     return errors
 

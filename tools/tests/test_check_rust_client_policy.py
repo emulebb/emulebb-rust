@@ -277,6 +277,30 @@ run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
         self.assertTrue(any("actionlint" in error for error in errors))
 
 
+class TestRequiredCiGates(unittest.TestCase):
+    def test_current_workflows_expose_stable_aggregate_checks(self) -> None:
+        self.assertEqual(CHECKER.check_required_ci_gates(), [])
+
+    def test_rejects_incomplete_aggregate_checks(self) -> None:
+        errors = CHECKER.check_required_ci_gates("jobs: {}\n", "jobs: {}\n")
+
+        self.assertEqual(len(errors), 9)
+        self.assertTrue(any("complete CI aggregate dependency" in error for error in errors))
+        self.assertTrue(any("complete CodeQL matrix dependency" in error for error in errors))
+
+
+class TestDefaultBranchPolicy(unittest.TestCase):
+    def test_current_policy_is_single_maintainer_safe_and_fail_closed(self) -> None:
+        self.assertEqual(CHECKER.check_default_branch_policy(), [])
+
+    def test_rejects_ruleset_drift_and_undocumented_break_glass(self) -> None:
+        errors = CHECKER.check_default_branch_policy("{}\n", "policy\n")
+
+        self.assertEqual(len(errors), 7)
+        self.assertTrue(any("no-bypass" in error for error in errors))
+        self.assertTrue(any("break-glass" in error for error in errors))
+
+
 class TestCiLinuxRunnerPin(unittest.TestCase):
     def test_current_ci_pins_linux_runners(self) -> None:
         self.assertEqual(CHECKER.check_ci_linux_runner_pin(), [])
@@ -356,12 +380,12 @@ class TestReleaseCiGate(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("nightly.yml", errors[0])
 
-    def test_rejects_source_gate_without_each_codeql_language(self) -> None:
+    def test_rejects_source_gate_without_stable_aggregate_checks(self) -> None:
         errors = CHECKER.check_release_ci_gate(helper_text="REQUIRED_SOURCE_CHECKS = ()\n")
 
-        self.assertEqual(len(errors), 4)
-        self.assertTrue(any("CodeQL (actions)" in error for error in errors))
-        self.assertTrue(any("CodeQL (rust)" in error for error in errors))
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(any("Required CI" in error for error in errors))
+        self.assertTrue(any("Required CodeQL" in error for error in errors))
 
 
 class TestNightlyCoordination(unittest.TestCase):

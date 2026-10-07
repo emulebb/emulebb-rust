@@ -227,3 +227,29 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check advisories licenses sources
+
+  required-ci:
+    name: Required CI
+    if: ${{ always() }}
+    needs: [workflow-lint, build-test, rest-openapi, quality, supply-chain]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job
+        shell: bash
+        env:
+          WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
+          BUILD_TEST_RESULT: ${{ needs.build-test.result }}
+          REST_OPENAPI_RESULT: ${{ needs.rest-openapi.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
+        run: |
+          set -euo pipefail
+          for result in \
+            "$WORKFLOW_LINT_RESULT" \
+            "$BUILD_TEST_RESULT" \
+            "$REST_OPENAPI_RESULT" \
+            "$QUALITY_RESULT" \
+            "$SUPPLY_CHAIN_RESULT"; do
+            test "$result" = success
+          done

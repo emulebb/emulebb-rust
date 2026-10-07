@@ -29,22 +29,7 @@ NIGHTLY_TAG_RE = re.compile(
 SAFE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
 METADATA_SCHEMA_PATH = "crates/emulebb-metadata/src/schema.rs"
 METADATA_SCHEMA_RE = re.compile(r"^pub const SCHEMA_VERSION: i64 = (?P<version>\d+);$", re.MULTILINE)
-REQUIRED_BUILD_CHECKS = (
-    "GitHub Actions workflow lint",
-    "build+test (ubuntu-24.04)",
-    "build+test (macos-latest)",
-    "build+test (windows-latest)",
-    "live REST/OpenAPI conformance",
-    "policy + format + clippy",
-    "cargo-deny (advisories, licenses, sources)",
-)
-REQUIRED_CODEQL_CHECKS = (
-    "CodeQL (actions)",
-    "CodeQL (javascript-typescript)",
-    "CodeQL (python)",
-    "CodeQL (rust)",
-)
-REQUIRED_SOURCE_CHECKS = REQUIRED_BUILD_CHECKS + REQUIRED_CODEQL_CHECKS
+REQUIRED_SOURCE_CHECKS = ("Required CI", "Required CodeQL")
 
 
 @dataclass(frozen=True)
