@@ -837,48 +837,148 @@ def check_nightly_coordination(
 
 
 def check_release_image_promotion(workflow_text: str | None = None) -> list[str]:
-    """Require GHCR publication to promote the candidate that passed smoke testing."""
+    """Require release publication to be digest-bound, ordered, and write-once."""
 
     workflow = ROOT / ".github" / "workflows" / "release.yml"
     text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
-    publish_job = re.search(
-        r"(?ms)^  publish-image:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
-        text,
-    )
-    if publish_job is None:
-        return [".github/workflows/release.yml is missing the image publishing job"]
+    errors: list[str] = []
 
-    body = publish_job.group("body")
-    required = {
-        "name: emulebb-rust-image-candidate": "smoke-tested image artifact download",
-        "regclient/actions/regctl-installer@": "pinned registry client installer",
-        "release: v0.11.6": "pinned registry client release",
-        'regctl image import "$VERSIONED_IMAGE" "$OCI_ARCHIVE"':
-            "exact OCI archive import",
-        'regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"':
-            "floating-channel retag from the immutable image",
-        'regctl image digest "$CHANNEL_IMAGE"': "published-channel digest verification",
-    }
-    errors = [
-        f".github/workflows/release.yml is missing {description} configuration"
-        for fragment, description in required.items()
-        if fragment not in body
-    ]
-    installer = re.search(r"regclient/actions/regctl-installer@([^\s#]+)", body)
-    if installer is None or not action_ref_is_immutable(installer.group(1)):
-        errors.append(
-            ".github/workflows/release.yml must pin the registry client installer by full commit SHA"
+    def job_body(name: str) -> str | None:
+        match = re.search(
+            rf"(?ms)^  {re.escape(name)}:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+            text,
         )
-    forbidden = {
-        "package-emulebb-rust-image-ci": "rebuilds the image after smoke testing",
-        "docker/setup-buildx-action": "sets up an unnecessary publishing rebuild",
-        "pattern: emulebb-rust-package-*": "downloads native inputs instead of the tested image",
-    }
-    errors.extend(
-        f".github/workflows/release.yml publish-image {description}"
-        for fragment, description in forbidden.items()
-        if fragment in body
-    )
+        return None if match is None else match.group("body")
+
+    image_candidate = job_body("image-candidate")
+    if image_candidate is None:
+        errors.append(".github/workflows/release.yml is missing the image candidate job")
+    else:
+        candidate_required = {
+            "release_publish.py oci-digest": "verified OCI digest generation",
+            "multiarch.oci.digest": "OCI digest sidecar retention",
+        }
+        errors.extend(
+            f".github/workflows/release.yml image-candidate is missing {description}"
+            for fragment, description in candidate_required.items()
+            if fragment not in image_candidate
+        )
+
+    publish_image = job_body("publish-image")
+    if publish_image is None:
+        errors.append(".github/workflows/release.yml is missing the image publishing job")
+    else:
+        publish_required = {
+            "name: emulebb-rust-image-candidate": "smoke-tested image artifact download",
+            "regclient/actions/regctl-installer@": "pinned registry client installer",
+            "release: v0.11.6": "pinned registry client release",
+            "CANDIDATE_DIGEST_FILE:": "candidate digest sidecar input",
+            'regctl tag ls "$IMAGE_REPOSITORY"': "versioned-tag existence check",
+            'existing_digest="$(regctl image digest "$VERSIONED_IMAGE")"': (
+                "existing image digest comparison"
+            ),
+            'regctl image import "$VERSIONED_IMAGE" "$OCI_ARCHIVE"': (
+                "exact OCI archive import"
+            ),
+            'published_digest="$(regctl image digest "$VERSIONED_IMAGE")"': (
+                "published image digest verification"
+            ),
+            'test "$published_digest" = "$candidate_digest"': (
+                "candidate-to-registry digest equality check"
+            ),
+        }
+        errors.extend(
+            f".github/workflows/release.yml is missing {description} configuration"
+            for fragment, description in publish_required.items()
+            if fragment not in publish_image
+        )
+        installer = re.search(
+            r"regclient/actions/regctl-installer@([^\s#]+)", publish_image
+        )
+        if installer is None or not action_ref_is_immutable(installer.group(1)):
+            errors.append(
+                ".github/workflows/release.yml must pin the publish-image registry client "
+                "installer by full commit SHA"
+            )
+        forbidden = {
+            "package-emulebb-rust-image-ci": "rebuilds the image after smoke testing",
+            "docker/setup-buildx-action": "sets up an unnecessary publishing rebuild",
+            "pattern: emulebb-rust-package-*": "downloads native inputs instead of the tested image",
+            'regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"': (
+                "advances a floating channel before the GitHub release"
+            ),
+        }
+        errors.extend(
+            f".github/workflows/release.yml publish-image {description}"
+            for fragment, description in forbidden.items()
+            if fragment in publish_image
+        )
+
+    publish_native = job_body("publish-native")
+    if publish_native is None:
+        errors.append(".github/workflows/release.yml is missing the native publishing job")
+    else:
+        native_required = {
+            "needs: publish-image": "image-before-release ordering",
+            "id: draft-release": "draft release output",
+            "draft: true": "draft-first release creation",
+            "overwrite_files: false": "write-once release assets",
+            "gh api --method PATCH": "explicit release finalization",
+            "-F draft=false": "draft finalization after asset upload",
+        }
+        errors.extend(
+            f".github/workflows/release.yml publish-native is missing {description}"
+            for fragment, description in native_required.items()
+            if fragment not in publish_native
+        )
+
+    publish_channel = job_body("publish-nightly-channel")
+    if publish_channel is None:
+        errors.append(
+            ".github/workflows/release.yml is missing the nightly channel publishing job"
+        )
+    else:
+        channel_required = {
+            "needs: publish-native": "release-before-channel ordering",
+            "inputs.channel == 'nightly'": "nightly-only channel gate",
+            "regclient/actions/regctl-installer@": "pinned channel registry client installer",
+            "release: v0.11.6": "pinned channel registry client release",
+            'regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"': (
+                "floating-channel promotion"
+            ),
+            'regctl image digest "$CHANNEL_IMAGE"': "published-channel digest verification",
+        }
+        errors.extend(
+            f".github/workflows/release.yml publish-nightly-channel is missing {description}"
+            for fragment, description in channel_required.items()
+            if fragment not in publish_channel
+        )
+        installer = re.search(
+            r"regclient/actions/regctl-installer@([^\s#]+)", publish_channel
+        )
+        if installer is None or not action_ref_is_immutable(installer.group(1)):
+            errors.append(
+                ".github/workflows/release.yml must pin the nightly-channel registry client "
+                "installer by full commit SHA"
+            )
+
+    cleanup = job_body("cleanup-nightlies")
+    if cleanup is None:
+        errors.append(".github/workflows/release.yml is missing the nightly cleanup job")
+    else:
+        cleanup_required = {
+            "needs: [publish-native, publish-nightly-channel]": (
+                "publication-before-cleanup ordering"
+            ),
+            "always()": "post-publication cleanup evaluation",
+            "continue-on-error: true": "non-fatal retention cleanup",
+            "nightly_release.py prune --keep 14": "bounded nightly retention",
+        }
+        errors.extend(
+            f".github/workflows/release.yml cleanup-nightlies is missing {description}"
+            for fragment, description in cleanup_required.items()
+            if fragment not in cleanup
+        )
     return errors
 
 

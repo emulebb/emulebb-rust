@@ -389,7 +389,7 @@ class TestReleaseImagePromotion(unittest.TestCase):
 
         errors = CHECKER.check_release_image_promotion(workflow)
 
-        self.assertEqual(len(errors), 7)
+        self.assertGreaterEqual(len(errors), 7)
         self.assertTrue(any("exact OCI archive import" in error for error in errors))
         self.assertTrue(any("rebuilds the image" in error for error in errors))
 
@@ -411,8 +411,47 @@ class TestReleaseImagePromotion(unittest.TestCase):
 
         errors = CHECKER.check_release_image_promotion(workflow)
 
-        self.assertEqual(len(errors), 1)
-        self.assertIn("full commit SHA", errors[0])
+        self.assertTrue(any("full commit SHA" in error for error in errors))
+
+    def test_rejects_release_assets_that_are_not_draft_first_and_write_once(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow = workflow.replace("          draft: true\n", "          draft: false\n", 1)
+        workflow = workflow.replace(
+            "          overwrite_files: false\n",
+            "          overwrite_files: true\n",
+            1,
+        )
+
+        errors = CHECKER.check_release_image_promotion(workflow)
+
+        self.assertTrue(any("draft-first" in error for error in errors))
+        self.assertTrue(any("write-once" in error for error in errors))
+
+    def test_rejects_advancing_channel_before_release(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow = workflow.replace(
+            "  publish-native:\n",
+            '      - run: regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"\n\n'
+            "  publish-native:\n",
+            1,
+        )
+
+        errors = CHECKER.check_release_image_promotion(workflow)
+
+        self.assertTrue(any("before the GitHub release" in error for error in errors))
+
+    def test_rejects_fatal_post_publication_cleanup(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        ).replace("        continue-on-error: true\n", "        continue-on-error: false\n", 1)
+
+        errors = CHECKER.check_release_image_promotion(workflow)
+
+        self.assertTrue(any("non-fatal retention cleanup" in error for error in errors))
 
 
 class TestReleaseImageSecurity(unittest.TestCase):

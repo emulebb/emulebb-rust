@@ -268,6 +268,8 @@ jobs:
         run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
       - name: Smoke first-run LinuxServer image
         run: python .ci/emulebb-build-tests/scripts/smoke-rust-container.py --archive "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar" --image "ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}"
+      - name: Record the verified OCI manifest digest
+        run: python tools/release_publish.py oci-digest --archive "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar" --output "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.digest"
       - name: Install pinned Trivy
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
@@ -322,7 +324,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: emulebb-rust-image-candidate
-          path: ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar
+            ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.digest
           if-no-files-found: error
           retention-days: 30
 
@@ -344,8 +348,6 @@ jobs:
         with:
           name: emulebb-rust-image-candidate
           path: ${{ runner.temp }}/emulebb-rust-out/artifacts
-      - name: Install Cosign for registry-client verification
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Install pinned registry client
         uses: regclient/actions/regctl-installer@1b705e32d40851370799ea5814e83d0a5f6a70dc # v0.1.0
         with:
@@ -356,25 +358,32 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Import the smoke-tested immutable image
+      - name: Publish the versioned image exactly once
         shell: bash
         env:
           OCI_ARCHIVE: ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar
+          CANDIDATE_DIGEST_FILE: ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.digest
+          IMAGE_REPOSITORY: ghcr.io/emulebb/emulebb-rust
           VERSIONED_IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
         run: |
           set -euo pipefail
-          regctl image import "$VERSIONED_IMAGE" "$OCI_ARCHIVE"
-          regctl image digest "$VERSIONED_IMAGE"
-      - name: Point the floating nightly tag at the immutable image
-        if: ${{ inputs.channel == 'nightly' }}
-        shell: bash
-        env:
-          VERSIONED_IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
-          CHANNEL_IMAGE: ghcr.io/emulebb/emulebb-rust:nightly
-        run: |
-          set -euo pipefail
-          regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"
-          test "$(regctl image digest "$VERSIONED_IMAGE")" = "$(regctl image digest "$CHANNEL_IMAGE")"
+          candidate_digest="$(tr -d '\r\n' < "$CANDIDATE_DIGEST_FILE")"
+          [[ "$candidate_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "invalid candidate digest: $candidate_digest" >&2
+            exit 1
+          }
+          available_tags="$(regctl tag ls "$IMAGE_REPOSITORY")"
+          if printf '%s\n' "$available_tags" | grep -Fqx -- "$RELEASE_VERSION"; then
+            existing_digest="$(regctl image digest "$VERSIONED_IMAGE")"
+            test "$existing_digest" = "$candidate_digest" || {
+              echo "$VERSIONED_IMAGE already exists with conflicting digest $existing_digest" >&2
+              exit 1
+            }
+          else
+            regctl image import "$VERSIONED_IMAGE" "$OCI_ARCHIVE"
+          fi
+          published_digest="$(regctl image digest "$VERSIONED_IMAGE")"
+          test "$published_digest" = "$candidate_digest"
 
   publish-native:
     name: Publish verified native assets
@@ -446,17 +455,73 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
       - name: Publish GitHub prerelease
+        id: draft-release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ inputs.channel == 'nightly' && format('rust-v{0}', inputs.release_version) || github.ref_name }}
           target_commitish: ${{ inputs.source_ref || github.sha }}
+          draft: true
           prerelease: true
           make_latest: false
           body_path: ${{ inputs.channel == 'nightly' && format('{0}/nightly-release-notes.md', runner.temp) || 'emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.2-NOTES.md' }}
           files: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
           fail_on_unmatched_files: true
-      - name: Keep the newest 14 nightlies
-        if: ${{ inputs.channel == 'nightly' }}
+          overwrite_files: false
+      - name: Publish the complete prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.draft-release.outputs.id }}
+        run: gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -F draft=false -F prerelease=true -f make_latest=false --silent
+
+  publish-nightly-channel:
+    name: Advance the nightly image channel
+    if: ${{ inputs.publish && inputs.channel == 'nightly' }}
+    needs: publish-native
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Install pinned registry client
+        uses: regclient/actions/regctl-installer@1b705e32d40851370799ea5814e83d0a5f6a70dc # v0.1.0
+        with:
+          release: v0.11.6
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Point the floating nightly tag at the published image
+        shell: bash
+        env:
+          VERSIONED_IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
+          CHANNEL_IMAGE: ghcr.io/emulebb/emulebb-rust:nightly
+        run: |
+          set -euo pipefail
+          versioned_digest="$(regctl image digest "$VERSIONED_IMAGE")"
+          regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"
+          test "$versioned_digest" = "$(regctl image digest "$CHANNEL_IMAGE")"
+
+  cleanup-nightlies:
+    name: Retain the newest 14 nightlies
+    if: ${{ always() && inputs.publish && inputs.channel == 'nightly' && needs.publish-native.result == 'success' && needs.publish-nightly-channel.result == 'success' }}
+    needs: [publish-native, publish-nightly-channel]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: emulebb-rust
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Prune superseded nightly releases
+        continue-on-error: true
         working-directory: emulebb-rust
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
