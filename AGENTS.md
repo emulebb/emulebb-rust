@@ -10,8 +10,8 @@
 Everything below is this repo's local delta only.
 
 **Lifecycle:** `rust-v0.1.0-beta.2` is the active corrective release line and
-the active experimental product-development lane. Beta status is not a
-production-readiness claim. Do not rewrite published beta tags or artifacts.
+the active beta product-development lane. Do not rewrite published beta tags
+or artifacts.
 
 - This repo owns the Rust headless client and embedded SPA WebUI. Keep the
   controller aligned with the Rust-forward `/api/v1` contract under tooling
