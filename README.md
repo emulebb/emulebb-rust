@@ -14,8 +14,7 @@ The repository began from earlier Kad and ED2K work, but it is intentionally a
 local client product. The `0.1.0-beta.2` line does not expose a coordinator API.
 
 > **Public beta:** [`rust-v0.1.0-beta.2`](https://github.com/emulebb/emulebb-rust/releases/tag/rust-v0.1.0-beta.2)
-> is published for Windows, Linux, and macOS. It is experimental software and
-> is not presented as production-ready. The release decision and retained
+> is published for Windows, Linux, and macOS. The release decision and retained
 > evidence are tracked in
 > [RUST-BUG-101 / issue 19](https://github.com/emulebb/emulebb-rust/issues/19).
 
@@ -223,8 +222,8 @@ The public [release notes](https://github.com/emulebb/emulebb-tooling/blob/main/
 and [release scope](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-SCOPE.md)
 are the version-specific operator and compatibility references.
 
-The manual [release workflow](.github/workflows/release.yml) retains unsigned
-candidate artifacts for Windows, Linux, and macOS on x64 and ARM64. Native ZIP,
+The manual [release workflow](.github/workflows/release.yml) retains candidate
+artifacts for Windows, Linux, and macOS on x64 and ARM64. Native ZIP,
 DEB/AppImage, and app-in-DMG packages include the daemon and browser WebUI. It
 also builds and smoke-tests a Linux amd64/arm64 OCI image without publishing it.
 The container base is digest-pinned, and both variants must pass a scan for
@@ -269,11 +268,10 @@ No separate nightly changelog needs manual maintenance. Clear commit subjects
 therefore produce better release notes; see
 [`CONTRIBUTING.md`](CONTRIBUTING.md#nightly-release-notes).
 
-Nightly binaries remain experimental and are not code-signed. Verify downloads
-against the published `SHA256SUMS`; GitHub build-provenance attestations are
-also published. The newest 14 nightly prereleases are retained, so use an
-immutable version rather than the moving container tag when reproducibility
-matters.
+Verify downloads against the published `SHA256SUMS`; GitHub build-provenance
+attestations are also published. The newest 14 nightly prereleases are retained,
+so use an immutable version rather than the moving container tag when
+reproducibility matters.
 
 The image uses LinuxServer's s6 base and supports `PUID`/`PGID`, `/config` for
 profile state, and `/data/ed2k` for completed downloads. It serves the WebUI

@@ -2,9 +2,8 @@
 
 ## Supported versions
 
-eMuleBB Rust is experimental beta software, not a production-readiness claim.
-Security fixes are made against the current line rather than backported across
-older profiles or releases.
+Security fixes are made against the current beta line rather than backported
+across older profiles or releases.
 
 | Version | Security support |
 | --- | --- |
