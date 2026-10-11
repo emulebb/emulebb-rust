@@ -578,7 +578,7 @@ impl EmulebbCore {
             // which would block obfuscated reasks. STUN-probe the data-plane egress
             // and fill it only when still unknown (set_if_unset), so the server
             // path keeps precedence (eMule GetPublicIP order: server, then Kad/STUN).
-            if enable_udp_reask {
+            if enable_udp_reask || kad_network_enabled {
                 tasks.push(tokio::spawn(run_ed2k_public_ip_probe(
                     network.bind_ip,
                     ed2k_public_ip.clone(),
