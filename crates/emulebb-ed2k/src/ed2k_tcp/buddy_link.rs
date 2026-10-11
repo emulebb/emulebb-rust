@@ -39,8 +39,9 @@ use super::firewall_helper::{complete_authorized_kad_callback, is_connection_shu
 use super::hello::{build_hello_responses, encode_emule_info_answer, encode_hello_request};
 use super::transport::{Ed2kTransport, EmuleTcpPacket};
 use super::{
-    Ed2kHelloIdentity, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_EDONKEYPROT, OP_EMULEINFO,
-    OP_EMULEINFOANSWER, OP_EMULEPROT, OP_HELLO, OP_HELLOANSWER, OP_REASKCALLBACKTCP,
+    Ed2kCallbackSessionHandle, Ed2kHelloIdentity, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK,
+    OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_HELLO, OP_HELLOANSWER,
+    OP_REASKCALLBACKTCP,
 };
 use crate::ed2k_client_udp::ReaskSourceHandle;
 
@@ -57,7 +58,7 @@ const BUDDY_READ_POLL: Duration = Duration::from_secs(15);
 
 /// Inputs for the outbound buddy link task.
 pub struct OutboundBuddyLinkOptions {
-    /// VPN/tunnel bind IP for the buddy socket and any callback connect-out.
+    /// VPN/tunnel bind IP for the buddy socket.
     pub bind_ip: Ipv4Addr,
     /// The buddy's TCP endpoint (its source IP + the TCP port it returned).
     pub buddy_addr: SocketAddr,
@@ -73,6 +74,8 @@ pub struct OutboundBuddyLinkOptions {
     /// Transfer runtime, used to confirm the relayed callback file is one we
     /// share or download before connecting out (oracle GetFileByID guard).
     pub transfer_runtime: Arc<Ed2kTransferRuntime>,
+    /// Listener-owned dispatcher for callbacks relayed over this buddy link.
+    pub callback_sessions: Ed2kCallbackSessionHandle,
     /// The shared buddy-socket registry (outbound slot).
     pub registry: BuddySocketRegistry,
     /// Handle to the UDP reask loop, so a buddy-relayed `OP_REASKCALLBACKTCP` can
@@ -107,6 +110,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         hello_identity,
         own_kad_id,
         transfer_runtime,
+        callback_sessions,
         registry,
         reask_handle,
         timeout,
@@ -157,11 +161,11 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     let result = drive_buddy_link(
         &mut transport,
         &mut ping_timer,
-        bind_ip,
         buddy_addr,
         hello_identity,
         own_kad_id,
         &transfer_runtime,
+        &callback_sessions,
         reask_handle.as_ref(),
         &cancel,
     )
@@ -183,11 +187,11 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
 async fn drive_buddy_link(
     transport: &mut Ed2kTransport,
     ping_timer: &mut tokio::time::Interval,
-    bind_ip: Ipv4Addr,
     buddy_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
     own_kad_id: [u8; 16],
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<&ReaskSourceHandle>,
     cancel: &CancellationToken,
 ) -> Result<()> {
@@ -215,11 +219,11 @@ async fn drive_buddy_link(
                     Ok(Ok(Some(packet))) => {
                         if !handle_buddy_packet(
                             transport,
-                            bind_ip,
                             buddy_addr,
                             hello_identity,
                             own_kad_id,
                             transfer_runtime,
+                            callback_sessions,
                             reask_handle,
                             packet,
                         )
@@ -246,11 +250,11 @@ async fn drive_buddy_link(
 )]
 async fn handle_buddy_packet(
     transport: &mut Ed2kTransport,
-    bind_ip: Ipv4Addr,
     buddy_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
     own_kad_id: [u8; 16],
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<&ReaskSourceHandle>,
     packet: EmuleTcpPacket,
 ) -> Result<bool> {
@@ -268,10 +272,9 @@ async fn handle_buddy_packet(
             // inbound listener session, so the two acceptance surfaces stay in
             // lock-step.
             complete_authorized_kad_callback(
-                bind_ip,
                 own_kad_id,
                 transfer_runtime,
-                hello_identity,
+                callback_sessions,
                 &callback,
                 &format!("buddy {buddy_addr}"),
             )
@@ -473,15 +476,17 @@ mod tests {
         let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(tmp.path()).unwrap());
         let cancel = CancellationToken::new();
         let hello = dummy_hello_identity();
+        let (callback_sessions, _callback_session_inbox) =
+            super::super::ed2k_callback_session_channel();
 
         let driver = drive_buddy_link(
             &mut transport,
             &mut ping_timer,
-            bind_ip,
             SocketAddr::new(std::net::IpAddr::V4(bind_ip), addr.port()),
             hello,
             [0xAB; 16],
             &transfer_runtime,
+            &callback_sessions,
             None,
             &cancel,
         );

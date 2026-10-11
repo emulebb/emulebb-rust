@@ -9,12 +9,13 @@ use super::{
     EMULE_INFO_FEATURES, EMULE_PROTOCOL_VERSION, EMULE_SECURE_IDENT_VERSION,
     EMULE_TCP_CRYPT_MAGIC_REQUESTER, EMULE_TCP_CRYPT_MAGIC_SERVER, EMULE_TCP_CRYPT_MAGIC_SYNC,
     EMULE_VERSION_SHORT, ET_COMMENTS, ET_FEATURES, ET_SOURCEEXCHANGE, Ed2kAichHashset,
-    Ed2kConnectionContext, Ed2kFileIdentifier, Ed2kHashsetRequestOptions, Ed2kHelloIdentity,
-    Ed2kPeerConnectMode, Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
-    Ed2kPeerFileDownloadOutcome, Ed2kPeerSecureIdentState, Ed2kSecureIdent, Ed2kSessionSource,
-    Ed2kTransport, Ed2kTransportMode, EmuleTcpPacket, FirewallCheckUdpRequest, HELLO_NICKNAME,
-    HelloBuddySnapshot, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ,
-    OP_AICHREQUEST, OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
+    Ed2kCallbackSessionHandle, Ed2kConnectionContext, Ed2kFileIdentifier,
+    Ed2kHashsetRequestOptions, Ed2kHelloIdentity, Ed2kPeerConnectMode, Ed2kPeerDownloadFile,
+    Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kPeerFileDownloadOutcome,
+    Ed2kPeerSecureIdentState, Ed2kSecureIdent, Ed2kSessionSource, Ed2kTransport, Ed2kTransportMode,
+    EmuleTcpPacket, FirewallCheckUdpRequest, HELLO_NICKNAME, HelloBuddySnapshot,
+    OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ, OP_AICHREQUEST,
+    OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
     OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_BUDDYPING, OP_BUDDYPONG,
     OP_CALLBACK, OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ,
     OP_CHATCAPTCHARES, OP_COMPRESSEDPART, OP_COMPRESSEDPART_I64, OP_EDONKEYPROT, OP_EMULEINFO,
@@ -47,12 +48,13 @@ use super::{
     decode_shared_files_answer_payload, decode_shared_files_dir_answer_payload,
     decode_shared_files_dir_request_payload, decode_signature_payload, derive_obfuscation_key,
     download_file_from_peer, download_files_from_peer, drive_download_session,
-    emule_connect_options, emule_misc_options1, emule_misc_options2, emule_version_tag,
-    encode_accept_upload_req, encode_aich_file_hash_answer, encode_aich_file_hash_request,
-    encode_aich_recovery_failure_answer, encode_aich_recovery_request, encode_answer_sources,
-    encode_answer_sources2, encode_compressed_part_fragment, encode_empty_shared_files_answer,
-    encode_emule_info_answer, encode_emule_info_request, encode_file_req_ans_nofil,
-    encode_hashset_answer2, encode_hashset_request2, encode_hello_answer, encode_hello_request,
+    ed2k_callback_session_channel, emule_connect_options, emule_misc_options1, emule_misc_options2,
+    emule_version_tag, encode_accept_upload_req, encode_aich_file_hash_answer,
+    encode_aich_file_hash_request, encode_aich_recovery_failure_answer,
+    encode_aich_recovery_request, encode_answer_sources, encode_answer_sources2,
+    encode_compressed_part_fragment, encode_empty_shared_files_answer, encode_emule_info_answer,
+    encode_emule_info_request, encode_file_req_ans_nofil, encode_hashset_answer2,
+    encode_hashset_request2, encode_hello_answer, encode_hello_request,
     encode_incoming_obfuscation_response, encode_multipacket_answer,
     encode_multipacket_ext2_request, encode_multipacket_request, encode_packed_packet,
     encode_packet, encode_port_test_answer, encode_public_ip_answer, encode_queue_ranking,
@@ -154,9 +156,15 @@ macro_rules! handle_connection_test {
                 reachability: &crate::reachability::ExternalReachability::new(),
                 buddy_registry: &crate::buddy_socket::BuddySocketRegistry::new(),
                 port_test_registry: &crate::PortTestRegistry::new(),
+                callback_sessions: callback_session_handle_for_test(),
             },
         )
     };
+}
+
+fn callback_session_handle_for_test() -> Ed2kCallbackSessionHandle {
+    let (handle, _inbox) = ed2k_callback_session_channel();
+    handle
 }
 
 fn assert_startup_multipacket_ext2(

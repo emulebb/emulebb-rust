@@ -428,16 +428,15 @@ pub(crate) async fn kad_callback_is_authorized(
 /// Validate a received Kad `OP_CALLBACK` and, when authorized, connect out to
 /// the requester so the firewalled requester can reach us (oracle
 /// `ListenSocket.cpp:1596-1633` -> `TryToConnectOrDelete`). Returns whether the
-/// callback was accepted (a spawned connect-out started); an unauthorized or
+/// callback was accepted by the bounded session dispatcher; an unauthorized or
 /// obviously invalid endpoint is dropped silently, exactly like the oracle.
 ///
 /// Shared by the inbound listener session and the outbound buddy link so the two
 /// acceptance surfaces cannot diverge.
 pub(crate) async fn complete_authorized_kad_callback(
-    bind_ip: Ipv4Addr,
     own_kad_id: [u8; 16],
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
-    hello_identity: Ed2kHelloIdentity,
+    callback_sessions: &super::Ed2kCallbackSessionHandle,
     callback: &KadCallbackRequest,
     source: &str,
 ) -> bool {
@@ -455,27 +454,19 @@ pub(crate) async fn complete_authorized_kad_callback(
         return false;
     }
     let requester = SocketAddr::new(IpAddr::V4(callback.peer_ip), callback.peer_tcp_port);
-    tokio::spawn(async move {
-        match connect_callback_peer(
-            bind_ip,
-            requester,
-            hello_identity,
-            None,
-            None,
-            super::ED2K_CONNECTION_IDLE_TIMEOUT,
-        )
-        .await
-        {
-            Ok(mode) => debug!(
-                "Kad firewalled-callback connect-out to {requester} completed transport={}",
-                mode.as_str()
-            ),
-            Err(error) => {
-                debug!("Kad firewalled-callback connect-out to {requester} failed: {error:#}")
-            }
+    match callback_sessions.try_start(super::Ed2kCallbackSessionRequest {
+        peer_addr: requester,
+        expected_user_hash: None,
+        peer_connect_options: None,
+        timeout: super::ED2K_CONNECTION_IDLE_TIMEOUT,
+        origin: super::Ed2kCallbackSessionOrigin::Kad,
+    }) {
+        Ok(()) => true,
+        Err(error) => {
+            debug!("Kad firewalled-callback dispatch to {requester} failed: {error}");
+            false
         }
-    });
-    true
+    }
 }
 
 /// Mirror the oracle's active peer callback path by opening an outgoing eD2k

@@ -423,6 +423,7 @@ impl EmulebbCore {
                     buddy_registry: buddy_registry.clone(),
                     buddy_link_cancel: Arc::clone(&buddy_link_cancel),
                     transfer_runtime: Arc::clone(&self.ed2k_transfers),
+                    callback_sessions: callback_sessions.clone(),
                     reask_handle: Arc::clone(&self.ed2k_reask_handle),
                     network: network.clone(),
                 },
@@ -478,6 +479,7 @@ impl EmulebbCore {
             reachability: self.ed2k_reachability.clone(),
             buddy_registry: buddy_registry.clone(),
             port_test_registry: port_test_registry.clone(),
+            callback_sessions: callback_sessions.clone(),
             callback_session_inbox,
             callback_timeout: Duration::from_secs(network.ed2k.callback_timeout_secs.max(1)),
         })));

@@ -55,6 +55,7 @@ pub struct Ed2kListenerOptions {
     /// Cross-transport TCP/UDP external listener-test association.
     pub port_test_registry: crate::PortTestRegistry,
     /// Listener-owned consumer for outbound callback-session requests.
+    pub callback_sessions: Ed2kCallbackSessionHandle,
     pub callback_session_inbox: Ed2kCallbackSessionInbox,
     /// Maximum grant-to-connect time for disconnected upload waiters.
     pub callback_timeout: Duration,
@@ -75,6 +76,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         reachability,
         buddy_registry,
         port_test_registry,
+        callback_sessions,
         callback_session_inbox,
         callback_timeout,
     } = options;
@@ -114,6 +116,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             reachability: reachability.clone(),
             buddy_registry: buddy_registry.clone(),
             port_test_registry: port_test_registry.clone(),
+            callback_sessions: callback_sessions.clone(),
             bind_ip,
             shutdown: Arc::clone(&shutdown),
         },
@@ -133,6 +136,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             reachability: reachability.clone(),
             buddy_registry: buddy_registry.clone(),
             port_test_registry: port_test_registry.clone(),
+            callback_sessions: callback_sessions.clone(),
             bind_ip,
             callback_timeout,
             shutdown: Arc::clone(&shutdown),
@@ -193,6 +197,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                 let reachability = reachability.clone();
                 let buddy_registry = buddy_registry.clone();
                 let port_test_registry = port_test_registry.clone();
+                let callback_sessions = callback_sessions.clone();
                 tokio::spawn(async move {
                     // Hold the admission guard for the whole handler so the
                     // inbound slot is released on every exit path (Drop).
@@ -210,6 +215,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                             reachability: &reachability,
                             buddy_registry: &buddy_registry,
                             port_test_registry: &port_test_registry,
+                            callback_sessions,
                         },
                     )
                     .await

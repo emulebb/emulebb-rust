@@ -34,11 +34,12 @@ use emulebb_ed2k::{
         search_source_batch_via_background_session, search_source_udp_server_batches,
     },
     ed2k_tcp::{
-        Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions,
-        Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport, Ed2kSecureIdent, HelloBuddySnapshot,
-        OutboundBuddyLinkOptions, download_files_from_peer, ed2k_callback_session_channel,
-        emule_connect_options, encode_kad_callback_relay_frame, run_ed2k_listener,
-        run_outbound_buddy_link, set_hello_buddy_snapshot, set_publish_rust_identity,
+        Ed2kCallbackSessionHandle, Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile,
+        Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport, Ed2kSecureIdent,
+        HelloBuddySnapshot, OutboundBuddyLinkOptions, download_files_from_peer,
+        ed2k_callback_session_channel, emule_connect_options, encode_kad_callback_relay_frame,
+        run_ed2k_listener, run_outbound_buddy_link, set_hello_buddy_snapshot,
+        set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry,
@@ -5291,6 +5292,7 @@ struct KadLocalStoreRuntime {
     /// change.
     buddy_link_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
+    callback_sessions: Ed2kCallbackSessionHandle,
     /// Lazily-read handle to the UDP reask loop, so a buddy link established here
     /// can answer buddy-relayed `OP_REASKCALLBACKTCP` over UDP (source side). Read
     /// at buddy-link spawn time because the reask loop starts after this task.
@@ -6126,6 +6128,7 @@ async fn handle_kad_local_store_packet(
                 &runtime.buddy_link_cancel,
                 &runtime.reachability,
                 &runtime.transfer_runtime,
+                &runtime.callback_sessions,
                 reask_handle,
                 network,
                 from,
@@ -6340,6 +6343,7 @@ async fn handle_kad_find_buddy_res(
     buddy_link_cancel: &Arc<std::sync::Mutex<Option<CancellationToken>>>,
     reachability: &ExternalReachability,
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<ReaskSourceHandle>,
     network: &Ed2kNetworkConfig,
     from: SocketAddr,
@@ -6391,6 +6395,7 @@ async fn handle_kad_find_buddy_res(
     let kad_buddy = Arc::clone(kad_buddy);
     let own_kad_id = dht.own_id().0;
     let transfer_runtime = Arc::clone(transfer_runtime);
+    let callback_sessions = callback_sessions.clone();
     let lost = Arc::new(tokio::sync::Notify::new());
     // LOWID-G8: install a fresh cancellation handle for this link so the
     // buddy-management loop can tear it down (and stop its keepalive pings) when
@@ -6408,6 +6413,7 @@ async fn handle_kad_find_buddy_res(
             hello_identity,
             own_kad_id,
             transfer_runtime,
+            callback_sessions,
             registry,
             reask_handle,
             timeout: KAD_BUDDY_LINK_TIMEOUT,
