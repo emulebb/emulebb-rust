@@ -48,6 +48,7 @@ fn reasking_peer(udp_port: u16) -> Ed2kUploadPeerIdentity {
         should_crypt: true,
         user_hash: Some(PEER_USER_HASH),
         client_id: Some(0x0A00_0007),
+        server_endpoint: None,
         friend_slot: false,
         ident_verified: false,
         ident_bad_guy: false,

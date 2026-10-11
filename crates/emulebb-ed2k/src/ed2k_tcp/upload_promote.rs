@@ -352,6 +352,7 @@ mod tests {
             user_hash: Some([0x5A; 16]),
             // LowID client id (< 0x0100_0000): not directly dialable.
             client_id: Some(0x0000_1234),
+            server_endpoint: None,
             friend_slot: false,
             ident_verified: false,
             ident_bad_guy: false,

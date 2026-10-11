@@ -33,6 +33,7 @@ pub(super) fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUpl
         should_crypt: false,
         user_hash: Some([user_marker; 16]),
         client_id: Some(client_id),
+        server_endpoint: None,
         friend_slot: false,
         // Verified ident by default so credit-scoring fixtures exercise the real
         // ratio math; A4 has a dedicated test for the unverified neutral path.
@@ -61,6 +62,7 @@ pub(super) fn same_ip_upload_peer(port_marker: u8) -> Ed2kUploadPeerIdentity {
         should_crypt: false,
         user_hash: Some([port_marker; 16]),
         client_id: Some(0x0A09_0900 + u32::from(port_marker)),
+        server_endpoint: None,
         friend_slot: false,
         ident_verified: true,
         ident_bad_guy: false,
