@@ -41,6 +41,7 @@ pub(crate) enum Ed2kServerCallbackRoute {
 }
 
 pub(crate) const ED2K_SERVER_CALLBACK_COOLDOWN: Duration = Duration::from_secs(20 * 60);
+pub(crate) const ED2K_DIRECT_CALLBACK_COOLDOWN: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Ed2kServerCallbackKey {
@@ -52,6 +53,73 @@ pub(crate) struct Ed2kServerCallbackKey {
 pub(crate) struct Ed2kServerCallbackCooldownPermit {
     key: Ed2kServerCallbackKey,
     claimed_at: Instant,
+}
+
+/// Peer/route identity of one direct UDP callback wait. The wire request has no
+/// file hash and one inbound callback session can negotiate multiple A4AF
+/// files, so the cooldown must not multiply by file.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Ed2kDirectCallbackKey {
+    source_endpoint: SocketAddr,
+    user_hash: [u8; 16],
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Ed2kDirectCallbackCooldownPermit {
+    key: Ed2kDirectCallbackKey,
+    claimed_at: Instant,
+}
+
+pub(crate) fn claim_ed2k_direct_callback_request(
+    last_sent: &mut HashMap<Ed2kDirectCallbackKey, Instant>,
+    source_endpoint: SocketAddr,
+    user_hash: [u8; 16],
+    now: Instant,
+) -> Option<Ed2kDirectCallbackCooldownPermit> {
+    last_sent.retain(|_, sent_at| {
+        now.saturating_duration_since(*sent_at) < ED2K_DIRECT_CALLBACK_COOLDOWN
+    });
+    let key = Ed2kDirectCallbackKey {
+        source_endpoint,
+        user_hash,
+    };
+    if last_sent.get(&key).is_some_and(|sent_at| {
+        now.saturating_duration_since(*sent_at) < ED2K_DIRECT_CALLBACK_COOLDOWN
+    }) {
+        return None;
+    }
+    last_sent.insert(key.clone(), now);
+    Some(Ed2kDirectCallbackCooldownPermit {
+        key,
+        claimed_at: now,
+    })
+}
+
+/// Roll back only the exact direct-callback cooldown claim which is known not
+/// to have reached the local UDP socket.
+pub(crate) fn cancel_ed2k_direct_callback_request(
+    last_sent: &mut HashMap<Ed2kDirectCallbackKey, Instant>,
+    permit: Ed2kDirectCallbackCooldownPermit,
+) -> bool {
+    if last_sent.get(&permit.key) != Some(&permit.claimed_at) {
+        return false;
+    }
+    last_sent.remove(&permit.key);
+    true
+}
+
+/// Start the 45-second peer wait at successful or ambiguous dispatch
+/// settlement without allowing an older settlement to refresh a newer claim.
+pub(crate) fn commit_ed2k_direct_callback_request(
+    last_sent: &mut HashMap<Ed2kDirectCallbackKey, Instant>,
+    permit: Ed2kDirectCallbackCooldownPermit,
+    now: Instant,
+) -> bool {
+    if last_sent.get(&permit.key) != Some(&permit.claimed_at) {
+        return false;
+    }
+    last_sent.insert(permit.key, now);
+    true
 }
 
 pub(crate) fn claim_ed2k_server_callback_request(

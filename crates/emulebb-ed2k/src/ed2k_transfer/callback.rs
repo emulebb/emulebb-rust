@@ -1372,6 +1372,22 @@ mod tests {
         .unwrap()
     }
 
+    fn direct_request(
+        source_endpoint: SocketAddr,
+        user_hash: [u8; 16],
+        hash_byte: u8,
+    ) -> Ed2kCallbackTicketRequest {
+        Ed2kCallbackTicketRequest::direct_udp(
+            source_endpoint,
+            17,
+            user_hash,
+            4662,
+            download(hash_byte),
+            Duration::from_secs(45),
+        )
+        .unwrap()
+    }
+
     fn dispatch_permit(reservation: Ed2kCallbackReservation) -> Ed2kCallbackDispatchPermit {
         match reservation {
             Ed2kCallbackReservation::Dispatch(permit) => permit,
@@ -1603,6 +1619,34 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn direct_udp_ticket_joins_a4af_only_on_the_same_route_and_peer_hash() {
+        let now = Instant::now();
+        let source_a: SocketAddr = "192.0.2.1:4672".parse().unwrap();
+        let source_b: SocketAddr = "192.0.2.1:4673".parse().unwrap();
+        let mut store = CallbackTicketStore::default();
+
+        assert!(matches!(
+            store.reserve(direct_request(source_a, [0x44; 16], 1), now),
+            Ok(Ed2kCallbackReservation::Dispatch(_))
+        ));
+        assert!(matches!(
+            store.reserve(direct_request(source_a, [0x44; 16], 2), now),
+            Ok(Ed2kCallbackReservation::Joined { .. })
+        ));
+        assert!(matches!(
+            store.reserve(direct_request(source_b, [0x44; 16], 3), now),
+            Ok(Ed2kCallbackReservation::Dispatch(_))
+        ));
+        assert!(matches!(
+            store.reserve(direct_request(source_a, [0x55; 16], 4), now),
+            Ok(Ed2kCallbackReservation::Dispatch(_))
+        ));
+
+        assert_eq!(store.tickets.len(), 3);
+        assert_eq!(store.tickets[0].downloads, vec![download(1), download(2)]);
     }
 
     #[test]

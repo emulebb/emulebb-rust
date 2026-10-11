@@ -100,12 +100,11 @@ pub(crate) struct CoreState {
     /// per-client `MIN2MS(20)` retry gate.
     pub(crate) ed2k_server_callback_last_sent:
         HashMap<crate::ed2k_sources::Ed2kServerCallbackKey, Instant>,
-    /// Last time we originated an `OP_DIRECTCALLBACKREQ` to a firewalled type-6
-    /// source, keyed by (source ip, source tcp port, file hash). Enforces the
-    /// same callback cooldown as the Kad-buddy path so a direct-callback source
-    /// is not re-requested every requery round.
+    /// Last settled `OP_DIRECTCALLBACKREQ` dispatch per direct route/peer,
+    /// keyed by (source UDP endpoint, user hash). One connect-back session can
+    /// negotiate every A4AF file, so file identity is deliberately absent.
     pub(crate) ed2k_direct_callback_last_sent:
-        HashMap<crate::kad_callback_initiator::KadCallbackKey, Instant>,
+        HashMap<crate::ed2k_sources::Ed2kDirectCallbackKey, Instant>,
     pub(crate) shared_directories: Vec<SharedDirectoryRoot>,
     pub(crate) unshared_hashes: HashSet<String>,
     pub(crate) monitor_shared_hashes: HashMap<PathBuf, MonitoredSharedFile>,

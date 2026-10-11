@@ -19,7 +19,8 @@ use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 pub use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_ed2k::{
-    DirectCallbackArgs, NatManager, NatManagerBuilder, PortTestRegistry, ReaskSourceHandle,
+    DirectCallbackArgs, DirectCallbackDispatchOutcome, NatManager, NatManagerBuilder,
+    PortTestRegistry, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
     built_in_port_mapping_providers,
     config::Ed2kRuntimeConfig,
@@ -44,9 +45,9 @@ use emulebb_ed2k::{
     },
     ed2k_transfer::{
         ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackDownload,
-        Ed2kCallbackIntent, Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kMediaMetadata,
-        Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedPublishDemandSignal, Ed2kSourceHint,
-        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kMediaMetadata, Ed2kResumeManifest,
+        Ed2kSharedEntry, Ed2kSharedPublishDemandSignal, Ed2kSourceHint, Ed2kTransferRuntime,
+        Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::ExternalReachability,
@@ -180,13 +181,15 @@ use ed2k_source_batch::{
 };
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity,
-    cancel_ed2k_server_callback_request, claim_ed2k_server_callback_request,
-    collect_kad_ed2k_metadata, collect_kad_ed2k_sources, commit_ed2k_server_callback_request,
-    direct_download_candidate_sources, drop_self_sources, ed2k_server_callback_permitted,
-    ed2k_server_callback_route, found_source_from_hint, global_udp_source_batch_server_attempts,
-    global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query, kad_metadata_words,
-    kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
-    merge_download_sources, new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
+    cancel_ed2k_direct_callback_request, cancel_ed2k_server_callback_request,
+    claim_ed2k_direct_callback_request, claim_ed2k_server_callback_request,
+    collect_kad_ed2k_metadata, collect_kad_ed2k_sources, commit_ed2k_direct_callback_request,
+    commit_ed2k_server_callback_request, direct_download_candidate_sources, drop_self_sources,
+    ed2k_server_callback_permitted, ed2k_server_callback_route, found_source_from_hint,
+    global_udp_source_batch_server_attempts, global_udp_source_search_excluded_endpoint,
+    hash_only_ed2k_search_query, kad_metadata_words, kad_source_result_to_ed2k_found_source,
+    keyword_target, manifest_has_ed2k_transfer_progress, merge_download_sources,
+    new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
     should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
     should_query_server_udp_source_supplement, should_refresh_ed2k_server_sources,
     should_skip_no_progress_source_requery, significant_keyword_words_unique,
@@ -201,7 +204,6 @@ use kad_buddy::{
     BuddyNeedInput, FindBuddyReqRefusal, INCOMING_BUDDY_ATTACH_TIMEOUT_SECS, IncomingBuddy,
     KadBuddyState, OutgoingBuddy, buddy_search_target, find_buddy_res_matches,
 };
-use kad_callback_initiator::{KAD_CALLBACK_INITIATOR_COOLDOWN, should_send_kad_callback};
 #[cfg(test)]
 use kad_hello::{
     build_kad_hello_request_tags, build_kad_hello_response_tags, firewalled_response_ip_for_sender,
@@ -1263,8 +1265,11 @@ impl EmulebbCore {
             // so it TCP-connects back to us. This precedes and excludes the
             // server-callback path below, exactly as MFC's TryToConnect orders
             // direct callback (5) before server callback (6).
-            self.send_ed2k_direct_callbacks(network, &transfer, &sources)
+            self.send_ed2k_direct_callbacks(network, &transfer, &sources, callback_window, cancel)
                 .await;
+            if cancel.is_cancelled() {
+                return Ok(None);
+            }
             // Oracle CanDoCallback (emule.cpp:2952-2969): a server
             // OP_CALLBACKREQUEST is only legal when WE are HighID on the ed2k
             // server. A LowID node must NOT ask its own server to relay a
@@ -2917,6 +2922,8 @@ impl EmulebbCore {
         network: &Ed2kNetworkConfig,
         transfer: &Transfer,
         sources: &[Ed2kFoundSource],
+        callback_window: Duration,
+        cancel: &CancellationToken,
     ) {
         if !sources
             .iter()
@@ -2935,65 +2942,193 @@ impl EmulebbCore {
             .advertised_tcp_port(network.listen_port);
         let our_user_hash = network.user_hash;
         let our_connect_options = emule_connect_options(network.ed2k.obfuscation_enabled);
+        let file_hash = match transfer.hash.parse::<Ed2kHash>() {
+            Ok(hash) => hash,
+            Err(error) => {
+                tracing::warn!(
+                    "direct UDP callback skipped for invalid file hash {}: {error}",
+                    transfer.hash
+                );
+                return;
+            }
+        };
         for source in sources
             .iter()
             .filter(|source| source.is_direct_callback_source())
         {
+            if cancel.is_cancelled() {
+                return;
+            }
             let Some(source_udp_port) = source.source_udp_port else {
                 continue;
             };
-            let file_hash = match transfer.hash.parse::<Ed2kHash>() {
-                Ok(hash) => hash,
-                Err(_) => continue,
+            let Some(source_user_hash) = source.user_hash else {
+                tracing::warn!(
+                    "direct UDP callback source lacks a user hash file_hash={} source={}:{}",
+                    transfer.hash,
+                    source.ip,
+                    source.tcp_port,
+                );
+                continue;
             };
-            let key = (source.ip, source.tcp_port, file_hash);
-            let now = Instant::now();
-            {
-                let mut state = self.state.lock().await;
-                let last_sent = state.ed2k_direct_callback_last_sent.get(&key).copied();
-                if !should_send_kad_callback(last_sent, now, KAD_CALLBACK_INITIATOR_COOLDOWN) {
+            let dest = SocketAddr::new(IpAddr::V4(source.ip), source_udp_port);
+            let callback_download = Ed2kCallbackDownload {
+                file_hash,
+                display_name: transfer.name.clone(),
+                file_size: transfer.size_bytes,
+                source: Ed2kSourceHint {
+                    ip: source.ip.to_string(),
+                    tcp_port: source.tcp_port,
+                    user_hash: Some(hex::encode(source_user_hash)),
+                    connect_options: source.obfuscation_options,
+                    file_comment: String::new(),
+                    file_rating: 0,
+                },
+            };
+            let callback_ticket = match Ed2kCallbackTicketRequest::direct_udp(
+                dest,
+                source.client_id,
+                source_user_hash,
+                source.tcp_port,
+                callback_download,
+                callback_window,
+            ) {
+                Ok(ticket) => ticket,
+                Err(error) => {
+                    tracing::warn!(
+                        "direct UDP callback ticket rejected file_hash={} source={dest}: {error}",
+                        transfer.hash,
+                    );
                     continue;
                 }
-                state.ed2k_direct_callback_last_sent.insert(key, now);
-            }
-            // Register the callback intent so the source's inbound TCP connect-back
-            // (it hellos with its LowID client-id) is claimed as this download.
-            self.ed2k_transfers
-                .register_callback_intent(Ed2kCallbackIntent {
-                    client_id: source.client_id,
-                    file_hash: transfer.hash.clone(),
-                    display_name: transfer.name.clone(),
-                    file_size: transfer.size_bytes,
-                    source: Ed2kSourceHint {
-                        ip: source.ip.to_string(),
-                        tcp_port: source.tcp_port,
-                        user_hash: source.user_hash.map(hex::encode),
-                        connect_options: source.obfuscation_options,
-                        file_comment: String::new(),
-                        file_rating: 0,
-                    },
-                })
-                .await;
-            let dest = SocketAddr::new(IpAddr::V4(source.ip), source_udp_port);
+            };
+            let callback_dispatch_permit = match self
+                .ed2k_transfers
+                .reserve_callback_ticket(callback_ticket)
+                .await
+            {
+                Ok(Ed2kCallbackReservation::Dispatch(permit)) => permit,
+                Ok(Ed2kCallbackReservation::Joined { .. }) => {
+                    tracing::debug!(
+                        "direct UDP callback joined pending peer session file_hash={} source={dest}",
+                        transfer.hash,
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "direct UDP callback reservation failed file_hash={} source={dest}: {error}",
+                        transfer.hash,
+                    );
+                    continue;
+                }
+            };
+            let callback_cooldown_permit = {
+                let mut state = self.state.lock().await;
+                claim_ed2k_direct_callback_request(
+                    &mut state.ed2k_direct_callback_last_sent,
+                    dest,
+                    source_user_hash,
+                    Instant::now(),
+                )
+            };
+            let Some(callback_cooldown_permit) = callback_cooldown_permit else {
+                let _ = self
+                    .ed2k_transfers
+                    .cancel_callback_ticket(callback_dispatch_permit)
+                    .await;
+                tracing::debug!(
+                    "direct UDP callback suppressed by cooldown file_hash={} source={dest}",
+                    transfer.hash,
+                );
+                continue;
+            };
+            let Some(callback_dispatch_guard) = self
+                .ed2k_transfers
+                .begin_callback_ticket_dispatch(callback_dispatch_permit)
+            else {
+                let cooldown_cancelled = {
+                    let mut state = self.state.lock().await;
+                    cancel_ed2k_direct_callback_request(
+                        &mut state.ed2k_direct_callback_last_sent,
+                        callback_cooldown_permit,
+                    )
+                };
+                tracing::debug!(
+                    "direct UDP callback settled before dispatch file_hash={} source={dest} cooldown_cancelled={cooldown_cancelled}",
+                    transfer.hash,
+                );
+                continue;
+            };
+            let callback_deadline = callback_dispatch_guard.expires_at();
             // Obfuscate toward the source when it advertised crypt support and we
             // hold its user hash (oracle `ShouldReceiveCryptUDPPackets`).
             let obfuscate = source
                 .obfuscation_options
                 .is_some_and(|options| options & 0x01 != 0)
-                && source.user_hash.is_some();
-            let queued = handle.send_direct_callback(DirectCallbackArgs {
-                dest,
-                our_tcp_port,
-                our_user_hash,
-                connect_options: our_connect_options,
-                dest_user_hash: source.user_hash,
-                obfuscate,
-            });
-            if queued {
-                tracing::debug!(
-                    "sent OP_DIRECTCALLBACKREQ file_hash={} source={dest} our_tcp_port={our_tcp_port}",
-                    transfer.hash
-                );
+                && source_user_hash != [0; 16];
+            let dispatch = handle
+                .send_direct_callback(
+                    DirectCallbackArgs {
+                        dest,
+                        our_tcp_port,
+                        our_user_hash,
+                        connect_options: our_connect_options,
+                        dest_user_hash: Some(source_user_hash),
+                        obfuscate,
+                    },
+                    callback_deadline,
+                    cancel,
+                )
+                .await;
+            match dispatch {
+                Ok(DirectCallbackDispatchOutcome::Sent) => {
+                    let ticket_outcome = callback_dispatch_guard.mark_dispatched();
+                    let cooldown_committed = {
+                        let mut state = self.state.lock().await;
+                        commit_ed2k_direct_callback_request(
+                            &mut state.ed2k_direct_callback_last_sent,
+                            callback_cooldown_permit,
+                            Instant::now(),
+                        )
+                    };
+                    tracing::debug!(
+                        "sent OP_DIRECTCALLBACKREQ file_hash={} source={dest} our_tcp_port={our_tcp_port} ticket_outcome={ticket_outcome:?} cooldown_committed={cooldown_committed}",
+                        transfer.hash,
+                    );
+                }
+                Ok(DirectCallbackDispatchOutcome::NotSent { reason }) => {
+                    let ticket_cancelled = callback_dispatch_guard.cancel();
+                    let cooldown_cancelled = {
+                        let mut state = self.state.lock().await;
+                        cancel_ed2k_direct_callback_request(
+                            &mut state.ed2k_direct_callback_last_sent,
+                            callback_cooldown_permit,
+                        )
+                    };
+                    tracing::warn!(
+                        "OP_DIRECTCALLBACKREQ not sent file_hash={} source={dest} ticket_cancelled={ticket_cancelled} cooldown_cancelled={cooldown_cancelled}: {reason}",
+                        transfer.hash,
+                    );
+                }
+                Err(error) => {
+                    // Queue admission is the ambiguity boundary. Preserve both
+                    // admission and cooldown when cancellation, expiry, or worker
+                    // loss cannot prove whether the datagram write started.
+                    let ticket_outcome = callback_dispatch_guard.mark_dispatched();
+                    let cooldown_committed = {
+                        let mut state = self.state.lock().await;
+                        commit_ed2k_direct_callback_request(
+                            &mut state.ed2k_direct_callback_last_sent,
+                            callback_cooldown_permit,
+                            Instant::now(),
+                        )
+                    };
+                    tracing::warn!(
+                        "OP_DIRECTCALLBACKREQ delivery unknown file_hash={} source={dest} ticket_outcome={ticket_outcome:?} cooldown_committed={cooldown_committed}: {error}",
+                        transfer.hash,
+                    );
+                }
             }
         }
     }

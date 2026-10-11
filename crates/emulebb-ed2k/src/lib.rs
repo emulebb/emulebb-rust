@@ -6,9 +6,9 @@ pub mod disk_space;
 mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;
 pub use ed2k_client_udp::{
-    DirectCallbackArgs, ReaskCommand, ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent,
-    ReaskEventReceiver, ReaskEventSender, ReaskSourceHandle, reask_command_channel,
-    reask_event_channel, run_ed2k_udp_reask_loop,
+    DirectCallbackArgs, DirectCallbackDispatch, DirectCallbackDispatchOutcome, ReaskCommand,
+    ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent, ReaskEventReceiver, ReaskEventSender,
+    ReaskSourceHandle, reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
 #[expect(
     dead_code,
