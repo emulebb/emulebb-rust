@@ -68,6 +68,13 @@ pub(super) async fn handle_server_packet(
                 let mut guard = session.state.write().await;
                 guard.connecting = false;
                 guard.connected = true;
+                if !session.login_accepted {
+                    // `trace_id` is allocated from the process-global server
+                    // session counter. Do not increment the attempt-local state:
+                    // parallel transports and reconnects begin from independent
+                    // snapshots and could otherwise reuse generation 1.
+                    guard.session_generation = session.trace_id;
+                }
                 guard.client_id = Some(id_change.client_id);
                 guard.server_flags = id_change.server_flags;
             }

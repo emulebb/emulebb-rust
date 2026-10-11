@@ -1,6 +1,11 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, sync::oneshot, time::Instant as TokioInstant};
+
+use crate::ed2k_server::{
+    OP_CALLBACKREQUEST,
+    background::{BackgroundServerSearchContext, start_background_server_search},
+};
 
 async fn connected_background_test_session() -> (ServerSession, TcpStream) {
     let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
@@ -8,6 +13,23 @@ async fn connected_background_test_session() -> (ServerSession, TcpStream) {
     let peer = TcpStream::connect(addr).await.unwrap();
     let (stream, peer_addr) = listener.accept().await.unwrap();
     (ServerSession::from_stream_for_test(stream, peer_addr), peer)
+}
+
+async fn mark_background_session_connected(
+    session: &mut ServerSession,
+    endpoint: SocketAddr,
+    generation: u64,
+    our_client_id: u32,
+) {
+    session.login_accepted = true;
+    session.assigned_client_id = Some(our_client_id);
+    *session.state.write().await = Ed2kServerState {
+        endpoint: Some(endpoint),
+        client_id: session.assigned_client_id,
+        connected: true,
+        session_generation: generation,
+        ..Ed2kServerState::default()
+    };
 }
 
 async fn read_source_request_frame(peer: &mut TcpStream) -> (u8, Vec<u8>) {
@@ -18,6 +40,99 @@ async fn read_source_request_frame(peer: &mut TcpStream) -> (u8, Vec<u8>) {
     let mut payload = vec![0u8; frame_len - 1];
     peer.read_exact(&mut payload).await.unwrap();
     (header[5], payload)
+}
+
+#[tokio::test]
+async fn background_callback_writes_only_on_the_expected_server_generation() {
+    let live_endpoint = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661));
+    let generation = 7;
+    let target_low_id = 0x0012_3456;
+    let (mut session, mut peer) = connected_background_test_session().await;
+    mark_background_session_connected(
+        &mut session,
+        live_endpoint,
+        generation,
+        u32::from_le_bytes([198, 51, 100, 2]),
+    )
+    .await;
+    let server = background_test_server(live_endpoint);
+    let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::default()));
+    let (response, receive_response) = oneshot::channel();
+
+    let pending = start_background_server_search(
+        &mut session,
+        BackgroundServerSearchContext {
+            server: &server,
+            connect_options: 0,
+            shared_catalog: &shared_catalog,
+            bind_ip: crate::test_bind_ip(),
+            tcp_port: 4662,
+        },
+        BackgroundServerSearchRequest::Callback {
+            expected_server_endpoint: live_endpoint,
+            expected_session_generation: generation,
+            client_id: target_low_id,
+            deadline: TokioInstant::now() + Duration::from_secs(1),
+            cancel: CancellationToken::new(),
+            response,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(pending.is_none());
+    assert!(receive_response.await.unwrap().is_ok());
+    let (opcode, payload) = read_source_request_frame(&mut peer).await;
+    assert_eq!(opcode, OP_CALLBACKREQUEST);
+    assert_eq!(payload, target_low_id.to_le_bytes());
+}
+
+#[tokio::test]
+async fn background_callback_rejects_a_stale_or_ineligible_route_without_writing() {
+    let live_endpoint = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661));
+    let other_endpoint = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 11), 4661));
+    let high_id = u32::from_le_bytes([198, 51, 100, 2]);
+    for (label, expected_endpoint, expected_generation, our_client_id) in [
+        ("generation", live_endpoint, 7, high_id),
+        ("endpoint", other_endpoint, 8, high_id),
+        ("our-lowid", live_endpoint, 8, 0x0000_1234),
+    ] {
+        let (mut session, peer) = connected_background_test_session().await;
+        mark_background_session_connected(&mut session, live_endpoint, 8, our_client_id).await;
+        let server = background_test_server(live_endpoint);
+        let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::default()));
+        let (response, receive_response) = oneshot::channel();
+
+        let pending = start_background_server_search(
+            &mut session,
+            BackgroundServerSearchContext {
+                server: &server,
+                connect_options: 0,
+                shared_catalog: &shared_catalog,
+                bind_ip: crate::test_bind_ip(),
+                tcp_port: 4662,
+            },
+            BackgroundServerSearchRequest::Callback {
+                expected_server_endpoint: expected_endpoint,
+                expected_session_generation: expected_generation,
+                client_id: 0x0012_3456,
+                deadline: TokioInstant::now() + Duration::from_secs(1),
+                cancel: CancellationToken::new(),
+                response,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(pending.is_none(), "{label}");
+        assert!(receive_response.await.unwrap().is_err(), "{label}");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), peer.readable())
+                .await
+                .is_err(),
+            "{label} mismatch wrote a callback frame"
+        );
+    }
 }
 
 #[tokio::test]

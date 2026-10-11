@@ -1217,7 +1217,8 @@ impl EmulebbCore {
             Duration::from_secs(network.ed2k.callback_timeout_secs.max(timeout.as_secs()))
                 .min(ED2K_CALLBACK_TICKET_MAX_LIFETIME);
         let max_peers = network.ed2k.max_parallel_download_peers.max(1);
-        let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
+        let connected_server_route = self.connected_ed2k_server_route().await;
+        let connected_server_endpoint = connected_server_route.map(|(endpoint, _)| endpoint);
         let connected_search_handle = self.connected_ed2k_search_handle().await;
 
         let mut attempted_direct_endpoints = HashSet::new();
@@ -1442,9 +1443,15 @@ impl EmulebbCore {
                 } else {
                     match callback_route {
                         Ed2kServerCallbackRoute::BackgroundSession => {
-                            if let Some(handle) = connected_search_handle.as_ref() {
+                            if let (
+                                Some(handle),
+                                Some((expected_server_endpoint, expected_session_generation)),
+                            ) = (connected_search_handle.as_ref(), connected_server_route)
+                            {
                                 match request_callback_via_background_session(
                                     handle,
+                                    expected_server_endpoint,
+                                    expected_session_generation,
                                     source.client_id,
                                     callback_deadline,
                                     cancel,
@@ -2902,12 +2909,22 @@ impl EmulebbCore {
     }
 
     async fn connected_ed2k_server_endpoint(&self) -> Option<SocketAddr> {
+        self.connected_ed2k_server_route()
+            .await
+            .map(|(endpoint, _)| endpoint)
+    }
+
+    async fn connected_ed2k_server_route(&self) -> Option<(SocketAddr, u64)> {
         let server_state = {
             let runtime_guard = self.ed2k_runtime.lock().await;
             Arc::clone(&runtime_guard.as_ref()?.server_state)
         };
         let state = server_state.read().await;
-        state.connected.then_some(state.endpoint).flatten()
+        state
+            .connected
+            .then_some(state.endpoint)
+            .flatten()
+            .map(|endpoint| (endpoint, state.session_generation))
     }
 
     /// Our own TCP-firewalled (LowID) verdict from the live session state, in the
