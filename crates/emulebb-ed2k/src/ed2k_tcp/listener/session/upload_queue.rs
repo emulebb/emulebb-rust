@@ -478,12 +478,12 @@ impl ListenerUploadQueue {
         }
     }
 
-    /// Attach a promoted-outbound slot grant (a waiter with no live connection
-    /// promoted by the runtime queue) to this fresh outbound connection and
-    /// push OP_ACCEPTUPLOADREQ (oracle `ConnectionEstablished`,
-    /// BaseClient.cpp:1634-1641). Returns `false` when the grant went stale
-    /// before the connect completed; the caller closes the connection.
-    pub(in crate::ed2k_tcp) async fn attach_promoted_grant(
+    /// Attach an already-atomic upload grant to this connection and push
+    /// OP_ACCEPTUPLOADREQ (oracle `ConnectionEstablished`,
+    /// BaseClient.cpp:1634-1641). This covers both a HighID promote-dial and an
+    /// inbound LowID callback claim. Returns `false` when the grant went stale
+    /// before attachment; the caller closes the connection.
+    pub(in crate::ed2k_tcp) async fn attach_granted_session(
         &mut self,
         transfer_runtime: &Ed2kTransferRuntime,
         peer_identity: &Ed2kUploadPeerIdentity,
