@@ -173,6 +173,10 @@ fn hello_decode_preserves_multipacket_capabilities() {
     // The peer's eD2k UDP port is recovered from CT_EMULE_UDPPORTS (low 16 bits)
     // for (ip, udp_port) reask correlation.
     assert_eq!(profile.identity.udp_port, 41000);
+    assert_eq!(
+        profile.identity.server_endpoint,
+        Some(SocketAddr::from((Ipv4Addr::new(176, 123, 2, 239), 4232)))
+    );
 }
 
 #[test]
@@ -197,7 +201,25 @@ fn hello_learns_direct_udp_callback_capability_from_bit_12() {
         let profile = decode_hello_profile(&packet[6..]).unwrap();
 
         assert_eq!(profile.supports_direct_udp_callback, advertised);
+        assert_eq!(profile.identity.server_endpoint, None);
     }
+}
+
+#[test]
+fn hello_decode_rejects_a_truncated_server_endpoint_trailer() {
+    let mut packet = encode_hello_answer(Ed2kHelloIdentity {
+        user_hash: [0x45; 16],
+        client_id: 0x0000_1234,
+        tcp_port: 41001,
+        udp_port: 41000,
+        server_ip: u32::from_le_bytes([203, 0, 113, 9]),
+        server_port: 4661,
+        connect_options: emule_connect_options(false),
+        direct_udp_callback: false,
+    });
+    packet.pop();
+
+    assert!(decode_hello_answer_profile(&packet[6..]).is_err());
 }
 
 #[test]
@@ -405,12 +427,13 @@ fn emule_info_decode_preserves_stock_capability_tags() {
 }
 
 fn hello_answer_payload_with_raw_tags(tag_count: u32, raw_tags: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(26 + raw_tags.len());
+    let mut payload = Vec::with_capacity(32 + raw_tags.len());
     payload.extend_from_slice(&[0x55; 16]);
     payload.extend_from_slice(&0x521B_5895u32.to_le_bytes());
     payload.extend_from_slice(&4662u16.to_le_bytes());
     payload.extend_from_slice(&tag_count.to_le_bytes());
     payload.extend_from_slice(raw_tags);
+    payload.extend_from_slice(&[0; 6]);
     payload
 }
 

@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use super::hello_buddy::hello_buddy_snapshot;
 use super::hello_miscoptions::{
@@ -404,6 +407,10 @@ pub(super) struct DecodedHelloIdentity {
     /// Peer's Kad UDP port (high 16 bits of `CT_EMULE_UDPPORTS`, eMule `m_nKadPort`);
     /// `0` when not Kad-reachable. Feeds the firewalled-LowID callback guard.
     pub(super) kad_port: u16,
+    /// Server endpoint from the mandatory six-byte HELLO trailer. LowID client
+    /// IDs are scoped to this endpoint and cannot be correlated safely without
+    /// it. Zero/unspecified trailers are represented as `None`.
+    pub(super) server_endpoint: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -513,6 +520,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         tcp_port: u16::from_le_bytes([type_payload[20], type_payload[21]]),
         udp_port: 0,
         kad_port: 0,
+        server_endpoint: None,
     };
 
     let mut cursor = &type_payload[22..];
@@ -577,6 +585,15 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
             _ => {}
         }
         cursor = tag.remaining;
+    }
+
+    if cursor.len() < 6 {
+        anyhow::bail!("short eD2k hello server endpoint trailer");
+    }
+    let server_ip = Ipv4Addr::from(<[u8; 4]>::try_from(&cursor[..4]).unwrap());
+    let server_port = u16::from_le_bytes(cursor[4..6].try_into().unwrap());
+    if !server_ip.is_unspecified() && server_port != 0 {
+        identity.server_endpoint = Some(SocketAddr::new(IpAddr::V4(server_ip), server_port));
     }
 
     Ok(DecodedHelloProfile {
