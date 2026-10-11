@@ -10,9 +10,11 @@ use emulebb_kad_dht::SourceResult;
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    ED2K_SERVER_CALLBACK_COOLDOWN, claim_ed2k_server_callback_request, configured_server_attempts,
-    ed2k_server_callback_permitted, global_udp_source_batch_server_attempts,
-    kad_source_result_to_ed2k_found_source, merge_download_sources,
+    ED2K_SERVER_CALLBACK_COOLDOWN, cancel_ed2k_server_callback_request,
+    claim_ed2k_server_callback_request, commit_ed2k_server_callback_request,
+    configured_server_attempts, ed2k_server_callback_permitted,
+    global_udp_source_batch_server_attempts, kad_source_result_to_ed2k_found_source,
+    merge_download_sources,
 };
 
 fn kad_source(udp_port: u16) -> SourceResult {
@@ -90,54 +92,103 @@ fn global_udp_source_batch_attempts_cover_effective_server_list() {
 }
 
 #[test]
-fn server_callback_claim_is_per_server_client_file_and_uses_twenty_minute_gate() {
+fn server_callback_claim_is_peer_scoped_for_a4af_and_uses_twenty_minute_gate() {
     let mut last_sent = HashMap::new();
     let now = Instant::now();
     let server_a = "192.0.2.1:4661".parse().unwrap();
     let server_b = "192.0.2.2:4661".parse().unwrap();
 
-    assert!(claim_ed2k_server_callback_request(
+    let first = claim_ed2k_server_callback_request(&mut last_sent, server_a, 0x1234, now).unwrap();
+    assert!(
+        claim_ed2k_server_callback_request(
+            &mut last_sent,
+            server_a,
+            0x1234,
+            now + Duration::from_secs(30)
+        )
+        .is_none()
+    );
+    assert!(
+        claim_ed2k_server_callback_request(
+            &mut last_sent,
+            server_b,
+            0x1234,
+            now + Duration::from_secs(30)
+        )
+        .is_some()
+    );
+    assert!(
+        claim_ed2k_server_callback_request(
+            &mut last_sent,
+            server_a,
+            0x5678,
+            now + Duration::from_secs(30)
+        )
+        .is_some()
+    );
+    let committed_at = now + Duration::from_secs(5 * 60);
+    assert!(commit_ed2k_server_callback_request(
         &mut last_sent,
-        server_a,
+        first,
+        committed_at,
+    ));
+    assert!(
+        claim_ed2k_server_callback_request(
+            &mut last_sent,
+            server_a,
+            0x1234,
+            now + ED2K_SERVER_CALLBACK_COOLDOWN
+        )
+        .is_none()
+    );
+    assert!(
+        claim_ed2k_server_callback_request(
+            &mut last_sent,
+            server_a,
+            0x1234,
+            committed_at + ED2K_SERVER_CALLBACK_COOLDOWN
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn server_callback_cooldown_cancel_releases_exact_linear_claim() {
+    let mut last_sent = HashMap::new();
+    let now = Instant::now();
+    let server = "192.0.2.1:4661".parse().unwrap();
+    let first = claim_ed2k_server_callback_request(&mut last_sent, server, 0x1234, now).unwrap();
+
+    assert!(cancel_ed2k_server_callback_request(&mut last_sent, first));
+    let replacement = claim_ed2k_server_callback_request(
+        &mut last_sent,
+        server,
         0x1234,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        now
-    ));
-    assert!(!claim_ed2k_server_callback_request(
+        now + Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(
+        claim_ed2k_server_callback_request(
+            &mut last_sent,
+            server,
+            0x1234,
+            now + Duration::from_secs(2),
+        )
+        .is_none()
+    );
+    assert!(cancel_ed2k_server_callback_request(
         &mut last_sent,
-        server_a,
-        0x1234,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        now + Duration::from_secs(30)
+        replacement
     ));
-    assert!(claim_ed2k_server_callback_request(
-        &mut last_sent,
-        server_b,
-        0x1234,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        now + Duration::from_secs(30)
-    ));
-    assert!(claim_ed2k_server_callback_request(
-        &mut last_sent,
-        server_a,
-        0x1234,
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        now + Duration::from_secs(30)
-    ));
-    assert!(claim_ed2k_server_callback_request(
-        &mut last_sent,
-        server_a,
-        0x5678,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        now + Duration::from_secs(30)
-    ));
-    assert!(claim_ed2k_server_callback_request(
-        &mut last_sent,
-        server_a,
-        0x1234,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        now + ED2K_SERVER_CALLBACK_COOLDOWN
-    ));
+    assert!(
+        claim_ed2k_server_callback_request(
+            &mut last_sent,
+            server,
+            0x1234,
+            now + Duration::from_secs(3),
+        )
+        .is_some()
+    );
 }
 
 #[test]

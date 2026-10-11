@@ -237,6 +237,13 @@ pub struct Ed2kCallbackIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ed2kCallbackTicketId(pub(super) u64);
 
+/// Maximum lifetime accepted for an inbound callback admission ticket.
+///
+/// Producers should use the same bounded window for their outbound callback
+/// dispatch so a queued wire request cannot outlive the admission authority it
+/// is meant to activate.
+pub const ED2K_CALLBACK_TICKET_MAX_LIFETIME: Duration = Duration::from_secs(5 * 60);
+
 /// Callback transport which was asked to make the peer connect back.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ed2kCallbackRoute {
@@ -304,6 +311,14 @@ pub(crate) struct Ed2kCallbackHelloIdentity {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Ed2kCallbackDispatchPermit {
     pub(super) ticket_id: Ed2kCallbackTicketId,
+    pub(super) expires_at: std::time::Instant,
+}
+
+impl Ed2kCallbackDispatchPermit {
+    /// Exact reservation deadline shared with a queued outbound dispatch.
+    pub fn expires_at(&self) -> std::time::Instant {
+        self.expires_at
+    }
 }
 
 /// Result of reserving callback work before dispatching the wire request.

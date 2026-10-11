@@ -69,6 +69,7 @@ mod upload_cooldown;
 mod upload_queue;
 
 pub(crate) use block_lease::Ed2kDownloadBlockLease;
+pub use callback::Ed2kCallbackDispatchGuard;
 pub use catalog::{
     Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange, IndexedSharedCatalog,
 };
@@ -93,15 +94,16 @@ pub use ingest::{LocalIngestProgressEvent, LocalIngestProgressObserver, LocalIng
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
+pub use model::{
+    ED2K_CALLBACK_TICKET_MAX_LIFETIME, Ed2kCallbackDispatchOutcome, Ed2kCallbackDispatchPermit,
+    Ed2kCallbackDownload, Ed2kCallbackIntent, Ed2kCallbackReservation, Ed2kCallbackRoute,
+    Ed2kCallbackTicketError, Ed2kCallbackTicketId, Ed2kCallbackTicketRequest,
+    Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest,
+    Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
+};
 pub(crate) use model::{
     Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,
     Ed2kCallbackHelloIdentity, Ed2kCallbackPeer, PieceWriteOutcome,
-};
-pub use model::{
-    Ed2kCallbackDispatchOutcome, Ed2kCallbackDispatchPermit, Ed2kCallbackDownload,
-    Ed2kCallbackIntent, Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError,
-    Ed2kCallbackTicketId, Ed2kCallbackTicketRequest, Ed2kLocalIngestSummary, Ed2kPieceState,
-    Ed2kReloadIndexEntry, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
 pub(crate) use piece_store::Ed2kVerifiedRangeReader;
 use source_exchange::SourceExchangeState;

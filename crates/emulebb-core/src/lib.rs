@@ -24,14 +24,15 @@ use emulebb_ed2k::{
     built_in_port_mapping_providers,
     config::Ed2kRuntimeConfig,
     ed2k_server::{
-        Ed2kBackgroundSearchInterrupted, Ed2kFoundSource, Ed2kServerLoopOptions,
-        Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpCallbackRequestOptions,
-        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
-        SearchCriteria, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
-        parse_server_met, publish_shared_catalog_via_background_session,
-        request_callback_via_background_session, request_callback_via_udp_server,
-        run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
-        search_source_batch_via_background_session, search_source_udp_server_batches,
+        Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundSearchInterrupted, Ed2kFoundSource,
+        Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
+        Ed2kUdpCallbackRequestOptions, Ed2kUdpKeywordSearchOptions,
+        Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats, SearchCriteria,
+        ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
+        publish_shared_catalog_via_background_session, request_callback_via_background_session,
+        request_callback_via_udp_server, run_ed2k_server_loop, search_keyword_udp_servers,
+        search_keyword_via_background_session, search_source_batch_via_background_session,
+        search_source_udp_server_batches,
     },
     ed2k_tcp::{
         Ed2kCallbackSessionHandle, Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile,
@@ -42,9 +43,10 @@ use emulebb_ed2k::{
         set_publish_rust_identity,
     },
     ed2k_transfer::{
-        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry,
-        Ed2kSharedPublishDemandSignal, Ed2kSourceHint, Ed2kTransferRuntime,
-        Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackDownload,
+        Ed2kCallbackIntent, Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kMediaMetadata,
+        Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedPublishDemandSignal, Ed2kSourceHint,
+        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::ExternalReachability,
@@ -178,7 +180,8 @@ use ed2k_source_batch::{
 };
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity,
-    claim_ed2k_server_callback_request, collect_kad_ed2k_metadata, collect_kad_ed2k_sources,
+    cancel_ed2k_server_callback_request, claim_ed2k_server_callback_request,
+    collect_kad_ed2k_metadata, collect_kad_ed2k_sources, commit_ed2k_server_callback_request,
     direct_download_candidate_sources, drop_self_sources, ed2k_server_callback_permitted,
     ed2k_server_callback_route, found_source_from_hint, global_udp_source_batch_server_attempts,
     global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query, kad_metadata_words,
@@ -336,6 +339,12 @@ enum Ed2kSharedCatalogPublishOutcome {
     Published(OfferFilesPublishStats),
     NoNetwork,
     NotConnected,
+}
+
+enum Ed2kServerCallbackDispatch {
+    Sent,
+    KnownNotSent(String),
+    DeliveryUnknown(anyhow::Error),
 }
 
 /// RAII guard that removes a transfer hash from `active_download_attempts` (and
@@ -1202,12 +1211,9 @@ impl EmulebbCore {
         // gets eMule's full reach (ClientList.cpp:1059 SEC2MS(45)) so a firewalled
         // source has time to connect back.
         let timeout = Duration::from_secs(network.ed2k.connect_timeout_secs.max(10));
-        let callback_timeout = Duration::from_secs(
-            network
-                .ed2k
-                .callback_timeout_secs
-                .max(network.ed2k.connect_timeout_secs),
-        );
+        let callback_window =
+            Duration::from_secs(network.ed2k.callback_timeout_secs.max(timeout.as_secs()))
+                .min(ED2K_CALLBACK_TICKET_MAX_LIFETIME);
         let max_peers = network.ed2k.max_parallel_download_peers.max(1);
         let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
         let connected_search_handle = self.connected_ed2k_search_handle().await;
@@ -1276,7 +1282,6 @@ impl EmulebbCore {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            let callback_cancel = CancellationToken::new();
             for source in callback_only_sources {
                 if !requested_callback_sources.insert(source_key(&source)) {
                     continue;
@@ -1309,17 +1314,77 @@ impl EmulebbCore {
                     );
                     continue;
                 }
-                let callback_claimed = {
+                let callback_download = Ed2kCallbackDownload {
+                    file_hash,
+                    display_name: transfer.name.clone(),
+                    file_size: transfer.size_bytes,
+                    source: Ed2kSourceHint {
+                        ip: source.ip.to_string(),
+                        tcp_port: source.tcp_port,
+                        user_hash: source.user_hash.map(hex::encode),
+                        connect_options: source.obfuscation_options,
+                        file_comment: String::new(),
+                        file_rating: 0,
+                    },
+                };
+                let callback_ticket = match Ed2kCallbackTicketRequest::server(
+                    source_server,
+                    source.client_id,
+                    source.user_hash,
+                    source.tcp_port,
+                    callback_download,
+                    callback_window,
+                ) {
+                    Ok(ticket) => ticket,
+                    Err(error) => {
+                        tracing::warn!(
+                            "ED2K server callback ticket rejected file_hash={} client_id={} source_server={}: {error}",
+                            transfer.hash,
+                            source.client_id,
+                            source_server,
+                        );
+                        continue;
+                    }
+                };
+                let callback_dispatch_permit = match self
+                    .ed2k_transfers
+                    .reserve_callback_ticket(callback_ticket)
+                    .await
+                {
+                    Ok(Ed2kCallbackReservation::Dispatch(permit)) => permit,
+                    Ok(Ed2kCallbackReservation::Joined { .. }) => {
+                        tracing::debug!(
+                            "ED2K server callback joined pending peer session file_hash={} client_id={} source_server={}",
+                            transfer.hash,
+                            source.client_id,
+                            source_server,
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "ED2K server callback reservation failed file_hash={} client_id={} source_server={}: {error}",
+                            transfer.hash,
+                            source.client_id,
+                            source_server,
+                        );
+                        continue;
+                    }
+                };
+                let callback_cooldown_permit = {
                     let mut state = self.state.lock().await;
                     claim_ed2k_server_callback_request(
                         &mut state.ed2k_server_callback_last_sent,
                         source_server,
                         source.client_id,
-                        &transfer.hash,
                         Instant::now(),
                     )
                 };
-                if !callback_claimed {
+                let Some(callback_cooldown_permit) = callback_cooldown_permit else {
+                    let _ = self
+                        .ed2k_transfers
+                        .cancel_callback_ticket(callback_dispatch_permit)
+                        .await;
                     tracing::debug!(
                         "ED2K server callback suppressed by cooldown file_hash={} client_id={} source_server={}",
                         transfer.hash,
@@ -1327,74 +1392,153 @@ impl EmulebbCore {
                         source_server,
                     );
                     continue;
-                }
-                self.ed2k_transfers
-                    .register_callback_intent(Ed2kCallbackIntent {
-                        client_id: source.client_id,
-                        file_hash: transfer.hash.clone(),
-                        display_name: transfer.name.clone(),
-                        file_size: transfer.size_bytes,
-                        source: Ed2kSourceHint {
-                            ip: source.ip.to_string(),
-                            tcp_port: source.tcp_port,
-                            user_hash: source.user_hash.map(hex::encode),
-                            connect_options: source.obfuscation_options,
-                            file_comment: String::new(),
-                            file_rating: 0,
-                        },
-                    })
-                    .await;
-                tracing::debug!(
-                    "ED2K callback requested file_hash={} client_id={} tcp_port={} source_server={} requery_round={}",
-                    transfer.hash,
-                    source.client_id,
-                    source.tcp_port,
-                    source_server,
-                    source_requery_round
-                );
-                let callback_result = match callback_route {
-                    Ed2kServerCallbackRoute::BackgroundSession => {
-                        if let Some(handle) = connected_search_handle.as_ref() {
-                            request_callback_via_background_session(
-                                handle,
-                                source.client_id,
-                                callback_timeout,
-                                &callback_cancel,
-                            )
-                            .await
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "ED2K callback needs a connected background server session"
-                            ))
-                        }
-                    }
-                    Ed2kServerCallbackRoute::GlobalUdp => match self.ed2k_reachability.get() {
-                        Some(requester_public_ip) => {
-                            request_callback_via_udp_server(Ed2kUdpCallbackRequestOptions {
-                                bind_ip: network.bind_ip,
-                                config: &config,
-                                requester_public_ip,
-                                requester_tcp_port: self
-                                    .ed2k_reachability
-                                    .advertised_tcp_port(network.listen_port),
-                                server_endpoint: source_server,
-                                target_client_id: source.client_id,
-                            })
-                            .await
-                        }
-                        None => Err(anyhow::anyhow!(
-                            "ED2K global callback requires a known public IPv4"
-                        )),
-                    },
-                    Ed2kServerCallbackRoute::Unavailable => Ok(()),
                 };
-                if let Err(error) = callback_result {
-                    tracing::warn!(
-                        "ED2K callback request failed file_hash={} client_id={} source_server={}: {error}",
+                let Some(callback_dispatch_guard) = self
+                    .ed2k_transfers
+                    .begin_callback_ticket_dispatch(callback_dispatch_permit)
+                else {
+                    let cooldown_cancelled = {
+                        let mut state = self.state.lock().await;
+                        cancel_ed2k_server_callback_request(
+                            &mut state.ed2k_server_callback_last_sent,
+                            callback_cooldown_permit,
+                        )
+                    };
+                    tracing::debug!(
+                        "ED2K server callback settled before dispatch file_hash={} client_id={} source_server={} cooldown_cancelled={}",
                         transfer.hash,
                         source.client_id,
                         source_server,
+                        cooldown_cancelled,
                     );
+                    continue;
+                };
+                let callback_deadline = callback_dispatch_guard.expires_at();
+                let callback_dispatch = if Instant::now() >= callback_deadline {
+                    Ed2kServerCallbackDispatch::KnownNotSent(
+                        "ED2K callback ticket expired before route dispatch".to_string(),
+                    )
+                } else {
+                    match callback_route {
+                        Ed2kServerCallbackRoute::BackgroundSession => {
+                            if let Some(handle) = connected_search_handle.as_ref() {
+                                match request_callback_via_background_session(
+                                    handle,
+                                    source.client_id,
+                                    callback_deadline,
+                                    cancel,
+                                )
+                                .await
+                                {
+                                    Ok(Ed2kBackgroundCallbackDispatchOutcome::Sent) => {
+                                        Ed2kServerCallbackDispatch::Sent
+                                    }
+                                    Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+                                        reason,
+                                    }) => Ed2kServerCallbackDispatch::KnownNotSent(reason),
+                                    Err(error) => {
+                                        Ed2kServerCallbackDispatch::DeliveryUnknown(error)
+                                    }
+                                }
+                            } else {
+                                Ed2kServerCallbackDispatch::KnownNotSent(
+                                    "ED2K callback needs a connected background server session"
+                                        .to_string(),
+                                )
+                            }
+                        }
+                        Ed2kServerCallbackRoute::GlobalUdp => match self.ed2k_reachability.get() {
+                            Some(requester_public_ip) => match request_callback_via_udp_server(
+                                Ed2kUdpCallbackRequestOptions {
+                                    bind_ip: network.bind_ip,
+                                    config: &config,
+                                    requester_public_ip,
+                                    requester_tcp_port: self
+                                        .ed2k_reachability
+                                        .advertised_tcp_port(network.listen_port),
+                                    server_endpoint: source_server,
+                                    target_client_id: source.client_id,
+                                },
+                            )
+                            .await
+                            {
+                                Ok(()) => Ed2kServerCallbackDispatch::Sent,
+                                Err(error) => {
+                                    Ed2kServerCallbackDispatch::KnownNotSent(error.to_string())
+                                }
+                            },
+                            None => Ed2kServerCallbackDispatch::KnownNotSent(
+                                "ED2K global callback requires a known public IPv4".to_string(),
+                            ),
+                        },
+                        Ed2kServerCallbackRoute::Unavailable => {
+                            Ed2kServerCallbackDispatch::KnownNotSent(
+                                "ED2K server callback route became unavailable".to_string(),
+                            )
+                        }
+                    }
+                };
+                match callback_dispatch {
+                    Ed2kServerCallbackDispatch::Sent => {
+                        let ticket_outcome = callback_dispatch_guard.mark_dispatched();
+                        let cooldown_committed = {
+                            let mut state = self.state.lock().await;
+                            commit_ed2k_server_callback_request(
+                                &mut state.ed2k_server_callback_last_sent,
+                                callback_cooldown_permit,
+                                Instant::now(),
+                            )
+                        };
+                        tracing::debug!(
+                            "ED2K callback requested file_hash={} client_id={} tcp_port={} source_server={} requery_round={} ticket_outcome={ticket_outcome:?} cooldown_committed={cooldown_committed}",
+                            transfer.hash,
+                            source.client_id,
+                            source.tcp_port,
+                            source_server,
+                            source_requery_round
+                        );
+                    }
+                    Ed2kServerCallbackDispatch::KnownNotSent(reason) => {
+                        let ticket_cancelled = callback_dispatch_guard.cancel();
+                        let cooldown_cancelled = {
+                            let mut state = self.state.lock().await;
+                            cancel_ed2k_server_callback_request(
+                                &mut state.ed2k_server_callback_last_sent,
+                                callback_cooldown_permit,
+                            )
+                        };
+                        tracing::warn!(
+                            "ED2K callback request not sent file_hash={} client_id={} source_server={} ticket_cancelled={} cooldown_cancelled={}: {reason}",
+                            transfer.hash,
+                            source.client_id,
+                            source_server,
+                            ticket_cancelled,
+                            cooldown_cancelled,
+                        );
+                    }
+                    Ed2kServerCallbackDispatch::DeliveryUnknown(error) => {
+                        // The command may have reached the server. Conservatively
+                        // arm admission and retain the cooldown instead of sending
+                        // a duplicate callback or deleting a fast inbound claim.
+                        let ticket_outcome = callback_dispatch_guard.mark_dispatched();
+                        let cooldown_committed = {
+                            let mut state = self.state.lock().await;
+                            commit_ed2k_server_callback_request(
+                                &mut state.ed2k_server_callback_last_sent,
+                                callback_cooldown_permit,
+                                Instant::now(),
+                            )
+                        };
+                        tracing::warn!(
+                            "ED2K callback delivery unknown file_hash={} client_id={} source_server={} ticket_outcome={ticket_outcome:?} cooldown_committed={cooldown_committed}: {error}",
+                            transfer.hash,
+                            source.client_id,
+                            source_server,
+                        );
+                    }
+                }
+                if cancel.is_cancelled() {
+                    return Ok(None);
                 }
             }
 

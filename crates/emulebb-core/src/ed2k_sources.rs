@@ -46,30 +46,64 @@ pub(crate) const ED2K_SERVER_CALLBACK_COOLDOWN: Duration = Duration::from_secs(2
 pub(crate) struct Ed2kServerCallbackKey {
     server_endpoint: SocketAddr,
     client_id: u32,
-    file_hash: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Ed2kServerCallbackCooldownPermit {
+    key: Ed2kServerCallbackKey,
+    claimed_at: Instant,
 }
 
 pub(crate) fn claim_ed2k_server_callback_request(
     last_sent: &mut HashMap<Ed2kServerCallbackKey, Instant>,
     server_endpoint: SocketAddr,
     client_id: u32,
-    file_hash: &str,
     now: Instant,
-) -> bool {
+) -> Option<Ed2kServerCallbackCooldownPermit> {
     last_sent.retain(|_, sent_at| {
         now.saturating_duration_since(*sent_at) < ED2K_SERVER_CALLBACK_COOLDOWN
     });
     let key = Ed2kServerCallbackKey {
         server_endpoint,
         client_id,
-        file_hash: file_hash.to_string(),
     };
     if last_sent.get(&key).is_some_and(|sent_at| {
         now.saturating_duration_since(*sent_at) < ED2K_SERVER_CALLBACK_COOLDOWN
     }) {
+        return None;
+    }
+    last_sent.insert(key.clone(), now);
+    Some(Ed2kServerCallbackCooldownPermit {
+        key,
+        claimed_at: now,
+    })
+}
+
+/// Roll back one callback cooldown only when it still belongs to this exact
+/// pre-dispatch claim. A stale failure cannot clear a newer successful send.
+pub(crate) fn cancel_ed2k_server_callback_request(
+    last_sent: &mut HashMap<Ed2kServerCallbackKey, Instant>,
+    permit: Ed2kServerCallbackCooldownPermit,
+) -> bool {
+    if last_sent.get(&permit.key) != Some(&permit.claimed_at) {
         return false;
     }
-    last_sent.insert(key, now);
+    last_sent.remove(&permit.key);
+    true
+}
+
+/// Start the peer retry interval when dispatch was sent or became ambiguous.
+/// The linear permit prevents an older settlement from refreshing a newer
+/// callback claim for the same server-local peer.
+pub(crate) fn commit_ed2k_server_callback_request(
+    last_sent: &mut HashMap<Ed2kServerCallbackKey, Instant>,
+    permit: Ed2kServerCallbackCooldownPermit,
+    now: Instant,
+) -> bool {
+    if last_sent.get(&permit.key) != Some(&permit.claimed_at) {
+        return false;
+    }
+    last_sent.insert(permit.key, now);
     true
 }
 

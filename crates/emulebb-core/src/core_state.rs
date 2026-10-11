@@ -94,9 +94,10 @@ pub(crate) struct CoreState {
     /// round (oracle `DS_WAITCALLBACKKAD` reap window).
     pub(crate) ed2k_kad_callback_last_sent:
         HashMap<crate::kad_callback_initiator::KadCallbackKey, Instant>,
-    /// Last time we sent `OP_CALLBACKREQUEST` through the connected eD2K server,
-    /// keyed by (LowID client id, file hash). Mirrors eMule's per-source
-    /// `MIN2MS(20)` callback retry gate.
+    /// Last time we sent a classic server callback for one server-local LowID
+    /// peer, keyed by (server endpoint, client id). The peer-scoped gate covers
+    /// every A4AF file joined to that callback session and mirrors eMule's
+    /// per-client `MIN2MS(20)` retry gate.
     pub(crate) ed2k_server_callback_last_sent:
         HashMap<crate::ed2k_sources::Ed2kServerCallbackKey, Instant>,
     /// Last time we originated an `OP_DIRECTCALLBACKREQ` to a firewalled type-6
