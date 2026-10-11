@@ -16,7 +16,7 @@ use crate::{
 };
 use emulebb_kad_proto::Ed2kHash;
 
-use super::packet_handler::decode_id_change_payload;
+use super::packet_handler::{decode_id_change_payload, log_uncorrelated_server_reject};
 use super::{
     Ed2kFoundSource, Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_IDCHANGE,
     OP_LOGINREQUEST, OP_REJECT, ResolvedServerEntry, ServerLoginCapabilities, ServerSession,
@@ -302,13 +302,122 @@ async fn search_sources_on_server(
                 return Ok(results);
             }
             OP_REJECT => {
-                anyhow::bail!(
-                    "ED2K server {transport_endpoint} rejected the source-search session"
-                );
+                log_uncorrelated_server_reject(transport_endpoint, packet.payload.len());
             }
             _ => {}
         }
     }
 
     Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, time::Duration};
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::{SourceSearchServerOptions, search_sources_on_server};
+
+    async fn read_active_source_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 6];
+        stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], super::super::OP_EDONKEYPROT);
+        let payload_len =
+            u32::from_le_bytes(header[1..5].try_into().unwrap()).saturating_sub(1) as usize;
+        let mut payload = vec![0u8; payload_len];
+        stream.read_exact(&mut payload).await.unwrap();
+        (header[5], payload)
+    }
+
+    fn active_source_identity() -> crate::ed2k_tcp::Ed2kHelloIdentity {
+        crate::ed2k_tcp::Ed2kHelloIdentity {
+            user_hash: [0x11; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: 0,
+            direct_udp_callback: false,
+        }
+    }
+
+    fn active_source_server(endpoint: SocketAddr) -> super::super::ResolvedServerEntry {
+        let SocketAddr::V4(endpoint) = endpoint else {
+            panic!("test server must be IPv4");
+        };
+        super::super::ResolvedServerEntry {
+            entry: super::super::ConfiguredServerEntry::from_endpoint_text(
+                &SocketAddr::V4(endpoint).to_string(),
+            )
+            .unwrap(),
+            ip: *endpoint.ip(),
+        }
+    }
+
+    #[tokio::test]
+    async fn active_source_search_ignores_reject_before_typed_result() {
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let file_hash = emulebb_kad_proto::Ed2kHash([0x44; 16]);
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (opcode, _) = read_active_source_frame(&mut stream).await;
+            assert_eq!(opcode, super::super::OP_LOGINREQUEST);
+            let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+            stream
+                .write_all(
+                    &super::super::encode_packet(
+                        super::super::OP_IDCHANGE,
+                        &high_id.to_le_bytes(),
+                        false,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            loop {
+                let (opcode, _) = read_active_source_frame(&mut stream).await;
+                if matches!(
+                    opcode,
+                    super::super::OP_GETSOURCES | super::super::OP_GETSOURCES_OBFU
+                ) {
+                    break;
+                }
+            }
+            let mut found_sources = file_hash.0.to_vec();
+            found_sources.push(0);
+            let mut replies =
+                super::super::encode_packet(super::super::OP_REJECT, &[0x01], false).unwrap();
+            replies.extend_from_slice(
+                &super::super::encode_packet(super::super::OP_FOUNDSOURCES, &found_sources, false)
+                    .unwrap(),
+            );
+            stream.write_all(&replies).await.unwrap();
+        });
+        let cancel = CancellationToken::new();
+        let server = active_source_server(endpoint);
+
+        let results = search_sources_on_server(SourceSearchServerOptions {
+            bind_ip: crate::test_bind_ip(),
+            server: &server,
+            hello_identity: active_source_identity(),
+            nickname: "eMule",
+            shared_catalog: &[],
+            file_hash,
+            file_size: 123,
+            idle_timeout: Duration::from_secs(1),
+            cancel: &cancel,
+        })
+        .await
+        .unwrap();
+
+        assert!(results.is_empty());
+        server_task.await.unwrap();
+    }
 }

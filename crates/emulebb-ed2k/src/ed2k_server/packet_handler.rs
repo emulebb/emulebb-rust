@@ -20,6 +20,13 @@ use super::{
     wait_for_offer_files_settle,
 };
 
+pub(super) fn log_uncorrelated_server_reject(endpoint: SocketAddr, payload_len: usize) {
+    warn!(
+        "ED2K server {} sent uncorrelated OP_REJECT payload_len={}; preserving session and pending operations",
+        endpoint, payload_len
+    );
+}
+
 #[expect(
     clippy::cognitive_complexity,
     reason = "linear protocol orchestration flow"
@@ -300,11 +307,7 @@ pub(super) async fn handle_server_packet(
             // earlier rejection can already be queued in TCP while a later
             // command is sent. Typed replies and per-request deadlines remain
             // the only authorities for completing background operations.
-            warn!(
-                "ED2K server {} sent uncorrelated OP_REJECT payload_len={}; preserving session and pending operations",
-                session.endpoint,
-                packet.payload.len()
-            );
+            log_uncorrelated_server_reject(session.endpoint, packet.payload.len());
         }
         opcode => {
             debug!(
