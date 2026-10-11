@@ -7,6 +7,28 @@ use std::net::Ipv4Addr;
 /// Larger values are treated as poisoned observations and reset to zero.
 const MAX_KAD_KEYWORD_AVAILABILITY: u32 = 65_500;
 
+/// Local wire-dispatch result of a FINDSOURCE-assisted Kad callback walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KadCallbackSearchDispatchOutcome {
+    /// At least one close Kad contact accepted the callback datagram locally.
+    Dispatched { request_count: usize },
+    /// No `KADEMLIA_CALLBACK_REQ` reached the local UDP socket.
+    NotDispatched {
+        reason: KadCallbackSearchNotDispatchedReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KadCallbackSearchNotDispatchedReason {
+    Cancelled,
+    DeadlineElapsed,
+    DuplicateTarget,
+    SearchCapacityBusy,
+    SearchSemaphoreClosed,
+    NoRespondingContacts,
+    SendFailed,
+}
+
 /// One peer chosen to run an outbound Kad UDP firewall check against us.
 ///
 /// The oracle (`CUDPFirewallTester::QueryNextClient`) only asks contacts that

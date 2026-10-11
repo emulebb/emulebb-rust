@@ -772,7 +772,7 @@ async fn test_run_search_phase_collects_multiple_search_res_packets() {
             .unwrap();
     });
 
-    let search_entries = run_search_phase(
+    let search_phase = run_search_phase(
         &rpc,
         SearchPhaseConfig {
             responded: std::slice::from_ref(&contact),
@@ -799,8 +799,15 @@ async fn test_run_search_phase_collects_multiple_search_res_packets() {
     .await;
 
     assert!(
-        search_entries.is_empty(),
+        search_phase.search_entries.is_empty(),
         "streaming searches should not duplicate raw SEARCH_RES storage"
+    );
+    assert_eq!(
+        search_phase.dispatch,
+        Phase2DispatchStats {
+            attempted: 1,
+            sent: 1,
+        }
     );
     let streamed_first = result_rx.recv().await.expect("first streamed result");
     let streamed_second = result_rx.recv().await.expect("second streamed result");

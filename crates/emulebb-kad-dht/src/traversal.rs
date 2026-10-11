@@ -196,6 +196,22 @@ pub struct TraversalResult {
     /// they intentionally leave this buffer empty to avoid duplicating every
     /// inbound result page in memory.
     pub search_entries: Vec<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>,
+    /// Local socket-write accounting for phase-2 search packets. Callback
+    /// producers use this to distinguish a traversal that actually dispatched
+    /// `KADEMLIA_CALLBACK_REQ` from one that found no route or whose sends all
+    /// failed.
+    pub phase2_dispatch: Phase2DispatchStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Phase2DispatchStats {
+    pub attempted: usize,
+    pub sent: usize,
+}
+
+struct SearchPhaseResult {
+    search_entries: Vec<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>,
+    dispatch: Phase2DispatchStats,
 }
 
 fn traversal_closest_limit(search_kind: &TraversalKind, phase2_fanout: usize) -> usize {
@@ -318,9 +334,11 @@ pub async fn run_traversal(
 
     // ── Phase 2: Send search packets to close nodes ──────────────────────────
 
-    let search_entries = match search_kind {
-        TraversalKind::FindNode => vec![],
-        TraversalKind::Store => vec![],
+    let search_phase = match search_kind {
+        TraversalKind::FindNode | TraversalKind::Store => SearchPhaseResult {
+            search_entries: Vec::new(),
+            dispatch: Phase2DispatchStats::default(),
+        },
         kind => {
             run_search_phase(
                 rpc,
@@ -346,7 +364,8 @@ pub async fn run_traversal(
 
     TraversalResult {
         closest,
-        search_entries,
+        search_entries: search_phase.search_entries,
+        phase2_dispatch: search_phase.dispatch,
     }
 }
 
@@ -882,10 +901,7 @@ fn log_lookup_phase_summary(candidates: &[TraversalCandidate], closest_count: us
 }
 
 /// Send search packets to the selected responding nodes and collect results.
-async fn run_search_phase(
-    rpc: &RpcManager,
-    config: SearchPhaseConfig<'_>,
-) -> Vec<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)> {
+async fn run_search_phase(rpc: &RpcManager, config: SearchPhaseConfig<'_>) -> SearchPhaseResult {
     let SearchPhaseConfig {
         responded,
         kind,
@@ -902,11 +918,17 @@ async fn run_search_phase(
         result_tx,
     } = config;
     if cancel.is_cancelled() {
-        return vec![];
+        return SearchPhaseResult {
+            search_entries: Vec::new(),
+            dispatch: Phase2DispatchStats::default(),
+        };
     }
     let now = Instant::now();
     if now >= response_deadline {
-        return vec![];
+        return SearchPhaseResult {
+            search_entries: Vec::new(),
+            dispatch: Phase2DispatchStats::default(),
+        };
     }
     // Phase 2 must keep collecting SEARCH_RES for the FULL remaining search
     // budget, not just one per-node query window. `query_timeout` bounds an
@@ -927,11 +949,18 @@ async fn run_search_phase(
         send_to.len(),
         qt.as_secs_f32()
     );
+    if send_to.is_empty() {
+        return SearchPhaseResult {
+            search_entries: Vec::new(),
+            dispatch: Phase2DispatchStats::default(),
+        };
+    }
 
     let mut unsolicited = rpc.subscribe();
     let mut queried_addrs = HashMap::new();
     let mut pending_contacts = send_to.into_iter().collect::<VecDeque<_>>();
     let mut search_entries = Vec::new();
+    let mut dispatch = Phase2DispatchStats::default();
     let should_collect_search_entries = result_tx.is_none();
     let result_tx = result_tx;
     let mut next_emit_at = compute_initial_jumpstart_emit_at(
@@ -984,7 +1013,7 @@ async fn run_search_phase(
             continue;
         }
 
-        if let Some(next) = emit_next_search_packet(
+        if let Some((next, sent)) = emit_next_search_packet(
             rpc,
             &kind,
             target,
@@ -995,6 +1024,8 @@ async fn run_search_phase(
         )
         .await
         {
+            dispatch.attempted += 1;
+            dispatch.sent += usize::from(sent);
             next_emit_at = next;
         }
     }
@@ -1004,7 +1035,10 @@ async fn run_search_phase(
         search_entries.len()
     );
 
-    search_entries
+    SearchPhaseResult {
+        search_entries,
+        dispatch,
+    }
 }
 
 async fn emit_next_search_packet(
@@ -1015,7 +1049,7 @@ async fn emit_next_search_packet(
     jumpstart_tick: Duration,
     pending_contacts: &mut VecDeque<&TraversalContact>,
     queried_addrs: &mut HashMap<SocketAddr, u8>,
-) -> Option<Instant> {
+) -> Option<(Instant, bool)> {
     let contact = pending_contacts.pop_front()?;
     register_traversal_identity(rpc, contact);
     let packet = search_phase_packet(kind, target, contact.version);
@@ -1025,14 +1059,18 @@ async fn emit_next_search_packet(
         contact.addr,
         pending_contacts.len()
     );
-    if let Err(err) = rpc.send_with_class(contact.addr, &packet, work_class).await {
-        trace!("search phase send failed for {}: {}", contact.id, err);
-    }
+    let sent = match rpc.send_with_class(contact.addr, &packet, work_class).await {
+        Ok(()) => true,
+        Err(error) => {
+            trace!("search phase send failed for {}: {}", contact.id, error);
+            false
+        }
+    };
     queried_addrs
         .entry(contact.addr)
         .and_modify(|version| *version = (*version).max(contact.version))
         .or_insert(contact.version);
-    Some(Instant::now() + jumpstart_tick)
+    Some((Instant::now() + jumpstart_tick, sent))
 }
 
 fn search_phase_packet(kind: &TraversalKind, target: NodeId, contact_version: u8) -> KadPacket {
