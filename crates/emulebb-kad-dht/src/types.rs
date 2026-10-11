@@ -8,6 +8,7 @@ use std::net::Ipv4Addr;
 const MAX_KAD_KEYWORD_AVAILABILITY: u32 = 65_500;
 
 /// Local wire-dispatch result of a FINDSOURCE-assisted Kad callback walk.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KadCallbackSearchDispatchOutcome {
     /// At least one close Kad contact accepted the callback datagram locally.
