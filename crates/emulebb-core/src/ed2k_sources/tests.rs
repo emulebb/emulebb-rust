@@ -10,8 +10,10 @@ use emulebb_kad_dht::SourceResult;
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    ED2K_SERVER_CALLBACK_COOLDOWN, cancel_ed2k_server_callback_request,
-    claim_ed2k_server_callback_request, commit_ed2k_server_callback_request,
+    ED2K_DIRECT_CALLBACK_COOLDOWN, ED2K_SERVER_CALLBACK_COOLDOWN,
+    cancel_ed2k_direct_callback_request, cancel_ed2k_server_callback_request,
+    claim_ed2k_direct_callback_request, claim_ed2k_server_callback_request,
+    commit_ed2k_direct_callback_request, commit_ed2k_server_callback_request,
     configured_server_attempts, ed2k_server_callback_permitted,
     global_udp_source_batch_server_attempts, kad_source_result_to_ed2k_found_source,
     merge_download_sources,
@@ -188,6 +190,98 @@ fn server_callback_cooldown_cancel_releases_exact_linear_claim() {
             now + Duration::from_secs(3),
         )
         .is_some()
+    );
+}
+
+#[test]
+fn direct_callback_claim_is_peer_scoped_and_settles_from_dispatch_time() {
+    let mut last_sent = HashMap::new();
+    let now = Instant::now();
+    let source_a = "198.51.100.40:4672".parse().unwrap();
+    let source_b = "198.51.100.41:4672".parse().unwrap();
+    let hash_a = [0x11; 16];
+    let hash_b = [0x22; 16];
+
+    let first = claim_ed2k_direct_callback_request(&mut last_sent, source_a, hash_a, now).unwrap();
+    assert!(
+        claim_ed2k_direct_callback_request(
+            &mut last_sent,
+            source_a,
+            hash_a,
+            now + Duration::from_secs(5),
+        )
+        .is_none(),
+        "the same callback peer is one A4AF session regardless of file"
+    );
+    assert!(
+        claim_ed2k_direct_callback_request(
+            &mut last_sent,
+            source_b,
+            hash_a,
+            now + Duration::from_secs(5),
+        )
+        .is_some(),
+        "the UDP route is part of direct callback identity"
+    );
+    assert!(
+        claim_ed2k_direct_callback_request(
+            &mut last_sent,
+            source_a,
+            hash_b,
+            now + Duration::from_secs(5),
+        )
+        .is_some(),
+        "a different protocol user hash is a different peer"
+    );
+
+    let settled_at = now + Duration::from_secs(10);
+    assert!(commit_ed2k_direct_callback_request(
+        &mut last_sent,
+        first,
+        settled_at,
+    ));
+    assert!(
+        claim_ed2k_direct_callback_request(
+            &mut last_sent,
+            source_a,
+            hash_a,
+            now + ED2K_DIRECT_CALLBACK_COOLDOWN,
+        )
+        .is_none(),
+        "cooldown starts at dispatch settlement rather than reservation"
+    );
+    assert!(
+        claim_ed2k_direct_callback_request(
+            &mut last_sent,
+            source_a,
+            hash_a,
+            settled_at + ED2K_DIRECT_CALLBACK_COOLDOWN,
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn direct_callback_cooldown_rollback_is_exact_and_linear() {
+    let mut last_sent = HashMap::new();
+    let now = Instant::now();
+    let source = "198.51.100.40:4672".parse().unwrap();
+    let user_hash = [0x11; 16];
+    let first = claim_ed2k_direct_callback_request(&mut last_sent, source, user_hash, now).unwrap();
+
+    assert!(cancel_ed2k_direct_callback_request(&mut last_sent, first));
+    let stale = claim_ed2k_direct_callback_request(
+        &mut last_sent,
+        source,
+        user_hash,
+        now + Duration::from_secs(1),
+    )
+    .unwrap();
+    let key = stale.key.clone();
+    last_sent.insert(key, now + Duration::from_secs(2));
+    assert!(
+        !cancel_ed2k_direct_callback_request(&mut last_sent, stale),
+        "an old failure must not clear a newer callback claim"
     );
 }
 

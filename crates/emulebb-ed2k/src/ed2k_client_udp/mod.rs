@@ -51,9 +51,9 @@ pub(crate) use outbound::{
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
 pub use runtime::{
-    DirectCallbackArgs, ReaskCommand, ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent,
-    ReaskEventReceiver, ReaskEventSender, ReaskSourceHandle, reask_command_channel,
-    reask_event_channel, run_ed2k_udp_reask_loop,
+    DirectCallbackArgs, DirectCallbackDispatch, DirectCallbackDispatchOutcome, ReaskCommand,
+    ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent, ReaskEventReceiver, ReaskEventSender,
+    ReaskSourceHandle, reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
 pub(crate) use service::{ReaskInboundOutcome, ReaskService, ReaskTickOutput, TransferReaskInfo};
 pub(crate) use source_set::ReaskSourceSet;
