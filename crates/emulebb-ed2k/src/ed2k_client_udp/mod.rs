@@ -10,10 +10,11 @@
 //! - [`state`]: per-source reask state, cadence policy, and the downloader-side
 //!   reaction table.
 //! - [`reciprocity`]: the uploader-side answer decision for inbound reasks.
-//! - [`runtime`]: the live transport loop ([`run_ed2k_udp_reask_loop`]), spawned
-//!   by `emulebb-core` when `enable_udp_reask` is set (default on). Datagrams
-//!   ride the shared, egress-pinned Kad UDP socket (no separate client-UDP
-//!   port), with [`buddy_relay`] handling the LowID buddy-relayed legs.
+//! - [`runtime`]: the live transport loop ([`run_ed2k_udp_reask_loop`]), always
+//!   spawned by `emulebb-core` for direct callbacks and port tests. The
+//!   `enable_udp_reask` flag gates only reask and buddy-relay behavior. Datagrams
+//!   ride the shared, egress-pinned Kad UDP socket (no separate client-UDP port),
+//!   with [`buddy_relay`] handling the LowID buddy-relayed legs.
 //!
 //! The re-exports below are the module's full foundation surface. The live
 //! runtime reaches some of it through direct submodule paths and the unit
