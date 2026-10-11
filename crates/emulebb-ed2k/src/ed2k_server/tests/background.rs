@@ -1098,3 +1098,143 @@ async fn shutdown_preempts_a_silent_pending_login() {
     assert!(!state.connected);
     server_task.abort();
 }
+
+#[tokio::test]
+async fn reject_before_id_change_does_not_abort_login() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        stream
+            .write_all(&encode_packet(OP_REJECT, &[], false).unwrap())
+            .await
+            .unwrap();
+        let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
+    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let (_, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+
+    let observe_connected = async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.read().await.connected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("OP_REJECT must leave the login attempt awaiting OP_IDCHANGE");
+        reconnect_signal.notify_one();
+    };
+    let (result, ()) = tokio::join!(
+        run_one_server_session(&server, &context, &inbox),
+        observe_connected
+    );
+
+    assert_eq!(result.unwrap(), ServerSessionExit::RestartPreferredOrder);
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn reject_does_not_complete_or_disconnect_pending_background_search() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+        loop {
+            let (opcode, _) = read_client_frame(&mut stream).await;
+            if opcode == OP_SEARCHREQUEST {
+                break;
+            }
+        }
+        let mut replies = encode_packet(OP_REJECT, &[0xAA, 0x55], false).unwrap();
+        replies.extend_from_slice(
+            &encode_packet(OP_SEARCHRESULT, &0u32.to_le_bytes(), false).unwrap(),
+        );
+        stream.write_all(&replies).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
+    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let (handle, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+    let cancel = CancellationToken::new();
+
+    let search = async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.read().await.connected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background session should accept login");
+        let result = search_keyword_via_background_session(
+            &handle,
+            "reject followed by result",
+            Default::default(),
+            Duration::from_secs(1),
+            &cancel,
+        )
+        .await;
+        reconnect_signal.notify_one();
+        result
+    };
+    let (session_result, search_result) =
+        tokio::join!(run_one_server_session(&server, &context, &inbox), search);
+
+    assert_eq!(
+        session_result.unwrap(),
+        ServerSessionExit::RestartPreferredOrder
+    );
+    assert!(search_result.unwrap().is_empty());
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn uncorrelated_reject_does_not_downgrade_negotiated_offer_pacing() {
+    let (mut session, _peer) = connected_background_test_session().await;
+    let policy = OfferFilesPolicy::validate(1, 25, 10, 1_000, 1_001).unwrap();
+    session.login_accepted = true;
+    session.offer_files_pacing = OfferFilesPacingMode::Negotiated(policy);
+    session.last_tx_opcode = Some(OP_OFFERFILES);
+    let context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
+
+    handle_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_REJECT,
+            payload: Vec::new(),
+        },
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        session.offer_files_pacing,
+        OfferFilesPacingMode::Negotiated(policy)
+    );
+}
