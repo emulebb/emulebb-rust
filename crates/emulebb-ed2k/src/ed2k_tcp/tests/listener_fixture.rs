@@ -195,6 +195,7 @@ impl ListenerTestRuntime {
             super::handle_connection(
                 super::Ed2kSessionSource::CallbackUpload {
                     transport: Box::new(transport),
+                    expected_user_hash: None,
                 },
                 peer_addr,
                 super::Ed2kConnectionContext {

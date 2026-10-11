@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use anyhow::Result;
 use tracing::{debug, error, info, warn};
 
-use crate::ed2k_tcp::{connect_callback_peer, enrich_hello_identity};
+use crate::ed2k_tcp::{Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest};
 
 use super::offer_policy::{OfferFilesCapabilityAdvertisement, OfferFilesPolicy};
 use super::server_description::valid_dynamic_host;
@@ -268,40 +268,22 @@ pub(super) async fn handle_server_packet(
                         .unwrap_or_else(|| "plaintext".to_string()),
                     packet.payload.len()
                 );
-                let bind_ip = context.bind_ip;
-                let hello_identity = enrich_hello_identity(
-                    context.hello_identity,
-                    &context.state,
-                    &context.kad_firewall,
-                )
-                .await;
-                let connect_timeout = context.connect_timeout;
-                tokio::spawn(async move {
-                    match connect_callback_peer(
-                        bind_ip,
-                        callback.peer_addr,
-                        hello_identity,
-                        callback.user_hash,
-                        callback.connect_options,
-                        connect_timeout,
-                    )
-                    .await
-                    {
-                        Ok(mode) => {
-                            debug!(
-                                "ED2K callback peer connect completed peer={} transport={}",
-                                callback.peer_addr,
-                                mode.as_str()
-                            );
-                        }
-                        Err(error) => {
-                            debug!(
-                                "ED2K callback peer connect failed peer={}: {error}",
-                                callback.peer_addr
-                            );
-                        }
-                    }
-                });
+                if let Err(error) =
+                    context
+                        .callback_sessions
+                        .try_start(Ed2kCallbackSessionRequest {
+                            peer_addr: callback.peer_addr,
+                            expected_user_hash: callback.user_hash,
+                            peer_connect_options: callback.connect_options,
+                            timeout: context.connect_timeout,
+                            origin: Ed2kCallbackSessionOrigin::Server,
+                        })
+                {
+                    debug!(
+                        "ED2K callback peer dispatch failed peer={}: {error}",
+                        callback.peer_addr
+                    );
+                }
             }
         }
         OP_CALLBACK_FAIL => {

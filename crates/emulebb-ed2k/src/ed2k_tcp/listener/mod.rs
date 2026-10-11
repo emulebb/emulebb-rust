@@ -22,8 +22,13 @@ use crate::{
 
 use super::{Ed2kHelloIdentity, Ed2kSecureIdent};
 
+mod callback;
 mod session;
 
+pub use callback::{
+    Ed2kCallbackDispatchError, Ed2kCallbackSessionHandle, Ed2kCallbackSessionInbox,
+    Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest, ed2k_callback_session_channel,
+};
 pub(crate) use session::reply_with_firewall_udp;
 pub(in crate::ed2k_tcp) use session::{
     Ed2kConnectionContext, Ed2kSessionSource, handle_connection,
@@ -49,6 +54,8 @@ pub struct Ed2kListenerOptions {
     pub buddy_registry: BuddySocketRegistry,
     /// Cross-transport TCP/UDP external listener-test association.
     pub port_test_registry: crate::PortTestRegistry,
+    /// Listener-owned consumer for outbound callback-session requests.
+    pub callback_session_inbox: Ed2kCallbackSessionInbox,
     /// Maximum grant-to-connect time for disconnected upload waiters.
     pub callback_timeout: Duration,
 }
@@ -68,6 +75,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         reachability,
         buddy_registry,
         port_test_registry,
+        callback_session_inbox,
         callback_timeout,
     } = options;
     // Resolve the VPN bind interface index once (from the listener's local addr)
@@ -94,6 +102,22 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             return;
         }
     };
+    tokio::spawn(callback::run_callback_session_supervisor(
+        callback_session_inbox,
+        callback::Ed2kCallbackSessionRuntime {
+            dht: dht.clone(),
+            server_state: Arc::clone(&server_state),
+            kad_firewall: Arc::clone(&kad_firewall),
+            secure_ident: Arc::clone(&secure_ident),
+            transfer_runtime: Arc::clone(&transfer_runtime),
+            hello_identity,
+            reachability: reachability.clone(),
+            buddy_registry: buddy_registry.clone(),
+            port_test_registry: port_test_registry.clone(),
+            bind_ip,
+            shutdown: Arc::clone(&shutdown),
+        },
+    ));
     // Outbound promote-connect driver: hands upload slots to waiters whose
     // connection is gone by dialing their advertised endpoint and pushing
     // OP_ACCEPTUPLOADREQ (master AddUpNextClient connect-out,

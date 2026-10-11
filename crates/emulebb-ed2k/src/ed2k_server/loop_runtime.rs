@@ -49,6 +49,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         reconnect_signal,
         target_server_endpoint,
         server_list_events,
+        callback_sessions,
     } = options;
     let search_inbox = Arc::new(tokio::sync::Mutex::new(search_inbox));
     let failed_attempt_reconnect_delay = Duration::from_secs(config.reconnect_interval_secs.max(1));
@@ -75,6 +76,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         server_list_events,
         add_servers_from_server: config.add_servers_from_server,
         offer_files_capability_enabled: config.offer_files_capability_enabled,
+        callback_sessions,
     };
 
     let configured_servers = match configured_server_entries(&config) {
