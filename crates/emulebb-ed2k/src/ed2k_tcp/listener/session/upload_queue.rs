@@ -487,12 +487,19 @@ impl ListenerUploadQueue {
         &mut self,
         transfer_runtime: &Ed2kTransferRuntime,
         peer_identity: &Ed2kUploadPeerIdentity,
-        handle: Ed2kUploadSessionHandle,
+        mut handle: Ed2kUploadSessionHandle,
         file_hash: Ed2kHash,
         transport: &mut Ed2kTransport,
         peer_addr: SocketAddr,
     ) -> Result<bool> {
         if transfer_runtime.poll_upload_session(&handle, true).await
+            != Ed2kUploadSessionStatus::Granted
+        {
+            return Ok(false);
+        }
+        if transfer_runtime
+            .refresh_upload_session_peer(&mut handle, peer_identity.clone())
+            .await
             != Ed2kUploadSessionStatus::Granted
         {
             return Ok(false);

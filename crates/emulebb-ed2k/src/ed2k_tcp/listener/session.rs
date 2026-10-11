@@ -112,6 +112,9 @@ enum PeerSessionPhase {
     Established,
 }
 
+const MAX_PRE_ESTABLISHMENT_FRAMES: usize = 8;
+const MAX_PRE_ESTABLISHMENT_BYTES: usize = 64 * 1024;
+
 impl PeerSessionPhase {
     const fn allows(self, protocol: u8, opcode: u8) -> bool {
         match self {
@@ -183,8 +186,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     };
     let response_identity =
         enrich_hello_identity(response_identity, server_state, kad_firewall).await;
-    let mut callback_expected_user_hash = None;
-    let (mut transport, promoted_grant, mut session_phase) = match source {
+    let mut outbound_expected_user_hash = None;
+    let (mut transport, mut pending_promoted_grant, mut session_phase) = match source {
         Ed2kSessionSource::Inbound(stream) => {
             let local_addr = stream.local_addr().with_context(|| {
                 format!("failed to resolve local eD2k listener address for {peer_addr}")
@@ -229,7 +232,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 "callback_connect",
                 || "adopting outbound callback transport".to_string(),
             );
-            callback_expected_user_hash = expected_user_hash;
+            outbound_expected_user_hash = expected_user_hash;
             (*transport, None, PeerSessionPhase::AwaitingOutboundHello)
         }
         // A slot grant for a disconnected waiter arrives on a connection WE
@@ -239,6 +242,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "promote_connect", || {
                 format!("file_hash={}", grant.file_hash)
             });
+            outbound_expected_user_hash = grant.peer.user_hash;
             (
                 *transport,
                 Some(*grant),
@@ -247,15 +251,18 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         }
     };
     let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
-    transport
-        .stream
-        .set_nodelay(true)
-        .with_context(|| format!("failed to enable TCP_NODELAY for peer {peer_addr}"))?;
+    if let Err(error) = transport.stream.set_nodelay(true) {
+        if let Some(grant) = pending_promoted_grant.take() {
+            transfer_runtime.release_upload_session(&grant.handle).await;
+        }
+        return Err(error)
+            .with_context(|| format!("failed to enable TCP_NODELAY for peer {peer_addr}"));
+    }
     debug!(
         "eD2k TCP peer session with {peer_addr} transport={}",
         transport.mode.as_str()
     );
-    if promoted_grant.is_none() {
+    if pending_promoted_grant.is_none() {
         dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "accept", || {
             format!("udp_port={kad_udp_port}")
         });
@@ -291,39 +298,27 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // a flood of these is a share-probe and the peer is banned (MFC file_request_flood).
     let mut failed_file_req_count: u32 = 0;
 
+    // Seed locally-known scheduling facts before HELLO binding. The queued hash
+    // is only an expected initial identity, not a bound live identity: a stale
+    // endpoint mismatch closes without the impersonation ban reserved for a
+    // later changed HELLO on an already-bound session.
+    if let Some(grant) = pending_promoted_grant.as_ref() {
+        peer_upload_identity = grant.peer.clone();
+        peer_upload_identity.should_crypt = transport.mode.is_obfuscated();
+    }
+
     // Every outbound peer session announces itself before entering the shared
-    // dispatcher. Callback sessions then wait for the requester's normal file
-    // requests; promoted-upload sessions additionally attach and push their
-    // already-granted upload slot.
+    // dispatcher. Promoted uploads keep their grant pending until a valid live
+    // HELLO identity is bound; only then may OP_ACCEPTUPLOADREQ be sent.
     if session_phase.sends_outbound_hello() {
         let hello_packet = encode_hello_request(response_identity);
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hello_request", &hello_packet);
-        transport
-            .write_all(&hello_packet)
-            .await
-            .with_context(|| format!("failed to send OP_HELLO to outbound peer {peer_addr}"))?;
-    }
-    if let Some(grant) = promoted_grant {
-        peer_upload_identity = grant.peer.clone();
-        peer_upload_identity.should_crypt = transport.mode.is_obfuscated();
-        bound_user_hash = grant.peer.user_hash;
-        let file_hash = Ed2kHash::from_str(&grant.file_hash)
-            .with_context(|| format!("invalid promoted upload file hash {}", grant.file_hash))?;
-        requested_file_hash = Some(file_hash);
-        let attached = upload_queue
-            .attach_granted_session(
-                transfer_runtime,
-                &grant.peer,
-                grant.handle,
-                file_hash,
-                &mut transport,
-                peer_addr,
-            )
-            .await?;
-        if !attached {
-            // The grant went stale while connecting (aged out or re-owned by an
-            // inbound reconnect): nothing to serve on this connection.
-            return Ok(());
+        if let Err(error) = transport.write_all(&hello_packet).await {
+            if let Some(grant) = pending_promoted_grant.take() {
+                transfer_runtime.release_upload_session(&grant.handle).await;
+            }
+            return Err(error)
+                .with_context(|| format!("failed to send OP_HELLO to outbound peer {peer_addr}"));
         }
     }
 
@@ -340,9 +335,17 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // Last time the peer actually sent us a packet: feeds the waiting-connection
     // idle close (oracle socket timeout) inside poll_on_timeout.
     let mut last_packet_at = tokio::time::Instant::now();
+    let handshake_deadline = last_packet_at + ED2K_CONNECTION_IDLE_TIMEOUT;
+    let mut pre_establishment_frames = 0_usize;
+    let mut pre_establishment_bytes = 0_usize;
     let result: Result<()> = async {
         loop {
-        let read_timeout = upload_queue.read_timeout();
+        let mut read_timeout = upload_queue.read_timeout();
+        if session_phase != PeerSessionPhase::Established {
+            read_timeout = read_timeout.min(
+                handshake_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            );
+        }
         // While serving as an inbound buddy, also drain relay frames (OP_CALLBACK)
         // that handle_kad_callback_req pushes down this held socket.
         let packet = if let Some(hold) = buddy_hold.as_mut() {
@@ -438,6 +441,21 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         last_packet_at = tokio::time::Instant::now();
         dump_ed2k_tcp_listener_recv(peer_addr, transport.mode, "session", &packet);
 
+        if session_phase != PeerSessionPhase::Established {
+            pre_establishment_frames = pre_establishment_frames.saturating_add(1);
+            pre_establishment_bytes = pre_establishment_bytes
+                .saturating_add(super::super::TCP_PACKET_HEADER_LEN)
+                .saturating_add(packet.payload.len());
+            if pre_establishment_frames > MAX_PRE_ESTABLISHMENT_FRAMES
+                || pre_establishment_bytes > MAX_PRE_ESTABLISHMENT_BYTES
+            {
+                debug!(
+                    "closing eD2k peer {peer_addr}: pre-establishment budget exceeded frames={pre_establishment_frames} bytes={pre_establishment_bytes}"
+                );
+                break Ok(());
+            }
+        }
+
         if !session_phase.allows(packet.protocol, packet.opcode) {
             debug!(
                 "closing eD2k peer {peer_addr}: packet protocol=0x{:02X} opcode=0x{:02X} is invalid during {session_phase:?}",
@@ -450,6 +468,14 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         match (packet.protocol, packet.opcode) {
             (OP_EDONKEYPROT, OP_HELLO) => {
                 let hello_profile = decode_hello_profile(&packet.payload)?;
+                if !outbound_hello_identity_matches(
+                    session_phase,
+                    outbound_expected_user_hash,
+                    hello_profile.identity.user_hash,
+                    peer_addr,
+                ) {
+                    break Ok(());
+                }
                 if !apply_peer_hello_profile(
                     PeerHelloStateRefs {
                         bound_user_hash: &mut bound_user_hash,
@@ -504,6 +530,19 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         .write_all(&reply)
                         .await
                         .with_context(|| format!("failed to reply to OP_HELLO from {peer_addr}"))?;
+                }
+                if !attach_pending_promoted_grant(
+                    &mut pending_promoted_grant,
+                    &mut upload_queue,
+                    transfer_runtime,
+                    &peer_upload_identity,
+                    &mut requested_file_hash,
+                    &mut transport,
+                    peer_addr,
+                )
+                .await?
+                {
+                    break Ok(());
                 }
                 // A callback we originated for a detached LowID upload waiter
                 // owns a missed-turn entitlement, not a speculative active slot.
@@ -642,12 +681,13 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             }
             (OP_EDONKEYPROT, OP_HELLOANSWER) => {
                 let hello_profile = decode_hello_answer_profile(&packet.payload)?;
-                if callback_expected_user_hash.is_some_and(|expected| {
-                    expected != hello_profile.identity.user_hash
-                }) {
-                    debug!(
-                        "callback peer {peer_addr} answered with a different user hash than the route supplied"
-                    );
+                if !outbound_hello_identity_matches(
+                    session_phase,
+                    outbound_expected_user_hash,
+                    hello_profile.identity.user_hash,
+                    peer_addr,
+                ) {
+                    break Ok(());
                 }
                 if !apply_peer_hello_profile(
                     PeerHelloStateRefs {
@@ -670,6 +710,19 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     "received eD2k OP_HELLOANSWER from {peer_addr} transport={}",
                     transport.mode.as_str()
                 );
+                if !attach_pending_promoted_grant(
+                    &mut pending_promoted_grant,
+                    &mut upload_queue,
+                    transfer_runtime,
+                    &peer_upload_identity,
+                    &mut requested_file_hash,
+                    &mut transport,
+                    peer_addr,
+                )
+                .await?
+                {
+                    break Ok(());
+                }
                 peer_secure_ident.peer_sec_ident = hello_profile.misc_options1.secure_ident;
                 peer_secure_ident.our_external_ip = reachability.get();
                 if hello_profile.supports_secure_ident && !peer_secure_ident.requested_peer_key {
@@ -1267,6 +1320,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     }
     .await;
 
+    if let Some(grant) = pending_promoted_grant.take() {
+        transfer_runtime.release_upload_session(&grant.handle).await;
+    }
     upload_queue.release(transfer_runtime).await;
     // Release the inbound buddy slot when the held session ends so the
     // buddy-management loop can re-establish on a reconnect (oracle buddy-loss).
@@ -1275,6 +1331,54 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         debug!("released inbound Kad buddy session for {peer_addr}");
     }
     result
+}
+
+fn outbound_hello_identity_matches(
+    session_phase: PeerSessionPhase,
+    expected_user_hash: Option<[u8; 16]>,
+    observed_user_hash: [u8; 16],
+    peer_addr: SocketAddr,
+) -> bool {
+    if session_phase != PeerSessionPhase::AwaitingOutboundHello
+        || expected_user_hash.is_none_or(|expected| expected == observed_user_hash)
+    {
+        return true;
+    }
+    debug!("closing outbound eD2k peer {peer_addr}: HELLO identity differs from the routed peer");
+    false
+}
+
+async fn attach_pending_promoted_grant(
+    pending_grant: &mut Option<Ed2kUploadGrantedPromotion>,
+    upload_queue: &mut ListenerUploadQueue,
+    transfer_runtime: &Ed2kTransferRuntime,
+    peer_identity: &Ed2kUploadPeerIdentity,
+    requested_file_hash: &mut Option<Ed2kHash>,
+    transport: &mut Ed2kTransport,
+    peer_addr: SocketAddr,
+) -> Result<bool> {
+    let Some(grant) = pending_grant.take() else {
+        return Ok(true);
+    };
+    let file_hash = match Ed2kHash::from_str(&grant.file_hash) {
+        Ok(file_hash) => file_hash,
+        Err(error) => {
+            transfer_runtime.release_upload_session(&grant.handle).await;
+            return Err(error)
+                .with_context(|| format!("invalid promoted upload file hash {}", grant.file_hash));
+        }
+    };
+    *requested_file_hash = Some(file_hash);
+    upload_queue
+        .attach_granted_session(
+            transfer_runtime,
+            peer_identity,
+            grant.handle,
+            file_hash,
+            transport,
+            peer_addr,
+        )
+        .await
 }
 
 async fn handle_udp_port_test_event(
