@@ -37,6 +37,21 @@ pub(super) fn push_u32_tag(payload: &mut Vec<u8>, name: u8, value: u32) {
     payload.extend_from_slice(&value.to_le_bytes());
 }
 
+/// Write a legacy textual-name tag with an exact UINT32 value type.
+///
+/// Capability negotiation tags can require an exact wire type, so they must
+/// not use [`push_named_int_tag`], which intentionally down-sizes small values.
+pub(super) fn push_named_u32_tag(payload: &mut Vec<u8>, name: &str, value: u32) {
+    payload.push(TAGTYPE_UINT32);
+    payload.extend_from_slice(
+        &u16::try_from(name.len())
+            .expect("tag name length fits in u16")
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(name.as_bytes());
+    payload.extend_from_slice(&value.to_le_bytes());
+}
+
 pub(super) fn push_short_u32_tag(payload: &mut Vec<u8>, name: u8, value: u32) {
     payload.push(TAG_SHORT_NAME_MASK | TAGTYPE_UINT32);
     payload.push(name);

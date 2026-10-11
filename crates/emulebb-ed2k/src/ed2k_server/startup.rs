@@ -19,9 +19,10 @@ use crate::{
     },
 };
 
+use super::offer_policy::OFFER_FILES_CAPABILITY_VERSION;
 use super::tag_codec::{
-    push_named_int_tag, push_named_string_tag, push_short_int_tag, push_short_string_tag,
-    push_short_u8_tag, push_string_tag, push_u32_tag,
+    push_named_int_tag, push_named_string_tag, push_named_u32_tag, push_short_int_tag,
+    push_short_string_tag, push_short_u8_tag, push_string_tag, push_u32_tag,
 };
 use super::{
     CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS, CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION,
@@ -64,12 +65,22 @@ pub(super) struct EncodedUdpSourceRequestBatch {
     pub included_large_files: usize,
 }
 
-pub(super) fn encode_login_request(identity: Ed2kHelloIdentity, nickname: &str) -> Vec<u8> {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ServerLoginCapabilities {
+    pub(super) offer_files_v1: bool,
+}
+
+pub(super) fn encode_login_request(
+    identity: Ed2kHelloIdentity,
+    nickname: &str,
+    capabilities: ServerLoginCapabilities,
+) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     payload.extend_from_slice(&identity.user_hash);
     payload.extend_from_slice(&identity.client_id.to_le_bytes());
     payload.extend_from_slice(&identity.tcp_port.to_le_bytes());
-    payload.extend_from_slice(&4u32.to_le_bytes());
+    let tag_count = 4 + u32::from(capabilities.offer_files_v1);
+    payload.extend_from_slice(&tag_count.to_le_bytes());
     push_string_tag(&mut payload, CT_NAME, nickname);
     push_u32_tag(&mut payload, CT_VERSION, EDONKEY_VERSION);
     push_u32_tag(
@@ -78,6 +89,9 @@ pub(super) fn encode_login_request(identity: Ed2kHelloIdentity, nickname: &str) 
         server_capabilities(identity.connect_options),
     );
     push_u32_tag(&mut payload, CT_EMULE_VERSION, emule_version_tag());
+    if capabilities.offer_files_v1 {
+        push_named_u32_tag(&mut payload, "offerfiles_v", OFFER_FILES_CAPABILITY_VERSION);
+    }
     payload
 }
 

@@ -1,6 +1,8 @@
 use super::TCP_PACKET_HEADER_LEN;
 use super::background::send_source_request_batch;
-use super::offer_policy::{OfferFilesCapabilityAdvertisement, OfferFilesPolicy};
+use super::offer_policy::{
+    OFFER_FILES_CAPABILITY_VERSION, OfferFilesCapabilityAdvertisement, OfferFilesPolicy,
+};
 use super::session_driver::ServerSessionExit;
 use super::types::ServerSessionContext;
 use super::{
@@ -23,17 +25,18 @@ use super::{
     SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES,
     SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES, SERVER_UDP_FLAG_TCPOBFUSCATION,
     SERVER_UDP_FLAG_UDPOBFUSCATION, SOURCE_OBFUSCATION_USER_HASH_PRESENT, ST_DESCRIPTION,
-    ST_HARDFILES, ST_SERVERNAME, ST_SOFTFILES, ServerSession, ServerTransportMode, ServerUdpPacket,
-    TAG_SHORT_NAME_MASK, TAGTYPE_STR1, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16,
-    TAGTYPE_UINT32, TAGTYPE_UINT64, biguint_to_fixed_be, decode_callback_request,
-    decode_found_sources, decode_id_change_payload, decode_search_result_page,
-    decode_search_results, decode_server_ident, decode_server_ident_details, decode_server_payload,
-    decode_server_udp_datagram, decode_server_udp_datagram_with_key, derive_server_cipher,
-    derive_server_udp_cipher, ed2k_server_list_event_channel, encode_login_request,
-    encode_offer_files_payload, encode_packet, encode_search_request, encode_server_udp_crypt_ping,
-    encode_server_udp_datagram, encode_source_request, encode_udp_search_request,
-    encode_udp_source_request_batch, format_server_flags, handle_background_udp_packet,
-    ipv4_from_client_id, login_identity_for_server_transport, new_ed2k_server_search_channel,
+    ST_HARDFILES, ST_SERVERNAME, ST_SOFTFILES, ServerLoginCapabilities, ServerSession,
+    ServerTransportMode, ServerUdpPacket, TAG_SHORT_NAME_MASK, TAGTYPE_STR1, TAGTYPE_STRING,
+    TAGTYPE_UINT8, TAGTYPE_UINT16, TAGTYPE_UINT32, TAGTYPE_UINT64, biguint_to_fixed_be,
+    decode_callback_request, decode_found_sources, decode_id_change_payload,
+    decode_search_result_page, decode_search_results, decode_server_ident,
+    decode_server_ident_details, decode_server_payload, decode_server_udp_datagram,
+    decode_server_udp_datagram_with_key, derive_server_cipher, derive_server_udp_cipher,
+    ed2k_server_list_event_channel, encode_login_request, encode_offer_files_payload,
+    encode_packet, encode_search_request, encode_server_udp_crypt_ping, encode_server_udp_datagram,
+    encode_source_request, encode_udp_search_request, encode_udp_source_request_batch,
+    format_server_flags, handle_background_udp_packet, ipv4_from_client_id,
+    login_identity_for_server_transport, new_ed2k_server_search_channel,
     offer_files_catalog_fingerprint, run_one_server_session, run_server_transport_attempts,
     search_keyword_via_background_session, search_source_batch_via_background_session,
     search_source_via_background_session, server_capabilities, server_opcode_allows_compression,
