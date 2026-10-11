@@ -124,6 +124,22 @@ fn server_ident_parser_rejects_duplicate_capability_fields() {
 }
 
 #[test]
+fn malformed_first_server_ident_becomes_an_invalid_legacy_snapshot() {
+    let mut payload = vec![0u8; 22];
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.push(TAGTYPE_UINT32);
+    payload.extend_from_slice(&12u16.to_le_bytes());
+    payload.extend_from_slice(b"truncated");
+
+    assert!(decode_server_ident_details(&payload).is_err());
+    assert!(matches!(
+        decode_server_ident_snapshot(&payload).offer_files_capability,
+        OfferFilesCapabilityAdvertisement::Invalid(reason)
+            if reason.contains("malformed OP_SERVERIDENT")
+    ));
+}
+
+#[test]
 fn server_ident_parser_keeps_legacy_when_capability_is_absent() {
     let mut payload = vec![0u8; 22];
     payload.extend_from_slice(&2u32.to_le_bytes());
