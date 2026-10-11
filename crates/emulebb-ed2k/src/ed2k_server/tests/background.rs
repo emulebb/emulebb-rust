@@ -789,15 +789,133 @@ fn background_test_server(endpoint: SocketAddr) -> ResolvedServerEntry {
     server
 }
 
-async fn read_login_request(stream: &mut TcpStream) {
+async fn read_client_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
     let mut header = [0u8; TCP_PACKET_HEADER_LEN];
     stream.read_exact(&mut header).await.unwrap();
     assert_eq!(header[0], OP_EDONKEYPROT);
-    assert_eq!(header[5], OP_LOGINREQUEST);
     let payload_len =
         u32::from_le_bytes(header[1..5].try_into().unwrap()).saturating_sub(1) as usize;
     let mut payload = vec![0u8; payload_len];
     stream.read_exact(&mut payload).await.unwrap();
+    (header[5], payload)
+}
+
+async fn read_login_request_payload(stream: &mut TcpStream) -> Vec<u8> {
+    let (opcode, payload) = read_client_frame(stream).await;
+    assert_eq!(opcode, OP_LOGINREQUEST);
+    payload
+}
+
+async fn read_login_request(stream: &mut TcpStream) {
+    let _ = read_login_request_payload(stream).await;
+}
+
+fn push_server_ident_named_u32(payload: &mut Vec<u8>, name: &str, value: u32) {
+    payload.push(TAGTYPE_UINT32);
+    payload.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    payload.extend_from_slice(name.as_bytes());
+    payload.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_server_ident_numeric_u32(payload: &mut Vec<u8>, name: u8, value: u32) {
+    payload.push(TAG_SHORT_NAME_MASK | TAGTYPE_UINT32);
+    payload.push(name);
+    payload.extend_from_slice(&value.to_le_bytes());
+}
+
+fn offer_files_v1_server_ident() -> Vec<u8> {
+    let mut payload = vec![0u8; 22];
+    payload.extend_from_slice(&5u32.to_le_bytes());
+    push_server_ident_named_u32(&mut payload, "offerfiles_v", OFFER_FILES_CAPABILITY_VERSION);
+    push_server_ident_named_u32(&mut payload, "offerfiles_batch_max", 25);
+    push_server_ident_named_u32(&mut payload, "offerfiles_min_interval_ms", 10);
+    push_server_ident_numeric_u32(&mut payload, ST_SOFTFILES, 1_000);
+    push_server_ident_numeric_u32(&mut payload, ST_HARDFILES, 26);
+    payload
+}
+
+fn background_offer_file() -> Ed2kSharedEntry {
+    Ed2kSharedEntry {
+        file_hash: "00112233445566778899aabbccddeeff".to_string(),
+        display_name: "offerfiles-v1.bin".to_string(),
+        file_size: 1_234,
+        verified_complete: true,
+        verified_ranges: Vec::new(),
+        compatibility_hint: false,
+        source_count_hint: None,
+        aich_root: None,
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+        media: Default::default(),
+        all_time_uploaded_bytes: 0,
+        complete_parts: Vec::new(),
+        publish: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn background_offer_files_v1_waits_for_server_ident_before_first_batch() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let login = read_login_request_payload(&mut stream).await;
+        assert_eq!(u32::from_le_bytes(login[22..26].try_into().unwrap()), 5);
+        let mut capability_tag = vec![TAGTYPE_UINT32, 12, 0];
+        capability_tag.extend_from_slice(b"offerfiles_v");
+        capability_tag.extend_from_slice(&OFFER_FILES_CAPABILITY_VERSION.to_le_bytes());
+        assert!(login.ends_with(&capability_tag));
+
+        let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), read_client_frame(&mut stream))
+                .await
+                .is_err(),
+            "v1 publication must wait for the first server identity snapshot"
+        );
+
+        stream
+            .write_all(
+                &encode_packet(OP_SERVERIDENT, &offer_files_v1_server_ident(), false).unwrap(),
+            )
+            .await
+            .unwrap();
+        let (opcode, payload) =
+            tokio::time::timeout(Duration::from_secs(1), read_client_frame(&mut stream))
+                .await
+                .expect("negotiated first offer should be sent after server identity");
+        assert_eq!(opcode, OP_OFFERFILES);
+        assert_eq!(u32::from_le_bytes(payload[..4].try_into().unwrap()), 1);
+    });
+
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_secs(2));
+    context
+        .shared_catalog
+        .write()
+        .await
+        .push(background_offer_file());
+    let (_, inbox) = new_ed2k_server_search_channel(1);
+    let server = background_test_server(endpoint);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let session = run_one_server_session(&server, &context, &inbox);
+
+    let (session_result, server_result) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(session, server_task)
+    })
+    .await
+    .expect("background v1 handshake should complete promptly");
+    server_result.unwrap();
+    assert!(
+        session_result.is_err(),
+        "mock server closes after the assertion"
+    );
 }
 
 #[tokio::test]
