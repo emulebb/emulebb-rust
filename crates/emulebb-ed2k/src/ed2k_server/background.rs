@@ -106,6 +106,37 @@ pub struct Ed2kServerSearchInbox {
     pub(super) receiver: mpsc::Receiver<BackgroundServerSearchRequest>,
 }
 
+#[cfg(test)]
+impl Ed2kServerSearchInbox {
+    /// Confirm one queued callback command without standing up a server socket.
+    /// Cross-module producer tests use this to verify that they selected the
+    /// live background-session path and retained their admission state after a
+    /// definitive send acknowledgement.
+    pub(crate) async fn confirm_callback_for_test(&mut self) -> (SocketAddr, u64, u32) {
+        let request = self
+            .receiver
+            .recv()
+            .await
+            .expect("background callback command");
+        let BackgroundServerSearchRequest::Callback {
+            expected_server_endpoint,
+            expected_session_generation,
+            client_id,
+            response,
+            ..
+        } = request
+        else {
+            panic!("expected background callback command")
+        };
+        response.send(Ok(())).expect("callback acknowledgement");
+        (
+            expected_server_endpoint,
+            expected_session_generation,
+            client_id,
+        )
+    }
+}
+
 /// Whether a background-session callback command reached the server socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ed2kBackgroundCallbackDispatchOutcome {

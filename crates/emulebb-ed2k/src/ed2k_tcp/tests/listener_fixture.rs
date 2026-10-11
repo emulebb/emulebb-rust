@@ -68,6 +68,8 @@ pub(super) struct ListenerTestRuntime {
     listener: Option<TcpListener>,
     dht: DhtNode,
     server_state: Arc<RwLock<Ed2kServerState>>,
+    server_search: crate::ed2k_server::Ed2kServerSearchHandle,
+    _server_search_inbox: crate::ed2k_server::Ed2kServerSearchInbox,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     secure_ident: Arc<Ed2kSecureIdent>,
     hello_identity: Ed2kHelloIdentity,
@@ -94,11 +96,15 @@ impl ListenerTestRuntime {
         })
         .await
         .unwrap();
+        let (server_search, server_search_inbox) =
+            crate::ed2k_server::new_ed2k_server_search_channel(4);
 
         Self {
             listener: Some(listener),
             dht,
             server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+            server_search,
+            _server_search_inbox: server_search_inbox,
             kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
             secure_ident: listener_secure_ident(),
             hello_identity,
@@ -159,6 +165,7 @@ impl ListenerTestRuntime {
         Arc::new(crate::ed2k_tcp::upload_promote::UploadPromoteDriver {
             dht: self.dht.clone(),
             server_state: Arc::clone(&self.server_state),
+            server_search: self.server_search.clone(),
             kad_firewall: Arc::clone(&self.kad_firewall),
             secure_ident: Arc::clone(&self.secure_ident),
             transfer_runtime: Arc::clone(&self.transfer_runtime),
