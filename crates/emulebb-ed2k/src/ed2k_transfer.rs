@@ -96,10 +96,9 @@ pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
 pub use model::{
     ED2K_CALLBACK_TICKET_MAX_LIFETIME, Ed2kCallbackDispatchOutcome, Ed2kCallbackDispatchPermit,
-    Ed2kCallbackDownload, Ed2kCallbackIntent, Ed2kCallbackReservation, Ed2kCallbackRoute,
-    Ed2kCallbackTicketError, Ed2kCallbackTicketId, Ed2kCallbackTicketRequest,
-    Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest,
-    Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
+    Ed2kCallbackDownload, Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError,
+    Ed2kCallbackTicketId, Ed2kCallbackTicketRequest, Ed2kLocalIngestSummary, Ed2kPieceState,
+    Ed2kReloadIndexEntry, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
 pub(crate) use model::{
     Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,
@@ -201,7 +200,6 @@ pub struct Ed2kTransferRuntime {
     shared_catalog_hydration_cursor: StdMutex<Option<String>>,
     shared_catalog_hydration_pending: AtomicBool,
     servable_shared_hash_cache: Arc<StdMutex<ServableSharedHashCache>>,
-    callback_intents: Arc<RwLock<Vec<Ed2kCallbackIntent>>>,
     callback_tickets: Arc<StdMutex<callback::CallbackTicketStore>>,
     /// Per-file-hash manifest IO locks (see [`Self::lock_manifest`]). Manifest
     /// state is keyed by one file hash everywhere, so transfers only serialize
@@ -502,7 +500,6 @@ impl Ed2kTransferRuntime {
             shared_catalog_hydration_cursor: StdMutex::new(hydration_cursor),
             shared_catalog_hydration_pending: AtomicBool::new(hydration_pending),
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
-            callback_intents: Arc::new(RwLock::new(Vec::new())),
             callback_tickets: Arc::new(StdMutex::new(callback::CallbackTicketStore::default())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
             delivery_locks: Arc::new(StdMutex::new(HashMap::new())),
