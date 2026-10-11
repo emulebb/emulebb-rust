@@ -218,21 +218,6 @@ pub struct Ed2kReloadIndexEntry {
     pub source_mtime_ms: Option<i64>,
 }
 
-/// One pending LowID callback download intent remembered until a peer calls back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ed2kCallbackIntent {
-    /// Raw server-reported LowID/client-id used when requesting the callback.
-    pub client_id: u32,
-    /// File hash in lowercase hex.
-    pub file_hash: String,
-    /// Canonical file name.
-    pub display_name: String,
-    /// Expected file size.
-    pub file_size: u64,
-    /// Best-effort source hint captured when the callback was requested.
-    pub source: Ed2kSourceHint,
-}
-
 /// Opaque process-local identifier for one pending callback ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ed2kCallbackTicketId(pub(super) u64);

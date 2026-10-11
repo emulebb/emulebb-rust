@@ -68,9 +68,9 @@ use crate::{
     ed2k_server::{Ed2kFoundSource, Ed2kServerState},
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackDispatchOutcome, Ed2kCallbackDownload,
-        Ed2kCallbackHelloIdentity, Ed2kCallbackIntent, Ed2kCallbackReservation,
-        Ed2kCallbackTicketRequest, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime,
-        Ed2kUploadQueueConfig, new_transfer_job,
+        Ed2kCallbackHelloIdentity, Ed2kCallbackReservation, Ed2kCallbackTicketRequest,
+        Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kUploadQueueConfig,
+        new_transfer_job,
     },
     kad_firewall::KadFirewallState,
     paths::unique_test_dir,

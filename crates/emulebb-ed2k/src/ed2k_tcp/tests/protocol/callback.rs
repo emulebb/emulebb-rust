@@ -72,7 +72,7 @@ async fn adopted_callback_session_serves_after_hello_answer() {
 }
 
 #[tokio::test]
-async fn inbound_callback_prefers_route_scoped_ticket_over_legacy_client_id_intent() {
+async fn inbound_callback_claim_is_scoped_to_the_server_route() {
     let mut runtime = ListenerTestRuntime::new(
         "ed2k-inbound-ticketed-callback",
         listener_hello_identity(),
@@ -89,7 +89,6 @@ async fn inbound_callback_prefers_route_scoped_ticket_over_legacy_client_id_inte
     let other_server_endpoint = SocketAddr::from((other_server_ip, 4661));
     let ticket_hash = Ed2kHash::from_bytes([0x31; 16]);
     let other_server_hash = Ed2kHash::from_bytes([0x32; 16]);
-    let legacy_hash = Ed2kHash::from_bytes([0x42; 16]);
     runtime
         .transfer_runtime
         .ensure_job(&new_transfer_job(
@@ -159,7 +158,7 @@ async fn inbound_callback_prefers_route_scoped_ticket_over_legacy_client_id_inte
                     file_hash: other_server_hash,
                     display_name: "other-server.bin".to_string(),
                     file_size: 1,
-                    source: source.clone(),
+                    source,
                 },
                 Duration::from_secs(30),
             )
@@ -177,18 +176,6 @@ async fn inbound_callback_prefers_route_scoped_ticket_over_legacy_client_id_inte
             .await,
         Ed2kCallbackDispatchOutcome::Armed
     );
-    let legacy_intent = Ed2kCallbackIntent {
-        client_id: peer_client_id,
-        file_hash: legacy_hash.to_string(),
-        display_name: "legacy.bin".to_string(),
-        file_size: 1,
-        source,
-    };
-    runtime
-        .transfer_runtime
-        .register_callback_intent(legacy_intent.clone())
-        .await;
-
     let listener_task = runtime.spawn_listener_connections(1);
     let mut stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
     stream
@@ -218,12 +205,13 @@ async fn inbound_callback_prefers_route_scoped_ticket_over_legacy_client_id_inte
         request
             .windows(ticket_hash.0.len())
             .any(|window| window == ticket_hash.0),
-        "listener must start the ticketed file before the client-id-only legacy intent"
+        "listener must claim the ticket for the peer's server route"
     );
     assert!(
         !request
-            .windows(legacy_hash.0.len())
-            .any(|window| window == legacy_hash.0)
+            .windows(other_server_hash.0.len())
+            .any(|window| window == other_server_hash.0),
+        "listener must not claim a same-client-id ticket from another server route"
     );
     stream
         .write_all(&encode_file_req_ans_nofil(&ticket_hash))
@@ -247,15 +235,6 @@ async fn inbound_callback_prefers_route_scoped_ticket_over_legacy_client_id_inte
         other_server_hash
     );
     other_server_session.finish().unwrap();
-
-    assert_eq!(
-        runtime
-            .transfer_runtime
-            .claim_callback_intent(peer_client_id)
-            .await,
-        Some(legacy_intent),
-        "ticket adoption must not drain the compatibility intent store"
-    );
 }
 
 #[tokio::test]
