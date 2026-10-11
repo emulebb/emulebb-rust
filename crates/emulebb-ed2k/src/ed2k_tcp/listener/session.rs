@@ -19,8 +19,8 @@ use crate::{
     buddy_socket::BuddySocketRegistry,
     ed2k_server::Ed2kServerState,
     ed2k_transfer::{
-        Ed2kCallbackHelloIdentity, Ed2kTransferRuntime, Ed2kUploadGrantedPromotion,
-        Ed2kUploadPeerIdentity,
+        Ed2kCallbackHelloIdentity, Ed2kTransferRuntime, Ed2kUploadCallbackClaim,
+        Ed2kUploadGrantedPromotion, Ed2kUploadPeerIdentity,
     },
     kad_firewall::KadFirewallState,
     port_test::{PortTestRegistration, PortTestRegistry},
@@ -279,7 +279,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             .with_context(|| format!("invalid promoted upload file hash {}", grant.file_hash))?;
         requested_file_hash = Some(file_hash);
         let attached = upload_queue
-            .attach_promoted_grant(
+            .attach_granted_session(
                 transfer_runtime,
                 &grant.peer,
                 grant.handle,
@@ -463,6 +463,50 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         .await
                         .with_context(|| format!("failed to reply to OP_HELLO from {peer_addr}"))?;
                 }
+                // A callback we originated for a detached LowID upload waiter
+                // owns a missed-turn entitlement, not a speculative active slot.
+                // Claim it only after the peer's HELLO has bound its identity,
+                // then immediately push OP_ACCEPTUPLOADREQ like stock
+                // ConnectionEstablished. Upload takes priority over a coincident
+                // download callback ticket because the latter remains queued for
+                // a later callback, while monopolising this socket in the current
+                // download-only driver would strand the upload entitlement.
+                let upload_callback_claimed = match transfer_runtime
+                    .claim_upload_callback_promotion(peer_upload_identity.clone())
+                    .await
+                {
+                    Ed2kUploadCallbackClaim::Granted(grant) => {
+                        let file_hash = Ed2kHash::from_str(&grant.file_hash).with_context(|| {
+                            format!(
+                                "invalid callback upload file hash {}",
+                                grant.file_hash
+                            )
+                        })?;
+                        peer_upload_identity = grant.peer.clone();
+                        requested_file_hash = Some(file_hash);
+                        if !upload_queue
+                            .attach_granted_session(
+                                transfer_runtime,
+                                &grant.peer,
+                                grant.handle,
+                                file_hash,
+                                &mut transport,
+                                peer_addr,
+                            )
+                            .await?
+                        {
+                            break Ok(());
+                        }
+                        true
+                    }
+                    Ed2kUploadCallbackClaim::MatchedButFull => {
+                        debug!(
+                            "retaining matched LowID upload callback from {peer_addr}: temporary overflow slot is occupied"
+                        );
+                        false
+                    }
+                    Ed2kUploadCallbackClaim::NotMatched => false,
+                };
                 // SUI level + our HighID IP for V1/V2 outbound signature selection.
                 peer_secure_ident.peer_sec_ident = hello_profile.misc_options1.secure_ident;
                 peer_secure_ident.our_external_ip = reachability.get();
@@ -478,14 +522,19 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
                     })?;
                 }
-                let callback_session = match transfer_runtime.claim_callback_session(
-                    callback_hello_identity(peer_addr, &hello_profile),
-                ) {
-                    Ok(callback_session) => callback_session,
-                    Err(error) => {
-                        break Err(anyhow::anyhow!(
-                            "failed to admit callback session for {peer_addr}: {error:?}"
-                        ));
+                let callback_session = if upload_callback_claimed {
+                    None
+                } else {
+                    match transfer_runtime.claim_callback_session(callback_hello_identity(
+                        peer_addr,
+                        &hello_profile,
+                    )) {
+                        Ok(callback_session) => callback_session,
+                        Err(error) => {
+                            break Err(anyhow::anyhow!(
+                                "failed to admit callback session for {peer_addr}: {error:?}"
+                            ));
+                        }
                     }
                 };
                 if let Some(mut callback_session) = callback_session {

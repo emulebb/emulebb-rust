@@ -305,6 +305,144 @@ async fn listener_upload_queue_dials_disconnected_waiter_for_slot_grant() {
 }
 
 #[tokio::test]
+async fn listener_claims_low_id_callback_at_hello_without_a_second_upload_request() {
+    use crate::ed2k_transfer::{
+        Ed2kUploadCallbackRoute, Ed2kUploadPeerIdentity, Ed2kUploadPendingPromotion,
+        Ed2kUploadSessionPhaseSnapshot,
+    };
+
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-upload-listener-lowid-callback-hello",
+        listener_test_identity(0x74, 0x4455_6677, 41002, 41003),
+        [0x83; 16],
+        0x99AA_BBCC,
+    )
+    .await;
+    runtime.use_one_slot_upload_queue().await;
+    let file = runtime
+        .seed_verified_upload_file("callback-promoted.txt", vec![0x6D; 4096])
+        .await;
+
+    let active_peer = Ed2kUploadPeerIdentity {
+        ip: IpAddr::V4(test_bind_ip()),
+        tcp_port: 4661,
+        udp_port: Some(4665),
+        udp_version: 4,
+        should_crypt: false,
+        user_hash: Some([0x84; 16]),
+        client_id: Some(0x0A00_0084),
+        server_endpoint: None,
+        friend_slot: false,
+        ident_verified: false,
+        ident_bad_guy: false,
+        gpl_evildoer: false,
+        banned: false,
+        emule_version: 0x99,
+        is_emule_client: true,
+        kad_port: 0,
+        supports_direct_udp_callback: false,
+        firewall_context: Default::default(),
+        client_software: None,
+    };
+    let callback_hello = Ed2kHelloIdentity {
+        direct_udp_callback: true,
+        ..listener_test_identity(0x85, 0x0000_0085, 4662, 4666)
+    };
+    let callback_peer = Ed2kUploadPeerIdentity {
+        ip: IpAddr::V4(test_bind_ip()),
+        tcp_port: callback_hello.tcp_port,
+        udp_port: Some(callback_hello.udp_port),
+        udp_version: 4,
+        should_crypt: false,
+        user_hash: Some(callback_hello.user_hash),
+        client_id: Some(callback_hello.client_id),
+        server_endpoint: None,
+        friend_slot: false,
+        ident_verified: false,
+        ident_bad_guy: false,
+        gpl_evildoer: false,
+        banned: false,
+        emule_version: 0x99,
+        is_emule_client: true,
+        kad_port: 0,
+        supports_direct_udp_callback: true,
+        firewall_context: Default::default(),
+        client_software: None,
+    };
+
+    let (active, active_status) = runtime
+        .transfer_runtime
+        .begin_upload_session(active_peer, &file.file_hash)
+        .await;
+    assert_eq!(
+        active_status,
+        crate::ed2k_transfer::Ed2kUploadSessionStatus::Granted
+    );
+    let (waiting, waiting_status) = runtime
+        .transfer_runtime
+        .begin_upload_session(callback_peer.clone(), &file.file_hash)
+        .await;
+    assert_eq!(
+        waiting_status,
+        crate::ed2k_transfer::Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
+    runtime
+        .transfer_runtime
+        .release_upload_session(&waiting)
+        .await;
+    runtime
+        .transfer_runtime
+        .release_upload_session(&active)
+        .await;
+    let promotions = runtime
+        .transfer_runtime
+        .take_pending_upload_promotions()
+        .await;
+    let [Ed2kUploadPendingPromotion::Callback(permit)] = promotions.as_slice() else {
+        panic!("detached LowID waiter must produce one callback permit");
+    };
+    assert!(
+        runtime
+            .transfer_runtime
+            .begin_upload_callback_dispatch(
+                permit,
+                Ed2kUploadCallbackRoute::DirectUdp {
+                    endpoint: SocketAddr::new(callback_peer.ip, callback_hello.udp_port),
+                },
+            )
+            .await
+    );
+    let producer_cancel = permit.cancellation_token();
+
+    let server = runtime.spawn_listener_loop();
+    let mut callback_stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
+    callback_stream
+        .write_all(&encode_hello_request(callback_hello))
+        .await
+        .unwrap();
+    let hello_answer =
+        read_until_opcode(&mut callback_stream, OP_EDONKEYPROT, OP_HELLOANSWER).await;
+    assert!(!hello_answer.is_empty());
+    let accept = read_until_opcode(&mut callback_stream, OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ).await;
+    assert_eq!(
+        accept.len(),
+        6,
+        "callback HELLO must receive OP_ACCEPTUPLOADREQ without OP_STARTUPLOADREQ"
+    );
+    assert!(producer_cancel.is_cancelled());
+    let snapshot = runtime.transfer_runtime.upload_queue_snapshot().await;
+    assert!(snapshot.iter().any(|entry| {
+        entry.user_hash == Some(callback_hello.user_hash)
+            && entry.file_hash == file.file_hash.to_string()
+            && entry.phase == Ed2kUploadSessionPhaseSnapshot::Granted
+            && entry.connected
+    }));
+
+    drop(callback_stream);
+    server.abort();
+}
+
+#[tokio::test]
 async fn listener_upload_queue_rejects_unverified_reconnect_claim() {
     let mut runtime = ListenerTestRuntime::new(
         "ed2k-upload-listener-queue-reconnect-hello",
