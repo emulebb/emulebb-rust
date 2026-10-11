@@ -17,7 +17,7 @@ use tokio::{
     net::{TcpSocket, TcpStream},
     sync::RwLock,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::ed2k_tcp::MAX_ED2K_PACKET_LEN;
 
@@ -44,6 +44,12 @@ static NEXT_SERVER_SESSION_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 pub(super) struct Ed2kPacket {
     pub(super) opcode: u8,
     pub(super) payload: Vec<u8>,
+}
+
+enum ServerPacketRead {
+    Packet(Ed2kPacket),
+    Eof,
+    DroppedPackedFrame,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -739,6 +745,16 @@ impl ServerSession {
     }
 
     pub(super) async fn read_packet(&mut self) -> Result<Option<Ed2kPacket>> {
+        loop {
+            match self.read_framed_packet().await? {
+                ServerPacketRead::Packet(packet) => return Ok(Some(packet)),
+                ServerPacketRead::Eof => return Ok(None),
+                ServerPacketRead::DroppedPackedFrame => {}
+            }
+        }
+    }
+
+    async fn read_framed_packet(&mut self) -> Result<ServerPacketRead> {
         let mut header = [0u8; TCP_PACKET_HEADER_LEN];
         match self.stream.read_exact(&mut header).await {
             Ok(_) => {}
@@ -751,7 +767,7 @@ impl ServerSession {
                     self.endpoint
                 );
                 dump_ed2k_server_meta(self, "server session drop reason=eof");
-                return Ok(None);
+                return Ok(ServerPacketRead::Eof);
             }
             Err(error) => {
                 dump_ed2k_server_meta(
@@ -825,6 +841,20 @@ impl ServerSession {
         }
         let payload = match decode_server_payload(header[0], payload) {
             Ok(payload) => payload,
+            Err(error) if header[0] == OP_PACKEDPROT => {
+                warn!(
+                    "dropping malformed bounded ED2K packed frame from {} opcode=0x{:02X} compressed_len={}: {error}",
+                    self.endpoint, header[5], payload_len
+                );
+                dump_ed2k_server_meta(
+                    self,
+                    format!(
+                        "server packet drop reason=packed_decode opcode=0x{:02X} compressed_len={} detail={error}",
+                        header[5], payload_len
+                    ),
+                );
+                return Ok(ServerPacketRead::DroppedPackedFrame);
+            }
             Err(error) => {
                 dump_ed2k_server_meta(
                     self,
@@ -846,7 +876,7 @@ impl ServerSession {
             payload.len()
         );
         dump_ed2k_server_packet(self, "rx", header[0], header[5], &payload);
-        Ok(Some(Ed2kPacket {
+        Ok(ServerPacketRead::Packet(Ed2kPacket {
             opcode: header[5],
             payload,
         }))
@@ -887,6 +917,70 @@ mod tests {
             err.to_string()
                 .contains("oversized ED2K server packet length"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_read_drops_malformed_packed_frame_and_keeps_stream_aligned() {
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let writer = tokio::spawn(async move {
+            let mut peer = TcpStream::connect(addr).await.unwrap();
+            let malformed_payload = [0x01, 0x02, 0x03];
+            let mut wire = vec![OP_PACKEDPROT];
+            wire.extend_from_slice(
+                &u32::try_from(malformed_payload.len() + 1)
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+            wire.push(super::super::OP_SEARCHRESULT);
+            wire.extend_from_slice(&malformed_payload);
+
+            let mut status_payload = 123u32.to_le_bytes().to_vec();
+            status_payload.extend_from_slice(&456u32.to_le_bytes());
+            wire.extend_from_slice(
+                &encode_packet(super::super::OP_SERVERSTATUS, &status_payload, false).unwrap(),
+            );
+            peer.write_all(&wire).await.unwrap();
+            peer
+        });
+        let (stream, peer_addr) = listener.accept().await.unwrap();
+        let _peer = writer.await.unwrap();
+        let mut session = ServerSession::from_stream_for_test(stream, peer_addr);
+
+        let packet = session
+            .read_packet()
+            .await
+            .unwrap()
+            .expect("valid frame after malformed packed frame must remain readable");
+
+        assert_eq!(packet.opcode, super::super::OP_SERVERSTATUS);
+        assert_eq!(packet.payload[..4], 123u32.to_le_bytes());
+        assert_eq!(packet.payload[4..], 456u32.to_le_bytes());
+    }
+
+    #[tokio::test]
+    async fn server_read_keeps_invalid_raw_marker_transport_fatal() {
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let writer = tokio::spawn(async move {
+            let mut peer = TcpStream::connect(addr).await.unwrap();
+            peer.write_all(&[0x01, 1, 0, 0, 0, 0x42]).await.unwrap();
+            peer
+        });
+        let (stream, peer_addr) = listener.accept().await.unwrap();
+        let _peer = writer.await.unwrap();
+        let mut session = ServerSession::from_stream_for_test(stream, peer_addr);
+
+        let error = session
+            .read_packet()
+            .await
+            .expect_err("invalid raw protocol marker must remain transport-fatal");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported ED2K server protocol")
         );
     }
 
