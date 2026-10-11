@@ -1,6 +1,95 @@
 use super::*;
 
 #[tokio::test]
+async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
+    let transfer_root = unique_runtime_dir("emulebb-core-direct-callback-without-reask");
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.ed2k.enable_udp_reask = false;
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network.clone()),
+    )
+    .unwrap();
+    assert!(core.ed2k_reask_handle.lock().unwrap().is_none());
+
+    let receiver = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let source_udp_port = receiver.local_addr().unwrap().port();
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        node_id: NodeId::from_bytes([0x51; 16]),
+        udp_key: 0x1122_3344,
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    dht.set_running(true);
+    let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
+    *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+        search_handle,
+        server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        server_enabled: Arc::new(AtomicBool::new(true)),
+        dht,
+        kad_nodes_dat_path: None,
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        nat: Arc::new(NatManager::default()),
+        shutdown: Arc::new(AtomicBool::new(false)),
+        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
+        target_server_endpoint: Arc::new(RwLock::new(None)),
+        kad_firewall_recheck: None,
+        tasks: Vec::new(),
+        download_tasks: Arc::clone(&core.ed2k_download_tasks),
+    });
+
+    let file_hash = Ed2kHash::from_bytes([0x52; 16]);
+    let transfer = a4af_test_transfer(&file_hash.to_string(), "downloading");
+    let source = Ed2kFoundSource {
+        file_hash,
+        ip: Ipv4Addr::LOCALHOST,
+        tcp_port: 4662,
+        client_id: 0x1234,
+        low_id: true,
+        obfuscated: true,
+        obfuscation_options: Some(0x08),
+        user_hash: Some([0x53; 16]),
+        source_server: None,
+        buddy_id: None,
+        buddy_endpoint: None,
+        source_udp_port: Some(source_udp_port),
+    };
+
+    core.send_ed2k_direct_callbacks(
+        &network,
+        &transfer,
+        &[source],
+        Duration::from_secs(5),
+        &CancellationToken::new(),
+    )
+    .await;
+
+    let mut datagram = [0_u8; 64];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), receiver.recv_from(&mut datagram))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(len, 21);
+    assert_eq!(&datagram[..2], &[0xC5, 0x95]);
+    assert_eq!(&datagram[2..4], &network.listen_port.to_le_bytes());
+    assert_eq!(&datagram[4..20], &network.user_hash);
+    assert_eq!(
+        datagram[20],
+        emule_connect_options(network.ed2k.obfuscation_enabled)
+    );
+}
+
+#[tokio::test]
 async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
     // A4AF source-set leg 1: a peer registered for two of our files is engaged for
     // exactly one file at a time; the second file defers the same peer

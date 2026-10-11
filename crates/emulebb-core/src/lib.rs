@@ -19,8 +19,8 @@ use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 pub use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_ed2k::{
-    DirectCallbackArgs, DirectCallbackDispatchOutcome, NatManager, NatManagerBuilder,
-    PortTestRegistry, ReaskSourceHandle,
+    DirectCallbackArgs, DirectCallbackDispatchOutcome, DirectCallbackSender, NatManager,
+    NatManagerBuilder, PortTestRegistry, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
     built_in_port_mapping_providers,
     config::Ed2kRuntimeConfig,
@@ -2959,9 +2959,14 @@ impl EmulebbCore {
         if self.ed2k_self_tcp_firewalled().await {
             return;
         }
-        let Some(handle) = self.ed2k_reask_handle.lock().unwrap().clone() else {
+        let Some(dht) = self
+            .ed2k_dht_node()
+            .await
+            .filter(emulebb_kad_dht::DhtNode::is_running)
+        else {
             return;
         };
+        let direct_callback = DirectCallbackSender::new(dht, self.ed2k_reachability.clone());
         let our_tcp_port = self
             .ed2k_reachability
             .advertised_tcp_port(network.listen_port);
@@ -3092,8 +3097,8 @@ impl EmulebbCore {
                 .obfuscation_options
                 .is_some_and(|options| options & 0x01 != 0)
                 && source_user_hash != [0; 16];
-            let dispatch = handle
-                .send_direct_callback(
+            let dispatch = direct_callback
+                .dispatch(
                     DirectCallbackArgs {
                         dest,
                         our_tcp_port,
