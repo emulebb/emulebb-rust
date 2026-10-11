@@ -747,6 +747,8 @@ fn background_test_context(
     state: Arc<RwLock<Ed2kServerState>>,
     connect_timeout: Duration,
 ) -> ServerSessionContext {
+    let (callback_sessions, _callback_session_inbox) =
+        crate::ed2k_tcp::ed2k_callback_session_channel();
     ServerSessionContext {
         bind_ip: crate::test_bind_ip(),
         nat: Arc::new(NatManager::default()),
@@ -775,6 +777,7 @@ fn background_test_context(
         server_list_events: None,
         add_servers_from_server: false,
         offer_files_capability_enabled: true,
+        callback_sessions,
     }
 }
 

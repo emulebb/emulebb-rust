@@ -116,6 +116,7 @@ pub(super) struct ServerSessionContext {
     /// OP_GETSERVERLIST on connect and accepting servers from OP_SERVERLIST.
     pub(super) add_servers_from_server: bool,
     pub(super) offer_files_capability_enabled: bool,
+    pub(super) callback_sessions: crate::ed2k_tcp::Ed2kCallbackSessionHandle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,4 +284,6 @@ pub struct Ed2kServerLoopOptions {
     /// Optional feedback channel to the core's server store (server discovery +
     /// connect/ping outcome). `None` disables server-list feedback.
     pub server_list_events: Option<Ed2kServerListEventSender>,
+    /// Nonblocking dispatcher for peer sessions requested by the server.
+    pub callback_sessions: crate::ed2k_tcp::Ed2kCallbackSessionHandle,
 }

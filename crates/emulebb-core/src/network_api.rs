@@ -323,6 +323,7 @@ impl EmulebbCore {
                 format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
             })?);
         let hello_identity = self.ed2k_hello_identity(&network);
+        let (callback_sessions, callback_session_inbox) = ed2k_callback_session_channel();
         let mut tasks = Vec::new();
         // The Kad socket is also the stock eD2K client-UDP socket. Its receive
         // loop stays active even when Kad routing itself is disabled so
@@ -477,6 +478,7 @@ impl EmulebbCore {
             reachability: self.ed2k_reachability.clone(),
             buddy_registry: buddy_registry.clone(),
             port_test_registry: port_test_registry.clone(),
+            callback_session_inbox,
             callback_timeout: Duration::from_secs(network.ed2k.callback_timeout_secs.max(1)),
         })));
         // Learned public-IP cell (eMule theApp public IP), shared by the server
@@ -509,6 +511,7 @@ impl EmulebbCore {
             reconnect_signal: Arc::clone(&server_reconnect_signal),
             target_server_endpoint: Arc::clone(&target_server_endpoint),
             server_list_events: Some(server_list_events_tx),
+            callback_sessions: callback_sessions.clone(),
         })));
         tasks.push(tokio::spawn(
             Self::run_ed2k_shared_catalog_demand_publish_loop(

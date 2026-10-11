@@ -87,6 +87,10 @@ pub(in crate::ed2k_tcp) enum Ed2kSessionSource {
         // Boxed: the established transport dwarfs the plain inbound socket
         // (clippy::large_enum_variant).
         transport: Box<Ed2kTransport>,
+        /// Route-supplied peer hash used for obfuscated transport setup. It is
+        /// not an authenticated session identity; HELLOANSWER remains the
+        /// authoritative live identity.
+        expected_user_hash: Option<[u8; 16]>,
     },
     PromotedUpload {
         // Boxed: the established transport dwarfs the plain inbound socket
@@ -143,6 +147,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     };
     let response_identity =
         enrich_hello_identity(response_identity, server_state, kad_firewall).await;
+    let mut callback_expected_user_hash = None;
     let (mut transport, promoted_grant, send_outbound_hello) = match source {
         Ed2kSessionSource::Inbound(stream) => {
             let local_addr = stream.local_addr().with_context(|| {
@@ -178,13 +183,17 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             };
             (transport, None, false)
         }
-        Ed2kSessionSource::CallbackUpload { transport } => {
+        Ed2kSessionSource::CallbackUpload {
+            transport,
+            expected_user_hash,
+        } => {
             dump_ed2k_tcp_listener_meta(
                 peer_addr,
                 Some(transport.mode),
                 "callback_connect",
                 || "adopting outbound callback transport".to_string(),
             );
+            callback_expected_user_hash = expected_user_hash;
             (*transport, None, true)
         }
         // A slot grant for a disconnected waiter arrives on a connection WE
@@ -519,6 +528,13 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             }
             (OP_EDONKEYPROT, OP_HELLOANSWER) => {
                 let hello_profile = decode_hello_answer_profile(&packet.payload)?;
+                if callback_expected_user_hash.is_some_and(|expected| {
+                    expected != hello_profile.identity.user_hash
+                }) {
+                    debug!(
+                        "callback peer {peer_addr} answered with a different user hash than the route supplied"
+                    );
+                }
                 if !apply_peer_hello_profile(
                     PeerHelloStateRefs {
                         bound_user_hash: &mut bound_user_hash,

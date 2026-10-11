@@ -36,9 +36,9 @@ use emulebb_ed2k::{
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions,
         Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport, Ed2kSecureIdent, HelloBuddySnapshot,
-        OutboundBuddyLinkOptions, download_files_from_peer, emule_connect_options,
-        encode_kad_callback_relay_frame, run_ed2k_listener, run_outbound_buddy_link,
-        set_hello_buddy_snapshot, set_publish_rust_identity,
+        OutboundBuddyLinkOptions, download_files_from_peer, ed2k_callback_session_channel,
+        emule_connect_options, encode_kad_callback_relay_frame, run_ed2k_listener,
+        run_outbound_buddy_link, set_hello_buddy_snapshot, set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry,

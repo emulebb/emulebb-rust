@@ -137,9 +137,13 @@ pub(in crate::ed2k_tcp) use identity::{
     verify_peer_secure_ident_signature,
 };
 pub(crate) use listener::reply_with_firewall_udp;
+pub use listener::{
+    Ed2kCallbackDispatchError, Ed2kCallbackSessionHandle, Ed2kCallbackSessionInbox,
+    Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest, Ed2kListenerOptions,
+    ed2k_callback_session_channel, run_ed2k_listener,
+};
 #[cfg(test)]
 use listener::{Ed2kConnectionContext, Ed2kSessionSource, handle_connection};
-pub use listener::{Ed2kListenerOptions, run_ed2k_listener};
 use obfuscation::{
     Rc4KeyStream, accept_incoming_obfuscation_handshake, is_plain_ed2k_protocol_marker,
     negotiate_outgoing_obfuscation_handshake, should_enable_outgoing_obfuscation,
