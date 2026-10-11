@@ -1227,6 +1227,11 @@ impl EmulebbCore {
         let mut last_direct_error: Option<anyhow::Error> = None;
         let mut deferred_active_direct_sources = false;
         let mut source_requery_round = 0usize;
+        // FINDSOURCE callback traversals outlive one source-routing call, but
+        // remain supervised by this download attempt. They run beside faster
+        // direct/server callback and TCP routes, then settle before a retryable
+        // attempt returns so the retry cadence cannot abandon them.
+        let mut kad_findsource_tasks = JoinSet::new();
         loop {
             // Per-hash cancel check at the top of each requery round: delete /
             // pause / stop / recheck signal this token to stop the in-flight
@@ -1250,15 +1255,26 @@ impl EmulebbCore {
                 &sources,
                 &mut requested_callback_sources,
             );
-            // Originate the outbound Kad callback for firewalled buddy sources whose
-            // buddy relay endpoint is known (oracle BaseClient.cpp CCS_KADCALLBACK):
-            // the buddy relays an OP_CALLBACK so the source connects back to us. This
-            // is the connection-establishing counterpart to the reask detach above
+            // Originate the outbound Kad callback for firewalled buddy sources,
+            // directly when the buddy endpoint is known and through FINDSOURCE
+            // otherwise (oracle BaseClient.cpp CCS_KADCALLBACK). The buddy relays
+            // an OP_CALLBACK so the source connects back to us. This is the
+            // connection-establishing counterpart to the reask detach above
             // (which only keeps polling source availability over UDP). Its own
-            // per-(source,file) cooldown map dedups it independently of the
+            // per-peer/route cooldown map dedups it independently of the
             // requested_callback_sources set the reask/server-callback paths share.
-            self.send_kad_buddy_callbacks(network, &transfer, file_hash, &sources)
-                .await;
+            self.send_kad_buddy_callbacks(
+                network,
+                &transfer,
+                &sources,
+                callback_window,
+                cancel,
+                &mut kad_findsource_tasks,
+            )
+            .await;
+            if cancel.is_cancelled() {
+                return Ok(None);
+            }
             // Originate direct UDP callbacks for firewalled type-6 sources
             // (oracle CCS_DIRECTCALLBACK, the first-core setting LowID connect
             // path): send OP_DIRECTCALLBACKREQ to the source's Kad UDP endpoint
@@ -1855,6 +1871,15 @@ impl EmulebbCore {
                 }
             }
             break;
+        }
+
+        while let Some(result) = kad_findsource_tasks.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!("Kad FINDSOURCE callback task failed: {error}");
+            }
+        }
+        if cancel.is_cancelled() {
+            return Ok(None);
         }
 
         let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;

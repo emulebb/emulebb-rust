@@ -28,20 +28,26 @@
 //! When the buddy endpoint is unknown, the same request is sent through the
 //! bounded `CSearch::FINDSOURCE`-shaped Kad traversal.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use emulebb_ed2k::{
     ed2k_server::Ed2kFoundSource,
-    ed2k_transfer::{Ed2kCallbackIntent, Ed2kSourceHint},
+    ed2k_transfer::{
+        Ed2kCallbackDispatchGuard, Ed2kCallbackDownload, Ed2kCallbackReservation,
+        Ed2kCallbackTicketRequest, Ed2kSourceHint,
+    },
 };
-use emulebb_kad_dht::RpcWorkClass;
+use emulebb_kad_dht::{DhtNode, KadCallbackSearchDispatchOutcome, RpcWorkClass};
 use emulebb_kad_proto::{CallbackReq, Ed2kHash, KadPacket, NodeId};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use super::{Ed2kNetworkConfig, EmulebbCore, Transfer};
 
-/// How long we suppress a repeat `KADEMLIA_CALLBACK_REQ` for the same
-/// (source, file). This mirrors the oracle's `DS_WAITCALLBACKKAD` reap window
+/// How long we suppress a repeat `KADEMLIA_CALLBACK_REQ` for the same peer and
+/// callback route. This mirrors the oracle's `DS_WAITCALLBACKKAD` reap window
 /// (`ClientList.cpp` `SEC2MS(45)`): once a callback is sent, the source has that
 /// long to connect back, so re-issuing sooner would only duplicate the request
 /// (and, on the receiving buddy, be dropped by its `KADEMLIA_CALLBACK_REQ`
@@ -52,23 +58,45 @@ use super::{Ed2kNetworkConfig, EmulebbCore, Transfer};
 /// tracker would start dropping and which never speeds up the connect-back.
 pub(crate) const KAD_CALLBACK_INITIATOR_COOLDOWN: Duration = Duration::from_secs(45);
 
-/// Dedup/rate-limit key for an outbound Kad callback: the firewalled source's own
-/// eD2k endpoint plus the file we want. Keyed on the source (not the buddy) so two
-/// different files served by the same firewalled peer each get their own callback,
-/// matching the oracle per-`CUpDownClient`/per-`m_reqfile` wait state.
-pub(crate) type KadCallbackKey = (Ipv4Addr, u16, Ed2kHash);
+/// Peer/route identity of one Kad callback wait. One inbound callback TCP
+/// session can negotiate every A4AF file for the same remote peer, so file
+/// identity is deliberately absent. The optional endpoint remains part of the
+/// route: a FINDSOURCE ticket must not suppress a later direct buddy request
+/// which cannot join that ticket.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct KadCallbackKey {
+    buddy_id: [u8; 16],
+    buddy_endpoint: Option<SocketAddr>,
+    user_hash: [u8; 16],
+}
 
-/// The dedup/rate-limit key for a source+file, or `None` when the source is not a
-/// direct-callback candidate (not a firewalled buddy source, or the buddy relay
-/// endpoint / port is unusable).
-pub(crate) fn kad_callback_key(
-    source: &Ed2kFoundSource,
-    file_hash: Ed2kHash,
-) -> Option<KadCallbackKey> {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct KadCallbackCooldownPermit {
+    key: KadCallbackKey,
+    claimed_at: Instant,
+}
+
+/// Normalize a published buddy endpoint into the exact direct callback route.
+/// Zero-port and unspecified addresses are not dialable and therefore use the
+/// FINDSOURCE route (`None`).
+#[must_use]
+fn normalized_buddy_endpoint(source: &Ed2kFoundSource) -> Option<SocketAddr> {
+    source
+        .buddy_endpoint
+        .filter(|(ip, port)| !ip.is_unspecified() && *port != 0)
+        .map(|(ip, port)| SocketAddr::new(IpAddr::V4(ip), port))
+}
+
+/// The cooldown key for a callback-capable source with a usable peer identity.
+pub(crate) fn kad_callback_key(source: &Ed2kFoundSource) -> Option<KadCallbackKey> {
     if !is_kad_callback_candidate(source) {
         return None;
     }
-    Some((source.ip, source.tcp_port, file_hash))
+    Some(KadCallbackKey {
+        buddy_id: source.buddy_id?,
+        buddy_endpoint: normalized_buddy_endpoint(source),
+        user_hash: source.user_hash?,
+    })
 }
 
 /// Whether the source has the identity required for either direct callback or
@@ -78,27 +106,101 @@ pub(crate) fn is_kad_callback_candidate(source: &Ed2kFoundSource) -> bool {
     source.low_id && source.buddy_id.is_some()
 }
 
-/// Whether `source` can be reached with a *direct* Kad callback right now: it is a
-/// firewalled LowID buddy source (types 3/5) whose buddy id AND buddy relay
-/// endpoint (with a non-zero port) are known. Mirrors the oracle
-/// `BaseClient.cpp` precondition `HasValidBuddyID() && GetBuddyIP() && GetBuddyPort()`.
-#[must_use]
-pub(crate) fn is_direct_kad_callback_candidate(source: &Ed2kFoundSource) -> bool {
-    source.has_kad_buddy_reask_target()
-        && matches!(source.buddy_endpoint, Some((_, port)) if port != 0)
+pub(crate) fn claim_kad_callback_request(
+    last_sent: &mut HashMap<KadCallbackKey, Instant>,
+    key: KadCallbackKey,
+    now: Instant,
+) -> Option<KadCallbackCooldownPermit> {
+    last_sent.retain(|_, sent_at| {
+        now.saturating_duration_since(*sent_at) < KAD_CALLBACK_INITIATOR_COOLDOWN
+    });
+    if last_sent.get(&key).is_some_and(|sent_at| {
+        now.saturating_duration_since(*sent_at) < KAD_CALLBACK_INITIATOR_COOLDOWN
+    }) {
+        return None;
+    }
+    last_sent.insert(key.clone(), now);
+    Some(KadCallbackCooldownPermit {
+        key,
+        claimed_at: now,
+    })
 }
 
-/// Whether a callback may be sent given the last time one was sent for this key.
-/// `None` (never sent) always allows; otherwise the cooldown must have elapsed.
-#[must_use]
-pub(crate) fn should_send_kad_callback(
-    last_sent: Option<Instant>,
-    now: Instant,
-    cooldown: Duration,
+/// Roll back only the exact provisional cooldown whose callback request is
+/// proven not to have reached the local UDP socket.
+pub(crate) fn cancel_kad_callback_request(
+    last_sent: &mut HashMap<KadCallbackKey, Instant>,
+    permit: KadCallbackCooldownPermit,
 ) -> bool {
-    match last_sent {
-        None => true,
-        Some(sent_at) => now.duration_since(sent_at) >= cooldown,
+    if last_sent.get(&permit.key) != Some(&permit.claimed_at) {
+        return false;
+    }
+    last_sent.remove(&permit.key);
+    true
+}
+
+/// Start the callback wait at successful or ambiguous dispatch settlement,
+/// without allowing a stale settlement to refresh a newer claim.
+pub(crate) fn commit_kad_callback_request(
+    last_sent: &mut HashMap<KadCallbackKey, Instant>,
+    permit: KadCallbackCooldownPermit,
+    now: Instant,
+) -> bool {
+    if last_sent.get(&permit.key) != Some(&permit.claimed_at) {
+        return false;
+    }
+    last_sent.insert(permit.key, now);
+    true
+}
+
+enum KadCallbackDispatch {
+    Sent { request_count: usize },
+    KnownNotSent(String),
+    DeliveryUnknown(String),
+}
+
+struct KadCallbackDispatchContext {
+    guard: Ed2kCallbackDispatchGuard,
+    cooldown: KadCallbackCooldownPermit,
+    source_peer: SocketAddr,
+    buddy_peer: Option<SocketAddr>,
+    transfer_hash: String,
+    our_tcp_port: u16,
+}
+
+async fn send_direct_kad_callback(
+    dht: &DhtNode,
+    buddy_peer: SocketAddr,
+    request: CallbackReq,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> KadCallbackDispatch {
+    if cancel.is_cancelled() {
+        return KadCallbackDispatch::KnownNotSent(
+            "Kad callback cancelled before direct dispatch".to_string(),
+        );
+    }
+    if Instant::now() >= deadline {
+        return KadCallbackDispatch::KnownNotSent(
+            "Kad callback ticket expired before direct dispatch".to_string(),
+        );
+    }
+
+    let packet = KadPacket::CallbackReq(request);
+    let send = dht.send_packet(buddy_peer, &packet);
+    tokio::pin!(send);
+    tokio::select! {
+        biased;
+        outcome = &mut send => match outcome {
+            Ok(()) => KadCallbackDispatch::Sent { request_count: 1 },
+            Err(error) => KadCallbackDispatch::KnownNotSent(error.to_string()),
+        },
+        () = cancel.cancelled() => KadCallbackDispatch::DeliveryUnknown(
+            "Kad callback cancelled after direct dispatch began".to_string(),
+        ),
+        () = tokio::time::sleep_until(deadline.into()) => KadCallbackDispatch::DeliveryUnknown(
+            "Kad callback deadline elapsed after direct dispatch began".to_string(),
+        ),
     }
 }
 
@@ -139,13 +241,86 @@ pub(crate) fn build_kad_callback_req(
 }
 
 impl EmulebbCore {
+    async fn settle_kad_callback_dispatch(
+        &self,
+        context: KadCallbackDispatchContext,
+        dispatch: KadCallbackDispatch,
+    ) {
+        let KadCallbackDispatchContext {
+            guard,
+            cooldown,
+            source_peer,
+            buddy_peer,
+            transfer_hash,
+            our_tcp_port,
+        } = context;
+        match dispatch {
+            KadCallbackDispatch::Sent { request_count } => {
+                let ticket_outcome = guard.mark_dispatched();
+                let cooldown_committed = {
+                    let mut state = self.state.lock().await;
+                    commit_kad_callback_request(
+                        &mut state.ed2k_kad_callback_last_sent,
+                        cooldown,
+                        Instant::now(),
+                    )
+                };
+                crate::diag_kad_event::callback("sent", buddy_peer, source_peer, &transfer_hash);
+                tracing::debug!(
+                    "sent Kad KADEMLIA_CALLBACK_REQ file_hash={transfer_hash} source={source_peer} buddy={} request_count={request_count} our_tcp_port={our_tcp_port} ticket_outcome={ticket_outcome:?} cooldown_committed={cooldown_committed}",
+                    buddy_peer.map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
+                );
+            }
+            KadCallbackDispatch::KnownNotSent(reason) => {
+                let ticket_cancelled = guard.cancel();
+                let cooldown_cancelled = {
+                    let mut state = self.state.lock().await;
+                    cancel_kad_callback_request(&mut state.ed2k_kad_callback_last_sent, cooldown)
+                };
+                crate::diag_kad_event::callback(
+                    "send_failed",
+                    buddy_peer,
+                    source_peer,
+                    &transfer_hash,
+                );
+                tracing::warn!(
+                    "Kad KADEMLIA_CALLBACK_REQ not sent file_hash={transfer_hash} source={source_peer} buddy={} ticket_cancelled={ticket_cancelled} cooldown_cancelled={cooldown_cancelled}: {reason}",
+                    buddy_peer.map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
+                );
+            }
+            KadCallbackDispatch::DeliveryUnknown(reason) => {
+                let ticket_outcome = guard.mark_dispatched();
+                let cooldown_committed = {
+                    let mut state = self.state.lock().await;
+                    commit_kad_callback_request(
+                        &mut state.ed2k_kad_callback_last_sent,
+                        cooldown,
+                        Instant::now(),
+                    )
+                };
+                crate::diag_kad_event::callback(
+                    "delivery_unknown",
+                    buddy_peer,
+                    source_peer,
+                    &transfer_hash,
+                );
+                tracing::warn!(
+                    "Kad KADEMLIA_CALLBACK_REQ delivery unknown file_hash={transfer_hash} source={source_peer} buddy={} ticket_outcome={ticket_outcome:?} cooldown_committed={cooldown_committed}: {reason}",
+                    buddy_peer.map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
+                );
+            }
+        }
+    }
+
     /// Originate direct or FINDSOURCE-assisted Kad callbacks for LowID sources.
     pub(super) async fn send_kad_buddy_callbacks(
         &self,
         network: &Ed2kNetworkConfig,
         transfer: &Transfer,
-        file_hash: Ed2kHash,
         sources: &[Ed2kFoundSource],
+        callback_window: Duration,
+        cancel: &CancellationToken,
+        findsource_tasks: &mut JoinSet<()>,
     ) {
         if !sources.iter().any(is_kad_callback_candidate) || self.ed2k_self_tcp_firewalled().await {
             return;
@@ -157,82 +332,180 @@ impl EmulebbCore {
         else {
             return;
         };
+        let file_hash = match transfer.hash.parse::<Ed2kHash>() {
+            Ok(hash) => hash,
+            Err(error) => {
+                tracing::warn!(
+                    "Kad callback skipped for invalid file hash {}: {error}",
+                    transfer.hash,
+                );
+                return;
+            }
+        };
         let our_tcp_port = self
             .ed2k_reachability
             .advertised_tcp_port(network.listen_port);
         for source in sources.iter().filter(|s| is_kad_callback_candidate(s)) {
+            if cancel.is_cancelled() {
+                break;
+            }
             let Some(buddy_id) = source.buddy_id else {
                 continue;
             };
-            let Some(key) = kad_callback_key(source, file_hash) else {
+            let Some(source_user_hash) = source.user_hash else {
+                tracing::warn!(
+                    "Kad callback source lacks a user hash file_hash={} source={}:{}",
+                    transfer.hash,
+                    source.ip,
+                    source.tcp_port,
+                );
                 continue;
             };
-            let now = Instant::now();
-            {
-                let mut state = self.state.lock().await;
-                if !should_send_kad_callback(
-                    state.ed2k_kad_callback_last_sent.get(&key).copied(),
-                    now,
-                    KAD_CALLBACK_INITIATOR_COOLDOWN,
-                ) {
+            let buddy_endpoint = normalized_buddy_endpoint(source);
+            let source_peer = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
+            let callback_download = Ed2kCallbackDownload {
+                file_hash,
+                display_name: transfer.name.clone(),
+                file_size: transfer.size_bytes,
+                source: Ed2kSourceHint {
+                    ip: source.ip.to_string(),
+                    tcp_port: source.tcp_port,
+                    user_hash: Some(hex::encode(source_user_hash)),
+                    connect_options: source.obfuscation_options,
+                    file_comment: String::new(),
+                    file_rating: 0,
+                },
+            };
+            let callback_ticket = match Ed2kCallbackTicketRequest::kad_buddy(
+                buddy_id,
+                buddy_endpoint,
+                source.client_id,
+                source_user_hash,
+                source.ip,
+                source.tcp_port,
+                callback_download,
+                callback_window,
+            ) {
+                Ok(ticket) => ticket,
+                Err(error) => {
+                    tracing::warn!(
+                        "Kad callback ticket rejected file_hash={} source={source_peer} buddy={}: {error}",
+                        transfer.hash,
+                        buddy_endpoint
+                            .map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
+                    );
                     continue;
                 }
-                state.ed2k_kad_callback_last_sent.insert(key, now);
-            }
-            self.ed2k_transfers
-                .register_callback_intent(Ed2kCallbackIntent {
-                    client_id: source.client_id,
-                    file_hash: transfer.hash.clone(),
-                    display_name: transfer.name.clone(),
-                    file_size: transfer.size_bytes,
-                    source: Ed2kSourceHint {
-                        ip: source.ip.to_string(),
-                        tcp_port: source.tcp_port,
-                        user_hash: source.user_hash.map(hex::encode),
-                        connect_options: source.obfuscation_options,
-                        file_comment: String::new(),
-                        file_rating: 0,
-                    },
-                })
-                .await;
-            let source_peer = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
-            let request = build_kad_callback_req(buddy_id, file_hash, our_tcp_port);
-            if !is_direct_kad_callback_candidate(source) {
-                let dht = dht.clone();
-                let transfer_hash = transfer.hash.clone();
-                let buddy_id_hex = hex::encode(buddy_id);
-                tokio::spawn(async move {
+            };
+            let callback_dispatch_permit = match self
+                .ed2k_transfers
+                .reserve_callback_ticket(callback_ticket)
+                .await
+            {
+                Ok(Ed2kCallbackReservation::Dispatch(permit)) => permit,
+                Ok(Ed2kCallbackReservation::Joined { .. }) => {
                     tracing::debug!(
-                        "starting Kad FINDSOURCE callback walk file_hash={transfer_hash} source={source_peer} buddy_id={buddy_id_hex}"
+                        "Kad callback joined pending peer session file_hash={} source={source_peer} buddy={}",
+                        transfer.hash,
+                        buddy_endpoint
+                            .map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
                     );
-                    dht.find_source_search(request, RpcWorkClass::Interactive)
-                        .await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Kad callback reservation failed file_hash={} source={source_peer}: {error}",
+                        transfer.hash,
+                    );
+                    continue;
+                }
+            };
+            let key = kad_callback_key(source)
+                .expect("validated Kad callback ticket has a cooldown identity");
+            let callback_cooldown_permit = {
+                let mut state = self.state.lock().await;
+                claim_kad_callback_request(
+                    &mut state.ed2k_kad_callback_last_sent,
+                    key,
+                    Instant::now(),
+                )
+            };
+            let Some(callback_cooldown_permit) = callback_cooldown_permit else {
+                let _ = self
+                    .ed2k_transfers
+                    .cancel_callback_ticket(callback_dispatch_permit)
+                    .await;
+                tracing::debug!(
+                    "Kad callback suppressed by cooldown file_hash={} source={source_peer} buddy={}",
+                    transfer.hash,
+                    buddy_endpoint
+                        .map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
+                );
+                continue;
+            };
+            let Some(callback_dispatch_guard) = self
+                .ed2k_transfers
+                .begin_callback_ticket_dispatch(callback_dispatch_permit)
+            else {
+                let cooldown_cancelled = {
+                    let mut state = self.state.lock().await;
+                    cancel_kad_callback_request(
+                        &mut state.ed2k_kad_callback_last_sent,
+                        callback_cooldown_permit,
+                    )
+                };
+                tracing::debug!(
+                    "Kad callback settled before dispatch file_hash={} source={source_peer} cooldown_cancelled={cooldown_cancelled}",
+                    transfer.hash,
+                );
+                continue;
+            };
+            let callback_deadline = callback_dispatch_guard.expires_at();
+            let request = build_kad_callback_req(buddy_id, file_hash, our_tcp_port);
+            let context = KadCallbackDispatchContext {
+                guard: callback_dispatch_guard,
+                cooldown: callback_cooldown_permit,
+                source_peer,
+                buddy_peer: buddy_endpoint,
+                transfer_hash: transfer.hash.clone(),
+                our_tcp_port,
+            };
+            let Some(buddy_peer) = buddy_endpoint else {
+                let core = self.clone();
+                let dht = dht.clone();
+                let cancel = cancel.clone();
+                let buddy_id_hex = hex::encode(buddy_id);
+                findsource_tasks.spawn(async move {
+                    tracing::debug!(
+                        "starting Kad FINDSOURCE callback walk file_hash={} source={source_peer} buddy_id={buddy_id_hex}",
+                        context.transfer_hash,
+                    );
+                    let dispatch = match dht
+                        .find_source_search_until(
+                            request,
+                            RpcWorkClass::Interactive,
+                            callback_deadline,
+                            &cancel,
+                        )
+                        .await
+                    {
+                        KadCallbackSearchDispatchOutcome::Dispatched { request_count } => {
+                            KadCallbackDispatch::Sent { request_count }
+                        }
+                        KadCallbackSearchDispatchOutcome::NotDispatched { reason } => {
+                            KadCallbackDispatch::KnownNotSent(format!(
+                                "Kad FINDSOURCE callback not dispatched: {reason:?}"
+                            ))
+                        }
+                    };
+                    core.settle_kad_callback_dispatch(context, dispatch).await;
                 });
                 continue;
-            }
-            let Some((buddy_ip, buddy_port)) = source.buddy_endpoint else {
-                continue;
             };
-            let buddy_peer = SocketAddr::new(IpAddr::V4(buddy_ip), buddy_port);
-            let outcome = dht
-                .send_packet(buddy_peer, &KadPacket::CallbackReq(request))
-                .await;
-            let milestone = if outcome.is_ok() {
-                "sent"
-            } else {
-                "send_failed"
-            };
-            crate::diag_kad_event::callback(milestone, buddy_peer, source_peer, &transfer.hash);
-            match outcome {
-                Ok(()) => tracing::debug!(
-                    "sent Kad KADEMLIA_CALLBACK_REQ file_hash={} source={source_peer} buddy={buddy_peer} our_tcp_port={our_tcp_port}",
-                    transfer.hash
-                ),
-                Err(error) => tracing::warn!(
-                    "Kad KADEMLIA_CALLBACK_REQ send failed file_hash={} source={source_peer} buddy={buddy_peer}: {error}",
-                    transfer.hash
-                ),
-            }
+            let dispatch =
+                send_direct_kad_callback(&dht, buddy_peer, request, callback_deadline, cancel)
+                    .await;
+            self.settle_kad_callback_dispatch(context, dispatch).await;
         }
     }
 }
@@ -252,7 +525,7 @@ mod tests {
             low_id: true,
             obfuscated: false,
             obfuscation_options: None,
-            user_hash: None,
+            user_hash: Some([0x6b; 16]),
             source_server: None,
             buddy_id: Some([0x5a; 16]),
             buddy_endpoint: Some((Ipv4Addr::new(198, 51, 100, 9), 5000)),
@@ -261,64 +534,111 @@ mod tests {
     }
 
     #[test]
-    fn candidate_requires_buddy_id_endpoint_and_nonzero_port() {
+    fn candidate_normalizes_direct_and_findsource_routes() {
         let file_hash = Ed2kHash::from_bytes([0x4b; 16]);
         let source = buddy_source(file_hash);
-        assert!(is_direct_kad_callback_candidate(&source));
+        assert!(normalized_buddy_endpoint(&source).is_some());
         assert_eq!(
-            kad_callback_key(&source, file_hash),
-            Some((Ipv4Addr::new(192, 0, 2, 77), 4662, file_hash))
+            kad_callback_key(&source),
+            Some(KadCallbackKey {
+                buddy_id: [0x5a; 16],
+                buddy_endpoint: Some("198.51.100.9:5000".parse().unwrap()),
+                user_hash: [0x6b; 16],
+            })
         );
 
-        // A zero buddy port is not dialable.
+        // An unusable buddy endpoint falls back to route discovery rather than
+        // being treated as a direct datagram destination.
         let mut zero_port = buddy_source(file_hash);
         zero_port.buddy_endpoint = Some((Ipv4Addr::new(198, 51, 100, 9), 0));
-        assert!(!is_direct_kad_callback_candidate(&zero_port));
+        assert_eq!(normalized_buddy_endpoint(&zero_port), None);
         assert_eq!(
-            kad_callback_key(&zero_port, file_hash),
-            Some((Ipv4Addr::new(192, 0, 2, 77), 4662, file_hash))
+            kad_callback_key(&zero_port),
+            Some(KadCallbackKey {
+                buddy_id: [0x5a; 16],
+                buddy_endpoint: None,
+                user_hash: [0x6b; 16],
+            })
         );
+
+        let mut unspecified_ip = buddy_source(file_hash);
+        unspecified_ip.buddy_endpoint = Some((Ipv4Addr::UNSPECIFIED, 5000));
+        assert_eq!(normalized_buddy_endpoint(&unspecified_ip), None);
 
         let mut unknown_endpoint = buddy_source(file_hash);
         unknown_endpoint.buddy_endpoint = None;
         assert!(is_kad_callback_candidate(&unknown_endpoint));
-        assert!(!is_direct_kad_callback_candidate(&unknown_endpoint));
-        assert!(kad_callback_key(&unknown_endpoint, file_hash).is_some());
+        assert_eq!(normalized_buddy_endpoint(&unknown_endpoint), None);
+        assert!(kad_callback_key(&unknown_endpoint).is_some());
+
+        let mut missing_user_hash = buddy_source(file_hash);
+        missing_user_hash.user_hash = None;
+        assert!(is_kad_callback_candidate(&missing_user_hash));
+        assert!(kad_callback_key(&missing_user_hash).is_none());
 
         // A HighID (direct-dialable) source is never a callback candidate.
         let mut high_id = buddy_source(file_hash);
         high_id.low_id = false;
         high_id.buddy_id = None;
         high_id.buddy_endpoint = None;
-        assert!(!is_direct_kad_callback_candidate(&high_id));
+        assert!(!is_kad_callback_candidate(&high_id));
     }
 
     #[test]
-    fn cooldown_gate_allows_first_send_then_suppresses_within_window() {
+    fn cooldown_is_peer_route_scoped_and_not_file_scoped() {
         let now = Instant::now();
-        // Never sent -> always allowed.
-        assert!(should_send_kad_callback(
-            None,
-            now,
-            KAD_CALLBACK_INITIATOR_COOLDOWN
+        let first_file = buddy_source(Ed2kHash::from_bytes([0x11; 16]));
+        let second_file = buddy_source(Ed2kHash::from_bytes([0x22; 16]));
+        let direct_key = kad_callback_key(&first_file).unwrap();
+        assert_eq!(kad_callback_key(&second_file), Some(direct_key.clone()));
+
+        let mut last_sent = HashMap::new();
+        let permit = claim_kad_callback_request(&mut last_sent, direct_key.clone(), now).unwrap();
+        assert!(
+            claim_kad_callback_request(
+                &mut last_sent,
+                direct_key.clone(),
+                now + Duration::from_secs(44),
+            )
+            .is_none()
+        );
+
+        // A FINDSOURCE route cannot join the direct-route ticket and therefore
+        // owns an independent cooldown identity.
+        let mut findsource = first_file.clone();
+        findsource.buddy_endpoint = None;
+        let findsource_key = kad_callback_key(&findsource).unwrap();
+        assert_ne!(findsource_key, direct_key);
+        assert!(claim_kad_callback_request(&mut last_sent, findsource_key, now).is_some());
+
+        assert!(commit_kad_callback_request(
+            &mut last_sent,
+            permit,
+            now + Duration::from_secs(2),
         ));
-        // Just sent -> suppressed until the cooldown elapses.
-        assert!(!should_send_kad_callback(
-            Some(now),
-            now,
-            KAD_CALLBACK_INITIATOR_COOLDOWN
-        ));
-        assert!(!should_send_kad_callback(
-            Some(now),
-            now + Duration::from_secs(44),
-            KAD_CALLBACK_INITIATOR_COOLDOWN
-        ));
-        // At/after the cooldown -> allowed again.
-        assert!(should_send_kad_callback(
-            Some(now),
+        assert!(
+            claim_kad_callback_request(&mut last_sent, direct_key, now + Duration::from_secs(46),)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cooldown_rollback_is_exact_and_linear() {
+        let now = Instant::now();
+        let key = kad_callback_key(&buddy_source(Ed2kHash::from_bytes([0x33; 16]))).unwrap();
+        let mut last_sent = HashMap::new();
+        let stale = claim_kad_callback_request(&mut last_sent, key.clone(), now).unwrap();
+        let current = claim_kad_callback_request(
+            &mut last_sent,
+            key.clone(),
             now + KAD_CALLBACK_INITIATOR_COOLDOWN,
-            KAD_CALLBACK_INITIATOR_COOLDOWN
-        ));
+        )
+        .unwrap();
+
+        assert!(!cancel_kad_callback_request(&mut last_sent, stale));
+        assert!(last_sent.contains_key(&key));
+        assert!(cancel_kad_callback_request(&mut last_sent, current));
+        assert!(!last_sent.contains_key(&key));
     }
 
     #[test]
