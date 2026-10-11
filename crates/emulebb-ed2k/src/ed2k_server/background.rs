@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -106,6 +106,15 @@ pub struct Ed2kServerSearchInbox {
     pub(super) receiver: mpsc::Receiver<BackgroundServerSearchRequest>,
 }
 
+/// Whether a background-session callback command reached the server socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ed2kBackgroundCallbackDispatchOutcome {
+    /// The complete `OP_CALLBACKREQUEST` frame was written to the live session.
+    Sent,
+    /// The command was proven not to have reached a server session.
+    NotSent { reason: String },
+}
+
 /// One file included in a connected-server TCP source-search frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ed2kServerSourceBatchTarget {
@@ -135,6 +144,8 @@ pub(super) enum BackgroundServerSearchRequest {
     },
     Callback {
         client_id: u32,
+        deadline: TokioInstant,
+        cancel: CancellationToken,
         response: oneshot::Sender<BackgroundCallbackRequestResponse>,
     },
     Publish {
@@ -310,26 +321,76 @@ pub async fn search_source_batch_via_background_session(
 pub async fn request_callback_via_background_session(
     handle: &Ed2kServerSearchHandle,
     client_id: u32,
-    timeout: Duration,
+    deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<()> {
+) -> Result<Ed2kBackgroundCallbackDispatchOutcome> {
+    if cancel.is_cancelled() {
+        return Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+            reason: "ED2K background callback cancelled before queueing".to_string(),
+        });
+    }
+    let now = Instant::now();
+    if deadline <= now {
+        return Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+            reason: "ED2K background callback ticket expired before queueing".to_string(),
+        });
+    }
+    let wait_budget = deadline.saturating_duration_since(now);
+    let deadline = TokioInstant::from_std(deadline);
     let (response, receive_response) = oneshot::channel();
-    handle
-        .sender
-        .send(BackgroundServerSearchRequest::Callback {
-            client_id,
-            response,
-        })
-        .await
-        .context("ED2K background callback channel is closed")?;
+    let request = BackgroundServerSearchRequest::Callback {
+        client_id,
+        deadline,
+        cancel: cancel.clone(),
+        response,
+    };
+    let sent = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            return Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+                reason: "ED2K background callback cancelled before queueing".to_string(),
+            });
+        }
+        _ = tokio::time::sleep_until(deadline) => {
+            return Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+                reason: format!(
+                    "ED2K background callback timed out before queueing after {wait_budget:?}"
+                ),
+            });
+        }
+        sent = handle.sender.send(request) => sent,
+    };
+    if sent.is_err() {
+        return Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+            reason: "ED2K background callback channel is closed".to_string(),
+        });
+    }
 
     tokio::select! {
-        _ = cancel.cancelled() => Ok(()),
-        result = tokio::time::timeout(timeout, receive_response) => {
-            let response = result
-                .with_context(|| format!("timed out waiting for ED2K background callback response after {timeout:?}"))?
-                .context("ED2K background callback responder dropped")?;
-            response.map_err(BackgroundSearchFailure::into_anyhow)
+        biased;
+        response = receive_response => {
+            let response = response.context(
+                "ED2K background callback responder dropped; delivery status is unknown"
+            )?;
+            match response {
+                Ok(()) => Ok(Ed2kBackgroundCallbackDispatchOutcome::Sent),
+                Err(failure) if failure.interrupted => {
+                    Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+                        reason: failure.message,
+                    })
+                }
+                Err(failure) => Err(failure.into_anyhow()),
+            }
+        }
+        _ = cancel.cancelled() => {
+            anyhow::bail!(
+                "ED2K background callback cancelled after queueing; delivery status is unknown"
+            )
+        }
+        _ = tokio::time::sleep_until(deadline) => {
+            anyhow::bail!(
+                "timed out waiting for ED2K background callback response after {wait_budget:?}; delivery status is unknown"
+            )
         }
     }
 }
@@ -612,6 +673,28 @@ pub(super) fn fail_pending_background_search(
     }
 }
 
+fn callback_dispatch_stopped(cancel: &CancellationToken, deadline: TokioInstant) -> bool {
+    cancel.is_cancelled() || TokioInstant::now() >= deadline
+}
+
+fn stop_callback_before_dispatch(
+    cancel: &CancellationToken,
+    deadline: TokioInstant,
+    response: oneshot::Sender<BackgroundCallbackRequestResponse>,
+    stage: &str,
+) -> Option<oneshot::Sender<BackgroundCallbackRequestResponse>> {
+    if !callback_dispatch_stopped(cancel, deadline) {
+        return Some(response);
+    }
+    let reason = if cancel.is_cancelled() {
+        format!("ED2K background callback cancelled {stage}")
+    } else {
+        format!("ED2K background callback expired {stage}")
+    };
+    let _ = response.send(Err(BackgroundSearchFailure::interrupted(reason)));
+    None
+}
+
 #[expect(
     clippy::cognitive_complexity,
     reason = "linear protocol orchestration flow"
@@ -727,9 +810,27 @@ pub(super) async fn start_background_server_search(
         }
         BackgroundServerSearchRequest::Callback {
             client_id,
+            deadline,
+            cancel,
             response,
         } => {
+            let Some(response) = stop_callback_before_dispatch(
+                &cancel,
+                deadline,
+                response,
+                "before offer-files settlement",
+            ) else {
+                return Ok(None);
+            };
             wait_for_offer_files_settle(session).await;
+            let Some(response) = stop_callback_before_dispatch(
+                &cancel,
+                deadline,
+                response,
+                "while waiting for offer-files settlement",
+            ) else {
+                return Ok(None);
+            };
             session.set_phase(
                 ServerSessionPhase::SearchActive,
                 format!("dispatching background callback request client_id={client_id}"),
@@ -789,4 +890,209 @@ pub(super) fn log_search_result_page(endpoint: SocketAddr, results: &[Ed2kSearch
         result_count = results.len(),
         "received ED2K search result page"
     );
+}
+
+#[cfg(test)]
+mod callback_dispatch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_before_queueing_is_known_not_sent() {
+        let (handle, _inbox) = new_ed2k_server_search_channel(1);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let outcome = request_callback_via_background_session(
+            &handle,
+            0x1234,
+            Instant::now() + Duration::from_secs(1),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            Ed2kBackgroundCallbackDispatchOutcome::NotSent { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_channel_is_known_not_sent() {
+        let (handle, inbox) = new_ed2k_server_search_channel(1);
+        drop(inbox);
+
+        let outcome = request_callback_via_background_session(
+            &handle,
+            0x1234,
+            Instant::now() + Duration::from_secs(1),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            Ed2kBackgroundCallbackDispatchOutcome::NotSent { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn timeout_before_queueing_is_known_not_sent() {
+        let (handle, _inbox) = new_ed2k_server_search_channel(1);
+        let (response, _receive_response) = oneshot::channel();
+        handle
+            .sender
+            .send(BackgroundServerSearchRequest::Callback {
+                client_id: 0x1111,
+                deadline: TokioInstant::now() + Duration::from_secs(1),
+                cancel: CancellationToken::new(),
+                response,
+            })
+            .await
+            .unwrap();
+
+        let outcome = request_callback_via_background_session(
+            &handle,
+            0x2222,
+            Instant::now() + Duration::from_millis(10),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            Ed2kBackgroundCallbackDispatchOutcome::NotSent { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn connected_worker_confirms_sent_callback() {
+        let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+        let task = tokio::spawn(async move {
+            request_callback_via_background_session(
+                &handle,
+                0x1234,
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        let request = inbox.receiver.recv().await.unwrap();
+        let BackgroundServerSearchRequest::Callback { response, .. } = request else {
+            panic!("expected callback command")
+        };
+        response.send(Ok(())).unwrap();
+
+        assert_eq!(
+            task.await.unwrap().unwrap(),
+            Ed2kBackgroundCallbackDispatchOutcome::Sent
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_session_interruption_is_known_not_sent() {
+        let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+        let task = tokio::spawn(async move {
+            request_callback_via_background_session(
+                &handle,
+                0x1234,
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        let request = inbox.receiver.recv().await.unwrap();
+        let BackgroundServerSearchRequest::Callback { response, .. } = request else {
+            panic!("expected callback command")
+        };
+        response
+            .send(Err(BackgroundSearchFailure::interrupted(
+                "connection closed before dispatch",
+            )))
+            .unwrap();
+
+        assert_eq!(
+            task.await.unwrap().unwrap(),
+            Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+                reason: "connection closed before dispatch".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_queueing_has_unknown_delivery() {
+        let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            request_callback_via_background_session(
+                &handle,
+                0x1234,
+                Instant::now() + Duration::from_secs(1),
+                &task_cancel,
+            )
+            .await
+        });
+        let request = inbox.receiver.recv().await.unwrap();
+        let BackgroundServerSearchRequest::Callback {
+            deadline,
+            cancel: queued_cancel,
+            response,
+            ..
+        } = request
+        else {
+            panic!("expected callback command")
+        };
+        cancel.cancel();
+
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("delivery status is unknown"));
+        assert!(
+            stop_callback_before_dispatch(
+                &queued_cancel,
+                deadline,
+                response,
+                "before delayed worker dispatch",
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_after_queueing_has_unknown_delivery() {
+        let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+        let task = tokio::spawn(async move {
+            request_callback_via_background_session(
+                &handle,
+                0x1234,
+                Instant::now() + Duration::from_millis(10),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        let request = inbox.receiver.recv().await.unwrap();
+        let BackgroundServerSearchRequest::Callback {
+            deadline,
+            cancel,
+            response,
+            ..
+        } = request
+        else {
+            panic!("expected callback command")
+        };
+
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("delivery status is unknown"));
+        assert!(
+            stop_callback_before_dispatch(
+                &cancel,
+                deadline,
+                response,
+                "before delayed worker dispatch",
+            )
+            .is_none()
+        );
+    }
 }

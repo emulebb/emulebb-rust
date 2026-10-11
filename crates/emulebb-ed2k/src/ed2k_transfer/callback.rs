@@ -8,21 +8,26 @@ use std::{
 };
 
 use super::{
-    Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken, Ed2kCallbackDispatchOutcome,
-    Ed2kCallbackDispatchPermit, Ed2kCallbackDownload, Ed2kCallbackHelloIdentity,
-    Ed2kCallbackIntent, Ed2kCallbackPeer, Ed2kCallbackReservation, Ed2kCallbackRoute,
-    Ed2kCallbackTicketError, Ed2kCallbackTicketId, Ed2kCallbackTicketRequest, Ed2kTransferRuntime,
+    ED2K_CALLBACK_TICKET_MAX_LIFETIME, Ed2kCallbackClaim, Ed2kCallbackClaimError,
+    Ed2kCallbackClaimToken, Ed2kCallbackDispatchOutcome, Ed2kCallbackDispatchPermit,
+    Ed2kCallbackDownload, Ed2kCallbackHelloIdentity, Ed2kCallbackIntent, Ed2kCallbackPeer,
+    Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError, Ed2kCallbackTicketId,
+    Ed2kCallbackTicketRequest, Ed2kTransferRuntime,
 };
 
 const CALLBACK_TICKET_CAPACITY: usize = 1_024;
 const CALLBACK_TICKET_DOWNLOAD_CAPACITY: usize = 256;
 const CALLBACK_CLAIM_DOWNLOAD_CAPACITY: usize = 256;
 const CALLBACK_CLAIM_LEASE: Duration = Duration::from_secs(5);
-const MAX_CALLBACK_TICKET_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallbackTicketState {
     Reserved,
+    /// One linear dispatch guard owns the queued or in-progress wire request.
+    /// The guard settles or rolls this state back synchronously on drop, so it
+    /// must not be reaped at the reservation deadline while socket delivery is
+    /// still being classified.
+    Dispatching,
     Armed,
     Leased {
         generation: u64,
@@ -41,6 +46,7 @@ enum CallbackTicketState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallbackTicketReadyState {
     Reserved,
+    Dispatching,
     Armed,
 }
 
@@ -48,6 +54,7 @@ impl From<CallbackTicketReadyState> for CallbackTicketState {
     fn from(state: CallbackTicketReadyState) -> Self {
         match state {
             CallbackTicketReadyState::Reserved => Self::Reserved,
+            CallbackTicketReadyState::Dispatching => Self::Dispatching,
             CallbackTicketReadyState::Armed => Self::Armed,
         }
     }
@@ -84,6 +91,63 @@ pub(super) struct CallbackTicketStore {
     ticket_capacity: usize,
     download_capacity: usize,
     tickets: VecDeque<CallbackTicketRecord>,
+}
+
+/// Cancellation-safe ownership of one callback request while its wire
+/// delivery is queued or in progress.
+///
+/// Dispatching tickets remain claimable and cannot expire underneath the
+/// socket write. Dropping this guard conservatively arms admission because an
+/// aborted future cannot prove that delivery never began; explicit known-not-
+/// sent cancellation remains available and consumes it exactly once.
+#[derive(Debug)]
+pub struct Ed2kCallbackDispatchGuard {
+    store: Arc<StdMutex<CallbackTicketStore>>,
+    permit: Option<Ed2kCallbackDispatchPermit>,
+}
+
+impl Ed2kCallbackDispatchGuard {
+    /// Exact pre-dispatch deadline established by ticket reservation.
+    pub fn expires_at(&self) -> Instant {
+        self.permit
+            .as_ref()
+            .expect("live dispatch guard always owns a permit")
+            .expires_at()
+    }
+
+    /// Arm the ticket after the request was sent or delivery became ambiguous.
+    pub fn mark_dispatched(mut self) -> Ed2kCallbackDispatchOutcome {
+        let permit = self
+            .permit
+            .take()
+            .expect("live dispatch guard always owns a permit");
+        self.store
+            .lock()
+            .unwrap()
+            .mark_dispatched(permit, Instant::now())
+    }
+
+    /// Roll back the exact reservation after delivery was proven not to start.
+    pub fn cancel(mut self) -> bool {
+        let permit = self
+            .permit
+            .take()
+            .expect("live dispatch guard always owns a permit");
+        self.store.lock().unwrap().cancel(permit, Instant::now())
+    }
+}
+
+impl Drop for Ed2kCallbackDispatchGuard {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let _ = self
+            .store
+            .lock()
+            .unwrap()
+            .mark_dispatched(permit, Instant::now());
+    }
 }
 
 #[derive(Debug)]
@@ -194,7 +258,7 @@ fn validate_ticket_request(
     if request.valid_for.is_zero() {
         return Err(Ed2kCallbackTicketError::ZeroLifetime);
     }
-    if request.valid_for > MAX_CALLBACK_TICKET_LIFETIME {
+    if request.valid_for > ED2K_CALLBACK_TICKET_MAX_LIFETIME {
         return Err(Ed2kCallbackTicketError::LifetimeTooLong);
     }
     if request.peer.source_tcp_port == 0 {
@@ -403,6 +467,7 @@ impl CallbackTicketStore {
             return Ok(Ed2kCallbackReservation::Dispatch(
                 Ed2kCallbackDispatchPermit {
                     ticket_id: ticket.id,
+                    expires_at: ticket.expires_at,
                 },
             ));
         }
@@ -410,7 +475,9 @@ impl CallbackTicketStore {
         if let Some(ticket) = self.tickets.iter_mut().find(|ticket| {
             matches!(
                 ticket.state,
-                CallbackTicketState::Reserved | CallbackTicketState::Armed
+                CallbackTicketState::Reserved
+                    | CallbackTicketState::Dispatching
+                    | CallbackTicketState::Armed
             ) && ticket.route == request.route
                 && peers_can_merge(&ticket.route, &ticket.peer, &request.peer)
         }) {
@@ -441,7 +508,10 @@ impl CallbackTicketStore {
             state: CallbackTicketState::Reserved,
         });
         Ok(Ed2kCallbackReservation::Dispatch(
-            Ed2kCallbackDispatchPermit { ticket_id: id },
+            Ed2kCallbackDispatchPermit {
+                ticket_id: id,
+                expires_at,
+            },
         ))
     }
 
@@ -506,6 +576,36 @@ impl CallbackTicketStore {
         hashes.len() <= CALLBACK_CLAIM_DOWNLOAD_CAPACITY
     }
 
+    fn begin_dispatch(&mut self, permit: &Ed2kCallbackDispatchPermit, now: Instant) -> bool {
+        self.reap(now);
+        let Some(ticket) = self
+            .tickets
+            .iter_mut()
+            .find(|ticket| ticket.id == permit.ticket_id)
+        else {
+            return false;
+        };
+        match &mut ticket.state {
+            CallbackTicketState::Reserved => ticket.state = CallbackTicketState::Dispatching,
+            CallbackTicketState::Leased { prior_state, .. }
+                if *prior_state == CallbackTicketReadyState::Reserved =>
+            {
+                *prior_state = CallbackTicketReadyState::Dispatching;
+            }
+            CallbackTicketState::SessionOwned { prior_state, .. }
+                if *prior_state == CallbackTicketReadyState::Reserved =>
+            {
+                *prior_state = CallbackTicketReadyState::Dispatching;
+            }
+            CallbackTicketState::Dispatching
+            | CallbackTicketState::Armed
+            | CallbackTicketState::Leased { .. }
+            | CallbackTicketState::SessionOwned { .. }
+            | CallbackTicketState::NeedsDispatch => return false,
+        }
+        true
+    }
+
     fn mark_dispatched(
         &mut self,
         permit: Ed2kCallbackDispatchPermit,
@@ -520,14 +620,22 @@ impl CallbackTicketStore {
             return Ed2kCallbackDispatchOutcome::Settled;
         };
         match &mut ticket.state {
-            CallbackTicketState::Reserved => ticket.state = CallbackTicketState::Armed,
+            CallbackTicketState::Reserved | CallbackTicketState::Dispatching => {
+                ticket.state = CallbackTicketState::Armed;
+            }
             CallbackTicketState::Leased { prior_state, .. }
-                if *prior_state == CallbackTicketReadyState::Reserved =>
+                if matches!(
+                    prior_state,
+                    CallbackTicketReadyState::Reserved | CallbackTicketReadyState::Dispatching
+                ) =>
             {
                 *prior_state = CallbackTicketReadyState::Armed;
             }
             CallbackTicketState::SessionOwned { prior_state, .. }
-                if *prior_state == CallbackTicketReadyState::Reserved =>
+                if matches!(
+                    prior_state,
+                    CallbackTicketReadyState::Reserved | CallbackTicketReadyState::Dispatching
+                ) =>
             {
                 *prior_state = CallbackTicketReadyState::Armed;
             }
@@ -546,15 +654,38 @@ impl CallbackTicketStore {
 
     fn cancel(&mut self, permit: Ed2kCallbackDispatchPermit, now: Instant) -> bool {
         let mut index = self.tickets.iter().position(|ticket| {
-            ticket.id == permit.ticket_id && ticket.state == CallbackTicketState::Reserved
+            ticket.id == permit.ticket_id
+                && matches!(
+                    ticket.state,
+                    CallbackTicketState::Reserved | CallbackTicketState::Dispatching
+                )
         });
         if index.is_none() {
             self.reap(now);
             index = self.tickets.iter().position(|ticket| {
-                ticket.id == permit.ticket_id && ticket.state == CallbackTicketState::Reserved
+                ticket.id == permit.ticket_id
+                    && matches!(
+                        ticket.state,
+                        CallbackTicketState::Reserved | CallbackTicketState::Dispatching
+                    )
             });
         }
         let Some(index) = index else {
+            if let Some(ticket) = self
+                .tickets
+                .iter_mut()
+                .find(|ticket| ticket.id == permit.ticket_id)
+            {
+                match &mut ticket.state {
+                    CallbackTicketState::Leased { prior_state, .. }
+                    | CallbackTicketState::SessionOwned { prior_state, .. }
+                        if *prior_state == CallbackTicketReadyState::Dispatching =>
+                    {
+                        *prior_state = CallbackTicketReadyState::Reserved;
+                    }
+                    _ => {}
+                }
+            }
             return false;
         };
         if self.tickets[index].cancel_restores_needs_dispatch {
@@ -665,6 +796,7 @@ impl CallbackTicketStore {
         {
             let prior_state = match ticket.state {
                 CallbackTicketState::Reserved => CallbackTicketReadyState::Reserved,
+                CallbackTicketState::Dispatching => CallbackTicketReadyState::Dispatching,
                 CallbackTicketState::Armed => CallbackTicketReadyState::Armed,
                 CallbackTicketState::Leased { .. }
                 | CallbackTicketState::SessionOwned { .. }
@@ -883,13 +1015,14 @@ impl CallbackTicketStore {
             CallbackTicketState::Reserved
             | CallbackTicketState::Armed
             | CallbackTicketState::NeedsDispatch => ticket.expires_at > now,
+            CallbackTicketState::Dispatching => true,
             CallbackTicketState::Leased {
                 lease_deadline,
                 prior_state,
                 ..
             } if lease_deadline <= now => {
                 ticket.state = prior_state.into();
-                ticket.expires_at > now
+                prior_state == CallbackTicketReadyState::Dispatching || ticket.expires_at > now
             }
             CallbackTicketState::Leased { .. } => true,
             CallbackTicketState::SessionOwned { .. } => true,
@@ -899,7 +1032,7 @@ impl CallbackTicketStore {
 
 impl CallbackTicketState {
     fn is_claimable(self) -> bool {
-        matches!(self, Self::Reserved | Self::Armed)
+        matches!(self, Self::Reserved | Self::Dispatching | Self::Armed)
     }
 }
 
@@ -1027,6 +1160,25 @@ impl Ed2kTransferRuntime {
         now: Instant,
     ) -> Result<Ed2kCallbackReservation, Ed2kCallbackTicketError> {
         self.callback_tickets.lock().unwrap().reserve(request, now)
+    }
+
+    /// Move a reservation under cancellation-safe dispatch ownership.
+    ///
+    /// `None` means a fast callback or expiry already settled the reservation,
+    /// so the caller must not originate another wire request.
+    pub fn begin_callback_ticket_dispatch(
+        &self,
+        permit: Ed2kCallbackDispatchPermit,
+    ) -> Option<Ed2kCallbackDispatchGuard> {
+        let began = self
+            .callback_tickets
+            .lock()
+            .unwrap()
+            .begin_dispatch(&permit, Instant::now());
+        began.then(|| Ed2kCallbackDispatchGuard {
+            store: Arc::clone(&self.callback_tickets),
+            permit: Some(permit),
+        })
     }
 
     /// Mark a callback dispatch successful. A fast inbound lease records this
@@ -1451,6 +1603,52 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn dispatching_ticket_survives_its_queue_deadline_then_arms_from_settlement_time() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let mut store = CallbackTicketStore::default();
+        let permit = dispatch_permit(store.reserve(server_request(server, 17, 1), now).unwrap());
+        assert_eq!(permit.expires_at(), now + Duration::from_secs(45));
+        assert!(store.begin_dispatch(&permit, now));
+
+        let settled_at = now + Duration::from_secs(60);
+        store.reap(settled_at);
+        assert_eq!(store.tickets[0].state, CallbackTicketState::Dispatching);
+        assert_eq!(
+            store.mark_dispatched(permit, settled_at),
+            Ed2kCallbackDispatchOutcome::Armed
+        );
+        store.reap(settled_at + Duration::from_secs(44));
+        assert_eq!(store.tickets.len(), 1);
+        store.reap(settled_at + Duration::from_secs(45));
+        assert!(store.tickets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropped_dispatch_guard_conservatively_arms_the_reservation() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-dispatch-guard-drop",
+        ))
+        .unwrap();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let permit = dispatch_permit(
+            runtime
+                .reserve_callback_ticket(server_request(server, 17, 1))
+                .await
+                .unwrap(),
+        );
+        let guard = runtime.begin_callback_ticket_dispatch(permit).unwrap();
+        drop(guard);
+
+        let claim = runtime
+            .lease_callback_tickets(hello(Some(server), 17, [0x55; 16]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.downloads, vec![download(1)]);
     }
 
     #[tokio::test]
@@ -2200,7 +2398,7 @@ mod tests {
                 None,
                 4662,
                 download(1),
-                MAX_CALLBACK_TICKET_LIFETIME + Duration::from_secs(1),
+                ED2K_CALLBACK_TICKET_MAX_LIFETIME + Duration::from_secs(1),
             ),
             Err(Ed2kCallbackTicketError::LifetimeTooLong)
         ));
