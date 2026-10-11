@@ -1,5 +1,11 @@
 //! Serializable ED2K transfer data models.
 
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    time::Duration,
+};
+
+use emulebb_kad_proto::Ed2kHash;
 use serde::{Deserialize, Serialize};
 
 use super::block_bitmap::PartBlockBitmap;
@@ -225,6 +231,154 @@ pub struct Ed2kCallbackIntent {
     pub file_size: u64,
     /// Best-effort source hint captured when the callback was requested.
     pub source: Ed2kSourceHint,
+}
+
+/// Opaque process-local identifier for one pending callback ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ed2kCallbackTicketId(pub(super) u64);
+
+/// Callback transport which was asked to make the peer connect back.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Ed2kCallbackRoute {
+    /// Classic server callback in one server-local LowID namespace.
+    Server { server_endpoint: SocketAddr },
+    /// Kad callback relayed through the source's buddy.
+    KadBuddy {
+        buddy_id: [u8; 16],
+        buddy_endpoint: Option<SocketAddr>,
+    },
+    /// Direct UDP callback sent to the firewalled source itself.
+    DirectUdp { source_endpoint: SocketAddr },
+}
+
+/// Expected identity of the peer for which a callback was requested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Ed2kCallbackPeer {
+    /// Server-reported client-id. It is only authoritative together with the
+    /// server endpoint stored by [`Ed2kCallbackRoute::Server`].
+    pub client_id: u32,
+    /// Protocol user hash when the discovery route supplied it.
+    pub expected_user_hash: Option<[u8; 16]>,
+    /// Dialable source IP for hashless non-server compatibility matching.
+    /// Server LowID IPv4 renderings must be represented as `None`.
+    pub source_ip: Option<Ipv4Addr>,
+    /// Peer-advertised ED2K TCP port, never the inbound socket's ephemeral port.
+    pub source_tcp_port: u16,
+}
+
+/// One file to negotiate after an expected callback peer is admitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kCallbackDownload {
+    /// Binary ED2K file hash; callback admission never accepts an invalid hex form.
+    pub file_hash: Ed2kHash,
+    /// Canonical file name.
+    pub display_name: String,
+    /// Expected file size.
+    pub file_size: u64,
+    /// Best available source metadata for the download session.
+    pub source: Ed2kSourceHint,
+}
+
+/// Request used to reserve one bounded, expiring callback ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kCallbackTicketRequest {
+    pub(super) route: Ed2kCallbackRoute,
+    pub(super) peer: Ed2kCallbackPeer,
+    pub(super) download: Ed2kCallbackDownload,
+    /// Absolute ticket expiry is computed at reservation time. Merging another
+    /// A4AF file does not extend the original callback window.
+    pub(super) valid_for: Duration,
+}
+
+/// Identity observed on an inbound ED2K HELLO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ed2kCallbackHelloIdentity {
+    pub user_hash: [u8; 16],
+    pub client_id: u32,
+    pub server_endpoint: Option<SocketAddr>,
+    pub peer_ip: Option<Ipv4Addr>,
+    pub tcp_port: u16,
+}
+
+/// Linear authority to finish or cancel one callback dispatch reservation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Ed2kCallbackDispatchPermit {
+    pub(super) ticket_id: Ed2kCallbackTicketId,
+}
+
+/// Result of reserving callback work before dispatching the wire request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ed2kCallbackReservation {
+    /// This caller owns the network dispatch and must arm or cancel the permit.
+    Dispatch(Ed2kCallbackDispatchPermit),
+    /// Another caller owns the shared callback dispatch; this A4AF file joined it.
+    Joined { ticket_id: Ed2kCallbackTicketId },
+}
+
+/// Opaque lease token used to settle an inbound callback admission exactly once.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Ed2kCallbackClaimToken {
+    pub(super) ticket_ids: Vec<Ed2kCallbackTicketId>,
+    pub(super) generation: u64,
+}
+
+/// Files admitted for one callback connection and the token which owns them.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Ed2kCallbackClaim {
+    pub token: Ed2kCallbackClaimToken,
+    pub downloads: Vec<Ed2kCallbackDownload>,
+}
+
+/// Bounded callback-ticket operation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ed2kCallbackTicketError {
+    ZeroLifetime,
+    LifetimeTooLong,
+    DeadlineOverflow,
+    TicketCapacity,
+    DownloadCapacity,
+    IdentifierExhausted,
+    InvalidServerEndpoint,
+    InvalidServerClientId,
+    InvalidBuddyId,
+    InvalidBuddyEndpoint,
+    InvalidDirectEndpoint,
+    MissingUserHash,
+    ZeroTcpPort,
+}
+
+impl std::fmt::Display for Ed2kCallbackTicketError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::ZeroLifetime => "callback ticket lifetime must be non-zero",
+            Self::LifetimeTooLong => "callback ticket lifetime exceeds the protocol bound",
+            Self::DeadlineOverflow => "callback ticket deadline overflow",
+            Self::TicketCapacity => "callback ticket capacity reached",
+            Self::DownloadCapacity => "callback ticket A4AF capacity reached",
+            Self::IdentifierExhausted => "callback ticket identifier space exhausted",
+            Self::InvalidServerEndpoint => "callback server endpoint must be non-zero IPv4",
+            Self::InvalidServerClientId => "server callback target must be a non-zero LowID",
+            Self::InvalidBuddyId => "Kad callback buddy id must be non-zero",
+            Self::InvalidBuddyEndpoint => "callback buddy endpoint must be non-zero IPv4",
+            Self::InvalidDirectEndpoint => {
+                "direct callback endpoint must be non-zero IPv4 and match the source"
+            }
+            Self::MissingUserHash => "Kad/direct callback requires a non-zero user hash",
+            Self::ZeroTcpPort => "callback source TCP port must be non-zero",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for Ed2kCallbackTicketError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ed2kCallbackClaimError {
+    AmbiguousPeer,
+    ClaimCapacity,
+    DeadlineOverflow,
+    IdentifierExhausted,
+    StaleClaim,
 }
 
 /// Durable download resume metadata stored next to the piece payload.
