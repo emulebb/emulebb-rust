@@ -497,6 +497,40 @@ impl Ed2kTransferRuntime {
         )
     }
 
+    pub(crate) async fn begin_upload_callback_dispatch(
+        &self,
+        permit: &super::Ed2kUploadCallbackPermit,
+        route: super::Ed2kUploadCallbackRoute,
+    ) -> bool {
+        self.upload_queue
+            .lock()
+            .await
+            .begin_callback_dispatch(permit, route, Instant::now())
+    }
+
+    pub(crate) async fn cancel_upload_callback_known_not_sent(
+        &self,
+        permit: &super::Ed2kUploadCallbackPermit,
+    ) -> bool {
+        self.upload_queue
+            .lock()
+            .await
+            .cancel_callback_known_not_sent(permit, Instant::now())
+    }
+
+    pub(crate) async fn claim_upload_callback_promotion(
+        &self,
+        peer: Ed2kUploadPeerIdentity,
+    ) -> super::Ed2kUploadCallbackClaim {
+        let connection_id = self
+            .next_upload_connection_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.upload_queue
+            .lock()
+            .await
+            .claim_callback_promotion(peer, Instant::now(), connection_id)
+    }
+
     /// Release one queue-visible upload client selected from REST management state.
     pub async fn release_upload_client(&self, client_id: &str, waiting_queue: bool) -> bool {
         self.upload_queue

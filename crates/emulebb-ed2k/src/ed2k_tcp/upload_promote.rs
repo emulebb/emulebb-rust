@@ -8,8 +8,9 @@
 //! `CUpDownClient::ConnectionEstablished`, BaseClient.cpp:1634-1641). A failed
 //! connect drops the grant — the oracle deletes the client on a failed
 //! `TryToConnect` — freeing the slot for the next waiter. A LowID peer cannot
-//! be dialed directly; without a live callback path its grant is dropped the
-//! same way.
+//! be dialed directly: it keeps its waiting entry and missed-turn entitlement
+//! while a callback is attempted, so another ready waiter can use the base
+//! slot in the meantime.
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -30,7 +31,8 @@ use crate::{
     ed2k_client_udp::{OutboundReaskTarget, build_direct_callback_req_datagram},
     ed2k_server::Ed2kServerState,
     ed2k_transfer::{
-        Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadPendingPromotion,
+        Ed2kTransferRuntime, Ed2kUploadCallbackPermit, Ed2kUploadCallbackRoute,
+        Ed2kUploadGrantedPromotion, Ed2kUploadPeerIdentity, Ed2kUploadPendingPromotion,
         is_low_id_client_id,
     },
     kad_firewall::KadFirewallState,
@@ -75,10 +77,9 @@ impl UploadPromoteDriver {
         }
     }
 
-    /// Drain the pending grants once and dispatch one outbound connect task
-    /// per dialable grant; an undialable grant (LowID without a callback path,
-    /// unusable endpoint) is dropped immediately like the oracle's failed
-    /// `TryToConnect` so the slot moves on to the next waiter.
+    /// Drain pending connection work once. HighID grants own a slot and are
+    /// dialed directly; LowID callback permits remain waiting entitlements and
+    /// therefore never release or cool an active upload session on failure.
     pub(in crate::ed2k_tcp) async fn promote_pending_once(self: &Arc<Self>) {
         // Run the complete queue maintenance pass before handing out slots:
         // purge unshared files, expire dead/revoked leases, and promote waiters.
@@ -96,39 +97,65 @@ impl UploadPromoteDriver {
         // listener's upload_firewall_context). A firewalled node cannot originate a
         // direct callback because the peer's connect-back could not reach us.
         let we_are_firewalled = self.we_are_firewalled().await;
-        for grant in grants {
-            match plan_promotion(&grant.peer, we_are_firewalled) {
-                PromoteAction::Dial(peer_endpoint) => {
-                    let driver = Arc::clone(self);
-                    tokio::spawn(async move {
-                        driver.connect_promoted_upload(peer_endpoint, grant).await;
-                    });
-                }
-                PromoteAction::DirectCallback(dest) => {
-                    // Poke the firewalled LowID waiter so it TCP-connects back onto
-                    // the granted slot; keep the queue entry (do NOT release) so the
-                    // inbound connect-back is served, mirroring the master keeping the
-                    // US_ONUPLOADQUEUE client through CCS_DIRECTCALLBACK
-                    // (BaseClient.cpp:1478-1492).
-                    if !self.send_direct_callback_req(dest, &grant.peer).await {
-                        self.transfer_runtime
-                            .note_failed_upload_promotion(&grant.peer)
-                            .await;
-                        self.transfer_runtime
-                            .release_upload_session(&grant.handle)
-                            .await;
+        for promotion in grants {
+            match promotion {
+                Ed2kUploadPendingPromotion::DirectDial(grant) => {
+                    match plan_promotion(&grant.peer, we_are_firewalled) {
+                        PromoteAction::Dial(peer_endpoint) => {
+                            let driver = Arc::clone(self);
+                            tokio::spawn(async move {
+                                driver.connect_promoted_upload(peer_endpoint, grant).await;
+                            });
+                        }
+                        PromoteAction::DirectCallback(_) | PromoteAction::Drop => {
+                            debug!(
+                                "dropping direct-dial upload promotion for {}:{}: unusable endpoint",
+                                grant.peer.ip, grant.peer.tcp_port
+                            );
+                            self.transfer_runtime
+                                .release_upload_session(&grant.handle)
+                                .await;
+                        }
                     }
                 }
-                PromoteAction::Drop => {
-                    debug!(
-                        "dropping upload promotion for {}:{}: no direct-callback path",
-                        grant.peer.ip, grant.peer.tcp_port
-                    );
-                    self.transfer_runtime
-                        .release_upload_session(&grant.handle)
+                Ed2kUploadPendingPromotion::Callback(permit) => {
+                    self.dispatch_upload_callback(permit, we_are_firewalled)
                         .await;
                 }
             }
+        }
+    }
+
+    async fn dispatch_upload_callback(
+        &self,
+        permit: Ed2kUploadCallbackPermit,
+        we_are_firewalled: bool,
+    ) {
+        let PromoteAction::DirectCallback(dest) = plan_promotion(&permit.peer, we_are_firewalled)
+        else {
+            debug!(
+                "retaining LowID upload waiter {}:{} without a usable callback route",
+                permit.peer.ip, permit.peer.tcp_port
+            );
+            self.transfer_runtime
+                .cancel_upload_callback_known_not_sent(&permit)
+                .await;
+            return;
+        };
+        if !self
+            .transfer_runtime
+            .begin_upload_callback_dispatch(
+                &permit,
+                Ed2kUploadCallbackRoute::DirectUdp { endpoint: dest },
+            )
+            .await
+        {
+            return;
+        }
+        if !self.send_direct_callback_req(dest, &permit.peer).await {
+            self.transfer_runtime
+                .cancel_upload_callback_known_not_sent(&permit)
+                .await;
         }
     }
 
@@ -192,7 +219,7 @@ impl UploadPromoteDriver {
     async fn connect_promoted_upload(
         &self,
         peer_endpoint: SocketAddr,
-        grant: Ed2kUploadPendingPromotion,
+        grant: Ed2kUploadGrantedPromotion,
     ) {
         let handle = grant.handle.clone();
         let peer = grant.peer.clone();
@@ -213,7 +240,7 @@ impl UploadPromoteDriver {
     async fn serve_promoted_upload(
         &self,
         peer_endpoint: SocketAddr,
-        grant: Ed2kUploadPendingPromotion,
+        grant: Ed2kUploadGrantedPromotion,
     ) -> anyhow::Result<()> {
         // Obfuscate the outbound connect when the waiter's own session was
         // obfuscated (mirrors the oracle reusing the peer's crypt preference).

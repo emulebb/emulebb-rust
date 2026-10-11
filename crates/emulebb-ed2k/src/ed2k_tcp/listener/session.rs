@@ -19,8 +19,8 @@ use crate::{
     buddy_socket::BuddySocketRegistry,
     ed2k_server::Ed2kServerState,
     ed2k_transfer::{
-        Ed2kCallbackHelloIdentity, Ed2kTransferRuntime, Ed2kUploadPeerIdentity,
-        Ed2kUploadPendingPromotion,
+        Ed2kCallbackHelloIdentity, Ed2kTransferRuntime, Ed2kUploadGrantedPromotion,
+        Ed2kUploadPeerIdentity,
     },
     kad_firewall::KadFirewallState,
     port_test::{PortTestRegistration, PortTestRegistry},
@@ -101,7 +101,7 @@ pub(in crate::ed2k_tcp) enum Ed2kSessionSource {
         // Boxed: the established transport dwarfs the plain inbound socket
         // (clippy::large_enum_variant).
         transport: Box<Ed2kTransport>,
-        grant: Box<Ed2kUploadPendingPromotion>,
+        grant: Box<Ed2kUploadGrantedPromotion>,
     },
 }
 

@@ -4,8 +4,8 @@ use emulebb_metadata::MetadataStore;
 use crate::{
     config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig},
     ed2k_transfer::{
-        Ed2kTransferRuntime, Ed2kUploadRangeAdmission, Ed2kUploadSessionPhaseSnapshot,
-        Ed2kUploadSessionStatus,
+        Ed2kTransferRuntime, Ed2kUploadPendingPromotion, Ed2kUploadRangeAdmission,
+        Ed2kUploadSessionPhaseSnapshot, Ed2kUploadSessionStatus,
     },
     paths::unique_test_dir,
 };
@@ -1166,7 +1166,9 @@ async fn upload_queue_slot_grant_to_disconnected_waiter_queues_outbound_promotio
         1,
         "one outbound promote-connect grant expected"
     );
-    let grant = &grants[0];
+    let Ed2kUploadPendingPromotion::DirectDial(grant) = &grants[0] else {
+        panic!("HighID waiter must produce a direct-dial grant");
+    };
     assert_eq!(grant.peer.user_hash, Some([0x22; 16]));
     assert_eq!(grant.file_hash, file_hash.to_string());
     assert_eq!(
@@ -1208,7 +1210,9 @@ async fn upload_queue_expired_promotion_revokes_its_lease_and_frees_the_slot() {
         .take_pending_upload_promotions_with_timeout(std::time::Duration::ZERO)
         .await;
     assert_eq!(grants.len(), 1);
-    let grant = &grants[0];
+    let Ed2kUploadPendingPromotion::DirectDial(grant) = &grants[0] else {
+        panic!("HighID waiter must produce a direct-dial grant");
+    };
     assert_eq!(
         runtime.poll_upload_session(&grant.handle, false).await,
         Ed2kUploadSessionStatus::Stale
@@ -1243,6 +1247,261 @@ async fn upload_queue_connected_waiter_promotion_needs_no_outbound_connect() {
         Ed2kUploadSessionStatus::Granted
     );
     assert!(runtime.take_pending_upload_promotions().await.is_empty());
+}
+
+#[tokio::test]
+async fn low_id_callback_intent_keeps_waiting_while_ready_peer_fills_base_slot() {
+    use crate::ed2k_transfer::{
+        Ed2kUploadCallbackClaim, Ed2kUploadCallbackRoute, Ed2kUploadQueueSnapshotEntry,
+    };
+
+    let root = unique_test_dir("ed2k-upload-queue-lowid-callback-intent");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x80; 16]);
+
+    let (active, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x41, 0x0A00_0041), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+
+    let mut low_id = upload_peer(2, 0x42, 0x0000_0042);
+    low_id.friend_slot = true;
+    low_id.udp_port = Some(41_042);
+    low_id.supports_direct_udp_callback = true;
+    let returning_low_id = low_id.clone();
+    let (low_id_handle, low_id_status) = runtime
+        .begin_upload_session(low_id.clone(), &file_hash)
+        .await;
+    assert_eq!(low_id_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    let (_ready, ready_status) = runtime
+        .begin_upload_session(upload_peer(3, 0x43, 0x0A00_0043), &file_hash)
+        .await;
+    assert_eq!(ready_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
+
+    runtime.release_upload_session(&low_id_handle).await;
+    runtime.release_upload_session(&active).await;
+
+    let promotions = runtime.take_pending_upload_promotions().await;
+    assert_eq!(promotions.len(), 1);
+    let Ed2kUploadPendingPromotion::Callback(permit) = &promotions[0] else {
+        panic!("detached LowID waiter must produce a callback permit");
+    };
+    assert_eq!(permit.peer.user_hash, Some([0x42; 16]));
+    assert_eq!(permit.file_hash, file_hash.to_string());
+
+    let snapshot = runtime.upload_queue_snapshot().await;
+    let phase_for = |entries: &[Ed2kUploadQueueSnapshotEntry], marker: u8| {
+        entries
+            .iter()
+            .find(|entry| entry.user_hash == Some([marker; 16]))
+            .map(|entry| entry.phase)
+    };
+    assert_eq!(
+        phase_for(&snapshot, 0x42),
+        Some(Ed2kUploadSessionPhaseSnapshot::Waiting),
+        "callback entitlement must not consume an active slot"
+    );
+    assert_eq!(
+        phase_for(&snapshot, 0x43),
+        Some(Ed2kUploadSessionPhaseSnapshot::Granted),
+        "a ready waiter must fill the base slot while callback is in flight"
+    );
+
+    let callback_endpoint = std::net::SocketAddr::new(returning_low_id.ip, 41_042);
+    assert!(
+        runtime
+            .begin_upload_callback_dispatch(
+                permit,
+                Ed2kUploadCallbackRoute::DirectUdp {
+                    endpoint: callback_endpoint,
+                },
+            )
+            .await
+    );
+    let producer_cancel = permit.cancellation_token();
+    let mut impostor = returning_low_id.clone();
+    impostor.user_hash = Some([0x99; 16]);
+    assert!(matches!(
+        runtime.claim_upload_callback_promotion(impostor).await,
+        Ed2kUploadCallbackClaim::NotMatched
+    ));
+    assert!(
+        !producer_cancel.is_cancelled(),
+        "a hash mismatch must not consume the callback epoch"
+    );
+    let grant = match runtime
+        .claim_upload_callback_promotion(returning_low_id)
+        .await
+    {
+        Ed2kUploadCallbackClaim::Granted(grant) => grant,
+        other => panic!("matching callback HELLO did not claim its grant: {other:?}"),
+    };
+    assert!(producer_cancel.is_cancelled());
+    assert_eq!(
+        runtime.poll_upload_session(&grant.handle, false).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert!(
+        !runtime.cancel_upload_callback_known_not_sent(permit).await,
+        "late dispatch settlement must not mutate the claimed grant"
+    );
+}
+
+#[tokio::test]
+async fn low_id_callback_timeout_retains_missed_turn_for_reask() {
+    let root = unique_test_dir("ed2k-upload-queue-lowid-callback-timeout");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x81; 16]);
+
+    let (active, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x51, 0x0A00_0051), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let mut low_id = upload_peer(2, 0x52, 0x0000_0052);
+    low_id.friend_slot = true;
+    low_id.udp_port = Some(41_052);
+    low_id.supports_direct_udp_callback = true;
+    let (waiting, waiting_status) = runtime
+        .begin_upload_session(low_id.clone(), &file_hash)
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    let (_ready, ready_status) = runtime
+        .begin_upload_session(upload_peer(3, 0x53, 0x0A00_0053), &file_hash)
+        .await;
+    assert_eq!(ready_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
+
+    runtime.release_upload_session(&waiting).await;
+    runtime.release_upload_session(&active).await;
+    let promotions = runtime
+        .take_pending_upload_promotions_with_timeout(std::time::Duration::ZERO)
+        .await;
+    let [Ed2kUploadPendingPromotion::Callback(permit)] = promotions.as_slice() else {
+        panic!("expected exactly one callback permit");
+    };
+
+    let snapshot = runtime.upload_queue_snapshot().await;
+    let retained = snapshot
+        .iter()
+        .find(|entry| entry.user_hash == Some([0x52; 16]))
+        .expect("timed-out LowID waiter must remain queued");
+    assert_eq!(retained.phase, Ed2kUploadSessionPhaseSnapshot::Waiting);
+    assert!(permit.cancellation_token().is_cancelled());
+    assert!(runtime.take_pending_upload_promotions().await.is_empty());
+
+    let (reattached, status) = runtime.begin_upload_session(low_id, &file_hash).await;
+    assert_eq!(
+        status,
+        Ed2kUploadSessionStatus::Granted,
+        "a later live reask must consume the retained missed-turn entitlement"
+    );
+    assert_eq!(
+        runtime.poll_upload_session(&reattached, false).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
+#[tokio::test]
+async fn callback_claim_allows_only_one_temporary_overflow_slot() {
+    use crate::ed2k_transfer::{Ed2kUploadCallbackClaim, Ed2kUploadCallbackRoute};
+
+    let root = unique_test_dir("ed2k-upload-queue-callback-overflow-bound");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x82; 16]);
+
+    let (active, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x61, 0x0A00_0061), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+
+    let mut low_a = upload_peer(2, 0x62, 0x0000_0062);
+    low_a.friend_slot = true;
+    low_a.udp_port = Some(41_062);
+    low_a.supports_direct_udp_callback = true;
+    let (low_a_handle, low_a_status) = runtime
+        .begin_upload_session(low_a.clone(), &file_hash)
+        .await;
+    assert_eq!(low_a_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    let mut low_b = upload_peer(3, 0x63, 0x0000_0063);
+    low_b.friend_slot = true;
+    low_b.udp_port = Some(41_063);
+    low_b.supports_direct_udp_callback = true;
+    let (low_b_handle, low_b_status) = runtime
+        .begin_upload_session(low_b.clone(), &file_hash)
+        .await;
+    assert_eq!(low_b_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
+
+    let (ready, ready_status) = runtime
+        .begin_upload_session(upload_peer(4, 0x64, 0x0A00_0064), &file_hash)
+        .await;
+    assert_eq!(ready_status, Ed2kUploadSessionStatus::Waiting { rank: 3 });
+    runtime.release_upload_session(&low_a_handle).await;
+    runtime.release_upload_session(&low_b_handle).await;
+    runtime.release_upload_session(&active).await;
+
+    let first_promotions = runtime.take_pending_upload_promotions().await;
+    let [Ed2kUploadPendingPromotion::Callback(first)] = first_promotions.as_slice() else {
+        panic!("first open slot must arm the highest-ranked LowID waiter");
+    };
+    runtime.release_upload_session(&ready).await;
+    let second_promotions = runtime.take_pending_upload_promotions().await;
+    let [Ed2kUploadPendingPromotion::Callback(second)] = second_promotions.as_slice() else {
+        panic!("next open slot must arm the next LowID waiter");
+    };
+
+    let (base, base_status) = runtime
+        .begin_upload_session(upload_peer(5, 0x65, 0x0A00_0065), &file_hash)
+        .await;
+    assert_eq!(base_status, Ed2kUploadSessionStatus::Granted);
+    assert!(
+        runtime
+            .begin_upload_callback_dispatch(
+                first,
+                Ed2kUploadCallbackRoute::DirectUdp {
+                    endpoint: std::net::SocketAddr::new(low_a.ip, 41_062),
+                },
+            )
+            .await
+    );
+    assert!(
+        runtime
+            .begin_upload_callback_dispatch(
+                second,
+                Ed2kUploadCallbackRoute::DirectUdp {
+                    endpoint: std::net::SocketAddr::new(low_b.ip, 41_063),
+                },
+            )
+            .await
+    );
+
+    let first_grant = match runtime.claim_upload_callback_promotion(low_a).await {
+        Ed2kUploadCallbackClaim::Granted(grant) => grant,
+        other => panic!("first callback must receive the overflow slot: {other:?}"),
+    };
+    assert!(matches!(
+        runtime.claim_upload_callback_promotion(low_b.clone()).await,
+        Ed2kUploadCallbackClaim::MatchedButFull
+    ));
+    runtime.release_upload_session(&base).await;
+    let second_grant = match runtime.claim_upload_callback_promotion(low_b).await {
+        Ed2kUploadCallbackClaim::Granted(grant) => grant,
+        other => panic!("retained callback must claim after capacity returns: {other:?}"),
+    };
+    assert_eq!(
+        runtime
+            .poll_upload_session(&first_grant.handle, false)
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime
+            .poll_upload_session(&second_grant.handle, false)
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
 }
 
 /// REG-3: a waiter whose requested file is no longer shared is purged on the
