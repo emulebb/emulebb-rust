@@ -189,6 +189,7 @@ impl ListenerTestRuntime {
                 kad_firewall: Arc::clone(&self.kad_firewall),
                 secure_ident: Arc::clone(&self.secure_ident),
                 transfer_runtime: Arc::clone(&self.transfer_runtime),
+                ip_filter: crate::ipfilter::IpFilter::default(),
                 hello_identity: self.hello_identity,
                 reachability: crate::reachability::ExternalReachability::new(),
                 buddy_registry: crate::buddy_socket::BuddySocketRegistry::new(),

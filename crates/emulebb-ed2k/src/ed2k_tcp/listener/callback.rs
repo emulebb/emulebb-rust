@@ -18,7 +18,7 @@ use emulebb_kad_dht::DhtNode;
 
 use crate::{
     PortTestRegistry, buddy_socket::BuddySocketRegistry, ed2k_server::Ed2kServerState,
-    ed2k_transfer::Ed2kTransferRuntime, kad_firewall::KadFirewallState,
+    ed2k_transfer::Ed2kTransferRuntime, ipfilter::IpFilter, kad_firewall::KadFirewallState,
     reachability::ExternalReachability,
 };
 
@@ -128,6 +128,8 @@ pub(in crate::ed2k_tcp) struct Ed2kCallbackSessionRuntime {
     pub kad_firewall: Arc<Mutex<KadFirewallState>>,
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub transfer_runtime: Arc<Ed2kTransferRuntime>,
+    /// Live shared IP filter, checked immediately before every callback dial.
+    pub ip_filter: IpFilter,
     pub hello_identity: Ed2kHelloIdentity,
     pub reachability: ExternalReachability,
     pub buddy_registry: BuddySocketRegistry,
@@ -187,6 +189,17 @@ async fn serve_callback_session(
     runtime: Ed2kCallbackSessionRuntime,
     request: Ed2kCallbackSessionRequest,
 ) -> anyhow::Result<()> {
+    if let Err(rejection) =
+        callback_request_admission(&runtime.ip_filter, &runtime.transfer_runtime, &request)
+    {
+        debug!(
+            "dropping ED2K {} callback before connect peer={} reason={}",
+            request.origin.as_str(),
+            request.peer_addr,
+            rejection.as_str()
+        );
+        return Ok(());
+    }
     let transport = Ed2kTransport::connect_outgoing(
         runtime.bind_ip,
         request.peer_addr,
@@ -225,9 +238,95 @@ async fn serve_callback_session(
     .await
 }
 
+/// Shared callback connect-out admission. All server, Kad, and direct-UDP
+/// callback routes converge here immediately before opening a TCP socket, so a
+/// dynamically reloaded IP filter or newly recorded client ban cannot be
+/// bypassed by a request which was already queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallbackAdmissionRejection {
+    NonIpv4,
+    IpFiltered,
+    ClientBanned,
+}
+
+impl CallbackAdmissionRejection {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NonIpv4 => "non-IPv4 endpoint",
+            Self::IpFiltered => "IP-filtered endpoint",
+            Self::ClientBanned => "banned client identity",
+        }
+    }
+}
+
+fn callback_request_admission(
+    ip_filter: &IpFilter,
+    transfer_runtime: &Ed2kTransferRuntime,
+    request: &Ed2kCallbackSessionRequest,
+) -> Result<(), CallbackAdmissionRejection> {
+    let SocketAddr::V4(peer_addr) = request.peer_addr else {
+        return Err(CallbackAdmissionRejection::NonIpv4);
+    };
+    let peer_ip = *peer_addr.ip();
+    if ip_filter.is_filtered(peer_ip) {
+        return Err(CallbackAdmissionRejection::IpFiltered);
+    }
+    if transfer_runtime.is_client_banned(Some(peer_ip), request.expected_user_hash.as_ref()) {
+        return Err(CallbackAdmissionRejection::ClientBanned);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emulebb_kad_dht::DhtConfig;
+    use tokio::net::TcpListener;
+
+    fn transfer_runtime() -> (tempfile::TempDir, Ed2kTransferRuntime) {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        (root, runtime)
+    }
+
+    async fn session_runtime(
+        ip_filter: IpFilter,
+    ) -> (tempfile::TempDir, Ed2kCallbackSessionRuntime) {
+        let root = tempfile::tempdir().unwrap();
+        let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(root.path()).unwrap());
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
+        let runtime = Ed2kCallbackSessionRuntime {
+            dht,
+            server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+            kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+            secure_ident: Arc::new(Ed2kSecureIdent::generate().unwrap()),
+            transfer_runtime,
+            ip_filter,
+            hello_identity: Ed2kHelloIdentity {
+                user_hash: [0x11; 16],
+                client_id: 0,
+                tcp_port: 4662,
+                udp_port: 4672,
+                server_ip: 0,
+                server_port: 0,
+                connect_options: 0,
+                direct_udp_callback: false,
+            },
+            reachability: ExternalReachability::new(),
+            buddy_registry: BuddySocketRegistry::new(),
+            port_test_registry: PortTestRegistry::new(),
+            callback_sessions,
+            bind_ip: Ipv4Addr::LOCALHOST,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        (root, runtime)
+    }
 
     fn request() -> Ed2kCallbackSessionRequest {
         Ed2kCallbackSessionRequest {
@@ -256,6 +355,98 @@ mod tests {
         assert_eq!(
             handle.try_start(request()),
             Err(Ed2kCallbackDispatchError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn callback_admission_rejects_filtered_endpoint_before_dial() {
+        let (_root, runtime) = transfer_runtime();
+        let filter = IpFilter::parse("127.0.0.1 - 127.0.0.1 , 100 , blocked", 127);
+
+        assert_eq!(
+            callback_request_admission(&filter, &runtime, &request()),
+            Err(CallbackAdmissionRejection::IpFiltered)
+        );
+    }
+
+    #[test]
+    fn callback_admission_rejects_ip_or_hash_ban_before_dial() {
+        let (_root, runtime) = transfer_runtime();
+        let banned_ip = Ipv4Addr::new(198, 51, 100, 7);
+        let banned_hash = [0xA5; 16];
+        runtime.ban_client(Some(banned_ip), Some(banned_hash));
+
+        let mut by_ip = request();
+        by_ip.peer_addr = SocketAddr::from((banned_ip, 4662));
+        assert_eq!(
+            callback_request_admission(&IpFilter::default(), &runtime, &by_ip),
+            Err(CallbackAdmissionRejection::ClientBanned)
+        );
+
+        let mut by_hash = request();
+        by_hash.peer_addr = SocketAddr::from((Ipv4Addr::new(198, 51, 100, 8), 4662));
+        by_hash.expected_user_hash = Some(banned_hash);
+        assert_eq!(
+            callback_request_admission(&IpFilter::default(), &runtime, &by_hash),
+            Err(CallbackAdmissionRejection::ClientBanned)
+        );
+    }
+
+    #[test]
+    fn callback_admission_accepts_unfiltered_unbanned_ipv4() {
+        let (_root, runtime) = transfer_runtime();
+        assert_eq!(
+            callback_request_admission(&IpFilter::default(), &runtime, &request()),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_supervisor_never_dials_a_filtered_peer_for_any_route() {
+        let peer = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        let filter = IpFilter::parse("127.0.0.1 - 127.0.0.1 , 100 , blocked", 127);
+        let (_root, runtime) = session_runtime(filter).await;
+
+        for origin in [
+            Ed2kCallbackSessionOrigin::Server,
+            Ed2kCallbackSessionOrigin::Kad,
+            Ed2kCallbackSessionOrigin::DirectUdp,
+        ] {
+            let mut request = request();
+            request.peer_addr = peer_addr;
+            request.origin = origin;
+            serve_callback_session(runtime.clone(), request)
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), peer.accept())
+                .await
+                .is_err(),
+            "no callback route may open a socket to an IP-filtered peer"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_supervisor_never_dials_a_hash_banned_peer() {
+        let peer = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        let banned_hash = [0xA5; 16];
+        let (_root, runtime) = session_runtime(IpFilter::default()).await;
+        runtime.transfer_runtime.ban_client(None, Some(banned_hash));
+        let mut request = request();
+        request.peer_addr = peer_addr;
+        request.expected_user_hash = Some(banned_hash);
+
+        serve_callback_session(runtime, request).await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), peer.accept())
+                .await
+                .is_err(),
+            "a user-hash ban must prevent the callback socket from opening"
         );
     }
 }

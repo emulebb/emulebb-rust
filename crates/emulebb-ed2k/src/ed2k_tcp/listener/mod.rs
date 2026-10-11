@@ -116,6 +116,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             kad_firewall: Arc::clone(&kad_firewall),
             secure_ident: Arc::clone(&secure_ident),
             transfer_runtime: Arc::clone(&transfer_runtime),
+            ip_filter: ip_filter.clone(),
             hello_identity,
             reachability: reachability.clone(),
             buddy_registry: buddy_registry.clone(),
