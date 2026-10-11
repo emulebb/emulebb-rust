@@ -162,6 +162,7 @@ impl ListenerTestRuntime {
             reachability: crate::reachability::ExternalReachability::new(),
             buddy_registry: crate::buddy_socket::BuddySocketRegistry::new(),
             port_test_registry: crate::PortTestRegistry::new(),
+            callback_sessions: callback_session_handle_for_test(),
             bind_ip: test_bind_ip(),
             callback_timeout: crate::ed2k_tcp::ED2K_CONNECTION_IDLE_TIMEOUT,
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -208,6 +209,7 @@ impl ListenerTestRuntime {
                     reachability: &crate::reachability::ExternalReachability::new(),
                     buddy_registry: &crate::buddy_socket::BuddySocketRegistry::new(),
                     port_test_registry: &crate::PortTestRegistry::new(),
+                    callback_sessions: callback_session_handle_for_test(),
                 },
             )
             .await
@@ -342,6 +344,7 @@ pub(super) fn spawn_single_listener_connection_with_port_test_registry(
                 reachability: &crate::reachability::ExternalReachability::new(),
                 buddy_registry: &crate::buddy_socket::BuddySocketRegistry::new(),
                 port_test_registry: &port_test_registry,
+                callback_sessions: callback_session_handle_for_test(),
             },
         )
         .await

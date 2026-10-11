@@ -132,6 +132,7 @@ pub(super) struct Ed2kCallbackSessionRuntime {
     pub reachability: ExternalReachability,
     pub buddy_registry: BuddySocketRegistry,
     pub port_test_registry: PortTestRegistry,
+    pub callback_sessions: Ed2kCallbackSessionHandle,
     pub bind_ip: Ipv4Addr,
     pub shutdown: Arc<AtomicBool>,
 }
@@ -218,6 +219,7 @@ async fn serve_callback_session(
             reachability: &runtime.reachability,
             buddy_registry: &runtime.buddy_registry,
             port_test_registry: &runtime.port_test_registry,
+            callback_sessions: runtime.callback_sessions,
         },
     )
     .await

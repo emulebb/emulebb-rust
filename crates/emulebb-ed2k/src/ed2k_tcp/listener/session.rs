@@ -114,6 +114,8 @@ pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
     pub(in crate::ed2k_tcp) buddy_registry: &'a BuddySocketRegistry,
     /// Cross-transport TCP/UDP listener-test association.
     pub(in crate::ed2k_tcp) port_test_registry: &'a PortTestRegistry,
+    /// Dispatcher used when this peer relays an authorized Kad callback.
+    pub(in crate::ed2k_tcp) callback_sessions: super::Ed2kCallbackSessionHandle,
 }
 
 pub(in crate::ed2k_tcp) async fn handle_connection(
@@ -131,6 +133,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         reachability,
         buddy_registry,
         port_test_registry,
+        callback_sessions,
     } = context;
     let kad_udp_port = dht
         .bind_addr()
@@ -207,10 +210,6 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         }
     };
     let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
-    let local_addr = transport
-        .stream
-        .local_addr()
-        .with_context(|| format!("failed to resolve local eD2k session address for {peer_addr}"))?;
     transport
         .stream
         .set_nodelay(true)
@@ -927,21 +926,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 // is shared/downloaded. Route through the shared guard so this
                 // inbound path cannot drift from the buddy-link path and cannot be
                 // abused as a connect-back reflector/probe.
-                let bind_ip = match local_addr.ip() {
-                    IpAddr::V4(ip) => ip,
-                    IpAddr::V6(_) => {
-                        debug!(
-                            "skipping Kad callback connect-out for {peer_addr}: IPv6 bind \
-                             address unsupported"
-                        );
-                        continue;
-                    }
-                };
                 complete_authorized_kad_callback(
-                    bind_ip,
                     dht.own_id().0,
                     transfer_runtime,
-                    response_identity,
+                    &callback_sessions,
                     &callback,
                     &format!("inbound {peer_addr}"),
                 )

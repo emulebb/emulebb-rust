@@ -55,6 +55,7 @@ pub(in crate::ed2k_tcp) struct UploadPromoteDriver {
     pub(in crate::ed2k_tcp) reachability: crate::reachability::ExternalReachability,
     pub(in crate::ed2k_tcp) buddy_registry: BuddySocketRegistry,
     pub(in crate::ed2k_tcp) port_test_registry: crate::PortTestRegistry,
+    pub(in crate::ed2k_tcp) callback_sessions: super::Ed2kCallbackSessionHandle,
     /// Local bind address for outbound connects (the listener's VPN-pinned IP).
     pub(in crate::ed2k_tcp) bind_ip: Ipv4Addr,
     /// Maximum time a granted disconnected waiter may take to attach a TCP
@@ -253,6 +254,7 @@ impl UploadPromoteDriver {
                 reachability: &self.reachability,
                 buddy_registry: &self.buddy_registry,
                 port_test_registry: &self.port_test_registry,
+                callback_sessions: self.callback_sessions.clone(),
             },
         )
         .await
