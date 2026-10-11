@@ -23,7 +23,9 @@ use anyhow::Result;
 use emulebb_ed2k::ed2k_server::{
     Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerState,
 };
-use emulebb_ed2k::ed2k_tcp::{Ed2kHelloIdentity, connect_callback_peer};
+use emulebb_ed2k::ed2k_tcp::{
+    Ed2kCallbackSessionHandle, Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest,
+};
 use emulebb_ed2k::kad_firewall::KadFirewallState;
 use emulebb_ed2k::stun::{
     DEFAULT_STUN_TIMEOUT, NatMappingBehavior, stun_probe, stun_probe_mapping_behavior,
@@ -44,10 +46,8 @@ use crate::{Ed2kNetworkConfig, EmulebbCore, current_tcp_firewalled};
 /// to mirror `TryToConnectOrDelete`. Cloned cheaply (all `Arc`/`Copy`).
 #[derive(Clone)]
 pub(crate) struct ReaskReengageContext {
-    /// Our eD2k bind IP for the outbound callback connection (egress-pinned).
-    pub bind_ip: Ipv4Addr,
-    /// Our advertised hello identity for the outbound `OP_HELLO`.
-    pub hello_identity: Ed2kHelloIdentity,
+    /// Listener-owned dispatcher for the callback's long-lived peer session.
+    pub callback_sessions: Ed2kCallbackSessionHandle,
     /// The eD2k TCP listener, for the last-resort firewalled fallback verdict.
     pub ed2k_listener: Arc<TcpListener>,
     /// The eD2k server state (authoritative LowID flag).
@@ -373,32 +373,18 @@ async fn handle_direct_callback_req(
     // (oracle AddTrackCallbackRequests, only on an accepted request).
     ctx.direct_callback_limiter.track(requester_ip);
     let peer_addr = SocketAddr::new(IpAddr::V4(requester_ip), tcp_port);
-    let bind_ip = ctx.bind_ip;
-    let hello_identity = ctx.hello_identity;
-    // Connect out like the oracle TryToConnectOrDelete: open an outgoing eD2k
-    // client connection and send OP_HELLO, carrying the requester's user hash +
-    // connect options for the obfuscated handshake. Spawned so a slow connect
-    // never stalls the event consumer.
-    tokio::spawn(async move {
-        match connect_callback_peer(
-            bind_ip,
-            peer_addr,
-            hello_identity,
-            Some(user_hash),
-            Some(connect_options),
-            Duration::from_secs(20),
-        )
-        .await
-        {
-            Ok(mode) => tracing::debug!(
-                "direct-UDP-callback connect-out to {peer_addr} completed transport={}",
-                mode.as_str()
-            ),
-            Err(error) => {
-                tracing::debug!("direct-UDP-callback connect-out to {peer_addr} failed: {error:#}")
-            }
-        }
-    });
+    // Queue the complete peer session without waiting on the dial from this UDP
+    // event consumer. The listener-owned supervisor sends HELLO and retains the
+    // socket for the requester's subsequent upload protocol.
+    if let Err(error) = ctx.callback_sessions.try_start(Ed2kCallbackSessionRequest {
+        peer_addr,
+        expected_user_hash: Some(user_hash),
+        peer_connect_options: Some(connect_options),
+        timeout: Duration::from_secs(20),
+        origin: Ed2kCallbackSessionOrigin::DirectUdp,
+    }) {
+        tracing::debug!("direct-UDP-callback dispatch to {peer_addr} failed: {error}");
+    }
 }
 
 /// Consumer for server-list feedback raised by the ED2K server session loop
