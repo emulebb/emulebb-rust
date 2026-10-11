@@ -284,11 +284,43 @@ async fn listener_upload_queue_dials_disconnected_waiter_for_slot_grant() {
     }
     let mut waiter_side = waiter_side.expect("the promote driver never dialed the waiter");
 
-    // The dialed connection announces us and delivers the grant: OP_HELLO
-    // first, then OP_ACCEPTUPLOADREQ (oracle ConnectionEstablished,
-    // BaseClient.cpp:1634-1641).
+    // The dialed connection announces us, but the grant remains pending until
+    // the remote identity completes the HELLO exchange (oracle
+    // CheckHandshakeFinished -> ConnectionEstablished).
     let hello = read_until_opcode(&mut waiter_side, OP_EDONKEYPROT, OP_HELLO).await;
     assert!(!hello.is_empty());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            read_until_opcode(&mut waiter_side, OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ),
+        )
+        .await
+        .is_err(),
+        "promoted upload was accepted before HELLO identity binding"
+    );
+
+    // Old-style eMule can send its info packet before HELLOANSWER. It receives
+    // the normal info answer but must not establish the peer session by itself.
+    waiter_side
+        .write_all(&encode_emule_info_request(waiter_identity.udp_port))
+        .await
+        .unwrap();
+    let info_answer = read_until_opcode(&mut waiter_side, OP_EMULEPROT, OP_EMULEINFOANSWER).await;
+    assert!(!info_answer.is_empty());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            read_until_opcode(&mut waiter_side, OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ),
+        )
+        .await
+        .is_err(),
+        "legacy info prelude established the peer without HELLOANSWER"
+    );
+
+    waiter_side
+        .write_all(&encode_hello_answer(waiter_identity))
+        .await
+        .unwrap();
     let accept = read_until_opcode(&mut waiter_side, OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ).await;
     assert_eq!(accept.len(), 6, "OP_ACCEPTUPLOADREQ carries no payload");
     let snapshot = runtime.transfer_runtime.upload_queue_snapshot().await;

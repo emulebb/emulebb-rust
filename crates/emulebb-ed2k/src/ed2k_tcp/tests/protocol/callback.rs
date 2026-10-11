@@ -72,6 +72,94 @@ async fn adopted_callback_session_serves_after_hello_answer() {
 }
 
 #[tokio::test]
+async fn adopted_callback_session_rejects_mismatched_expected_identity() {
+    let runtime = ListenerTestRuntime::new(
+        "ed2k-callback-expected-identity-mismatch",
+        listener_hello_identity(),
+        [0x9B; 16],
+        0x2345_6789,
+    )
+    .await;
+    let requester = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let requester_addr = requester.local_addr().unwrap();
+    let (callback_sessions, shutdown, supervisor) = runtime.spawn_callback_session_supervisor();
+    callback_sessions
+        .try_start(callback_request(requester_addr, Some([0x99; 16]), None))
+        .unwrap();
+    let (mut stream, _) = requester.accept().await.unwrap();
+
+    let _hello = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_HELLO).await;
+    let observed_identity = peer_hello_identity();
+    stream
+        .write_all(&encode_hello_answer(observed_identity))
+        .await
+        .unwrap();
+
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+        .await
+        .expect("mismatched callback identity did not close")
+        .unwrap();
+    assert_eq!(read, 0);
+    assert!(
+        !runtime
+            .transfer_runtime
+            .is_client_banned(Some(test_bind_ip()), Some(&observed_identity.user_hash),)
+    );
+
+    stop_callback_supervisor(shutdown, supervisor).await;
+}
+
+#[tokio::test]
+async fn adopted_callback_session_accepts_simultaneous_hello() {
+    let runtime = ListenerTestRuntime::new(
+        "ed2k-callback-simultaneous-hello",
+        listener_hello_identity(),
+        [0x9C; 16],
+        0x3456_789A,
+    )
+    .await;
+    let file = runtime
+        .seed_verified_upload_file("simultaneous-hello.txt", b"callback payload".to_vec())
+        .await;
+    let requester = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let requester_addr = requester.local_addr().unwrap();
+    let (callback_sessions, shutdown, supervisor) = runtime.spawn_callback_session_supervisor();
+    let peer_identity = peer_hello_identity();
+    callback_sessions
+        .try_start(callback_request(
+            requester_addr,
+            Some(peer_identity.user_hash),
+            None,
+        ))
+        .unwrap();
+    let (mut stream, _) = requester.accept().await.unwrap();
+
+    let _hello = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_HELLO).await;
+    stream
+        .write_all(&encode_hello_request(peer_identity))
+        .await
+        .unwrap();
+    let _hello_answer = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_HELLOANSWER).await;
+
+    let manifest = runtime
+        .transfer_runtime
+        .manifest(&file.file_hash.to_string())
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_request_filename(&file.file_hash, &manifest))
+        .await
+        .unwrap();
+    let filename_answer =
+        read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_REQFILENAMEANSWER).await;
+    assert_eq!(&filename_answer[6..22], &file.file_hash.0);
+
+    drop(stream);
+    stop_callback_supervisor(shutdown, supervisor).await;
+}
+
+#[tokio::test]
 async fn inbound_callback_claim_is_scoped_to_the_server_route() {
     let mut runtime = ListenerTestRuntime::new(
         "ed2k-inbound-ticketed-callback",
