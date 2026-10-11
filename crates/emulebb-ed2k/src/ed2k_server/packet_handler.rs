@@ -313,11 +313,13 @@ pub(super) async fn handle_server_packet(
         OP_REJECT => {
             if session.last_tx_opcode == Some(OP_OFFERFILES) && session.offer_files_negotiated() {
                 warn!(
-                    "ED2K server {} rejected a negotiated OP_OFFERFILES batch; locking this connection to legacy pacing",
+                    "ED2K server {} rejected a negotiated OP_OFFERFILES batch; slowing this connection without relaxing negotiated limits",
                     session.endpoint
                 );
                 session
-                    .fallback_offer_files_to_legacy("server rejected negotiated OP_OFFERFILES")
+                    .fallback_offer_files_to_conservative(
+                        "server rejected negotiated OP_OFFERFILES",
+                    )
                     .await;
                 return Ok(());
             }
