@@ -150,26 +150,33 @@ pub(super) async fn handle_server_packet(
             }
         }
         OP_SERVERIDENT => {
-            let ident = decode_server_ident_details(&packet.payload)?;
-            {
-                let mut guard = session.state.write().await;
-                if let Some(name) = &ident.name {
-                    guard.server_name = Some(name.clone());
+            if session.has_server_ident_snapshot() {
+                debug!(
+                    "ignoring repeated ED2K server ident from {} after the connection snapshot was fixed",
+                    session.endpoint
+                );
+            } else {
+                let ident = decode_server_ident_snapshot(&packet.payload);
+                {
+                    let mut guard = session.state.write().await;
+                    if let Some(name) = &ident.name {
+                        guard.server_name = Some(name.clone());
+                    }
+                    if let Some(description) = &ident.description {
+                        guard.server_description = Some(description.clone());
+                    }
                 }
-                if let Some(description) = &ident.description {
-                    guard.server_description = Some(description.clone());
-                }
+                session
+                    .observe_offer_files_capability(ident.offer_files_capability.clone())
+                    .await;
+                debug!(
+                    "ED2K server ident from {}: name={} description={} offer_files_capability={:?}",
+                    session.endpoint,
+                    ident.name.as_deref().unwrap_or("-"),
+                    ident.description.as_deref().unwrap_or("-"),
+                    ident.offer_files_capability,
+                );
             }
-            session
-                .observe_offer_files_capability(ident.offer_files_capability.clone())
-                .await;
-            debug!(
-                "ED2K server ident from {}: name={} description={} offer_files_capability={:?}",
-                session.endpoint,
-                ident.name.as_deref().unwrap_or("-"),
-                ident.description.as_deref().unwrap_or("-"),
-                ident.offer_files_capability,
-            );
             if allow_probe_search {
                 maybe_send_probe_search(session, context).await?;
             }
@@ -482,6 +489,16 @@ pub(super) struct DecodedServerIdent {
     pub(super) name: Option<String>,
     pub(super) description: Option<String>,
     pub(super) offer_files_capability: OfferFilesCapabilityAdvertisement,
+}
+
+pub(super) fn decode_server_ident_snapshot(payload: &[u8]) -> DecodedServerIdent {
+    decode_server_ident_details(payload).unwrap_or_else(|error| DecodedServerIdent {
+        name: None,
+        description: None,
+        offer_files_capability: OfferFilesCapabilityAdvertisement::Invalid(format!(
+            "malformed OP_SERVERIDENT: {error:#}"
+        )),
+    })
 }
 
 fn exact_u32_tag(tag: &DecodedTag) -> Option<u32> {

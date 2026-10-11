@@ -105,7 +105,7 @@ pub(super) struct ServerSession {
     pub(super) offer_files_refresh_catalog: bool,
     pub(super) offer_files_pacing: OfferFilesPacingMode,
     pub(super) offer_files_capability_enabled: bool,
-    pub(super) offer_files_capability_advertisement: Option<OfferFilesCapabilityAdvertisement>,
+    pub(super) offer_files_capability_snapshot: Option<OfferFilesCapabilityAdvertisement>,
     pub(super) offer_files_negotiation_deadline: Option<Instant>,
     pub(super) offer_files_next_publish_at: Option<Instant>,
     pub(super) offer_files_publish_requested: bool,
@@ -244,7 +244,7 @@ impl ServerSession {
             offer_files_refresh_catalog: true,
             offer_files_pacing: OfferFilesPacingMode::AwaitingCapability,
             offer_files_capability_enabled: true,
-            offer_files_capability_advertisement: None,
+            offer_files_capability_snapshot: None,
             offer_files_negotiation_deadline: None,
             offer_files_next_publish_at: None,
             offer_files_publish_requested: false,
@@ -284,7 +284,7 @@ impl ServerSession {
             offer_files_refresh_catalog: true,
             offer_files_pacing: OfferFilesPacingMode::AwaitingCapability,
             offer_files_capability_enabled: true,
-            offer_files_capability_advertisement: None,
+            offer_files_capability_snapshot: None,
             offer_files_negotiation_deadline: None,
             offer_files_next_publish_at: None,
             offer_files_publish_requested: false,
@@ -318,7 +318,7 @@ impl ServerSession {
             self.offer_files_next_publish_at = Some(Instant::now());
             return;
         }
-        if let Some(advertisement) = self.offer_files_capability_advertisement.clone() {
+        if let Some(advertisement) = self.offer_files_capability_snapshot.clone() {
             self.lock_offer_files_capability(advertisement);
             self.offer_files_next_publish_at = Some(Instant::now());
         } else {
@@ -337,7 +337,14 @@ impl ServerSession {
         &mut self,
         advertisement: OfferFilesCapabilityAdvertisement,
     ) {
-        self.offer_files_capability_advertisement = Some(advertisement.clone());
+        if self.offer_files_capability_snapshot.is_some() {
+            debug!(
+                "ignoring repeated ED2K offer-files capability from {} after the connection snapshot was fixed",
+                self.endpoint
+            );
+            return;
+        }
+        self.offer_files_capability_snapshot = Some(advertisement.clone());
         if self.offer_files_capability_enabled
             && matches!(
                 self.offer_files_pacing,
@@ -355,6 +362,10 @@ impl ServerSession {
             );
         }
         self.publish_offer_files_pacing_state().await;
+    }
+
+    pub(super) fn has_server_ident_snapshot(&self) -> bool {
+        self.offer_files_capability_snapshot.is_some()
     }
 
     fn lock_offer_files_capability(&mut self, advertisement: OfferFilesCapabilityAdvertisement) {
@@ -1036,6 +1047,29 @@ mod tests {
             OfferFilesPacingMode::Legacy { .. }
         ));
         assert!(session.offer_files_publish_due());
+    }
+
+    #[tokio::test]
+    async fn first_server_ident_snapshot_cannot_be_replaced() {
+        let (mut session, _peer) = connected_test_session_with_peer().await;
+        session.login_accepted = true;
+        session.configure_offer_files_capability(true);
+        session.begin_offer_files_publishing().await;
+        let first =
+            OfferFilesCapabilityAdvertisement::Invalid("malformed OP_SERVERIDENT".to_string());
+
+        session.observe_offer_files_capability(first.clone()).await;
+        session
+            .observe_offer_files_capability(OfferFilesCapabilityAdvertisement::Supported(
+                OfferFilesPolicy::validate(1, 25, 250, 1_000, 201).unwrap(),
+            ))
+            .await;
+
+        assert_eq!(session.offer_files_capability_snapshot, Some(first));
+        assert!(matches!(
+            session.offer_files_pacing,
+            OfferFilesPacingMode::Legacy { .. }
+        ));
     }
 
     #[tokio::test]

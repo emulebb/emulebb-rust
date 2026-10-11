@@ -85,7 +85,7 @@ use packet_handler::handle_server_packet;
 #[cfg(test)]
 use packet_handler::{
     decode_callback_request, decode_id_change_payload, decode_server_ident,
-    decode_server_ident_details,
+    decode_server_ident_details, decode_server_ident_snapshot,
 };
 #[cfg(test)]
 use result_decoder::decode_search_results;
