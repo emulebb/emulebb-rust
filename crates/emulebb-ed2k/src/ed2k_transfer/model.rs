@@ -315,6 +315,15 @@ pub enum Ed2kCallbackReservation {
     Joined { ticket_id: Ed2kCallbackTicketId },
 }
 
+/// Result of settling a linear callback dispatch permit after the wire send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ed2kCallbackDispatchOutcome {
+    /// The pending ticket was armed for the expected connect-back.
+    Armed,
+    /// A fast callback session or expiry already settled this permit's epoch.
+    Settled,
+}
+
 /// Opaque lease token used to settle an inbound callback admission exactly once.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Ed2kCallbackClaimToken {
