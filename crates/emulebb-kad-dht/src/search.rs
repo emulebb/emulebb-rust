@@ -1,7 +1,7 @@
 use crate::node::concurrency::{SearchAcquireError, SearchConcurrency};
 use crate::traversal::{
-    KadIpFilter, KadResContactSink, SearchResultObservation, TraversalConfig, TraversalContact,
-    TraversalKind, run_traversal,
+    KadIpFilter, KadResContactSink, MoreResultsMode, SearchResultObservation, TraversalConfig,
+    TraversalContact, TraversalKind, run_traversal,
 };
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
@@ -112,6 +112,7 @@ pub(crate) fn search_keywords_by_request(
             response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
+            more_results: MoreResultsMode::Maximize,
             cancel: cancel.clone(),
             result_tx: Some(raw_tx),
             work_class,
@@ -246,6 +247,7 @@ pub(crate) fn search_sources_by_request(
             response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
+            more_results: MoreResultsMode::Maximize,
             cancel: cancel.clone(),
             result_tx: Some(raw_tx),
             work_class,
@@ -332,6 +334,7 @@ pub(crate) fn search_notes(
             response_grace: SEARCH_RESULT_GRACE,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
+            more_results: MoreResultsMode::Maximize,
             cancel: cancel.clone(),
             result_tx: Some(raw_tx),
             work_class,

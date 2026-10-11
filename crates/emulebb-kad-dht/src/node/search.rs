@@ -1,7 +1,9 @@
 use super::{DhtNode, contact_helpers::addr_from_contact};
 use crate::error::DhtError;
 use crate::traversal::refresh::{NodeRefreshConfig, NodeRefreshOutcome, run_node_refresh_lookup};
-use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
+use crate::traversal::{
+    MoreResultsMode, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
+};
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::packet::{CallbackReq, FindBuddyReq};
@@ -55,6 +57,7 @@ impl DhtNode {
             response_grace: Duration::ZERO,
             query_timeout: Duration::from_secs(10),
             phase2_fanout: self.inner.config.search_phase2_fanout,
+            more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class,
@@ -174,6 +177,7 @@ impl DhtNode {
             response_grace: Duration::ZERO,
             query_timeout: Duration::from_secs(10),
             phase2_fanout: SEARCHFINDBUDDY_TOTAL,
+            more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class,
@@ -198,6 +202,7 @@ impl DhtNode {
             response_grace: Duration::ZERO,
             query_timeout: Duration::from_secs(10),
             phase2_fanout: SEARCHFINDSOURCE_TOTAL,
+            more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class,

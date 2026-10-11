@@ -15,8 +15,8 @@ use emulebb_kad_proto::{
     Ed2kHash, KadPacket, NodeId, Tag,
     constants::{
         ALPHA, K, KADEMLIA_FIND_NODE, KADEMLIA_FIND_VALUE, KADEMLIA_FIND_VALUE_MORE,
-        KADEMLIA_STORE, KADEMLIA_VERSION2_47A, KADEMLIA_VERSION3_47B, KADEMLIA_VERSION5_48A,
-        SEARCHTOLERANCE,
+        KADEMLIA_FIND_VALUE_MORE_REASKS, KADEMLIA_STORE, KADEMLIA_VERSION2_47A,
+        KADEMLIA_VERSION3_47B, KADEMLIA_VERSION5_48A, SEARCHTOLERANCE,
     },
     opcode,
     packet::{
@@ -126,6 +126,28 @@ pub enum TraversalKind {
     FindSource { request: CallbackReq },
 }
 
+/// Policy for the wider `KADEMLIA_FIND_VALUE_MORE` routing reask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MoreResultsMode {
+    /// Preserve the stock stalled-lookup recovery: at most one wider reask, and
+    /// only when the two closest tried contacts are dead.
+    #[default]
+    RecoveryOnly,
+    /// Automatically ask distinct closest responders for wider contact sets,
+    /// bounded by [`KADEMLIA_FIND_VALUE_MORE_REASKS`]. This is the headless
+    /// equivalent of exhausting aMule's user-triggered “more results” action.
+    Maximize,
+}
+
+impl MoreResultsMode {
+    fn reask_limit(self) -> usize {
+        match self {
+            Self::RecoveryOnly => 1,
+            Self::Maximize => KADEMLIA_FIND_VALUE_MORE_REASKS,
+        }
+    }
+}
+
 /// Inputs for one full traversal run.
 pub struct TraversalConfig {
     /// Target ID being resolved or searched.
@@ -141,6 +163,9 @@ pub struct TraversalConfig {
     pub query_timeout: Duration,
     /// Maximum number of close contacts to use in phase 2.
     pub phase2_fanout: usize,
+    /// Whether value lookups only recover from a dead closest set or
+    /// automatically exhaust the bounded wider-contact reasks.
+    pub more_results: MoreResultsMode,
     /// External cancellation token for the whole run.
     pub cancel: CancellationToken,
     /// Optional streaming hook for phase-2 SEARCH_RES entries.
@@ -213,6 +238,7 @@ struct LookupPhaseConfig<'a> {
     query_timeout: Duration,
     closest_limit: usize,
     req_count: u8,
+    more_results: MoreResultsMode,
     work_class: RpcWorkClass,
     cancel: &'a CancellationToken,
     ip_filter: Option<&'a KadIpFilter>,
@@ -246,6 +272,7 @@ pub async fn run_traversal(
         response_grace,
         query_timeout,
         phase2_fanout,
+        more_results,
         cancel,
         result_tx,
         work_class,
@@ -280,6 +307,7 @@ pub async fn run_traversal(
             query_timeout,
             closest_limit,
             req_count: req_count_for_kind(&search_kind),
+            more_results,
             work_class,
             cancel: &cancel,
             ip_filter: ip_filter.as_ref(),
@@ -373,8 +401,10 @@ async fn run_lookup_phase(
     let mut seen: HashSet<NodeId> = candidates.iter().map(|c| c.contact.id).collect();
     let mut join_set = JoinSet::new();
     let mut last_lookup_response_at = None;
-    // eMule `CSearch::JumpStart` FIND_VALUE_MORE re-ask: at most one per lookup.
-    let mut more_asked: Option<NodeId> = None;
+    // Distinct responders already sent the wider FIND_VALUE_MORE request. The
+    // set both prevents duplicate reasks and authenticates their larger RES.
+    let mut more_asked = HashSet::<NodeId>::new();
+    let more_reask_limit = config.more_results.reask_limit();
 
     loop {
         if lookup_deadline_reached(config.cancel, config.deadline) {
@@ -386,8 +416,9 @@ async fn run_lookup_phase(
         // the closest responded contact for MORE close nodes (count 11 instead of
         // the value-lookup 2), so a duplicate-of-dead closest set does not hide
         // the truly-closest live node (eMule Search.cpp:288-304).
-        if more_asked.is_none()
-            && let Some(target_id) = select_reask_more_target(&candidates, config.req_count)
+        if more_asked.is_empty()
+            && let Some(target_id) =
+                select_reask_more_target(&candidates, config.req_count, &more_asked)
         {
             spawn_lookup_query_by_id(
                 rpc,
@@ -398,7 +429,33 @@ async fn run_lookup_phase(
                 KADEMLIA_FIND_VALUE_MORE,
                 remaining,
             );
-            more_asked = Some(target_id);
+            more_asked.insert(target_id);
+        }
+        // Public value searches have no interactive "more" button, so exhaust
+        // the same bounded action automatically once the ordinary lookup has
+        // converged. Keep the shared ALPHA ceiling across normal and wider REQs.
+        if config.more_results == MoreResultsMode::Maximize
+            && lookup_phase_done(&candidates, config.search_kind, config.closest_limit)
+        {
+            let available_slots = ALPHA.saturating_sub(join_set.len());
+            let remaining_reasks = more_reask_limit.saturating_sub(more_asked.len());
+            for target_id in select_more_results_targets(
+                &candidates,
+                config.req_count,
+                &more_asked,
+                available_slots.min(remaining_reasks),
+            ) {
+                spawn_lookup_query_by_id(
+                    rpc,
+                    &mut join_set,
+                    &candidates,
+                    target_id,
+                    &config,
+                    KADEMLIA_FIND_VALUE_MORE,
+                    remaining,
+                );
+                more_asked.insert(target_id);
+            }
         }
         if join_set.is_empty() {
             break;
@@ -414,12 +471,17 @@ async fn run_lookup_phase(
             &mut seen,
             &config,
             contact_id,
-            more_asked,
+            &more_asked,
             query_result,
         ) {
             last_lookup_response_at = Some(Instant::now());
         }
-        if lookup_phase_done(&candidates, config.search_kind, config.closest_limit) {
+        if join_set.is_empty()
+            && lookup_phase_done(&candidates, config.search_kind, config.closest_limit)
+            && (config.more_results != MoreResultsMode::Maximize
+                || select_more_results_targets(&candidates, config.req_count, &more_asked, 1)
+                    .is_empty())
+        {
             break;
         }
     }
@@ -435,7 +497,11 @@ async fn run_lookup_phase(
 /// (6) contacts have been tried, and the two closest tried contacts both failed
 /// (neither responded). `candidates` is kept sorted by XOR distance, so the first
 /// non-`Pending` entries are the closest tried ones.
-fn select_reask_more_target(candidates: &[TraversalCandidate], req_count: u8) -> Option<NodeId> {
+fn select_reask_more_target(
+    candidates: &[TraversalCandidate],
+    req_count: u8,
+    more_asked: &HashSet<NodeId>,
+) -> Option<NodeId> {
     if req_count != KADEMLIA_FIND_VALUE {
         return None;
     }
@@ -455,8 +521,33 @@ fn select_reask_more_target(candidates: &[TraversalCandidate], req_count: u8) ->
     }
     tried
         .iter()
-        .find(|candidate| candidate.state == CandidateState::Responded)
+        .find(|candidate| {
+            candidate.state == CandidateState::Responded
+                && !more_asked.contains(&candidate.contact.id)
+        })
         .map(|candidate| candidate.contact.id)
+}
+
+/// Closest distinct responders eligible for the user-visible wider-contact
+/// action. The caller supplies the remaining request/ALPHA budget.
+fn select_more_results_targets(
+    candidates: &[TraversalCandidate],
+    req_count: u8,
+    more_asked: &HashSet<NodeId>,
+    limit: usize,
+) -> Vec<NodeId> {
+    if req_count != KADEMLIA_FIND_VALUE || limit == 0 {
+        return Vec::new();
+    }
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.state == CandidateState::Responded
+                && !more_asked.contains(&candidate.contact.id)
+        })
+        .take(limit)
+        .map(|candidate| candidate.contact.id)
+        .collect()
 }
 
 fn initial_traversal_candidates(
@@ -487,15 +578,11 @@ fn launch_pending_queries(
     config: &LookupPhaseConfig<'_>,
     remaining: Duration,
 ) {
-    let inflight_count = candidates
-        .iter()
-        .filter(|candidate| candidate.state == CandidateState::Inflight)
-        .count();
     let pending_indexes = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| candidate.state == CandidateState::Pending)
-        .take(ALPHA.saturating_sub(inflight_count))
+        .take(ALPHA.saturating_sub(join_set.len()))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
 
@@ -594,7 +681,7 @@ fn handle_lookup_response(
     seen: &mut HashSet<NodeId>,
     config: &LookupPhaseConfig<'_>,
     contact_id: NodeId,
-    more_asked: Option<NodeId>,
+    more_asked: &HashSet<NodeId>,
     query_result: Result<KadPacket, emulebb_kad_net::NetError>,
 ) -> bool {
     let candidate_idx = candidates
@@ -603,7 +690,11 @@ fn handle_lookup_response(
     match query_result {
         Err(error) => {
             trace!("query failed for {}: {}", contact_id, error);
-            set_candidate_state(candidates, candidate_idx, CandidateState::Failed);
+            // A MORE failure does not erase the valid ordinary response that
+            // made this peer eligible for the reask in the first place.
+            if !more_asked.contains(&contact_id) {
+                set_candidate_state(candidates, candidate_idx, CandidateState::Failed);
+            }
             false
         }
         Ok(KadPacket::Res(response)) => {
@@ -625,7 +716,9 @@ fn handle_lookup_response(
                 contact_id,
                 other.opcode()
             );
-            set_candidate_state(candidates, candidate_idx, CandidateState::Failed);
+            if !more_asked.contains(&contact_id) {
+                set_candidate_state(candidates, candidate_idx, CandidateState::Failed);
+            }
             false
         }
     }
@@ -647,7 +740,7 @@ fn insert_response_contacts(
     config: &LookupPhaseConfig<'_>,
     contact_id: NodeId,
     candidate_idx: Option<usize>,
-    more_asked: Option<NodeId>,
+    more_asked: &HashSet<NodeId>,
     response: emulebb_kad_proto::packet::Res,
 ) {
     let responder_addr = candidate_idx
@@ -659,10 +752,9 @@ fn insert_response_contacts(
         .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
     // The FIND_VALUE_MORE re-ask target may return up to KADEMLIA_FIND_NODE (11)
     // contacts even though the lookup's normal request count is the value-lookup
-    // 2; admit the wider set only from that one contact (eMule ProcessResponse's
-    // `pRequestedMoreNodesContact == pFromContact && size <= KADEMLIA_FIND_VALUE_MORE`
-    // exception, Search.cpp:352).
-    let max_contacts = if more_asked == Some(contact_id) {
+    // 2; admit the wider set only from a contact we explicitly reasked (aMule's
+    // `m_requestedMoreNodes` exception in `CSearch::ProcessResponse`).
+    let max_contacts = if more_asked.contains(&contact_id) {
         KADEMLIA_FIND_VALUE_MORE as usize
     } else {
         config.req_count as usize

@@ -386,6 +386,7 @@ fn test_res_contacts_feed_the_addunfiltered_sink_as_they_arrive() {
         query_timeout: std::time::Duration::from_secs(1),
         closest_limit: K,
         req_count: 16,
+        more_results: MoreResultsMode::RecoveryOnly,
         work_class: RpcWorkClass::Maintenance,
         cancel: &cancel,
         ip_filter: Some(&filter),
@@ -400,7 +401,7 @@ fn test_res_contacts_feed_the_addunfiltered_sink_as_they_arrive() {
         &config,
         NodeId::from_bytes([9; 16]),
         None,
-        None,
+        &HashSet::new(),
         response,
     );
 
@@ -1111,6 +1112,7 @@ async fn test_run_traversal_obfuscates_phase1_queries_for_fresh_contacts() {
             response_grace: Duration::ZERO,
             query_timeout: Duration::from_millis(200),
             phase2_fanout: 1,
+            more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class: RpcWorkClass::Interactive,
@@ -1274,6 +1276,7 @@ async fn keyword_traversal_collects_reply_after_active_deadline() {
             response_grace: Duration::from_millis(200),
             query_timeout: Duration::from_millis(140),
             phase2_fanout: 1,
+            more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class: RpcWorkClass::Interactive,
@@ -1335,6 +1338,7 @@ async fn test_value_lookup_phase_still_fans_out_alpha_initial_reqs() {
             response_grace: Duration::ZERO,
             query_timeout: Duration::from_millis(150),
             phase2_fanout: 1,
+            more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class: RpcWorkClass::Interactive,
@@ -1360,6 +1364,110 @@ async fn test_value_lookup_phase_still_fans_out_alpha_initial_reqs() {
     assert!(
         reqs.iter().all(|(_, req)| req.count == KADEMLIA_FIND_VALUE),
         "value lookups keep the FIND_VALUE contact-count byte"
+    );
+}
+
+#[tokio::test]
+async fn maximize_more_results_reasks_four_distinct_responders_on_wire() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let injector = transport.injector();
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+
+    let target = NodeId::ZERO;
+    let initial = (1u8..=4)
+        .map(|n| TraversalContact {
+            id: NodeId::from_bytes([n; 16]),
+            addr: format!("192.168.1.{n}:4672").parse().unwrap(),
+            tcp_port: 0,
+            version: 9,
+        })
+        .collect::<Vec<_>>();
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let run_rpc = rpc.clone();
+    let run = tokio::spawn(async move {
+        run_traversal(
+            &run_rpc,
+            initial,
+            TraversalConfig {
+                target,
+                search_kind: TraversalKind::Keyword {
+                    request: SearchKeyReq {
+                        target,
+                        start_position: 0,
+                        restrictive_payload: Vec::new(),
+                    },
+                },
+                timeout: Duration::from_secs(10),
+                response_grace: Duration::ZERO,
+                query_timeout: Duration::from_millis(250),
+                phase2_fanout: 1,
+                more_results: MoreResultsMode::Maximize,
+                cancel: run_cancel,
+                result_tx: None,
+                work_class: RpcWorkClass::Interactive,
+                ip_filter: None,
+                res_contact_sink: None,
+            },
+        )
+        .await
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut normal_targets = HashSet::new();
+    let mut wider_targets = Vec::new();
+    while Instant::now() < deadline && wider_targets.len() < KADEMLIA_FIND_VALUE_MORE_REASKS {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        for (addr, bytes) in transport.drain_outgoing() {
+            let Ok(KadPacket::Req(request)) = KadPacket::decode(&bytes) else {
+                continue;
+            };
+            match request.count {
+                KADEMLIA_FIND_VALUE => {
+                    normal_targets.insert(addr);
+                }
+                KADEMLIA_FIND_VALUE_MORE => wider_targets.push(addr),
+                other => panic!("unexpected lookup contact count {other}"),
+            }
+            injector
+                .send((
+                    KadPacket::Res(emulebb_kad_proto::packet::Res {
+                        target,
+                        contacts: Vec::new(),
+                    })
+                    .encode()
+                    .unwrap(),
+                    addr,
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
+    // Give the scheduler an opportunity to violate the cap before cancelling
+    // the otherwise long result-collection phase.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    for (addr, bytes) in transport.drain_outgoing() {
+        if let Ok(KadPacket::Req(request)) = KadPacket::decode(&bytes)
+            && request.count == KADEMLIA_FIND_VALUE_MORE
+        {
+            wider_targets.push(addr);
+        }
+    }
+    cancel.cancel();
+    let _ = run.await.unwrap();
+
+    assert_eq!(normal_targets.len(), 4);
+    assert_eq!(wider_targets.len(), KADEMLIA_FIND_VALUE_MORE_REASKS);
+    assert_eq!(
+        wider_targets.iter().copied().collect::<HashSet<_>>().len(),
+        KADEMLIA_FIND_VALUE_MORE_REASKS,
+        "each wider request must target a distinct prior responder"
     );
 }
 
@@ -1393,7 +1501,7 @@ fn reask_more_fires_when_best_two_tried_are_dead_and_targets_closest_responder()
         reask_candidate(0x06, CandidateState::Failed),
     ];
     assert_eq!(
-        select_reask_more_target(&candidates, KADEMLIA_FIND_VALUE),
+        select_reask_more_target(&candidates, KADEMLIA_FIND_VALUE, &HashSet::new()),
         Some(NodeId::from_bytes([0x03; 16]))
     );
 }
@@ -1410,7 +1518,7 @@ fn reask_more_suppressed_when_a_best_two_contact_responded_or_too_few_tried() {
         reask_candidate(0x06, CandidateState::Failed),
     ];
     assert_eq!(
-        select_reask_more_target(&closest_alive, KADEMLIA_FIND_VALUE),
+        select_reask_more_target(&closest_alive, KADEMLIA_FIND_VALUE, &HashSet::new()),
         None
     );
 
@@ -1421,7 +1529,7 @@ fn reask_more_suppressed_when_a_best_two_contact_responded_or_too_few_tried() {
         reask_candidate(0x03, CandidateState::Responded),
     ];
     assert_eq!(
-        select_reask_more_target(&too_few, KADEMLIA_FIND_VALUE),
+        select_reask_more_target(&too_few, KADEMLIA_FIND_VALUE, &HashSet::new()),
         None
     );
 
@@ -1435,8 +1543,52 @@ fn reask_more_suppressed_when_a_best_two_contact_responded_or_too_few_tried() {
         reask_candidate(0x06, CandidateState::Failed),
     ];
     assert_eq!(
-        select_reask_more_target(&node_lookup, KADEMLIA_FIND_NODE),
+        select_reask_more_target(&node_lookup, KADEMLIA_FIND_NODE, &HashSet::new()),
         None
+    );
+}
+
+#[test]
+fn maximize_more_results_selects_closest_distinct_responders_within_bound() {
+    let candidates = vec![
+        reask_candidate(0x01, CandidateState::Responded),
+        reask_candidate(0x02, CandidateState::Failed),
+        reask_candidate(0x03, CandidateState::Responded),
+        reask_candidate(0x04, CandidateState::Responded),
+        reask_candidate(0x05, CandidateState::Responded),
+        reask_candidate(0x06, CandidateState::Responded),
+    ];
+    let already_asked = HashSet::from([NodeId::from_bytes([0x01; 16])]);
+
+    let selected = select_more_results_targets(
+        &candidates,
+        KADEMLIA_FIND_VALUE,
+        &already_asked,
+        KADEMLIA_FIND_VALUE_MORE_REASKS - already_asked.len(),
+    );
+
+    assert_eq!(MoreResultsMode::RecoveryOnly.reask_limit(), 1);
+    assert_eq!(
+        MoreResultsMode::Maximize.reask_limit(),
+        KADEMLIA_FIND_VALUE_MORE_REASKS
+    );
+    assert_eq!(
+        selected,
+        vec![
+            NodeId::from_bytes([0x03; 16]),
+            NodeId::from_bytes([0x04; 16]),
+            NodeId::from_bytes([0x05; 16]),
+        ]
+    );
+    assert!(
+        select_more_results_targets(
+            &candidates,
+            KADEMLIA_FIND_NODE,
+            &already_asked,
+            KADEMLIA_FIND_VALUE_MORE_REASKS,
+        )
+        .is_empty(),
+        "the wider action is only legal for FIND_VALUE lookups"
     );
 }
 
@@ -1527,6 +1679,7 @@ async fn test_find_buddy_walk_req_carries_store_contact_count() {
             response_grace: Duration::ZERO,
             query_timeout: Duration::from_millis(40),
             phase2_fanout: emulebb_kad_proto::constants::SEARCHFINDBUDDY_TOTAL,
+            more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class: RpcWorkClass::Interactive,
