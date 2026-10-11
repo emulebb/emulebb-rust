@@ -1,10 +1,14 @@
 use super::{DhtNode, contact_helpers::addr_from_contact};
 use crate::error::DhtError;
+use crate::node::concurrency::SearchAcquireError;
 use crate::traversal::refresh::{NodeRefreshConfig, NodeRefreshOutcome, run_node_refresh_lookup};
 use crate::traversal::{
     MoreResultsMode, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
 };
-use crate::types::{NoteResult, SearchResult, SourceResult};
+use crate::types::{
+    KadCallbackSearchDispatchOutcome, KadCallbackSearchNotDispatchedReason, NoteResult,
+    SearchResult, SourceResult,
+};
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::packet::{CallbackReq, FindBuddyReq};
 use emulebb_kad_proto::{
@@ -16,7 +20,7 @@ use emulebb_kad_proto::{
 };
 use emulebb_kad_routing::Contact;
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// FINDBUDDY walk budget: the oracle lifetime (`SEARCHFINDBUDDY_LIFETIME` =
@@ -190,26 +194,93 @@ impl DhtNode {
     /// Locate an unknown buddy endpoint and send the source callback request to
     /// close contacts, matching MFC's `CSearch::FINDSOURCE` fallback.
     pub async fn find_source_search(&self, request: CallbackReq, work_class: RpcWorkClass) {
+        let cancel = CancellationToken::new();
+        let deadline = Instant::now() + FIND_SOURCE_LOOKUP_TIMEOUT;
+        let _ = self
+            .find_source_search_until(request, work_class, deadline, &cancel)
+            .await;
+    }
+
+    /// Run FINDSOURCE under the caller's callback-ticket deadline and report
+    /// whether any `KADEMLIA_CALLBACK_REQ` reached the local UDP socket.
+    pub async fn find_source_search_until(
+        &self,
+        request: CallbackReq,
+        work_class: RpcWorkClass,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> KadCallbackSearchDispatchOutcome {
+        if cancel.is_cancelled() {
+            return KadCallbackSearchDispatchOutcome::NotDispatched {
+                reason: KadCallbackSearchNotDispatchedReason::Cancelled,
+            };
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return KadCallbackSearchDispatchOutcome::NotDispatched {
+                reason: KadCallbackSearchNotDispatchedReason::DeadlineElapsed,
+            };
+        }
         let target = request.buddy_id;
-        let Ok(_permit) = self.try_acquire_search_permit(target) else {
-            return;
+        let _permit = match self.try_acquire_search_permit(target) {
+            Ok(permit) => permit,
+            Err(error) => {
+                let reason = match error {
+                    SearchAcquireError::Duplicate => {
+                        KadCallbackSearchNotDispatchedReason::DuplicateTarget
+                    }
+                    SearchAcquireError::Busy => {
+                        KadCallbackSearchNotDispatchedReason::SearchCapacityBusy
+                    }
+                    SearchAcquireError::Closed => {
+                        KadCallbackSearchNotDispatchedReason::SearchSemaphoreClosed
+                    }
+                };
+                return KadCallbackSearchDispatchOutcome::NotDispatched { reason };
+            }
         };
         let initial = self.closest_traversal_seed(&target).await;
+        if cancel.is_cancelled() {
+            return KadCallbackSearchDispatchOutcome::NotDispatched {
+                reason: KadCallbackSearchNotDispatchedReason::Cancelled,
+            };
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return KadCallbackSearchDispatchOutcome::NotDispatched {
+                reason: KadCallbackSearchNotDispatchedReason::DeadlineElapsed,
+            };
+        }
         let config = TraversalConfig {
             target,
             search_kind: TraversalKind::FindSource { request },
-            timeout: FIND_SOURCE_LOOKUP_TIMEOUT,
+            timeout: FIND_SOURCE_LOOKUP_TIMEOUT.min(deadline.saturating_duration_since(now)),
             response_grace: Duration::ZERO,
             query_timeout: Duration::from_secs(10),
             phase2_fanout: SEARCHFINDSOURCE_TOTAL,
             more_results: MoreResultsMode::RecoveryOnly,
-            cancel: CancellationToken::new(),
+            cancel: cancel.clone(),
             result_tx: None,
             work_class,
             ip_filter: self.ip_filter(),
             res_contact_sink: Some(self.res_contact_sink()),
         };
-        let _ = run_traversal(&self.inner.rpc, initial, config).await;
+        let result = run_traversal(&self.inner.rpc, initial, config).await;
+        if result.phase2_dispatch.sent != 0 {
+            return KadCallbackSearchDispatchOutcome::Dispatched {
+                request_count: result.phase2_dispatch.sent,
+            };
+        }
+        let reason = if cancel.is_cancelled() {
+            KadCallbackSearchNotDispatchedReason::Cancelled
+        } else if Instant::now() >= deadline {
+            KadCallbackSearchNotDispatchedReason::DeadlineElapsed
+        } else if result.phase2_dispatch.attempted != 0 {
+            KadCallbackSearchNotDispatchedReason::SendFailed
+        } else {
+            KadCallbackSearchNotDispatchedReason::NoRespondingContacts
+        };
+        KadCallbackSearchDispatchOutcome::NotDispatched { reason }
     }
 
     /// Routing-table contacts closest to `target`, mapped into the traversal
@@ -591,14 +662,18 @@ impl DhtNode {
 #[cfg(test)]
 mod tests {
     use super::{FIND_BUDDY_LOOKUP_TIMEOUT, FIND_SOURCE_LOOKUP_TIMEOUT};
-    use crate::{DhtConfig, DhtNode};
+    use crate::{
+        DhtConfig, DhtNode, KadCallbackSearchDispatchOutcome, KadCallbackSearchNotDispatchedReason,
+    };
     use emulebb_kad_net::RpcWorkClass;
     use emulebb_kad_proto::{
-        KadPacket, NodeId, constants::KADEMLIA_FIND_NODE, packet::Res as KadRes,
+        CallbackReq, Ed2kHash, KadPacket, NodeId, constants::KADEMLIA_FIND_NODE,
+        packet::Res as KadRes,
     };
     use emulebb_kad_routing::Contact;
     use std::net::{IpAddr, SocketAddr};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
 
     /// FINDBUDDY honors the oracle 100 s search lifetime with the shared 20 s
     /// stop grace (`SEARCHFINDBUDDY_LIFETIME - SEC(20)`,
@@ -611,6 +686,142 @@ mod tests {
     #[test]
     fn find_source_walk_budget_is_lifetime_minus_stop_grace() {
         assert_eq!(FIND_SOURCE_LOOKUP_TIMEOUT.as_secs(), 25);
+    }
+
+    async fn empty_test_dht() -> DhtNode {
+        DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::new(IpAddr::V4(crate::test_bind_ip()), 0)),
+            obfuscation_enabled: false,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    fn callback_request(target: NodeId) -> CallbackReq {
+        CallbackReq {
+            buddy_id: target,
+            file_hash: Ed2kHash::from_bytes([0x44; 16]),
+            tcp_port: 4662,
+        }
+    }
+
+    #[tokio::test]
+    async fn find_source_dispatch_reports_preflight_stops_and_no_route() {
+        let dht = empty_test_dht().await;
+        let target = NodeId::from_bytes([0x52; 16]);
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            dht.find_source_search_until(
+                callback_request(target),
+                RpcWorkClass::Interactive,
+                Instant::now() + Duration::from_secs(5),
+                &cancelled,
+            )
+            .await,
+            KadCallbackSearchDispatchOutcome::NotDispatched {
+                reason: KadCallbackSearchNotDispatchedReason::Cancelled,
+            }
+        );
+
+        assert_eq!(
+            dht.find_source_search_until(
+                callback_request(target),
+                RpcWorkClass::Interactive,
+                Instant::now()
+                    .checked_sub(Duration::from_secs(1))
+                    .expect("representable past instant"),
+                &CancellationToken::new(),
+            )
+            .await,
+            KadCallbackSearchDispatchOutcome::NotDispatched {
+                reason: KadCallbackSearchNotDispatchedReason::DeadlineElapsed,
+            }
+        );
+
+        assert_eq!(
+            dht.find_source_search_until(
+                callback_request(target),
+                RpcWorkClass::Interactive,
+                Instant::now() + Duration::from_secs(5),
+                &CancellationToken::new(),
+            )
+            .await,
+            KadCallbackSearchDispatchOutcome::NotDispatched {
+                reason: KadCallbackSearchNotDispatchedReason::NoRespondingContacts,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn find_source_dispatch_counts_callback_sent_before_cancellation() {
+        let bind_ip = crate::test_bind_ip();
+        let peer = tokio::net::UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
+            .await
+            .unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        let dht = empty_test_dht().await;
+        let _handle = dht.start();
+        let target = NodeId::from_bytes([0x52; 16]);
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x42; 16]),
+            bind_ip,
+            peer_addr.port(),
+            4662,
+            9,
+        ))
+        .await
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let dht = dht.clone();
+            let cancel = cancel.clone();
+            async move {
+                dht.find_source_search_until(
+                    callback_request(target),
+                    RpcWorkClass::Interactive,
+                    Instant::now() + Duration::from_secs(10),
+                    &cancel,
+                )
+                .await
+            }
+        });
+
+        let mut buf = [0u8; 512];
+        let (len, from) = tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut buf))
+            .await
+            .expect("FINDSOURCE lookup request")
+            .unwrap();
+        let KadPacket::Req(req) = KadPacket::decode(&buf[..len]).unwrap() else {
+            panic!("FINDSOURCE must begin with a Kad lookup request")
+        };
+        assert_eq!(req.target, target);
+        peer.send_to(
+            &KadPacket::Res(KadRes {
+                target,
+                contacts: Vec::new(),
+            })
+            .encode()
+            .unwrap(),
+            from,
+        )
+        .await
+        .unwrap();
+
+        let (len, _) = tokio::time::timeout(Duration::from_secs(6), peer.recv_from(&mut buf))
+            .await
+            .expect("KADEMLIA_CALLBACK_REQ dispatch")
+            .unwrap();
+        assert!(matches!(
+            KadPacket::decode(&buf[..len]).unwrap(),
+            KadPacket::CallbackReq(_)
+        ));
+        cancel.cancel();
+        assert_eq!(
+            task.await.unwrap(),
+            KadCallbackSearchDispatchOutcome::Dispatched { request_count: 1 }
+        );
     }
 
     /// The 4-hour NODECOMPLETE self-lookup targets our OWN KadID and goes on
