@@ -38,8 +38,9 @@ use super::super::dump::{
 };
 use super::super::firewall_helper::complete_authorized_kad_callback;
 use super::super::hello::{
-    DecodedHelloProfile, build_hello_responses, decode_emule_info_profile, decode_hello_profile,
-    encode_emule_info_answer, encode_hello_request,
+    DecodedHelloProfile, build_hello_responses, decode_emule_info_profile,
+    decode_hello_answer_profile, decode_hello_profile, encode_emule_info_answer,
+    encode_hello_request,
 };
 use super::super::identity::{Ed2kPeerSecureIdentState, begin_secure_ident_probe};
 use super::super::{
@@ -74,12 +75,19 @@ use shared_file::{
 use upload_payload::{UploadPayloadOutcome, UploadPayloadRequest, serve_upload_payload};
 use upload_queue::{ListenerQueuePoll, ListenerUploadQueue};
 
-/// Transport source for one eD2k peer session: an accepted inbound socket, or
-/// an already-established OUTBOUND connection dialed to hand an upload slot to
-/// a disconnected waiter (oracle `AddUpNextClient` US_CONNECTING connect-out,
-/// UploadQueue.cpp:327-361).
+/// Transport source for one eD2k peer session: an accepted inbound socket or an
+/// already-established outbound transport whose ownership moves into the
+/// ordinary long-lived peer dispatcher.
 pub(in crate::ed2k_tcp) enum Ed2kSessionSource {
     Inbound(TcpStream),
+    /// A callback connect-out requested by an ED2K server, Kad buddy, or direct
+    /// UDP callback. The callback only establishes transport direction; after
+    /// our outbound HELLO this is an ordinary upload-capable peer session.
+    CallbackUpload {
+        // Boxed: the established transport dwarfs the plain inbound socket
+        // (clippy::large_enum_variant).
+        transport: Box<Ed2kTransport>,
+    },
     PromotedUpload {
         // Boxed: the established transport dwarfs the plain inbound socket
         // (clippy::large_enum_variant).
@@ -135,7 +143,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     };
     let response_identity =
         enrich_hello_identity(response_identity, server_state, kad_firewall).await;
-    let (mut transport, promoted_grant) = match source {
+    let (mut transport, promoted_grant, send_outbound_hello) = match source {
         Ed2kSessionSource::Inbound(stream) => {
             let local_addr = stream.local_addr().with_context(|| {
                 format!("failed to resolve local eD2k listener address for {peer_addr}")
@@ -168,7 +176,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     anyhow::bail!("timed out waiting for initial eD2k peer bytes");
                 }
             };
-            (transport, None)
+            (transport, None, false)
+        }
+        Ed2kSessionSource::CallbackUpload { transport } => {
+            dump_ed2k_tcp_listener_meta(
+                peer_addr,
+                Some(transport.mode),
+                "callback_connect",
+                || "adopting outbound callback transport".to_string(),
+            );
+            (*transport, None, true)
         }
         // A slot grant for a disconnected waiter arrives on a connection WE
         // dialed (master AddUpNextClient US_CONNECTING connect-out); the
@@ -177,7 +194,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "promote_connect", || {
                 format!("file_hash={}", grant.file_hash)
             });
-            (*transport, Some(*grant))
+            (*transport, Some(*grant), true)
         }
     };
     let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
@@ -229,10 +246,18 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // a flood of these is a share-probe and the peer is banned (MFC file_request_flood).
     let mut failed_file_req_count: u32 = 0;
 
-    // A promoted-upload outbound session announces itself and pushes the slot
-    // grant before entering the dispatch loop: the oracle sends OP_HELLO and
-    // then OP_ACCEPTUPLOADREQ on the fresh connection it opened for the
-    // promoted waiter (ConnectionEstablished, BaseClient.cpp:1634-1641).
+    // Every outbound peer session announces itself before entering the shared
+    // dispatcher. Callback sessions then wait for the requester's normal file
+    // requests; promoted-upload sessions additionally attach and push their
+    // already-granted upload slot.
+    if send_outbound_hello {
+        let hello_packet = encode_hello_request(response_identity);
+        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hello_request", &hello_packet);
+        transport
+            .write_all(&hello_packet)
+            .await
+            .with_context(|| format!("failed to send OP_HELLO to outbound peer {peer_addr}"))?;
+    }
     if let Some(grant) = promoted_grant {
         peer_upload_identity = grant.peer.clone();
         peer_upload_identity.should_crypt = transport.mode.is_obfuscated();
@@ -240,11 +265,6 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         let file_hash = Ed2kHash::from_str(&grant.file_hash)
             .with_context(|| format!("invalid promoted upload file hash {}", grant.file_hash))?;
         requested_file_hash = Some(file_hash);
-        let hello_packet = encode_hello_request(response_identity);
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hello_request", &hello_packet);
-        transport.write_all(&hello_packet).await.with_context(|| {
-            format!("failed to send OP_HELLO to promoted upload peer {peer_addr}")
-        })?;
         let attached = upload_queue
             .attach_promoted_grant(
                 transfer_runtime,
@@ -376,50 +396,22 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         match (packet.protocol, packet.opcode) {
             (OP_EDONKEYPROT, OP_HELLO) => {
                 let hello_profile = decode_hello_profile(&packet.payload)?;
-                // Phase B: a re-hello presenting a different user hash than the one
-                // already bound is credit-farming impersonation -> ban + drop
-                // (MFC identity_userhash_changed -> Ban()).
-                if let Some(prior_hash) = bound_user_hash
-                    && prior_hash != hello_profile.identity.user_hash
-                {
-                    let ban_ip = match peer_addr {
-                        SocketAddr::V4(v4) => Some(*v4.ip()),
-                        SocketAddr::V6(_) => None,
-                    };
-                    transfer_runtime
-                        .ban_client(ban_ip, Some(hello_profile.identity.user_hash));
-                    crate::ed2k_transfer::diag_bad_peer::identity_userhash_changed(
-                        &peer_addr.to_string(),
-                        Some(hello_profile.identity.user_hash),
-                    );
-                    debug!(
-                        "banning {peer_addr}: user hash changed mid-connection (impersonation)"
-                    );
+                if !apply_peer_hello_profile(
+                    PeerHelloStateRefs {
+                        bound_user_hash: &mut bound_user_hash,
+                        supports_aich: &mut peer_supports_aich,
+                        supports_secure_ident: &mut peer_supports_secure_ident,
+                        supports_file_identifiers: &mut peer_supports_file_identifiers,
+                        accept_comment_version: &mut peer_accept_comment_version,
+                        upload_identity: &mut peer_upload_identity,
+                    },
+                    transfer_runtime,
+                    peer_addr,
+                    transport.mode.is_obfuscated(),
+                    &hello_profile,
+                ) {
                     break Ok(());
                 }
-                bound_user_hash = Some(hello_profile.identity.user_hash);
-                peer_supports_aich = hello_profile.supports_aich;
-                peer_supports_secure_ident = hello_profile.supports_secure_ident;
-                peer_supports_file_identifiers = hello_profile.supports_file_identifiers;
-                // The modern hello MISCOPTIONS1 carries m_byAcceptCommentVer
-                // (bits 4-7). Capture it so OP_REQUESTFILENAME can answer with
-                // OP_FILEDESC when we have a comment/rating to share.
-                peer_accept_comment_version =
-                    hello_profile.misc_options1.accept_comment_version;
-                peer_upload_identity =
-                    upload_peer_identity_from_hello(peer_addr, &hello_profile);
-                // Obfuscate UDP reasks to peers whose TCP session is obfuscated.
-                peer_upload_identity.should_crypt = transport.mode.is_obfuscated();
-                // Feed the upload-score `banned` flag from the ban store now that
-                // we know the peer's user hash (eMule `CUpDownClient::IsBanned`
-                // -> upload score 0). Either the IP or the hash being banned
-                // zeroes the score, exactly like `IsBannedClient(pClient)`.
-                let peer_ban_ip = match peer_addr {
-                    SocketAddr::V4(v4) => Some(*v4.ip()),
-                    SocketAddr::V6(_) => None,
-                };
-                peer_upload_identity.banned = transfer_runtime
-                    .is_client_banned(peer_ban_ip, Some(&hello_profile.identity.user_hash));
                 debug!(
                     "received eD2k OP_HELLO from {peer_addr} transport={} mule_hello={}",
                     transport.mode.as_str(),
@@ -526,10 +518,41 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
             }
             (OP_EDONKEYPROT, OP_HELLOANSWER) => {
+                let hello_profile = decode_hello_answer_profile(&packet.payload)?;
+                if !apply_peer_hello_profile(
+                    PeerHelloStateRefs {
+                        bound_user_hash: &mut bound_user_hash,
+                        supports_aich: &mut peer_supports_aich,
+                        supports_secure_ident: &mut peer_supports_secure_ident,
+                        supports_file_identifiers: &mut peer_supports_file_identifiers,
+                        accept_comment_version: &mut peer_accept_comment_version,
+                        upload_identity: &mut peer_upload_identity,
+                    },
+                    transfer_runtime,
+                    peer_addr,
+                    transport.mode.is_obfuscated(),
+                    &hello_profile,
+                ) {
+                    break Ok(());
+                }
                 debug!(
                     "received eD2k OP_HELLOANSWER from {peer_addr} transport={}",
                     transport.mode.as_str()
                 );
+                peer_secure_ident.peer_sec_ident = hello_profile.misc_options1.secure_ident;
+                peer_secure_ident.our_external_ip = reachability.get();
+                if hello_profile.supports_secure_ident && !peer_secure_ident.requested_peer_key {
+                    let request = begin_secure_ident_probe(&mut peer_secure_ident);
+                    dump_ed2k_tcp_listener_send(
+                        peer_addr,
+                        transport.mode,
+                        "secure_ident_probe",
+                        &request,
+                    );
+                    transport.write_all(&request).await.with_context(|| {
+                        format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
+                    })?;
+                }
             }
             (OP_EMULEPROT, OP_MULTIPACKET) | (OP_EMULEPROT, OP_MULTIPACKET_EXT) => {
                 requested_file_hash = handle_multipacket_request(
@@ -1246,6 +1269,81 @@ fn upload_peer_identity_from_hello(
         firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),
         client_software: profile.client_software.clone(),
     }
+}
+
+struct PeerHelloStateRefs<'a> {
+    bound_user_hash: &'a mut Option<[u8; 16]>,
+    supports_aich: &'a mut bool,
+    supports_secure_ident: &'a mut bool,
+    supports_file_identifiers: &'a mut bool,
+    accept_comment_version: &'a mut u8,
+    upload_identity: &'a mut Ed2kUploadPeerIdentity,
+}
+
+/// Bind one decoded HELLO or HELLOANSWER to the live peer session.
+///
+/// Outbound callback sessions receive OP_HELLOANSWER rather than OP_HELLO, but
+/// both packet forms carry the same identity and capability state. Keeping the
+/// binding here prevents an outbound session from serving with socket-only
+/// identity while the inbound path uses the decoded peer profile.
+fn apply_peer_hello_profile(
+    state: PeerHelloStateRefs<'_>,
+    transfer_runtime: &Ed2kTransferRuntime,
+    peer_addr: SocketAddr,
+    should_crypt: bool,
+    profile: &DecodedHelloProfile,
+) -> bool {
+    // Phase B: a re-hello presenting a different user hash than the one already
+    // bound is credit-farming impersonation -> ban + drop
+    // (MFC identity_userhash_changed -> Ban()).
+    if let Some(prior_hash) = *state.bound_user_hash
+        && prior_hash != profile.identity.user_hash
+    {
+        let ban_ip = match peer_addr {
+            SocketAddr::V4(v4) => Some(*v4.ip()),
+            SocketAddr::V6(_) => None,
+        };
+        transfer_runtime.ban_client(ban_ip, Some(profile.identity.user_hash));
+        crate::ed2k_transfer::diag_bad_peer::identity_userhash_changed(
+            &peer_addr.to_string(),
+            Some(profile.identity.user_hash),
+        );
+        debug!("banning {peer_addr}: user hash changed mid-connection (impersonation)");
+        return false;
+    }
+
+    *state.bound_user_hash = Some(profile.identity.user_hash);
+    *state.supports_aich = profile.supports_aich;
+    *state.supports_secure_ident = profile.supports_secure_ident;
+    *state.supports_file_identifiers = profile.supports_file_identifiers;
+    // The modern hello MISCOPTIONS1 carries m_byAcceptCommentVer (bits 4-7).
+    *state.accept_comment_version = profile.misc_options1.accept_comment_version;
+    let previous_identity = state.upload_identity.clone();
+    *state.upload_identity = upload_peer_identity_from_hello(peer_addr, profile);
+    // HELLO has no representation for several locally-derived or later-learned
+    // uploader properties. Keep those across a re-hello and, in particular,
+    // across the HELLOANSWER received by a promoted outbound upload session.
+    state.upload_identity.udp_version = previous_identity.udp_version;
+    state.upload_identity.friend_slot = previous_identity.friend_slot;
+    state.upload_identity.ident_verified = previous_identity.ident_verified;
+    state.upload_identity.ident_bad_guy = previous_identity.ident_bad_guy;
+    state.upload_identity.gpl_evildoer |= previous_identity.gpl_evildoer;
+    state.upload_identity.emule_version = previous_identity
+        .emule_version
+        .max(state.upload_identity.emule_version);
+    state.upload_identity.is_emule_client |= previous_identity.is_emule_client;
+    state.upload_identity.firewall_context = previous_identity.firewall_context;
+    // Obfuscate UDP reasks to peers whose TCP session is obfuscated.
+    state.upload_identity.should_crypt = should_crypt;
+    // Feed the upload-score `banned` flag from the ban store now that we know
+    // the peer's user hash. Either IP or hash being banned zeroes the score.
+    let peer_ban_ip = match peer_addr {
+        SocketAddr::V4(v4) => Some(*v4.ip()),
+        SocketAddr::V6(_) => None,
+    };
+    state.upload_identity.banned =
+        transfer_runtime.is_client_banned(peer_ban_ip, Some(&profile.identity.user_hash));
+    true
 }
 
 pub(crate) async fn reply_with_firewall_udp(

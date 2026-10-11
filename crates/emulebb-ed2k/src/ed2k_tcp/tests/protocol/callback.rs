@@ -2,6 +2,48 @@ use super::*;
 use crate::ed2k_tcp::{reply_with_firewall_udp, send_kad_firewall_tcp_ack};
 
 #[tokio::test]
+async fn adopted_callback_session_serves_after_hello_answer() {
+    let runtime = ListenerTestRuntime::new(
+        "ed2k-callback-adopted-session",
+        listener_hello_identity(),
+        [0x9A; 16],
+        0x1234_5678,
+    )
+    .await;
+    let file = runtime
+        .seed_verified_upload_file("callback.txt", b"callback payload".to_vec())
+        .await;
+    let requester = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let requester_addr = requester.local_addr().unwrap();
+    let session = runtime.spawn_callback_upload(requester_addr).await;
+    let (mut stream, _) = requester.accept().await.unwrap();
+
+    let hello = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_HELLO).await;
+    assert_eq!(hello[0], OP_EDONKEYPROT);
+    assert_eq!(hello[5], OP_HELLO);
+
+    stream
+        .write_all(&encode_hello_answer(peer_hello_identity()))
+        .await
+        .unwrap();
+    let manifest = runtime
+        .transfer_runtime
+        .manifest(&file.file_hash.to_string())
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_request_filename(&file.file_hash, &manifest))
+        .await
+        .unwrap();
+    let filename_answer =
+        read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_REQFILENAMEANSWER).await;
+    assert_eq!(&filename_answer[6..22], &file.file_hash.0);
+
+    drop(stream);
+    session.await.unwrap();
+}
+
+#[tokio::test]
 async fn callback_connect_uses_plaintext_when_peer_has_no_crypt_metadata() {
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
