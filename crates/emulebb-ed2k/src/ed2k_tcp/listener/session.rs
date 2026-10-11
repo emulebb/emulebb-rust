@@ -28,9 +28,9 @@ use crate::{
 
 use super::super::codec::{
     decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
-    decode_exact_file_hash_payload, decode_kad_callback_payload, decode_optional_file_hash_payload,
-    encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_buddy_pong,
-    encode_port_test_answer, encode_port_test_result, encode_public_ip_answer,
+    decode_exact_file_hash_payload, decode_optional_file_hash_payload, encode_aich_recovery_answer,
+    encode_aich_recovery_failure_answer, encode_buddy_pong, encode_port_test_answer,
+    encode_port_test_result, encode_public_ip_answer,
 };
 use super::super::download::{
     DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
@@ -39,7 +39,9 @@ use super::super::download::{
 use super::super::dump::{
     dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_recv, dump_ed2k_tcp_listener_send,
 };
-use super::super::firewall_helper::complete_authorized_kad_callback;
+use super::super::firewall_helper::{
+    complete_authorized_kad_callback, decode_kad_callback_if_running,
+};
 use super::super::hello::{
     DecodedHelloProfile, build_hello_responses, decode_emule_info_profile,
     decode_hello_answer_profile, decode_hello_profile, encode_emule_info_answer,
@@ -925,7 +927,14 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 notify::handle_public_ip_answer(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_CALLBACK) => {
-                let callback = decode_kad_callback_payload(&packet.payload)?;
+                let Some(callback) = decode_kad_callback_if_running(
+                    dht,
+                    &packet.payload,
+                    &format!("inbound {peer_addr}"),
+                )?
+                else {
+                    continue;
+                };
                 dump_ed2k_tcp_listener_meta(
                     peer_addr,
                     Some(transport.mode),
@@ -949,7 +958,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 // inbound path cannot drift from the buddy-link path and cannot be
                 // abused as a connect-back reflector/probe.
                 complete_authorized_kad_callback(
-                    dht.own_id().0,
+                    dht,
                     transfer_runtime,
                     &callback_sessions,
                     &callback,

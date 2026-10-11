@@ -1,5 +1,43 @@
 use super::*;
 
+/// Stock checks `CKademlia::IsRunning()` before it parses `OP_CALLBACK`. A
+/// malformed callback received during a Kad pause is therefore request-local
+/// and must not close the otherwise valid peer connection.
+#[tokio::test]
+async fn stopped_kad_ignores_malformed_callback_without_closing_listener_session() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-stopped-kad-callback",
+        listener_hello_identity(),
+        [0x3C; 16],
+        0x1122_3344,
+    )
+    .await;
+    runtime.set_kad_running(false);
+    let server = runtime.spawn_listener_connections(1);
+    let mut stream =
+        connect_peer_and_exchange_hello(runtime.peer_addr, peer_hello_identity()).await;
+
+    stream
+        .write_all(&encode_packet(OP_EMULEPROT, OP_CALLBACK, &[0x01]))
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_packet(OP_EMULEPROT, OP_PUBLICIP_REQ, &[]))
+        .await
+        .unwrap();
+    let response = read_until_opcode(&mut stream, OP_EMULEPROT, OP_PUBLICIP_ANSWER).await;
+    assert_eq!(
+        decode_public_ip_answer_payload(&response[6..]).unwrap(),
+        test_bind_ip()
+    );
+
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
     let payload = b"ubuntu linux upload startup handshake".repeat(512);
