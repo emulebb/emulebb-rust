@@ -1,5 +1,47 @@
 use super::*;
 
+#[tokio::test]
+async fn listener_disconnects_hash_banned_peer_before_hello_reply() {
+    let peer_identity = peer_hello_identity();
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-hash-banned-hello",
+        listener_hello_identity(),
+        [0x3D; 16],
+        0x2233_4455,
+    )
+    .await;
+    runtime
+        .transfer_runtime
+        .ban_client(None, Some(peer_identity.user_hash));
+    let server = runtime.spawn_listener_connections(1);
+    let mut stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
+
+    stream
+        .write_all(&encode_hello_request(peer_identity))
+        .await
+        .unwrap();
+
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+        .await
+        .expect("banned HELLO connection did not close")
+        .unwrap();
+    assert_eq!(read, 0, "banned identity received a HELLO reply");
+    assert!(
+        runtime
+            .transfer_runtime
+            .upload_queue_snapshot()
+            .await
+            .is_empty(),
+        "banned identity reached upload admission"
+    );
+
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 /// Stock checks `CKademlia::IsRunning()` before it parses `OP_CALLBACK`. A
 /// malformed callback received during a Kad pause is therefore request-local
 /// and must not close the otherwise valid peer connection.

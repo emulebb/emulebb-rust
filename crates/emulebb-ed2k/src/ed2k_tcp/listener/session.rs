@@ -1455,6 +1455,10 @@ fn apply_peer_hello_profile(
     };
     state.upload_identity.banned =
         transfer_runtime.is_client_banned(peer_ban_ip, Some(&profile.identity.user_hash));
+    if state.upload_identity.banned {
+        debug!("disconnecting banned eD2k peer {peer_addr} after HELLO identity binding");
+        return false;
+    }
     true
 }
 
