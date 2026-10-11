@@ -57,6 +57,13 @@ enum HelperOutcome {
 
 const TCP_FIREWALL_RECHECK_LIMIT: usize = 4;
 const UDP_FIREWALL_CHECK_CLIENTS_TO_ASK: usize = 2;
+/// Consecutive completed checks without a verdict after which the previous UDP
+/// verification is no longer trustworthy. Mirrors aMule's bounded failed-round
+/// allowance rather than retaining a successful observation indefinitely.
+const UDP_VERIFICATION_INCONCLUSIVE_ROUND_LIMIT: u8 = 2;
+/// Maximum lifetime of a UDP verdict: aMule's two-hour recheck horizon plus its
+/// six-minute in-flight round deadline.
+const UDP_VERIFICATION_MAX_AGE_SECS: i64 = 2 * 60 * 60 + 6 * 60;
 const EXTERNAL_PORT_DISCOVERY_REPORTERS: usize = 3;
 /// Unique helpers that must report the same off-list incoming UDP port before we
 /// trust it as our real external port (one report could be a NAT fluke).
@@ -125,6 +132,10 @@ pub struct KadFirewallState {
     /// `None` until a verdict has ever been established (no eD2k server and no
     /// Kad recheck completed yet), so callers can fall back to other signals.
     pub tcp_firewalled_verdict: Option<bool>,
+    /// Time at which the current UDP verdict was established.
+    udp_verified_at: Option<DateTime<Utc>>,
+    /// Consecutive completed UDP checks which could not establish a verdict.
+    udp_inconclusive_rounds: u8,
     active_round: Option<UdpFirewallCheckRound>,
     active_tcp_round: Option<TcpFirewallCheckRound>,
     active_external_port_discovery: Option<ExternalPortDiscoveryRound>,
@@ -437,16 +448,9 @@ impl KadFirewallState {
 
         if error_code == 0 && round.expected_ports.contains(&incoming_port) {
             *outcome = HelperOutcome::Succeeded;
-            let summary = finalize_round(
-                &mut self.active_round,
-                true,
-                observed_at,
-                &mut self.udp_open,
-                &mut self.udp_verified,
-                &mut self.last_udp_check_succeeded_at,
-                &mut self.last_udp_check_failed_at,
-            )
-            .expect("active round disappeared while marking success");
+            let summary = self
+                .finalize_udp_round(true, observed_at)
+                .expect("active round disappeared while marking success");
             self.last_error = None;
             return FirewallUdpPacketOutcome::Open(summary);
         }
@@ -466,16 +470,9 @@ impl KadFirewallState {
                 *outcome = HelperOutcome::Succeeded;
                 round.discovered_external_udp_port = Some(incoming_port);
                 self.discovered_external_udp_port = Some(incoming_port);
-                let summary = finalize_round(
-                    &mut self.active_round,
-                    true,
-                    observed_at,
-                    &mut self.udp_open,
-                    &mut self.udp_verified,
-                    &mut self.last_udp_check_succeeded_at,
-                    &mut self.last_udp_check_failed_at,
-                )
-                .expect("active round disappeared while marking discovery success");
+                let summary = self
+                    .finalize_udp_round(true, observed_at)
+                    .expect("active round disappeared while marking discovery success");
                 self.last_error = None;
                 return FirewallUdpPacketOutcome::Open(summary);
             }
@@ -512,15 +509,7 @@ impl KadFirewallState {
             .values()
             .any(|outcome| matches!(outcome, HelperOutcome::Succeeded))
         {
-            return finalize_round(
-                &mut self.active_round,
-                true,
-                completed_at,
-                &mut self.udp_open,
-                &mut self.udp_verified,
-                &mut self.last_udp_check_succeeded_at,
-                &mut self.last_udp_check_failed_at,
-            );
+            return self.finalize_udp_round(true, completed_at);
         }
 
         let no_requests_sent = round
@@ -528,8 +517,7 @@ impl KadFirewallState {
             .values()
             .all(|outcome| matches!(outcome, HelperOutcome::RequestFailed));
         if no_requests_sent {
-            self.last_error = Some("all UDP firewall-check TCP requests failed".to_string());
-            self.active_round = None;
+            self.record_udp_check_inconclusive("all UDP firewall-check TCP requests failed");
             return None;
         }
 
@@ -539,23 +527,105 @@ impl KadFirewallState {
             .filter(|outcome| matches!(outcome, HelperOutcome::TestFailed))
             .count();
         if explicit_failed_helpers < UDP_FIREWALL_CHECK_CLIENTS_TO_ASK {
-            self.last_error =
-                Some("UDP firewall-check timed out without enough helper replies".to_string());
-            self.active_round = None;
+            self.record_udp_check_inconclusive(
+                "UDP firewall-check timed out without enough helper replies",
+            );
             return None;
         }
 
         self.last_error =
             Some("UDP firewall-check timed out without a positive result".to_string());
-        finalize_round(
-            &mut self.active_round,
-            false,
+        self.finalize_udp_round(false, completed_at)
+    }
+
+    /// Complete an attempted UDP check without a new open/closed verdict.
+    ///
+    /// The previous verdict remains usable briefly, matching the oracle during a
+    /// normal recheck, but repeated inconclusive rounds are tracked so callers can
+    /// invalidate it with [`Self::expire_udp_verification_if_stale`].
+    pub fn record_udp_check_inconclusive(&mut self, error: impl Into<String>) {
+        self.active_round = None;
+        self.udp_inconclusive_rounds = self.udp_inconclusive_rounds.saturating_add(1);
+        self.last_error = Some(error.into());
+    }
+
+    /// Invalidate a UDP verdict once repeated checks are inconclusive or its
+    /// absolute lifetime exceeds the aMule-derived freshness window.
+    ///
+    /// Returns `true` exactly when a verified verdict transitions to unverified,
+    /// allowing the runtime to revoke any peer-confirmed advertised UDP port.
+    pub fn expire_udp_verification_if_stale(&mut self, now: DateTime<Utc>) -> bool {
+        if !self.udp_verified {
+            return false;
+        }
+
+        let too_many_inconclusive =
+            self.udp_inconclusive_rounds >= UDP_VERIFICATION_INCONCLUSIVE_ROUND_LIMIT;
+        let too_old = self.udp_verified_at.is_none_or(|verified_at| {
+            now.signed_duration_since(verified_at).num_seconds() >= UDP_VERIFICATION_MAX_AGE_SECS
+        });
+        if !too_many_inconclusive && !too_old {
+            return false;
+        }
+
+        self.udp_verified = false;
+        self.last_error = Some(if too_many_inconclusive {
+            "Kad UDP verification expired after repeated inconclusive checks".to_string()
+        } else {
+            "Kad UDP verification exceeded its maximum age".to_string()
+        });
+        true
+    }
+
+    fn finalize_udp_round(
+        &mut self,
+        open: bool,
+        completed_at: DateTime<Utc>,
+    ) -> Option<UdpFirewallCheckSummary> {
+        let round = self.active_round.take()?;
+        let helpers_selected = round.helper_outcomes.len();
+        let helpers_requested = round
+            .helper_outcomes
+            .values()
+            .filter(|outcome| !matches!(outcome, HelperOutcome::RequestFailed))
+            .count();
+        let helpers_succeeded = round
+            .helper_outcomes
+            .values()
+            .filter(|outcome| matches!(outcome, HelperOutcome::Succeeded))
+            .count();
+        let helpers_failed = round
+            .helper_outcomes
+            .values()
+            .filter(|outcome| matches!(outcome, HelperOutcome::TestFailed))
+            .count();
+
+        self.udp_open = open;
+        self.udp_verified = true;
+        self.udp_verified_at = Some(completed_at);
+        self.udp_inconclusive_rounds = 0;
+        if open {
+            self.last_udp_check_succeeded_at = Some(completed_at);
+        } else {
+            self.last_udp_check_failed_at = Some(completed_at);
+        }
+
+        let external_udp_port = if open {
+            round.discovered_external_udp_port
+        } else {
+            None
+        };
+
+        Some(UdpFirewallCheckSummary {
+            open,
+            helpers_selected,
+            helpers_requested,
+            helpers_succeeded,
+            helpers_failed,
+            started_at: round.started_at,
             completed_at,
-            &mut self.udp_open,
-            &mut self.udp_verified,
-            &mut self.last_udp_check_succeeded_at,
-            &mut self.last_udp_check_failed_at,
-        )
+            external_udp_port,
+        })
     }
 
     /// Whether we should treat ourselves as UDP-firewalled for the purpose of
@@ -568,59 +638,6 @@ impl KadFirewallState {
     pub fn is_udp_firewalled(&self) -> bool {
         self.udp_verified && !self.udp_open
     }
-}
-
-fn finalize_round(
-    round: &mut Option<UdpFirewallCheckRound>,
-    open: bool,
-    completed_at: DateTime<Utc>,
-    udp_open: &mut bool,
-    udp_verified: &mut bool,
-    last_succeeded_at: &mut Option<DateTime<Utc>>,
-    last_failed_at: &mut Option<DateTime<Utc>>,
-) -> Option<UdpFirewallCheckSummary> {
-    let round = round.take()?;
-    let helpers_selected = round.helper_outcomes.len();
-    let helpers_requested = round
-        .helper_outcomes
-        .values()
-        .filter(|outcome| !matches!(outcome, HelperOutcome::RequestFailed))
-        .count();
-    let helpers_succeeded = round
-        .helper_outcomes
-        .values()
-        .filter(|outcome| matches!(outcome, HelperOutcome::Succeeded))
-        .count();
-    let helpers_failed = round
-        .helper_outcomes
-        .values()
-        .filter(|outcome| matches!(outcome, HelperOutcome::TestFailed))
-        .count();
-
-    *udp_open = open;
-    *udp_verified = true;
-    if open {
-        *last_succeeded_at = Some(completed_at);
-    } else {
-        *last_failed_at = Some(completed_at);
-    }
-
-    let external_udp_port = if open {
-        round.discovered_external_udp_port
-    } else {
-        None
-    };
-
-    Some(UdpFirewallCheckSummary {
-        open,
-        helpers_selected,
-        helpers_requested,
-        helpers_succeeded,
-        helpers_failed,
-        started_at: round.started_at,
-        completed_at,
-        external_udp_port,
-    })
 }
 
 mod tcp_recheck;

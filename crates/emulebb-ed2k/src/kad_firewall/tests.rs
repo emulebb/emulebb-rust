@@ -2,7 +2,7 @@ use super::{
     ExternalPortDiscoveryOutcome, FirewallUdpPacketOutcome, FirewalledResponseOutcome,
     KadFirewallState,
 };
-use chrono::{TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 
 #[test]
 fn udp_round_marks_open_on_matching_port() {
@@ -163,6 +163,58 @@ fn udp_round_request_failure_plus_one_negative_preserves_previous_verified_open_
     assert!(state.udp_verified);
     assert!(!state.udp_check_in_progress());
     assert!(!state.is_udp_firewalled());
+}
+
+#[test]
+fn udp_verification_expires_after_two_inconclusive_rounds() {
+    let mut state = KadFirewallState::default();
+    let helper = "203.0.113.36".parse().unwrap();
+    let verified_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 48, 0).unwrap();
+    assert!(state.begin_udp_check([helper], [41000], verified_at));
+    assert!(matches!(
+        state.record_firewall_udp_packet(helper, 0, 41000, verified_at),
+        FirewallUdpPacketOutcome::Open(_)
+    ));
+
+    let first_check = verified_at + Duration::minutes(1);
+    assert!(state.begin_udp_check([helper], [41000], first_check));
+    assert!(state.finish_udp_check(first_check).is_none());
+    assert!(!state.expire_udp_verification_if_stale(first_check));
+    assert!(state.udp_verified);
+
+    let second_check = verified_at + Duration::minutes(2);
+    assert!(state.begin_udp_check([helper], [41000], second_check));
+    assert!(state.finish_udp_check(second_check).is_none());
+    assert!(state.expire_udp_verification_if_stale(second_check));
+    assert!(!state.udp_verified);
+    assert!(state.udp_open);
+    assert_eq!(
+        state.last_error.as_deref(),
+        Some("Kad UDP verification expired after repeated inconclusive checks")
+    );
+}
+
+#[test]
+fn udp_verification_expires_at_absolute_age_limit() {
+    let mut state = KadFirewallState::default();
+    let helper = "203.0.113.37".parse().unwrap();
+    let verified_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 50, 0).unwrap();
+    assert!(state.begin_udp_check([helper], [41000], verified_at));
+    assert!(matches!(
+        state.record_firewall_udp_packet(helper, 0, 41000, verified_at),
+        FirewallUdpPacketOutcome::Open(_)
+    ));
+
+    assert!(!state.expire_udp_verification_if_stale(
+        verified_at + Duration::hours(2) + Duration::minutes(6) - Duration::seconds(1)
+    ));
+    assert!(state.udp_verified);
+    assert!(
+        state.expire_udp_verification_if_stale(
+            verified_at + Duration::hours(2) + Duration::minutes(6)
+        )
+    );
+    assert!(!state.udp_verified);
 }
 
 #[test]
