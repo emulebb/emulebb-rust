@@ -105,6 +105,34 @@ pub(in crate::ed2k_tcp) enum Ed2kSessionSource {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerSessionPhase {
+    AwaitingInboundHello,
+    AwaitingOutboundHello,
+    Established,
+}
+
+impl PeerSessionPhase {
+    const fn allows(self, protocol: u8, opcode: u8) -> bool {
+        match self {
+            Self::AwaitingInboundHello => matches!(
+                (protocol, opcode),
+                (OP_EDONKEYPROT, OP_HELLO) | (OP_EMULEPROT, OP_PORTTEST)
+            ),
+            Self::AwaitingOutboundHello => matches!(
+                (protocol, opcode),
+                (OP_EDONKEYPROT, OP_HELLO | OP_HELLOANSWER)
+                    | (OP_EMULEPROT, OP_EMULEINFO | OP_EMULEINFOANSWER)
+            ),
+            Self::Established => true,
+        }
+    }
+
+    const fn sends_outbound_hello(self) -> bool {
+        matches!(self, Self::AwaitingOutboundHello)
+    }
+}
+
 pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
     pub(in crate::ed2k_tcp) dht: &'a DhtNode,
     pub(in crate::ed2k_tcp) server_state: &'a Arc<RwLock<Ed2kServerState>>,
@@ -156,7 +184,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     let response_identity =
         enrich_hello_identity(response_identity, server_state, kad_firewall).await;
     let mut callback_expected_user_hash = None;
-    let (mut transport, promoted_grant, send_outbound_hello) = match source {
+    let (mut transport, promoted_grant, mut session_phase) = match source {
         Ed2kSessionSource::Inbound(stream) => {
             let local_addr = stream.local_addr().with_context(|| {
                 format!("failed to resolve local eD2k listener address for {peer_addr}")
@@ -189,7 +217,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     anyhow::bail!("timed out waiting for initial eD2k peer bytes");
                 }
             };
-            (transport, None, false)
+            (transport, None, PeerSessionPhase::AwaitingInboundHello)
         }
         Ed2kSessionSource::CallbackUpload {
             transport,
@@ -202,7 +230,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 || "adopting outbound callback transport".to_string(),
             );
             callback_expected_user_hash = expected_user_hash;
-            (*transport, None, true)
+            (*transport, None, PeerSessionPhase::AwaitingOutboundHello)
         }
         // A slot grant for a disconnected waiter arrives on a connection WE
         // dialed (master AddUpNextClient US_CONNECTING connect-out); the
@@ -211,7 +239,11 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "promote_connect", || {
                 format!("file_hash={}", grant.file_hash)
             });
-            (*transport, Some(*grant), true)
+            (
+                *transport,
+                Some(*grant),
+                PeerSessionPhase::AwaitingOutboundHello,
+            )
         }
     };
     let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
@@ -263,7 +295,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // dispatcher. Callback sessions then wait for the requester's normal file
     // requests; promoted-upload sessions additionally attach and push their
     // already-granted upload slot.
-    if send_outbound_hello {
+    if session_phase.sends_outbound_hello() {
         let hello_packet = encode_hello_request(response_identity);
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hello_request", &hello_packet);
         transport
@@ -406,6 +438,15 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         last_packet_at = tokio::time::Instant::now();
         dump_ed2k_tcp_listener_recv(peer_addr, transport.mode, "session", &packet);
 
+        if !session_phase.allows(packet.protocol, packet.opcode) {
+            debug!(
+                "closing eD2k peer {peer_addr}: packet protocol=0x{:02X} opcode=0x{:02X} is invalid during {session_phase:?}",
+                packet.protocol,
+                packet.opcode,
+            );
+            break Ok(());
+        }
+
         match (packet.protocol, packet.opcode) {
             (OP_EDONKEYPROT, OP_HELLO) => {
                 let hello_profile = decode_hello_profile(&packet.payload)?;
@@ -425,6 +466,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 ) {
                     break Ok(());
                 }
+                session_phase = PeerSessionPhase::Established;
                 debug!(
                     "received eD2k OP_HELLO from {peer_addr} transport={} mule_hello={}",
                     transport.mode.as_str(),
@@ -623,6 +665,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 ) {
                     break Ok(());
                 }
+                session_phase = PeerSessionPhase::Established;
                 debug!(
                     "received eD2k OP_HELLOANSWER from {peer_addr} transport={}",
                     transport.mode.as_str()
