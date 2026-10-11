@@ -642,8 +642,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 requested_file_hash = Some(requested);
                 if transfer_runtime.local_servable_entry(&requested).await?.is_some() {
                     let mut peer_identity = peer_upload_identity.clone();
-                    peer_identity.firewall_context =
-                        upload_firewall_context(server_state, kad_firewall).await;
+                    peer_identity.firewall_context = upload_firewall_context(
+                        server_state,
+                        kad_firewall,
+                        peer_identity.server_endpoint,
+                    )
+                    .await;
                     // `None` where the oracle is silent (rejected admission /
                     // waiting rank toward a plain-eDonkey peer).
                     if let Some(reply) = upload_queue
@@ -805,8 +809,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             }
             (OP_EDONKEYPROT, OP_REQUESTPARTS) | (OP_EMULEPROT, OP_REQUESTPARTS_I64) => {
                 let mut peer_identity = peer_upload_identity.clone();
-                peer_identity.firewall_context =
-                    upload_firewall_context(server_state, kad_firewall).await;
+                peer_identity.firewall_context = upload_firewall_context(
+                    server_state,
+                    kad_firewall,
+                    peer_identity.server_endpoint,
+                )
+                .await;
                 match serve_upload_payload(UploadPayloadRequest {
                     transfer_runtime,
                     upload_queue: &mut upload_queue,
@@ -1267,6 +1275,7 @@ fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIden
         should_crypt: false,
         user_hash: None,
         client_id: None,
+        server_endpoint: None,
         friend_slot: false,
         ident_verified: false,
         ident_bad_guy: false,
@@ -1300,6 +1309,7 @@ fn upload_peer_identity_from_hello(
         should_crypt: false,
         user_hash: Some(remote_hello.user_hash),
         client_id: Some(remote_hello.client_id),
+        server_endpoint: remote_hello.server_endpoint,
         friend_slot: false,
         ident_verified: false,
         ident_bad_guy: false,
@@ -1473,35 +1483,49 @@ async fn enrich_hello_identity(
 /// `we_are_connected` mirrors `theApp.IsConnected()` (an eD2k server session or a
 /// firewall-verified open Kad UDP path), and `we_are_firewalled` mirrors
 /// `theApp.IsFirewalled()` (server-assigned LowID or a Kad TCP-firewalled
-/// verdict). `peer_on_same_server` is `false`: an inbound peer's server is not
-/// known at the listener, and the master treats an unknown peer server
-/// (`GetServerIP()` 0) as a different server (`IsLocalServer` false).
+/// verdict). `peer_on_same_server` compares the peer's HELLO server provenance
+/// with the endpoint of our established server session (`IsLocalServer`).
 async fn upload_firewall_context(
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    peer_server_endpoint: Option<SocketAddr>,
 ) -> crate::ed2k_transfer::Ed2kUploadFirewallContext {
-    let (server_connected, server_low_id) = {
+    let (server_connected, server_firewalled, peer_on_same_server) = {
         let state = server_state.read().await;
-        (state.connected, state.tcp_firewalled().unwrap_or(false))
+        (
+            state.connected,
+            state.tcp_firewalled(),
+            state.connected
+                && peer_server_endpoint.is_some()
+                && state.endpoint == peer_server_endpoint,
+        )
     };
-    let (kad_connected, kad_tcp_firewalled) = {
+    let (kad_connected, kad_firewalled) = {
         let firewall = kad_firewall.lock().await;
         (
             firewall.udp_verified && firewall.udp_open,
-            firewall.tcp_firewalled().unwrap_or(false),
+            firewall.tcp_firewalled(),
         )
     };
     crate::ed2k_transfer::Ed2kUploadFirewallContext {
         we_are_connected: server_connected || kad_connected,
-        we_are_firewalled: server_low_id || kad_tcp_firewalled,
-        peer_on_same_server: false,
+        // A server-assigned ID is authoritative while present. Consult Kad only
+        // when the server has not supplied a TCP reachability verdict.
+        we_are_firewalled: server_firewalled.or(kad_firewalled).unwrap_or(false),
+        peer_on_same_server,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BUDDY_PINGPONG_MIN_INTERVAL, allow_buddy_pingpong_at};
-    use std::time::{Duration, Instant};
+    use super::{BUDDY_PINGPONG_MIN_INTERVAL, allow_buddy_pingpong_at, upload_firewall_context};
+    use crate::{ed2k_server::Ed2kServerState, kad_firewall::KadFirewallState};
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    use tokio::sync::{Mutex, RwLock};
 
     #[test]
     fn buddy_pingpong_gate_is_thirteen_minutes_and_pongs_every_other_ping() {
@@ -1534,5 +1558,49 @@ mod tests {
             Some(t),
             t + BUDDY_PINGPONG_MIN_INTERVAL
         ));
+    }
+
+    #[tokio::test]
+    async fn upload_firewall_context_recognizes_the_peers_shared_server() {
+        let server_endpoint = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661));
+        let server_state = Arc::new(RwLock::new(Ed2kServerState {
+            endpoint: Some(server_endpoint),
+            client_id: Some(u32::from_le_bytes([198, 51, 100, 2])),
+            connected: true,
+            ..Ed2kServerState::default()
+        }));
+        let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
+
+        let shared =
+            upload_firewall_context(&server_state, &kad_firewall, Some(server_endpoint)).await;
+        assert!(shared.we_are_connected);
+        assert!(!shared.we_are_firewalled);
+        assert!(shared.peer_on_same_server);
+
+        let other_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 11), 4661));
+        let different =
+            upload_firewall_context(&server_state, &kad_firewall, Some(other_server)).await;
+        assert!(!different.peer_on_same_server);
+        let unknown = upload_firewall_context(&server_state, &kad_firewall, None).await;
+        assert!(!unknown.peer_on_same_server);
+    }
+
+    #[tokio::test]
+    async fn server_tcp_verdict_takes_priority_over_kad() {
+        let server_state = Arc::new(RwLock::new(Ed2kServerState {
+            client_id: Some(u32::from_le_bytes([198, 51, 100, 2])),
+            connected: true,
+            ..Ed2kServerState::default()
+        }));
+        let mut kad = KadFirewallState::default();
+        kad.tcp_firewalled_verdict = Some(true);
+        let kad_firewall = Arc::new(Mutex::new(kad));
+
+        let context = upload_firewall_context(&server_state, &kad_firewall, None).await;
+        assert!(!context.we_are_firewalled);
+
+        server_state.write().await.client_id = None;
+        let kad_fallback = upload_firewall_context(&server_state, &kad_firewall, None).await;
+        assert!(kad_fallback.we_are_firewalled);
     }
 }

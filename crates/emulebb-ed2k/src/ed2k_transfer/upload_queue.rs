@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -158,6 +158,11 @@ pub(crate) struct Ed2kUploadPeerIdentity {
     pub user_hash: Option<[u8; 16]>,
     /// Remote peer client-id when known.
     pub client_id: Option<u32>,
+    /// Server endpoint advertised by the peer in HELLO. This is route
+    /// provenance, not stable client identity: a LowID waiter can be asked to
+    /// connect back through our live server only while both clients share this
+    /// exact endpoint. Excluded from identity eq/hash.
+    pub server_endpoint: Option<SocketAddr>,
     /// Whether local policy has granted this peer the stock friend-slot fast path.
     pub friend_slot: bool,
     /// Whether the peer's secure-ident signature was RSA-verified (eMule
@@ -2553,6 +2558,7 @@ pub(super) fn test_support_peer() -> Ed2kUploadPeerIdentity {
         should_crypt: false,
         user_hash: Some([1; 16]),
         client_id: Some(0x0102_0304),
+        server_endpoint: None,
         friend_slot: false,
         ident_verified: false,
         ident_bad_guy: false,
