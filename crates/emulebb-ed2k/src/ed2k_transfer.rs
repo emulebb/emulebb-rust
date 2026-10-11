@@ -93,10 +93,15 @@ pub use ingest::{LocalIngestProgressEvent, LocalIngestProgressObserver, LocalIng
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
-pub(crate) use model::{Ed2kAichHashset, PieceWriteOutcome};
+pub(crate) use model::{
+    Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,
+    Ed2kCallbackHelloIdentity, Ed2kCallbackPeer, PieceWriteOutcome,
+};
 pub use model::{
-    Ed2kCallbackIntent, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry,
-    Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
+    Ed2kCallbackDispatchPermit, Ed2kCallbackDownload, Ed2kCallbackIntent, Ed2kCallbackReservation,
+    Ed2kCallbackRoute, Ed2kCallbackTicketError, Ed2kCallbackTicketId, Ed2kCallbackTicketRequest,
+    Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest,
+    Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
 pub(crate) use piece_store::Ed2kVerifiedRangeReader;
 use source_exchange::SourceExchangeState;
@@ -195,6 +200,7 @@ pub struct Ed2kTransferRuntime {
     shared_catalog_hydration_pending: AtomicBool,
     servable_shared_hash_cache: Arc<StdMutex<ServableSharedHashCache>>,
     callback_intents: Arc<RwLock<Vec<Ed2kCallbackIntent>>>,
+    callback_tickets: Arc<Mutex<callback::CallbackTicketStore>>,
     /// Per-file-hash manifest IO locks (see [`Self::lock_manifest`]). Manifest
     /// state is keyed by one file hash everywhere, so transfers only serialize
     /// against themselves; a single global lock here used to serialize every
@@ -495,6 +501,7 @@ impl Ed2kTransferRuntime {
             shared_catalog_hydration_pending: AtomicBool::new(hydration_pending),
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_intents: Arc::new(RwLock::new(Vec::new())),
+            callback_tickets: Arc::new(Mutex::new(callback::CallbackTicketStore::default())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
             delivery_locks: Arc::new(StdMutex::new(HashMap::new())),
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),

@@ -1,8 +1,686 @@
-//! LowID callback intent bookkeeping.
+//! LowID callback admission tickets and legacy intent bookkeeping.
 
-use super::{Ed2kCallbackIntent, Ed2kTransferRuntime};
+use std::{
+    collections::{HashSet, VecDeque},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::{Duration, Instant},
+};
+
+use super::{
+    Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken, Ed2kCallbackDispatchPermit,
+    Ed2kCallbackDownload, Ed2kCallbackHelloIdentity, Ed2kCallbackIntent, Ed2kCallbackPeer,
+    Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError, Ed2kCallbackTicketId,
+    Ed2kCallbackTicketRequest, Ed2kTransferRuntime,
+};
+
+const CALLBACK_TICKET_CAPACITY: usize = 1_024;
+const CALLBACK_TICKET_DOWNLOAD_CAPACITY: usize = 256;
+const CALLBACK_CLAIM_DOWNLOAD_CAPACITY: usize = 256;
+const CALLBACK_CLAIM_LEASE: Duration = Duration::from_secs(5);
+const MAX_CALLBACK_TICKET_LIFETIME: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallbackTicketState {
+    Reserved,
+    Armed,
+    Leased {
+        generation: u64,
+        lease_deadline: Instant,
+        prior_state: CallbackTicketReadyState,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallbackTicketReadyState {
+    Reserved,
+    Armed,
+}
+
+impl From<CallbackTicketReadyState> for CallbackTicketState {
+    fn from(state: CallbackTicketReadyState) -> Self {
+        match state {
+            CallbackTicketReadyState::Reserved => Self::Reserved,
+            CallbackTicketReadyState::Armed => Self::Armed,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CallbackTicketRecord {
+    id: Ed2kCallbackTicketId,
+    route: Ed2kCallbackRoute,
+    peer: Ed2kCallbackPeer,
+    downloads: Vec<Ed2kCallbackDownload>,
+    expires_at: Instant,
+    state: CallbackTicketState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallbackFallbackKey {
+    Server {
+        server_endpoint: SocketAddr,
+        client_id: u32,
+    },
+    Endpoint {
+        ip: Ipv4Addr,
+        tcp_port: u16,
+    },
+}
+
+#[derive(Debug)]
+pub(super) struct CallbackTicketStore {
+    next_ticket_id: u64,
+    next_lease_generation: u64,
+    ticket_capacity: usize,
+    download_capacity: usize,
+    tickets: VecDeque<CallbackTicketRecord>,
+}
+
+impl Default for CallbackTicketStore {
+    fn default() -> Self {
+        Self::new(CALLBACK_TICKET_CAPACITY, CALLBACK_TICKET_DOWNLOAD_CAPACITY)
+    }
+}
+
+impl Ed2kCallbackTicketRequest {
+    /// Build a ticket for a classic server callback.
+    pub fn server(
+        server_endpoint: SocketAddr,
+        client_id: u32,
+        expected_user_hash: Option<[u8; 16]>,
+        source_tcp_port: u16,
+        download: Ed2kCallbackDownload,
+        valid_for: Duration,
+    ) -> Result<Self, Ed2kCallbackTicketError> {
+        validate_ticket_request(Self {
+            route: Ed2kCallbackRoute::Server { server_endpoint },
+            peer: Ed2kCallbackPeer {
+                client_id,
+                expected_user_hash,
+                source_ip: None,
+                source_tcp_port,
+            },
+            download,
+            valid_for,
+        })
+    }
+
+    /// Build a ticket for a Kad buddy-relayed callback.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "typed protocol identity constructor"
+    )]
+    pub fn kad_buddy(
+        buddy_id: [u8; 16],
+        buddy_endpoint: Option<SocketAddr>,
+        client_id: u32,
+        user_hash: [u8; 16],
+        source_ip: Ipv4Addr,
+        source_tcp_port: u16,
+        download: Ed2kCallbackDownload,
+        valid_for: Duration,
+    ) -> Result<Self, Ed2kCallbackTicketError> {
+        validate_ticket_request(Self {
+            route: Ed2kCallbackRoute::KadBuddy {
+                buddy_id,
+                buddy_endpoint,
+            },
+            peer: Ed2kCallbackPeer {
+                client_id,
+                expected_user_hash: Some(user_hash),
+                source_ip: Some(source_ip),
+                source_tcp_port,
+            },
+            download,
+            valid_for,
+        })
+    }
+
+    /// Build a ticket for a direct UDP callback to a firewalled Kad source.
+    pub fn direct_udp(
+        source_endpoint: SocketAddr,
+        client_id: u32,
+        user_hash: [u8; 16],
+        source_tcp_port: u16,
+        download: Ed2kCallbackDownload,
+        valid_for: Duration,
+    ) -> Result<Self, Ed2kCallbackTicketError> {
+        let source_ip = match source_endpoint.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        };
+        validate_ticket_request(Self {
+            route: Ed2kCallbackRoute::DirectUdp { source_endpoint },
+            peer: Ed2kCallbackPeer {
+                client_id,
+                expected_user_hash: Some(user_hash),
+                source_ip,
+                source_tcp_port,
+            },
+            download,
+            valid_for,
+        })
+    }
+}
+
+fn validate_ticket_request(
+    mut request: Ed2kCallbackTicketRequest,
+) -> Result<Ed2kCallbackTicketRequest, Ed2kCallbackTicketError> {
+    if request.valid_for.is_zero() {
+        return Err(Ed2kCallbackTicketError::ZeroLifetime);
+    }
+    if request.valid_for > MAX_CALLBACK_TICKET_LIFETIME {
+        return Err(Ed2kCallbackTicketError::LifetimeTooLong);
+    }
+    if request.peer.source_tcp_port == 0 {
+        return Err(Ed2kCallbackTicketError::ZeroTcpPort);
+    }
+    match request.route {
+        Ed2kCallbackRoute::Server { server_endpoint } => {
+            if !is_valid_ipv4_endpoint(server_endpoint) {
+                return Err(Ed2kCallbackTicketError::InvalidServerEndpoint);
+            }
+            if request.peer.client_id == 0 || request.peer.client_id >= 0x0100_0000 {
+                return Err(Ed2kCallbackTicketError::InvalidServerClientId);
+            }
+            if request.peer.expected_user_hash == Some([0; 16]) {
+                request.peer.expected_user_hash = None;
+            }
+            request.peer.source_ip = None;
+        }
+        Ed2kCallbackRoute::KadBuddy {
+            buddy_id,
+            buddy_endpoint,
+        } => {
+            if buddy_id == [0; 16] {
+                return Err(Ed2kCallbackTicketError::InvalidBuddyId);
+            }
+            if buddy_endpoint.is_some_and(|endpoint| !is_valid_ipv4_endpoint(endpoint)) {
+                return Err(Ed2kCallbackTicketError::InvalidBuddyEndpoint);
+            }
+            if request
+                .peer
+                .expected_user_hash
+                .is_none_or(|hash| hash == [0; 16])
+            {
+                return Err(Ed2kCallbackTicketError::MissingUserHash);
+            }
+            if request.peer.source_ip.is_none_or(|ip| ip.is_unspecified()) {
+                return Err(Ed2kCallbackTicketError::InvalidBuddyEndpoint);
+            }
+        }
+        Ed2kCallbackRoute::DirectUdp { source_endpoint } => {
+            let IpAddr::V4(endpoint_ip) = source_endpoint.ip() else {
+                return Err(Ed2kCallbackTicketError::InvalidDirectEndpoint);
+            };
+            if endpoint_ip.is_unspecified()
+                || source_endpoint.port() == 0
+                || request.peer.source_ip != Some(endpoint_ip)
+            {
+                return Err(Ed2kCallbackTicketError::InvalidDirectEndpoint);
+            }
+            if request
+                .peer
+                .expected_user_hash
+                .is_none_or(|hash| hash == [0; 16])
+            {
+                return Err(Ed2kCallbackTicketError::MissingUserHash);
+            }
+        }
+    }
+    Ok(request)
+}
+
+fn is_valid_ipv4_endpoint(endpoint: SocketAddr) -> bool {
+    matches!(endpoint.ip(), IpAddr::V4(ip) if !ip.is_unspecified()) && endpoint.port() != 0
+}
+
+impl CallbackTicketStore {
+    fn new(ticket_capacity: usize, download_capacity: usize) -> Self {
+        Self {
+            next_ticket_id: 1,
+            next_lease_generation: 1,
+            ticket_capacity,
+            download_capacity,
+            tickets: VecDeque::new(),
+        }
+    }
+
+    fn reserve(
+        &mut self,
+        request: Ed2kCallbackTicketRequest,
+        now: Instant,
+    ) -> Result<Ed2kCallbackReservation, Ed2kCallbackTicketError> {
+        self.reap(now);
+        let request = validate_ticket_request(request)?;
+        let expires_at = now
+            .checked_add(request.valid_for)
+            .ok_or(Ed2kCallbackTicketError::DeadlineOverflow)?;
+
+        if let Some(ticket) = self.tickets.iter_mut().find(|ticket| {
+            matches!(
+                ticket.state,
+                CallbackTicketState::Reserved | CallbackTicketState::Armed
+            ) && ticket.route == request.route
+                && peers_can_merge(&ticket.route, &ticket.peer, &request.peer)
+        }) {
+            ticket.peer.expected_user_hash = ticket
+                .peer
+                .expected_user_hash
+                .or(request.peer.expected_user_hash);
+            if let Some(existing) = ticket
+                .downloads
+                .iter_mut()
+                .find(|download| download.file_hash == request.download.file_hash)
+            {
+                *existing = request.download;
+            } else {
+                if ticket.downloads.len() >= self.download_capacity {
+                    return Err(Ed2kCallbackTicketError::DownloadCapacity);
+                }
+                ticket.downloads.push(request.download);
+            }
+            return Ok(Ed2kCallbackReservation::Joined {
+                ticket_id: ticket.id,
+            });
+        }
+
+        if self.tickets.len() >= self.ticket_capacity {
+            return Err(Ed2kCallbackTicketError::TicketCapacity);
+        }
+        let id = Ed2kCallbackTicketId(self.next_ticket_id);
+        self.next_ticket_id = self
+            .next_ticket_id
+            .checked_add(1)
+            .ok_or(Ed2kCallbackTicketError::IdentifierExhausted)?;
+        self.tickets.push_back(CallbackTicketRecord {
+            id,
+            route: request.route,
+            peer: request.peer,
+            downloads: vec![request.download],
+            expires_at,
+            state: CallbackTicketState::Reserved,
+        });
+        Ok(Ed2kCallbackReservation::Dispatch(
+            Ed2kCallbackDispatchPermit { ticket_id: id },
+        ))
+    }
+
+    fn mark_dispatched(&mut self, permit: Ed2kCallbackDispatchPermit, now: Instant) -> bool {
+        self.reap(now);
+        let Some(ticket) = self
+            .tickets
+            .iter_mut()
+            .find(|ticket| ticket.id == permit.ticket_id)
+        else {
+            return false;
+        };
+        match &mut ticket.state {
+            CallbackTicketState::Reserved => ticket.state = CallbackTicketState::Armed,
+            CallbackTicketState::Leased { prior_state, .. }
+                if *prior_state == CallbackTicketReadyState::Reserved =>
+            {
+                *prior_state = CallbackTicketReadyState::Armed;
+            }
+            CallbackTicketState::Armed | CallbackTicketState::Leased { .. } => return false,
+        }
+        true
+    }
+
+    fn cancel(&mut self, permit: Ed2kCallbackDispatchPermit, now: Instant) -> bool {
+        self.reap(now);
+        let Some(index) = self.tickets.iter().position(|ticket| {
+            ticket.id == permit.ticket_id && ticket.state == CallbackTicketState::Reserved
+        }) else {
+            return false;
+        };
+        self.tickets.remove(index);
+        true
+    }
+
+    fn lease(
+        &mut self,
+        hello: Ed2kCallbackHelloIdentity,
+        now: Instant,
+    ) -> Result<Option<Ed2kCallbackClaim>, Ed2kCallbackClaimError> {
+        self.reap(now);
+
+        let strong_hash_match = self.tickets.iter().any(|ticket| {
+            ticket.state.is_claimable()
+                && hello.user_hash != [0; 16]
+                && ticket.peer.expected_user_hash == Some(hello.user_hash)
+        });
+        let candidate_ids = if strong_hash_match {
+            self.tickets
+                .iter()
+                .filter(|ticket| {
+                    ticket.state.is_claimable()
+                        && ticket.peer.expected_user_hash == Some(hello.user_hash)
+                })
+                .map(|ticket| ticket.id)
+                .collect::<Vec<_>>()
+        } else {
+            let mut selected_key = None;
+            for ticket in self
+                .tickets
+                .iter()
+                .filter(|ticket| ticket.state.is_claimable())
+            {
+                let Some(key) = fallback_match_key(ticket, hello) else {
+                    continue;
+                };
+                if selected_key.is_some_and(|selected| selected != key) {
+                    return Err(Ed2kCallbackClaimError::AmbiguousPeer);
+                }
+                selected_key = Some(key);
+            }
+            let Some(selected_key) = selected_key else {
+                return Ok(None);
+            };
+            self.tickets
+                .iter()
+                .filter(|ticket| {
+                    ticket.state.is_claimable()
+                        && fallback_match_key(ticket, hello) == Some(selected_key)
+                })
+                .map(|ticket| ticket.id)
+                .collect::<Vec<_>>()
+        };
+        if candidate_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let candidate_id_set = candidate_ids.iter().copied().collect::<HashSet<_>>();
+        let mut selected_ids = Vec::new();
+        let mut downloads = Vec::new();
+        let mut seen_file_hashes = HashSet::new();
+        for ticket in self
+            .tickets
+            .iter()
+            .filter(|ticket| candidate_id_set.contains(&ticket.id))
+        {
+            let new_downloads = ticket
+                .downloads
+                .iter()
+                .filter(|download| !seen_file_hashes.contains(&download.file_hash))
+                .cloned()
+                .collect::<Vec<_>>();
+            if downloads.len() + new_downloads.len() > CALLBACK_CLAIM_DOWNLOAD_CAPACITY {
+                continue;
+            }
+            selected_ids.push(ticket.id);
+            for download in new_downloads {
+                seen_file_hashes.insert(download.file_hash);
+                downloads.push(download);
+            }
+        }
+        if selected_ids.is_empty() {
+            return Err(Ed2kCallbackClaimError::ClaimCapacity);
+        }
+
+        let generation = self.next_lease_generation;
+        self.next_lease_generation = self
+            .next_lease_generation
+            .checked_add(1)
+            .ok_or(Ed2kCallbackClaimError::IdentifierExhausted)?;
+        let lease_deadline = now
+            .checked_add(CALLBACK_CLAIM_LEASE)
+            .ok_or(Ed2kCallbackClaimError::DeadlineOverflow)?;
+        let selected_id_set = selected_ids.iter().copied().collect::<HashSet<_>>();
+        for ticket in self
+            .tickets
+            .iter_mut()
+            .filter(|ticket| selected_id_set.contains(&ticket.id))
+        {
+            let prior_state = match ticket.state {
+                CallbackTicketState::Reserved => CallbackTicketReadyState::Reserved,
+                CallbackTicketState::Armed => CallbackTicketReadyState::Armed,
+                CallbackTicketState::Leased { .. } => continue,
+            };
+            ticket.state = CallbackTicketState::Leased {
+                generation,
+                lease_deadline,
+                prior_state,
+            };
+        }
+        Ok(Some(Ed2kCallbackClaim {
+            token: Ed2kCallbackClaimToken {
+                ticket_ids: selected_ids,
+                generation,
+            },
+            downloads,
+        }))
+    }
+
+    fn commit(
+        &mut self,
+        token: &Ed2kCallbackClaimToken,
+        now: Instant,
+    ) -> Result<(), Ed2kCallbackClaimError> {
+        self.reap(now);
+        if !self.token_is_current(token) {
+            return Err(Ed2kCallbackClaimError::StaleClaim);
+        }
+        self.tickets
+            .retain(|ticket| !token.ticket_ids.contains(&ticket.id));
+        Ok(())
+    }
+
+    fn release(
+        &mut self,
+        token: &Ed2kCallbackClaimToken,
+        now: Instant,
+    ) -> Result<(), Ed2kCallbackClaimError> {
+        self.reap(now);
+        if !self.token_is_current(token) {
+            return Err(Ed2kCallbackClaimError::StaleClaim);
+        }
+        for ticket in self
+            .tickets
+            .iter_mut()
+            .filter(|ticket| token.ticket_ids.contains(&ticket.id))
+        {
+            let CallbackTicketState::Leased { prior_state, .. } = ticket.state else {
+                unreachable!("token validity requires every ticket to be leased")
+            };
+            ticket.state = prior_state.into();
+        }
+        self.reap(now);
+        Ok(())
+    }
+
+    fn token_is_current(&self, token: &Ed2kCallbackClaimToken) -> bool {
+        !token.ticket_ids.is_empty()
+            && token.ticket_ids.iter().all(|ticket_id| {
+                self.tickets.iter().any(|ticket| {
+                    ticket.id == *ticket_id
+                        && matches!(
+                            ticket.state,
+                            CallbackTicketState::Leased { generation, .. }
+                                if generation == token.generation
+                        )
+                })
+            })
+    }
+
+    fn reap(&mut self, now: Instant) {
+        self.tickets.retain_mut(|ticket| match ticket.state {
+            CallbackTicketState::Reserved | CallbackTicketState::Armed => ticket.expires_at > now,
+            CallbackTicketState::Leased {
+                lease_deadline,
+                prior_state,
+                ..
+            } if lease_deadline <= now => {
+                ticket.state = prior_state.into();
+                ticket.expires_at > now
+            }
+            CallbackTicketState::Leased { .. } => true,
+        });
+    }
+}
+
+impl CallbackTicketState {
+    fn is_claimable(self) -> bool {
+        matches!(self, Self::Reserved | Self::Armed)
+    }
+}
+
+fn peers_can_merge(
+    route: &Ed2kCallbackRoute,
+    existing: &Ed2kCallbackPeer,
+    incoming: &Ed2kCallbackPeer,
+) -> bool {
+    if matches!(
+        (existing.expected_user_hash, incoming.expected_user_hash),
+        (Some(left), Some(right)) if left != right
+    ) {
+        return false;
+    }
+    if existing.expected_user_hash.is_some() && incoming.expected_user_hash.is_some() {
+        return true;
+    }
+    match route {
+        Ed2kCallbackRoute::Server { .. } => existing.client_id == incoming.client_id,
+        Ed2kCallbackRoute::KadBuddy { .. } | Ed2kCallbackRoute::DirectUdp { .. } => {
+            existing.source_ip == incoming.source_ip
+                && existing.source_ip.is_some()
+                && existing.source_tcp_port == incoming.source_tcp_port
+        }
+    }
+}
+
+fn fallback_match_key(
+    ticket: &CallbackTicketRecord,
+    hello: Ed2kCallbackHelloIdentity,
+) -> Option<CallbackFallbackKey> {
+    if ticket.peer.expected_user_hash.is_some() {
+        return None;
+    }
+    match ticket.route {
+        Ed2kCallbackRoute::Server { server_endpoint }
+            if hello.server_endpoint == Some(server_endpoint)
+                && hello.client_id == ticket.peer.client_id =>
+        {
+            Some(CallbackFallbackKey::Server {
+                server_endpoint,
+                client_id: ticket.peer.client_id,
+            })
+        }
+        Ed2kCallbackRoute::KadBuddy { .. } | Ed2kCallbackRoute::DirectUdp { .. } => {
+            let source_ip = ticket.peer.source_ip?;
+            if hello.peer_ip != Some(source_ip) || ticket.peer.source_tcp_port != hello.tcp_port {
+                return None;
+            }
+            Some(CallbackFallbackKey::Endpoint {
+                ip: source_ip,
+                tcp_port: hello.tcp_port,
+            })
+        }
+        _ => None,
+    }
+}
 
 impl Ed2kTransferRuntime {
+    /// Reserve callback work before dispatching the corresponding network request.
+    pub async fn reserve_callback_ticket(
+        &self,
+        request: Ed2kCallbackTicketRequest,
+    ) -> Result<Ed2kCallbackReservation, Ed2kCallbackTicketError> {
+        self.reserve_callback_ticket_at(request, Instant::now())
+            .await
+    }
+
+    async fn reserve_callback_ticket_at(
+        &self,
+        request: Ed2kCallbackTicketRequest,
+        now: Instant,
+    ) -> Result<Ed2kCallbackReservation, Ed2kCallbackTicketError> {
+        self.callback_tickets.lock().await.reserve(request, now)
+    }
+
+    /// Mark a callback dispatch successful. A fast inbound lease records this
+    /// transition transactionally so a later release restores `Armed`.
+    pub async fn mark_callback_ticket_dispatched(
+        &self,
+        permit: Ed2kCallbackDispatchPermit,
+    ) -> bool {
+        self.mark_callback_ticket_dispatched_at(permit, Instant::now())
+            .await
+    }
+
+    async fn mark_callback_ticket_dispatched_at(
+        &self,
+        permit: Ed2kCallbackDispatchPermit,
+        now: Instant,
+    ) -> bool {
+        self.callback_tickets
+            .lock()
+            .await
+            .mark_dispatched(permit, now)
+    }
+
+    /// Cancel one exact reservation after a proven not-sent dispatch failure.
+    /// Cancellation cannot invalidate a ticket already leased by a callback.
+    pub async fn cancel_callback_ticket(&self, permit: Ed2kCallbackDispatchPermit) -> bool {
+        self.cancel_callback_ticket_at(permit, Instant::now()).await
+    }
+
+    async fn cancel_callback_ticket_at(
+        &self,
+        permit: Ed2kCallbackDispatchPermit,
+        now: Instant,
+    ) -> bool {
+        self.callback_tickets.lock().await.cancel(permit, now)
+    }
+
+    /// Lease all pending A4AF work proven to belong to an inbound HELLO identity.
+    pub(crate) async fn lease_callback_tickets(
+        &self,
+        hello: Ed2kCallbackHelloIdentity,
+    ) -> Result<Option<Ed2kCallbackClaim>, Ed2kCallbackClaimError> {
+        self.lease_callback_tickets_at(hello, Instant::now()).await
+    }
+
+    async fn lease_callback_tickets_at(
+        &self,
+        hello: Ed2kCallbackHelloIdentity,
+        now: Instant,
+    ) -> Result<Option<Ed2kCallbackClaim>, Ed2kCallbackClaimError> {
+        self.callback_tickets.lock().await.lease(hello, now)
+    }
+
+    /// Consume a callback claim after the admitted peer session has adopted it.
+    pub(crate) async fn commit_callback_claim(
+        &self,
+        token: &Ed2kCallbackClaimToken,
+    ) -> Result<(), Ed2kCallbackClaimError> {
+        self.commit_callback_claim_at(token, Instant::now()).await
+    }
+
+    async fn commit_callback_claim_at(
+        &self,
+        token: &Ed2kCallbackClaimToken,
+        now: Instant,
+    ) -> Result<(), Ed2kCallbackClaimError> {
+        self.callback_tickets.lock().await.commit(token, now)
+    }
+
+    /// Re-arm an admission claim which failed before the callback session adopted it.
+    pub(crate) async fn release_callback_claim(
+        &self,
+        token: &Ed2kCallbackClaimToken,
+    ) -> Result<(), Ed2kCallbackClaimError> {
+        self.release_callback_claim_at(token, Instant::now()).await
+    }
+
+    async fn release_callback_claim_at(
+        &self,
+        token: &Ed2kCallbackClaimToken,
+        now: Instant,
+    ) -> Result<(), Ed2kCallbackClaimError> {
+        self.callback_tickets.lock().await.release(token, now)
+    }
+
     /// Register one pending LowID callback download intent.
     pub async fn register_callback_intent(&self, intent: Ed2kCallbackIntent) {
         let mut intents = self.callback_intents.write().await;
@@ -45,10 +723,9 @@ mod tests {
     use super::*;
     use crate::{ed2k_transfer::Ed2kSourceHint, paths::unique_test_dir};
 
-    fn intent(client_id: u32, hash_byte: u8) -> Ed2kCallbackIntent {
-        Ed2kCallbackIntent {
-            client_id,
-            file_hash: hex::encode([hash_byte; 16]),
+    fn download(hash_byte: u8) -> Ed2kCallbackDownload {
+        Ed2kCallbackDownload {
+            file_hash: emulebb_kad_proto::Ed2kHash::from_bytes([hash_byte; 16]),
             display_name: format!("{hash_byte}.bin"),
             file_size: u64::from(hash_byte),
             source: Ed2kSourceHint {
@@ -59,6 +736,55 @@ mod tests {
                 file_comment: String::new(),
                 file_rating: 0,
             },
+        }
+    }
+
+    fn server_request(
+        server: SocketAddr,
+        client_id: u32,
+        hash_byte: u8,
+    ) -> Ed2kCallbackTicketRequest {
+        Ed2kCallbackTicketRequest::server(
+            server,
+            client_id,
+            None,
+            4662,
+            download(hash_byte),
+            Duration::from_secs(45),
+        )
+        .unwrap()
+    }
+
+    fn dispatch_permit(reservation: Ed2kCallbackReservation) -> Ed2kCallbackDispatchPermit {
+        match reservation {
+            Ed2kCallbackReservation::Dispatch(permit) => permit,
+            Ed2kCallbackReservation::Joined { .. } => {
+                panic!("expected callback dispatch ownership")
+            }
+        }
+    }
+
+    fn hello(
+        server: Option<SocketAddr>,
+        client_id: u32,
+        user_hash: [u8; 16],
+    ) -> Ed2kCallbackHelloIdentity {
+        Ed2kCallbackHelloIdentity {
+            user_hash,
+            client_id,
+            server_endpoint: server,
+            peer_ip: Some(Ipv4Addr::new(192, 0, 2, 1)),
+            tcp_port: 4662,
+        }
+    }
+
+    fn intent(client_id: u32, hash_byte: u8) -> Ed2kCallbackIntent {
+        Ed2kCallbackIntent {
+            client_id,
+            file_hash: hex::encode([hash_byte; 16]),
+            display_name: format!("{hash_byte}.bin"),
+            file_size: u64::from(hash_byte),
+            source: download(hash_byte).source,
         }
     }
 
@@ -82,5 +808,524 @@ mod tests {
         );
         assert_eq!(runtime.claim_callback_intent(23).await, Some(intent(23, 2)));
         assert!(runtime.claim_callback_intents(17).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ticket_claim_is_scoped_to_the_server_low_id_namespace() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-server-scope",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server_a = "192.0.2.10:4661".parse().unwrap();
+        let server_b = "192.0.2.20:4661".parse().unwrap();
+        runtime
+            .reserve_callback_ticket_at(server_request(server_a, 17, 1), now)
+            .await
+            .unwrap();
+        runtime
+            .reserve_callback_ticket_at(server_request(server_b, 17, 2), now)
+            .await
+            .unwrap();
+
+        assert!(
+            runtime
+                .lease_callback_tickets_at(hello(None, 17, [0x55; 16]), now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let claim = runtime
+            .lease_callback_tickets_at(hello(Some(server_b), 17, [0x55; 16]), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.downloads, vec![download(2)]);
+        assert!(
+            runtime
+                .commit_callback_claim_at(&claim.token, now)
+                .await
+                .is_ok()
+        );
+
+        let remaining = runtime
+            .lease_callback_tickets_at(hello(Some(server_a), 17, [0x66; 16]), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(remaining.downloads, vec![download(1)]);
+    }
+
+    #[tokio::test]
+    async fn known_user_hash_matches_before_route_fallback_and_mismatch_never_falls_back() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-hash-first",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server: SocketAddr = "192.0.2.10:4661".parse().unwrap();
+        let mut request = server_request(server, 17, 1);
+        request.peer.expected_user_hash = Some([0x44; 16]);
+        runtime
+            .reserve_callback_ticket_at(request, now)
+            .await
+            .unwrap();
+
+        assert!(
+            runtime
+                .lease_callback_tickets_at(hello(Some(server), 17, [0x45; 16]), now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let claim = runtime
+            .lease_callback_tickets_at(hello(None, 999, [0x44; 16]), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.downloads, vec![download(1)]);
+    }
+
+    #[tokio::test]
+    async fn reservation_merges_a4af_without_extending_expiry() {
+        let runtime =
+            Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-callback-ticket-a4af"))
+                .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let first = dispatch_permit(
+            runtime
+                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .await
+                .unwrap(),
+        );
+        let mut second_request = server_request(server, 17, 2);
+        second_request.peer.source_tcp_port = 4663;
+        let second = runtime
+            .reserve_callback_ticket_at(second_request, now + Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(
+            second,
+            Ed2kCallbackReservation::Joined {
+                ticket_id: first.ticket_id,
+            }
+        );
+        assert!(runtime.mark_callback_ticket_dispatched_at(first, now).await);
+
+        assert!(
+            runtime
+                .lease_callback_tickets_at(
+                    hello(Some(server), 17, [0x55; 16]),
+                    now + Duration::from_secs(45),
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_removes_only_the_dispatch_owners_ticket() {
+        let runtime =
+            Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-callback-ticket-cancel"))
+                .unwrap();
+        let now = Instant::now();
+        let server_a = "192.0.2.10:4661".parse().unwrap();
+        let server_b = "192.0.2.20:4661".parse().unwrap();
+        let cancelled = dispatch_permit(
+            runtime
+                .reserve_callback_ticket_at(server_request(server_a, 17, 1), now)
+                .await
+                .unwrap(),
+        );
+        let surviving = dispatch_permit(
+            runtime
+                .reserve_callback_ticket_at(server_request(server_b, 17, 2), now)
+                .await
+                .unwrap(),
+        );
+
+        assert!(runtime.cancel_callback_ticket_at(cancelled, now).await);
+        assert!(
+            runtime
+                .mark_callback_ticket_dispatched_at(surviving, now)
+                .await
+        );
+        let claim = runtime
+            .lease_callback_tickets_at(hello(Some(server_b), 17, [0x55; 16]), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.downloads, vec![download(2)]);
+    }
+
+    #[test]
+    fn bounded_store_rejects_without_evicting_and_expiry_frees_capacity() {
+        let now = Instant::now();
+        let server_a = "192.0.2.10:4661".parse().unwrap();
+        let server_b = "192.0.2.20:4661".parse().unwrap();
+        let mut store = CallbackTicketStore::new(1, 1);
+        let mut first = server_request(server_a, 17, 1);
+        first.valid_for = Duration::from_secs(1);
+        store.reserve(first, now).unwrap();
+        assert_eq!(
+            store.reserve(server_request(server_b, 17, 2), now),
+            Err(Ed2kCallbackTicketError::TicketCapacity)
+        );
+        assert!(
+            store
+                .reserve(
+                    server_request(server_b, 17, 2),
+                    now + Duration::from_secs(1),
+                )
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn released_claim_rearms_but_committed_claim_is_consumed() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-settlement",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        runtime
+            .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+            .await
+            .unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+        let first = runtime
+            .lease_callback_tickets_at(observed, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            runtime
+                .release_callback_claim_at(&first.token, now)
+                .await
+                .is_ok()
+        );
+        let second = runtime
+            .lease_callback_tickets_at(observed, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.token.generation, second.token.generation);
+        assert!(
+            runtime
+                .commit_callback_claim_at(&second.token, now)
+                .await
+                .is_ok()
+        );
+        assert!(
+            runtime
+                .lease_callback_tickets_at(observed, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_lease_rearms_with_a_new_generation_and_rejects_the_stale_token() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-stale-lease",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        runtime
+            .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+            .await
+            .unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+        let stale = runtime
+            .lease_callback_tickets_at(observed, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let replacement = runtime
+            .lease_callback_tickets_at(observed, now + CALLBACK_CLAIM_LEASE)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(stale.token.generation, replacement.token.generation);
+        assert_eq!(
+            runtime
+                .commit_callback_claim_at(&stale.token, now + CALLBACK_CLAIM_LEASE)
+                .await,
+            Err(Ed2kCallbackClaimError::StaleClaim)
+        );
+        assert!(
+            runtime
+                .commit_callback_claim_at(&replacement.token, now + CALLBACK_CLAIM_LEASE)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_cannot_invalidate_a_fast_inbound_claim() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-cancel-race",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let permit = dispatch_permit(
+            runtime
+                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .await
+                .unwrap(),
+        );
+        let claim = runtime
+            .lease_callback_tickets_at(hello(Some(server), 17, [0x55; 16]), now)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!runtime.cancel_callback_ticket_at(permit, now).await);
+        assert!(
+            runtime
+                .commit_callback_claim_at(&claim.token, now)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn released_reserved_claim_restores_the_dispatch_permit() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-release-reserved",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let permit = dispatch_permit(
+            runtime
+                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .await
+                .unwrap(),
+        );
+        let claim = runtime
+            .lease_callback_tickets_at(hello(Some(server), 17, [0x55; 16]), now)
+            .await
+            .unwrap()
+            .unwrap();
+
+        runtime
+            .release_callback_claim_at(&claim.token, now)
+            .await
+            .unwrap();
+        assert!(runtime.cancel_callback_ticket_at(permit, now).await);
+    }
+
+    #[tokio::test]
+    async fn successful_dispatch_during_a_fast_lease_restores_armed_state() {
+        let runtime =
+            Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-callback-ticket-fast-arm"))
+                .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let permit = dispatch_permit(
+            runtime
+                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .await
+                .unwrap(),
+        );
+        let claim = runtime
+            .lease_callback_tickets_at(hello(Some(server), 17, [0x55; 16]), now)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            runtime
+                .mark_callback_ticket_dispatched_at(permit, now)
+                .await
+        );
+        runtime
+            .release_callback_claim_at(&claim.token, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.callback_tickets.lock().await.tickets[0].state,
+            CallbackTicketState::Armed
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_reserved_lease_restores_the_dispatch_permit() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-expired-reserved",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let permit = dispatch_permit(
+            runtime
+                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .await
+                .unwrap(),
+        );
+        let claim = runtime
+            .lease_callback_tickets_at(hello(Some(server), 17, [0x55; 16]), now)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            runtime
+                .cancel_callback_ticket_at(permit, now + CALLBACK_CLAIM_LEASE)
+                .await
+        );
+        assert_eq!(
+            runtime
+                .commit_callback_claim_at(&claim.token, now + CALLBACK_CLAIM_LEASE)
+                .await,
+            Err(Ed2kCallbackClaimError::StaleClaim)
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_after_original_expiry_removes_the_ticket() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-ticket-release-expired",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let mut request = server_request(server, 17, 1);
+        request.valid_for = Duration::from_secs(1);
+        runtime
+            .reserve_callback_ticket_at(request, now)
+            .await
+            .unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+        let claim = runtime
+            .lease_callback_tickets_at(observed, now)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            runtime
+                .release_callback_claim_at(&claim.token, now + Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
+        assert!(
+            runtime
+                .lease_callback_tickets_at(observed, now + Duration::from_secs(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ticket_constructors_reject_unclaimable_protocol_identity() {
+        let server: SocketAddr = "192.0.2.10:4661".parse().unwrap();
+        let normalized = Ed2kCallbackTicketRequest::server(
+            server,
+            17,
+            Some([0; 16]),
+            4662,
+            download(1),
+            Duration::from_secs(45),
+        )
+        .unwrap();
+        assert_eq!(normalized.peer.expected_user_hash, None);
+        assert!(matches!(
+            Ed2kCallbackTicketRequest::server(
+                server,
+                17,
+                None,
+                0,
+                download(1),
+                Duration::from_secs(45),
+            ),
+            Err(Ed2kCallbackTicketError::ZeroTcpPort)
+        ));
+        assert!(matches!(
+            Ed2kCallbackTicketRequest::server(
+                server,
+                17,
+                None,
+                4662,
+                download(1),
+                MAX_CALLBACK_TICKET_LIFETIME + Duration::from_secs(1),
+            ),
+            Err(Ed2kCallbackTicketError::LifetimeTooLong)
+        ));
+        assert!(matches!(
+            Ed2kCallbackTicketRequest::kad_buddy(
+                [0; 16],
+                None,
+                17,
+                [0x33; 16],
+                Ipv4Addr::new(192, 0, 2, 1),
+                4662,
+                download(1),
+                Duration::from_secs(45),
+            ),
+            Err(Ed2kCallbackTicketError::InvalidBuddyId)
+        ));
+        assert!(matches!(
+            Ed2kCallbackTicketRequest::kad_buddy(
+                [0x22; 16],
+                None,
+                17,
+                [0; 16],
+                Ipv4Addr::new(192, 0, 2, 1),
+                4662,
+                download(1),
+                Duration::from_secs(45),
+            ),
+            Err(Ed2kCallbackTicketError::MissingUserHash)
+        ));
+        assert!(matches!(
+            Ed2kCallbackTicketRequest::direct_udp(
+                "[2001:db8::1]:4672".parse().unwrap(),
+                17,
+                [0x33; 16],
+                4662,
+                download(1),
+                Duration::from_secs(45),
+            ),
+            Err(Ed2kCallbackTicketError::InvalidDirectEndpoint)
+        ));
+    }
+
+    #[test]
+    fn oversized_hash_first_work_is_split_across_bounded_claims() {
+        let now = Instant::now();
+        let server_a: SocketAddr = "192.0.2.10:4661".parse().unwrap();
+        let server_b: SocketAddr = "192.0.2.20:4661".parse().unwrap();
+        let mut store = CallbackTicketStore::default();
+        for index in 0..258u16 {
+            let mut request = server_request(if index < 129 { server_a } else { server_b }, 17, 1);
+            request.peer.expected_user_hash = Some([0x44; 16]);
+            let mut hash = [0; 16];
+            hash[..2].copy_from_slice(&index.to_le_bytes());
+            request.download.file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(hash);
+            store.reserve(request, now).unwrap();
+        }
+
+        let first = store
+            .lease(hello(None, 999, [0x44; 16]), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.downloads.len(), 129);
+        store.commit(&first.token, now).unwrap();
+        let second = store
+            .lease(hello(None, 999, [0x44; 16]), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.downloads.len(), 129);
     }
 }
