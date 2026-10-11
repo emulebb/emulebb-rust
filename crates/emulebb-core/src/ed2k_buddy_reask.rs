@@ -12,10 +12,12 @@
 //! glue: it builds the [`ReaskDetachArgs`] and hands them to the reask handle.
 
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use emulebb_ed2k::{ReaskDetachArgs, ReaskSourceHandle, ed2k_server::Ed2kFoundSource};
+use emulebb_ed2k::{
+    ReaskDetachArgs, ReaskSourceHandle,
+    ed2k_server::{Ed2kFoundSource, Ed2kFoundSourceKey},
+};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::ed2k_sources::source_key;
@@ -26,7 +28,7 @@ use crate::ed2k_sources::source_key;
 /// for a firewalled-buddy Kad source).
 const ED2K_DEFAULT_UDP_VERSION: u8 = 4;
 
-type RequestedCallbackSources = HashSet<(Ipv4Addr, u16, Option<[u8; 16]>, Option<u8>)>;
+type RequestedCallbackSources = HashSet<Ed2kFoundSourceKey>;
 
 /// Detach every firewalled LowID Kad source with a known buddy onto the UDP reask
 /// loop so it originates an `OP_REASKCALLBACKUDP` to its buddy on the normal
@@ -93,6 +95,7 @@ mod tests {
     use crate::ed2k_sources::kad_source_result_to_ed2k_found_source;
     use emulebb_ed2k::{ReaskCommand, reask_command_channel};
     use emulebb_kad_dht::SourceResult;
+    use std::net::Ipv4Addr;
 
     fn buddy_source(file_hash: Ed2kHash) -> Ed2kFoundSource {
         Ed2kFoundSource {

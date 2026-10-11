@@ -218,7 +218,64 @@ pub struct Ed2kFoundSource {
     pub source_udp_port: Option<u16>,
 }
 
+/// Stable in-memory identity for one discovered ED2K source.
+///
+/// A HighID source is globally addressable, so reports from multiple servers
+/// identify the same peer. A LowID client-id is meaningful only within the
+/// reporting server's namespace and must retain that server provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Ed2kFoundSourceKey {
+    /// Publicly reachable peer, identified by its dialable TCP endpoint.
+    HighIdEndpoint { ip: Ipv4Addr, tcp_port: u16 },
+    /// Server-firewalled peer, identified in one server's client-id namespace.
+    ServerLowId {
+        server_endpoint: SocketAddr,
+        client_id: u32,
+    },
+    /// Kad-discovered firewalled peer with a protocol user hash.
+    HashedLowId { user_hash: [u8; 16] },
+    /// Legacy firewalled peer without server or hash provenance.
+    UnscopedLowId { client_id: u32, tcp_port: u16 },
+}
+
 impl Ed2kFoundSource {
+    /// Return the route-aware identity used for source deduplication.
+    #[must_use]
+    pub fn identity_key(&self) -> Ed2kFoundSourceKey {
+        if !self.low_id {
+            return Ed2kFoundSourceKey::HighIdEndpoint {
+                ip: self.ip,
+                tcp_port: self.tcp_port,
+            };
+        }
+        if let Some(server_endpoint) = self.source_server {
+            return Ed2kFoundSourceKey::ServerLowId {
+                server_endpoint,
+                client_id: self.client_id,
+            };
+        }
+        if let Some(user_hash) = self.user_hash {
+            return Ed2kFoundSourceKey::HashedLowId { user_hash };
+        }
+        Ed2kFoundSourceKey::UnscopedLowId {
+            client_id: self.client_id,
+            tcp_port: self.tcp_port,
+        }
+    }
+
+    /// Enrich an already-known route with optional data learned from another
+    /// observation of the same source without replacing established values.
+    pub fn merge_discovery_metadata_from(&mut self, incoming: &Self) {
+        debug_assert_eq!(self.identity_key(), incoming.identity_key());
+        self.obfuscated |= incoming.obfuscated;
+        self.obfuscation_options = self.obfuscation_options.or(incoming.obfuscation_options);
+        self.user_hash = self.user_hash.or(incoming.user_hash);
+        self.source_server = self.source_server.or(incoming.source_server);
+        self.buddy_id = self.buddy_id.or(incoming.buddy_id);
+        self.buddy_endpoint = self.buddy_endpoint.or(incoming.buddy_endpoint);
+        self.source_udp_port = self.source_udp_port.or(incoming.source_udp_port);
+    }
+
     /// Returns `true` when this source can be dialed directly over TCP.
     #[must_use]
     pub fn is_direct_dialable(&self) -> bool {

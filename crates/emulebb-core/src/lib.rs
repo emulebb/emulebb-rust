@@ -1281,13 +1281,21 @@ impl EmulebbCore {
                 if !requested_callback_sources.insert(source_key(&source)) {
                     continue;
                 }
+                let Some(source_server) = source.source_server else {
+                    tracing::debug!(
+                        "ED2K server callback unavailable file_hash={} client_id={} source_server=-",
+                        transfer.hash,
+                        source.client_id,
+                    );
+                    continue;
+                };
                 let callback_route =
-                    ed2k_server_callback_route(source.source_server, connected_server_endpoint);
+                    ed2k_server_callback_route(Some(source_server), connected_server_endpoint);
                 // Both TCP server callback and legacy cross-server global UDP
                 // callback require us to be HighID/reachable.
                 if !ed2k_server_callback_permitted(
                     self_tcp_firewalled,
-                    source.source_server,
+                    Some(source_server),
                     connected_server_endpoint,
                 ) {
                     tracing::debug!(
@@ -1295,9 +1303,7 @@ impl EmulebbCore {
                         transfer.hash,
                         source.client_id,
                         self_tcp_firewalled,
-                        source
-                            .source_server
-                            .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string()),
+                        source_server,
                         connected_server_endpoint
                             .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string())
                     );
@@ -1307,6 +1313,7 @@ impl EmulebbCore {
                     let mut state = self.state.lock().await;
                     claim_ed2k_server_callback_request(
                         &mut state.ed2k_server_callback_last_sent,
+                        source_server,
                         source.client_id,
                         &transfer.hash,
                         Instant::now(),
@@ -1317,9 +1324,7 @@ impl EmulebbCore {
                         "ED2K server callback suppressed by cooldown file_hash={} client_id={} source_server={}",
                         transfer.hash,
                         source.client_id,
-                        source
-                            .source_server
-                            .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string())
+                        source_server,
                     );
                     continue;
                 }
@@ -1344,9 +1349,7 @@ impl EmulebbCore {
                     transfer.hash,
                     source.client_id,
                     source.tcp_port,
-                    source
-                        .source_server
-                        .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string()),
+                    source_server,
                     source_requery_round
                 );
                 let callback_result = match callback_route {
@@ -1365,29 +1368,24 @@ impl EmulebbCore {
                             ))
                         }
                     }
-                    Ed2kServerCallbackRoute::GlobalUdp => {
-                        match (self.ed2k_reachability.get(), source.source_server) {
-                            (Some(requester_public_ip), Some(server_endpoint)) => {
-                                request_callback_via_udp_server(Ed2kUdpCallbackRequestOptions {
-                                    bind_ip: network.bind_ip,
-                                    config: &config,
-                                    requester_public_ip,
-                                    requester_tcp_port: self
-                                        .ed2k_reachability
-                                        .advertised_tcp_port(network.listen_port),
-                                    server_endpoint,
-                                    target_client_id: source.client_id,
-                                })
-                                .await
-                            }
-                            (None, _) => Err(anyhow::anyhow!(
-                                "ED2K global callback requires a known public IPv4"
-                            )),
-                            (_, None) => Err(anyhow::anyhow!(
-                                "ED2K global callback source has no server endpoint"
-                            )),
+                    Ed2kServerCallbackRoute::GlobalUdp => match self.ed2k_reachability.get() {
+                        Some(requester_public_ip) => {
+                            request_callback_via_udp_server(Ed2kUdpCallbackRequestOptions {
+                                bind_ip: network.bind_ip,
+                                config: &config,
+                                requester_public_ip,
+                                requester_tcp_port: self
+                                    .ed2k_reachability
+                                    .advertised_tcp_port(network.listen_port),
+                                server_endpoint: source_server,
+                                target_client_id: source.client_id,
+                            })
+                            .await
                         }
-                    }
+                        None => Err(anyhow::anyhow!(
+                            "ED2K global callback requires a known public IPv4"
+                        )),
+                    },
                     Ed2kServerCallbackRoute::Unavailable => Ok(()),
                 };
                 if let Err(error) = callback_result {
@@ -1395,9 +1393,7 @@ impl EmulebbCore {
                         "ED2K callback request failed file_hash={} client_id={} source_server={}: {error}",
                         transfer.hash,
                         source.client_id,
-                        source
-                            .source_server
-                            .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string())
+                        source_server,
                     );
                 }
             }
