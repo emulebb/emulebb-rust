@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::net::TcpStream;
 
 async fn connected_background_test_session() -> (ServerSession, TcpStream) {
@@ -1236,4 +1236,254 @@ async fn uncorrelated_reject_does_not_downgrade_negotiated_offer_pacing() {
         session.offer_files_pacing,
         OfferFilesPacingMode::Negotiated(policy)
     );
+}
+
+#[tokio::test]
+async fn malformed_uncorrelated_search_result_is_packet_local() {
+    let (mut session, _peer) = connected_background_test_session().await;
+    let context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
+
+    handle_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_SEARCHRESULT,
+            payload: vec![0x01],
+        },
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let mut status = 123u32.to_le_bytes().to_vec();
+    status.extend_from_slice(&456u32.to_le_bytes());
+    handle_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_SERVERSTATUS,
+            payload: status,
+        },
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let state = session.state.read().await;
+    assert_eq!(state.server_users, Some(123));
+    assert_eq!(state.server_files, Some(456));
+}
+
+#[tokio::test]
+async fn malformed_typed_replies_preserve_pending_request_and_session() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let file_hash = Ed2kHash([0x61; 16]);
+    let stale_hash = Ed2kHash([0x62; 16]);
+    let result_hash = Ed2kHash([0x63; 16]);
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+
+        loop {
+            let (opcode, _) = read_client_frame(&mut stream).await;
+            if opcode == OP_SEARCHREQUEST {
+                break;
+            }
+        }
+        let mut first_page = 1u32.to_le_bytes().to_vec();
+        first_page.extend_from_slice(&result_hash.0);
+        first_page.extend_from_slice(&0u32.to_le_bytes());
+        first_page.extend_from_slice(&4662u16.to_le_bytes());
+        first_page.extend_from_slice(&0u32.to_le_bytes());
+        first_page.push(1);
+        stream
+            .write_all(&encode_packet(OP_SEARCHRESULT, &first_page, false).unwrap())
+            .await
+            .unwrap();
+
+        let (opcode, payload) = read_client_frame(&mut stream).await;
+        assert_eq!(opcode, OP_QUERY_MORE_RESULT);
+        assert!(payload.is_empty());
+
+        let mut keyword_replies = encode_packet(OP_SEARCHRESULT, &[0x01], false).unwrap();
+        keyword_replies.extend_from_slice(
+            &encode_packet(OP_SEARCHRESULT, &0u32.to_le_bytes(), false).unwrap(),
+        );
+        stream.write_all(&keyword_replies).await.unwrap();
+
+        loop {
+            let (opcode, payload) = read_client_frame(&mut stream).await;
+            if matches!(opcode, OP_GETSOURCES | OP_GETSOURCES_OBFU) {
+                assert_eq!(&payload[..16], &file_hash.0);
+                break;
+            }
+        }
+        stream
+            .write_all(&encode_packet(OP_FOUNDSOURCES, &file_hash.0, false).unwrap())
+            .await
+            .unwrap();
+
+        let mut stale_response = stale_hash.0.to_vec();
+        stale_response.push(0);
+        let mut valid_response = file_hash.0.to_vec();
+        valid_response.push(0);
+        valid_response.extend_from_slice(&[0xAA, 0xBB]);
+        let mut replies = encode_packet(OP_FOUNDSOURCES, &file_hash.0, false).unwrap();
+        replies.extend_from_slice(&encode_packet(OP_FOUNDSOURCES, &stale_response, false).unwrap());
+        replies.extend_from_slice(&encode_packet(OP_FOUNDSOURCES, &valid_response, false).unwrap());
+        stream.write_all(&replies).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
+    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let (handle, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+    let cancel = CancellationToken::new();
+
+    let requests = async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.read().await.connected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background session should accept login");
+
+        let keyword_results = search_keyword_via_background_session(
+            &handle,
+            "malformed result",
+            Default::default(),
+            Duration::from_secs(1),
+            &cancel,
+        )
+        .await
+        .expect("valid final page must complete the original keyword request");
+        assert_eq!(keyword_results.len(), 1);
+        assert_eq!(keyword_results[0].file_hash, result_hash);
+
+        let results = search_source_via_background_session(
+            &handle,
+            file_hash,
+            123,
+            Duration::from_secs(1),
+            &cancel,
+        )
+        .await
+        .expect("valid matching reply must complete the original source request");
+        reconnect_signal.notify_one();
+        results
+    };
+    let (session_result, results) =
+        tokio::join!(run_one_server_session(&server, &context, &inbox), requests);
+
+    assert_eq!(
+        session_result.unwrap(),
+        ServerSessionExit::RestartPreferredOrder
+    );
+    assert!(results.is_empty());
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let file_hash_a = Ed2kHash([0x71; 16]);
+    let file_hash_b = Ed2kHash([0x72; 16]);
+    let stale_hash = Ed2kHash([0x73; 16]);
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+
+        let mut requested = HashSet::new();
+        while requested.len() < 2 {
+            let (opcode, payload) = read_client_frame(&mut stream).await;
+            if matches!(opcode, OP_GETSOURCES | OP_GETSOURCES_OBFU) {
+                requested.insert(Ed2kHash(payload[..16].try_into().unwrap()));
+            }
+        }
+        assert_eq!(requested, HashSet::from([file_hash_a, file_hash_b]));
+
+        let mut valid_a = file_hash_a.0.to_vec();
+        valid_a.push(0);
+        let mut stale = stale_hash.0.to_vec();
+        stale.push(0);
+        let mut valid_b = file_hash_b.0.to_vec();
+        valid_b.push(0);
+        valid_b.push(0xAA);
+        let mut replies = encode_packet(OP_FOUNDSOURCES, &[0x01; 8], false).unwrap();
+        replies.extend_from_slice(&encode_packet(OP_FOUNDSOURCES, &valid_a, false).unwrap());
+        replies.extend_from_slice(&encode_packet(OP_FOUNDSOURCES, &file_hash_b.0, false).unwrap());
+        replies.extend_from_slice(&encode_packet(OP_FOUNDSOURCES, &stale, false).unwrap());
+        replies.extend_from_slice(&encode_packet(OP_FOUNDSOURCES, &valid_b, false).unwrap());
+        stream.write_all(&replies).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
+    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let (handle, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+    let cancel = CancellationToken::new();
+
+    let request = async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.read().await.connected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background session should accept login");
+
+        let results = search_source_batch_via_background_session(
+            &handle,
+            &[
+                Ed2kServerSourceBatchTarget {
+                    file_hash: file_hash_a,
+                    file_size: 123,
+                },
+                Ed2kServerSourceBatchTarget {
+                    file_hash: file_hash_b,
+                    file_size: 456,
+                },
+            ],
+            Duration::from_secs(1),
+            &cancel,
+        )
+        .await
+        .expect("valid replies must complete the original batch");
+        reconnect_signal.notify_one();
+        results
+    };
+    let (session_result, results) =
+        tokio::join!(run_one_server_session(&server, &context, &inbox), request);
+
+    assert_eq!(
+        session_result.unwrap(),
+        ServerSessionExit::RestartPreferredOrder
+    );
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.get(&file_hash_a), Some(&Vec::new()));
+    assert_eq!(results.get(&file_hash_b), Some(&Vec::new()));
+    server_task.abort();
 }

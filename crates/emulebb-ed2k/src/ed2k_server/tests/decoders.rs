@@ -256,11 +256,13 @@ fn found_sources_decoder_extracts_plain_sources() {
     payload.extend_from_slice(&[10, 20, 30, 40]);
     payload.extend_from_slice(&4662u16.to_le_bytes());
 
-    let sources = decode_found_sources(&payload, false).unwrap();
+    let decoded = decode_found_sources(&payload, false).unwrap();
     let client_id = u32::from_le_bytes([10, 20, 30, 40]);
 
+    assert_eq!(decoded.file_hash, Ed2kHash([0xAA; 16]));
+    assert_eq!(decoded.trailing_len, 0);
     assert_eq!(
-        sources,
+        decoded.sources,
         vec![Ed2kFoundSource {
             file_hash: Ed2kHash([0xAA; 16]),
             ip: Ipv4Addr::new(10, 20, 30, 40),
@@ -286,14 +288,15 @@ fn found_sources_decoder_marks_low_id_sources_as_callback_only() {
     payload.extend_from_slice(&34254u32.to_le_bytes());
     payload.extend_from_slice(&4662u16.to_le_bytes());
 
-    let sources = decode_found_sources(&payload, false).unwrap();
+    let decoded = decode_found_sources(&payload, false).unwrap();
     let client_id = 34254u32;
 
-    assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].client_id, client_id);
-    assert_eq!(sources[0].ip, ipv4_from_client_id(client_id));
-    assert!(sources[0].low_id);
-    assert!(!sources[0].is_direct_dialable());
+    assert_eq!(decoded.file_hash, Ed2kHash([0xAB; 16]));
+    assert_eq!(decoded.sources.len(), 1);
+    assert_eq!(decoded.sources[0].client_id, client_id);
+    assert_eq!(decoded.sources[0].ip, ipv4_from_client_id(client_id));
+    assert!(decoded.sources[0].low_id);
+    assert!(!decoded.sources[0].is_direct_dialable());
 }
 
 #[test]
@@ -306,11 +309,12 @@ fn found_sources_decoder_extracts_obfuscated_sources_with_user_hash() {
     payload.push(SOURCE_OBFUSCATION_USER_HASH_PRESENT | 0x03);
     payload.extend_from_slice(&[0x61; 16]);
 
-    let sources = decode_found_sources(&payload, true).unwrap();
+    let decoded = decode_found_sources(&payload, true).unwrap();
     let client_id = u32::from_le_bytes([10, 20, 30, 40]);
 
+    assert_eq!(decoded.file_hash, Ed2kHash([0xCC; 16]));
     assert_eq!(
-        sources,
+        decoded.sources,
         vec![Ed2kFoundSource {
             file_hash: Ed2kHash([0xCC; 16]),
             ip: Ipv4Addr::new(10, 20, 30, 40),
@@ -326,6 +330,19 @@ fn found_sources_decoder_extracts_obfuscated_sources_with_user_hash() {
             source_udp_port: None,
         }]
     );
+}
+
+#[test]
+fn found_sources_decoder_preserves_empty_envelope_hash_and_tolerates_trailing_data() {
+    let mut payload = vec![0xDD; 16];
+    payload.push(0);
+    payload.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+
+    let decoded = decode_found_sources(&payload, false).unwrap();
+
+    assert_eq!(decoded.file_hash, Ed2kHash([0xDD; 16]));
+    assert!(decoded.sources.is_empty());
+    assert_eq!(decoded.trailing_len, 3);
 }
 
 #[test]

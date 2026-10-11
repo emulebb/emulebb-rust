@@ -484,17 +484,21 @@ async fn search_keyword_on_server(
 
     let mut results = Vec::new();
     let mut page_count = 0u32;
+    let mut response_deadline = None;
 
     loop {
         if cancel.is_cancelled() {
             return Ok(Vec::new());
         }
 
-        let packet = tokio::time::timeout(idle_timeout, session.read_packet())
-            .await
-            .with_context(|| {
-                format!("timed out waiting for ED2K server search reply from {transport_endpoint}")
-            })??;
+        let packet = if let Some(deadline) = response_deadline {
+            tokio::time::timeout_at(deadline, session.read_packet()).await
+        } else {
+            tokio::time::timeout(idle_timeout, session.read_packet()).await
+        }
+        .with_context(|| {
+            format!("timed out waiting for ED2K server search reply from {transport_endpoint}")
+        })??;
         let Some(packet) = packet else {
             break;
         };
@@ -537,9 +541,19 @@ async fn search_keyword_on_server(
                             "failed to send ED2K keyword search request to {transport_endpoint}"
                         )
                     })?;
+                response_deadline = Some(TokioInstant::now() + idle_timeout);
             }
             OP_SEARCHRESULT => {
-                let page = decode_search_result_page(&packet.payload)?;
+                let page = match decode_search_result_page(&packet.payload) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        warn!(
+                            "ignoring malformed ED2K one-shot OP_SEARCHRESULT from {} and preserving prior pages until the original deadline: {error}",
+                            transport_endpoint
+                        );
+                        continue;
+                    }
+                };
                 page_count += 1;
                 results.extend(page.files);
                 if page.more_results_available {
@@ -628,7 +642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_keyword_search_ignores_reject_before_typed_result() {
+    async fn active_keyword_search_ignores_reject_and_malformed_result() {
         let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
         let endpoint = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
@@ -656,6 +670,10 @@ mod tests {
             let mut replies =
                 super::super::encode_packet(super::super::OP_REJECT, &[], false).unwrap();
             replies.extend_from_slice(
+                &super::super::encode_packet(super::super::OP_SEARCHRESULT, &[0x01], false)
+                    .unwrap(),
+            );
+            replies.extend_from_slice(
                 &super::super::encode_packet(
                     super::super::OP_SEARCHRESULT,
                     &0u32.to_le_bytes(),
@@ -665,7 +683,7 @@ mod tests {
             );
             stream.write_all(&replies).await.unwrap();
         });
-        let payload = super::super::encode_search_request("reject then result").unwrap();
+        let payload = super::super::encode_search_request("reject malformed then result").unwrap();
         let cancel = CancellationToken::new();
 
         let results = search_keyword_on_server(

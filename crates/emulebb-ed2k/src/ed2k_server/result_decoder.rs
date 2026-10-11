@@ -24,6 +24,15 @@ pub(super) struct SearchResultPage {
     pub(super) more_results_available: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DecodedFoundSources {
+    /// File identity carried by the response envelope, including count-zero replies.
+    pub(super) file_hash: Ed2kHash,
+    pub(super) sources: Vec<Ed2kFoundSource>,
+    /// Stock parsers consume the declared entries and tolerate extension/diagnostic bytes.
+    pub(super) trailing_len: usize,
+}
+
 #[cfg(test)]
 pub(super) fn decode_search_results(payload: &[u8]) -> Result<SearchResultSummary> {
     let page = decode_search_result_page(payload)?;
@@ -101,15 +110,13 @@ pub(super) fn decode_udp_found_source_sets(payload: &[u8]) -> Result<Vec<Vec<Ed2
 pub(super) fn decode_found_sources(
     payload: &[u8],
     obfuscated: bool,
-) -> Result<Vec<Ed2kFoundSource>> {
+) -> Result<DecodedFoundSources> {
     let (results, rest) = decode_found_sources_from(payload, obfuscated)?;
-    if !rest.is_empty() {
-        anyhow::bail!(
-            "unexpected ED2K found-sources trailing data len={}",
-            rest.len()
-        );
-    }
-    Ok(results)
+    Ok(DecodedFoundSources {
+        file_hash: Ed2kHash(payload[..16].try_into().unwrap()),
+        sources: results,
+        trailing_len: rest.len(),
+    })
 }
 
 fn decode_search_result_page_from(payload: &[u8]) -> Result<(SearchResultPage, &[u8])> {
