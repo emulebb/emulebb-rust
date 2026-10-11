@@ -1,7 +1,8 @@
 //! The client-to-client UDP source-reask runtime loop (`docs/design/udp-source-reask.md`
 //! §4.2-§4.6). Lives in `emulebb-ed2k` because it composes the crate-internal
 //! [`super::ReaskService`] with the shared Kad UDP socket via [`DhtNode`]; core
-//! spawns it (on by default, gated by `Ed2kRuntimeConfig.enable_udp_reask`).
+//! always spawns it so direct callbacks and port tests remain reachable, while
+//! `Ed2kRuntimeConfig.enable_udp_reask` gates only source-reask behavior.
 //!
 //! It registers a foreign-datagram handler on the shared socket (inbound reask
 //! packets that fail Kad decode arrive here) and `select!`s that against a
@@ -13,8 +14,9 @@
 //! dropped on `RetryTcp`); the **downloader origination** of
 //! `OP_REASKCALLBACKUDP` to a LowID source's buddy; and the **buddy relay** legs
 //! (relay an inbound `OP_REASKCALLBACKUDP` as `OP_REASKCALLBACKTCP`, and answer a
-//! relayed reask over UDP) — both via [`super::buddy_relay`]. Gated behind
-//! `enable_udp_reask` (on by default).
+//! relayed reask over UDP) — both via [`super::buddy_relay`]. Those reask and
+//! buddy-relay paths are gated behind `enable_udp_reask` (on by default);
+//! direct callbacks and port tests are independent client-UDP control paths.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -234,9 +236,10 @@ fn hex_preview(bytes: &[u8]) -> String {
     out
 }
 
-/// Run the UDP source-reask loop until `shutdown` is set. Spawned by core only
-/// when `enable_udp_reask` is on (the default); the flag exists so the transport
-/// can be disabled to fall back to the held-TCP path if needed.
+/// Run the shared client-UDP ingress and source-reask loop until `shutdown` is
+/// set. Core always spawns it for direct callbacks and port tests; when
+/// `enable_udp_reask` is off, commands, ticks, reask packets, and buddy-relay
+/// packets remain disabled so queued sources fall back to the held-TCP path.
 #[expect(
     clippy::too_many_arguments,
     reason = "flat protocol or runtime boundary"
@@ -284,7 +287,7 @@ pub async fn run_ed2k_udp_reask_loop(
                 handle_inbound_datagram(
                     &mut service, &dht, &transfer_runtime, &events, &ip_filter,
                     &buddy_registry, &port_test_registry, reask_enabled, user_hash,
-                    public_ip.octets(), &data, from,
+                    udp_version, public_ip.octets(), &data, from,
                 )
                 .await;
             }
@@ -388,6 +391,7 @@ async fn handle_inbound_datagram(
     port_test_registry: &PortTestRegistry,
     reask_enabled: bool,
     our_user_hash: [u8; 16],
+    udp_version: u8,
     our_public_ip: [u8; 4],
     data: &[u8],
     from: SocketAddr,
@@ -414,16 +418,14 @@ async fn handle_inbound_datagram(
     );
     super::dump::dump_client_udp_recv(from, &our_user_hash, our_public_ip, data);
     if !reask_enabled {
-        let SocketAddr::V4(from_v4) = from else {
-            return;
-        };
-        if matches!(
-            parse_inbound_reask_datagram(data, from_v4.ip().octets(), &our_user_hash, 4),
-            Some(InboundReaskMessage::PortTest)
-        ) {
-            let acknowledged = port_test_registry.acknowledge_udp_probe();
-            debug!("ed2k udp port test probe from {from}: tcp_result_sent={acknowledged}");
-        }
+        handle_reask_disabled_datagram(
+            events,
+            port_test_registry,
+            our_user_hash,
+            udp_version,
+            data,
+            from,
+        );
         return;
     }
     let outcome = service.handle_inbound(data, from, Instant::now());
@@ -471,35 +473,69 @@ async fn handle_inbound_datagram(
             super::buddy_relay::relay_buddy_reask_callback(buddy_registry, &callback, from);
         }
         ReaskInboundOutcome::DirectCallbackReq { req, from } => {
-            // We have no TCP-connect / hello-identity / firewalled-verdict state
-            // here, so raise an event for core to gate (Kademlia::IsRunning() &&
-            // IsFirewalled()) and connect out (oracle ClientUDPSocket.cpp
-            // OP_DIRECTCALLBACKREQ -> TryToConnectOrDelete). IPv4-only: a non-V4
-            // requester can never be a client source, so it is dropped.
-            if let SocketAddr::V4(v4) = from {
-                trace!(
-                    "ed2k udp reask: inbound OP_DIRECTCALLBACKREQ from {from} \
-                     (tcp_port={}); raising connect-out event",
-                    req.tcp_port
-                );
-                let _ = events.send(ReaskEvent::DirectCallbackReq {
-                    requester_ip: *v4.ip(),
-                    tcp_port: req.tcp_port,
-                    user_hash: req.user_hash,
-                    connect_options: req.connect_options,
-                });
-            } else {
-                trace!(
-                    "ed2k udp reask: dropping OP_DIRECTCALLBACKREQ from non-IPv4 requester {from}"
-                );
-            }
+            raise_direct_callback_event(events, req, from);
         }
         ReaskInboundOutcome::PortTest { from } => {
-            let acknowledged = port_test_registry.acknowledge_udp_probe();
-            debug!("ed2k udp port test probe from {from}: tcp_result_sent={acknowledged}");
+            acknowledge_port_test(port_test_registry, from);
         }
         ReaskInboundOutcome::Ignored => {}
     }
+}
+
+fn handle_reask_disabled_datagram(
+    events: &ReaskEventSender,
+    port_test_registry: &PortTestRegistry,
+    our_user_hash: [u8; 16],
+    udp_version: u8,
+    data: &[u8],
+    from: SocketAddr,
+) {
+    let SocketAddr::V4(from_v4) = from else {
+        return;
+    };
+    match parse_inbound_reask_datagram(data, from_v4.ip().octets(), &our_user_hash, udp_version) {
+        Some(InboundReaskMessage::DirectCallbackReq(req)) => {
+            raise_direct_callback_event(events, req, from);
+        }
+        Some(InboundReaskMessage::PortTest) => {
+            acknowledge_port_test(port_test_registry, from);
+        }
+        // Source reask and buddy relay stay disabled. In particular, do not
+        // route them through ReaskService, which could answer or mutate state.
+        _ => {}
+    }
+}
+
+fn raise_direct_callback_event(
+    events: &ReaskEventSender,
+    req: super::codec::DirectCallbackReq,
+    from: SocketAddr,
+) {
+    // We have no TCP-connect / hello-identity / firewalled-verdict state here,
+    // so raise an event for core to gate (Kademlia::IsRunning() &&
+    // IsFirewalled()) and connect out (oracle ClientUDPSocket.cpp
+    // OP_DIRECTCALLBACKREQ -> TryToConnectOrDelete). IPv4-only: a non-V4
+    // requester can never be a client source, so it is dropped.
+    if let SocketAddr::V4(v4) = from {
+        trace!(
+            "ed2k client udp: inbound OP_DIRECTCALLBACKREQ from {from} \
+             (tcp_port={}); raising connect-out event",
+            req.tcp_port
+        );
+        let _ = events.send(ReaskEvent::DirectCallbackReq {
+            requester_ip: *v4.ip(),
+            tcp_port: req.tcp_port,
+            user_hash: req.user_hash,
+            connect_options: req.connect_options,
+        });
+    } else {
+        trace!("ed2k client udp: dropping OP_DIRECTCALLBACKREQ from non-IPv4 requester {from}");
+    }
+}
+
+fn acknowledge_port_test(port_test_registry: &PortTestRegistry, from: SocketAddr) {
+    let acknowledged = port_test_registry.acknowledge_udp_probe();
+    debug!("ed2k udp port test probe from {from}: tcp_result_sent={acknowledged}");
 }
 
 /// Apply a download session's detach command to the reask source state.

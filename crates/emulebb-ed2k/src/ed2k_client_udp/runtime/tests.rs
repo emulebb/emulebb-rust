@@ -219,49 +219,65 @@ fn retry_tcp_timeout_releases_held_lease() {
     assert_eq!(svc.remove_source(endpoint.0, endpoint.1), None);
 }
 
-#[tokio::test]
-async fn inbound_direct_callback_req_raises_connect_out_event() {
-    use crate::buddy_socket::BuddySocketRegistry;
+#[test]
+fn inbound_direct_callback_req_raises_connect_out_event_when_reask_is_disabled() {
     use crate::ed2k_client_udp::codec::OP_DIRECTCALLBACKREQ;
-    use crate::ipfilter::IpFilter;
+    use crate::ed2k_client_udp_obfuscation::obfuscate_client_udp_with;
+    use crate::port_test::PortTestRegistry;
 
-    let mut svc = service();
     let requester: SocketAddr = "198.51.100.7:4662".parse().unwrap();
+    let our_user_hash = [0x10; 16];
     let mut body = Vec::new();
     body.extend_from_slice(&4662u16.to_le_bytes());
     body.extend_from_slice(&[0x5A; 16]);
     body.push(0x01);
-    let mut datagram = vec![0xC5u8, OP_DIRECTCALLBACKREQ];
-    datagram.extend_from_slice(&body);
-    let outcome = svc.handle_inbound(&datagram, requester, Instant::now());
-    match outcome {
-        ReaskInboundOutcome::DirectCallbackReq { req, from } => {
-            let SocketAddr::V4(v4) = from else {
-                panic!("ipv4")
-            };
-            let event = ReaskEvent::DirectCallbackReq {
-                requester_ip: *v4.ip(),
-                tcp_port: req.tcp_port,
-                user_hash: req.user_hash,
-                connect_options: req.connect_options,
-            };
-            match event {
-                ReaskEvent::DirectCallbackReq {
-                    requester_ip,
-                    tcp_port,
-                    user_hash,
-                    ..
-                } => {
-                    assert_eq!(requester_ip, Ipv4Addr::new(198, 51, 100, 7));
-                    assert_eq!(tcp_port, 4662);
-                    assert_eq!(user_hash, [0x5A; 16]);
-                }
-                other => panic!("expected DirectCallbackReq event, got {other:?}"),
+    let mut plain = vec![0xC5u8, OP_DIRECTCALLBACKREQ];
+    plain.extend_from_slice(&body);
+    let obfuscated =
+        obfuscate_client_udp_with(&our_user_hash, [198, 51, 100, 7], &plain, 0x1357, 0x40);
+
+    for datagram in [plain, obfuscated] {
+        let (events, mut rx) = reask_event_channel();
+        handle_reask_disabled_datagram(
+            &events,
+            &PortTestRegistry::new(),
+            our_user_hash,
+            4,
+            &datagram,
+            requester,
+        );
+        match rx.try_recv().expect("a direct callback event") {
+            ReaskEvent::DirectCallbackReq {
+                requester_ip,
+                tcp_port,
+                user_hash,
+                connect_options,
+            } => {
+                assert_eq!(requester_ip, Ipv4Addr::new(198, 51, 100, 7));
+                assert_eq!(tcp_port, 4662);
+                assert_eq!(user_hash, [0x5A; 16]);
+                assert_eq!(connect_options, 0x01);
             }
+            other => panic!("expected DirectCallbackReq event, got {other:?}"),
         }
-        other => panic!("expected DirectCallbackReq outcome, got {other:?}"),
     }
-    let _ = (BuddySocketRegistry::new(), IpFilter::default());
+}
+
+#[test]
+fn inbound_source_reask_remains_ignored_when_reask_is_disabled() {
+    use crate::ed2k_client_udp::codec::OP_QUEUEFULL;
+    use crate::port_test::PortTestRegistry;
+
+    let (events, mut rx) = reask_event_channel();
+    handle_reask_disabled_datagram(
+        &events,
+        &PortTestRegistry::new(),
+        [0x10; 16],
+        4,
+        &[0xC5, OP_QUEUEFULL],
+        "198.51.100.7:4662".parse().unwrap(),
+    );
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]

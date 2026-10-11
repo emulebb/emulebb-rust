@@ -536,7 +536,8 @@ impl EmulebbCore {
             if enable_udp_reask {
                 *self.ed2k_reask_handle.lock().unwrap() = Some(reask_handle);
             }
-            // Typed loop->core event channel (libtorrent-alert style) for re-engage.
+            // Typed client-UDP loop->core event channel (libtorrent-alert style)
+            // for source re-engage and direct callbacks.
             let (reask_events_tx, reask_events_rx) = reask_event_channel();
             tasks.push(tokio::spawn(run_ed2k_udp_reask_loop(
                 dht.clone(),
@@ -552,26 +553,24 @@ impl EmulebbCore {
                 enable_udp_reask,
                 Arc::clone(&shutdown),
             )));
-            // Re-engage consumer: when a reask reports a low queue rank, the loop
-            // hands the source back and signals here to reconnect over TCP now.
-            if enable_udp_reask {
-                tasks.push(tokio::spawn(run_ed2k_reask_reengage(
-                    self.clone(),
-                    reask_events_rx,
-                    crate::ed2k_net_drivers::ReaskReengageContext {
-                        callback_sessions: callback_sessions.clone(),
-                        ed2k_listener: Arc::clone(&ed2k_listener),
-                        server_state: Arc::clone(&server_state),
-                        kad_firewall: Arc::clone(&kad_firewall),
-                        direct_callback_limiter: Arc::new(
-                            crate::callback_tracker::DirectCallbackRateLimiter::new(),
-                        ),
-                    },
-                    Arc::clone(&shutdown),
-                )));
-            } else {
-                drop(reask_events_rx);
-            }
+            // Always consume client-UDP events: re-engage events exist only when
+            // reask is enabled, while direct callbacks remain independent of that
+            // optimization and must be handled whenever Kad is live.
+            tasks.push(tokio::spawn(run_ed2k_reask_reengage(
+                self.clone(),
+                reask_events_rx,
+                crate::ed2k_net_drivers::ReaskReengageContext {
+                    dht: dht.clone(),
+                    callback_sessions: callback_sessions.clone(),
+                    ed2k_listener: Arc::clone(&ed2k_listener),
+                    server_state: Arc::clone(&server_state),
+                    kad_firewall: Arc::clone(&kad_firewall),
+                    direct_callback_limiter: Arc::new(
+                        crate::callback_tracker::DirectCallbackRateLimiter::new(),
+                    ),
+                },
+                Arc::clone(&shutdown),
+            )));
             // Public-IP fallback (H2): the reask obfuscation key is our public IP
             // (eMule EncryptSendClient). It is normally learned from the server
             // (OP_IDCHANGE), but in Kad-only / pre-connect / LowID it is unknown,

@@ -35,6 +35,7 @@ use emulebb_ed2k::{
     reachability::ExternalReachability,
 };
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
+use emulebb_kad_dht::DhtNode;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 
@@ -46,6 +47,8 @@ use crate::{Ed2kNetworkConfig, EmulebbCore, current_tcp_firewalled};
 /// to mirror `TryToConnectOrDelete`. Cloned cheaply (all `Arc`/`Copy`).
 #[derive(Clone)]
 pub(crate) struct ReaskReengageContext {
+    /// Live Kad runtime; stock accepts direct callbacks only while Kad is running.
+    pub dht: DhtNode,
     /// Listener-owned dispatcher for the callback's long-lived peer session.
     pub callback_sessions: Ed2kCallbackSessionHandle,
     /// The eD2k TCP listener, for the last-resort firewalled fallback verdict.
@@ -329,10 +332,9 @@ fn direct_callback_target_is_valid(requester_ip: Ipv4Addr, tcp_port: u16) -> boo
 /// callback (MISCOPTIONS2 bit 12) — to connect out to it. Mirrors the oracle
 /// `ClientUDPSocket.cpp` `OP_DIRECTCALLBACKREQ` handler: gate on
 /// `Kademlia::IsRunning() && Kademlia::IsFirewalled()`, then connect out to the
-/// requester (`TryToConnectOrDelete`). The reask loop only runs with Kad up, so
-/// the running half holds; we re-check the firewalled half live here (it can
-/// change as our reachability is learned), only acting when we are still the
-/// firewalled side we advertised.
+/// requester (`TryToConnectOrDelete`). Re-check both halves live because the
+/// shared client-UDP ingress outlives Kad protocol activity and reachability can
+/// change after the source advertisement.
 async fn handle_direct_callback_req(
     ctx: &ReaskReengageContext,
     requester_ip: Ipv4Addr,
@@ -340,6 +342,12 @@ async fn handle_direct_callback_req(
     user_hash: [u8; 16],
     connect_options: u8,
 ) {
+    if !ctx.dht.is_running() {
+        tracing::debug!(
+            "ignoring OP_DIRECTCALLBACKREQ from {requester_ip}:{tcp_port}: Kad is not running"
+        );
+        return;
+    }
     if !direct_callback_target_is_valid(requester_ip, tcp_port) {
         tracing::debug!(
             "ignoring OP_DIRECTCALLBACKREQ: invalid connect-back endpoint {requester_ip}:{tcp_port}"
@@ -557,5 +565,40 @@ mod tests {
             Ipv4Addr::new(198, 51, 100, 7),
             4662
         ));
+    }
+
+    #[tokio::test]
+    async fn direct_callback_requires_live_kad_at_dispatch_time() {
+        let dht = DhtNode::new(emulebb_kad_dht::DhtConfig {
+            bind_addr: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+            ..emulebb_kad_dht::DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        dht.set_running(false);
+        let listener = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+        let server_state = Arc::new(RwLock::new(Ed2kServerState {
+            client_id: Some(1),
+            ..Ed2kServerState::default()
+        }));
+        let (callback_sessions, _callback_inbox) =
+            emulebb_ed2k::ed2k_tcp::ed2k_callback_session_channel();
+        let limiter = Arc::new(crate::callback_tracker::DirectCallbackRateLimiter::new());
+        let requester_ip = Ipv4Addr::new(198, 51, 100, 7);
+        let context = ReaskReengageContext {
+            dht,
+            callback_sessions,
+            ed2k_listener: listener,
+            server_state,
+            kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+            direct_callback_limiter: Arc::clone(&limiter),
+        };
+
+        handle_direct_callback_req(&context, requester_ip, 4662, [0x5A; 16], 0x01).await;
+
+        assert!(
+            limiter.allow(requester_ip),
+            "a callback rejected because Kad stopped must not consume its rate-limit slot"
+        );
     }
 }
