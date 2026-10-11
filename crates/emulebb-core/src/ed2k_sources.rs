@@ -18,7 +18,7 @@ use std::{
 use anyhow::{Context, Result};
 use emulebb_ed2k::{
     config::Ed2kRuntimeConfig,
-    ed2k_server::{Ed2kFoundSource, Ed2kSearchFile},
+    ed2k_server::{Ed2kFoundSource, Ed2kFoundSourceKey, Ed2kSearchFile},
     ed2k_transfer::{Ed2kResumeManifest, Ed2kSourceHint},
 };
 use emulebb_kad_dht::{DhtNode, RpcWorkClass, SearchResult as KadSearchResult, SourceResult};
@@ -42,10 +42,16 @@ pub(crate) enum Ed2kServerCallbackRoute {
 
 pub(crate) const ED2K_SERVER_CALLBACK_COOLDOWN: Duration = Duration::from_secs(20 * 60);
 
-pub(crate) type Ed2kServerCallbackKey = (u32, String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Ed2kServerCallbackKey {
+    server_endpoint: SocketAddr,
+    client_id: u32,
+    file_hash: String,
+}
 
 pub(crate) fn claim_ed2k_server_callback_request(
     last_sent: &mut HashMap<Ed2kServerCallbackKey, Instant>,
+    server_endpoint: SocketAddr,
     client_id: u32,
     file_hash: &str,
     now: Instant,
@@ -53,7 +59,11 @@ pub(crate) fn claim_ed2k_server_callback_request(
     last_sent.retain(|_, sent_at| {
         now.saturating_duration_since(*sent_at) < ED2K_SERVER_CALLBACK_COOLDOWN
     });
-    let key = (client_id, file_hash.to_string());
+    let key = Ed2kServerCallbackKey {
+        server_endpoint,
+        client_id,
+        file_hash: file_hash.to_string(),
+    };
     if last_sent.get(&key).is_some_and(|sent_at| {
         now.saturating_duration_since(*sent_at) < ED2K_SERVER_CALLBACK_COOLDOWN
     }) {
@@ -63,15 +73,8 @@ pub(crate) fn claim_ed2k_server_callback_request(
     true
 }
 
-pub(crate) fn source_key(
-    source: &Ed2kFoundSource,
-) -> (Ipv4Addr, u16, Option<[u8; 16]>, Option<u8>) {
-    (
-        source.ip,
-        source.tcp_port,
-        source.user_hash,
-        source.obfuscation_options,
-    )
+pub(crate) fn source_key(source: &Ed2kFoundSource) -> Ed2kFoundSourceKey {
+    source.identity_key()
 }
 
 pub(crate) fn found_source_from_hint(
@@ -697,21 +700,18 @@ pub(crate) fn merge_download_sources(
     target: &mut Vec<Ed2kFoundSource>,
     incoming: Vec<Ed2kFoundSource>,
 ) {
-    let mut seen =
-        target
-            .iter()
-            .map(source_key)
-            .collect::<HashSet<(Ipv4Addr, u16, Option<[u8; 16]>, Option<u8>)>>();
+    let mut seen = target
+        .iter()
+        .map(source_key)
+        .collect::<HashSet<Ed2kFoundSourceKey>>();
     for source in incoming {
         if seen.insert(source_key(&source)) {
             target.push(source);
         } else if let Some(existing) = target
             .iter_mut()
             .find(|existing| source_key(existing) == source_key(&source))
-            && existing.source_server.is_none()
-            && source.source_server.is_some()
         {
-            existing.source_server = source.source_server;
+            existing.merge_discovery_metadata_from(&source);
         }
     }
 }

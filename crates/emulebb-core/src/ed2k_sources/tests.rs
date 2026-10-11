@@ -90,36 +90,50 @@ fn global_udp_source_batch_attempts_cover_effective_server_list() {
 }
 
 #[test]
-fn server_callback_claim_is_per_client_file_and_uses_twenty_minute_gate() {
+fn server_callback_claim_is_per_server_client_file_and_uses_twenty_minute_gate() {
     let mut last_sent = HashMap::new();
     let now = Instant::now();
+    let server_a = "192.0.2.1:4661".parse().unwrap();
+    let server_b = "192.0.2.2:4661".parse().unwrap();
 
     assert!(claim_ed2k_server_callback_request(
         &mut last_sent,
+        server_a,
         0x1234,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         now
     ));
     assert!(!claim_ed2k_server_callback_request(
         &mut last_sent,
+        server_a,
         0x1234,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         now + Duration::from_secs(30)
     ));
     assert!(claim_ed2k_server_callback_request(
         &mut last_sent,
+        server_b,
+        0x1234,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        now + Duration::from_secs(30)
+    ));
+    assert!(claim_ed2k_server_callback_request(
+        &mut last_sent,
+        server_a,
         0x1234,
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         now + Duration::from_secs(30)
     ));
     assert!(claim_ed2k_server_callback_request(
         &mut last_sent,
+        server_a,
         0x5678,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         now + Duration::from_secs(30)
     ));
     assert!(claim_ed2k_server_callback_request(
         &mut last_sent,
+        server_a,
         0x1234,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         now + ED2K_SERVER_CALLBACK_COOLDOWN
@@ -178,6 +192,50 @@ fn direct_source(file_hash: Ed2kHash, ip: Ipv4Addr, tcp_port: u16) -> Ed2kFoundS
         buddy_endpoint: None,
         source_udp_port: None,
     }
+}
+
+fn low_id_source(file_hash: Ed2kHash, client_id: u32, server: &str) -> Ed2kFoundSource {
+    Ed2kFoundSource {
+        file_hash,
+        ip: Ipv4Addr::from(client_id.to_le_bytes()),
+        tcp_port: 4662,
+        client_id,
+        low_id: true,
+        obfuscated: false,
+        obfuscation_options: None,
+        user_hash: None,
+        source_server: Some(server.parse().unwrap()),
+        buddy_id: None,
+        buddy_endpoint: None,
+        source_udp_port: None,
+    }
+}
+
+#[test]
+fn download_source_merge_keeps_low_ids_from_different_servers() {
+    let file_hash = Ed2kHash::from_bytes([0x34; 16]);
+    let mut sources = vec![low_id_source(file_hash, 17, "192.0.2.1:4661")];
+
+    merge_download_sources(
+        &mut sources,
+        vec![low_id_source(file_hash, 17, "192.0.2.2:4661")],
+    );
+
+    assert_eq!(sources.len(), 2);
+}
+
+#[test]
+fn download_source_merge_deduplicates_high_ids_from_different_servers() {
+    let file_hash = Ed2kHash::from_bytes([0x35; 16]);
+    let mut first = direct_source(file_hash, Ipv4Addr::new(198, 51, 100, 10), 4662);
+    first.source_server = Some("192.0.2.1:4661".parse().unwrap());
+    let mut duplicate = first.clone();
+    duplicate.source_server = Some("192.0.2.2:4661".parse().unwrap());
+    let mut sources = vec![first];
+
+    merge_download_sources(&mut sources, vec![duplicate]);
+
+    assert_eq!(sources.len(), 1);
 }
 
 #[test]
