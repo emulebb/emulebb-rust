@@ -72,6 +72,498 @@ async fn adopted_callback_session_serves_after_hello_answer() {
 }
 
 #[tokio::test]
+async fn inbound_callback_prefers_route_scoped_ticket_over_legacy_client_id_intent() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-inbound-ticketed-callback",
+        listener_hello_identity(),
+        [0x9B; 16],
+        0x2345_6789,
+    )
+    .await;
+    let peer_user_hash = [0x73; 16];
+    let peer_client_id = 0x0000_4321;
+    let peer_tcp_port = 46671;
+    let server_ip = Ipv4Addr::new(203, 0, 113, 17);
+    let server_endpoint = SocketAddr::from((server_ip, 4661));
+    let other_server_ip = Ipv4Addr::new(203, 0, 113, 18);
+    let other_server_endpoint = SocketAddr::from((other_server_ip, 4661));
+    let ticket_hash = Ed2kHash::from_bytes([0x31; 16]);
+    let other_server_hash = Ed2kHash::from_bytes([0x32; 16]);
+    let legacy_hash = Ed2kHash::from_bytes([0x42; 16]);
+    runtime
+        .transfer_runtime
+        .ensure_job(&new_transfer_job(
+            ticket_hash,
+            "ticketed.bin".to_string(),
+            1,
+        ))
+        .await
+        .unwrap();
+    runtime
+        .transfer_runtime
+        .ensure_job(&new_transfer_job(
+            other_server_hash,
+            "other-server.bin".to_string(),
+            1,
+        ))
+        .await
+        .unwrap();
+
+    let source = Ed2kSourceHint {
+        ip: test_bind_ip().to_string(),
+        tcp_port: peer_tcp_port,
+        user_hash: Some(hex::encode(peer_user_hash)),
+        connect_options: Some(emule_connect_options(false)),
+        file_comment: String::new(),
+        file_rating: 0,
+    };
+    let reservation = runtime
+        .transfer_runtime
+        .reserve_callback_ticket(
+            Ed2kCallbackTicketRequest::server(
+                server_endpoint,
+                peer_client_id,
+                None,
+                peer_tcp_port,
+                Ed2kCallbackDownload {
+                    file_hash: ticket_hash,
+                    display_name: "ticketed.bin".to_string(),
+                    file_size: 1,
+                    source: source.clone(),
+                },
+                Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let Ed2kCallbackReservation::Dispatch(permit) = reservation else {
+        panic!("first callback ticket must own dispatch")
+    };
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .mark_callback_ticket_dispatched(permit)
+            .await,
+        Ed2kCallbackDispatchOutcome::Armed
+    );
+    let other_server_reservation = runtime
+        .transfer_runtime
+        .reserve_callback_ticket(
+            Ed2kCallbackTicketRequest::server(
+                other_server_endpoint,
+                peer_client_id,
+                None,
+                peer_tcp_port,
+                Ed2kCallbackDownload {
+                    file_hash: other_server_hash,
+                    display_name: "other-server.bin".to_string(),
+                    file_size: 1,
+                    source: source.clone(),
+                },
+                Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let Ed2kCallbackReservation::Dispatch(other_server_permit) = other_server_reservation else {
+        panic!("other server callback ticket must own its own dispatch")
+    };
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .mark_callback_ticket_dispatched(other_server_permit)
+            .await,
+        Ed2kCallbackDispatchOutcome::Armed
+    );
+    let legacy_intent = Ed2kCallbackIntent {
+        client_id: peer_client_id,
+        file_hash: legacy_hash.to_string(),
+        display_name: "legacy.bin".to_string(),
+        file_size: 1,
+        source,
+    };
+    runtime
+        .transfer_runtime
+        .register_callback_intent(legacy_intent.clone())
+        .await;
+
+    let listener_task = runtime.spawn_listener_connections(1);
+    let mut stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
+    stream
+        .write_all(&encode_hello_request(Ed2kHelloIdentity {
+            user_hash: peer_user_hash,
+            client_id: peer_client_id,
+            tcp_port: peer_tcp_port,
+            udp_port: 46672,
+            server_ip: u32::from_le_bytes(server_ip.octets()),
+            server_port: server_endpoint.port(),
+            connect_options: emule_connect_options(false),
+            direct_udp_callback: false,
+        }))
+        .await
+        .unwrap();
+
+    let request = loop {
+        let packet = read_packet(&mut stream).await;
+        if matches!(
+            packet[5],
+            OP_REQUESTFILENAME | OP_MULTIPACKET | OP_MULTIPACKET_EXT | OP_MULTIPACKET_EXT2
+        ) {
+            break packet;
+        }
+    };
+    assert!(
+        request
+            .windows(ticket_hash.0.len())
+            .any(|window| window == ticket_hash.0),
+        "listener must start the ticketed file before the client-id-only legacy intent"
+    );
+    assert!(
+        !request
+            .windows(legacy_hash.0.len())
+            .any(|window| window == legacy_hash.0)
+    );
+    stream
+        .write_all(&encode_file_req_ans_nofil(&ticket_hash))
+        .await
+        .unwrap();
+    listener_task.await.unwrap();
+
+    let other_server_session = runtime
+        .transfer_runtime
+        .claim_callback_session(Ed2kCallbackHelloIdentity {
+            user_hash: peer_user_hash,
+            client_id: peer_client_id,
+            server_endpoint: Some(other_server_endpoint),
+            peer_ip: Some(test_bind_ip()),
+            tcp_port: peer_tcp_port,
+        })
+        .unwrap()
+        .expect("other server's same-client-id ticket must remain pending");
+    assert_eq!(
+        other_server_session.current().unwrap().unwrap().file_hash,
+        other_server_hash
+    );
+    other_server_session.finish().unwrap();
+
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .claim_callback_intent(peer_client_id)
+            .await,
+        Some(legacy_intent),
+        "ticket adoption must not drain the compatibility intent store"
+    );
+}
+
+#[tokio::test]
+async fn inbound_ticketed_callback_switches_a4af_after_file_not_found() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-inbound-ticketed-callback-a4af",
+        listener_hello_identity(),
+        [0x9C; 16],
+        0x3456_789A,
+    )
+    .await;
+    let peer_user_hash = [0x74; 16];
+    let peer_client_id = 0x0000_4322;
+    let peer_tcp_port = 46673;
+    let server_ip = Ipv4Addr::new(203, 0, 113, 19);
+    let server_endpoint = SocketAddr::from((server_ip, 4661));
+    let first_hash = Ed2kHash::from_bytes([0x51; 16]);
+    let second_hash = Ed2kHash::from_bytes([0x52; 16]);
+    let source = Ed2kSourceHint {
+        ip: test_bind_ip().to_string(),
+        tcp_port: peer_tcp_port,
+        user_hash: Some(hex::encode(peer_user_hash)),
+        connect_options: Some(emule_connect_options(false)),
+        file_comment: String::new(),
+        file_rating: 0,
+    };
+    for (hash, name) in [(first_hash, "first.bin"), (second_hash, "second.bin")] {
+        runtime
+            .transfer_runtime
+            .ensure_job(&new_transfer_job(hash, name.to_string(), 1))
+            .await
+            .unwrap();
+    }
+
+    let first_reservation = runtime
+        .transfer_runtime
+        .reserve_callback_ticket(
+            Ed2kCallbackTicketRequest::server(
+                server_endpoint,
+                peer_client_id,
+                None,
+                peer_tcp_port,
+                Ed2kCallbackDownload {
+                    file_hash: first_hash,
+                    display_name: "first.bin".to_string(),
+                    file_size: 1,
+                    source: source.clone(),
+                },
+                Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let Ed2kCallbackReservation::Dispatch(permit) = first_reservation else {
+        panic!("first A4AF callback ticket must own dispatch")
+    };
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .mark_callback_ticket_dispatched(permit)
+            .await,
+        Ed2kCallbackDispatchOutcome::Armed
+    );
+    assert!(matches!(
+        runtime
+            .transfer_runtime
+            .reserve_callback_ticket(
+                Ed2kCallbackTicketRequest::server(
+                    server_endpoint,
+                    peer_client_id,
+                    None,
+                    peer_tcp_port,
+                    Ed2kCallbackDownload {
+                        file_hash: second_hash,
+                        display_name: "second.bin".to_string(),
+                        file_size: 1,
+                        source,
+                    },
+                    Duration::from_secs(30),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap(),
+        Ed2kCallbackReservation::Joined { .. }
+    ));
+
+    let listener_task = runtime.spawn_listener_connections(1);
+    let mut stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
+    stream
+        .write_all(&encode_hello_request(Ed2kHelloIdentity {
+            user_hash: peer_user_hash,
+            client_id: peer_client_id,
+            tcp_port: peer_tcp_port,
+            udp_port: 46674,
+            server_ip: u32::from_le_bytes(server_ip.octets()),
+            server_port: server_endpoint.port(),
+            connect_options: emule_connect_options(false),
+            direct_udp_callback: false,
+        }))
+        .await
+        .unwrap();
+
+    for expected_hash in [first_hash, second_hash] {
+        let request = loop {
+            let packet = read_packet(&mut stream).await;
+            if matches!(
+                packet[5],
+                OP_REQUESTFILENAME | OP_MULTIPACKET | OP_MULTIPACKET_EXT | OP_MULTIPACKET_EXT2
+            ) {
+                break packet;
+            }
+        };
+        assert!(
+            request
+                .windows(expected_hash.0.len())
+                .any(|window| window == expected_hash.0),
+            "callback A4AF must advance in reservation order"
+        );
+        stream
+            .write_all(&encode_file_req_ans_nofil(&expected_hash))
+            .await
+            .unwrap();
+    }
+    listener_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_tail() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-inbound-ticketed-callback-close",
+        listener_hello_identity(),
+        [0x9D; 16],
+        0x4567_89AB,
+    )
+    .await;
+    let peer_user_hash = [0x75; 16];
+    let peer_client_id = 0x0000_4323;
+    let peer_tcp_port = 46675;
+    let server_ip = Ipv4Addr::new(203, 0, 113, 20);
+    let server_endpoint = SocketAddr::from((server_ip, 4661));
+    let first_hash = Ed2kHash::from_bytes([0x61; 16]);
+    let second_hash = Ed2kHash::from_bytes([0x62; 16]);
+    let retry_hash = Ed2kHash::from_bytes([0x63; 16]);
+    let source = Ed2kSourceHint {
+        ip: test_bind_ip().to_string(),
+        tcp_port: peer_tcp_port,
+        user_hash: Some(hex::encode(peer_user_hash)),
+        connect_options: Some(emule_connect_options(false)),
+        file_comment: String::new(),
+        file_rating: 0,
+    };
+    for (hash, name) in [
+        (first_hash, "first.bin"),
+        (second_hash, "second.bin"),
+        (retry_hash, "retry.bin"),
+    ] {
+        runtime
+            .transfer_runtime
+            .ensure_job(&new_transfer_job(hash, name.to_string(), 1))
+            .await
+            .unwrap();
+    }
+
+    let first_reservation = runtime
+        .transfer_runtime
+        .reserve_callback_ticket(
+            Ed2kCallbackTicketRequest::server(
+                server_endpoint,
+                peer_client_id,
+                None,
+                peer_tcp_port,
+                Ed2kCallbackDownload {
+                    file_hash: first_hash,
+                    display_name: "first.bin".to_string(),
+                    file_size: 1,
+                    source: source.clone(),
+                },
+                Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let Ed2kCallbackReservation::Dispatch(permit) = first_reservation else {
+        panic!("first callback file must own dispatch")
+    };
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .mark_callback_ticket_dispatched(permit)
+            .await,
+        Ed2kCallbackDispatchOutcome::Armed
+    );
+    assert!(matches!(
+        runtime
+            .transfer_runtime
+            .reserve_callback_ticket(
+                Ed2kCallbackTicketRequest::server(
+                    server_endpoint,
+                    peer_client_id,
+                    None,
+                    peer_tcp_port,
+                    Ed2kCallbackDownload {
+                        file_hash: second_hash,
+                        display_name: "second.bin".to_string(),
+                        file_size: 1,
+                        source: source.clone(),
+                    },
+                    Duration::from_secs(30),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap(),
+        Ed2kCallbackReservation::Joined { .. }
+    ));
+
+    let listener_task = runtime.spawn_listener_connections(1);
+    let mut stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
+    stream
+        .write_all(&encode_hello_request(Ed2kHelloIdentity {
+            user_hash: peer_user_hash,
+            client_id: peer_client_id,
+            tcp_port: peer_tcp_port,
+            udp_port: 46676,
+            server_ip: u32::from_le_bytes(server_ip.octets()),
+            server_port: server_endpoint.port(),
+            connect_options: emule_connect_options(false),
+            direct_udp_callback: false,
+        }))
+        .await
+        .unwrap();
+    let request = loop {
+        let packet = read_packet(&mut stream).await;
+        if matches!(
+            packet[5],
+            OP_REQUESTFILENAME | OP_MULTIPACKET | OP_MULTIPACKET_EXT | OP_MULTIPACKET_EXT2
+        ) {
+            break packet;
+        }
+    };
+    assert!(
+        request
+            .windows(first_hash.0.len())
+            .any(|window| window == first_hash.0)
+    );
+    drop(stream);
+    listener_task.await.unwrap();
+
+    let retry_reservation = runtime
+        .transfer_runtime
+        .reserve_callback_ticket(
+            Ed2kCallbackTicketRequest::server(
+                server_endpoint,
+                peer_client_id,
+                None,
+                peer_tcp_port,
+                Ed2kCallbackDownload {
+                    file_hash: retry_hash,
+                    display_name: "retry.bin".to_string(),
+                    file_size: 1,
+                    source,
+                },
+                Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let Ed2kCallbackReservation::Dispatch(retry_permit) = retry_reservation else {
+        panic!("retained A4AF tail must require a fresh callback dispatch")
+    };
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .mark_callback_ticket_dispatched(retry_permit)
+            .await,
+        Ed2kCallbackDispatchOutcome::Armed
+    );
+    let mut retry_session = runtime
+        .transfer_runtime
+        .claim_callback_session(Ed2kCallbackHelloIdentity {
+            user_hash: peer_user_hash,
+            client_id: peer_client_id,
+            server_endpoint: Some(server_endpoint),
+            peer_ip: Some(test_bind_ip()),
+            tcp_port: peer_tcp_port,
+        })
+        .unwrap()
+        .expect("fresh dispatch must admit the retained callback tail");
+    assert_eq!(
+        retry_session.current().unwrap().unwrap().file_hash,
+        second_hash,
+        "the closed session's current file was acknowledged, but its A4AF tail must survive"
+    );
+    retry_session.acknowledge_current().unwrap();
+    assert_eq!(
+        retry_session.current().unwrap().unwrap().file_hash,
+        retry_hash,
+        "new retry work must follow the retained tail"
+    );
+    retry_session.acknowledge_current().unwrap();
+    retry_session.finish().unwrap();
+}
+
+#[tokio::test]
 async fn callback_connect_uses_plaintext_when_peer_has_no_crypt_metadata() {
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
