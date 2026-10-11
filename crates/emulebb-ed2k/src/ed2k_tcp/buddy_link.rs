@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use emulebb_kad_dht::DhtNode;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -34,8 +35,10 @@ use tracing::{debug, info};
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
-use super::codec::{decode_kad_callback_payload, decode_reask_callback_tcp_payload};
-use super::firewall_helper::{complete_authorized_kad_callback, is_connection_shutdown_error};
+use super::codec::decode_reask_callback_tcp_payload;
+use super::firewall_helper::{
+    complete_authorized_kad_callback, decode_kad_callback_if_running, is_connection_shutdown_error,
+};
 use super::hello::{build_hello_responses, encode_emule_info_answer, encode_hello_request};
 use super::transport::{Ed2kTransport, EmuleTcpPacket};
 use super::{
@@ -68,9 +71,10 @@ pub struct OutboundBuddyLinkOptions {
     pub buddy_connect_options: u8,
     /// Our hello identity, so the buddy recognizes us as its incoming buddy.
     pub hello_identity: Ed2kHelloIdentity,
-    /// Our own Kad id, used to validate the `uCheck` field of a relayed
-    /// OP_CALLBACK (oracle ListenSocket.cpp: `check XOR allones == GetKadID()`).
-    pub own_kad_id: [u8; 16],
+    /// Live Kad state and identity used to gate and validate relayed
+    /// `OP_CALLBACK` frames (oracle requires `CKademlia::IsRunning()` and
+    /// `check XOR allones == GetKadID()`).
+    pub dht: DhtNode,
     /// Transfer runtime, used to confirm the relayed callback file is one we
     /// share or download before connecting out (oracle GetFileByID guard).
     pub transfer_runtime: Arc<Ed2kTransferRuntime>,
@@ -108,7 +112,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         buddy_user_hash,
         buddy_connect_options,
         hello_identity,
-        own_kad_id,
+        dht,
         transfer_runtime,
         callback_sessions,
         registry,
@@ -163,7 +167,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         &mut ping_timer,
         buddy_addr,
         hello_identity,
-        own_kad_id,
+        &dht,
         &transfer_runtime,
         &callback_sessions,
         reask_handle.as_ref(),
@@ -189,7 +193,7 @@ async fn drive_buddy_link(
     ping_timer: &mut tokio::time::Interval,
     buddy_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
-    own_kad_id: [u8; 16],
+    dht: &DhtNode,
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<&ReaskSourceHandle>,
@@ -221,7 +225,7 @@ async fn drive_buddy_link(
                             transport,
                             buddy_addr,
                             hello_identity,
-                            own_kad_id,
+                            dht,
                             transfer_runtime,
                             callback_sessions,
                             reask_handle,
@@ -252,7 +256,7 @@ async fn handle_buddy_packet(
     transport: &mut Ed2kTransport,
     buddy_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
-    own_kad_id: [u8; 16],
+    dht: &DhtNode,
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<&ReaskSourceHandle>,
@@ -260,7 +264,11 @@ async fn handle_buddy_packet(
 ) -> Result<bool> {
     match (packet.protocol, packet.opcode) {
         (OP_EMULEPROT, OP_CALLBACK) => {
-            let callback = decode_kad_callback_payload(&packet.payload)?;
+            let source = format!("buddy {buddy_addr}");
+            let Some(callback) = decode_kad_callback_if_running(dht, &packet.payload, &source)?
+            else {
+                return Ok(true);
+            };
             debug!(
                 "buddy {buddy_addr} relayed OP_CALLBACK file_hash={} requester={}:{}",
                 callback.file_hash, callback.peer_ip, callback.peer_tcp_port
@@ -272,11 +280,11 @@ async fn handle_buddy_packet(
             // inbound listener session, so the two acceptance surfaces stay in
             // lock-step.
             complete_authorized_kad_callback(
-                own_kad_id,
+                dht,
                 transfer_runtime,
                 callback_sessions,
                 &callback,
-                &format!("buddy {buddy_addr}"),
+                &source,
             )
             .await;
             Ok(true)
@@ -416,13 +424,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use emulebb_kad_dht::{DhtConfig, DhtNode};
+    use emulebb_kad_proto::NodeId;
     use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
     use tokio_util::sync::CancellationToken;
 
-    use super::super::Ed2kHelloIdentity;
     use super::super::transport::{Ed2kTransport, Ed2kTransportMode};
-    use super::drive_buddy_link;
+    use super::super::{Ed2kHelloIdentity, EmuleTcpPacket, OP_CALLBACK, OP_EMULEPROT};
+    use super::{drive_buddy_link, handle_buddy_packet};
     use crate::ed2k_transfer::Ed2kTransferRuntime;
 
     fn dummy_hello_identity() -> Ed2kHelloIdentity {
@@ -436,6 +446,57 @@ mod tests {
             connect_options: 0,
             direct_udp_callback: false,
         }
+    }
+
+    /// The held buddy link follows the same stock pre-parse Kad-running gate as
+    /// an ordinary inbound client session. Malformed stopped-Kad traffic is
+    /// ignored and the persistent relay connection remains usable.
+    #[tokio::test]
+    async fn stopped_kad_ignores_malformed_callback_without_closing_buddy_link() {
+        let bind_ip = crate::test_bind_ip();
+        let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (_server, _) = listener.accept().await.unwrap();
+        let mut transport = Ed2kTransport::from_parts(
+            client,
+            VecDeque::new(),
+            None,
+            None,
+            Ed2kTransportMode::Plaintext,
+        );
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::from((bind_ip, 0))),
+            node_id: NodeId::from_bytes([0xAB; 16]),
+            udp_key: 0x1122_3344,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        dht.set_running(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(tmp.path()).unwrap());
+        let (callback_sessions, _callback_session_inbox) =
+            super::super::ed2k_callback_session_channel();
+
+        assert!(
+            handle_buddy_packet(
+                &mut transport,
+                addr,
+                dummy_hello_identity(),
+                &dht,
+                &transfer_runtime,
+                &callback_sessions,
+                None,
+                EmuleTcpPacket {
+                    protocol: OP_EMULEPROT,
+                    opcode: OP_CALLBACK,
+                    payload: vec![0x01],
+                },
+            )
+            .await
+            .unwrap()
+        );
     }
 
     /// LOWID-G8: cancelling the buddy link's token must stop the keepalive loop
@@ -478,13 +539,21 @@ mod tests {
         let hello = dummy_hello_identity();
         let (callback_sessions, _callback_session_inbox) =
             super::super::ed2k_callback_session_channel();
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::from((bind_ip, 0))),
+            node_id: NodeId::from_bytes([0xAB; 16]),
+            udp_key: 0x1122_3344,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
 
         let driver = drive_buddy_link(
             &mut transport,
             &mut ping_timer,
             SocketAddr::new(std::net::IpAddr::V4(bind_ip), addr.port()),
             hello,
-            [0xAB; 16],
+            &dht,
             &transfer_runtime,
             &callback_sessions,
             None,

@@ -6698,7 +6698,7 @@ async fn handle_kad_find_buddy_res(
     let buddy_addr = SocketAddr::new(from.ip(), res.tcp_port);
     let registry = buddy_registry.clone();
     let kad_buddy = Arc::clone(kad_buddy);
-    let own_kad_id = dht.own_id().0;
+    let dht = dht.clone();
     let transfer_runtime = Arc::clone(transfer_runtime);
     let callback_sessions = callback_sessions.clone();
     let lost = Arc::new(tokio::sync::Notify::new());
@@ -6716,7 +6716,7 @@ async fn handle_kad_find_buddy_res(
             buddy_user_hash,
             buddy_connect_options: connect_options,
             hello_identity,
-            own_kad_id,
+            dht,
             transfer_runtime,
             callback_sessions,
             registry,

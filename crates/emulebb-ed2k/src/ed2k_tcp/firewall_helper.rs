@@ -12,7 +12,7 @@ use emulebb_kad_dht::DhtNode;
 
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
-use super::codec::KadCallbackRequest;
+use super::codec::{KadCallbackRequest, decode_kad_callback_payload};
 use super::dump::{
     dump_ed2k_tcp_helper_meta, dump_ed2k_tcp_helper_recv, dump_ed2k_tcp_helper_send,
 };
@@ -405,6 +405,23 @@ pub(crate) fn kad_callback_check_matches(buddy_check: [u8; 16], own_kad_id: [u8;
         .all(|(check, own)| !check == *own)
 }
 
+/// Apply stock's Kad-running gate before parsing a received `OP_CALLBACK`.
+///
+/// eMule and aMule ignore this opcode without examining its payload while Kad
+/// is stopped. That ordering matters: malformed traffic must not tear down an
+/// otherwise valid client or held-buddy TCP session during a Kad pause.
+pub(crate) fn decode_kad_callback_if_running(
+    dht: &DhtNode,
+    payload: &[u8],
+    source: &str,
+) -> Result<Option<KadCallbackRequest>> {
+    if !dht.is_running() {
+        debug!("ignoring {source} OP_CALLBACK while Kad is not running");
+        return Ok(None);
+    }
+    decode_kad_callback_payload(payload).map(Some)
+}
+
 /// Whether a received `OP_CALLBACK` is authorized to induce a connect-out,
 /// mirroring the oracle `ListenSocket.cpp:1596-1633` guard: (1) `uCheck XOR
 /// all-ones == our own Kad id`, and (2) the referenced file is one we share or
@@ -413,9 +430,6 @@ pub(crate) fn kad_callback_check_matches(buddy_check: [u8; 16], own_kad_id: [u8;
 /// inbound listener session and the outbound buddy link route through here to
 /// avoid drifting.
 ///
-/// The oracle also requires `CKademlia::IsRunning()`; a rust `OP_CALLBACK`
-/// handler only runs with the Kad `DhtNode` live, so that half is structurally
-/// satisfied by the caller and not re-checked here.
 pub(crate) async fn kad_callback_is_authorized(
     own_kad_id: [u8; 16],
     transfer_runtime: &Ed2kTransferRuntime,
@@ -434,16 +448,35 @@ pub(crate) async fn kad_callback_is_authorized(
 /// Shared by the inbound listener session and the outbound buddy link so the two
 /// acceptance surfaces cannot diverge.
 pub(crate) async fn complete_authorized_kad_callback(
-    own_kad_id: [u8; 16],
+    dht: &DhtNode,
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     callback_sessions: &super::Ed2kCallbackSessionHandle,
     callback: &KadCallbackRequest,
     source: &str,
 ) -> bool {
-    if !kad_callback_is_authorized(own_kad_id, transfer_runtime, callback).await {
+    // Recheck after decode. The ingress paths also gate before parsing to
+    // preserve stock's request-local handling of malformed callbacks while Kad
+    // is stopped.
+    if !dht.is_running() {
+        debug!(
+            "dropping {source} OP_CALLBACK file_hash={} requester={}:{}: Kad is not running",
+            callback.file_hash, callback.peer_ip, callback.peer_tcp_port
+        );
+        return false;
+    }
+    if !kad_callback_is_authorized(dht.own_id().0, transfer_runtime, callback).await {
         debug!(
             "dropping {source} OP_CALLBACK file_hash={} requester={}:{}: failed uCheck / \
              unshared-file guard",
+            callback.file_hash, callback.peer_ip, callback.peer_tcp_port
+        );
+        return false;
+    }
+    // The ownership lookup is asynchronous. Fail closed if Kad stopped while it
+    // was in flight, before handing work to the callback-session supervisor.
+    if !dht.is_running() {
+        debug!(
+            "dropping {source} OP_CALLBACK file_hash={} requester={}:{}: Kad stopped before dispatch",
             callback.file_hash, callback.peer_ip, callback.peer_tcp_port
         );
         return false;
@@ -538,12 +571,17 @@ pub(crate) fn is_connection_shutdown_error(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
 
+    use emulebb_kad_dht::{DhtConfig, DhtNode};
     use emulebb_kad_proto::Ed2kHash;
+    use emulebb_kad_proto::NodeId;
 
     use super::super::codec::KadCallbackRequest;
-    use super::{kad_callback_check_matches, kad_callback_is_authorized};
+    use super::{
+        complete_authorized_kad_callback, kad_callback_check_matches, kad_callback_is_authorized,
+    };
     use crate::ed2k_transfer::{Ed2kTransferRuntime, new_transfer_job};
 
     fn callback(buddy_check: [u8; 16], file_hash: Ed2kHash) -> KadCallbackRequest {
@@ -607,5 +645,49 @@ mod tests {
             .await
             .unwrap();
         assert!(kad_callback_is_authorized(own, &runtime, &callback(own.map(|b| !b), owned)).await);
+    }
+
+    /// Stock eMule/aMule require `CKademlia::IsRunning()` before an otherwise
+    /// valid relayed callback may induce a TCP connect-out. Retaining the shared
+    /// UDP socket while Kad is paused must not weaken that state-machine gate.
+    #[tokio::test]
+    async fn callback_acceptance_tracks_live_kad_state() {
+        let own = [0xABu8; 16];
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+            node_id: NodeId::from_bytes(own),
+            udp_key: 0x1122_3344,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(tmp.path()).unwrap());
+        let owned = Ed2kHash::from_bytes([0x44; 16]);
+        runtime
+            .ensure_job(&new_transfer_job(owned, "owned".into(), 1))
+            .await
+            .unwrap();
+        let (callback_sessions, _callback_session_inbox) =
+            super::super::ed2k_callback_session_channel();
+        let request = callback(own.map(|byte| !byte), owned);
+
+        assert!(dht.is_running());
+        assert!(
+            complete_authorized_kad_callback(&dht, &runtime, &callback_sessions, &request, "test",)
+                .await
+        );
+
+        dht.set_running(false);
+        assert!(
+            !complete_authorized_kad_callback(
+                &dht,
+                &runtime,
+                &callback_sessions,
+                &request,
+                "test",
+            )
+            .await
+        );
     }
 }

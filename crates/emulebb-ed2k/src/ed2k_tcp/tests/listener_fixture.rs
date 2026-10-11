@@ -107,6 +107,10 @@ impl ListenerTestRuntime {
         }
     }
 
+    pub(super) fn set_kad_running(&self, running: bool) {
+        self.dht.set_running(running);
+    }
+
     pub(super) async fn use_one_slot_upload_queue(&self) {
         self.transfer_runtime
             .configure_upload_queue(Ed2kUploadQueueConfig {
