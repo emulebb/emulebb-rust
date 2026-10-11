@@ -21,7 +21,7 @@ use super::{
     ResolvedServerEntry, SERVER_TCP_FLAG_LARGEFILES, SearchCriteria, ServerSession,
     ServerSessionPhase, ServerUdpPacket, decode_udp_found_source_sets,
     decode_udp_search_result_pages, encode_search_request_with_criteria, encode_source_request,
-    merge_found_sources, send_due_offer_files_advertisement, source_request_opcode,
+    is_low_id, merge_found_sources, send_due_offer_files_advertisement, source_request_opcode,
     validate_found_sources, wait_for_offer_files_settle,
 };
 use crate::ed2k_transfer::Ed2kSharedCatalog;
@@ -143,6 +143,8 @@ pub(super) enum BackgroundServerSearchRequest {
         response: oneshot::Sender<BackgroundSourceBatchSearchResponse>,
     },
     Callback {
+        expected_server_endpoint: SocketAddr,
+        expected_session_generation: u64,
         client_id: u32,
         deadline: TokioInstant,
         cancel: CancellationToken,
@@ -320,10 +322,19 @@ pub async fn search_source_batch_via_background_session(
 /// background server session.
 pub async fn request_callback_via_background_session(
     handle: &Ed2kServerSearchHandle,
+    expected_server_endpoint: SocketAddr,
+    expected_session_generation: u64,
     client_id: u32,
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> Result<Ed2kBackgroundCallbackDispatchOutcome> {
+    if client_id == 0 || !is_low_id(client_id) {
+        return Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
+            reason: format!(
+                "ED2K background callback target must be a non-zero LowID, got {client_id}"
+            ),
+        });
+    }
     if cancel.is_cancelled() {
         return Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
             reason: "ED2K background callback cancelled before queueing".to_string(),
@@ -339,6 +350,8 @@ pub async fn request_callback_via_background_session(
     let deadline = TokioInstant::from_std(deadline);
     let (response, receive_response) = oneshot::channel();
     let request = BackgroundServerSearchRequest::Callback {
+        expected_server_endpoint,
+        expected_session_generation,
         client_id,
         deadline,
         cancel: cancel.clone(),
@@ -809,6 +822,8 @@ pub(super) async fn start_background_server_search(
             }))
         }
         BackgroundServerSearchRequest::Callback {
+            expected_server_endpoint,
+            expected_session_generation,
             client_id,
             deadline,
             cancel,
@@ -831,6 +846,28 @@ pub(super) async fn start_background_server_search(
             ) else {
                 return Ok(None);
             };
+            let live_route = {
+                let state = session.state.read().await;
+                state.connected.then_some((
+                    state.endpoint,
+                    state.session_generation,
+                    state.client_id,
+                ))
+            };
+            let route_matches = context.server.base_endpoint() == expected_server_endpoint
+                && matches!(
+                    live_route,
+                    Some((Some(endpoint), generation, Some(our_client_id)))
+                        if endpoint == expected_server_endpoint
+                            && generation == expected_session_generation
+                            && !is_low_id(our_client_id)
+                );
+            if !route_matches {
+                let _ = response.send(Err(BackgroundSearchFailure::interrupted(format!(
+                    "ED2K background callback expected server {expected_server_endpoint} generation {expected_session_generation}, but live route is {live_route:?}"
+                ))));
+                return Ok(None);
+            }
             session.set_phase(
                 ServerSessionPhase::SearchActive,
                 format!("dispatching background callback request client_id={client_id}"),
@@ -896,6 +933,32 @@ pub(super) fn log_search_result_page(endpoint: SocketAddr, results: &[Ed2kSearch
 mod callback_dispatch_tests {
     use super::*;
 
+    fn expected_server_endpoint() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661))
+    }
+
+    #[tokio::test]
+    async fn invalid_callback_target_is_known_not_sent_before_queueing() {
+        let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+        for client_id in [0, u32::from_le_bytes([198, 51, 100, 7])] {
+            let outcome = request_callback_via_background_session(
+                &handle,
+                expected_server_endpoint(),
+                1,
+                client_id,
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                outcome,
+                Ed2kBackgroundCallbackDispatchOutcome::NotSent { .. }
+            ));
+            assert!(inbox.receiver.try_recv().is_err());
+        }
+    }
+
     #[tokio::test]
     async fn cancelled_before_queueing_is_known_not_sent() {
         let (handle, _inbox) = new_ed2k_server_search_channel(1);
@@ -904,6 +967,8 @@ mod callback_dispatch_tests {
 
         let outcome = request_callback_via_background_session(
             &handle,
+            expected_server_endpoint(),
+            1,
             0x1234,
             Instant::now() + Duration::from_secs(1),
             &cancel,
@@ -924,6 +989,8 @@ mod callback_dispatch_tests {
 
         let outcome = request_callback_via_background_session(
             &handle,
+            expected_server_endpoint(),
+            1,
             0x1234,
             Instant::now() + Duration::from_secs(1),
             &CancellationToken::new(),
@@ -944,6 +1011,8 @@ mod callback_dispatch_tests {
         handle
             .sender
             .send(BackgroundServerSearchRequest::Callback {
+                expected_server_endpoint: expected_server_endpoint(),
+                expected_session_generation: 1,
                 client_id: 0x1111,
                 deadline: TokioInstant::now() + Duration::from_secs(1),
                 cancel: CancellationToken::new(),
@@ -954,6 +1023,8 @@ mod callback_dispatch_tests {
 
         let outcome = request_callback_via_background_session(
             &handle,
+            expected_server_endpoint(),
+            1,
             0x2222,
             Instant::now() + Duration::from_millis(10),
             &CancellationToken::new(),
@@ -973,6 +1044,8 @@ mod callback_dispatch_tests {
         let task = tokio::spawn(async move {
             request_callback_via_background_session(
                 &handle,
+                expected_server_endpoint(),
+                1,
                 0x1234,
                 Instant::now() + Duration::from_secs(1),
                 &CancellationToken::new(),
@@ -997,6 +1070,8 @@ mod callback_dispatch_tests {
         let task = tokio::spawn(async move {
             request_callback_via_background_session(
                 &handle,
+                expected_server_endpoint(),
+                1,
                 0x1234,
                 Instant::now() + Duration::from_secs(1),
                 &CancellationToken::new(),
@@ -1029,6 +1104,8 @@ mod callback_dispatch_tests {
         let task = tokio::spawn(async move {
             request_callback_via_background_session(
                 &handle,
+                expected_server_endpoint(),
+                1,
                 0x1234,
                 Instant::now() + Duration::from_secs(1),
                 &task_cancel,
@@ -1066,6 +1143,8 @@ mod callback_dispatch_tests {
         let task = tokio::spawn(async move {
             request_callback_via_background_session(
                 &handle,
+                expected_server_endpoint(),
+                1,
                 0x1234,
                 Instant::now() + Duration::from_millis(10),
                 &CancellationToken::new(),

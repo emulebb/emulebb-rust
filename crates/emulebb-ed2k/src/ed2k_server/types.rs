@@ -71,6 +71,10 @@ pub struct Ed2kServerState {
     pub connecting: bool,
     /// Whether the current session is established.
     pub connected: bool,
+    /// Monotonic identity for the accepted server login. It changes on every
+    /// successful login even when reconnecting to the same endpoint, so
+    /// server-local LowIDs cannot leak across assignment epochs.
+    pub session_generation: u64,
 }
 
 impl Ed2kServerState {
