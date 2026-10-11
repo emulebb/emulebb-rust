@@ -557,8 +557,7 @@ impl EmulebbCore {
                     self.clone(),
                     reask_events_rx,
                     crate::ed2k_net_drivers::ReaskReengageContext {
-                        bind_ip: network.bind_ip,
-                        hello_identity,
+                        callback_sessions: callback_sessions.clone(),
                         ed2k_listener: Arc::clone(&ed2k_listener),
                         server_state: Arc::clone(&server_state),
                         kad_firewall: Arc::clone(&kad_firewall),
