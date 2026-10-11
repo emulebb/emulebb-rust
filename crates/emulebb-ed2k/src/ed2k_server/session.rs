@@ -325,10 +325,10 @@ impl ServerSession {
             self.offer_files_pacing = OfferFilesPacingMode::AwaitingCapability;
             self.offer_files_negotiation_deadline =
                 Some(Instant::now() + OFFER_FILES_NEGOTIATION_WAIT);
-            // Stock publishes immediately after OP_IDCHANGE. Capability
-            // discovery may accelerate later batches, but must never delay the
-            // first stock-shaped OP_OFFERFILES advertisement.
-            self.offer_files_next_publish_at = Some(Instant::now());
+            // A client that requested v1 is bound by the server's advertised
+            // limits. Wait briefly for the first OP_SERVERIDENT so a queued
+            // welcome frame cannot lose a race with an immediate publication.
+            self.offer_files_next_publish_at = None;
         }
         self.publish_offer_files_pacing_state().await;
     }
@@ -459,10 +459,10 @@ impl ServerSession {
     pub(super) fn offer_files_publish_due(&self) -> bool {
         self.login_accepted
             && self.offer_files_publish_requested
-            && (!matches!(
+            && !matches!(
                 self.offer_files_pacing,
                 OfferFilesPacingMode::AwaitingCapability
-            ) || !self.offer_files_sent)
+            )
             && self
                 .offer_files_next_publish_at
                 .is_some_and(|due| due <= Instant::now())
@@ -991,7 +991,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_discovery_never_delays_first_stock_offer() {
+    async fn capability_discovery_holds_first_offer_until_server_ident() {
         let (mut session, _peer) = connected_test_session_with_peer().await;
         session.login_accepted = true;
         session.configure_offer_files_capability(true);
@@ -1002,27 +1002,12 @@ mod tests {
             session.offer_files_pacing,
             OfferFilesPacingMode::AwaitingCapability
         ));
-        assert!(session.offer_files_publish_due());
+        assert!(!session.offer_files_publish_due());
+        assert_eq!(session.offer_files_next_publish_at, None);
         assert_eq!(
             session.offer_files_wakeup_at(),
-            session.offer_files_next_publish_at
+            session.offer_files_negotiation_deadline
         );
-    }
-
-    #[tokio::test]
-    async fn capability_observed_after_first_offer_preserves_rate_limit() {
-        let (mut session, _peer) = connected_test_session_with_peer().await;
-        session.login_accepted = true;
-        session.configure_offer_files_capability(true);
-        session.begin_offer_files_publishing().await;
-        let sent_at = Instant::now();
-        session.offer_files_sent = true;
-        session.offer_files_sent_at = Some(sent_at);
-        session.finish_offer_files_batch(200, 800, false);
-
-        assert!(session.offer_files_publish_requested);
-        assert_eq!(session.offer_files_next_publish_at, None);
-        assert!(!session.offer_files_publish_due());
 
         session
             .observe_offer_files_capability(OfferFilesCapabilityAdvertisement::Supported(
@@ -1034,21 +1019,15 @@ mod tests {
             session.offer_files_pacing,
             OfferFilesPacingMode::Negotiated(_)
         ));
-        assert!(
-            session.offer_files_next_publish_at.unwrap() >= sent_at + Duration::from_millis(500)
-        );
+        assert!(session.offer_files_publish_due());
     }
 
     #[tokio::test]
-    async fn capability_timeout_keeps_stock_sixty_second_pace_after_first_offer() {
+    async fn capability_timeout_releases_first_offer_in_legacy_mode() {
         let (mut session, _peer) = connected_test_session_with_peer().await;
         session.login_accepted = true;
         session.configure_offer_files_capability(true);
         session.begin_offer_files_publishing().await;
-        let sent_at = Instant::now();
-        session.offer_files_sent = true;
-        session.offer_files_sent_at = Some(sent_at);
-        session.finish_offer_files_batch(200, 800, false);
 
         session.resolve_offer_files_negotiation_timeout().await;
 
@@ -1056,10 +1035,7 @@ mod tests {
             session.offer_files_pacing,
             OfferFilesPacingMode::Legacy { .. }
         ));
-        assert_eq!(
-            session.offer_files_next_publish_at,
-            Some(sent_at + OFFER_FILES_LEGACY_MIN_INTERVAL)
-        );
+        assert!(session.offer_files_publish_due());
     }
 
     #[tokio::test]

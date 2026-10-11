@@ -20,8 +20,8 @@ use super::server_entry::ConfiguredServerEntry;
 use super::{
     Ed2kSearchFile, Ed2kServerSearchObservation, Ed2kServerState, OP_GLOBSEARCHRES, OP_IDCHANGE,
     OP_LOGINREQUEST, OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT,
-    ResolvedServerEntry, SERVER_UDP_FLAG_LARGEFILES, SearchCriteria, ServerSession,
-    ServerSessionPhase, bind_server_udp_socket, configured_server_entries,
+    ResolvedServerEntry, SERVER_UDP_FLAG_LARGEFILES, SearchCriteria, ServerLoginCapabilities,
+    ServerSession, ServerSessionPhase, bind_server_udp_socket, configured_server_entries,
     decode_search_result_page, decode_udp_search_result_pages, encode_login_request, encode_packet,
     encode_search_request, encode_search_request_with_criteria,
     login_identity_for_server_transport, read_server_udp_packet_from_any, resolve_server_entry,
@@ -456,7 +456,7 @@ async fn search_keyword_on_server(
     );
     let login_request = encode_packet(
         OP_LOGINREQUEST,
-        &encode_login_request(login_identity, nickname),
+        &encode_login_request(login_identity, nickname, ServerLoginCapabilities::default()),
         false,
     )?;
     if use_server_obfuscation {

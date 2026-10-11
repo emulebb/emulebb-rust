@@ -19,9 +19,9 @@ use emulebb_kad_proto::Ed2kHash;
 use super::packet_handler::decode_id_change_payload;
 use super::{
     Ed2kFoundSource, Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_IDCHANGE,
-    OP_LOGINREQUEST, OP_REJECT, ResolvedServerEntry, ServerSession, ServerSessionPhase,
-    annotate_found_sources_server, configured_server_entries, decode_found_sources,
-    encode_login_request, encode_packet, encode_source_request,
+    OP_LOGINREQUEST, OP_REJECT, ResolvedServerEntry, ServerLoginCapabilities, ServerSession,
+    ServerSessionPhase, annotate_found_sources_server, configured_server_entries,
+    decode_found_sources, encode_login_request, encode_packet, encode_source_request,
     login_identity_for_server_transport, merge_found_sources, resolve_server_entry,
     send_connected_server_startup, should_use_server_obfuscation, source_request_opcode,
     validate_found_sources,
@@ -210,7 +210,7 @@ async fn search_sources_on_server(
     .await?;
     let login_request = encode_packet(
         OP_LOGINREQUEST,
-        &encode_login_request(login_identity, nickname),
+        &encode_login_request(login_identity, nickname, ServerLoginCapabilities::default()),
         false,
     )?;
     if use_server_obfuscation {
@@ -227,7 +227,7 @@ async fn search_sources_on_server(
         session
             .send_packet(
                 OP_LOGINREQUEST,
-                &encode_login_request(login_identity, nickname),
+                &encode_login_request(login_identity, nickname, ServerLoginCapabilities::default()),
             )
             .await?;
     }

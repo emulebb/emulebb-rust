@@ -225,6 +225,7 @@ fn login_request_matches_oracle_tag_shape() {
             direct_udp_callback: false,
         },
         HELLO_NICKNAME,
+        ServerLoginCapabilities::default(),
     );
     // CT_NAME login tag uses the stock WriteTagToFile form: TAGTYPE_STRING + u16 name-len.
     let nickname_tag_header = [TAGTYPE_STRING, 0x01, 0x00, CT_NAME];
@@ -283,6 +284,35 @@ fn login_request_matches_oracle_tag_shape() {
 }
 
 #[test]
+fn login_request_opts_into_offer_files_v1_with_exact_uint32_tag() {
+    let payload = encode_login_request(
+        Ed2kHelloIdentity {
+            user_hash: [0x11; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(true),
+            direct_udp_callback: false,
+        },
+        HELLO_NICKNAME,
+        ServerLoginCapabilities {
+            offer_files_v1: true,
+        },
+    );
+
+    assert_eq!(
+        u32::from_le_bytes([payload[22], payload[23], payload[24], payload[25]]),
+        5
+    );
+    let mut capability_tag = vec![TAGTYPE_UINT32, 12, 0];
+    capability_tag.extend_from_slice(b"offerfiles_v");
+    capability_tag.extend_from_slice(&OFFER_FILES_CAPABILITY_VERSION.to_le_bytes());
+    assert!(payload.ends_with(&capability_tag));
+}
+
+#[test]
 fn login_request_reuses_client_id_and_configured_nickname() {
     let payload = encode_login_request(
         Ed2kHelloIdentity {
@@ -296,6 +326,7 @@ fn login_request_reuses_client_id_and_configured_nickname() {
             direct_udp_callback: false,
         },
         "Configured Nick",
+        ServerLoginCapabilities::default(),
     );
 
     assert_eq!(
@@ -323,6 +354,7 @@ fn login_request_omits_crypt_flags_when_obfuscation_is_off() {
             direct_udp_callback: false,
         },
         HELLO_NICKNAME,
+        ServerLoginCapabilities::default(),
     );
 
     assert!(payload.windows(4).any(
@@ -353,6 +385,7 @@ fn login_request_matches_stock_072a_plaintext_sample() {
                 direct_udp_callback: false,
             },
             HELLO_NICKNAME,
+            ServerLoginCapabilities::default(),
         ),
         false,
     )
@@ -385,6 +418,7 @@ fn login_request_matches_stock_072a_obfuscated_preference_sample() {
                 direct_udp_callback: false,
             },
             HELLO_NICKNAME,
+            ServerLoginCapabilities::default(),
         ),
         false,
     )
