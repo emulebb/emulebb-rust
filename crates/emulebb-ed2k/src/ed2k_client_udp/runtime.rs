@@ -28,6 +28,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
+use super::direct_callback::{
+    DirectCallbackArgs, DirectCallbackDispatchOutcome, send_direct_callback_req,
+};
 use super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 use super::service::{ReaskInboundOutcome, ReaskService, ReaskTickPacing, TransferReaskInfo};
 use super::state::{ReaskAction, ReaskSource};
@@ -76,32 +79,6 @@ pub struct DirectCallbackDispatch {
     deadline: Instant,
     cancel: CancellationToken,
     outcome: oneshot::Sender<DirectCallbackDispatchOutcome>,
-}
-
-/// Whether the client-UDP worker proved that a direct callback did or did not
-/// reach the local datagram socket.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DirectCallbackDispatchOutcome {
-    Sent,
-    NotSent { reason: String },
-}
-
-/// Inputs for [`ReaskSourceHandle::send_direct_callback`]: everything the loop
-/// needs to encode and address a single `OP_DIRECTCALLBACKREQ`.
-#[derive(Debug, Clone)]
-pub struct DirectCallbackArgs {
-    /// The source's Kad UDP endpoint (its eD2k IP + advertised `FT_SOURCEUPORT`).
-    pub dest: SocketAddr,
-    /// Our externally-advertised eD2k TCP port the source connects back to.
-    pub our_tcp_port: u16,
-    /// Our eD2k user hash (identifies the connect-back to the source).
-    pub our_user_hash: [u8; 16],
-    /// Our connect options (`GetMyConnectOptions(true, false)`).
-    pub connect_options: u8,
-    /// The source's user hash — obfuscation key material.
-    pub dest_user_hash: Option<[u8; 16]>,
-    /// Whether to obfuscate toward the source (`ShouldReceiveCryptUDPPackets`).
-    pub obfuscate: bool,
 }
 
 /// Receiver end of the detach-command channel, owned by the reask loop.
@@ -690,44 +667,6 @@ fn apply_reask_command(
         }
         // Handled inline in the loop (needs async I/O); never routed here.
         ReaskCommand::AnswerCallbackTcp { .. } | ReaskCommand::SendDirectCallback(_) => {}
-    }
-}
-
-/// Originate one `OP_DIRECTCALLBACKREQ` over the shared client-UDP socket (we
-/// are a downloader asking a firewalled type-6 source to connect back). Mirrors
-/// the oracle `CCS_DIRECTCALLBACK` send: our TCP port + userhash + connect
-/// options, obfuscated toward the source when its crypt key is known.
-async fn send_direct_callback_req(
-    dht: &DhtNode,
-    our_public_ip: [u8; 4],
-    args: DirectCallbackArgs,
-) -> DirectCallbackDispatchOutcome {
-    let target = super::outbound::OutboundReaskTarget {
-        dest_user_hash: args.dest_user_hash.unwrap_or([0u8; 16]),
-        our_public_ip,
-        obfuscate: args.obfuscate && args.dest_user_hash.is_some(),
-    };
-    let datagram = super::outbound::build_direct_callback_req_datagram(
-        args.our_tcp_port,
-        &args.our_user_hash,
-        args.connect_options,
-        &target,
-    );
-    match dht.send_raw_datagram(args.dest, &datagram.bytes).await {
-        Ok(()) => {
-            super::dump::dump_client_udp_send(args.dest, &datagram);
-            trace!("ed2k udp: sent OP_DIRECTCALLBACKREQ to {}", args.dest);
-            DirectCallbackDispatchOutcome::Sent
-        }
-        Err(error) => {
-            trace!(
-                "ed2k udp: OP_DIRECTCALLBACKREQ to {} failed: {error}",
-                args.dest
-            );
-            DirectCallbackDispatchOutcome::NotSent {
-                reason: error.to_string(),
-            }
-        }
     }
 }
 

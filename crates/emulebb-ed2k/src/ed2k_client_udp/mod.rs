@@ -27,6 +27,7 @@
 
 pub(crate) mod buddy_relay;
 pub(crate) mod codec;
+mod direct_callback;
 pub(crate) mod dispatch;
 pub(crate) mod dump;
 pub(crate) mod outbound;
@@ -42,6 +43,9 @@ pub(crate) use codec::{
     ReaskCallbackUdp, ReaskFilePing, decode_reask_ack, decode_reask_callback_udp,
     decode_reask_file_ping, encode_reask_ack, encode_reask_callback_udp, encode_reask_file_ping,
 };
+pub use direct_callback::{
+    DirectCallbackArgs, DirectCallbackDispatchOutcome, DirectCallbackSender,
+};
 pub(crate) use dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 pub(crate) use outbound::{
     ClientUdpDatagram, OutboundReaskTarget, build_direct_callback_req_datagram,
@@ -51,9 +55,9 @@ pub(crate) use outbound::{
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
 pub use runtime::{
-    DirectCallbackArgs, DirectCallbackDispatch, DirectCallbackDispatchOutcome, ReaskCommand,
-    ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent, ReaskEventReceiver, ReaskEventSender,
-    ReaskSourceHandle, reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
+    DirectCallbackDispatch, ReaskCommand, ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent,
+    ReaskEventReceiver, ReaskEventSender, ReaskSourceHandle, reask_command_channel,
+    reask_event_channel, run_ed2k_udp_reask_loop,
 };
 pub(crate) use service::{ReaskInboundOutcome, ReaskService, ReaskTickOutput, TransferReaskInfo};
 pub(crate) use source_set::ReaskSourceSet;
