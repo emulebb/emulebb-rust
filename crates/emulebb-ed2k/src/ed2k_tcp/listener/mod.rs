@@ -29,6 +29,10 @@ pub use callback::{
     Ed2kCallbackDispatchError, Ed2kCallbackSessionHandle, Ed2kCallbackSessionInbox,
     Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest, ed2k_callback_session_channel,
 };
+#[cfg(test)]
+pub(in crate::ed2k_tcp) use callback::{
+    Ed2kCallbackSessionRuntime, run_callback_session_supervisor,
+};
 pub(crate) use session::reply_with_firewall_udp;
 pub(in crate::ed2k_tcp) use session::{
     Ed2kConnectionContext, Ed2kSessionSource, handle_connection,

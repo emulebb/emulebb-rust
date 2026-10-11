@@ -122,7 +122,7 @@ fn callback_session_channel_with_capacity(
 
 /// Long-lived dependencies cloned into each adopted callback session.
 #[derive(Clone)]
-pub(super) struct Ed2kCallbackSessionRuntime {
+pub(in crate::ed2k_tcp) struct Ed2kCallbackSessionRuntime {
     pub dht: DhtNode,
     pub server_state: Arc<RwLock<Ed2kServerState>>,
     pub kad_firewall: Arc<Mutex<KadFirewallState>>,
@@ -138,7 +138,7 @@ pub(super) struct Ed2kCallbackSessionRuntime {
 }
 
 /// Drain callback commands while keeping both queued and active work bounded.
-pub(super) async fn run_callback_session_supervisor(
+pub(in crate::ed2k_tcp) async fn run_callback_session_supervisor(
     mut inbox: Ed2kCallbackSessionInbox,
     runtime: Ed2kCallbackSessionRuntime,
 ) {

@@ -1,6 +1,31 @@
 use super::*;
 use crate::ed2k_tcp::{reply_with_firewall_udp, send_kad_firewall_tcp_ack};
 
+fn callback_request(
+    peer_addr: SocketAddr,
+    expected_user_hash: Option<[u8; 16]>,
+    peer_connect_options: Option<u8>,
+) -> Ed2kCallbackSessionRequest {
+    Ed2kCallbackSessionRequest {
+        peer_addr,
+        expected_user_hash,
+        peer_connect_options,
+        timeout: Duration::from_secs(3),
+        origin: Ed2kCallbackSessionOrigin::Server,
+    }
+}
+
+async fn stop_callback_supervisor(
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    supervisor: tokio::task::JoinHandle<()>,
+) {
+    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::timeout(Duration::from_secs(2), supervisor)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn adopted_callback_session_serves_after_hello_answer() {
     let runtime = ListenerTestRuntime::new(
@@ -15,7 +40,10 @@ async fn adopted_callback_session_serves_after_hello_answer() {
         .await;
     let requester = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let requester_addr = requester.local_addr().unwrap();
-    let session = runtime.spawn_callback_upload(requester_addr).await;
+    let (callback_sessions, shutdown, supervisor) = runtime.spawn_callback_session_supervisor();
+    callback_sessions
+        .try_start(callback_request(requester_addr, None, None))
+        .unwrap();
     let (mut stream, _) = requester.accept().await.unwrap();
 
     let hello = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_HELLO).await;
@@ -40,7 +68,7 @@ async fn adopted_callback_session_serves_after_hello_answer() {
     assert_eq!(&filename_answer[6..22], &file.file_hash.0);
 
     drop(stream);
-    session.await.unwrap();
+    stop_callback_supervisor(shutdown, supervisor).await;
 }
 
 #[tokio::test]
@@ -54,9 +82,8 @@ async fn callback_connect_uses_plaintext_when_peer_has_no_crypt_metadata() {
         packet
     });
 
-    let mode = connect_callback_peer(
-        test_bind_ip(),
-        peer_addr,
+    let runtime = ListenerTestRuntime::new(
+        "ed2k-callback-plaintext-session",
         Ed2kHelloIdentity {
             user_hash: [0x55; 16],
             client_id: 0,
@@ -67,17 +94,19 @@ async fn callback_connect_uses_plaintext_when_peer_has_no_crypt_metadata() {
             connect_options: emule_connect_options(true),
             direct_udp_callback: false,
         },
-        None,
-        None,
-        Duration::from_secs(3),
+        [0x55; 16],
+        0x1020_3040,
     )
-    .await
-    .unwrap();
+    .await;
+    let (callback_sessions, shutdown, supervisor) = runtime.spawn_callback_session_supervisor();
+    callback_sessions
+        .try_start(callback_request(peer_addr, None, None))
+        .unwrap();
 
     let packet = server.await.unwrap();
-    assert_eq!(mode, Ed2kPeerConnectMode::Plaintext);
     assert_eq!(packet[0], OP_EDONKEYPROT);
     assert_eq!(packet[5], OP_HELLO);
+    stop_callback_supervisor(shutdown, supervisor).await;
 }
 
 #[tokio::test]
@@ -143,9 +172,8 @@ async fn callback_connect_uses_obfuscation_when_peer_supports_crypt() {
         encrypted_packet
     });
 
-    let mode = connect_callback_peer(
-        test_bind_ip(),
-        peer_addr,
+    let runtime = ListenerTestRuntime::new(
+        "ed2k-callback-obfuscated-session",
         Ed2kHelloIdentity {
             user_hash: [0x77; 16],
             client_id: 0,
@@ -156,16 +184,24 @@ async fn callback_connect_uses_obfuscation_when_peer_supports_crypt() {
             connect_options: emule_connect_options(true),
             direct_udp_callback: false,
         },
-        Some(peer_user_hash),
-        Some(super::EMULE_CRYPT_SUPPORTS | super::EMULE_CRYPT_REQUESTS),
-        Duration::from_secs(3),
+        [0x66; 16],
+        0x5060_7080,
     )
-    .await
-    .unwrap();
+    .await;
+    let (callback_sessions, shutdown, supervisor) = runtime.spawn_callback_session_supervisor();
+    callback_sessions
+        .try_start(callback_request(
+            peer_addr,
+            Some(peer_user_hash),
+            Some(super::EMULE_CRYPT_SUPPORTS | super::EMULE_CRYPT_REQUESTS),
+        ))
+        .unwrap();
 
     let packet = server.await.unwrap();
-    assert_eq!(mode, Ed2kPeerConnectMode::Obfuscated);
-    assert_eq!(packet, expected_hello);
+    assert_eq!(packet[0], OP_EDONKEYPROT);
+    assert_eq!(packet[5], OP_HELLO);
+    assert_eq!(&packet[7..23], &[0x77; 16]);
+    stop_callback_supervisor(shutdown, supervisor).await;
 }
 
 #[tokio::test]
@@ -201,9 +237,8 @@ async fn callback_connect_stays_plaintext_when_local_obfuscation_is_disabled() {
         packet
     });
 
-    let mode = connect_callback_peer(
-        test_bind_ip(),
-        peer_addr,
+    let runtime = ListenerTestRuntime::new(
+        "ed2k-callback-local-plaintext-session",
         Ed2kHelloIdentity {
             user_hash: [0x88; 16],
             client_id: 0,
@@ -214,16 +249,24 @@ async fn callback_connect_stays_plaintext_when_local_obfuscation_is_disabled() {
             connect_options: emule_connect_options(false),
             direct_udp_callback: false,
         },
-        Some([0x99; 16]),
-        Some(super::EMULE_CRYPT_SUPPORTS | super::EMULE_CRYPT_REQUESTS),
-        Duration::from_secs(3),
+        [0x88; 16],
+        0x90A0_B0C0,
     )
-    .await
-    .unwrap();
+    .await;
+    let (callback_sessions, shutdown, supervisor) = runtime.spawn_callback_session_supervisor();
+    callback_sessions
+        .try_start(callback_request(
+            peer_addr,
+            Some([0x99; 16]),
+            Some(super::EMULE_CRYPT_SUPPORTS | super::EMULE_CRYPT_REQUESTS),
+        ))
+        .unwrap();
 
     let packet = server.await.unwrap();
-    assert_eq!(mode, Ed2kPeerConnectMode::Plaintext);
-    assert_eq!(packet, expected_hello);
+    assert_eq!(packet[0], OP_EDONKEYPROT);
+    assert_eq!(packet[5], OP_HELLO);
+    assert_eq!(&packet[7..23], &[0x88; 16]);
+    stop_callback_supervisor(shutdown, supervisor).await;
 }
 
 #[tokio::test]

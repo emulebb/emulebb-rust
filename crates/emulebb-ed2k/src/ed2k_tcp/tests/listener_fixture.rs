@@ -169,52 +169,36 @@ impl ListenerTestRuntime {
         })
     }
 
-    /// Dial a peer and transfer the established callback transport into the
-    /// ordinary long-lived peer-session dispatcher.
-    pub(super) async fn spawn_callback_upload(
+    /// Start the production callback-session supervisor over this fixture's
+    /// listener dependencies. Tests submit the same typed command as server,
+    /// Kad, and direct-UDP routes.
+    pub(super) fn spawn_callback_session_supervisor(
         &self,
-        peer_addr: SocketAddr,
-    ) -> tokio::task::JoinHandle<()> {
-        let transport = Ed2kTransport::connect_outgoing(
-            test_bind_ip(),
-            peer_addr,
-            self.hello_identity.connect_options,
-            None,
-            None,
-            crate::ed2k_tcp::ED2K_CONNECTION_IDLE_TIMEOUT,
-        )
-        .await
-        .unwrap();
-        let dht = self.dht.clone();
-        let transfer_runtime = Arc::clone(&self.transfer_runtime);
-        let server_state = Arc::clone(&self.server_state);
-        let kad_firewall = Arc::clone(&self.kad_firewall);
-        let secure_ident = Arc::clone(&self.secure_ident);
-        let hello_identity = self.hello_identity;
-
-        tokio::spawn(async move {
-            super::handle_connection(
-                super::Ed2kSessionSource::CallbackUpload {
-                    transport: Box::new(transport),
-                    expected_user_hash: None,
-                },
-                peer_addr,
-                super::Ed2kConnectionContext {
-                    dht: &dht,
-                    server_state: &server_state,
-                    kad_firewall: &kad_firewall,
-                    secure_ident: &secure_ident,
-                    transfer_runtime: &transfer_runtime,
-                    hello_identity,
-                    reachability: &crate::reachability::ExternalReachability::new(),
-                    buddy_registry: &crate::buddy_socket::BuddySocketRegistry::new(),
-                    port_test_registry: &crate::PortTestRegistry::new(),
-                    callback_sessions: callback_session_handle_for_test(),
-                },
-            )
-            .await
-            .unwrap();
-        })
+    ) -> (
+        Ed2kCallbackSessionHandle,
+        Arc<std::sync::atomic::AtomicBool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (handle, inbox) = ed2k_callback_session_channel();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = tokio::spawn(crate::ed2k_tcp::listener::run_callback_session_supervisor(
+            inbox,
+            crate::ed2k_tcp::listener::Ed2kCallbackSessionRuntime {
+                dht: self.dht.clone(),
+                server_state: Arc::clone(&self.server_state),
+                kad_firewall: Arc::clone(&self.kad_firewall),
+                secure_ident: Arc::clone(&self.secure_ident),
+                transfer_runtime: Arc::clone(&self.transfer_runtime),
+                hello_identity: self.hello_identity,
+                reachability: crate::reachability::ExternalReachability::new(),
+                buddy_registry: crate::buddy_socket::BuddySocketRegistry::new(),
+                port_test_registry: crate::PortTestRegistry::new(),
+                callback_sessions: handle.clone(),
+                bind_ip: test_bind_ip(),
+                shutdown: Arc::clone(&shutdown),
+            },
+        ));
+        (handle, shutdown, task)
     }
 
     pub(super) fn spawn_listener_connections(
