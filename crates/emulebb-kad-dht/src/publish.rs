@@ -6,7 +6,9 @@
 //! a per-contact outcome rather than a single transaction-wide success bit.
 
 use crate::error::DhtError;
-use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
+use crate::traversal::{
+    MoreResultsMode, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
+};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::constants::{
     KAD_VERSION_AICH_KEYWORD_PUBLISH, KADEMLIA_VERSION2_47A, KADEMLIA_VERSION4_47C,
@@ -291,6 +293,7 @@ async fn resolve_publish_contacts(
             response_grace: Duration::ZERO,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout: publish_contact_fanout.max(K),
+            more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class,

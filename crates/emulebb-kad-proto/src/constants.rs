@@ -82,6 +82,10 @@ pub const KADEMLIA_FIND_NODE: u8 = 0x0B;
 /// close nodes after a stalled value lookup (eMule `CSearch::JumpStart`
 /// `SendFindValue(.., true)`; `KADEMLIA_FIND_VALUE_MORE == KADEMLIA_FIND_NODE`).
 pub const KADEMLIA_FIND_VALUE_MORE: u8 = KADEMLIA_FIND_NODE;
+/// Maximum number of distinct responders that one value search may re-ask for
+/// the wider `KADEMLIA_FIND_VALUE_MORE` contact set. This is a per-search wire
+/// traffic bound, matching the aMule community implementation.
+pub const KADEMLIA_FIND_VALUE_MORE_REASKS: usize = 4;
 /// Contacts to request in Req for store operations.
 pub const KADEMLIA_STORE: u8 = 0x04;
 /// Max XOR distance high-32-bits for sending search packets to a node.
