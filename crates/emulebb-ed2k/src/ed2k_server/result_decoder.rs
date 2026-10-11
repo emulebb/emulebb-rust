@@ -74,10 +74,24 @@ pub(super) fn decode_udp_search_result_pages(payload: &[u8]) -> Result<Vec<Searc
 }
 
 pub(super) fn decode_udp_found_source_sets(payload: &[u8]) -> Result<Vec<Vec<Ed2kFoundSource>>> {
-    let mut cursor = payload;
-    let mut sets = Vec::new();
-    while !cursor.is_empty() {
-        let (sources, rest) = decode_found_sources_from(cursor, false)?;
+    if payload.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Lugdunum concatenates additional file source-sets behind an embedded
+    // E3/OP_GLOBFOUNDSOURCES marker. Commit the first valid set before parsing
+    // a marked continuation: stock clients keep that prefix if a later segment
+    // is malformed, and bytes without the marker are server-specific trailing
+    // data rather than another source-set.
+    let (first, mut cursor) = decode_found_sources_from(payload, false)?;
+    let mut sets = vec![first];
+    while udp_chain_matches(cursor, OP_GLOBFOUNDSOURCES) {
+        cursor = &cursor[2..];
+        if cursor.is_empty() {
+            break;
+        }
+        let Ok((sources, rest)) = decode_found_sources_from(cursor, false) else {
+            break;
+        };
         sets.push(sources);
         cursor = rest;
     }
@@ -410,12 +424,7 @@ fn decode_found_sources_from(
         });
     }
 
-    let rest = if udp_chain_matches(cursor, OP_GLOBFOUNDSOURCES) {
-        &cursor[2..]
-    } else {
-        cursor
-    };
-    Ok((results, rest))
+    Ok((results, cursor))
 }
 
 fn udp_chain_matches(payload: &[u8], opcode: u8) -> bool {
@@ -459,6 +468,45 @@ mod tests {
         let page = decode_search_result_page(&payload).expect("legitimate page decodes");
         assert_eq!(page.files.len(), 1);
         assert_eq!(page.files[0].file_name.as_deref(), Some("a.txt"));
+    }
+
+    fn udp_found_source_set(hash_byte: u8, client_id: u32, tcp_port: u16) -> Vec<u8> {
+        let mut payload = vec![hash_byte; 16];
+        payload.push(1);
+        payload.extend_from_slice(&client_id.to_le_bytes());
+        payload.extend_from_slice(&tcp_port.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn udp_found_sources_requires_lugdunum_chain_marker() {
+        let first = udp_found_source_set(0x11, 0x0102_0304, 4662);
+        let second = udp_found_source_set(0x22, 0x0506_0708, 4663);
+
+        let mut marked = first.clone();
+        marked.extend_from_slice(&[OP_EDONKEYPROT, OP_GLOBFOUNDSOURCES]);
+        marked.extend_from_slice(&second);
+        let sets = decode_udp_found_source_sets(&marked).expect("marked chain decodes");
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[0][0].file_hash, Ed2kHash([0x11; 16]));
+        assert_eq!(sets[1][0].file_hash, Ed2kHash([0x22; 16]));
+
+        let mut unmarked = first;
+        unmarked.extend_from_slice(&second);
+        let sets = decode_udp_found_source_sets(&unmarked).expect("valid prefix decodes");
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0][0].file_hash, Ed2kHash([0x11; 16]));
+    }
+
+    #[test]
+    fn udp_found_sources_retains_prefix_before_malformed_marked_tail() {
+        let mut payload = udp_found_source_set(0x33, 0x0102_0304, 4662);
+        payload.extend_from_slice(&[OP_EDONKEYPROT, OP_GLOBFOUNDSOURCES]);
+        payload.extend_from_slice(&[0x44; 8]);
+
+        let sets = decode_udp_found_source_sets(&payload).expect("valid prefix survives");
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0][0].file_hash, Ed2kHash([0x33; 16]));
     }
 
     #[test]
