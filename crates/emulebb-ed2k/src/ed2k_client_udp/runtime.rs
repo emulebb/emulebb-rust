@@ -21,16 +21,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
 use emulebb_kad_dht::{DhtNode, ForeignDatagramHandler};
 use emulebb_kad_proto::Ed2kHash;
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
-use super::direct_callback::{
-    DirectCallbackArgs, DirectCallbackDispatchOutcome, send_direct_callback_req,
-};
 use super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 use super::service::{ReaskInboundOutcome, ReaskService, ReaskTickPacing, TransferReaskInfo};
 use super::state::{ReaskAction, ReaskSource};
@@ -63,22 +58,6 @@ pub enum ReaskCommand {
         dest: SocketAddr,
         forwarded_reask: Vec<u8>,
     },
-    /// Originate an `OP_DIRECTCALLBACKREQ` to a firewalled type-6 source's Kad
-    /// UDP endpoint so it TCP-connects back to us (oracle `CCS_DIRECTCALLBACK`).
-    /// Sent over the shared client-UDP socket, obfuscated toward the source when
-    /// its crypt key is known.
-    SendDirectCallback(DirectCallbackDispatch),
-}
-
-/// Queued ownership of one direct-callback UDP write. The deadline and cancel
-/// token travel with the work so a delayed reask loop cannot send after the
-/// callback ticket or its download attempt is no longer valid.
-#[derive(Debug)]
-pub struct DirectCallbackDispatch {
-    args: DirectCallbackArgs,
-    deadline: Instant,
-    cancel: CancellationToken,
-    outcome: oneshot::Sender<DirectCallbackDispatchOutcome>,
 }
 
 /// Receiver end of the detach-command channel, owned by the reask loop.
@@ -160,66 +139,6 @@ impl ReaskSourceHandle {
             dest,
             forwarded_reask,
         });
-    }
-
-    /// Originate an `OP_DIRECTCALLBACKREQ` to a firewalled type-6 source and
-    /// wait until the client-UDP worker classifies the local socket write.
-    ///
-    /// A pre-queue cancellation, expired deadline, full/closed command queue,
-    /// or local UDP send error is proven `NotSent`. Cancellation, expiry, or
-    /// worker loss after queue admission is returned as an error because the
-    /// write may already have started; callers must retain callback admission
-    /// authority in that ambiguous case.
-    pub async fn send_direct_callback(
-        &self,
-        args: DirectCallbackArgs,
-        deadline: Instant,
-        cancel: &CancellationToken,
-    ) -> Result<DirectCallbackDispatchOutcome> {
-        if cancel.is_cancelled() {
-            return Ok(DirectCallbackDispatchOutcome::NotSent {
-                reason: "direct callback cancelled before queue admission".to_string(),
-            });
-        }
-        if Instant::now() >= deadline {
-            return Ok(DirectCallbackDispatchOutcome::NotSent {
-                reason: "direct callback deadline elapsed before queue admission".to_string(),
-            });
-        }
-
-        let (outcome, response) = oneshot::channel();
-        let command = ReaskCommand::SendDirectCallback(DirectCallbackDispatch {
-            args,
-            deadline,
-            cancel: cancel.clone(),
-            outcome,
-        });
-        match self.0.try_send(command) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                return Ok(DirectCallbackDispatchOutcome::NotSent {
-                    reason: "direct callback command queue is full".to_string(),
-                });
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                return Ok(DirectCallbackDispatchOutcome::NotSent {
-                    reason: "direct callback command queue is closed".to_string(),
-                });
-            }
-        }
-
-        tokio::select! {
-            biased;
-            outcome = response => outcome.map_err(|_| {
-                anyhow::anyhow!("direct callback worker stopped after queue admission")
-            }),
-            () = cancel.cancelled() => {
-                bail!("direct callback cancelled after queue admission; delivery unknown")
-            }
-            () = tokio::time::sleep_until(deadline.into()) => {
-                bail!("direct callback deadline elapsed after queue admission; delivery unknown")
-            }
-        }
     }
 }
 
@@ -371,8 +290,7 @@ pub async fn run_ed2k_udp_reask_loop(
             }
             maybe = commands.recv(), if reask_enabled => {
                 let Some(command) = maybe else { break };
-                // AnswerCallbackTcp / SendDirectCallback need async UDP I/O
-                // (handled here); the rest are sync.
+                // AnswerCallbackTcp needs async UDP I/O; the rest are sync.
                 match command {
                     ReaskCommand::AnswerCallbackTcp { dest, forwarded_reask } => {
                         match super::codec::decode_reask_file_ping(&forwarded_reask, udp_version) {
@@ -388,9 +306,6 @@ pub async fn run_ed2k_udp_reask_loop(
                             ),
                         }
                     }
-                    ReaskCommand::SendDirectCallback(dispatch) => {
-                        dispatch_direct_callback(&dht, public_ip.octets(), dispatch).await;
-                    }
                     other => apply_reask_command(&mut service, &events, other),
                 }
             }
@@ -400,34 +315,6 @@ pub async fn run_ed2k_udp_reask_loop(
         }
     }
     debug!("ed2k udp reask loop stopped");
-}
-
-fn direct_callback_dispatch_stopped(
-    deadline: Instant,
-    cancel: &CancellationToken,
-) -> Option<DirectCallbackDispatchOutcome> {
-    let reason = if cancel.is_cancelled() {
-        "direct callback cancelled before UDP send"
-    } else if Instant::now() >= deadline {
-        "direct callback deadline elapsed before UDP send"
-    } else {
-        return None;
-    };
-    Some(DirectCallbackDispatchOutcome::NotSent {
-        reason: reason.to_string(),
-    })
-}
-
-async fn dispatch_direct_callback(
-    dht: &DhtNode,
-    our_public_ip: [u8; 4],
-    dispatch: DirectCallbackDispatch,
-) {
-    let outcome = match direct_callback_dispatch_stopped(dispatch.deadline, &dispatch.cancel) {
-        Some(outcome) => outcome,
-        None => send_direct_callback_req(dht, our_public_ip, dispatch.args).await,
-    };
-    let _ = dispatch.outcome.send(outcome);
 }
 
 /// Decide the loop->core events for a routed downloader reply. Pure so the
@@ -666,7 +553,7 @@ fn apply_reask_command(
             service.mark_no_needed_parts(endpoint.0, endpoint.1, Instant::now());
         }
         // Handled inline in the loop (needs async I/O); never routed here.
-        ReaskCommand::AnswerCallbackTcp { .. } | ReaskCommand::SendDirectCallback(_) => {}
+        ReaskCommand::AnswerCallbackTcp { .. } => {}
     }
 }
 
