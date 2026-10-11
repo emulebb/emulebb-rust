@@ -348,17 +348,66 @@ impl Drop for Ed2kUploadWorkGuard {
     }
 }
 
-/// One granted upload slot whose peer had no live connection at promotion:
-/// the promote-connect driver must dial the peer's advertised endpoint and
-/// push OP_ACCEPTUPLOADREQ after the handshake (master `AddUpNextClient`,
-/// UploadQueue.cpp:327-361; `ConnectionEstablished`, BaseClient.cpp:1634-1641).
-/// The handle owns the session: releasing it on a failed connect drops the
-/// grant like the master's failed `TryToConnect` path.
+/// Callback route armed for a disconnected LowID waiter. The route is recorded
+/// before wire dispatch so a connect-back can atomically claim the entitlement
+/// even when it wins the race with the sender acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ed2kUploadCallbackRoute {
+    DirectUdp {
+        endpoint: SocketAddr,
+    },
+    Server {
+        endpoint: SocketAddr,
+        session_generation: u64,
+        client_id: u32,
+    },
+}
+
+/// A HighID waiter that already owns an active upload slot while Rust dials its
+/// advertised endpoint.
 #[derive(Debug, Clone)]
-pub(crate) struct Ed2kUploadPendingPromotion {
+pub(crate) struct Ed2kUploadGrantedPromotion {
     pub(crate) peer: Ed2kUploadPeerIdentity,
     pub(crate) file_hash: String,
     pub(crate) handle: Ed2kUploadSessionHandle,
+    pub(crate) expires_at: Instant,
+}
+
+/// A LowID callback entitlement. It deliberately has no upload-session handle:
+/// the peer remains a waiting client and consumes no active slot until a
+/// matching inbound HELLO atomically claims this exact generation.
+#[derive(Debug)]
+pub(crate) struct Ed2kUploadCallbackPermit {
+    key: Ed2kUploadSessionKey,
+    pub(crate) peer: Ed2kUploadPeerIdentity,
+    pub(crate) file_hash: String,
+    pub(crate) generation: u64,
+    pub(crate) expires_at: Instant,
+    cancel: CancellationToken,
+}
+
+impl Ed2kUploadCallbackPermit {
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+}
+
+/// One disconnected waiter selected for connection establishment. The enum
+/// keeps real slot ownership (HighID direct dial) disjoint from a revocable
+/// LowID callback entitlement.
+#[derive(Debug)]
+pub(crate) enum Ed2kUploadPendingPromotion {
+    DirectDial(Ed2kUploadGrantedPromotion),
+    Callback(Ed2kUploadCallbackPermit),
+}
+
+#[derive(Debug)]
+pub(crate) enum Ed2kUploadCallbackClaim {
+    Granted(Box<Ed2kUploadGrantedPromotion>),
+    /// The HELLO matched a retained missed-turn entitlement, but another
+    /// callback already occupies the single temporary overflow slot.
+    MatchedButFull,
+    NotMatched,
 }
 
 /// Queue-visible state of one inbound upload session.
@@ -463,6 +512,13 @@ struct Ed2kUploadSessionEntry {
     /// US_ONUPLOADQUEUE clients, BaseClient.cpp:1229) but is `connected = false`
     /// until it re-asks or the promote-connect driver dials it for a slot grant.
     connected: bool,
+    /// LowID callback entitlement. It stays on the waiting queue and is
+    /// therefore excluded from active-slot accounting until a matching HELLO
+    /// atomically claims it.
+    callback_promotion: Option<Ed2kUploadCallbackPromotion>,
+    /// Prevent repeated callback traffic after a proven failure or timeout.
+    /// A fresh live reask clears this marker.
+    callback_promotion_suppressed: bool,
     promotion_deadline: Option<Instant>,
     cancel: CancellationToken,
     activity: Arc<Ed2kUploadLeaseActivity>,
@@ -504,6 +560,14 @@ struct Ed2kUploadSessionEntry {
     rate_meter: WindowedRateMeter,
     requester_part_status: Option<Vec<bool>>,
     requester_complete_source_count: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+struct Ed2kUploadCallbackPromotion {
+    generation: u64,
+    deadline: Option<Instant>,
+    cancel: CancellationToken,
+    route: Option<Ed2kUploadCallbackRoute>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,6 +625,7 @@ pub(super) struct Ed2kUploadQueueState {
     /// AddUpNextClient connect-out, UploadQueue.cpp:327-361).
     pending_promotions: Vec<Ed2kUploadSessionKey>,
     next_waiting_sequence: u64,
+    next_promotion_generation: u64,
     underfill_since: Option<Instant>,
     /// Wall-clock instant of the most recent slot open (grant or promotion): the
     /// analog of the oracle `m_nLastStartUpload` stamped on every AddUpNextClient
@@ -590,6 +655,7 @@ impl Ed2kUploadQueueState {
             waiting_order: Vec::new(),
             pending_promotions: Vec::new(),
             next_waiting_sequence: 1,
+            next_promotion_generation: 1,
             underfill_since: None,
             last_slot_open: None,
             throttle_next_send_at: None,
@@ -717,16 +783,30 @@ impl Ed2kUploadQueueState {
         let score_modifiers =
             UploadScoreModifiers::from_peer(&key.peer, low_id, all_time_upload_ratio_permille);
         if let Some(existing_key) = self.session_key_for_peer(&key.peer) {
-            let (existing_connection_id, existing_connected, existing_phase) = self
+            let (
+                existing_connection_id,
+                existing_connected,
+                existing_phase,
+                existing_callback_entitlement,
+            ) = self
                 .sessions
                 .get(&existing_key)
-                .map(|session| (session.connection_id, session.connected, session.phase))
+                .map(|session| {
+                    (
+                        session.connection_id,
+                        session.connected,
+                        session.phase,
+                        session.callback_promotion.is_some(),
+                    )
+                })
                 .expect("existing peer queue key missing from session map");
-            let attaching_expected_callback = !existing_connected
-                && existing_phase == Ed2kUploadSessionPhase::Granted
-                && existing_key.peer.ip == key.peer.ip
-                && existing_key.peer.tcp_port == key.peer.tcp_port;
-            if existing_connection_id != connection_id && !attaching_expected_callback {
+            let attaching_disconnected_session = !existing_connected
+                && ((existing_phase == Ed2kUploadSessionPhase::Waiting
+                    && existing_callback_entitlement)
+                    || (existing_phase == Ed2kUploadSessionPhase::Granted
+                        && existing_key.peer.ip == key.peer.ip
+                        && existing_key.peer.tcp_port == key.peer.tcp_port));
+            if existing_connection_id != connection_id && !attaching_disconnected_session {
                 // A matching hash or fallback endpoint on another TCP connection
                 // is an identity collision, not a reconnect permission. Match the
                 // maintained MFC trust matrix: a verified incumbent wins; a
@@ -745,8 +825,14 @@ impl Ed2kUploadQueueState {
                 let Some(mut session) = self.sessions.remove(&existing_key) else {
                     unreachable!("existing peer queue key missing from session map");
                 };
-                if session.phase == Ed2kUploadSessionPhase::Waiting {
+                let consume_callback_entitlement = session.callback_promotion.is_some()
+                    && self.active_session_count()
+                        < self.effective_active_slot_limit(now).saturating_add(1);
+                if session.phase == Ed2kUploadSessionPhase::Waiting && !consume_callback_entitlement
+                {
                     self.replace_waiting_key(&existing_key, &key);
+                } else if session.phase == Ed2kUploadSessionPhase::Waiting {
+                    self.waiting_order.retain(|queued| queued != &existing_key);
                 }
                 if existing_key.file_hash != key.file_hash {
                     session.queued_ranges.clear();
@@ -759,6 +845,26 @@ impl Ed2kUploadQueueState {
                 // accumulated waiting score survives a reconnect (master re-ask on the
                 // same queue entry, UploadQueue.cpp:1865-1869).
                 session.connected = true;
+                if let Some(promotion) = session.callback_promotion.as_mut() {
+                    promotion.cancel.cancel();
+                    if consume_callback_entitlement {
+                        session.callback_promotion = None;
+                        session.callback_promotion_suppressed = false;
+                        session.phase = Ed2kUploadSessionPhase::Granted;
+                        session.queued_at = now;
+                        session.last_request_at = None;
+                        session.accumulated_slow_upload = Duration::ZERO;
+                        session.accumulated_zero_upload = Duration::ZERO;
+                        session.last_slow_upload_sample_at = Some(now);
+                        self.last_slot_open = Some(now);
+                    } else {
+                        promotion.deadline = None;
+                        promotion.route = None;
+                        session.callback_promotion_suppressed = true;
+                    }
+                } else {
+                    session.callback_promotion_suppressed = false;
+                }
                 session.promotion_deadline = None;
                 session.last_activity = now;
                 session.file_priority_score = file_priority_score;
@@ -806,7 +912,7 @@ impl Ed2kUploadQueueState {
         let inline_grant = slot_free
             && !cooled
             && self.slot_open_paced(now)
-            && self.best_admissible_waiting_key(now).is_none();
+            && self.best_admissible_waiting_key(now, false).is_none();
         let phase = if inline_grant {
             Ed2kUploadSessionPhase::Granted
         } else {
@@ -830,6 +936,8 @@ impl Ed2kUploadQueueState {
                 phase,
                 connection_id,
                 connected: true,
+                callback_promotion: None,
+                callback_promotion_suppressed: false,
                 promotion_deadline: None,
                 cancel: CancellationToken::new(),
                 activity: Arc::new(Ed2kUploadLeaseActivity::default()),
@@ -928,6 +1036,12 @@ impl Ed2kUploadQueueState {
         }
         if refresh_activity {
             session.connected = true;
+            if let Some(promotion) = session.callback_promotion.as_mut() {
+                promotion.cancel.cancel();
+                promotion.deadline = None;
+                promotion.route = None;
+                session.callback_promotion_suppressed = true;
+            }
             session.promotion_deadline = None;
             session.last_activity = now;
         }
@@ -1328,12 +1442,10 @@ impl Ed2kUploadQueueState {
         }
     }
 
-    /// Drain the queued promote-connect grants: sessions promoted to an active
-    /// slot while their peer had no live connection. Each returned grant is
-    /// rebound to a fresh connection id from `next_connection_id` so the
-    /// outbound connect owns the session (a failed connect releases it). A
-    /// grant whose peer re-attached inbound in the meantime (or whose session
-    /// is gone) is skipped: the inbound connection already owns the slot.
+    /// Drain queued connection-establishment work. HighID waiters already own a
+    /// granted slot and are rebound to a fresh connection id for direct dial.
+    /// LowID waiters stay queued and receive a separate callback permit whose
+    /// epoch must be claimed by a matching inbound HELLO.
     pub(super) fn take_pending_promotions(
         &mut self,
         now: Instant,
@@ -1344,30 +1456,190 @@ impl Ed2kUploadQueueState {
             return Vec::new();
         }
         let keys = std::mem::take(&mut self.pending_promotions);
-        let mut grants = Vec::new();
+        let mut promotions = Vec::new();
         for key in keys {
             let Some(session) = self.sessions.get_mut(&key) else {
                 continue;
             };
-            if session.connected || session.phase != Ed2kUploadSessionPhase::Granted {
+            let expires_at = now + connect_timeout;
+            if session.phase == Ed2kUploadSessionPhase::Waiting {
+                let Some(promotion) = session.callback_promotion.as_mut() else {
+                    continue;
+                };
+                if session.connected || promotion.deadline.is_some() {
+                    continue;
+                }
+                promotion.deadline = Some(expires_at);
+                promotions.push(Ed2kUploadPendingPromotion::Callback(
+                    Ed2kUploadCallbackPermit {
+                        key: key.clone(),
+                        peer: key.peer.clone(),
+                        file_hash: key.file_hash.clone(),
+                        generation: promotion.generation,
+                        expires_at,
+                        cancel: promotion.cancel.clone(),
+                    },
+                ));
+                continue;
+            }
+            if session.phase != Ed2kUploadSessionPhase::Granted || session.connected {
                 continue;
             }
             let connection_id = next_connection_id();
             session.connection_id = connection_id;
-            session.connected = false;
-            session.promotion_deadline = Some(now + connect_timeout);
-            grants.push(Ed2kUploadPendingPromotion {
-                peer: key.peer.clone(),
-                file_hash: key.file_hash.clone(),
-                handle: Ed2kUploadSessionHandle::from_session(
-                    key.clone(),
-                    connection_id,
-                    session.cancel.clone(),
-                    Arc::clone(&session.activity),
-                ),
-            });
+            session.promotion_deadline = Some(expires_at);
+            promotions.push(Ed2kUploadPendingPromotion::DirectDial(
+                Ed2kUploadGrantedPromotion {
+                    peer: key.peer.clone(),
+                    file_hash: key.file_hash.clone(),
+                    handle: Ed2kUploadSessionHandle::from_session(
+                        key,
+                        connection_id,
+                        session.cancel.clone(),
+                        Arc::clone(&session.activity),
+                    ),
+                    expires_at,
+                },
+            ));
         }
-        grants
+        promotions
+    }
+
+    /// Arm the exact callback route before any wire send. This makes an inbound
+    /// HELLO claimable even when it races ahead of the sender acknowledgement.
+    pub(super) fn begin_callback_dispatch(
+        &mut self,
+        permit: &Ed2kUploadCallbackPermit,
+        route: Ed2kUploadCallbackRoute,
+        now: Instant,
+    ) -> bool {
+        self.reap_expired_sessions(now);
+        if !callback_route_is_valid_for_peer(route, &permit.peer) {
+            return false;
+        }
+        let Some(session) = self.sessions.get_mut(&permit.key) else {
+            return false;
+        };
+        if session.phase != Ed2kUploadSessionPhase::Waiting || session.connected {
+            return false;
+        }
+        let Some(promotion) = session.callback_promotion.as_mut() else {
+            return false;
+        };
+        if promotion.generation != permit.generation
+            || promotion.deadline != Some(permit.expires_at)
+            || promotion.cancel.is_cancelled()
+            || promotion.route.is_some()
+        {
+            return false;
+        }
+        promotion.route = Some(route);
+        true
+    }
+
+    /// Settle a callback which was proven not to have reached the wire. Only
+    /// the matching live epoch can be changed; a late sender result cannot
+    /// disturb a successful HELLO claim or a newer callback generation.
+    pub(super) fn cancel_callback_known_not_sent(
+        &mut self,
+        permit: &Ed2kUploadCallbackPermit,
+        now: Instant,
+    ) -> bool {
+        self.reap_expired_sessions(now);
+        let Some(session) = self.sessions.get_mut(&permit.key) else {
+            return false;
+        };
+        let Some(promotion) = session.callback_promotion.as_mut() else {
+            return false;
+        };
+        if session.phase != Ed2kUploadSessionPhase::Waiting
+            || promotion.generation != permit.generation
+            || promotion.deadline != Some(permit.expires_at)
+            || promotion.cancel.is_cancelled()
+        {
+            return false;
+        }
+        promotion.cancel.cancel();
+        promotion.deadline = None;
+        promotion.route = None;
+        session.callback_promotion_suppressed = true;
+        self.promote_waiters(now);
+        true
+    }
+
+    /// Atomically convert a matching callback HELLO into a real active grant.
+    /// One temporary overflow slot mirrors stock's missed-turn admission: the
+    /// queue may already have filled the base slot while the callback was in
+    /// flight, but concurrent callback returns cannot grow without bound.
+    pub(super) fn claim_callback_promotion(
+        &mut self,
+        observed_peer: Ed2kUploadPeerIdentity,
+        now: Instant,
+        connection_id: u64,
+    ) -> Ed2kUploadCallbackClaim {
+        self.reap_expired_sessions(now);
+        let Some(old_key) = self.sessions.iter().find_map(|(key, session)| {
+            let promotion = session.callback_promotion.as_ref()?;
+            (session.phase == Ed2kUploadSessionPhase::Waiting
+                && promotion.route.is_some_and(|route| {
+                    callback_route_matches_hello(route, &key.peer, &observed_peer)
+                }))
+            .then(|| key.clone())
+        }) else {
+            return Ed2kUploadCallbackClaim::NotMatched;
+        };
+        if self.active_session_count() >= self.effective_active_slot_limit(now).saturating_add(1) {
+            return Ed2kUploadCallbackClaim::MatchedButFull;
+        }
+        if self
+            .session_key_for_peer(&observed_peer)
+            .is_some_and(|key| key != old_key)
+        {
+            return Ed2kUploadCallbackClaim::NotMatched;
+        }
+
+        let Some(mut session) = self.sessions.remove(&old_key) else {
+            return Ed2kUploadCallbackClaim::NotMatched;
+        };
+        let Some(promotion) = session.callback_promotion.take() else {
+            self.sessions.insert(old_key, session);
+            return Ed2kUploadCallbackClaim::NotMatched;
+        };
+        promotion.cancel.cancel();
+        self.waiting_order.retain(|queued| queued != &old_key);
+        self.pending_promotions
+            .retain(|pending| pending != &old_key);
+
+        session.phase = Ed2kUploadSessionPhase::Granted;
+        session.connection_id = connection_id;
+        session.connected = true;
+        session.callback_promotion_suppressed = false;
+        session.promotion_deadline = None;
+        session.queued_at = now;
+        session.last_activity = now;
+        session.last_request_at = None;
+        session.accumulated_slow_upload = Duration::ZERO;
+        session.accumulated_zero_upload = Duration::ZERO;
+        session.last_slow_upload_sample_at = Some(now);
+
+        let new_key = Ed2kUploadSessionKey {
+            peer: observed_peer.clone(),
+            file_hash: old_key.file_hash.clone(),
+        };
+        let handle = Ed2kUploadSessionHandle::from_session(
+            new_key.clone(),
+            connection_id,
+            session.cancel.clone(),
+            Arc::clone(&session.activity),
+        );
+        self.sessions.insert(new_key, session);
+        self.last_slot_open = Some(now);
+        Ed2kUploadCallbackClaim::Granted(Box::new(Ed2kUploadGrantedPromotion {
+            peer: observed_peer,
+            file_hash: old_key.file_hash,
+            handle,
+            expires_at: now,
+        }))
     }
 
     pub(super) fn snapshot(&mut self, now: Instant) -> Vec<Ed2kUploadQueueSnapshotEntry> {
@@ -1516,6 +1788,9 @@ impl Ed2kUploadQueueState {
 
     fn retire_session_key(&mut self, key: &Ed2kUploadSessionKey) {
         if let Some(session) = self.sessions.remove(key) {
+            if let Some(promotion) = session.callback_promotion {
+                promotion.cancel.cancel();
+            }
             session.cancel.cancel();
         }
         self.waiting_order.retain(|queued| queued != key);
@@ -1668,6 +1943,36 @@ impl Ed2kUploadQueueState {
         self.refresh_elastic_underfill(now);
         self.update_slow_upload_tracking(now);
         self.cooldown.purge_expired(now);
+        // A callback timeout revokes only the wire attempt. The LowID client
+        // never owned an active slot, so retain both its waiting score and its
+        // missed-turn entitlement (stock `m_bAddNextConnect`). A late connect-
+        // back may still claim an armed route, while a fresh ordinary reask may
+        // consume the entitlement without losing queue position. Suppression
+        // prevents blind callback retransmission.
+        let expired_callback_keys = self
+            .sessions
+            .iter()
+            .filter(|(_key, session)| {
+                session.phase == Ed2kUploadSessionPhase::Waiting
+                    && session
+                        .callback_promotion
+                        .as_ref()
+                        .and_then(|promotion| promotion.deadline)
+                        .is_some_and(|deadline| deadline <= now)
+            })
+            .map(|(key, _session)| key.clone())
+            .collect::<Vec<_>>();
+        for key in expired_callback_keys {
+            let Some(session) = self.sessions.get_mut(&key) else {
+                continue;
+            };
+            let Some(promotion) = session.callback_promotion.as_mut() else {
+                continue;
+            };
+            promotion.cancel.cancel();
+            promotion.deadline = None;
+            session.callback_promotion_suppressed = true;
+        }
         let active_before = self.active_session_count();
         let waiting_before = self.waiting_session_count();
         let expired = self
@@ -1999,7 +2304,7 @@ impl Ed2kUploadQueueState {
         // replacement -- rotating a productive capped slot for a peer that cannot
         // be promoted (all cooled, no probe) would idle the slot -- so the
         // admissible selection gates the rotation (RUST-PAR-020 U-GAP3).
-        self.best_admissible_waiting_key(now)?;
+        self.best_admissible_waiting_key(now, false)?;
         // Retain a productive capped slot while the upload line is underfilled:
         // rotating known throughput for an unknown replacement would widen the
         // underfill (UploadQueueSeams.h:683-684). `underfill_since` is refreshed
@@ -2081,6 +2386,11 @@ impl Ed2kUploadQueueState {
 
     fn promote_waiters(&mut self, now: Instant) {
         self.refresh_elastic_underfill(now);
+        // Bound each maintenance pass to one new callback attempt. Retained
+        // missed-turn entitlements do not block later passes from selecting a
+        // different detached LowID waiter; HELLO claim independently caps the
+        // temporary active-slot overflow to one.
+        let mut armed_callback_this_pass = false;
         while self.active_session_count() < self.effective_active_slot_limit(now) {
             // Slot-open pacing: below the busy-pipe datarate the fork opens at most
             // one new slot per second (oracle Process opens ONE client per tick via
@@ -2089,13 +2399,43 @@ impl Ed2kUploadQueueState {
             if !self.slot_open_paced(now) {
                 break;
             }
-            let Some(next_key) = self.best_admissible_waiting_key(now) else {
+            let Some(next_key) = self.best_admissible_waiting_key(now, !armed_callback_this_pass)
+            else {
                 break;
             };
+            let detached_low_id = self.sessions.get(&next_key).is_some_and(|session| {
+                !session.connected && next_key.peer.client_id.is_some_and(is_low_id_client_id)
+            });
+            if detached_low_id {
+                let generation = self.next_promotion_generation;
+                self.next_promotion_generation =
+                    self.next_promotion_generation.wrapping_add(1).max(1);
+                let Some(session) = self.sessions.get_mut(&next_key) else {
+                    continue;
+                };
+                session.callback_promotion = Some(Ed2kUploadCallbackPromotion {
+                    generation,
+                    deadline: None,
+                    cancel: CancellationToken::new(),
+                    route: None,
+                });
+                if !self.pending_promotions.contains(&next_key) {
+                    self.pending_promotions.push(next_key);
+                }
+                armed_callback_this_pass = true;
+                // The callback entitlement does not consume or pace a base slot.
+                // Continue so a connected (or directly dialable HighID) waiter
+                // can use the open slot in the same maintenance pass.
+                continue;
+            }
             self.waiting_order.retain(|queued| queued != &next_key);
             let Some(next_session) = self.sessions.get_mut(&next_key) else {
                 continue;
             };
+            if let Some(promotion) = next_session.callback_promotion.take() {
+                promotion.cancel.cancel();
+            }
+            next_session.callback_promotion_suppressed = false;
             next_session.phase = Ed2kUploadSessionPhase::Granted;
             next_session.promotion_deadline = None;
             next_session.last_activity = now;
@@ -2183,9 +2523,16 @@ impl Ed2kUploadQueueState {
     /// base slot would otherwise idle behind the cooled-only queue
     /// (`cooldownProbeClient`, :235-243,257). Rank display is unaffected: a
     /// cooled waiter keeps its queue rank, it is only skipped for promotion.
-    fn best_admissible_waiting_key(&self, now: Instant) -> Option<Ed2kUploadSessionKey> {
+    fn best_admissible_waiting_key(
+        &self,
+        now: Instant,
+        allow_detached_low_id: bool,
+    ) -> Option<Ed2kUploadSessionKey> {
         let ranked = self.ranked_waiting_keys(now);
         for key in &ranked {
+            if !self.waiter_is_selectable(key, allow_detached_low_id) {
+                continue;
+            }
             if !self
                 .cooldown
                 .is_cooled(key.peer.ip, key.peer.friend_slot, now)
@@ -2199,6 +2546,9 @@ impl Ed2kUploadQueueState {
         }
         let mut best: Option<(&&Ed2kUploadSessionKey, Duration)> = None;
         for key in &ranked {
+            if !self.waiter_is_selectable(key, allow_detached_low_id) {
+                continue;
+            }
             if !self.cooldown.can_probe(key.peer.ip, now, true) {
                 continue;
             }
@@ -2214,6 +2564,23 @@ impl Ed2kUploadQueueState {
             }
         }
         best.map(|(key, _)| (**key).clone())
+    }
+
+    fn waiter_is_selectable(
+        &self,
+        key: &Ed2kUploadSessionKey,
+        allow_detached_low_id: bool,
+    ) -> bool {
+        let Some(session) = self.sessions.get(key) else {
+            return false;
+        };
+        if session.connected {
+            return true;
+        }
+        if session.callback_promotion.is_some() || session.callback_promotion_suppressed {
+            return false;
+        }
+        allow_detached_low_id || !key.peer.client_id.is_some_and(is_low_id_client_id)
     }
 
     /// Whether a base upload slot would idle behind an all-cooled waiting queue,
@@ -2504,6 +2871,53 @@ fn same_upload_client(left: &Ed2kUploadPeerIdentity, right: &Ed2kUploadPeerIdent
         return left_hash == right_hash;
     }
     left.ip == right.ip && left.tcp_port == right.tcp_port
+}
+
+fn callback_route_is_valid_for_peer(
+    route: Ed2kUploadCallbackRoute,
+    peer: &Ed2kUploadPeerIdentity,
+) -> bool {
+    if !peer.client_id.is_some_and(is_low_id_client_id) {
+        return false;
+    }
+    match route {
+        Ed2kUploadCallbackRoute::DirectUdp { endpoint } => {
+            peer.supports_direct_udp_callback
+                && peer.udp_port == Some(endpoint.port())
+                && peer.ip == endpoint.ip()
+                && !endpoint.ip().is_unspecified()
+                && endpoint.port() != 0
+        }
+        Ed2kUploadCallbackRoute::Server {
+            endpoint,
+            client_id,
+            ..
+        } => {
+            peer.server_endpoint == Some(endpoint)
+                && peer.client_id == Some(client_id)
+                && is_low_id_client_id(client_id)
+        }
+    }
+}
+
+fn callback_route_matches_hello(
+    route: Ed2kUploadCallbackRoute,
+    expected: &Ed2kUploadPeerIdentity,
+    observed: &Ed2kUploadPeerIdentity,
+) -> bool {
+    if let Some(expected_hash) = expected.user_hash.filter(|hash| *hash != [0; 16]) {
+        return observed.user_hash == Some(expected_hash);
+    }
+    match route {
+        Ed2kUploadCallbackRoute::DirectUdp { endpoint } => {
+            observed.ip == endpoint.ip() && observed.tcp_port == expected.tcp_port
+        }
+        Ed2kUploadCallbackRoute::Server {
+            endpoint,
+            client_id,
+            ..
+        } => observed.server_endpoint == Some(endpoint) && observed.client_id == Some(client_id),
+    }
 }
 
 fn upload_payload_interval(byte_count: u64, limit_bytes_per_sec: u64) -> Duration {
