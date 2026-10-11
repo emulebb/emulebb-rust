@@ -15,7 +15,7 @@ use crate::{
     ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
 };
 
-use super::packet_handler::decode_id_change_payload;
+use super::packet_handler::{decode_id_change_payload, log_uncorrelated_server_reject};
 use super::server_entry::ConfiguredServerEntry;
 use super::{
     Ed2kSearchFile, Ed2kServerSearchObservation, Ed2kServerState, OP_GLOBSEARCHRES, OP_IDCHANGE,
@@ -560,7 +560,7 @@ async fn search_keyword_on_server(
                 }
             }
             OP_REJECT => {
-                anyhow::bail!("ED2K server {transport_endpoint} rejected the search session");
+                log_uncorrelated_server_reject(transport_endpoint, packet.payload.len());
             }
             _ => {}
         }
@@ -577,13 +577,113 @@ mod tests {
     };
 
     use crate::config::Ed2kRuntimeConfig;
-    use tokio::{net::UdpSocket, time::Instant as TokioInstant};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream, UdpSocket},
+        time::Instant as TokioInstant,
+    };
     use tokio_util::sync::CancellationToken;
 
     use super::{
         SearchCriteria, drain_keyword_udp_responses, eligible_udp_keyword_search_servers,
         encode_search_request_with_criteria, encode_udp_keyword_search_payloads,
+        search_keyword_on_server,
     };
+
+    async fn read_active_keyword_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 6];
+        stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], super::super::OP_EDONKEYPROT);
+        let payload_len =
+            u32::from_le_bytes(header[1..5].try_into().unwrap()).saturating_sub(1) as usize;
+        let mut payload = vec![0u8; payload_len];
+        stream.read_exact(&mut payload).await.unwrap();
+        (header[5], payload)
+    }
+
+    fn active_keyword_identity() -> crate::ed2k_tcp::Ed2kHelloIdentity {
+        crate::ed2k_tcp::Ed2kHelloIdentity {
+            user_hash: [0x11; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: 0,
+            direct_udp_callback: false,
+        }
+    }
+
+    fn active_keyword_server(endpoint: SocketAddr) -> super::super::ResolvedServerEntry {
+        let SocketAddr::V4(endpoint) = endpoint else {
+            panic!("test server must be IPv4");
+        };
+        super::super::ResolvedServerEntry {
+            entry: super::super::ConfiguredServerEntry::from_endpoint_text(
+                &SocketAddr::V4(endpoint).to_string(),
+            )
+            .unwrap(),
+            ip: *endpoint.ip(),
+        }
+    }
+
+    #[tokio::test]
+    async fn active_keyword_search_ignores_reject_before_typed_result() {
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (opcode, _) = read_active_keyword_frame(&mut stream).await;
+            assert_eq!(opcode, super::super::OP_LOGINREQUEST);
+            let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+            stream
+                .write_all(
+                    &super::super::encode_packet(
+                        super::super::OP_IDCHANGE,
+                        &high_id.to_le_bytes(),
+                        false,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            loop {
+                let (opcode, _) = read_active_keyword_frame(&mut stream).await;
+                if opcode == super::super::OP_SEARCHREQUEST {
+                    break;
+                }
+            }
+            let mut replies =
+                super::super::encode_packet(super::super::OP_REJECT, &[], false).unwrap();
+            replies.extend_from_slice(
+                &super::super::encode_packet(
+                    super::super::OP_SEARCHRESULT,
+                    &0u32.to_le_bytes(),
+                    false,
+                )
+                .unwrap(),
+            );
+            stream.write_all(&replies).await.unwrap();
+        });
+        let payload = super::super::encode_search_request("reject then result").unwrap();
+        let cancel = CancellationToken::new();
+
+        let results = search_keyword_on_server(
+            crate::test_bind_ip(),
+            &active_keyword_server(endpoint),
+            active_keyword_identity(),
+            "eMule",
+            &[],
+            &payload,
+            Duration::from_secs(1),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(results.is_empty());
+        server_task.await.unwrap();
+    }
 
     #[test]
     fn udp_keyword_search_builds_capability_specific_criteria_payloads() {

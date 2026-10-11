@@ -15,7 +15,7 @@ use crate::{
     ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
 };
 
-use super::packet_handler::decode_id_change_payload;
+use super::packet_handler::{decode_id_change_payload, log_uncorrelated_server_reject};
 use super::{
     Ed2kServerState, OP_CALLBACK_FAIL, OP_CALLBACKREQUEST, OP_IDCHANGE, OP_LOGINREQUEST, OP_REJECT,
     ServerLoginCapabilities, ServerSession, ServerSessionPhase, encode_login_request,
@@ -155,13 +155,19 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
                         );
                         return Ok(());
                     }
-                    let packet = tokio::time::timeout(remaining, session.read_packet())
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "timed out waiting for ED2K callback response from {transport_endpoint}"
-                            )
-                        })??;
+                    let packet = match tokio::time::timeout(remaining, session.read_packet()).await
+                    {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            session.set_phase(
+                                ServerSessionPhase::Completed,
+                                format!(
+                                    "completed callback request client_id={client_id} without explicit failure"
+                                ),
+                            );
+                            return Ok(());
+                        }
+                    };
                     let Some(packet) = packet else {
                         anyhow::bail!(
                             "ED2K server {transport_endpoint} closed after callback dispatch"
@@ -174,8 +180,9 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
                             );
                         }
                         OP_REJECT => {
-                            anyhow::bail!(
-                                "ED2K server {transport_endpoint} rejected the callback request"
+                            log_uncorrelated_server_reject(
+                                transport_endpoint,
+                                packet.payload.len(),
                             );
                         }
                         _ => {}
@@ -183,9 +190,106 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
                 }
             }
             OP_REJECT => {
-                anyhow::bail!("ED2K server {transport_endpoint} rejected the callback request");
+                log_uncorrelated_server_reject(transport_endpoint, packet.payload.len());
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::{Ed2kCallbackRequestOptions, request_callback_on_server};
+
+    async fn read_active_callback_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 6];
+        stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], super::super::OP_EDONKEYPROT);
+        let payload_len =
+            u32::from_le_bytes(header[1..5].try_into().unwrap()).saturating_sub(1) as usize;
+        let mut payload = vec![0u8; payload_len];
+        stream.read_exact(&mut payload).await.unwrap();
+        (header[5], payload)
+    }
+
+    fn active_callback_identity() -> crate::ed2k_tcp::Ed2kHelloIdentity {
+        crate::ed2k_tcp::Ed2kHelloIdentity {
+            user_hash: [0x11; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: 0,
+            direct_udp_callback: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn active_callback_ignores_reject_but_honors_typed_failure() {
+        for (response_opcode, expect_success) in [
+            (super::super::OP_REJECT, true),
+            (super::super::OP_CALLBACK_FAIL, false),
+        ] {
+            let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let server_task = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (opcode, _) = read_active_callback_frame(&mut stream).await;
+                assert_eq!(opcode, super::super::OP_LOGINREQUEST);
+                let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+                stream
+                    .write_all(
+                        &super::super::encode_packet(
+                            super::super::OP_IDCHANGE,
+                            &high_id.to_le_bytes(),
+                            false,
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                loop {
+                    let (opcode, _) = read_active_callback_frame(&mut stream).await;
+                    if opcode == super::super::OP_CALLBACKREQUEST {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(
+                        &super::super::encode_packet(response_opcode, &[0x01], false).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                if expect_success {
+                    std::future::pending::<()>().await;
+                }
+            });
+            let cancel = CancellationToken::new();
+            let config = crate::config::Ed2kRuntimeConfig::default();
+
+            let result = request_callback_on_server(Ed2kCallbackRequestOptions {
+                bind_ip: crate::test_bind_ip(),
+                config: &config,
+                hello_identity: active_callback_identity(),
+                shared_catalog: &[],
+                server_endpoint: endpoint,
+                client_id: 7,
+                timeout: Duration::from_millis(250),
+                cancel: &cancel,
+            })
+            .await;
+
+            assert_eq!(result.is_ok(), expect_success);
+            server_task.abort();
         }
     }
 }
