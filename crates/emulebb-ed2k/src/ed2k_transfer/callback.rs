@@ -195,7 +195,7 @@ impl Ed2kCallbackTicketRequest {
     }
 
     /// Build a ticket for a Kad buddy-relayed callback.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "typed protocol identity constructor"
     )]
