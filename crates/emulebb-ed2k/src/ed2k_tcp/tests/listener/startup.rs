@@ -42,6 +42,87 @@ async fn listener_disconnects_hash_banned_peer_before_hello_reply() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn listener_rejects_upload_admission_before_hello() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-pre-hello-upload",
+        listener_hello_identity(),
+        [0x3E; 16],
+        0x3344_5566,
+    )
+    .await;
+    let file = runtime
+        .seed_verified_upload_file("pre-hello.bin", vec![0x5A; 4096])
+        .await;
+    let server = runtime.spawn_listener_connections(1);
+    let mut stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
+
+    stream
+        .write_all(&encode_start_upload_req(&file.file_hash))
+        .await
+        .unwrap();
+
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+        .await
+        .expect("pre-HELLO upload connection did not close")
+        .unwrap();
+    assert_eq!(read, 0, "pre-HELLO upload request received a reply");
+    assert!(
+        runtime
+            .transfer_runtime
+            .upload_queue_snapshot()
+            .await
+            .is_empty(),
+        "pre-HELLO upload request reached queue admission"
+    );
+
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn listener_preserves_unaffiliated_plain_and_packed_port_test() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-pre-hello-port-test",
+        listener_hello_identity(),
+        [0x3F; 16],
+        0x4455_6677,
+    )
+    .await;
+    let server = runtime.spawn_listener_connections(2);
+    let packets = [
+        encode_packet(OP_EMULEPROT, OP_PORTTEST, &[]),
+        encode_packed_packet(OP_PORTTEST, &[]).unwrap(),
+    ];
+
+    for packet in packets {
+        let mut stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
+        stream.write_all(&packet).await.unwrap();
+
+        let answer = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_PORTTEST).await;
+        assert_eq!(&answer[6..], &[0x12]);
+
+        stream
+            .write_all(&encode_start_upload_req(&Ed2kHash::from_bytes([0x91; 16])))
+            .await
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+            .await
+            .expect("port-test-only connection accepted ordinary peer service")
+            .unwrap();
+        assert_eq!(read, 0);
+    }
+
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 /// Stock checks `CKademlia::IsRunning()` before it parses `OP_CALLBACK`. A
 /// malformed callback received during a Kad pause is therefore request-local
 /// and must not close the otherwise valid peer connection.
