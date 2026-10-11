@@ -234,9 +234,10 @@ impl Ed2kCallbackTicketRequest {
         download: Ed2kCallbackDownload,
         valid_for: Duration,
     ) -> Result<Self, Ed2kCallbackTicketError> {
-        let source_ip = match source_endpoint.ip() {
-            IpAddr::V4(ip) => Some(ip),
-            IpAddr::V6(_) => None,
+        let source_ip = if let IpAddr::V4(ip) = source_endpoint.ip() {
+            Some(ip)
+        } else {
+            None
         };
         validate_ticket_request(Self {
             route: Ed2kCallbackRoute::DirectUdp { source_endpoint },
