@@ -24,9 +24,9 @@ use super::{
     FIREWALL_HELPER_POST_REQUEST_KEEPALIVE_SECS, FirewallCheckUdpRequest, OP_EDONKEYPROT,
     OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_FWCHECKUDPREQ, OP_HELLO, OP_HELLOANSWER,
     OP_KAD_FWTCPCHECK_ACK, OP_PUBLICKEY, OP_SECIDENTSTATE, OP_SIGNATURE, begin_secure_ident_probe,
-    build_hello_responses, decode_public_key_payload, decode_secident_state,
-    encode_emule_info_answer, encode_hello_request, encode_packet, encode_secident_state,
-    random_nonzero_u32, reply_with_firewall_udp, try_send_secure_ident_signature,
+    decode_public_key_payload, decode_secident_state, encode_emule_info_answer,
+    encode_hello_request, encode_packet, encode_secident_state, random_nonzero_u32,
+    reply_with_firewall_udp, try_send_secure_ident_signature,
 };
 
 /// Immutable session metadata shared by one outgoing TCP helper exchange.
@@ -465,78 +465,6 @@ pub(crate) async fn complete_authorized_kad_callback(
         Err(error) => {
             debug!("Kad firewalled-callback dispatch to {requester} failed: {error}");
             false
-        }
-    }
-}
-
-/// Mirror the oracle's active peer callback path by opening an outgoing eD2k
-/// client connection and immediately sending `OP_HELLO`.
-pub async fn connect_callback_peer(
-    bind_ip: Ipv4Addr,
-    peer_addr: SocketAddr,
-    hello_identity: Ed2kHelloIdentity,
-    peer_user_hash: Option<[u8; 16]>,
-    peer_connect_options: Option<u8>,
-    timeout: Duration,
-) -> Result<Ed2kPeerConnectMode> {
-    let mut transport = Ed2kTransport::connect_outgoing(
-        bind_ip,
-        peer_addr,
-        hello_identity.connect_options,
-        peer_user_hash,
-        peer_connect_options,
-        timeout,
-    )
-    .await?;
-    let mode = match transport.mode {
-        Ed2kTransportMode::Plaintext => Ed2kPeerConnectMode::Plaintext,
-        Ed2kTransportMode::Obfuscated => Ed2kPeerConnectMode::Obfuscated,
-    };
-
-    let hello_packet = encode_hello_request(hello_identity);
-    tokio::time::timeout(timeout, transport.write_all(&hello_packet))
-        .await
-        .with_context(|| format!("timed out sending OP_HELLO to callback peer {peer_addr}"))??;
-
-    loop {
-        let packet = match tokio::time::timeout(
-            super::ED2K_CONNECTION_IDLE_TIMEOUT,
-            transport.read_packet(),
-        )
-        .await
-        {
-            Ok(Ok(packet)) => packet,
-            Ok(Err(error)) if is_connection_shutdown_error(&error) => return Ok(mode),
-            Ok(Err(error)) => {
-                return Err(error)
-                    .with_context(|| format!("failed to read eD2k packet from {peer_addr}"));
-            }
-            Err(_) => return Ok(mode),
-        };
-        let Some(packet) = packet else {
-            return Ok(mode);
-        };
-        match (packet.protocol, packet.opcode) {
-            (OP_EDONKEYPROT, OP_HELLO) => {
-                for reply in build_hello_responses(&packet.payload, hello_identity)? {
-                    transport
-                        .write_all(&reply)
-                        .await
-                        .with_context(|| format!("failed to reply to OP_HELLO from {peer_addr}"))?;
-                }
-            }
-            (OP_EDONKEYPROT, OP_HELLOANSWER)
-            | (OP_EMULEPROT, OP_EMULEINFOANSWER)
-            | (OP_EMULEPROT, OP_EMULEINFO) => {
-                if packet.opcode == OP_EMULEINFO {
-                    let reply = encode_emule_info_answer(hello_identity.udp_port);
-                    transport.write_all(&reply).await.with_context(|| {
-                        format!("failed to send OP_EMULEINFOANSWER to {peer_addr}")
-                    })?;
-                }
-                return Ok(mode);
-            }
-            _ => return Ok(mode),
         }
     }
 }
