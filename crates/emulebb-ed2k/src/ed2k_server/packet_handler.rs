@@ -11,13 +11,13 @@ use super::server_events::Ed2kServerListEvent;
 use super::tag_codec::{DecodedTag, DecodedTagName, DecodedTagValue, decode_tag_details};
 use super::types::{CallbackRequest, ServerSessionContext};
 use super::{
-    Ed2kPacket, Ed2kServerFailure, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE,
-    OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT,
-    OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS, ST_DESCRIPTION, ST_HARDFILES,
-    ST_SERVERNAME, ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32,
-    decode_ed2k_string, decode_search_result_page, decode_server_list, encode_search_request,
-    format_connect_options, format_server_flags, ipv4_from_client_id, is_low_id,
-    log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
+    Ed2kPacket, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE, OP_QUERY_MORE_RESULT,
+    OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
+    OP_SERVERSTATUS, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME, ST_SOFTFILES, ServerSession,
+    ServerSessionPhase, TAGTYPE_UINT32, decode_ed2k_string, decode_search_result_page,
+    decode_server_list, encode_search_request, format_connect_options, format_server_flags,
+    ipv4_from_client_id, is_low_id, log_search_result_page, send_connected_server_startup,
+    wait_for_offer_files_settle,
 };
 
 #[expect(
@@ -293,23 +293,18 @@ pub(super) async fn handle_server_packet(
             );
         }
         OP_REJECT => {
-            if session.last_tx_opcode == Some(OP_OFFERFILES) && session.offer_files_negotiated() {
-                warn!(
-                    "ED2K server {} rejected a negotiated OP_OFFERFILES batch; slowing this connection without relaxing negotiated limits",
-                    session.endpoint
-                );
-                session
-                    .fallback_offer_files_to_conservative(
-                        "server rejected negotiated OP_OFFERFILES",
-                    )
-                    .await;
-                return Ok(());
-            }
-            return Err(Ed2kServerFailure::protocol_rejection(format!(
-                "ED2K server {} rejected the last command",
-                session.endpoint
-            ))
-            .into());
+            // OP_REJECT is a null, uncorrelated server notice. Stock eMule and
+            // aMule log it and keep the socket alive; neither attributes it to
+            // an in-flight request. Doing so from the latest transmitted opcode
+            // is unsafe because several commands can be outstanding and an
+            // earlier rejection can already be queued in TCP while a later
+            // command is sent. Typed replies and per-request deadlines remain
+            // the only authorities for completing background operations.
+            warn!(
+                "ED2K server {} sent uncorrelated OP_REJECT payload_len={}; preserving session and pending operations",
+                session.endpoint,
+                packet.payload.len()
+            );
         }
         opcode => {
             debug!(

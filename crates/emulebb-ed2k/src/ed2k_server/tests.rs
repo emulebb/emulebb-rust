@@ -3,6 +3,7 @@ use super::background::send_source_request_batch;
 use super::offer_policy::{
     OFFER_FILES_CAPABILITY_VERSION, OfferFilesCapabilityAdvertisement, OfferFilesPolicy,
 };
+use super::session::OfferFilesPacingMode;
 use super::session_driver::ServerSessionExit;
 use super::types::ServerSessionContext;
 use super::{
@@ -11,7 +12,7 @@ use super::{
     EDONKEY_VERSION, EMULE_ENCRYPTION_METHOD_OBFUSCATION, EMULE_TCP_CRYPT_MAGIC_REQUESTER,
     EMULE_TCP_CRYPT_MAGIC_SERVER, EMULE_TCP_CRYPT_MAGIC_SYNC, EMULE_UDP_CRYPT_MAGIC_SERVER_CLIENT,
     EMULE_UDP_CRYPT_MAGIC_SYNC_SERVER, EMULE_VERSION_MAJOR, EMULE_VERSION_MINOR,
-    EMULE_VERSION_UPDATE, Ed2kFoundSource, Ed2kHash, Ed2kSearchFile, Ed2kServerFailure,
+    EMULE_VERSION_UPDATE, Ed2kFoundSource, Ed2kHash, Ed2kPacket, Ed2kSearchFile, Ed2kServerFailure,
     Ed2kServerFailurePhase, Ed2kServerFailureReason, Ed2kServerListEvent,
     Ed2kServerSourceBatchTarget, Ed2kServerState, Ed2kUdpSourceRequestTarget, FT_AICH_HASH,
     FT_COMPLETE_SOURCES, FT_FILENAME, FT_FILERATING, FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE,
@@ -19,12 +20,12 @@ use super::{
     OFFER_FILE_SAMPLE_SIZE, OP_EDONKEYPROT, OP_EMULEPROT, OP_GETSERVERLIST, OP_GETSOURCES,
     OP_GETSOURCES_OBFU, OP_GLOBFOUNDSOURCES, OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2,
     OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES,
-    OP_IDCHANGE, OP_LOGINREQUEST, OP_OFFERFILES, OP_PACKEDPROT, OP_SERVERIDENT,
-    PendingBackgroundServerSearch, ResolvedServerEntry, SERVER_OBFUSCATION_PRIME_BYTES,
-    SERVER_OBFUSCATION_PUBLIC_KEY_LEN, SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_LARGEFILES,
-    SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES,
-    SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES,
-    SERVER_UDP_FLAG_TCPOBFUSCATION, SERVER_UDP_FLAG_UDPOBFUSCATION,
+    OP_IDCHANGE, OP_LOGINREQUEST, OP_OFFERFILES, OP_PACKEDPROT, OP_REJECT, OP_SEARCHREQUEST,
+    OP_SEARCHRESULT, OP_SERVERIDENT, PendingBackgroundServerSearch, ResolvedServerEntry,
+    SERVER_OBFUSCATION_PRIME_BYTES, SERVER_OBFUSCATION_PUBLIC_KEY_LEN, SERVER_TCP_FLAG_COMPRESSION,
+    SERVER_TCP_FLAG_LARGEFILES, SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER,
+    SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2,
+    SERVER_UDP_FLAG_LARGEFILES, SERVER_UDP_FLAG_TCPOBFUSCATION, SERVER_UDP_FLAG_UDPOBFUSCATION,
     SOURCE_OBFUSCATION_USER_HASH_PRESENT, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME,
     ST_SOFTFILES, ServerLoginCapabilities, ServerSession, ServerTransportMode, ServerUdpPacket,
     TAG_SHORT_NAME_MASK, TAGTYPE_STR1, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16,
@@ -36,7 +37,7 @@ use super::{
     ed2k_server_list_event_channel, encode_login_request, encode_offer_files_payload,
     encode_packet, encode_search_request, encode_server_udp_crypt_ping, encode_server_udp_datagram,
     encode_source_request, encode_udp_search_request, encode_udp_source_request_batch,
-    format_server_flags, handle_background_udp_packet, ipv4_from_client_id,
+    format_server_flags, handle_background_udp_packet, handle_server_packet, ipv4_from_client_id,
     login_identity_for_server_transport, new_ed2k_server_search_channel,
     offer_files_catalog_fingerprint, run_one_server_session, run_server_transport_attempts,
     search_keyword_via_background_session, search_source_batch_via_background_session,
