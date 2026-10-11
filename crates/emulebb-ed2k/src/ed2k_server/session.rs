@@ -60,8 +60,14 @@ pub(super) enum ServerSessionPhase {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum OfferFilesPacingMode {
     AwaitingCapability,
-    Legacy { reason: String },
+    Legacy {
+        reason: String,
+    },
     Negotiated(OfferFilesPolicy),
+    Conservative {
+        policy: OfferFilesPolicy,
+        reason: String,
+    },
 }
 
 impl ServerSessionPhase {
@@ -396,6 +402,9 @@ impl ServerSession {
             (Some(sent_at), OfferFilesPacingMode::Negotiated(policy)) => {
                 sent_at + policy.next_batch_delay(self.offer_files_last_batch_entries.max(1))
             }
+            (Some(sent_at), OfferFilesPacingMode::Conservative { policy, .. }) => {
+                sent_at + policy.fallback_batch_delay(self.offer_files_last_batch_entries.max(1))
+            }
             _ => now,
         };
         self.offer_files_next_publish_at = Some(due.max(now));
@@ -440,6 +449,9 @@ impl ServerSession {
             (Some(sent_at), OfferFilesPacingMode::Negotiated(policy)) => {
                 sent_at + policy.next_batch_delay(self.offer_files_last_batch_entries.max(1))
             }
+            (Some(sent_at), OfferFilesPacingMode::Conservative { policy, .. }) => {
+                sent_at + policy.fallback_batch_delay(self.offer_files_last_batch_entries.max(1))
+            }
             _ => Instant::now(),
         };
         self.offer_files_next_publish_at = Some(
@@ -481,7 +493,8 @@ impl ServerSession {
 
     pub(super) fn offer_files_batch_limit(&self) -> usize {
         match self.offer_files_pacing {
-            OfferFilesPacingMode::Negotiated(policy) => {
+            OfferFilesPacingMode::Negotiated(policy)
+            | OfferFilesPacingMode::Conservative { policy, .. } => {
                 policy.effective_batch_max(self.offer_files_distinct_published_hashes.len())
             }
             _ => super::server_entry::server_offer_file_limit(self.server_soft_files),
@@ -514,6 +527,9 @@ impl ServerSession {
                 OfferFilesPacingMode::Legacy { .. } => {
                     Some(Instant::now() + OFFER_FILES_LEGACY_MIN_INTERVAL)
                 }
+                OfferFilesPacingMode::Conservative { policy, .. } => {
+                    Some(Instant::now() + policy.fallback_batch_delay(entries_sent))
+                }
                 OfferFilesPacingMode::AwaitingCapability => None,
             }
         } else {
@@ -521,8 +537,12 @@ impl ServerSession {
         };
     }
 
-    pub(super) async fn fallback_offer_files_to_legacy(&mut self, reason: impl Into<String>) {
-        self.offer_files_pacing = OfferFilesPacingMode::Legacy {
+    pub(super) async fn fallback_offer_files_to_conservative(&mut self, reason: impl Into<String>) {
+        let OfferFilesPacingMode::Negotiated(policy) = self.offer_files_pacing else {
+            return;
+        };
+        self.offer_files_pacing = OfferFilesPacingMode::Conservative {
+            policy,
             reason: reason.into(),
         };
         self.offer_files_negotiation_deadline = None;
@@ -530,12 +550,12 @@ impl ServerSession {
         self.offer_files_published_hashes.clear();
         self.offer_files_refresh_catalog = true;
         self.offer_files_publish_requested = true;
-        self.offer_files_next_publish_at = Some(
-            self.offer_files_sent_at
-                .map_or_else(Instant::now, |sent_at| {
-                    sent_at + OFFER_FILES_LEGACY_MIN_INTERVAL
-                }),
-        );
+        self.offer_files_next_publish_at = Some(self.offer_files_sent_at.map_or_else(
+            Instant::now,
+            |sent_at| {
+                sent_at + policy.fallback_batch_delay(self.offer_files_last_batch_entries.max(1))
+            },
+        ));
         self.publish_offer_files_pacing_state().await;
     }
 
@@ -557,13 +577,28 @@ impl ServerSession {
                 Some(policy.min_interval_ms),
                 None,
             ),
+            OfferFilesPacingMode::Conservative { policy, reason } => (
+                "negotiatedV1Fallback",
+                Some(
+                    policy.effective_batch_max(self.offer_files_distinct_published_hashes.len())
+                        as u32,
+                ),
+                Some(
+                    policy
+                        .min_interval_ms
+                        .max(OFFER_FILES_LEGACY_MIN_INTERVAL.as_millis() as u32),
+                ),
+                Some(reason.clone()),
+            ),
         };
         let mut state = self.state.write().await;
         state.offer_files_mode = Some(mode.to_string());
         state.offer_files_batch_max = batch_max;
         state.offer_files_min_interval_ms = min_interval_ms;
         state.offer_files_fallback_reason = fallback_reason;
-        if let OfferFilesPacingMode::Negotiated(policy) = &self.offer_files_pacing {
+        if let OfferFilesPacingMode::Negotiated(policy)
+        | OfferFilesPacingMode::Conservative { policy, .. } = &self.offer_files_pacing
+        {
             state.server_soft_files = Some(policy.soft_files);
             state.server_hard_files = Some(policy.hard_files);
         }
@@ -1115,32 +1150,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_negotiated_batch_requeues_a_fresh_legacy_sweep() {
+    async fn rejected_negotiated_batch_slows_without_relaxing_limits() {
         let (mut session, _peer) = connected_test_session_with_peer().await;
-        session.offer_files_pacing = OfferFilesPacingMode::Negotiated(
-            OfferFilesPolicy::validate(1, 200, 500, 1_000, 201).unwrap(),
-        );
+        let policy = OfferFilesPolicy::validate(1, 50, 90_000, 30, 51).unwrap();
+        session.offer_files_pacing = OfferFilesPacingMode::Negotiated(policy);
+        session.server_soft_files = 1_000;
         let sent_at = Instant::now();
         session.offer_files_sent_at = Some(sent_at);
-        session.offer_files_catalog_cursor = 200;
+        session.offer_files_last_batch_entries = 30;
+        session.offer_files_catalog_cursor = 30;
         session.offer_files_published_hashes.insert([7; 16]);
+        session
+            .offer_files_distinct_published_hashes
+            .insert([7; 16]);
 
         session
-            .fallback_offer_files_to_legacy("server rejected negotiated OP_OFFERFILES")
+            .fallback_offer_files_to_conservative("server rejected negotiated OP_OFFERFILES")
             .await;
 
         assert!(matches!(
             session.offer_files_pacing,
-            OfferFilesPacingMode::Legacy { .. }
+            OfferFilesPacingMode::Conservative {
+                policy: retained,
+                ..
+            } if retained == policy
         ));
+        assert_eq!(session.offer_files_batch_limit(), 29);
         assert!(session.offer_files_publish_requested);
         assert!(session.offer_files_refresh_catalog);
         assert_eq!(session.offer_files_catalog_cursor, 0);
         assert!(session.offer_files_published_hashes.is_empty());
         assert_eq!(
             session.offer_files_next_publish_at,
-            Some(sent_at + OFFER_FILES_LEGACY_MIN_INTERVAL)
+            Some(sent_at + Duration::from_secs(90))
         );
+        let state = session.state.read().await;
+        assert_eq!(
+            state.offer_files_mode.as_deref(),
+            Some("negotiatedV1Fallback")
+        );
+        assert_eq!(state.offer_files_batch_max, Some(29));
+        assert_eq!(state.offer_files_min_interval_ms, Some(90_000));
+        assert_eq!(state.server_soft_files, Some(30));
+        assert_eq!(state.server_hard_files, Some(51));
     }
 
     /// Read just the eD2k packet header (protocol + length + opcode) the session

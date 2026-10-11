@@ -64,6 +64,11 @@ impl OfferFilesPolicy {
             .div_ceil(u64::from(OFFER_FILES_LOCAL_RECORDS_PER_SECOND));
         Duration::from_millis(u64::from(self.min_interval_ms).max(local_delay_ms))
     }
+
+    pub(super) fn fallback_batch_delay(self, entries_sent: usize) -> Duration {
+        self.next_batch_delay(entries_sent)
+            .max(OFFER_FILES_LEGACY_MIN_INTERVAL)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +99,18 @@ mod tests {
         assert!(OfferFilesPolicy::validate(1, 200, 0, 1_000, 201).is_err());
         assert!(OfferFilesPolicy::validate(1, 200, 500, 0, 201).is_err());
         assert!(OfferFilesPolicy::validate(1, 200, 500, 1_000, 200).is_err());
+    }
+
+    #[test]
+    fn fallback_delay_never_undercuts_legacy_or_advertised_interval() {
+        let faster = OfferFilesPolicy::validate(1, 200, 500, 1_000, 201).unwrap();
+        assert_eq!(
+            faster.fallback_batch_delay(200),
+            OFFER_FILES_LEGACY_MIN_INTERVAL
+        );
+
+        let slower = OfferFilesPolicy::validate(1, 200, 90_000, 1_000, 201).unwrap();
+        assert_eq!(slower.fallback_batch_delay(200), Duration::from_secs(90));
     }
 
     #[test]
