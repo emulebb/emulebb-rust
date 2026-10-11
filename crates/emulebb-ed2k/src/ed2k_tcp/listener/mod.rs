@@ -16,8 +16,10 @@ use tracing::{debug, warn};
 use emulebb_kad_dht::DhtNode;
 
 use crate::{
-    buddy_socket::BuddySocketRegistry, ed2k_server::Ed2kServerState,
-    ed2k_transfer::Ed2kTransferRuntime, kad_firewall::KadFirewallState,
+    buddy_socket::BuddySocketRegistry,
+    ed2k_server::{Ed2kServerSearchHandle, Ed2kServerState},
+    ed2k_transfer::Ed2kTransferRuntime,
+    kad_firewall::KadFirewallState,
 };
 
 use super::{Ed2kHelloIdentity, Ed2kSecureIdent};
@@ -43,6 +45,9 @@ pub struct Ed2kListenerOptions {
     pub listener: Arc<TcpListener>,
     pub dht: DhtNode,
     pub server_state: Arc<RwLock<Ed2kServerState>>,
+    /// Command path into the same long-lived server session represented by
+    /// `server_state`; upload callbacks fence commands by endpoint + epoch.
+    pub server_search: Ed2kServerSearchHandle,
     pub kad_firewall: Arc<Mutex<KadFirewallState>>,
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub transfer_runtime: Arc<Ed2kTransferRuntime>,
@@ -71,6 +76,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         listener,
         dht,
         server_state,
+        server_search,
         kad_firewall,
         secure_ident,
         transfer_runtime,
@@ -134,6 +140,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         super::upload_promote::UploadPromoteDriver {
             dht: dht.clone(),
             server_state: Arc::clone(&server_state),
+            server_search,
             kad_firewall: Arc::clone(&kad_firewall),
             secure_ident: Arc::clone(&secure_ident),
             transfer_runtime: Arc::clone(&transfer_runtime),

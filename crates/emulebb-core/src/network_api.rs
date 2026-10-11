@@ -470,6 +470,7 @@ impl EmulebbCore {
             listener: Arc::clone(&ed2k_listener),
             dht: dht.clone(),
             server_state: Arc::clone(&server_state),
+            server_search: search_handle.clone(),
             kad_firewall: Arc::clone(&kad_firewall),
             secure_ident: Arc::clone(&network.secure_ident),
             transfer_runtime: Arc::clone(&self.ed2k_transfers),
