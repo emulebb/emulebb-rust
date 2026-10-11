@@ -5842,6 +5842,8 @@ async fn handle_kad_local_store_packet(
                         runtime
                             .reachability
                             .set_peer_confirmed_udp_port(external_udp_port);
+                    } else {
+                        runtime.reachability.clear_peer_confirmed_udp_port();
                     }
                     tracing::info!(
                         helpers_selected = summary.helpers_selected,

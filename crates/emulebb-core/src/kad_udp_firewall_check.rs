@@ -104,6 +104,7 @@ pub(crate) async fn run_kad_udp_firewall_check_loop(options: KadUdpFirewallCheck
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
+        expire_stale_kad_udp_verification(&kad_firewall, &reachability, Utc::now()).await;
         if !dht.is_bootstrapped() {
             continue;
         }
@@ -119,7 +120,14 @@ pub(crate) async fn run_kad_udp_firewall_check_loop(options: KadUdpFirewallCheck
         .await
         {
             tracing::debug!("Kad UDP firewall check round failed: {error:#}");
+            kad_firewall
+                .lock()
+                .await
+                .record_udp_check_inconclusive(format!(
+                    "Kad UDP firewall-check driver failed: {error:#}"
+                ));
         }
+        expire_stale_kad_udp_verification(&kad_firewall, &reachability, Utc::now()).await;
     }
 }
 
@@ -153,6 +161,10 @@ async fn run_kad_udp_firewall_check_round(
         .await;
     if helpers.is_empty() {
         tracing::debug!("Kad UDP firewall check skipped: no eligible helper contacts yet");
+        kad_firewall
+            .lock()
+            .await
+            .record_udp_check_inconclusive("no eligible UDP firewall-check helpers available");
         return Ok(());
     }
 
@@ -281,6 +293,7 @@ async fn apply_kad_udp_firewall_check_result(
                     "Kad UDP firewall check: open (external UDP port confirmed by peers)"
                 );
             } else {
+                reachability.clear_peer_confirmed_udp_port();
                 tracing::info!(
                     helpers_succeeded = summary.helpers_succeeded,
                     "Kad UDP firewall check: open (internal UDP port reachable)"
@@ -290,6 +303,7 @@ async fn apply_kad_udp_firewall_check_result(
         Some(summary) => {
             // kad_event firewall milestone `firewalled` (uniform-diagnostics-v2 §3.3).
             crate::diag_kad_event::firewall(true);
+            reachability.clear_peer_confirmed_udp_port();
             let error = kad_firewall.lock().await.last_error.clone();
             tracing::info!(
                 helpers_requested = summary.helpers_requested,
@@ -304,9 +318,27 @@ async fn apply_kad_udp_firewall_check_result(
     }
 }
 
+/// Revoke a stale Kad UDP verdict and its peer-observed advertised port while
+/// retaining any independently refreshed UPnP mapping as a fallback.
+async fn expire_stale_kad_udp_verification(
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    reachability: &ExternalReachability,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    let expired = kad_firewall
+        .lock()
+        .await
+        .expire_udp_verification_if_stale(now);
+    if expired {
+        reachability.clear_peer_confirmed_udp_port();
+        tracing::info!("Kad UDP firewall verification expired; peer-confirmed port revoked");
+    }
+    expired
+}
+
 #[cfg(test)]
 mod tests {
-    use super::apply_kad_udp_firewall_check_result;
+    use super::{apply_kad_udp_firewall_check_result, expire_stale_kad_udp_verification};
     use chrono::Utc;
     use emulebb_ed2k::kad_firewall::{KadFirewallState, UdpFirewallCheckSummary};
     use emulebb_ed2k::reachability::ExternalReachability;
@@ -352,24 +384,49 @@ mod tests {
     async fn open_on_internal_port_does_not_pin_a_port() {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let reachability = ExternalReachability::new();
+        reachability.set_external_udp_port(45000);
+        reachability.set_peer_confirmed_udp_port(53000);
 
         apply_kad_udp_firewall_check_result(&firewall, &reachability, Some(summary(true, None)))
             .await;
 
         assert!(!reachability.udp_port_is_peer_confirmed());
-        assert_eq!(reachability.advertised_udp_port(4672), 4672);
+        assert_eq!(reachability.advertised_udp_port(4672), 45000);
     }
 
     #[tokio::test]
-    async fn firewalled_or_no_verdict_leaves_reachability_untouched() {
+    async fn conclusive_firewalled_verdict_revokes_peer_confirmed_port() {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let reachability = ExternalReachability::new();
+        reachability.set_external_udp_port(45000);
+        reachability.set_peer_confirmed_udp_port(53000);
 
         apply_kad_udp_firewall_check_result(&firewall, &reachability, Some(summary(false, None)))
             .await;
-        apply_kad_udp_firewall_check_result(&firewall, &reachability, None).await;
 
         assert!(!reachability.udp_port_is_peer_confirmed());
-        assert_eq!(reachability.advertised_udp_port(4672), 4672);
+        assert_eq!(reachability.advertised_udp_port(4672), 45000);
+    }
+
+    #[tokio::test]
+    async fn inconclusive_verdict_preserves_port_until_state_expires() {
+        let now = Utc::now();
+        let helper = "203.0.113.40".parse().unwrap();
+        let mut state = KadFirewallState::default();
+        assert!(state.begin_udp_check([helper], [4672], now));
+        let _ = state.record_firewall_udp_packet(helper, 0, 4672, now);
+        state.record_udp_check_inconclusive("first inconclusive check");
+        state.record_udp_check_inconclusive("second inconclusive check");
+        let firewall = Arc::new(Mutex::new(state));
+        let reachability = ExternalReachability::new();
+        reachability.set_external_udp_port(45000);
+        reachability.set_peer_confirmed_udp_port(53000);
+
+        apply_kad_udp_firewall_check_result(&firewall, &reachability, None).await;
+        assert_eq!(reachability.advertised_udp_port(4672), 53000);
+
+        assert!(expire_stale_kad_udp_verification(&firewall, &reachability, now).await);
+        assert!(!reachability.udp_port_is_peer_confirmed());
+        assert_eq!(reachability.advertised_udp_port(4672), 45000);
     }
 }

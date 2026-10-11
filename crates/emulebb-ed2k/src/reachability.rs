@@ -23,7 +23,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
 #[derive(Debug, Default)]
 struct ReachabilityInner {
@@ -31,14 +31,12 @@ struct ReachabilityInner {
     public_ip: AtomicU32,
     /// Learned external eD2k TCP listener port; `0` = unknown / same as internal.
     external_tcp_port: AtomicU16,
-    /// Learned external eD2k UDP port; `0` = unknown / same as internal.
+    /// Locally-derived external eD2k UDP port (normally UPnP); `0` = unknown.
     external_udp_port: AtomicU16,
-    /// Whether the current external UDP port was confirmed by a remote peer (the
-    /// Kad UDP firewall check). A peer-observed port is the most authoritative
-    /// source for what the outside world actually sees, so once set it takes
-    /// precedence over the locally-derived UPnP mapping (mirrors eMule preferring
-    /// a firewall-check result over the gateway's announced external port).
-    udp_port_peer_confirmed: AtomicBool,
+    /// Remotely-observed external UDP port from the Kad firewall check; `0` = no
+    /// current peer confirmation. Kept separately so expiring stale verification
+    /// can reveal, rather than destroy, a concurrently refreshed UPnP mapping.
+    peer_confirmed_udp_port: AtomicU16,
 }
 
 /// Cheaply-clonable handle to this client's external reachability facts.
@@ -101,13 +99,10 @@ impl ExternalReachability {
     }
 
     /// Record the externally-reachable eD2k UDP port from the UPnP mapping. This
-    /// is the local/derived source, so it must not clobber a port that a remote
-    /// peer already confirmed via the Kad UDP firewall check. `0` clears (only
-    /// when no peer confirmation is in force).
+    /// local evidence is retained while a peer-confirmed value takes precedence,
+    /// so it is available immediately if that remote verification expires.
+    /// `0` clears the local mapping.
     pub fn set_external_udp_port(&self, port: u16) {
-        if self.inner.udp_port_peer_confirmed.load(Ordering::Relaxed) {
-            return;
-        }
         self.inner.external_udp_port.store(port, Ordering::Relaxed);
     }
 
@@ -118,16 +113,24 @@ impl ExternalReachability {
         if port == 0 {
             return;
         }
-        self.inner.external_udp_port.store(port, Ordering::Relaxed);
         self.inner
-            .udp_port_peer_confirmed
-            .store(true, Ordering::Relaxed);
+            .peer_confirmed_udp_port
+            .store(port, Ordering::Relaxed);
+    }
+
+    /// Revoke the remotely-confirmed UDP port while preserving any independent
+    /// UPnP mapping learned in parallel. Returns whether a confirmation existed.
+    pub fn clear_peer_confirmed_udp_port(&self) -> bool {
+        self.inner
+            .peer_confirmed_udp_port
+            .swap(0, Ordering::Relaxed)
+            != 0
     }
 
     /// Whether the external UDP port has been confirmed by a remote peer.
     #[must_use]
     pub fn udp_port_is_peer_confirmed(&self) -> bool {
-        self.inner.udp_port_peer_confirmed.load(Ordering::Relaxed)
+        self.inner.peer_confirmed_udp_port.load(Ordering::Relaxed) != 0
     }
 
     /// The eD2k TCP port to advertise: the learned external port when known, else
@@ -142,6 +145,10 @@ impl ExternalReachability {
     /// The eD2k UDP port to advertise: the learned external port when known, else
     /// the given internal socket port (`CT_EMULE_UDPPORTS` / `ET_UDPPORT`).
     pub fn advertised_udp_port(&self, internal_port: u16) -> u16 {
+        let peer_confirmed = self.inner.peer_confirmed_udp_port.load(Ordering::Relaxed);
+        if peer_confirmed != 0 {
+            return peer_confirmed;
+        }
         match self.inner.external_udp_port.load(Ordering::Relaxed) {
             0 => internal_port,
             port => port,
@@ -197,13 +204,17 @@ mod tests {
         r.set_peer_confirmed_udp_port(51000);
         assert!(r.udp_port_is_peer_confirmed());
         assert_eq!(r.advertised_udp_port(4672), 51000);
-        // Subsequent UPnP syncs (including a clear) must not clobber it.
+        // Subsequent UPnP syncs are retained but cannot supersede it.
         r.set_external_udp_port(46000);
-        r.set_external_udp_port(0);
         assert_eq!(r.advertised_udp_port(4672), 51000);
         // A zero peer confirmation is a no-op.
         r.set_peer_confirmed_udp_port(0);
         assert_eq!(r.advertised_udp_port(4672), 51000);
+        // Expiring the peer evidence reveals the latest UPnP mapping.
+        assert!(r.clear_peer_confirmed_udp_port());
+        assert!(!r.udp_port_is_peer_confirmed());
+        assert_eq!(r.advertised_udp_port(4672), 46000);
+        assert!(!r.clear_peer_confirmed_udp_port());
     }
 
     #[test]
