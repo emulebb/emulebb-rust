@@ -1218,7 +1218,6 @@ async fn uncorrelated_reject_does_not_downgrade_negotiated_offer_pacing() {
     let policy = OfferFilesPolicy::validate(1, 25, 10, 1_000, 1_001).unwrap();
     session.login_accepted = true;
     session.offer_files_pacing = OfferFilesPacingMode::Negotiated(policy);
-    session.last_tx_opcode = Some(OP_OFFERFILES);
     let context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
 
     handle_server_packet(

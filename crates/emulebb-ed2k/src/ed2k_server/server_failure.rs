@@ -128,14 +128,6 @@ impl Ed2kServerFailure {
         )
     }
 
-    pub(super) fn protocol_rejection(detail: impl Into<String>) -> Self {
-        Self::new(
-            Ed2kServerFailurePhase::Handshake,
-            Ed2kServerFailureReason::ProtocolRejection,
-            detail,
-        )
-    }
-
     pub(super) fn from_session_error(error: &anyhow::Error, was_connected: bool) -> Self {
         if was_connected {
             return Self::new(
