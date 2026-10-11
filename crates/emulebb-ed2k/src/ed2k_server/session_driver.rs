@@ -542,7 +542,25 @@ pub(super) async fn run_one_server_session(
                             cancel,
                             response,
                         }) => {
-                            let page = decode_search_result_page(&packet.payload)?;
+                            let page = match decode_search_result_page(&packet.payload) {
+                                Ok(page) => page,
+                                Err(error) => {
+                                    warn!(
+                                        "ignoring malformed ED2K OP_SEARCHRESULT from {} for query={query:?}; preserving request until its original deadline: {error}",
+                                        session.endpoint
+                                    );
+                                    pending_background_search =
+                                        Some(PendingBackgroundServerSearch::Keyword {
+                                            query,
+                                            deadline,
+                                            results,
+                                            page_count,
+                                            cancel,
+                                            response,
+                                        });
+                                    continue;
+                                }
+                            };
                             log_search_result_page(session.endpoint, &page.files);
                             page_count += 1;
                             results.extend(page.files);
@@ -584,17 +602,75 @@ pub(super) async fn run_one_server_session(
                         }
                         (OP_FOUNDSOURCES | OP_FOUNDSOURCES_OBFU, PendingBackgroundServerSearch::Source {
                             file_hash,
+                            deadline,
                             response,
-                            ..
                         }) => {
+                            let response_hash = packet
+                                .payload
+                                .get(..16)
+                                .map(|bytes| Ed2kHash(bytes.try_into().unwrap()));
+                            if let Some(response_hash) = response_hash
+                                && response_hash != file_hash
+                            {
+                                warn!(
+                                    "ignoring unmatched ED2K source response from {} expected_hash={} response_hash={} payload_len={}",
+                                    session.endpoint,
+                                    file_hash,
+                                    response_hash,
+                                    packet.payload.len()
+                                );
+                                pending_background_search =
+                                    Some(PendingBackgroundServerSearch::Source {
+                                        file_hash,
+                                        deadline,
+                                        response,
+                                    });
+                                continue;
+                            }
+                            let decoded = match decode_found_sources(
+                                &packet.payload,
+                                packet.opcode == OP_FOUNDSOURCES_OBFU,
+                            ) {
+                                Ok(decoded) => decoded,
+                                Err(error) => {
+                                    warn!(
+                                        "ignoring malformed ED2K OP_FOUNDSOURCES from {} for file_hash={file_hash}; preserving request until its original deadline: {error}",
+                                        session.endpoint
+                                    );
+                                    pending_background_search =
+                                        Some(PendingBackgroundServerSearch::Source {
+                                            file_hash,
+                                            deadline,
+                                            response,
+                                        });
+                                    continue;
+                                }
+                            };
+                            if decoded.trailing_len > 0 {
+                                debug!(
+                                    "accepted ED2K source response from {} with stock-compatible trailing bytes file_hash={} trailing_len={}",
+                                    session.endpoint,
+                                    file_hash,
+                                    decoded.trailing_len
+                                );
+                            }
                             let results = annotate_found_sources_server(
-                                decode_found_sources(
-                                    &packet.payload,
-                                    packet.opcode == OP_FOUNDSOURCES_OBFU,
-                                )?,
+                                decoded.sources,
                                 session.endpoint,
                             );
-                            validate_found_sources(&results, file_hash)?;
+                            if let Err(error) = validate_found_sources(&results, file_hash) {
+                                warn!(
+                                    "ignoring invalid ED2K OP_FOUNDSOURCES from {} for file_hash={file_hash}; preserving request until its original deadline: {error}",
+                                    session.endpoint
+                                );
+                                pending_background_search =
+                                    Some(PendingBackgroundServerSearch::Source {
+                                        file_hash,
+                                        deadline,
+                                        response,
+                                    });
+                                continue;
+                            }
                             session.set_phase(
                                 ServerSessionPhase::Completed,
                                 format!(
@@ -620,35 +696,88 @@ pub(super) async fn run_one_server_session(
                             mut results_by_hash,
                             response,
                         }) => {
-                            let response_hash = if packet.payload.len() >= 16 {
-                                Ed2kHash(packet.payload[..16].try_into().unwrap())
-                            } else {
-                                pending_background_search = Some(PendingBackgroundServerSearch::SourceBatch {
-                                    pending_hashes,
-                                    deadline,
-                                    results_by_hash,
-                                    response,
-                                });
-                                handle_server_packet(
-                                    &mut session,
-                                    packet,
-                                    context,
-                                    false,
-                                )
-                                .await?;
+                            let Some(response_hash) = packet
+                                .payload
+                                .get(..16)
+                                .map(|bytes| Ed2kHash(bytes.try_into().unwrap()))
+                            else {
+                                warn!(
+                                    "ignoring malformed batched ED2K OP_FOUNDSOURCES from {} without a file hash; preserving batch until its original deadline",
+                                    session.endpoint
+                                );
+                                pending_background_search =
+                                    Some(PendingBackgroundServerSearch::SourceBatch {
+                                        pending_hashes,
+                                        deadline,
+                                        results_by_hash,
+                                        response,
+                                    });
                                 continue;
                             };
+                            if !pending_hashes.contains(&response_hash) {
+                                warn!(
+                                    "ignoring unmatched ED2K batched source response from {} response_hash={} payload_len={}",
+                                    session.endpoint,
+                                    response_hash,
+                                    packet.payload.len()
+                                );
+                                pending_background_search =
+                                    Some(PendingBackgroundServerSearch::SourceBatch {
+                                        pending_hashes,
+                                        deadline,
+                                        results_by_hash,
+                                        response,
+                                    });
+                                continue;
+                            }
+                            let decoded = match decode_found_sources(
+                                &packet.payload,
+                                packet.opcode == OP_FOUNDSOURCES_OBFU,
+                            ) {
+                                Ok(decoded) => decoded,
+                                Err(error) => {
+                                    warn!(
+                                        "ignoring malformed batched ED2K OP_FOUNDSOURCES from {} for file_hash={response_hash}; preserving accumulated results and deadline: {error}",
+                                        session.endpoint
+                                    );
+                                    pending_background_search =
+                                        Some(PendingBackgroundServerSearch::SourceBatch {
+                                            pending_hashes,
+                                            deadline,
+                                            results_by_hash,
+                                            response,
+                                        });
+                                    continue;
+                                }
+                            };
+                            if decoded.trailing_len > 0 {
+                                debug!(
+                                    "accepted ED2K batched source response from {} with stock-compatible trailing bytes file_hash={} trailing_len={}",
+                                    session.endpoint,
+                                    response_hash,
+                                    decoded.trailing_len
+                                );
+                            }
                             let results = annotate_found_sources_server(
-                                decode_found_sources(
-                                    &packet.payload,
-                                    packet.opcode == OP_FOUNDSOURCES_OBFU,
-                                )?,
+                                decoded.sources,
                                 session.endpoint,
                             );
-                            validate_found_sources(&results, response_hash)?;
-                            if pending_hashes.remove(&response_hash) {
-                                results_by_hash.insert(response_hash, results);
+                            if let Err(error) = validate_found_sources(&results, response_hash) {
+                                warn!(
+                                    "ignoring invalid batched ED2K OP_FOUNDSOURCES from {} for file_hash={response_hash}; preserving accumulated results and deadline: {error}",
+                                    session.endpoint
+                                );
+                                pending_background_search =
+                                    Some(PendingBackgroundServerSearch::SourceBatch {
+                                        pending_hashes,
+                                        deadline,
+                                        results_by_hash,
+                                        response,
+                                    });
+                                continue;
                             }
+                            pending_hashes.remove(&response_hash);
+                            results_by_hash.insert(response_hash, results);
                             if pending_hashes.is_empty() {
                                 session.set_phase(
                                     ServerSessionPhase::Completed,

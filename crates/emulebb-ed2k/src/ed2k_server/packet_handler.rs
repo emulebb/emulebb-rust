@@ -126,7 +126,17 @@ pub(super) async fn handle_server_packet(
             }
         }
         OP_SEARCHRESULT => {
-            let page = decode_search_result_page(&packet.payload)?;
+            let page = match decode_search_result_page(&packet.payload) {
+                Ok(page) => page,
+                Err(error) => {
+                    warn!(
+                        "ignoring malformed uncorrelated ED2K OP_SEARCHRESULT from {} payload_len={}: {error}",
+                        session.endpoint,
+                        packet.payload.len()
+                    );
+                    return Ok(());
+                }
+            };
             log_search_result_page(session.endpoint, &page.files);
             if page.more_results_available {
                 session.set_phase(

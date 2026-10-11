@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -232,6 +232,7 @@ async fn search_sources_on_server(
             .await?;
     }
     session.last_tx = Instant::now();
+    let mut response_deadline = None;
     session.set_phase(
         ServerSessionPhase::AwaitingIdChange,
         "login request sent; awaiting OP_IDCHANGE for source search",
@@ -244,13 +245,16 @@ async fn search_sources_on_server(
         if cancel.is_cancelled() {
             return Ok(Vec::new());
         }
-        let packet = tokio::time::timeout(idle_timeout, session.read_packet())
-            .await
-            .with_context(|| {
-                format!(
-                    "timed out waiting for ED2K server source-search reply from {transport_endpoint}"
-                )
-            })??;
+        let packet = if let Some(deadline) = response_deadline {
+            tokio::time::timeout_at(deadline, session.read_packet()).await
+        } else {
+            tokio::time::timeout(idle_timeout, session.read_packet()).await
+        }
+        .with_context(|| {
+            format!(
+                "timed out waiting for ED2K server source-search reply from {transport_endpoint}"
+            )
+        })??;
         let Some(packet) = packet else {
             break;
         };
@@ -284,13 +288,58 @@ async fn search_sources_on_server(
                 let opcode =
                     source_request_opcode(login_identity.connect_options, session.server_flags);
                 session.send_packet(opcode, &source_request).await?;
+                response_deadline = Some(TokioInstant::now() + idle_timeout);
             }
             OP_FOUNDSOURCES | OP_FOUNDSOURCES_OBFU => {
-                let results = annotate_found_sources_server(
-                    decode_found_sources(&packet.payload, packet.opcode == OP_FOUNDSOURCES_OBFU)?,
-                    server.base_endpoint(),
-                );
-                validate_found_sources(&results, file_hash)?;
+                let Some(response_hash) = packet
+                    .payload
+                    .get(..16)
+                    .map(|bytes| Ed2kHash(bytes.try_into().unwrap()))
+                else {
+                    warn!(
+                        "ignoring malformed ED2K one-shot source response from {} without a file hash; preserving request until the original deadline",
+                        transport_endpoint
+                    );
+                    continue;
+                };
+                if response_hash != file_hash {
+                    warn!(
+                        "ignoring unmatched ED2K one-shot source response from {} expected_hash={} response_hash={} payload_len={}",
+                        transport_endpoint,
+                        file_hash,
+                        response_hash,
+                        packet.payload.len()
+                    );
+                    continue;
+                }
+                let decoded = match decode_found_sources(
+                    &packet.payload,
+                    packet.opcode == OP_FOUNDSOURCES_OBFU,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        warn!(
+                            "ignoring malformed ED2K one-shot source response from {} for file_hash={file_hash}; preserving request until the original deadline: {error}",
+                            transport_endpoint
+                        );
+                        continue;
+                    }
+                };
+                if decoded.trailing_len > 0 {
+                    debug!(
+                        "accepted ED2K one-shot source response from {} with stock-compatible trailing bytes file_hash={} trailing_len={}",
+                        transport_endpoint, file_hash, decoded.trailing_len
+                    );
+                }
+                let results =
+                    annotate_found_sources_server(decoded.sources, server.base_endpoint());
+                if let Err(error) = validate_found_sources(&results, file_hash) {
+                    warn!(
+                        "ignoring invalid ED2K one-shot source response from {} for file_hash={file_hash}; preserving request until the original deadline: {error}",
+                        transport_endpoint
+                    );
+                    continue;
+                }
                 session.set_phase(
                     ServerSessionPhase::Completed,
                     format!(
@@ -361,7 +410,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_source_search_ignores_reject_before_typed_result() {
+    async fn active_source_search_ignores_reject_malformed_and_unmatched_replies() {
         let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
         let endpoint = listener.local_addr().unwrap();
         let file_hash = emulebb_kad_proto::Ed2kHash([0x44; 16]);
@@ -390,10 +439,24 @@ mod tests {
                     break;
                 }
             }
+            let wrong_hash = emulebb_kad_proto::Ed2kHash([0x45; 16]);
             let mut found_sources = file_hash.0.to_vec();
             found_sources.push(0);
+            found_sources.extend_from_slice(&[0xAA, 0xBB]);
             let mut replies =
                 super::super::encode_packet(super::super::OP_REJECT, &[0x01], false).unwrap();
+            replies.extend_from_slice(
+                &super::super::encode_packet(super::super::OP_FOUNDSOURCES, &[0x01; 8], false)
+                    .unwrap(),
+            );
+            replies.extend_from_slice(
+                &super::super::encode_packet(super::super::OP_FOUNDSOURCES, &wrong_hash.0, false)
+                    .unwrap(),
+            );
+            replies.extend_from_slice(
+                &super::super::encode_packet(super::super::OP_FOUNDSOURCES, &file_hash.0, false)
+                    .unwrap(),
+            );
             replies.extend_from_slice(
                 &super::super::encode_packet(super::super::OP_FOUNDSOURCES, &found_sources, false)
                     .unwrap(),
