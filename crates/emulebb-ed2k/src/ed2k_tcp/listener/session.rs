@@ -18,7 +18,10 @@ use tokio::sync::mpsc;
 use crate::{
     buddy_socket::BuddySocketRegistry,
     ed2k_server::Ed2kServerState,
-    ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadPendingPromotion},
+    ed2k_transfer::{
+        Ed2kCallbackHelloIdentity, Ed2kTransferRuntime, Ed2kUploadPeerIdentity,
+        Ed2kUploadPendingPromotion,
+    },
     kad_firewall::KadFirewallState,
     port_test::{PortTestRegistration, PortTestRegistry},
 };
@@ -473,6 +476,78 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
                     })?;
                 }
+                let callback_session = match transfer_runtime.claim_callback_session(
+                    callback_hello_identity(peer_addr, &hello_profile),
+                ) {
+                    Ok(callback_session) => callback_session,
+                    Err(error) => {
+                        break Err(anyhow::anyhow!(
+                            "failed to admit callback session for {peer_addr}: {error:?}"
+                        ));
+                    }
+                };
+                if let Some(mut callback_session) = callback_session {
+                    let mut connection_state = DownloadConnectionState::from_inbound_hello(
+                        &hello_profile,
+                        &peer_secure_ident,
+                        peer_secure_ident.requested_peer_key,
+                    );
+                    let mut file_index = 0_usize;
+                    while let Some(download) = callback_session.current().map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to read callback session work for {peer_addr}: {error:?}"
+                        )
+                    })? {
+                        let file_hash_hex = download.file_hash.to_string();
+                        debug!(
+                            "claimed ticketed inbound ED2K callback download file_hash={} client_id={} peer={peer_addr} a4af_file_index={file_index}",
+                            download.file_hash, hello_profile.identity.client_id
+                        );
+                        let outcome = drive_download_session(DownloadSessionOptions {
+                            transport: &mut transport,
+                            peer_addr,
+                            hello_identity: response_identity,
+                            secure_ident: secure_ident.as_ref(),
+                            transfer_runtime,
+                            file_hash: download.file_hash,
+                            file_hash_hex: &file_hash_hex,
+                            timeout: ED2K_CONNECTION_IDLE_TIMEOUT,
+                            send_initial_requests: true,
+                            source_exchange_allowed: true,
+                            initial_hello_complete: true,
+                            initial_secure_ident_started: peer_secure_ident.requested_peer_key,
+                            peer_user_hash: Some(hello_profile.identity.user_hash),
+                            peer_connect_options: Some(hello_profile.connect_options),
+                            connection_state: Some(&mut connection_state),
+                            // Inbound callback downloads stay on TCP; UDP-reask detach
+                            // is driven only from the outbound download driver.
+                            reask_register: None,
+                        })
+                        .await?;
+                        callback_session.acknowledge_current().map_err(|error| {
+                            anyhow::anyhow!(
+                                "failed to acknowledge callback session work for {peer_addr}: {error:?}"
+                            )
+                        })?;
+                        file_index += 1;
+                        if matches!(
+                            outcome,
+                            Ed2kPeerDownloadOutcome::AcceptedButIncomplete
+                                | Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask
+                        ) {
+                            break;
+                        }
+                    }
+                    callback_session.finish().map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to finish callback session work for {peer_addr}: {error:?}"
+                        )
+                    })?;
+                    break Ok(());
+                }
+
+                // Compatibility fallback while callback request producers are
+                // migrated route-by-route onto the ticket store.
                 let callback_intents = transfer_runtime
                     .claim_callback_intents(hello_profile.identity.client_id)
                     .await;
@@ -1206,6 +1281,24 @@ fn allow_buddy_pingpong_at(last: Option<std::time::Instant>, now: std::time::Ins
     match last {
         None => true,
         Some(last) => now.saturating_duration_since(last) >= BUDDY_PINGPONG_MIN_INTERVAL,
+    }
+}
+
+fn callback_hello_identity(
+    peer_addr: SocketAddr,
+    profile: &DecodedHelloProfile,
+) -> Ed2kCallbackHelloIdentity {
+    Ed2kCallbackHelloIdentity {
+        user_hash: profile.identity.user_hash,
+        client_id: profile.identity.client_id,
+        server_endpoint: profile.identity.server_endpoint,
+        peer_ip: match peer_addr.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        },
+        // The socket's remote port is ephemeral. Callback identity uses the
+        // stable ED2K TCP port advertised by the peer's HELLO.
+        tcp_port: profile.identity.tcp_port,
     }
 }
 
