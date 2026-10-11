@@ -3,14 +3,15 @@
 use std::{
     collections::{HashSet, VecDeque},
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
 use super::{
-    Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken, Ed2kCallbackDispatchPermit,
-    Ed2kCallbackDownload, Ed2kCallbackHelloIdentity, Ed2kCallbackIntent, Ed2kCallbackPeer,
-    Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError, Ed2kCallbackTicketId,
-    Ed2kCallbackTicketRequest, Ed2kTransferRuntime,
+    Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken, Ed2kCallbackDispatchOutcome,
+    Ed2kCallbackDispatchPermit, Ed2kCallbackDownload, Ed2kCallbackHelloIdentity,
+    Ed2kCallbackIntent, Ed2kCallbackPeer, Ed2kCallbackReservation, Ed2kCallbackRoute,
+    Ed2kCallbackTicketError, Ed2kCallbackTicketId, Ed2kCallbackTicketRequest, Ed2kTransferRuntime,
 };
 
 const CALLBACK_TICKET_CAPACITY: usize = 1_024;
@@ -28,6 +29,13 @@ enum CallbackTicketState {
         lease_deadline: Instant,
         prior_state: CallbackTicketReadyState,
     },
+    SessionOwned {
+        generation: u64,
+        prior_state: CallbackTicketReadyState,
+    },
+    /// A callback connection was consumed before these files could use it.
+    /// The next matching scheduler reservation must originate a fresh callback.
+    NeedsDispatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,13 +53,15 @@ impl From<CallbackTicketReadyState> for CallbackTicketState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CallbackTicketRecord {
     id: Ed2kCallbackTicketId,
     route: Ed2kCallbackRoute,
     peer: Ed2kCallbackPeer,
     downloads: Vec<Ed2kCallbackDownload>,
     expires_at: Instant,
+    redispatch_lifetime: Duration,
+    cancel_restores_needs_dispatch: bool,
     state: CallbackTicketState,
 }
 
@@ -74,6 +84,21 @@ pub(super) struct CallbackTicketStore {
     ticket_capacity: usize,
     download_capacity: usize,
     tickets: VecDeque<CallbackTicketRecord>,
+}
+
+#[derive(Debug)]
+struct CallbackSessionToken {
+    generation: u64,
+}
+
+/// Exclusive ownership of one admitted callback peer's pending file set.
+///
+/// Dropping the guard after cancellation, panic, or an early protocol outcome
+/// returns every unacknowledged file to `NeedsDispatch` synchronously.
+#[derive(Debug)]
+pub(crate) struct Ed2kCallbackSessionClaim {
+    store: Arc<StdMutex<CallbackTicketStore>>,
+    token: Option<CallbackSessionToken>,
 }
 
 impl Default for CallbackTicketStore {
@@ -235,6 +260,41 @@ fn is_valid_ipv4_endpoint(endpoint: SocketAddr) -> bool {
     matches!(endpoint.ip(), IpAddr::V4(ip) if !ip.is_unspecified()) && endpoint.port() != 0
 }
 
+fn merge_ticket_download(
+    ticket: &mut CallbackTicketRecord,
+    peer: &Ed2kCallbackPeer,
+    download: Ed2kCallbackDownload,
+    download_capacity: usize,
+) -> Result<(), Ed2kCallbackTicketError> {
+    let existing_index = ticket
+        .downloads
+        .iter()
+        .position(|existing| existing.file_hash == download.file_hash);
+    if existing_index.is_none() && ticket.downloads.len() >= download_capacity {
+        return Err(Ed2kCallbackTicketError::DownloadCapacity);
+    }
+
+    ticket.peer.expected_user_hash = ticket.peer.expected_user_hash.or(peer.expected_user_hash);
+    if let Some(index) = existing_index {
+        ticket.downloads[index] = download;
+    } else {
+        ticket.downloads.push(download);
+    }
+    Ok(())
+}
+
+fn ticket_can_accept_download(
+    ticket: &CallbackTicketRecord,
+    download: &Ed2kCallbackDownload,
+    download_capacity: usize,
+) -> bool {
+    ticket
+        .downloads
+        .iter()
+        .any(|existing| existing.file_hash == download.file_hash)
+        || ticket.downloads.len() < download_capacity
+}
+
 impl CallbackTicketStore {
     fn new(ticket_capacity: usize, download_capacity: usize) -> Self {
         Self {
@@ -257,6 +317,96 @@ impl CallbackTicketStore {
             .checked_add(request.valid_for)
             .ok_or(Ed2kCallbackTicketError::DeadlineOverflow)?;
 
+        if let Some(generation) = self.active_session_generation_for(&request.route, &request.peer)
+        {
+            let candidate_index = self.tickets.iter().position(|ticket| {
+                ticket.route == request.route
+                    && peers_can_merge(&ticket.route, &ticket.peer, &request.peer)
+                    && (matches!(
+                        ticket.state,
+                        CallbackTicketState::SessionOwned {
+                            generation: owned_generation,
+                            ..
+                        } if owned_generation == generation
+                    ) || ticket.state == CallbackTicketState::NeedsDispatch)
+            });
+            if self.session_can_accept_download(
+                generation,
+                candidate_index,
+                request.download.file_hash,
+            ) {
+                if let Some(index) = candidate_index {
+                    let ticket = &mut self.tickets[index];
+                    merge_ticket_download(
+                        ticket,
+                        &request.peer,
+                        request.download,
+                        self.download_capacity,
+                    )?;
+                    ticket.redispatch_lifetime = ticket.redispatch_lifetime.max(request.valid_for);
+                    ticket.cancel_restores_needs_dispatch = false;
+                    ticket.state = CallbackTicketState::SessionOwned {
+                        generation,
+                        prior_state: CallbackTicketReadyState::Armed,
+                    };
+                    return Ok(Ed2kCallbackReservation::Joined {
+                        ticket_id: ticket.id,
+                    });
+                }
+
+                if self.tickets.len() >= self.ticket_capacity {
+                    return Err(Ed2kCallbackTicketError::TicketCapacity);
+                }
+                let id = self.allocate_ticket_id()?;
+                self.tickets.push_back(CallbackTicketRecord {
+                    id,
+                    route: request.route,
+                    peer: request.peer,
+                    downloads: vec![request.download],
+                    expires_at,
+                    redispatch_lifetime: request.valid_for,
+                    cancel_restores_needs_dispatch: false,
+                    state: CallbackTicketState::SessionOwned {
+                        generation,
+                        prior_state: CallbackTicketReadyState::Armed,
+                    },
+                });
+                return Ok(Ed2kCallbackReservation::Joined { ticket_id: id });
+            }
+        }
+
+        if let Some(index) = self.tickets.iter().position(|ticket| {
+            ticket.state == CallbackTicketState::NeedsDispatch
+                && ticket.route == request.route
+                && peers_can_merge(&ticket.route, &ticket.peer, &request.peer)
+        }) {
+            if !ticket_can_accept_download(
+                &self.tickets[index],
+                &request.download,
+                self.download_capacity,
+            ) {
+                return Err(Ed2kCallbackTicketError::DownloadCapacity);
+            }
+            let id = self.allocate_ticket_id()?;
+            let ticket = &mut self.tickets[index];
+            merge_ticket_download(
+                ticket,
+                &request.peer,
+                request.download,
+                self.download_capacity,
+            )?;
+            ticket.id = id;
+            ticket.expires_at = expires_at;
+            ticket.redispatch_lifetime = request.valid_for;
+            ticket.cancel_restores_needs_dispatch = true;
+            ticket.state = CallbackTicketState::Reserved;
+            return Ok(Ed2kCallbackReservation::Dispatch(
+                Ed2kCallbackDispatchPermit {
+                    ticket_id: ticket.id,
+                },
+            ));
+        }
+
         if let Some(ticket) = self.tickets.iter_mut().find(|ticket| {
             matches!(
                 ticket.state,
@@ -264,22 +414,13 @@ impl CallbackTicketStore {
             ) && ticket.route == request.route
                 && peers_can_merge(&ticket.route, &ticket.peer, &request.peer)
         }) {
-            ticket.peer.expected_user_hash = ticket
-                .peer
-                .expected_user_hash
-                .or(request.peer.expected_user_hash);
-            if let Some(existing) = ticket
-                .downloads
-                .iter_mut()
-                .find(|download| download.file_hash == request.download.file_hash)
-            {
-                *existing = request.download;
-            } else {
-                if ticket.downloads.len() >= self.download_capacity {
-                    return Err(Ed2kCallbackTicketError::DownloadCapacity);
-                }
-                ticket.downloads.push(request.download);
-            }
+            merge_ticket_download(
+                ticket,
+                &request.peer,
+                request.download,
+                self.download_capacity,
+            )?;
+            ticket.redispatch_lifetime = ticket.redispatch_lifetime.max(request.valid_for);
             return Ok(Ed2kCallbackReservation::Joined {
                 ticket_id: ticket.id,
             });
@@ -288,17 +429,15 @@ impl CallbackTicketStore {
         if self.tickets.len() >= self.ticket_capacity {
             return Err(Ed2kCallbackTicketError::TicketCapacity);
         }
-        let id = Ed2kCallbackTicketId(self.next_ticket_id);
-        self.next_ticket_id = self
-            .next_ticket_id
-            .checked_add(1)
-            .ok_or(Ed2kCallbackTicketError::IdentifierExhausted)?;
+        let id = self.allocate_ticket_id()?;
         self.tickets.push_back(CallbackTicketRecord {
             id,
             route: request.route,
             peer: request.peer,
             downloads: vec![request.download],
             expires_at,
+            redispatch_lifetime: request.valid_for,
+            cancel_restores_needs_dispatch: false,
             state: CallbackTicketState::Reserved,
         });
         Ok(Ed2kCallbackReservation::Dispatch(
@@ -306,14 +445,79 @@ impl CallbackTicketStore {
         ))
     }
 
-    fn mark_dispatched(&mut self, permit: Ed2kCallbackDispatchPermit, now: Instant) -> bool {
-        self.reap(now);
+    fn allocate_ticket_id(&mut self) -> Result<Ed2kCallbackTicketId, Ed2kCallbackTicketError> {
+        let id = Ed2kCallbackTicketId(self.next_ticket_id);
+        self.next_ticket_id = self
+            .next_ticket_id
+            .checked_add(1)
+            .ok_or(Ed2kCallbackTicketError::IdentifierExhausted)?;
+        Ok(id)
+    }
+
+    fn active_session_generation_for(
+        &self,
+        route: &Ed2kCallbackRoute,
+        peer: &Ed2kCallbackPeer,
+    ) -> Option<u64> {
+        self.tickets.iter().find_map(|ticket| {
+            let CallbackTicketState::SessionOwned { generation, .. } = ticket.state else {
+                return None;
+            };
+            let matches = if let Some(user_hash) = peer.expected_user_hash {
+                ticket.peer.expected_user_hash == Some(user_hash)
+            } else {
+                ticket.route == *route && peers_can_merge(route, &ticket.peer, peer)
+            };
+            matches.then_some(generation)
+        })
+    }
+
+    fn session_can_accept_download(
+        &self,
+        generation: u64,
+        candidate_index: Option<usize>,
+        file_hash: emulebb_kad_proto::Ed2kHash,
+    ) -> bool {
+        let mut hashes = self
+            .tickets
+            .iter()
+            .filter(|ticket| {
+                matches!(
+                    ticket.state,
+                    CallbackTicketState::SessionOwned {
+                        generation: owned_generation,
+                        ..
+                    } if owned_generation == generation
+                )
+            })
+            .flat_map(|ticket| ticket.downloads.iter().map(|download| download.file_hash))
+            .collect::<HashSet<_>>();
+        if let Some(index) = candidate_index
+            && self.tickets[index].state == CallbackTicketState::NeedsDispatch
+        {
+            hashes.extend(
+                self.tickets[index]
+                    .downloads
+                    .iter()
+                    .map(|download| download.file_hash),
+            );
+        }
+        hashes.insert(file_hash);
+        hashes.len() <= CALLBACK_CLAIM_DOWNLOAD_CAPACITY
+    }
+
+    fn mark_dispatched(
+        &mut self,
+        permit: Ed2kCallbackDispatchPermit,
+        now: Instant,
+    ) -> Ed2kCallbackDispatchOutcome {
         let Some(ticket) = self
             .tickets
             .iter_mut()
             .find(|ticket| ticket.id == permit.ticket_id)
         else {
-            return false;
+            self.reap(now);
+            return Ed2kCallbackDispatchOutcome::Settled;
         };
         match &mut ticket.state {
             CallbackTicketState::Reserved => ticket.state = CallbackTicketState::Armed,
@@ -322,19 +526,46 @@ impl CallbackTicketStore {
             {
                 *prior_state = CallbackTicketReadyState::Armed;
             }
-            CallbackTicketState::Armed | CallbackTicketState::Leased { .. } => return false,
+            CallbackTicketState::SessionOwned { prior_state, .. }
+                if *prior_state == CallbackTicketReadyState::Reserved =>
+            {
+                *prior_state = CallbackTicketReadyState::Armed;
+            }
+            CallbackTicketState::Armed
+            | CallbackTicketState::Leased { .. }
+            | CallbackTicketState::SessionOwned { .. }
+            | CallbackTicketState::NeedsDispatch => {
+                return Ed2kCallbackDispatchOutcome::Settled;
+            }
         }
-        true
+        if let Some(deadline) = now.checked_add(ticket.redispatch_lifetime) {
+            ticket.expires_at = deadline;
+        }
+        Ed2kCallbackDispatchOutcome::Armed
     }
 
     fn cancel(&mut self, permit: Ed2kCallbackDispatchPermit, now: Instant) -> bool {
-        self.reap(now);
-        let Some(index) = self.tickets.iter().position(|ticket| {
+        let mut index = self.tickets.iter().position(|ticket| {
             ticket.id == permit.ticket_id && ticket.state == CallbackTicketState::Reserved
-        }) else {
+        });
+        if index.is_none() {
+            self.reap(now);
+            index = self.tickets.iter().position(|ticket| {
+                ticket.id == permit.ticket_id && ticket.state == CallbackTicketState::Reserved
+            });
+        }
+        let Some(index) = index else {
             return false;
         };
-        self.tickets.remove(index);
+        if self.tickets[index].cancel_restores_needs_dispatch {
+            if let Some(deadline) = now.checked_add(self.tickets[index].redispatch_lifetime) {
+                self.tickets[index].expires_at = deadline;
+            }
+            self.tickets[index].state = CallbackTicketState::NeedsDispatch;
+        } else {
+            self.tickets.remove(index);
+        }
+        self.reap(now);
         true
     }
 
@@ -435,7 +666,11 @@ impl CallbackTicketStore {
             let prior_state = match ticket.state {
                 CallbackTicketState::Reserved => CallbackTicketReadyState::Reserved,
                 CallbackTicketState::Armed => CallbackTicketReadyState::Armed,
-                CallbackTicketState::Leased { .. } => continue,
+                CallbackTicketState::Leased { .. }
+                | CallbackTicketState::SessionOwned { .. }
+                | CallbackTicketState::NeedsDispatch => {
+                    continue;
+                }
             };
             ticket.state = CallbackTicketState::Leased {
                 generation,
@@ -458,11 +693,141 @@ impl CallbackTicketStore {
         now: Instant,
     ) -> Result<(), Ed2kCallbackClaimError> {
         self.reap(now);
-        if !self.token_is_current(token) {
+        if !self.lease_token_is_current(token) {
             return Err(Ed2kCallbackClaimError::StaleClaim);
         }
         self.tickets
             .retain(|ticket| !token.ticket_ids.contains(&ticket.id));
+        Ok(())
+    }
+
+    fn claim_session(
+        &mut self,
+        hello: Ed2kCallbackHelloIdentity,
+        now: Instant,
+    ) -> Result<Option<CallbackSessionToken>, Ed2kCallbackClaimError> {
+        let Some(claim) = self.lease(hello, now)? else {
+            return Ok(None);
+        };
+        let token = claim.token;
+        let ticket_ids = token.ticket_ids.iter().copied().collect::<HashSet<_>>();
+        for ticket in self
+            .tickets
+            .iter_mut()
+            .filter(|ticket| ticket_ids.contains(&ticket.id))
+        {
+            let CallbackTicketState::Leased {
+                generation,
+                prior_state,
+                ..
+            } = ticket.state
+            else {
+                unreachable!("token validity requires every ticket to be leased")
+            };
+            if hello.user_hash != [0; 16] && ticket.peer.expected_user_hash.is_none() {
+                ticket.peer.expected_user_hash = Some(hello.user_hash);
+            }
+            ticket.state = CallbackTicketState::SessionOwned {
+                generation,
+                prior_state,
+            };
+        }
+        Ok(Some(CallbackSessionToken {
+            generation: token.generation,
+        }))
+    }
+
+    fn session_current(
+        &mut self,
+        token: &CallbackSessionToken,
+        now: Instant,
+    ) -> Result<Option<Ed2kCallbackDownload>, Ed2kCallbackClaimError> {
+        self.reap(now);
+        if !self.session_token_is_current(token) {
+            return Err(Ed2kCallbackClaimError::StaleClaim);
+        }
+        Ok(self
+            .tickets
+            .iter()
+            .filter(|ticket| {
+                matches!(
+                    ticket.state,
+                    CallbackTicketState::SessionOwned { generation, .. }
+                        if generation == token.generation
+                )
+            })
+            .find_map(|ticket| ticket.downloads.first().cloned()))
+    }
+
+    fn acknowledge_session_current(
+        &mut self,
+        token: &CallbackSessionToken,
+        now: Instant,
+    ) -> Result<(), Ed2kCallbackClaimError> {
+        let Some(current) = self.session_current(token, now)? else {
+            return Ok(());
+        };
+        for ticket in self.tickets.iter_mut().filter(|ticket| {
+            matches!(
+                ticket.state,
+                CallbackTicketState::SessionOwned { generation, .. }
+                    if generation == token.generation
+            )
+        }) {
+            ticket
+                .downloads
+                .retain(|download| download.file_hash != current.file_hash);
+        }
+        Ok(())
+    }
+
+    fn finish_session(
+        &mut self,
+        token: &CallbackSessionToken,
+        now: Instant,
+    ) -> Result<(), Ed2kCallbackClaimError> {
+        self.reap(now);
+        if !self.session_token_is_current(token) {
+            return Err(Ed2kCallbackClaimError::StaleClaim);
+        }
+        let redispatch_deadlines = self
+            .tickets
+            .iter()
+            .filter(|ticket| {
+                matches!(
+                    ticket.state,
+                    CallbackTicketState::SessionOwned { generation, .. }
+                        if generation == token.generation
+                ) && !ticket.downloads.is_empty()
+            })
+            .map(|ticket| {
+                now.checked_add(ticket.redispatch_lifetime)
+                    .map(|deadline| (ticket.id, deadline))
+                    .ok_or(Ed2kCallbackClaimError::DeadlineOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for ticket in self.tickets.iter_mut().filter(|ticket| {
+            matches!(
+                ticket.state,
+                CallbackTicketState::SessionOwned { generation, .. }
+                    if generation == token.generation
+            )
+        }) {
+            if let Some((_, deadline)) = redispatch_deadlines
+                .iter()
+                .find(|(ticket_id, _)| *ticket_id == ticket.id)
+            {
+                ticket.expires_at = *deadline;
+                ticket.state = CallbackTicketState::NeedsDispatch;
+            }
+        }
+        self.tickets.retain(|ticket| {
+            !matches!(
+                ticket.state,
+                CallbackTicketState::SessionOwned { generation, .. }
+                    if generation == token.generation
+            ) || !ticket.downloads.is_empty()
+        });
         Ok(())
     }
 
@@ -472,7 +837,7 @@ impl CallbackTicketStore {
         now: Instant,
     ) -> Result<(), Ed2kCallbackClaimError> {
         self.reap(now);
-        if !self.token_is_current(token) {
+        if !self.lease_token_is_current(token) {
             return Err(Ed2kCallbackClaimError::StaleClaim);
         }
         for ticket in self
@@ -489,7 +854,7 @@ impl CallbackTicketStore {
         Ok(())
     }
 
-    fn token_is_current(&self, token: &Ed2kCallbackClaimToken) -> bool {
+    fn lease_token_is_current(&self, token: &Ed2kCallbackClaimToken) -> bool {
         !token.ticket_ids.is_empty()
             && token.ticket_ids.iter().all(|ticket_id| {
                 self.tickets.iter().any(|ticket| {
@@ -503,9 +868,21 @@ impl CallbackTicketStore {
             })
     }
 
+    fn session_token_is_current(&self, token: &CallbackSessionToken) -> bool {
+        self.tickets.iter().any(|ticket| {
+            matches!(
+                ticket.state,
+                CallbackTicketState::SessionOwned { generation, .. }
+                    if generation == token.generation
+            )
+        })
+    }
+
     fn reap(&mut self, now: Instant) {
         self.tickets.retain_mut(|ticket| match ticket.state {
-            CallbackTicketState::Reserved | CallbackTicketState::Armed => ticket.expires_at > now,
+            CallbackTicketState::Reserved
+            | CallbackTicketState::Armed
+            | CallbackTicketState::NeedsDispatch => ticket.expires_at > now,
             CallbackTicketState::Leased {
                 lease_deadline,
                 prior_state,
@@ -515,6 +892,7 @@ impl CallbackTicketStore {
                 ticket.expires_at > now
             }
             CallbackTicketState::Leased { .. } => true,
+            CallbackTicketState::SessionOwned { .. } => true,
         });
     }
 }
@@ -580,6 +958,59 @@ fn fallback_match_key(
     }
 }
 
+impl Ed2kCallbackSessionClaim {
+    /// Return the next peer-centric callback download without consuming it.
+    pub(crate) fn current(&self) -> Result<Option<Ed2kCallbackDownload>, Ed2kCallbackClaimError> {
+        let token = self
+            .token
+            .as_ref()
+            .expect("live callback claim always owns a token");
+        self.store
+            .lock()
+            .unwrap()
+            .session_current(token, Instant::now())
+    }
+
+    /// Consume the current file after one successful protocol outcome. The
+    /// same hash is removed from every selected ticket before advancing A4AF.
+    pub(crate) fn acknowledge_current(&mut self) -> Result<(), Ed2kCallbackClaimError> {
+        let token = self
+            .token
+            .as_ref()
+            .expect("live callback claim always owns a token");
+        self.store
+            .lock()
+            .unwrap()
+            .acknowledge_session_current(token, Instant::now())
+    }
+
+    /// Finish session ownership explicitly. Dropping the guard provides the
+    /// same cleanup for task cancellation and unwinding.
+    pub(crate) fn finish(mut self) -> Result<(), Ed2kCallbackClaimError> {
+        let token = self
+            .token
+            .take()
+            .expect("live callback claim always owns a token");
+        self.store
+            .lock()
+            .unwrap()
+            .finish_session(&token, Instant::now())
+    }
+}
+
+impl Drop for Ed2kCallbackSessionClaim {
+    fn drop(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        let _ = self
+            .store
+            .lock()
+            .unwrap()
+            .finish_session(&token, Instant::now());
+    }
+}
+
 impl Ed2kTransferRuntime {
     /// Reserve callback work before dispatching the corresponding network request.
     pub async fn reserve_callback_ticket(
@@ -595,7 +1026,7 @@ impl Ed2kTransferRuntime {
         request: Ed2kCallbackTicketRequest,
         now: Instant,
     ) -> Result<Ed2kCallbackReservation, Ed2kCallbackTicketError> {
-        self.callback_tickets.lock().await.reserve(request, now)
+        self.callback_tickets.lock().unwrap().reserve(request, now)
     }
 
     /// Mark a callback dispatch successful. A fast inbound lease records this
@@ -603,7 +1034,7 @@ impl Ed2kTransferRuntime {
     pub async fn mark_callback_ticket_dispatched(
         &self,
         permit: Ed2kCallbackDispatchPermit,
-    ) -> bool {
+    ) -> Ed2kCallbackDispatchOutcome {
         self.mark_callback_ticket_dispatched_at(permit, Instant::now())
             .await
     }
@@ -612,10 +1043,10 @@ impl Ed2kTransferRuntime {
         &self,
         permit: Ed2kCallbackDispatchPermit,
         now: Instant,
-    ) -> bool {
+    ) -> Ed2kCallbackDispatchOutcome {
         self.callback_tickets
             .lock()
-            .await
+            .unwrap()
             .mark_dispatched(permit, now)
     }
 
@@ -630,7 +1061,7 @@ impl Ed2kTransferRuntime {
         permit: Ed2kCallbackDispatchPermit,
         now: Instant,
     ) -> bool {
-        self.callback_tickets.lock().await.cancel(permit, now)
+        self.callback_tickets.lock().unwrap().cancel(permit, now)
     }
 
     /// Lease all pending A4AF work proven to belong to an inbound HELLO identity.
@@ -646,7 +1077,7 @@ impl Ed2kTransferRuntime {
         hello: Ed2kCallbackHelloIdentity,
         now: Instant,
     ) -> Result<Option<Ed2kCallbackClaim>, Ed2kCallbackClaimError> {
-        self.callback_tickets.lock().await.lease(hello, now)
+        self.callback_tickets.lock().unwrap().lease(hello, now)
     }
 
     /// Consume a callback claim after the admitted peer session has adopted it.
@@ -662,7 +1093,32 @@ impl Ed2kTransferRuntime {
         token: &Ed2kCallbackClaimToken,
         now: Instant,
     ) -> Result<(), Ed2kCallbackClaimError> {
-        self.callback_tickets.lock().await.commit(token, now)
+        self.callback_tickets.lock().unwrap().commit(token, now)
+    }
+
+    /// Atomically admit one matching HELLO into cancellation-safe live-session
+    /// ownership. No short lease remains active across peer network I/O.
+    pub(crate) fn claim_callback_session(
+        &self,
+        hello: Ed2kCallbackHelloIdentity,
+    ) -> Result<Option<Ed2kCallbackSessionClaim>, Ed2kCallbackClaimError> {
+        self.claim_callback_session_at(hello, Instant::now())
+    }
+
+    fn claim_callback_session_at(
+        &self,
+        hello: Ed2kCallbackHelloIdentity,
+        now: Instant,
+    ) -> Result<Option<Ed2kCallbackSessionClaim>, Ed2kCallbackClaimError> {
+        let token = self
+            .callback_tickets
+            .lock()
+            .unwrap()
+            .claim_session(hello, now)?;
+        Ok(token.map(|token| Ed2kCallbackSessionClaim {
+            store: Arc::clone(&self.callback_tickets),
+            token: Some(token),
+        }))
     }
 
     /// Re-arm an admission claim which failed before the callback session adopted it.
@@ -678,7 +1134,7 @@ impl Ed2kTransferRuntime {
         token: &Ed2kCallbackClaimToken,
         now: Instant,
     ) -> Result<(), Ed2kCallbackClaimError> {
-        self.callback_tickets.lock().await.release(token, now)
+        self.callback_tickets.lock().unwrap().release(token, now)
     }
 
     /// Register one pending LowID callback download intent.
@@ -737,6 +1193,15 @@ mod tests {
                 file_rating: 0,
             },
         }
+    }
+
+    fn indexed_download(index: u16) -> Ed2kCallbackDownload {
+        let mut value = download(index as u8);
+        let mut hash = [0; 16];
+        hash[..2].copy_from_slice(&index.to_le_bytes());
+        value.file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(hash);
+        value.display_name = format!("{index}.bin");
+        value
     }
 
     fn server_request(
@@ -912,7 +1377,10 @@ mod tests {
                 ticket_id: first.ticket_id,
             }
         );
-        assert!(runtime.mark_callback_ticket_dispatched_at(first, now).await);
+        assert_eq!(
+            runtime.mark_callback_ticket_dispatched_at(first, now).await,
+            Ed2kCallbackDispatchOutcome::Armed
+        );
 
         assert!(
             runtime
@@ -948,10 +1416,11 @@ mod tests {
         );
 
         assert!(runtime.cancel_callback_ticket_at(cancelled, now).await);
-        assert!(
+        assert_eq!(
             runtime
                 .mark_callback_ticket_dispatched_at(surviving, now)
-                .await
+                .await,
+            Ed2kCallbackDispatchOutcome::Armed
         );
         let claim = runtime
             .lease_callback_tickets_at(hello(Some(server_b), 17, [0x55; 16]), now)
@@ -1143,17 +1612,18 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(
+        assert_eq!(
             runtime
                 .mark_callback_ticket_dispatched_at(permit, now)
-                .await
+                .await,
+            Ed2kCallbackDispatchOutcome::Armed
         );
         runtime
             .release_callback_claim_at(&claim.token, now)
             .await
             .unwrap();
         assert_eq!(
-            runtime.callback_tickets.lock().await.tickets[0].state,
+            runtime.callback_tickets.lock().unwrap().tickets[0].state,
             CallbackTicketState::Armed
         );
     }
@@ -1225,6 +1695,478 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn dropped_session_claim_rearms_only_unacknowledged_a4af_work() {
+        let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(
+            "ed2k-callback-session-drop-a4af",
+        ))
+        .unwrap();
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let permit = dispatch_permit(
+            runtime
+                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .await
+                .unwrap(),
+        );
+        assert!(matches!(
+            runtime
+                .reserve_callback_ticket_at(server_request(server, 17, 2), now)
+                .await
+                .unwrap(),
+            Ed2kCallbackReservation::Joined { .. }
+        ));
+        assert_eq!(
+            runtime
+                .mark_callback_ticket_dispatched_at(permit, now)
+                .await,
+            Ed2kCallbackDispatchOutcome::Armed
+        );
+
+        let mut claim = runtime
+            .claim_callback_session_at(hello(Some(server), 17, [0x55; 16]), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.current().unwrap(), Some(download(1)));
+        claim.acknowledge_current().unwrap();
+        assert_eq!(claim.current().unwrap(), Some(download(2)));
+        drop(claim);
+
+        let tickets = runtime.callback_tickets.lock().unwrap();
+        assert_eq!(tickets.tickets.len(), 1);
+        assert_eq!(tickets.tickets[0].state, CallbackTicketState::NeedsDispatch);
+        assert_eq!(tickets.tickets[0].downloads, vec![download(2)]);
+    }
+
+    #[test]
+    fn session_owned_work_cannot_be_reaped_or_reclaimed_after_the_short_lease() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+        let mut store = CallbackTicketStore::default();
+        store.reserve(server_request(server, 17, 1), now).unwrap();
+        let token = store.claim_session(observed, now).unwrap().unwrap();
+
+        assert!(
+            store
+                .lease(observed, now + CALLBACK_CLAIM_LEASE)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.session_current(&token, now + CALLBACK_CLAIM_LEASE),
+            Ok(Some(download(1)))
+        );
+    }
+
+    #[test]
+    fn acknowledging_a_duplicate_hash_consumes_every_selected_ticket_copy() {
+        let now = Instant::now();
+        let server_a = "192.0.2.10:4661".parse().unwrap();
+        let server_b = "192.0.2.20:4661".parse().unwrap();
+        let mut first = server_request(server_a, 17, 1);
+        first.peer.expected_user_hash = Some([0x44; 16]);
+        let mut second = server_request(server_b, 23, 1);
+        second.peer.expected_user_hash = Some([0x44; 16]);
+        let mut store = CallbackTicketStore::default();
+        store.reserve(first, now).unwrap();
+        store.reserve(second, now).unwrap();
+
+        let token = store
+            .claim_session(hello(None, 999, [0x44; 16]), now)
+            .unwrap()
+            .unwrap();
+        store.acknowledge_session_current(&token, now).unwrap();
+        store.finish_session(&token, now).unwrap();
+        assert!(store.tickets.is_empty());
+    }
+
+    #[test]
+    fn work_joined_during_a_session_is_returned_for_fresh_dispatch() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+        let mut store = CallbackTicketStore::default();
+        store.reserve(server_request(server, 17, 1), now).unwrap();
+        let token = store.claim_session(observed, now).unwrap().unwrap();
+        store.acknowledge_session_current(&token, now).unwrap();
+
+        assert!(matches!(
+            store.reserve(server_request(server, 17, 2), now),
+            Ok(Ed2kCallbackReservation::Joined { .. })
+        ));
+        assert_eq!(store.session_current(&token, now), Ok(Some(download(2))));
+        store.finish_session(&token, now).unwrap();
+        let previous_ticket_id = store.tickets[0].id;
+        assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
+        let permit = dispatch_permit(
+            store
+                .reserve(server_request(server, 17, 2), now + Duration::from_secs(1))
+                .unwrap(),
+        );
+        assert_ne!(permit.ticket_id, previous_ticket_id);
+    }
+
+    #[test]
+    fn stale_permits_cannot_mutate_a_fresh_redispatch_epoch() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+
+        let mut mark_store = CallbackTicketStore::default();
+        let stale_mark = dispatch_permit(
+            mark_store
+                .reserve(server_request(server, 17, 1), now)
+                .unwrap(),
+        );
+        let owner = mark_store.claim_session(observed, now).unwrap().unwrap();
+        mark_store.finish_session(&owner, now).unwrap();
+        let fresh_mark = dispatch_permit(
+            mark_store
+                .reserve(server_request(server, 17, 1), now)
+                .unwrap(),
+        );
+        assert_ne!(stale_mark.ticket_id, fresh_mark.ticket_id);
+        assert_eq!(
+            mark_store.mark_dispatched(stale_mark, now),
+            Ed2kCallbackDispatchOutcome::Settled
+        );
+        assert_eq!(
+            mark_store.mark_dispatched(fresh_mark, now),
+            Ed2kCallbackDispatchOutcome::Armed
+        );
+
+        let mut cancel_store = CallbackTicketStore::default();
+        let stale_cancel = dispatch_permit(
+            cancel_store
+                .reserve(server_request(server, 17, 1), now)
+                .unwrap(),
+        );
+        let owner = cancel_store.claim_session(observed, now).unwrap().unwrap();
+        cancel_store.finish_session(&owner, now).unwrap();
+        let fresh_cancel = dispatch_permit(
+            cancel_store
+                .reserve(server_request(server, 17, 1), now)
+                .unwrap(),
+        );
+        assert_ne!(stale_cancel.ticket_id, fresh_cancel.ticket_id);
+        assert!(!cancel_store.cancel(stale_cancel, now));
+        assert!(cancel_store.cancel(fresh_cancel, now));
+    }
+
+    #[test]
+    fn cancelled_residual_dispatch_preserves_the_complete_retry_set() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+        let mut store = CallbackTicketStore::default();
+        store.reserve(server_request(server, 17, 1), now).unwrap();
+        store.reserve(server_request(server, 17, 2), now).unwrap();
+        let owner = store.claim_session(observed, now).unwrap().unwrap();
+        store.acknowledge_session_current(&owner, now).unwrap();
+        store.finish_session(&owner, now).unwrap();
+
+        let failed = dispatch_permit(store.reserve(server_request(server, 17, 2), now).unwrap());
+        assert!(store.cancel(failed, now));
+        assert_eq!(store.tickets.len(), 1);
+        assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
+        assert_eq!(store.tickets[0].downloads, vec![download(2)]);
+
+        assert!(matches!(
+            store.reserve(server_request(server, 17, 2), now),
+            Ok(Ed2kCallbackReservation::Dispatch(_))
+        ));
+    }
+
+    #[test]
+    fn same_hash_work_from_another_route_joins_the_active_peer_session() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let user_hash = [0x44; 16];
+        let mut first = server_request(server, 17, 1);
+        first.peer.expected_user_hash = Some(user_hash);
+        let mut store = CallbackTicketStore::default();
+        store.reserve(first, now).unwrap();
+        let owner = store
+            .claim_session(hello(None, 999, user_hash), now)
+            .unwrap()
+            .unwrap();
+
+        let joined = Ed2kCallbackTicketRequest::kad_buddy(
+            [0x22; 16],
+            None,
+            23,
+            user_hash,
+            Ipv4Addr::new(192, 0, 2, 1),
+            4662,
+            download(2),
+            Duration::from_secs(45),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.reserve(joined, now),
+            Ok(Ed2kCallbackReservation::Joined { .. })
+        ));
+        assert_eq!(store.session_current(&owner, now), Ok(Some(download(1))));
+        store.acknowledge_session_current(&owner, now).unwrap();
+        assert_eq!(store.session_current(&owner, now), Ok(Some(download(2))));
+        store.finish_session(&owner, now).unwrap();
+
+        assert_eq!(store.tickets.len(), 1);
+        assert!(matches!(
+            store.tickets[0].route,
+            Ed2kCallbackRoute::KadBuddy { .. }
+        ));
+        assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
+        assert_eq!(store.tickets[0].downloads, vec![download(2)]);
+    }
+
+    #[test]
+    fn same_route_join_cannot_bypass_the_live_session_file_bound() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let user_hash = [0x44; 16];
+        let mut store = CallbackTicketStore::default();
+        for index in 0..128u16 {
+            let mut request = server_request(server, 17, 1);
+            request.peer.expected_user_hash = Some(user_hash);
+            request.download = indexed_download(index);
+            store.reserve(request, now).unwrap();
+        }
+        for index in 128..256u16 {
+            let request = Ed2kCallbackTicketRequest::kad_buddy(
+                [0x22; 16],
+                None,
+                23,
+                user_hash,
+                Ipv4Addr::new(192, 0, 2, 1),
+                4662,
+                indexed_download(index),
+                Duration::from_secs(45),
+            )
+            .unwrap();
+            store.reserve(request, now).unwrap();
+        }
+        let owner = store
+            .claim_session(hello(None, 999, user_hash), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .tickets
+                .iter()
+                .filter(|ticket| matches!(ticket.state, CallbackTicketState::SessionOwned { .. }))
+                .flat_map(|ticket| ticket.downloads.iter().map(|download| download.file_hash))
+                .collect::<HashSet<_>>()
+                .len(),
+            CALLBACK_CLAIM_DOWNLOAD_CAPACITY
+        );
+
+        let mut overflow = server_request(server, 17, 1);
+        overflow.peer.expected_user_hash = Some(user_hash);
+        overflow.download = indexed_download(256);
+        assert!(matches!(
+            store.reserve(overflow, now),
+            Ok(Ed2kCallbackReservation::Dispatch(_))
+        ));
+        assert!(store.session_current(&owner, now).unwrap().is_some());
+        assert_eq!(
+            store
+                .tickets
+                .iter()
+                .filter(|ticket| matches!(ticket.state, CallbackTicketState::SessionOwned { .. }))
+                .flat_map(|ticket| ticket.downloads.iter().map(|download| download.file_hash))
+                .collect::<HashSet<_>>()
+                .len(),
+            CALLBACK_CLAIM_DOWNLOAD_CAPACITY
+        );
+    }
+
+    #[test]
+    fn live_session_cannot_absorb_an_oversized_residual_ticket() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let user_hash = [0x44; 16];
+        let mut store = CallbackTicketStore::default();
+        for index in 0..200u16 {
+            let mut request = server_request(server, 17, 1);
+            request.peer.expected_user_hash = Some(user_hash);
+            request.download = indexed_download(index);
+            store.reserve(request, now).unwrap();
+        }
+        for index in 200..300u16 {
+            let request = Ed2kCallbackTicketRequest::kad_buddy(
+                [0x22; 16],
+                None,
+                23,
+                user_hash,
+                Ipv4Addr::new(192, 0, 2, 1),
+                4662,
+                indexed_download(index),
+                Duration::from_secs(45),
+            )
+            .unwrap();
+            store.reserve(request, now).unwrap();
+        }
+        let residual_index = store
+            .tickets
+            .iter()
+            .position(|ticket| matches!(ticket.route, Ed2kCallbackRoute::KadBuddy { .. }))
+            .unwrap();
+        store.tickets[residual_index].state = CallbackTicketState::NeedsDispatch;
+        let owner = store
+            .claim_session(hello(None, 999, user_hash), now)
+            .unwrap()
+            .unwrap();
+
+        let retry = Ed2kCallbackTicketRequest::kad_buddy(
+            [0x22; 16],
+            None,
+            23,
+            user_hash,
+            Ipv4Addr::new(192, 0, 2, 1),
+            4662,
+            indexed_download(200),
+            Duration::from_secs(45),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.reserve(retry, now),
+            Ok(Ed2kCallbackReservation::Dispatch(_))
+        ));
+        assert_eq!(store.tickets[residual_index].downloads.len(), 100);
+        assert_eq!(
+            store.tickets[residual_index].state,
+            CallbackTicketState::Reserved
+        );
+        assert_eq!(
+            store
+                .tickets
+                .iter()
+                .filter(|ticket| matches!(ticket.state, CallbackTicketState::SessionOwned { .. }))
+                .flat_map(|ticket| ticket.downloads.iter().map(|download| download.file_hash))
+                .collect::<HashSet<_>>()
+                .len(),
+            200
+        );
+        assert!(store.session_current(&owner, now).unwrap().is_some());
+    }
+
+    #[test]
+    fn fallback_admission_pins_the_observed_hash_before_concurrent_joins() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let admitted_hash = [0x44; 16];
+        let mut store = CallbackTicketStore::default();
+        store.reserve(server_request(server, 17, 1), now).unwrap();
+        let owner = store
+            .claim_session(hello(Some(server), 17, admitted_hash), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.tickets[0].peer.expected_user_hash,
+            Some(admitted_hash)
+        );
+
+        let mut conflicting = server_request(server, 17, 2);
+        conflicting.peer.expected_user_hash = Some([0x45; 16]);
+        assert!(matches!(
+            store.reserve(conflicting, now),
+            Ok(Ed2kCallbackReservation::Dispatch(_))
+        ));
+        assert_eq!(store.session_current(&owner, now), Ok(Some(download(1))));
+    }
+
+    #[test]
+    fn late_dispatch_mark_after_complete_session_is_explicitly_settled() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+        let mut store = CallbackTicketStore::default();
+        let permit = dispatch_permit(store.reserve(server_request(server, 17, 1), now).unwrap());
+        let owner = store.claim_session(observed, now).unwrap().unwrap();
+        store.acknowledge_session_current(&owner, now).unwrap();
+        store.finish_session(&owner, now).unwrap();
+
+        assert_eq!(
+            store.mark_dispatched(permit, now),
+            Ed2kCallbackDispatchOutcome::Settled
+        );
+    }
+
+    #[test]
+    fn session_residuals_receive_a_fresh_bounded_redispatch_deadline() {
+        let now = Instant::now();
+        let after_original_expiry = now + Duration::from_secs(2);
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let observed = hello(Some(server), 17, [0x55; 16]);
+        let mut first = server_request(server, 17, 1);
+        first.valid_for = Duration::from_secs(1);
+        let mut store = CallbackTicketStore::default();
+        store.reserve(first, now).unwrap();
+        let owner = store.claim_session(observed, now).unwrap().unwrap();
+
+        assert!(matches!(
+            store.reserve(server_request(server, 17, 2), after_original_expiry),
+            Ok(Ed2kCallbackReservation::Joined { .. })
+        ));
+        store
+            .acknowledge_session_current(&owner, after_original_expiry)
+            .unwrap();
+        store.finish_session(&owner, after_original_expiry).unwrap();
+
+        assert_eq!(store.tickets.len(), 1);
+        assert_eq!(store.tickets[0].downloads, vec![download(2)]);
+        assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
+        assert_eq!(
+            store.tickets[0].expires_at,
+            after_original_expiry + Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn capacity_failure_does_not_partially_strengthen_ticket_identity() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let mut store = CallbackTicketStore::new(2, 1);
+        store.reserve(server_request(server, 17, 1), now).unwrap();
+        let original = store.tickets[0].clone();
+        let mut rejected = server_request(server, 17, 2);
+        rejected.peer.expected_user_hash = Some([0x44; 16]);
+
+        assert_eq!(
+            store.reserve(rejected, now),
+            Err(Ed2kCallbackTicketError::DownloadCapacity)
+        );
+        assert_eq!(store.tickets[0], original);
+    }
+
+    #[test]
+    fn fast_dispatch_completion_is_recorded_while_the_session_owns_the_ticket() {
+        let now = Instant::now();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let mut store = CallbackTicketStore::default();
+        let permit = dispatch_permit(store.reserve(server_request(server, 17, 1), now).unwrap());
+        let token = store
+            .claim_session(hello(Some(server), 17, [0x55; 16]), now)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            store.mark_dispatched(permit, now),
+            Ed2kCallbackDispatchOutcome::Armed
+        );
+        assert!(matches!(
+            store.tickets[0].state,
+            CallbackTicketState::SessionOwned {
+                prior_state: CallbackTicketReadyState::Armed,
+                ..
+            }
+        ));
+        store.finish_session(&token, now).unwrap();
+        assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
     }
 
     #[test]
