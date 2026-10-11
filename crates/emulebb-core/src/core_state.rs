@@ -88,10 +88,10 @@ pub(crate) struct CoreState {
     pub(crate) ed2k_server_source_last_frame_at: Option<Instant>,
     pub(crate) ed2k_udp_source_batch_last_queried: HashMap<String, Instant>,
     pub(crate) ed2k_kad_source_last_queried: HashMap<String, (Instant, u8)>,
-    /// Last time we sent an outbound Kad `KADEMLIA_CALLBACK_REQ` for a firewalled
-    /// buddy source, keyed by (source ip, source tcp port, file hash). Enforces the
-    /// callback cooldown so a buddy-only source is not re-callbacked every requery
-    /// round (oracle `DS_WAITCALLBACKKAD` reap window).
+    /// Last settled outbound Kad callback per firewalled peer/route. One inbound
+    /// callback session can negotiate all A4AF files, while direct-buddy and
+    /// FINDSOURCE routes remain distinct. Enforces the oracle
+    /// `DS_WAITCALLBACKKAD` reap window without multiplying requests by file.
     pub(crate) ed2k_kad_callback_last_sent:
         HashMap<crate::kad_callback_initiator::KadCallbackKey, Instant>,
     /// Last time we sent a classic server callback for one server-local LowID

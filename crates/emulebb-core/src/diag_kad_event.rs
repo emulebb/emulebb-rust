@@ -304,10 +304,17 @@ pub(crate) fn buddy(established: bool, peer: SocketAddr) {
 /// `callback` milestone (uniform-diagnostics-v2 §3.3, rust superset): we
 /// originated an outbound Kad `KADEMLIA_CALLBACK_REQ` to a firewalled buddy
 /// source's buddy so the source connects back to us (oracle `BaseClient.cpp`
-/// `CCS_KADCALLBACK`). `outcome` is `sent`/`send_failed`; `keys.peer` is the
-/// buddy relay endpoint the request went to. This has no direct MFC diag_event
-/// analog (MFC only `DebugSend`s), so it is an allowed rust-only superset event.
-pub(crate) fn callback(outcome: &str, buddy_peer: SocketAddr, source: SocketAddr, file_hash: &str) {
+/// `CCS_KADCALLBACK`). `outcome` is `sent`, `send_failed`, or
+/// `delivery_unknown`; `keys.peer` is the buddy relay endpoint the request went
+/// to when known, while FINDSOURCE traversal omits it. This has no direct MFC
+/// diag_event analog (MFC only `DebugSend`s), so it is an allowed rust-only
+/// superset event.
+pub(crate) fn callback(
+    outcome: &str,
+    buddy_peer: Option<SocketAddr>,
+    source: SocketAddr,
+    file_hash: &str,
+) {
     let milestone = match outcome {
         "sent" => "callback_requested",
         _ => "callback_request_failed",
@@ -320,13 +327,11 @@ pub(crate) fn callback(outcome: &str, buddy_peer: SocketAddr, source: SocketAddr
         "source": source.to_string(),
         "fileHash": file_hash,
     });
-    emit(
-        FAMILY,
-        "callback",
-        severity,
-        json!({ "peer": buddy_peer.to_string(), "fileHash": file_hash }),
-        body,
-    );
+    let mut keys = json!({ "fileHash": file_hash });
+    if let Some(peer) = buddy_peer {
+        keys["peer"] = json!(peer.to_string());
+    }
+    emit(FAMILY, "callback", severity, keys, body);
 }
 
 /// `lookup` milestone `lookup_complete` (schema §3.3): a Kad search/lookup
@@ -427,13 +432,19 @@ mod tests {
         buddy(false, "1.2.3.4:4672".parse().unwrap());
         callback(
             "sent",
-            "198.51.100.9:5000".parse().unwrap(),
+            Some("198.51.100.9:5000".parse().unwrap()),
             "192.0.2.77:4662".parse().unwrap(),
             "abc123",
         );
         callback(
             "send_failed",
-            "198.51.100.9:5000".parse().unwrap(),
+            Some("198.51.100.9:5000".parse().unwrap()),
+            "192.0.2.77:4662".parse().unwrap(),
+            "abc123",
+        );
+        callback(
+            "send_failed",
+            None,
             "192.0.2.77:4662".parse().unwrap(),
             "abc123",
         );
