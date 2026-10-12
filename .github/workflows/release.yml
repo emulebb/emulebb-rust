@@ -162,7 +162,7 @@ jobs:
         if: matrix.os == 'windows' && matrix.arch == 'x64'
         run: python -m pip install playwright==1.59.0 && python -m playwright install chromium
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           package-manager-cache: false
@@ -214,7 +214,7 @@ jobs:
         run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} --render-webui
       - name: Retain build diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: emulebb-rust-build-logs-${{ matrix.os }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/emulebb-rust-out/logs/builds/**/*.log
@@ -222,7 +222,7 @@ jobs:
           retention-days: 30
       - name: Retain package and provenance
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: emulebb-rust-package-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -281,7 +281,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Download all native assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: emulebb-rust-package-*
           merge-multiple: true
@@ -338,7 +338,7 @@ jobs:
           exit "$scan_status"
       - name: Retain image security evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: emulebb-rust-image-security
           path: ${{ runner.temp }}/emulebb-rust-out/image-security/*
@@ -346,7 +346,7 @@ jobs:
           retention-days: 30
       - name: Retain image candidate
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: emulebb-rust-image-candidate
           path: |
@@ -368,12 +368,12 @@ jobs:
       packages: write
     steps:
       - name: Download smoke-tested image candidate
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: emulebb-rust-image-candidate
           path: ${{ runner.temp }}/emulebb-rust-out/artifacts
       - name: Install pinned registry client
-        uses: regclient/actions/regctl-installer@1b705e32d40851370799ea5814e83d0a5f6a70dc # v0.1.0
+        uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # v0.2.0
         with:
           release: v0.11.6
       - name: Log in to GHCR
@@ -447,7 +447,7 @@ jobs:
       - name: Install pinned workspace CLI dependencies
         run: python -m pip install click==8.4.1 pydantic==2.13.4
       - name: Download all native assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: emulebb-rust-package-*
           merge-multiple: true
@@ -458,7 +458,7 @@ jobs:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
         run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
       - name: Download image security evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: emulebb-rust-image-security
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
@@ -509,7 +509,7 @@ jobs:
       packages: write
     steps:
       - name: Install pinned registry client
-        uses: regclient/actions/regctl-installer@1b705e32d40851370799ea5814e83d0a5f6a70dc # v0.1.0
+        uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # v0.2.0
         with:
           release: v0.11.6
       - name: Log in to GHCR
