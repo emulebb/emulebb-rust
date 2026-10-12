@@ -86,7 +86,12 @@ pub(super) fn emule_misc_options1() -> u32 {
     let comments_version = 1u32;
     // Recent stock eMule no longer advertises peer cache support.
     let peer_cache = 0u32;
-    let no_view_shared_files = 1u32;
+    // The listener serves OP_ASKSHAREDFILES / OP_ASKSHAREDDIRS and there is no
+    // local share-visibility toggle, so advertise view-allowed. Stock sets this
+    // bit only when `CanSeeShares() == vsfaNobody` (BaseClient.cpp:974), i.e.
+    // the stock default is 0; previously advertising 1 while serving browse was
+    // a backwards capability fingerprint.
+    let no_view_shared_files = 0u32;
     // Recent captures + local 0.72a advertise the packed/multipacket startup.
     let multipacket = 1u32;
     let preview_supported = 0u32;
