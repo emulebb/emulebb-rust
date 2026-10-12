@@ -78,6 +78,14 @@ pub(super) async fn handle_server_packet(
                 guard.client_id = Some(id_change.client_id);
                 guard.server_flags = id_change.server_flags;
             }
+            // Stock eMule runs the connected-server startup exactly once per
+            // assigned client ID (ServerSocket.cpp OP_IDCHANGE). A server that
+            // echoes IDCHANGE, or re-sends it after the callback test, must only
+            // refresh flags/public-IP state. Only a real client-ID reassignment
+            // (for example LowID-to-HighID) re-emits ConnectSucceeded and
+            // republishes the offer-file catalog.
+            let connected_transition =
+                !session.login_accepted || session.assigned_client_id != Some(id_change.client_id);
             info!(
                 "ED2K server assigned client_id={} high_id={} server_flags={} reported_client_ip={}",
                 id_change.client_id,
@@ -97,7 +105,7 @@ pub(super) async fn handle_server_packet(
             session.pending_login_deadline = None;
             // eMule `CServerList::ServerStats`: a successful connect resets the
             // server's fail-count. Report the login so the core clears it.
-            if let Some(sender) = context.server_list_events.as_ref() {
+            if connected_transition && let Some(sender) = context.server_list_events.as_ref() {
                 let _ = sender.send(Ed2kServerListEvent::ConnectSucceeded {
                     endpoint: session.endpoint.to_string(),
                 });
@@ -120,14 +128,16 @@ pub(super) async fn handle_server_packet(
                     .public_ip
                     .set(ipv4_from_client_id(id_change.client_id));
             }
-            send_connected_server_startup(
-                session,
-                &context.shared_catalog,
-                context.bind_ip,
-                context.hello_identity.tcp_port,
-                context.add_servers_from_server,
-            )
-            .await?;
+            if connected_transition {
+                send_connected_server_startup(
+                    session,
+                    &context.shared_catalog,
+                    context.bind_ip,
+                    context.hello_identity.tcp_port,
+                    context.add_servers_from_server,
+                )
+                .await?;
+            }
             if allow_probe_search {
                 maybe_send_probe_search(session, context).await?;
             }
