@@ -3,7 +3,7 @@ use super::background::send_source_request_batch;
 use super::offer_policy::{
     OFFER_FILES_CAPABILITY_VERSION, OfferFilesCapabilityAdvertisement, OfferFilesPolicy,
 };
-use super::session::OfferFilesPacingMode;
+use super::session::{OfferFilesPacingMode, ServerSessionPhase};
 use super::session_driver::ServerSessionExit;
 use super::types::ServerSessionContext;
 use super::{
@@ -48,7 +48,7 @@ use super::{
 };
 use crate::{
     NatManager,
-    ed2k_tcp::{Ed2kHelloIdentity, emule_connect_options},
+    ed2k_tcp::{Ed2kHelloIdentity, ed2k_callback_session_channel, emule_connect_options},
     ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
     kad_firewall::KadFirewallState,
     reachability::ExternalReachability,
@@ -67,7 +67,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{Mutex, Notify, RwLock},
 };
 use tokio_util::sync::CancellationToken;
@@ -154,6 +154,164 @@ fn id_change_decoder_preserves_zero_client_id_as_unaccepted_login() {
     assert_eq!(
         id_change.reported_client_ip,
         Some("127.0.0.1".parse().unwrap())
+    );
+}
+
+async fn connected_id_change_fixture() -> (
+    ServerSession,
+    TcpStream,
+    tokio::sync::mpsc::UnboundedReceiver<Ed2kServerListEvent>,
+    ServerSessionContext,
+) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = TcpStream::connect(addr).await.unwrap();
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let session = ServerSession::from_stream_for_test(stream, peer_addr);
+
+    let (server_list_events, events) = ed2k_server_list_event_channel();
+    let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
+    let context = ServerSessionContext {
+        bind_ip: Ipv4Addr::LOCALHOST,
+        nat: Arc::new(NatManager::default()),
+        hello_identity: Ed2kHelloIdentity {
+            user_hash: [0u8; 16],
+            client_id: 0,
+            tcp_port: 4662,
+            udp_port: 4672,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: 0,
+            direct_udp_callback: false,
+        },
+        nickname: "test".to_string(),
+        last_client_id: Arc::new(AtomicU32::new(0)),
+        probe_search_term: None,
+        shared_catalog: Arc::new(RwLock::new(IndexedSharedCatalog::default())),
+        state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        keepalive_interval: None,
+        connect_timeout: Duration::from_secs(25),
+        rotation_interval: None,
+        shutdown: Arc::new(AtomicBool::new(false)),
+        public_ip: ExternalReachability::new(),
+        reconnect_signal: Arc::new(Notify::new()),
+        server_list_events: Some(server_list_events),
+        add_servers_from_server: false,
+        offer_files_capability_enabled: false,
+        callback_sessions,
+    };
+    (session, peer, events, context)
+}
+
+fn id_change_packet(
+    client_id: u32,
+    server_flags: u32,
+    reported_ip: Option<Ipv4Addr>,
+) -> Ed2kPacket {
+    let mut payload = Vec::with_capacity(16);
+    payload.extend_from_slice(&client_id.to_le_bytes());
+    payload.extend_from_slice(&server_flags.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    if let Some(reported_ip) = reported_ip {
+        payload.extend_from_slice(&reported_ip.octets());
+    }
+    Ed2kPacket {
+        opcode: OP_IDCHANGE,
+        payload,
+    }
+}
+
+#[tokio::test]
+async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
+    let (mut session, _peer, mut events, context) = connected_id_change_fixture().await;
+    let client_id = 0x0102_0304;
+
+    handle_server_packet(
+        &mut session,
+        id_change_packet(client_id, 0, None),
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert!(session.login_accepted);
+    assert_eq!(session.assigned_client_id, Some(client_id));
+    assert_eq!(
+        context.public_ip.get(),
+        Some(ipv4_from_client_id(client_id))
+    );
+    assert!(matches!(session.phase, ServerSessionPhase::Connected));
+    assert!(matches!(
+        events.try_recv(),
+        Ok(Ed2kServerListEvent::ConnectSucceeded { .. })
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "first acceptance emits exactly one ConnectSucceeded event"
+    );
+
+    handle_server_packet(
+        &mut session,
+        id_change_packet(client_id, 0, None),
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(session.assigned_client_id, Some(client_id));
+    assert!(
+        events.try_recv().is_err(),
+        "redundant same-ID IDCHANGE must not re-emit ConnectSucceeded"
+    );
+}
+
+#[tokio::test]
+async fn client_id_reassignment_reruns_connected_startup() {
+    let (mut session, _peer, mut events, context) = connected_id_change_fixture().await;
+    let low_id = 0x0000_0001;
+    let high_id = 0x0102_0304;
+
+    context.public_ip.set(Ipv4Addr::new(203, 0, 113, 1));
+    handle_server_packet(
+        &mut session,
+        id_change_packet(low_id, 0, None),
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        events.try_recv(),
+        Ok(Ed2kServerListEvent::ConnectSucceeded { .. })
+    ));
+    assert_eq!(session.assigned_client_id, Some(low_id));
+    assert!(
+        !context.public_ip.is_known(),
+        "LowID without a reported IP clears the public IP"
+    );
+
+    handle_server_packet(
+        &mut session,
+        id_change_packet(high_id, 0, None),
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        events.try_recv(),
+        Ok(Ed2kServerListEvent::ConnectSucceeded { .. })
+    ));
+    assert_eq!(session.assigned_client_id, Some(high_id));
+    assert_eq!(context.public_ip.get(), Some(ipv4_from_client_id(high_id)));
+    assert!(
+        events.try_recv().is_err(),
+        "reassignment emits exactly one additional ConnectSucceeded event"
     );
 }
 
