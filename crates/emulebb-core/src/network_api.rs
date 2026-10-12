@@ -1,5 +1,28 @@
 use super::*;
 
+/// Periodic expiry prune cadence for the shared in-memory ban store, mirroring
+/// eMule `CClientList::Process` `BAN_CLEANUP_TIME` = `MIN2MS(20)` (20 minutes).
+/// Lookups already treat expired entries as not-banned; this only reclaims the
+/// two maps so a long-running daemon does not grow them without bound.
+const ED2K_BAN_PRUNE_INTERVAL: Duration = Duration::from_secs(20 * 60);
+
+/// Prune expired IP/user-hash ban entries on a fixed cadence until shutdown.
+async fn run_ed2k_ban_store_prune_loop(
+    ban_store: Arc<emulebb_ed2k::ban_store::BanStore>,
+    shutdown: Arc<AtomicBool>,
+    interval: Duration,
+) {
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        ban_store.prune_expired(std::time::Instant::now());
+    }
+}
+
 impl EmulebbCore {
     pub async fn import_kad_nodes_url(&self, url: &str) -> Result<bool> {
         let url = validate_url_import(url)?;
@@ -340,6 +363,14 @@ impl EmulebbCore {
         tasks.push(tokio::spawn(hostname_lookup::run_hostname_lookup_loop(
             self.clone(),
             Arc::clone(&shutdown),
+        )));
+        // Reclaim expired ban entries (IP + user hash) on the master cadence so
+        // the shared in-memory ban store does not grow unbounded across a
+        // long-running daemon (RUST-BUG-116).
+        tasks.push(tokio::spawn(run_ed2k_ban_store_prune_loop(
+            self.ed2k_transfers.ban_store(),
+            Arc::clone(&shutdown),
+            ED2K_BAN_PRUNE_INTERVAL,
         )));
         // "Reconnect now" signal: the advertised-ports sync fires it when the
         // external port changes (UPnP ready / remapped) so the server loop re-logs
@@ -916,5 +947,29 @@ mod nodes_dat_persistence_tests {
         drop(first);
         fs::remove_file(&path).unwrap();
         fs::remove_dir(&directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod ban_prune_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ban_prune_loop_ticks_and_honors_shutdown() {
+        let store = Arc::new(emulebb_ed2k::ban_store::BanStore::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handle = tokio::spawn(run_ed2k_ban_store_prune_loop(
+            Arc::clone(&store),
+            Arc::clone(&shutdown),
+            Duration::from_millis(5),
+        ));
+        // Let several ticks elapse; the task must still be running.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(!handle.is_finished());
+        shutdown.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("ban prune loop did not stop on shutdown")
+            .expect("ban prune loop panicked");
     }
 }
