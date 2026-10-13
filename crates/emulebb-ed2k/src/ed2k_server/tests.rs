@@ -167,10 +167,29 @@ async fn connected_id_change_fixture() -> (
     let addr = listener.local_addr().unwrap();
     let peer = TcpStream::connect(addr).await.unwrap();
     let (stream, peer_addr) = listener.accept().await.unwrap();
-    let session = ServerSession::from_stream_for_test(stream, peer_addr);
+    let mut session = ServerSession::from_stream_for_test(stream, peer_addr);
+    session.server_soft_files = 1_000;
 
     let (server_list_events, events) = ed2k_server_list_event_channel();
     let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
+    let shared_catalog = IndexedSharedCatalog::from_entries(vec![Ed2kSharedEntry {
+        file_hash: "00112233445566778899aabbccddeeff".to_string(),
+        display_name: "id-change-offer.bin".to_string(),
+        file_size: 1_234,
+        verified_complete: true,
+        verified_ranges: Vec::new(),
+        compatibility_hint: false,
+        source_count_hint: None,
+        aich_root: None,
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+        media: Default::default(),
+        all_time_uploaded_bytes: 0,
+        complete_parts: Vec::new(),
+        publish: Default::default(),
+    }]);
     let context = ServerSessionContext {
         bind_ip: Ipv4Addr::LOCALHOST,
         nat: Arc::new(NatManager::default()),
@@ -187,7 +206,7 @@ async fn connected_id_change_fixture() -> (
         nickname: "test".to_string(),
         last_client_id: Arc::new(AtomicU32::new(0)),
         probe_search_term: None,
-        shared_catalog: Arc::new(RwLock::new(IndexedSharedCatalog::default())),
+        shared_catalog: Arc::new(RwLock::new(shared_catalog)),
         state: Arc::new(RwLock::new(Ed2kServerState::default())),
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         keepalive_interval: None,
@@ -202,6 +221,29 @@ async fn connected_id_change_fixture() -> (
         callback_sessions,
     };
     (session, peer, events, context)
+}
+
+async fn read_client_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+    let mut header = [0u8; TCP_PACKET_HEADER_LEN];
+    stream.read_exact(&mut header).await.unwrap();
+    assert_eq!(header[0], OP_EDONKEYPROT);
+    let payload_len =
+        u32::from_le_bytes(header[1..5].try_into().unwrap()).saturating_sub(1) as usize;
+    let mut payload = vec![0u8; payload_len];
+    stream.read_exact(&mut payload).await.unwrap();
+    (header[5], payload)
+}
+
+async fn read_single_offer_file(stream: &mut TcpStream, expected_client_id: u32) {
+    let (opcode, payload) = tokio::time::timeout(Duration::from_secs(1), read_client_frame(stream))
+        .await
+        .expect("server session should publish one offer-files frame");
+    assert_eq!(opcode, OP_OFFERFILES);
+    assert_eq!(u32::from_le_bytes(payload[..4].try_into().unwrap()), 1);
+    assert_eq!(
+        u32::from_le_bytes(payload[20..24].try_into().unwrap()),
+        expected_client_id
+    );
 }
 
 fn id_change_packet(
@@ -224,7 +266,7 @@ fn id_change_packet(
 
 #[tokio::test]
 async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
-    let (mut session, _peer, mut events, context) = connected_id_change_fixture().await;
+    let (mut session, mut peer, mut events, context) = connected_id_change_fixture().await;
     let client_id = 0x0102_0304;
 
     handle_server_packet(
@@ -242,7 +284,7 @@ async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
         context.public_ip.get(),
         Some(ipv4_from_client_id(client_id))
     );
-    assert!(matches!(session.phase, ServerSessionPhase::Connected));
+    assert!(matches!(session.phase, ServerSessionPhase::OfferFilesSent));
     assert!(matches!(
         events.try_recv(),
         Ok(Ed2kServerListEvent::ConnectSucceeded { .. })
@@ -251,6 +293,7 @@ async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
         events.try_recv().is_err(),
         "first acceptance emits exactly one ConnectSucceeded event"
     );
+    read_single_offer_file(&mut peer, client_id).await;
 
     handle_server_packet(
         &mut session,
@@ -266,11 +309,17 @@ async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
         events.try_recv().is_err(),
         "redundant same-ID IDCHANGE must not re-emit ConnectSucceeded"
     );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), read_client_frame(&mut peer))
+            .await
+            .is_err(),
+        "redundant same-ID IDCHANGE must not republish the catalog"
+    );
 }
 
 #[tokio::test]
-async fn client_id_reassignment_reruns_connected_startup() {
-    let (mut session, _peer, mut events, context) = connected_id_change_fixture().await;
+async fn client_id_reassignment_republishes_catalog_with_new_endpoint() {
+    let (mut session, mut peer, mut events, context) = connected_id_change_fixture().await;
     let low_id = 0x0000_0001;
     let high_id = 0x0102_0304;
 
@@ -293,6 +342,7 @@ async fn client_id_reassignment_reruns_connected_startup() {
         !context.public_ip.is_known(),
         "LowID without a reported IP clears the public IP"
     );
+    read_single_offer_file(&mut peer, 0).await;
 
     handle_server_packet(
         &mut session,
@@ -313,6 +363,7 @@ async fn client_id_reassignment_reruns_connected_startup() {
         events.try_recv().is_err(),
         "reassignment emits exactly one additional ConnectSucceeded event"
     );
+    read_single_offer_file(&mut peer, high_id).await;
 }
 
 mod background;

@@ -315,7 +315,23 @@ impl ServerSession {
         }
     }
 
+    fn reset_offer_files_publication_epoch(&mut self) {
+        self.offer_files_sent = false;
+        self.offer_files_sent_at = None;
+        self.offer_files_catalog_fingerprint = None;
+        self.offer_files_catalog_cursor = 0;
+        self.offer_files_published_hashes.clear();
+        self.offer_files_distinct_published_hashes.clear();
+        self.offer_files_ranked_catalog.clear();
+        self.offer_files_refresh_catalog = true;
+        self.offer_files_negotiation_deadline = None;
+        self.offer_files_next_publish_at = None;
+        self.offer_files_publish_requested = false;
+        self.offer_files_last_batch_entries = 0;
+    }
+
     pub(super) async fn begin_offer_files_publishing(&mut self) {
+        self.reset_offer_files_publication_epoch();
         self.offer_files_publish_requested = true;
         if !self.offer_files_capability_enabled {
             self.offer_files_next_publish_at = Some(Instant::now());
