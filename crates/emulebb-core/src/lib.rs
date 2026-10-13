@@ -6695,7 +6695,7 @@ async fn handle_kad_find_buddy_res(
             tracing::debug!("ignoring Kad FINDBUDDY_RES from {from}: already hold a buddy");
             return;
         }
-        state.set_outgoing_buddy(buddy);
+        state.set_outgoing_buddy(buddy.clone());
     }
     set_hello_buddy_snapshot(Some(HelloBuddySnapshot {
         ip: buddy_ip,
@@ -6718,6 +6718,7 @@ async fn handle_kad_find_buddy_res(
     let dht = dht.clone();
     let transfer_runtime = Arc::clone(transfer_runtime);
     let callback_sessions = callback_sessions.clone();
+    let buddy_link_cancel = Arc::clone(buddy_link_cancel);
     // LOWID-G8: install a fresh cancellation handle for this link so the
     // buddy-management loop can tear it down (and stop its keepalive pings) when
     // the buddy relationship is no longer warranted.
@@ -6738,20 +6739,26 @@ async fn handle_kad_find_buddy_res(
             registry,
             reask_handle,
             timeout: KAD_BUDDY_LINK_TIMEOUT,
-            cancel,
+            cancel: cancel.clone(),
         })
         .await
         {
             tracing::debug!("outbound Kad buddy link to {buddy_addr} failed: {error:#}");
         }
-        // On any exit (connect failure, link drop, or cancellation), drop the
-        // acquired buddy so the next upkeep re-searches. The stale cancellation
-        // handle in the shared cell is harmless: it is overwritten when a new
-        // buddy is acquired, and cancelling an already-finished token is a no-op.
-        kad_buddy.lock().await.clear_outgoing_buddy();
-        set_hello_buddy_snapshot(None);
-        // kad_event buddy milestone `buddy_released` (uniform-diagnostics-v2 §3.3).
-        crate::diag_kad_event::buddy(false, buddy_addr);
+        {
+            let mut current_cancel = buddy_link_cancel.lock().unwrap();
+            if current_cancel.as_ref() == Some(&cancel) {
+                current_cancel.take();
+            }
+        }
+        if kad_buddy.lock().await.clear_outgoing_buddy_if(&buddy) {
+            set_hello_buddy_snapshot(None);
+            crate::diag_kad_event::buddy(false, buddy_addr);
+        } else {
+            tracing::debug!(
+                "outbound Kad buddy link to {buddy_addr} ended after its state was replaced"
+            );
+        }
     });
 }
 
