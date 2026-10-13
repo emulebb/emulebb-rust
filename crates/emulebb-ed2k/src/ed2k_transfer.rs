@@ -333,6 +333,10 @@ pub struct Ed2kTransferRuntime {
     /// the download driver, the UDP reask runtime, and core via this runtime's
     /// `Arc`. Not persisted across restart, matching the master.
     ban_store: Arc<crate::ban_store::BanStore>,
+    /// Cross-reconnect `(IPv4, advertised TCP port) -> user hash` history with
+    /// the master's two-hour `KEEPTRACK_TIME` lifetime. Listener sessions share
+    /// this process-local store so reconnecting cannot reset identity history.
+    tracked_client_identities: Arc<crate::tracked_client_identity::TrackedClientIdentityStore>,
     /// Per-transfer corruption blackbox (eMule `CCorruptionBlackBox`), keyed by
     /// file hash: which sender IP wrote which byte ranges, credited/debited by
     /// AICH block verdicts, evaluated for the 32%-corrupt-share ban. In-memory
@@ -496,6 +500,8 @@ impl Ed2kTransferRuntime {
         // hand a no-request repeat-offender straight to the shared ban list
         // (RUST-PAR-020 U-GAP3, mirroring `client->Ban(...)`, UploadQueue.cpp:1640).
         let ban_store = Arc::new(crate::ban_store::BanStore::new());
+        let tracked_client_identities =
+            Arc::new(crate::tracked_client_identity::TrackedClientIdentityStore::new());
         let mut upload_queue_state = Ed2kUploadQueueState::new(upload_queue_config);
         upload_queue_state.set_ban_store(Arc::clone(&ban_store));
         let runtime = Self {
@@ -544,6 +550,7 @@ impl Ed2kTransferRuntime {
             credit_system_enabled: AtomicBool::new(true),
             ich_enabled: AtomicBool::new(true),
             ban_store,
+            tracked_client_identities,
             corruption_blackbox: Arc::new(StdMutex::new(HashMap::new())),
         };
         // Credit aging on startup: drop peer credit rows last seen > 150 days ago
@@ -561,6 +568,15 @@ impl Ed2kTransferRuntime {
     #[must_use]
     pub fn ban_store(&self) -> Arc<crate::ban_store::BanStore> {
         Arc::clone(&self.ban_store)
+    }
+
+    /// Shared cross-reconnect client identity history used by the ED2K listener
+    /// and the core maintenance loop.
+    #[must_use]
+    pub fn tracked_client_identities(
+        &self,
+    ) -> Arc<crate::tracked_client_identity::TrackedClientIdentityStore> {
+        Arc::clone(&self.tracked_client_identities)
     }
 
     /// Hold one live ED2K peer connection in the per-IP registry. The returned

@@ -1,19 +1,21 @@
 use super::*;
 
-/// Periodic expiry prune cadence for the shared in-memory ban store, mirroring
+/// Periodic expiry prune cadence for shared in-memory client state, mirroring
 /// eMule `CClientList::Process` `BAN_CLEANUP_TIME` = `MIN2MS(20)` (20 minutes).
-/// Lookups already treat expired entries as not-banned; this only reclaims the
-/// two maps so a long-running daemon does not grow them without bound.
-const ED2K_BAN_PRUNE_INTERVAL: Duration = Duration::from_secs(20 * 60);
+const ED2K_CLIENT_STATE_PRUNE_INTERVAL: Duration = Duration::from_secs(20 * 60);
 
-/// Prune expired IP/user-hash ban entries on a fixed cadence until shutdown.
-async fn run_ed2k_ban_store_prune_loop(
+/// Prune expired ban and tracked-identity entries until shutdown.
+async fn run_ed2k_client_state_prune_loop(
     ban_store: Arc<emulebb_ed2k::ban_store::BanStore>,
+    tracked_client_identities: Arc<
+        emulebb_ed2k::tracked_client_identity::TrackedClientIdentityStore,
+    >,
     shutdown: Arc<AtomicBool>,
     interval: Duration,
 ) {
-    run_ed2k_ban_store_prune_loop_with_clock(
+    run_ed2k_client_state_prune_loop_with_clock(
         ban_store,
+        tracked_client_identities,
         shutdown,
         interval,
         std::time::Instant::now,
@@ -21,8 +23,11 @@ async fn run_ed2k_ban_store_prune_loop(
     .await;
 }
 
-async fn run_ed2k_ban_store_prune_loop_with_clock(
+async fn run_ed2k_client_state_prune_loop_with_clock(
     ban_store: Arc<emulebb_ed2k::ban_store::BanStore>,
+    tracked_client_identities: Arc<
+        emulebb_ed2k::tracked_client_identity::TrackedClientIdentityStore,
+    >,
     shutdown: Arc<AtomicBool>,
     interval: Duration,
     mut now: impl FnMut() -> std::time::Instant,
@@ -34,7 +39,9 @@ async fn run_ed2k_ban_store_prune_loop_with_clock(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        ban_store.prune_expired(now());
+        let now = now();
+        ban_store.prune_expired(now);
+        tracked_client_identities.prune_expired(now);
     }
 }
 
@@ -380,13 +387,13 @@ impl EmulebbCore {
             self.clone(),
             Arc::clone(&shutdown),
         )));
-        // Reclaim expired ban entries (IP + user hash) on the master cadence so
-        // the shared in-memory ban store does not grow unbounded across a
-        // long-running daemon (RUST-BUG-116).
-        tasks.push(tokio::spawn(run_ed2k_ban_store_prune_loop(
+        // Reclaim expired ban and reconnect-identity entries on the master's
+        // shared client-list maintenance cadence (RUST-BUG-115/116).
+        tasks.push(tokio::spawn(run_ed2k_client_state_prune_loop(
             self.ed2k_transfers.ban_store(),
+            self.ed2k_transfers.tracked_client_identities(),
             Arc::clone(&shutdown),
-            ED2K_BAN_PRUNE_INTERVAL,
+            ED2K_CLIENT_STATE_PRUNE_INTERVAL,
         )));
         // "Reconnect now" signal: the advertised-ports sync fires it when the
         // external port changes (UPnP ready / remapped) so the server loop re-logs
@@ -969,37 +976,56 @@ mod nodes_dat_persistence_tests {
 }
 
 #[cfg(test)]
-mod ban_prune_tests {
+mod client_state_prune_tests {
     use super::*;
     use emulebb_ed2k::ban_store::{BanStore, BanStoreRetainedCounts, CLIENT_BAN_TIME};
+    use emulebb_ed2k::tracked_client_identity::{
+        TrackedClientIdentityObservation, TrackedClientIdentityStore,
+    };
 
     #[tokio::test]
-    async fn ban_prune_loop_reclaims_expired_entries_and_honors_shutdown() {
+    async fn client_state_prune_loop_reclaims_expired_entries_and_honors_shutdown() {
         const EXPIRED_HASH: [u8; 16] = [1; 16];
         const FRESH_HASH: [u8; 16] = [2; 16];
 
-        let store = Arc::new(BanStore::new());
+        let ban_store = Arc::new(BanStore::new());
+        let tracked_client_identities = Arc::new(TrackedClientIdentityStore::new());
         let start = std::time::Instant::now();
         let expired_ip = Ipv4Addr::new(192, 0, 2, 10);
         let fresh_ip = Ipv4Addr::new(192, 0, 2, 11);
-        store.ban_at(Some(expired_ip), Some(EXPIRED_HASH), start);
-        store.ban_at(
+        ban_store.ban_at(Some(expired_ip), Some(EXPIRED_HASH), start);
+        ban_store.ban_at(
             Some(fresh_ip),
             Some(FRESH_HASH),
             start + CLIENT_BAN_TIME - Duration::from_secs(10),
         );
         assert_eq!(
-            store.retained_entry_counts(),
+            tracked_client_identities.observe_at(expired_ip, 4_662, EXPIRED_HASH, start),
+            TrackedClientIdentityObservation::FirstSeen
+        );
+        assert_eq!(
+            tracked_client_identities.observe_at(
+                fresh_ip,
+                4_662,
+                FRESH_HASH,
+                start + CLIENT_BAN_TIME - Duration::from_secs(10),
+            ),
+            TrackedClientIdentityObservation::FirstSeen
+        );
+        assert_eq!(
+            ban_store.retained_entry_counts(),
             BanStoreRetainedCounts {
                 ip: 2,
                 user_hash: 2,
             }
         );
+        assert_eq!(tracked_client_identities.retained_entry_count(), 2);
 
         let prune_at = start + CLIENT_BAN_TIME + Duration::from_secs(1);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let handle = tokio::spawn(run_ed2k_ban_store_prune_loop_with_clock(
-            Arc::clone(&store),
+        let handle = tokio::spawn(run_ed2k_client_state_prune_loop_with_clock(
+            Arc::clone(&ban_store),
+            Arc::clone(&tracked_client_identities),
             Arc::clone(&shutdown),
             Duration::from_millis(5),
             move || prune_at,
@@ -1007,11 +1033,12 @@ mod ban_prune_tests {
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if store.retained_entry_counts()
+                if ban_store.retained_entry_counts()
                     == (BanStoreRetainedCounts {
                         ip: 1,
                         user_hash: 1,
                     })
+                    && tracked_client_identities.retained_entry_count() == 1
                 {
                     break;
                 }
@@ -1019,15 +1046,23 @@ mod ban_prune_tests {
             }
         })
         .await
-        .expect("ban prune loop did not reclaim expired entries");
+        .expect("client-state prune loop did not reclaim expired entries");
 
-        assert!(!store.is_banned_at(Some(expired_ip), Some(&EXPIRED_HASH), prune_at));
-        assert!(store.is_banned_at(Some(fresh_ip), Some(&FRESH_HASH), prune_at));
+        assert!(!ban_store.is_banned_at(Some(expired_ip), Some(&EXPIRED_HASH), prune_at));
+        assert!(ban_store.is_banned_at(Some(fresh_ip), Some(&FRESH_HASH), prune_at));
+        assert_eq!(
+            tracked_client_identities.observe_at(fresh_ip, 4_662, EXPIRED_HASH, prune_at),
+            TrackedClientIdentityObservation::Changed
+        );
+        assert_eq!(
+            tracked_client_identities.observe_at(expired_ip, 4_662, FRESH_HASH, prune_at),
+            TrackedClientIdentityObservation::FirstSeen
+        );
         assert!(!handle.is_finished());
         shutdown.store(true, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
-            .expect("ban prune loop did not stop on shutdown")
-            .expect("ban prune loop panicked");
+            .expect("client-state prune loop did not stop on shutdown")
+            .expect("client-state prune loop panicked");
     }
 }
