@@ -2,9 +2,12 @@
 
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::path::Path;
 
 use emulebb_core::EmulebbCore;
 #[cfg(target_os = "macos")]
