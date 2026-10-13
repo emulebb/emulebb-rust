@@ -14,6 +14,7 @@ use emulebb_core::EmulebbCore;
 use emulebb_core::LocalShareCreate;
 #[cfg(windows)]
 use emulebb_core::{SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
+use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
 use emulebb_index::FileIndex;
 
 #[cfg(windows)]
@@ -50,6 +51,15 @@ async fn case_sensitive_windows_directory_preserves_case_variant_files() {
     };
     lower_file.write_all(b"lower").unwrap();
     drop(lower_file);
+    let upper_fingerprint = Ed2kTransferRuntime::scanned_source_identity(&upper_path)
+        .unwrap()
+        .2
+        .unwrap();
+    let lower_fingerprint = Ed2kTransferRuntime::scanned_source_identity(&lower_path)
+        .unwrap()
+        .2
+        .unwrap();
+    assert_ne!(upper_fingerprint.identity, lower_fingerprint.identity);
 
     let core = EmulebbCore::new(
         "test",
@@ -147,6 +157,16 @@ async fn case_insensitive_macos_alias_keeps_one_native_file_identity() {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => panic!("probe macOS case-insensitive volume: {error}"),
     }
+    let upper_fingerprint = Ed2kTransferRuntime::scanned_source_identity(&upper_path)
+        .unwrap()
+        .2
+        .unwrap();
+    let alias_fingerprint = Ed2kTransferRuntime::scanned_source_identity(&lower_alias)
+        .unwrap()
+        .2
+        .unwrap();
+    assert_eq!(upper_fingerprint.identity, alias_fingerprint.identity);
+    assert!(upper_fingerprint.safely_matches(&alias_fingerprint));
 
     let metadata_path = runtime_dir.join("metadata.sqlite");
     let transfer_root = runtime_dir.join("transfers");
