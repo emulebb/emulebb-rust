@@ -631,18 +631,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn valid_inbound_keepalive_refreshes_receive_liveness() {
+    async fn valid_inbound_ping_is_answered_and_refreshes_receive_liveness() {
         let (driver, mut peer, _cancel) = spawn_buddy_driver().await;
 
-        tokio::time::advance(Duration::from_secs(24 * 60)).await;
-        peer.write_all(&encode_packet(OP_EMULEPROT, OP_BUDDYPONG, &[]))
+        tokio::time::advance(Duration::from_secs(9 * 60)).await;
+        peer.write_all(&encode_packet(OP_EMULEPROT, OP_BUDDYPING, &[]))
             .await
             .unwrap();
         tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(60)).await;
+        let pong = peer.read_packet().await.unwrap().unwrap();
+        assert_eq!(pong.protocol, OP_EMULEPROT);
+        assert_eq!(pong.opcode, OP_BUDDYPONG);
+        assert!(pong.payload.is_empty());
+
+        tokio::time::advance(Duration::from_secs(16 * 60)).await;
         assert!(!driver.is_finished());
 
-        tokio::time::advance(Duration::from_secs(24 * 60)).await;
+        tokio::time::advance(Duration::from_secs(9 * 60)).await;
         assert_eq!(
             driver.await.unwrap().unwrap(),
             BuddyLinkEnd::ReceiveTimedOut
