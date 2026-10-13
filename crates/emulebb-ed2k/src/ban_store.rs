@@ -25,6 +25,16 @@ use parking_lot::Mutex;
 /// `HR2MS(4)` = 4 hours).
 pub const CLIENT_BAN_TIME: Duration = Duration::from_secs(4 * 60 * 60);
 
+/// Number of entries physically retained by each in-memory ban index.
+///
+/// This is a diagnostic snapshot, not an atomic view: concurrent updates may
+/// occur between reading the IP and user-hash indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BanStoreRetainedCounts {
+    pub ip: usize,
+    pub user_hash: usize,
+}
+
 /// Shared, in-memory client ban store keyed by both IPv4 address and 16-byte
 /// user hash, each entry carrying its expiry instant (placed-at + 4h TTL).
 ///
@@ -124,6 +134,14 @@ impl BanStore {
         self.by_hash.lock().retain(|_, until| *until > now);
     }
 
+    /// Return the number of entries physically retained by each ban index.
+    #[must_use]
+    pub fn retained_entry_counts(&self) -> BanStoreRetainedCounts {
+        let ip = self.by_ip.lock().len();
+        let user_hash = self.by_hash.lock().len();
+        BanStoreRetainedCounts { ip, user_hash }
+    }
+
     fn lookup_alive<K: std::hash::Hash + Eq>(
         map: &Mutex<HashMap<K, Instant>>,
         key: &K,
@@ -206,15 +224,33 @@ mod tests {
     fn prune_expired_reclaims_only_expired_entries() {
         let store = BanStore::new();
         let start = Instant::now();
-        let live_ip = Ipv4Addr::new(192, 0, 2, 2);
-        store.ban_at(Some(live_ip), Some(HASH_A), start);
-        // Prune well after the TTL: both entries gone, but a re-check confirms
-        // an entry banned at a later time survives.
+        let expired_ip = Ipv4Addr::new(192, 0, 2, 2);
+        store.ban_at(Some(expired_ip), Some(HASH_A), start);
         let later = start + CLIENT_BAN_TIME - Duration::from_secs(10);
         let fresh_ip = Ipv4Addr::new(192, 0, 2, 3);
-        store.ban_at(Some(fresh_ip), None, later);
-        store.prune_expired(start + CLIENT_BAN_TIME + Duration::from_secs(1));
-        assert!(!store.is_ip_banned_at(live_ip, later + CLIENT_BAN_TIME));
-        assert!(store.is_ip_banned_at(fresh_ip, later + Duration::from_secs(1)));
+        store.ban_at(Some(fresh_ip), Some(HASH_B), later);
+        assert_eq!(
+            store.retained_entry_counts(),
+            BanStoreRetainedCounts {
+                ip: 2,
+                user_hash: 2,
+            }
+        );
+
+        let prune_at = start + CLIENT_BAN_TIME + Duration::from_secs(1);
+        store.prune_expired(prune_at);
+
+        assert_eq!(
+            store.retained_entry_counts(),
+            BanStoreRetainedCounts {
+                ip: 1,
+                user_hash: 1,
+            }
+        );
+        assert!(!store.by_ip.lock().contains_key(&expired_ip));
+        assert!(!store.by_hash.lock().contains_key(&HASH_A));
+        assert!(store.by_ip.lock().contains_key(&fresh_ip));
+        assert!(store.by_hash.lock().contains_key(&HASH_B));
+        assert!(store.is_banned_at(Some(fresh_ip), Some(&HASH_B), prune_at));
     }
 }
