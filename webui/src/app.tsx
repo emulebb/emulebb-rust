@@ -57,6 +57,7 @@ import {
   KadView,
   LogsView,
   NetworkHealthView,
+  OperationCancelledError,
   Overview,
   SearchView,
   ServersView,
@@ -686,6 +687,9 @@ export function App() {
         await refresh();
       }
     } catch (caught) {
+      if (caught instanceof OperationCancelledError) {
+        return;
+      }
       setError(errorMessage(caught));
     }
   };

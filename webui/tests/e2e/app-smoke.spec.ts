@@ -639,7 +639,9 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     new URLSearchParams(request.query).get("sort") === "sources" &&
     new URLSearchParams(request.query).get("order") === "desc"
   )).toBe(true);
-  expect(requests.some((request) => request.path === `searches/2/results/${resultHash}/operations/download`)).toBe(true);
+  const searchDownload = requests.find((request) => request.path === `searches/2/results/${resultHash}/operations/download`);
+  expect(searchDownload).toBeDefined();
+  expect(JSON.parse(searchDownload?.body ?? "{}")).toMatchObject({ knownFilePolicy: "reject" });
   expect(requests.some((request) => request.method === "DELETE" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) =>
     request.method === "DELETE" &&
@@ -734,7 +736,11 @@ test("transfer add form validates eD2K link batches", async ({ page }) => {
   await expect(page.getByText("Transfers queued")).toBeVisible();
   const transferPost = requests.find((request) => request.method === "POST" && request.path === "transfers");
   expect(transferPost).toBeDefined();
-  expect(JSON.parse(transferPost?.body ?? "{}")).toEqual({ links: [validLink], paused: false });
+  expect(JSON.parse(transferPost?.body ?? "{}")).toEqual({
+    links: [validLink],
+    paused: false,
+    knownFilePolicy: "reject"
+  });
 });
 
 test("section resource operation forms validate endpoint addresses and ports", async ({ page }) => {
