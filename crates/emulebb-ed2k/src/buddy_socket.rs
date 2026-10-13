@@ -188,6 +188,19 @@ impl BuddySocketRegistry {
         self.lock().outbound = None;
     }
 
+    /// Drop the outbound slot only when it still belongs to the specified link.
+    /// Returns whether the matching slot was removed.
+    pub fn evict_outbound_if(&self, ip: Ipv4Addr, user_hash: [u8; 16]) -> bool {
+        let mut inner = self.lock();
+        let matches = inner
+            .outbound
+            .is_some_and(|buddy| buddy.ip == ip && buddy.user_hash == user_hash);
+        if matches {
+            inner.outbound = None;
+        }
+        matches
+    }
+
     /// Whether a peer (by IP + user hash) is our outbound buddy. Mirrors the
     /// oracle `buddy == client` identity check before answering buddy traffic.
     #[must_use]
@@ -309,6 +322,12 @@ mod tests {
         assert!(!registry.is_outbound_buddy(ip, [0x77; 16]));
         assert!(registry.is_outbound_buddy(ip2, [0x88; 16]));
 
+        assert!(!registry.evict_outbound_if(ip, [0x77; 16]));
+        assert!(registry.is_outbound_buddy(ip2, [0x88; 16]));
+        assert!(registry.evict_outbound_if(ip2, [0x88; 16]));
+        assert!(!registry.has_outbound());
+
+        registry.register_outbound(ip2, [0x88; 16]);
         registry.evict_outbound();
         assert!(!registry.has_outbound());
     }

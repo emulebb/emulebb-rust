@@ -154,7 +154,11 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     )
     .await;
 
-    registry.evict_outbound();
+    if !registry.evict_outbound_if(buddy_ip, buddy_user_hash) {
+        debug!(
+            "outbound Kad buddy link to {buddy_addr} ended after its registry slot was replaced"
+        );
+    }
     match &result {
         Ok(BuddyLinkEnd::Cancelled) => {
             info!("outbound Kad buddy link to {buddy_addr} cancelled")

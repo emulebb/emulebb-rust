@@ -318,6 +318,16 @@ impl KadBuddyState {
         self.last_search_at = None;
     }
 
+    /// Drop the acquired buddy only when it still belongs to the completed link.
+    /// Returns whether the matching relationship was removed.
+    pub fn clear_outgoing_buddy_if(&mut self, buddy: &OutgoingBuddy) -> bool {
+        if self.outgoing.as_ref() != Some(buddy) {
+            return false;
+        }
+        self.clear_outgoing_buddy();
+        true
+    }
+
     /// Whether we should launch a buddy search now.
     ///
     /// Mirrors the oracle upkeep: only when we need a buddy, do not already have
@@ -636,6 +646,21 @@ mod tests {
         state.clear_outgoing_buddy();
         assert!(!state.has_outgoing_buddy());
         assert!(state.should_search(need, now));
+    }
+
+    #[test]
+    fn stale_outgoing_link_cannot_clear_its_replacement() {
+        let mut state = KadBuddyState::new();
+        let stale = outgoing();
+        let mut replacement = outgoing();
+        replacement.tcp_addr = addr(8, 4662);
+        replacement.udp_addr = addr(8, 4672);
+        state.set_outgoing_buddy(replacement.clone());
+
+        assert!(!state.clear_outgoing_buddy_if(&stale));
+        assert!(state.has_outgoing_buddy());
+        assert!(state.clear_outgoing_buddy_if(&replacement));
+        assert!(!state.has_outgoing_buddy());
     }
 
     #[test]
