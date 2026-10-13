@@ -84,6 +84,25 @@ pub(crate) fn identity_userhash_changed(peer: &str, peer_hash: Option<[u8; 16]>)
     emit("bad_peer", "identity_userhash_changed", "high", keys, body);
 }
 
+/// `identity_userhash_changed_tracked`: the first identity binding for a new
+/// connection conflicts with the user hash retained for the same advertised
+/// `(IPv4, TCP port)`. Mirrors MFC `ComparePriorUserhash` and bans the peer by
+/// IP plus the newly advertised hash.
+pub(crate) fn identity_userhash_changed_tracked(peer: &str, peer_hash: Option<[u8; 16]>) {
+    let keys = packet_keys(peer, peer_hash);
+    let body = json!({
+        "action": "ban",
+        "reason": "Userhash changed (Found in TrackedClientsList)",
+    });
+    emit(
+        "bad_peer",
+        "identity_userhash_changed_tracked",
+        "high",
+        keys,
+        body,
+    );
+}
+
 /// `client_ban`: a peer was banned by the CorruptionBlackBox corrupt-data
 /// attribution (its AICH-attributed corrupt share crossed `CBB_BANTHRESHOLD`).
 /// Mirrors MFC `CUpDownClient::Ban` -> bad_peer `client_ban`

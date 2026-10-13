@@ -1552,22 +1552,47 @@ fn apply_peer_hello_profile(
     should_crypt: bool,
     profile: &DecodedHelloProfile,
 ) -> bool {
+    let peer_ban_ip = match peer_addr {
+        SocketAddr::V4(v4) => Some(*v4.ip()),
+        SocketAddr::V6(_) => None,
+    };
+
     // Phase B: a re-hello presenting a different user hash than the one already
     // bound is credit-farming impersonation -> ban + drop
     // (MFC identity_userhash_changed -> Ban()).
     if let Some(prior_hash) = *state.bound_user_hash
         && prior_hash != profile.identity.user_hash
     {
-        let ban_ip = match peer_addr {
-            SocketAddr::V4(v4) => Some(*v4.ip()),
-            SocketAddr::V6(_) => None,
-        };
-        transfer_runtime.ban_client(ban_ip, Some(profile.identity.user_hash));
+        transfer_runtime.ban_client(peer_ban_ip, Some(profile.identity.user_hash));
         crate::ed2k_transfer::diag_bad_peer::identity_userhash_changed(
             &peer_addr.to_string(),
             Some(profile.identity.user_hash),
         );
         debug!("banning {peer_addr}: user hash changed mid-connection (impersonation)");
+        return false;
+    }
+
+    if transfer_runtime.is_client_banned(peer_ban_ip, Some(&profile.identity.user_hash)) {
+        debug!("disconnecting banned eD2k peer {peer_addr} after HELLO identity binding");
+        return false;
+    }
+
+    if let Some(peer_ip) = peer_ban_ip
+        && transfer_runtime.tracked_client_identities().observe(
+            peer_ip,
+            profile.identity.tcp_port,
+            profile.identity.user_hash,
+        ) == crate::tracked_client_identity::TrackedClientIdentityObservation::Changed
+    {
+        transfer_runtime.ban_client(Some(peer_ip), Some(profile.identity.user_hash));
+        crate::ed2k_transfer::diag_bad_peer::identity_userhash_changed_tracked(
+            &peer_addr.to_string(),
+            Some(profile.identity.user_hash),
+        );
+        debug!(
+            "banning {peer_addr}: user hash changed across reconnect for advertised TCP port {}",
+            profile.identity.tcp_port
+        );
         return false;
     }
 
@@ -1594,18 +1619,7 @@ fn apply_peer_hello_profile(
     state.upload_identity.firewall_context = previous_identity.firewall_context;
     // Obfuscate UDP reasks to peers whose TCP session is obfuscated.
     state.upload_identity.should_crypt = should_crypt;
-    // Feed the upload-score `banned` flag from the ban store now that we know
-    // the peer's user hash. Either IP or hash being banned zeroes the score.
-    let peer_ban_ip = match peer_addr {
-        SocketAddr::V4(v4) => Some(*v4.ip()),
-        SocketAddr::V6(_) => None,
-    };
-    state.upload_identity.banned =
-        transfer_runtime.is_client_banned(peer_ban_ip, Some(&profile.identity.user_hash));
-    if state.upload_identity.banned {
-        debug!("disconnecting banned eD2k peer {peer_addr} after HELLO identity binding");
-        return false;
-    }
+    state.upload_identity.banned = false;
     true
 }
 
