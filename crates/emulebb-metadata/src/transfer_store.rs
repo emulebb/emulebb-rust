@@ -1,10 +1,12 @@
+use std::path::Path;
+
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
     download_history_store::record_completed_download,
-    store::{bool_to_i64, current_platform, decode_fixed_hex, unix_ms, upsert_local_path},
-    text::normalize_path_key,
+    NativePath,
+    store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_model::{
         MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
         MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
@@ -651,7 +653,7 @@ impl super::MetadataStore {
         let Some(old_path_id) = local_path_id(&tx, old_source_path)? else {
             return Ok(false);
         };
-        let new_path_id = upsert_local_path(&tx, new_source_path, now)?;
+        let new_path_id = upsert_local_path(&tx, Path::new(new_source_path), now)?;
         let Some(known_file_id) = tx
             .query_row(
                 "SELECT id FROM known_files WHERE ed2k_hash = ?1",
@@ -988,7 +990,7 @@ impl super::MetadataStore {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        let path_id = upsert_local_path(&tx, source_path, now)?;
+        let path_id = upsert_local_path(&tx, Path::new(source_path), now)?;
         tx.execute(
             r#"
             INSERT INTO shared_file_scan_failures(
@@ -1839,18 +1841,19 @@ fn optional_local_path_id(
     now: i64,
 ) -> Result<Option<i64>> {
     path.filter(|path| !path.trim().is_empty())
-        .map(|path| upsert_local_path(tx, path, now))
+        .map(|path| upsert_local_path(tx, Path::new(path), now))
         .transpose()
 }
 
 fn local_path_id(conn: &rusqlite::Connection, path: &str) -> Result<Option<i64>> {
+    let native_path = NativePath::from(Path::new(path));
     conn.query_row(
         r#"
         SELECT id
         FROM local_paths
-        WHERE platform = ?1 AND normalized_key = ?2
+        WHERE platform = ?1 AND native_path = ?2
         "#,
-        params![current_platform(), normalize_path_key(path)],
+        params![NativePath::platform(), native_path.storage_bytes()],
         |row| row.get(0),
     )
     .optional()

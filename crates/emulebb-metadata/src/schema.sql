@@ -207,16 +207,17 @@ CREATE TABLE local_paths (
     id INTEGER PRIMARY KEY,
     display_path TEXT NOT NULL,
     native_path BLOB NOT NULL,
-    canonical_display_path TEXT,
-    normalized_key TEXT NOT NULL,
+    search_key TEXT NOT NULL,
     platform TEXT NOT NULL,
     file_identity_kind TEXT,
     file_identity BLOB,
     size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
     mtime_ms INTEGER CHECK(mtime_ms IS NULL OR mtime_ms >= 0),
     last_stat_ms INTEGER CHECK(last_stat_ms IS NULL OR last_stat_ms >= 0),
-    UNIQUE(platform, normalized_key)
+    UNIQUE(platform, native_path)
 );
+
+CREATE INDEX idx_local_paths_search ON local_paths(platform, search_key);
 
 CREATE TABLE shared_directory_roots (
     id INTEGER PRIMARY KEY,
