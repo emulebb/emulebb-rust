@@ -33,6 +33,7 @@ use emulebb_kad_proto::Ed2kHash;
 
 mod aich_salvage;
 mod buddy_link;
+mod buddy_liveness;
 mod client_software;
 mod codec;
 mod diag_event;
@@ -76,7 +77,7 @@ pub(in crate::ed2k_tcp) use codec::{
 // Re-exported only for codec unit tests; the production decode path uses the
 // availability-returning variants above.
 pub(in crate::ed2k_tcp) use aich_salvage::handle_aich_recovery_answer;
-pub use buddy_link::{OutboundBuddyLinkOptions, run_outbound_buddy_link};
+pub use buddy_link::{BuddyLinkEnd, OutboundBuddyLinkOptions, run_outbound_buddy_link};
 #[cfg(test)]
 pub(in crate::ed2k_tcp) use codec::decode_file_status_payload;
 #[cfg(test)]
