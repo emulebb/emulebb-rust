@@ -17,6 +17,7 @@ use crate::{
     BulkOperationResult, PageQuery, SearchResultSort, SearchResultsPage, SearchResultsQuery,
     SearchSortOrder,
 };
+use emulebb_core::DownloadConflictError;
 use emulebb_core::Search;
 
 pub(crate) fn api_ok<T: Serialize>(data: T) -> (StatusCode, Json<Value>) {
@@ -198,6 +199,19 @@ pub(crate) fn api_error_with_details(
             }
         })),
     )
+}
+
+pub(crate) fn download_creation_error(error: anyhow::Error) -> Response {
+    if let Some(conflict) = error.downcast_ref::<DownloadConflictError>() {
+        return api_error_with_details(
+            StatusCode::CONFLICT,
+            "DOWNLOAD_CONFLICT",
+            conflict.to_string(),
+            json!({ "conflicts": conflict.conflicts }),
+        )
+        .into_response();
+    }
+    api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
 }
 
 /// Builds the canonical out-of-range error for a bounded scalar query field.

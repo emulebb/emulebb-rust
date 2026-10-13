@@ -30,6 +30,30 @@ async fn paused_body_uses_canonical_boolean_validation() {
 }
 
 #[tokio::test]
+async fn known_file_policy_uses_closed_download_policy_tokens() {
+    let app = test_router();
+    let link = "ed2k://|file|KnownPolicy.bin|1|00112233445566778899aabbccddeeff|/";
+    for value in ["true", "1", "null", r#""force""#] {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/transfers",
+            format!(r#"{{"link":"{link}","knownFilePolicy":{value}}}"#),
+            "knownFilePolicy must be reject or redownload",
+        )
+        .await;
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",
+            format!(r#"{{"knownFilePolicy":{value}}}"#),
+            "knownFilePolicy must be reject or redownload",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn category_create_body_uses_canonical_validation() {
     let app = test_router();
     let cases = [
