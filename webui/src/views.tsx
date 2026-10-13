@@ -1086,6 +1086,8 @@ export function SharingView(props: {
           <strong>{reload.changedCount ?? 0}</strong>
           <span>New</span>
           <strong>{reload.newCount ?? 0}</strong>
+          <span>Escaped paths</span>
+          <strong>{reload.escapedDisplayPathCount ?? 0}</strong>
           <span>Skipped</span>
           <strong>{reload.skippedIntakeCount ?? 0}</strong>
           <span>Pruned</span>

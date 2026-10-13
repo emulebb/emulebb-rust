@@ -63,6 +63,13 @@ impl NativePath {
     pub fn display_file_name(&self) -> Option<String> {
         self.0.file_name().map(display_native_os_str)
     }
+
+    /// Whether this path needs escaped code units to remain unambiguous on a
+    /// Unicode-only diagnostic or API surface.
+    #[must_use]
+    pub fn requires_escaped_display(&self) -> bool {
+        requires_escaped_display(self.0.as_os_str())
+    }
 }
 
 impl AsRef<Path> for NativePath {
@@ -215,6 +222,11 @@ fn display_native_os_str(value: &std::ffi::OsStr) -> String {
     output
 }
 
+#[cfg(unix)]
+fn requires_escaped_display(value: &std::ffi::OsStr) -> bool {
+    value.to_str().is_none()
+}
+
 #[cfg(windows)]
 fn display_native_os_str(value: &std::ffi::OsStr) -> String {
     use std::os::windows::ffi::OsStrExt;
@@ -233,6 +245,13 @@ fn display_native_os_str(value: &std::ffi::OsStr) -> String {
         }
     }
     output
+}
+
+#[cfg(windows)]
+fn requires_escaped_display(value: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    char::decode_utf16(value.encode_wide()).any(|decoded| decoded.is_err())
 }
 
 #[must_use]
@@ -273,6 +292,7 @@ mod tests {
         let path = NativePath::new(PathBuf::from(OsString::from_vec(vec![
             b'a', b'\\', 0xff, b'.', b'b', b'i', b'n',
         ])));
+        assert!(path.requires_escaped_display());
         assert_eq!(path.display_path(), r"a\\\xFF.bin");
         assert_eq!(
             NativePath::from_storage(NativePath::platform(), &path.storage_bytes()).unwrap(),
@@ -285,5 +305,10 @@ mod tests {
         let other = if cfg!(windows) { "unix" } else { "windows" };
         let error = NativePath::from_storage(other, b"path").unwrap_err();
         assert!(error.to_string().contains("belongs to platform"));
+    }
+
+    #[test]
+    fn valid_unicode_path_does_not_require_escaped_display() {
+        assert!(!NativePath::new("shared/β.bin").requires_escaped_display());
     }
 }

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::{IndexedFile, IndexedSharedDirectoryRoot};
-use emulebb_metadata::{MetadataImportedKnownFileEntry, NativeFileFingerprint};
+use emulebb_metadata::{MetadataImportedKnownFileEntry, NativeFileFingerprint, NativePath};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -44,6 +44,7 @@ pub struct SharedDirectoryReloadProgress {
     pub reused_count: usize,
     pub new_count: usize,
     pub changed_count: usize,
+    pub escaped_display_path_count: usize,
     pub missing_fingerprint_count: usize,
     pub stat_failed_count: usize,
     pub skipped_failed_count: usize,
@@ -145,6 +146,7 @@ impl Default for SharedDirectoryReloadProgress {
             reused_count: 0,
             new_count: 0,
             changed_count: 0,
+            escaped_display_path_count: 0,
             missing_fingerprint_count: 0,
             stat_failed_count: 0,
             skipped_failed_count: 0,
@@ -600,6 +602,15 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
         .files
         .sort_by(|left, right| left.path.cmp(&right.path));
     result.files.dedup_by(|left, right| left.path == right.path);
+    for file in &result.files {
+        let native_path = NativePath::from(file.path.as_path());
+        if native_path.requires_escaped_display() {
+            tracing::warn!(
+                path = %native_path.display_path(),
+                "shared file path requires escaped Unicode display representation",
+            );
+        }
+    }
     Ok(result)
 }
 
@@ -673,6 +684,7 @@ struct ReloadPlanStats {
     reused_count: usize,
     new_count: usize,
     changed_count: usize,
+    escaped_display_path_count: usize,
     missing_fingerprint_count: usize,
     stat_failed_count: usize,
     skipped_failed_count: usize,
@@ -698,6 +710,7 @@ impl ReloadPlanStats {
             reused_count: self.reused_count,
             new_count: self.new_count,
             changed_count: self.changed_count,
+            escaped_display_path_count: self.escaped_display_path_count,
             missing_fingerprint_count: self.missing_fingerprint_count,
             stat_failed_count: self.stat_failed_count,
             skipped_failed_count: self.skipped_failed_count,
@@ -828,6 +841,10 @@ async fn plan_incremental_reload_with_pruning(
             .collect::<HashMap<_, _>>();
         let mut stats = ReloadPlanStats {
             scanned_count: files.len(),
+            escaped_display_path_count: files
+                .iter()
+                .filter(|file| NativePath::from(file.path.as_path()).requires_escaped_display())
+                .count(),
             ..ReloadPlanStats::default()
         };
         let mut to_hash = Vec::new();

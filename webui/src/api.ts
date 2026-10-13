@@ -471,6 +471,7 @@ export type SharedDirectoryReloadProgress = {
   reusedCount?: number;
   newCount?: number;
   changedCount?: number;
+  escapedDisplayPathCount?: number;
   missingFingerprintCount?: number;
   statFailedCount?: number;
   skippedFailedCount?: number;
