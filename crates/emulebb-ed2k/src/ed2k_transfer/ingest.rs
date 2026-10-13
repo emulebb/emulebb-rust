@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
-use emulebb_metadata::{MetadataImportedKnownFileEntry, NativePath};
+use emulebb_metadata::{
+    MetadataImportedKnownFileEntry, NativeFileFingerprint, NativeFileIdentity,
+    NativeFileTimestamp, NativePath,
+};
 
 use crate::long_path::long_path;
 
@@ -307,6 +310,97 @@ pub(crate) fn source_mtime_ms(metadata: &Metadata) -> Option<i64> {
     i64::try_from(millis).ok()
 }
 
+/// Capture the native file identity and full-resolution filesystem timestamps
+/// used to decide whether a persisted content hash is still reusable.
+pub(crate) fn native_file_fingerprint(
+    source_path: &Path,
+    metadata: &Metadata,
+) -> Option<NativeFileFingerprint> {
+    let identity = match file_id::get_file_id(source_path).ok()? {
+        file_id::FileId::Inode {
+            device_id,
+            inode_number,
+        } => NativeFileIdentity::Unix {
+            device_id,
+            inode_number,
+        },
+        file_id::FileId::LowRes {
+            volume_serial_number,
+            file_index,
+        } => NativeFileIdentity::WindowsLowResolution {
+            volume_serial_number,
+            file_index,
+        },
+        file_id::FileId::HighRes {
+            volume_serial_number,
+            file_id,
+        } => NativeFileIdentity::WindowsHighResolution {
+            volume_serial_number,
+            file_id,
+        },
+    };
+    let (modified, changed) = native_file_timestamps(metadata)?;
+    Some(NativeFileFingerprint {
+        identity,
+        size_bytes: metadata.len(),
+        modified,
+        changed,
+    })
+}
+
+#[cfg(unix)]
+fn native_file_timestamps(
+    metadata: &Metadata,
+) -> Option<(NativeFileTimestamp, Option<NativeFileTimestamp>)> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some((
+        unix_timestamp(metadata.mtime(), metadata.mtime_nsec())?,
+        Some(unix_timestamp(metadata.ctime(), metadata.ctime_nsec())?),
+    ))
+}
+
+#[cfg(unix)]
+fn unix_timestamp(seconds: i64, nanoseconds: i64) -> Option<NativeFileTimestamp> {
+    NativeFileTimestamp::new(seconds, u32::try_from(nanoseconds).ok()?)
+}
+
+#[cfg(windows)]
+fn native_file_timestamps(
+    metadata: &Metadata,
+) -> Option<(NativeFileTimestamp, Option<NativeFileTimestamp>)> {
+    Some((system_time_timestamp(metadata.modified().ok()?)?, None))
+}
+
+#[cfg(windows)]
+fn system_time_timestamp(timestamp: std::time::SystemTime) -> Option<NativeFileTimestamp> {
+    match timestamp.duration_since(UNIX_EPOCH) {
+        Ok(duration) => NativeFileTimestamp::new(
+            i64::try_from(duration.as_secs()).ok()?,
+            duration.subsec_nanos(),
+        ),
+        Err(error) => {
+            let duration = error.duration();
+            let seconds = i64::try_from(duration.as_secs()).ok()?;
+            if duration.subsec_nanos() == 0 {
+                NativeFileTimestamp::new(seconds.checked_neg()?, 0)
+            } else {
+                NativeFileTimestamp::new(
+                    seconds.checked_add(1)?.checked_neg()?,
+                    1_000_000_000 - duration.subsec_nanos(),
+                )
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_file_timestamps(
+    _metadata: &Metadata,
+) -> Option<(NativeFileTimestamp, Option<NativeFileTimestamp>)> {
+    None
+}
+
 /// Stat a resolved long-path source for the incremental reload, returning
 /// `(file_size, mtime_ms)`. `None` when the file is missing/unreadable (treated
 /// as a miss, so it is (re)hashed). The size pairs with the persisted manifest
@@ -315,4 +409,44 @@ pub(crate) fn source_mtime_ms(metadata: &Metadata) -> Option<i64> {
 pub(crate) fn stat_source_identity(source_path: &Path) -> Option<(u64, Option<i64>)> {
     let metadata = std::fs::metadata(source_path).ok()?;
     Some((metadata.len(), source_mtime_ms(&metadata)))
+}
+
+#[cfg(test)]
+mod native_file_fingerprint_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn fingerprint_is_stable_for_the_same_file() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("payload.bin");
+        fs::write(&source, b"payload").unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+
+        let first = native_file_fingerprint(&source, &metadata).unwrap();
+        let second = native_file_fingerprint(&source, &fs::metadata(&source).unwrap()).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.size_bytes, 7);
+    }
+
+    #[test]
+    fn replacement_at_the_same_path_gets_a_different_identity() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("payload.bin");
+        let retained = temp.path().join("retained.bin");
+        fs::write(&source, b"same-size").unwrap();
+        let original = native_file_fingerprint(&source, &fs::metadata(&source).unwrap()).unwrap();
+        fs::rename(&source, &retained).unwrap();
+        fs::write(&source, b"different").unwrap();
+        let replacement =
+            native_file_fingerprint(&source, &fs::metadata(&source).unwrap()).unwrap();
+
+        assert_eq!(original.size_bytes, replacement.size_bytes);
+        assert_ne!(original.identity, replacement.identity);
+        assert!(!original.safely_matches(&replacement));
+    }
 }

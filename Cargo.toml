@@ -43,6 +43,7 @@ clap = { version = "4", features = ["derive"] }
 cc = "1"
 embed-manifest = "1.5"
 encoding_rs = "0.8"
+file-id = "0.2"
 flate2 = "1"
 fs4 = "1.1"
 futures-util = "0.3"
