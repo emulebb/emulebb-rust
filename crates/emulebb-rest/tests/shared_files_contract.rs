@@ -208,7 +208,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     std::fs::create_dir_all(&nested_root).unwrap();
     std::fs::create_dir_all(&extra_root).unwrap();
     let expected_shared_root = std::fs::canonicalize(long_path(&shared_root))
-        .map(|path| normal_path_display(&path.display().to_string()))
+        .map(|path| normal_path_display(path.display().to_string()))
         .expect("shared root should canonicalize");
     std::fs::write(&top_level_file, b"top level shared payload").unwrap();
     std::fs::write(&nested_file, b"nested shared payload").unwrap();

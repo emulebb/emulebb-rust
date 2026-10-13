@@ -682,7 +682,7 @@ pub(crate) fn managed_shared_file_path(share: &LocalShare) -> String {
     }
     let path = FsPath::new(&share.transfer_dir);
     if path.is_dir() {
-        normal_path_display(&path.join("pieces.bin").display().to_string())
+        normal_path_display(path.join("pieces.bin").display().to_string())
     } else {
         normal_path_display(&share.transfer_dir)
     }
@@ -690,7 +690,7 @@ pub(crate) fn managed_shared_file_path(share: &LocalShare) -> String {
 
 pub(crate) fn shared_file_directory(path: &str) -> String {
     normal_path_display(
-        &FsPath::new(path)
+        FsPath::new(path)
             .parent()
             .map(|directory| directory.display().to_string())
             .unwrap_or_default(),
