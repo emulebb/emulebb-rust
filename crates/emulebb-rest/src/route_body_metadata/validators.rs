@@ -909,11 +909,26 @@ pub(super) fn validate_transfer_add_body_fields(object: &JsonObject) -> Result<(
         return Err(invalid_body_error("link or links is required"));
     }
     validate_paused_body_field(object)?;
+    validate_known_file_policy_body_field(object)?;
     if let Some(link) = object.get("link") {
         validate_transfer_add_link(link)?;
     }
     if let Some(links) = object.get("links") {
         validate_transfer_add_links(links)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_known_file_policy_body_field(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get("knownFilePolicy") else {
+        return Ok(());
+    };
+    if !matches!(value.as_str(), Some("reject" | "redownload")) {
+        return Err(invalid_body_error(
+            "knownFilePolicy must be reject or redownload",
+        ));
     }
     Ok(())
 }

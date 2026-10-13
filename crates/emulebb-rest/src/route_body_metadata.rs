@@ -14,12 +14,12 @@ use validators::{
     validate_app_settings_patch_body_fields, validate_category_create_body_fields,
     validate_category_patch_body_fields, validate_destructive_confirmation_body_field,
     validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
-    validate_optional_boolean_body_field, validate_paused_body_field,
-    validate_search_create_body_fields, validate_server_create_body_fields,
-    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
-    validate_shared_directory_root_body_fields, validate_shared_file_patch_body_fields,
-    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
-    validate_url_import_body_fields,
+    validate_known_file_policy_body_field, validate_optional_boolean_body_field,
+    validate_paused_body_field, validate_search_create_body_fields,
+    validate_server_create_body_fields, validate_server_patch_body_fields,
+    validate_shared_directories_patch_body_fields, validate_shared_directory_root_body_fields,
+    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
+    validate_transfer_patch_body_fields, validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -151,7 +151,8 @@ fn validate_route_specific_body_fields(
         return validate_kad_bootstrap_body_fields(object);
     }
     if uses_paused_body(method, path) {
-        return validate_paused_body_field(object);
+        validate_paused_body_field(object)?;
+        return validate_known_file_policy_body_field(object);
     }
     if method == "POST" && path == "/api/v1/diagnostics/dumps" {
         validate_destructive_confirmation_body(method, path, object)?;
@@ -161,9 +162,17 @@ fn validate_route_specific_body_fields(
 }
 
 fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {
-    const TRANSFER_ADD: &[&str] = &["link", "links", "categoryId", "categoryName", "paused"];
+    const TRANSFER_ADD: &[&str] = &[
+        "link",
+        "links",
+        "categoryId",
+        "categoryName",
+        "paused",
+        "knownFilePolicy",
+    ];
     const TRANSFER_PATCH: &[&str] = &["name", "priority", "categoryId", "categoryName"];
-    const SEARCH_RESULT_DOWNLOAD: &[&str] = &["categoryId", "categoryName", "paused"];
+    const SEARCH_RESULT_DOWNLOAD: &[&str] =
+        &["categoryId", "categoryName", "paused", "knownFilePolicy"];
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];

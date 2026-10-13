@@ -668,6 +668,7 @@ async fn search_to_download_flow_uses_local_index() {
         "/api/v1/searches/{search_id}/results/00112233445566778899aabbccddeeff/operations/download"
     );
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -684,6 +685,29 @@ async fn search_to_download_flow_uses_local_index() {
     assert_eq!(value["data"]["ok"], true);
     assert_eq!(value["data"]["searchId"], search_id);
     assert_eq!(value["data"]["hash"], "00112233445566778899aabbccddeeff");
+
+    let conflict = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/searches/{search_id}/results/00112233445566778899aabbccddeeff/operations/download"
+                ))
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"knownFilePolicy":"reject"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let body = to_bytes(conflict.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "DOWNLOAD_CONFLICT");
+    assert_eq!(
+        value["error"]["details"]["conflicts"][0]["kind"],
+        "activeTransfer"
+    );
 }
 
 #[tokio::test]

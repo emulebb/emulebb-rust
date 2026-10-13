@@ -282,6 +282,63 @@ async fn create_transfers_accepts_canonical_links_array() {
 }
 
 #[tokio::test]
+async fn duplicate_transfer_returns_structured_download_conflict() {
+    let app = test_router();
+    let link = "ed2k://|file|Duplicate.bin|4096|00112233445566778899aabbccddeeff|/";
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/transfers")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"link":"{link}","paused":true,"knownFilePolicy":"reject"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+
+    let duplicate = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/transfers")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"link":"{link}","paused":true,"knownFilePolicy":"redownload"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    let body = to_bytes(duplicate.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "DOWNLOAD_CONFLICT");
+    assert_eq!(
+        value["error"]["details"]["conflicts"][0]["kind"],
+        "activeTransfer"
+    );
+    assert_eq!(
+        value["error"]["details"]["conflicts"][0]["hash"],
+        "00112233445566778899aabbccddeeff"
+    );
+    assert_eq!(
+        value["error"]["details"]["conflicts"][0]["currentPaths"],
+        json!([])
+    );
+    assert_eq!(
+        value["error"]["details"]["conflicts"][0]["redownloadAllowed"],
+        false
+    );
+}
+
+#[tokio::test]
 async fn delete_transfer_files_requires_confirm_and_removes_transfer() {
     let app = test_router();
     let create_response = app
