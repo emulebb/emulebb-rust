@@ -13,6 +13,9 @@ use super::super::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
 use super::write_repeating_pattern_file;
 use crate::paths::unique_test_dir;
 
+#[cfg(unix)]
+use emulebb_metadata::NativePath;
+
 #[tokio::test]
 async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     let root = unique_test_dir("ed2k-share-in-place");
@@ -239,4 +242,99 @@ async fn ingest_shares_files_with_unicode_brackets_and_nested_subfolders() {
             "{label}: served bytes"
         );
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn non_utf8_share_reopens_relocates_and_serves_exact_bytes() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let root = unique_test_dir("ed2k-share-non-utf8-path");
+    let source_dir = root.join("library");
+    fs::create_dir_all(&source_dir).unwrap();
+    let source_path = source_dir.join(OsString::from_vec(b"native-\xff.bin".to_vec()));
+    let payload = b"non-UTF-8 share upload payload";
+    if let Err(error) = fs::write(&source_path, payload) {
+        eprintln!("skipping non-UTF-8 path test: filesystem rejected name: {error}");
+        return;
+    }
+    let display_name = NativePath::from(source_path.as_path())
+        .display_file_name()
+        .unwrap();
+    assert_eq!(display_name, r"native-\xFF.bin");
+
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let summary = runtime
+        .ingest_local_file(&source_path, &display_name)
+        .await
+        .unwrap();
+    let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
+    assert_eq!(
+        runtime
+            .read_verified_range(&hash, 0, payload.len() as u64)
+            .await
+            .unwrap()
+            .unwrap(),
+        payload,
+    );
+    drop(runtime);
+
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        runtime
+            .read_verified_range(&hash, 0, payload.len() as u64)
+            .await
+            .unwrap()
+            .unwrap(),
+        payload,
+    );
+
+    let renamed_path = source_dir.join(OsString::from_vec(b"renamed-\xfe.bin".to_vec()));
+    fs::rename(&source_path, &renamed_path).unwrap();
+    let (_, file_size, source_fingerprint) =
+        Ed2kTransferRuntime::scanned_source_identity(&renamed_path).unwrap();
+    let renamed_display_name = NativePath::from(renamed_path.as_path())
+        .display_file_name()
+        .unwrap();
+    assert!(
+        runtime
+            .relocate_shared_source(
+                &summary.file_hash,
+                &source_path,
+                &renamed_path,
+                file_size,
+                source_fingerprint,
+                &renamed_display_name,
+                "unknown",
+            )
+            .await
+            .unwrap()
+    );
+    drop(runtime);
+
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
+    assert_eq!(
+        manifest.source_path.as_deref(),
+        Some(renamed_path.as_path())
+    );
+    assert_eq!(manifest.display_name, r"renamed-\xFE.bin");
+    assert_eq!(
+        runtime
+            .read_verified_range(&hash, 0, payload.len() as u64)
+            .await
+            .unwrap()
+            .unwrap(),
+        payload,
+    );
+    drop(runtime);
+
+    fs::remove_file(&renamed_path).unwrap();
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert!(!matches!(
+        runtime
+            .read_verified_range(&hash, 0, payload.len() as u64)
+            .await,
+        Ok(Some(_)),
+    ));
 }
