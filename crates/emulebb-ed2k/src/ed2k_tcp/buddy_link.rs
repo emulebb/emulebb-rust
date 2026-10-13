@@ -28,13 +28,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use emulebb_kad_dht::DhtNode;
-use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
+use super::buddy_liveness::BuddyLiveness;
 use super::codec::decode_reask_callback_tcp_payload;
 use super::firewall_helper::{
     complete_authorized_kad_callback, decode_kad_callback_if_running, is_connection_shutdown_error,
@@ -44,20 +44,16 @@ use super::transport::{Ed2kTransport, EmuleTcpPacket};
 use super::{
     Ed2kCallbackSessionHandle, Ed2kHelloIdentity, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK,
     OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_HELLO, OP_HELLOANSWER,
-    OP_REASKCALLBACKTCP,
+    OP_REASKCALLBACKTCP, decode_kad_callback_payload,
 };
 use crate::ed2k_client_udp::ReaskSourceHandle;
 
-/// Buddy keepalive cadence. The oracle sets the next allowed buddy ping to
-/// `now + MIN2MS(10)` (`SetLastBuddyPingPongTime`) and sends one whenever
-/// `SendBuddyPingPong()` (now past that mark) is true during upkeep, i.e. once
-/// every ten minutes.
-const BUDDY_PING_INTERVAL: Duration = Duration::from_secs(10 * 60);
-
-/// How long to wait for an inbound packet (incl. `OP_CALLBACK`) before checking
-/// the ping/shutdown timers. Kept short so shutdown and the ping cadence stay
-/// responsive without busy-looping.
-const BUDDY_READ_POLL: Duration = Duration::from_secs(15);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuddyLinkEnd {
+    Cancelled,
+    PeerClosed,
+    ReceiveTimedOut,
+}
 
 /// Inputs for the outbound buddy link task.
 pub struct OutboundBuddyLinkOptions {
@@ -89,9 +85,6 @@ pub struct OutboundBuddyLinkOptions {
     pub reask_handle: Option<ReaskSourceHandle>,
     /// Connect/IO timeout.
     pub timeout: Duration,
-    /// Notified once the buddy link has dropped, so the buddy-management loop can
-    /// re-search (oracle buddy-loss `SetFindBuddy`).
-    pub lost: Arc<Notify>,
     /// Cancellation handle held by the buddy-management loop: cancelled when the
     /// buddy relationship is no longer warranted (we stopped being firewalled, or
     /// Kad disconnected), which tears the link down and stops the keepalive pings
@@ -104,8 +97,8 @@ pub struct OutboundBuddyLinkOptions {
 /// Hold a persistent TCP connection to our buddy: connect + hello, register in
 /// the outbound slot, ping at the oracle cadence, and complete firewalled
 /// callbacks the buddy relays to us. Returns when the socket drops; on return
-/// the outbound slot is evicted and `lost` is notified.
-pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Result<()> {
+/// the outbound slot is evicted and the termination reason is returned.
+pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Result<BuddyLinkEnd> {
     let OutboundBuddyLinkOptions {
         bind_ip,
         buddy_addr,
@@ -118,7 +111,6 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         registry,
         reask_handle,
         timeout,
-        lost,
         cancel,
     } = options;
 
@@ -130,8 +122,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     // If the relationship was already cancelled while the connect was queued,
     // don't even open the socket.
     if cancel.is_cancelled() {
-        lost.notify_one();
-        return Ok(());
+        return Ok(BuddyLinkEnd::Cancelled);
     }
 
     let mut transport = connect_and_hello_buddy(
@@ -151,20 +142,8 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         transport.mode.as_str()
     );
 
-    // LOWID-G9a: the oracle's first buddy ping comes a full interval after the
-    // buddy client object is created (its ctor arms m_dwLastBuddyPingPongTime to
-    // now + MIN2MS(10), BaseClient.cpp:194 / UpDownClient.h:189), so
-    // SendBuddyPingPong() first becomes true ~10 min later. Arm the first tick a
-    // full interval out rather than firing at t=0.
-    let mut ping_timer = tokio::time::interval_at(
-        tokio::time::Instant::now() + BUDDY_PING_INTERVAL,
-        BUDDY_PING_INTERVAL,
-    );
-    ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
     let result = drive_buddy_link(
         &mut transport,
-        &mut ping_timer,
         buddy_addr,
         hello_identity,
         &dht,
@@ -176,9 +155,16 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     .await;
 
     registry.evict_outbound();
-    lost.notify_one();
     match &result {
-        Ok(()) => info!("outbound Kad buddy link to {buddy_addr} closed; will re-search"),
+        Ok(BuddyLinkEnd::Cancelled) => {
+            info!("outbound Kad buddy link to {buddy_addr} cancelled")
+        }
+        Ok(BuddyLinkEnd::PeerClosed) => {
+            info!("outbound Kad buddy link to {buddy_addr} closed; will re-search")
+        }
+        Ok(BuddyLinkEnd::ReceiveTimedOut) => {
+            info!("outbound Kad buddy link to {buddy_addr} receive-timed out; will re-search")
+        }
         Err(error) => debug!("outbound Kad buddy link to {buddy_addr} ended: {error:#}"),
     }
     result
@@ -190,7 +176,6 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
 )]
 async fn drive_buddy_link(
     transport: &mut Ed2kTransport,
-    ping_timer: &mut tokio::time::Interval,
     buddy_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
     dht: &DhtNode,
@@ -198,30 +183,32 @@ async fn drive_buddy_link(
     callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<&ReaskSourceHandle>,
     cancel: &CancellationToken,
-) -> Result<()> {
+) -> Result<BuddyLinkEnd> {
+    let mut liveness = BuddyLiveness::new(tokio::time::Instant::now());
     loop {
-        let read = tokio::time::timeout(BUDDY_READ_POLL, transport.read_packet());
         tokio::select! {
             biased;
             // The buddy-management loop cancels this token when the relationship
             // is no longer warranted (HighID / Kad-disconnect); stop the keepalive
             // and drop the socket so the remote helper's buddy slot is freed.
-            () = cancel.cancelled() => return Ok(()),
-            _ = ping_timer.tick() => {
+            () = cancel.cancelled() => return Ok(BuddyLinkEnd::Cancelled),
+            () = tokio::time::sleep_until(liveness.receive_deadline()) => {
+                return Ok(BuddyLinkEnd::ReceiveTimedOut);
+            }
+            () = tokio::time::sleep_until(liveness.next_ping_at()) => {
                 let ping = super::codec::encode_buddy_ping();
                 transport
                     .write_all(&ping)
                     .await
                     .with_context(|| format!("failed to send OP_BUDDYPING to buddy {buddy_addr}"))?;
+                liveness.record_ping_sent(tokio::time::Instant::now());
                 debug!("sent OP_BUDDYPING to buddy {buddy_addr}");
             }
-            outcome = read => {
+            outcome = transport.read_packet() => {
                 match outcome {
-                    // Idle read timeout: loop back so the ping timer can fire.
-                    Err(_) => continue,
-                    Ok(Ok(None)) => return Ok(()),
-                    Ok(Ok(Some(packet))) => {
-                        if !handle_buddy_packet(
+                    Ok(None) => return Ok(BuddyLinkEnd::PeerClosed),
+                    Ok(Some(packet)) => {
+                        match handle_buddy_packet(
                             transport,
                             buddy_addr,
                             hello_identity,
@@ -231,13 +218,20 @@ async fn drive_buddy_link(
                             reask_handle,
                             packet,
                         )
-                        .await?
-                        {
-                            return Ok(());
+                        .await? {
+                            BuddyPacketActivity::None => {}
+                            BuddyPacketActivity::Received => {
+                                liveness.record_received(tokio::time::Instant::now());
+                            }
+                            BuddyPacketActivity::Keepalive => {
+                                liveness.record_keepalive_received(tokio::time::Instant::now());
+                            }
                         }
                     }
-                    Ok(Err(error)) if is_connection_shutdown_error(&error) => return Ok(()),
-                    Ok(Err(error)) => {
+                    Err(error) if is_connection_shutdown_error(&error) => {
+                        return Ok(BuddyLinkEnd::PeerClosed);
+                    }
+                    Err(error) => {
                         return Err(error)
                             .with_context(|| format!("buddy link read failed from {buddy_addr}"));
                     }
@@ -247,7 +241,14 @@ async fn drive_buddy_link(
     }
 }
 
-/// Handle one inbound packet on the held buddy socket. Returns `false` to close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuddyPacketActivity {
+    None,
+    Received,
+    Keepalive,
+}
+
+/// Handle one inbound packet on the held buddy socket.
 #[expect(
     clippy::too_many_arguments,
     reason = "flat protocol or runtime boundary"
@@ -261,13 +262,22 @@ async fn handle_buddy_packet(
     callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<&ReaskSourceHandle>,
     packet: EmuleTcpPacket,
-) -> Result<bool> {
+) -> Result<BuddyPacketActivity> {
     match (packet.protocol, packet.opcode) {
         (OP_EMULEPROT, OP_CALLBACK) => {
             let source = format!("buddy {buddy_addr}");
+            if let Err(error) = decode_kad_callback_payload(&packet.payload) {
+                if dht.is_running() {
+                    return Err(error);
+                }
+                debug!(
+                    "ignoring malformed {source} OP_CALLBACK while Kad is not running: {error:#}"
+                );
+                return Ok(BuddyPacketActivity::None);
+            }
             let Some(callback) = decode_kad_callback_if_running(dht, &packet.payload, &source)?
             else {
-                return Ok(true);
+                return Ok(BuddyPacketActivity::Received);
             };
             debug!(
                 "buddy {buddy_addr} relayed OP_CALLBACK file_hash={} requester={}:{}",
@@ -287,7 +297,7 @@ async fn handle_buddy_packet(
                 &source,
             )
             .await;
-            Ok(true)
+            Ok(BuddyPacketActivity::Received)
         }
         (OP_EMULEPROT, OP_REASKCALLBACKTCP) => {
             // Source side: our buddy relayed a reask from a downloader that could
@@ -312,19 +322,37 @@ async fn handle_buddy_packet(
                         );
                     }
                 }
-                Err(error) => debug!(
-                    "ignoring malformed OP_REASKCALLBACKTCP from buddy {buddy_addr}: {error:#}"
-                ),
+                Err(error) => {
+                    debug!(
+                        "ignoring malformed OP_REASKCALLBACKTCP from buddy {buddy_addr}: {error:#}"
+                    );
+                    return Ok(BuddyPacketActivity::None);
+                }
             }
-            Ok(true)
+            Ok(BuddyPacketActivity::Received)
         }
-        // The buddy answers our ping with a pong; just keep the link alive.
         (OP_EMULEPROT, OP_BUDDYPONG) | (OP_EMULEPROT, OP_BUDDYPING) => {
+            if !packet.payload.is_empty() {
+                debug!(
+                    "ignoring malformed buddy keepalive opcode=0x{:02X} payload_len={} from {buddy_addr}",
+                    packet.opcode,
+                    packet.payload.len()
+                );
+                return Ok(BuddyPacketActivity::None);
+            }
+            if packet.opcode == OP_BUDDYPING {
+                transport
+                    .write_all(&super::codec::encode_buddy_pong())
+                    .await
+                    .with_context(|| {
+                        format!("failed to send OP_BUDDYPONG to buddy {buddy_addr}")
+                    })?;
+            }
             debug!(
                 "received buddy keepalive opcode=0x{:02X} from {buddy_addr}",
                 packet.opcode
             );
-            Ok(true)
+            Ok(BuddyPacketActivity::Keepalive)
         }
         // Late hello/info chatter from the buddy: answer info, otherwise ignore.
         (OP_EDONKEYPROT, OP_HELLO) => {
@@ -333,23 +361,25 @@ async fn handle_buddy_packet(
                     format!("failed to reply to OP_HELLO from buddy {buddy_addr}")
                 })?;
             }
-            Ok(true)
+            Ok(BuddyPacketActivity::Received)
         }
         (OP_EMULEPROT, OP_EMULEINFO) => {
             let reply = encode_emule_info_answer(hello_identity.udp_port);
             transport.write_all(&reply).await.with_context(|| {
                 format!("failed to send OP_EMULEINFOANSWER to buddy {buddy_addr}")
             })?;
-            Ok(true)
+            Ok(BuddyPacketActivity::Received)
         }
-        (OP_EDONKEYPROT, OP_HELLOANSWER) | (OP_EMULEPROT, OP_EMULEINFOANSWER) => Ok(true),
+        (OP_EDONKEYPROT, OP_HELLOANSWER) | (OP_EMULEPROT, OP_EMULEINFOANSWER) => {
+            Ok(BuddyPacketActivity::Received)
+        }
         // Any other opcode on the buddy link is unexpected; ignore but keep open.
         _ => {
             debug!(
                 "ignoring unexpected buddy-link packet protocol=0x{:02X} opcode=0x{:02X} from {buddy_addr}",
                 packet.protocol, packet.opcode
             );
-            Ok(true)
+            Ok(BuddyPacketActivity::None)
         }
     }
 }
@@ -426,13 +456,15 @@ mod tests {
 
     use emulebb_kad_dht::{DhtConfig, DhtNode};
     use emulebb_kad_proto::NodeId;
-    use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
     use tokio_util::sync::CancellationToken;
 
     use super::super::transport::{Ed2kTransport, Ed2kTransportMode};
-    use super::super::{Ed2kHelloIdentity, EmuleTcpPacket, OP_CALLBACK, OP_EMULEPROT};
-    use super::{drive_buddy_link, handle_buddy_packet};
+    use super::super::{
+        Ed2kHelloIdentity, EmuleTcpPacket, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_EMULEPROT,
+        OP_REASKCALLBACKTCP, encode_packet,
+    };
+    use super::{BuddyLinkEnd, BuddyPacketActivity, drive_buddy_link, handle_buddy_packet};
     use crate::ed2k_transfer::Ed2kTransferRuntime;
 
     fn dummy_hello_identity() -> Ed2kHelloIdentity {
@@ -446,6 +478,71 @@ mod tests {
             connect_options: 0,
             direct_udp_callback: false,
         }
+    }
+
+    async fn spawn_buddy_driver() -> (
+        tokio::task::JoinHandle<anyhow::Result<BuddyLinkEnd>>,
+        Ed2kTransport,
+        CancellationToken,
+    ) {
+        let bind_ip = crate::test_bind_ip();
+        let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
+        let buddy_addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(buddy_addr).await.unwrap();
+        let (peer, _) = listener.accept().await.unwrap();
+        let mut transport = Ed2kTransport::from_parts(
+            client,
+            VecDeque::new(),
+            None,
+            None,
+            Ed2kTransportMode::Plaintext,
+        );
+        let peer = Ed2kTransport::from_parts(
+            peer,
+            VecDeque::new(),
+            None,
+            None,
+            Ed2kTransportMode::Plaintext,
+        );
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::from((bind_ip, 0))),
+            node_id: NodeId::from_bytes([0xAB; 16]),
+            udp_key: 0x1122_3344,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let transfer_runtime =
+            Arc::new(Ed2kTransferRuntime::load_or_create(temp_dir.path()).unwrap());
+        let (callback_sessions, callback_session_inbox) =
+            super::super::ed2k_callback_session_channel();
+        let cancel = CancellationToken::new();
+        let driver_cancel = cancel.clone();
+        let driver = tokio::spawn(async move {
+            let _temp_dir = temp_dir;
+            let _callback_session_inbox = callback_session_inbox;
+            drive_buddy_link(
+                &mut transport,
+                buddy_addr,
+                dummy_hello_identity(),
+                &dht,
+                &transfer_runtime,
+                &callback_sessions,
+                None,
+                &driver_cancel,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        (driver, peer, cancel)
+    }
+
+    async fn expect_buddy_ping(peer: &mut Ed2kTransport) {
+        let packet = peer.read_packet().await.unwrap().unwrap();
+        assert_eq!(packet.protocol, OP_EMULEPROT);
+        assert_eq!(packet.opcode, OP_BUDDYPING);
+        assert!(packet.payload.is_empty());
     }
 
     /// The held buddy link follows the same stock pre-parse Kad-running gate as
@@ -479,7 +576,7 @@ mod tests {
         let (callback_sessions, _callback_session_inbox) =
             super::super::ed2k_callback_session_channel();
 
-        assert!(
+        assert_eq!(
             handle_buddy_packet(
                 &mut transport,
                 addr,
@@ -495,7 +592,8 @@ mod tests {
                 },
             )
             .await
-            .unwrap()
+            .unwrap(),
+            BuddyPacketActivity::None
         );
     }
 
@@ -503,76 +601,67 @@ mod tests {
     /// (and thus the OP_BUDDYPINGs) instead of running until the socket dies, so
     /// the remote helper's single buddy slot is freed promptly when we stop being
     /// firewalled / Kad disconnects.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn buddy_link_stops_and_stops_pinging_when_cancelled() {
-        // A fake buddy peer that accepts the connection and then stays silent, so
-        // the driver would otherwise idle on its ping/read timers indefinitely.
-        // Keep the fake peer on the same-machine loopback boundary.
-        let bind_ip = crate::test_bind_ip();
-        let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            // Hold the connection open (never send), and never observe an inbound
-            // OP_BUDDYPING (the first ping is a full interval away).
-            let mut buf = [0u8; 64];
-            let _ = tokio::time::timeout(Duration::from_secs(3), sock.read(&mut buf)).await;
-        });
+        let (driver, _peer, cancel) = spawn_buddy_driver().await;
+        cancel.cancel();
+        assert_eq!(driver.await.unwrap().unwrap(), BuddyLinkEnd::Cancelled);
+    }
 
-        let client = TcpStream::connect(addr).await.unwrap();
-        let mut transport = Ed2kTransport::from_parts(
-            client,
-            VecDeque::new(),
-            None,
-            None,
-            Ed2kTransportMode::Plaintext,
+    #[tokio::test(start_paused = true)]
+    async fn silent_buddy_expires_while_outbound_pings_succeed() {
+        let (driver, mut peer, _cancel) = spawn_buddy_driver().await;
+
+        tokio::time::advance(Duration::from_secs(10 * 60)).await;
+        tokio::task::yield_now().await;
+        expect_buddy_ping(&mut peer).await;
+        tokio::time::advance(Duration::from_secs(10 * 60)).await;
+        tokio::task::yield_now().await;
+        expect_buddy_ping(&mut peer).await;
+        tokio::time::advance(Duration::from_secs(5 * 60)).await;
+
+        assert_eq!(
+            driver.await.unwrap().unwrap(),
+            BuddyLinkEnd::ReceiveTimedOut
         );
-        // First tick a full interval out (LOWID-G9a), so no ping fires during the test.
-        let mut ping_timer = tokio::time::interval_at(
-            tokio::time::Instant::now() + super::BUDDY_PING_INTERVAL,
-            super::BUDDY_PING_INTERVAL,
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn valid_inbound_keepalive_refreshes_receive_liveness() {
+        let (driver, mut peer, _cancel) = spawn_buddy_driver().await;
+
+        tokio::time::advance(Duration::from_secs(24 * 60)).await;
+        peer.write_all(&encode_packet(OP_EMULEPROT, OP_BUDDYPONG, &[]))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(!driver.is_finished());
+
+        tokio::time::advance(Duration::from_secs(24 * 60)).await;
+        assert_eq!(
+            driver.await.unwrap().unwrap(),
+            BuddyLinkEnd::ReceiveTimedOut
         );
+    }
 
-        let tmp = tempfile::tempdir().unwrap();
-        let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(tmp.path()).unwrap());
-        let cancel = CancellationToken::new();
-        let hello = dummy_hello_identity();
-        let (callback_sessions, _callback_session_inbox) =
-            super::super::ed2k_callback_session_channel();
-        let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some(SocketAddr::from((bind_ip, 0))),
-            node_id: NodeId::from_bytes([0xAB; 16]),
-            udp_key: 0x1122_3344,
-            ..DhtConfig::default()
-        })
-        .await
-        .unwrap();
+    #[tokio::test(start_paused = true)]
+    async fn malformed_and_partial_traffic_do_not_refresh_receive_liveness() {
+        let (driver, mut peer, _cancel) = spawn_buddy_driver().await;
 
-        let driver = drive_buddy_link(
-            &mut transport,
-            &mut ping_timer,
-            SocketAddr::new(std::net::IpAddr::V4(bind_ip), addr.port()),
-            hello,
-            &dht,
-            &transfer_runtime,
-            &callback_sessions,
-            None,
-            &cancel,
+        tokio::time::advance(Duration::from_secs(24 * 60)).await;
+        peer.write_all(&encode_packet(OP_EMULEPROT, OP_REASKCALLBACKTCP, &[1]))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        let partial = encode_packet(OP_EMULEPROT, OP_BUDDYPONG, &[]);
+        peer.write_all(&partial[..3]).await.unwrap();
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        assert_eq!(
+            driver.await.unwrap().unwrap(),
+            BuddyLinkEnd::ReceiveTimedOut
         );
-        tokio::pin!(driver);
-
-        let cancel_signal = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            cancel_signal.cancel();
-        });
-
-        let outcome = tokio::time::timeout(Duration::from_secs(2), &mut driver).await;
-        assert!(
-            outcome.is_ok(),
-            "drive_buddy_link did not return promptly after cancellation"
-        );
-        assert!(outcome.unwrap().is_ok());
-        server.abort();
     }
 }

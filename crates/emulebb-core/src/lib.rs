@@ -6718,7 +6718,6 @@ async fn handle_kad_find_buddy_res(
     let dht = dht.clone();
     let transfer_runtime = Arc::clone(transfer_runtime);
     let callback_sessions = callback_sessions.clone();
-    let lost = Arc::new(tokio::sync::Notify::new());
     // LOWID-G8: install a fresh cancellation handle for this link so the
     // buddy-management loop can tear it down (and stop its keepalive pings) when
     // the buddy relationship is no longer warranted.
@@ -6739,7 +6738,6 @@ async fn handle_kad_find_buddy_res(
             registry,
             reask_handle,
             timeout: KAD_BUDDY_LINK_TIMEOUT,
-            lost,
             cancel,
         })
         .await
