@@ -227,10 +227,7 @@ fn display_native_os_str(value: &std::ffi::OsStr) -> String {
         match decoded {
             Ok('\\') => output.push_str("\\\\"),
             Ok(character) => output.push(character),
-            Err(error) => output.push_str(&format!(
-                "\\u{{{:04X}}}",
-                error.unpaired_surrogate()
-            )),
+            Err(error) => output.push_str(&format!("\\u{{{:04X}}}", error.unpaired_surrogate())),
         }
     }
     output
