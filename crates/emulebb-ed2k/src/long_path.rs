@@ -62,7 +62,11 @@ pub fn normal_path_display(path: impl AsRef<Path>) -> String {
 
 #[cfg(windows)]
 fn windows_long_path(path: &Path) -> PathBuf {
-    use std::path::{Component, Prefix};
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+        path::{Component, Prefix},
+    };
 
     let Some(first) = path.components().next() else {
         // Empty path: nothing to rewrite.
@@ -89,7 +93,7 @@ fn windows_long_path(path: &Path) -> PathBuf {
 
     // Build a normalized absolute path: keep the prefix + root, drop `.`, and
     // pop on `..`, since the OS will NOT normalize a verbatim path for us.
-    let mut prefix_text: Option<String> = None;
+    let mut verbatim_prefix: Option<Vec<u16>> = None;
     let mut is_unc = false;
     let mut stack: Vec<std::ffi::OsString> = Vec::new();
 
@@ -97,15 +101,19 @@ fn windows_long_path(path: &Path) -> PathBuf {
         match component {
             Component::Prefix(prefix) => match prefix.kind() {
                 Prefix::Disk(letter) => {
-                    prefix_text = Some(format!("{}:", (letter as char).to_ascii_uppercase()));
+                    verbatim_prefix = Some(
+                        format!("\\\\?\\{}:", (letter as char).to_ascii_uppercase())
+                            .encode_utf16()
+                            .collect(),
+                    );
                 }
                 Prefix::UNC(server, share) => {
                     is_unc = true;
-                    prefix_text = Some(format!(
-                        "{}\\{}",
-                        server.to_string_lossy(),
-                        share.to_string_lossy()
-                    ));
+                    let mut prefix = r"\\?\UNC\".encode_utf16().collect::<Vec<_>>();
+                    prefix.extend(server.encode_wide());
+                    prefix.push(b'\\' as u16);
+                    prefix.extend(share.encode_wide());
+                    verbatim_prefix = Some(prefix);
                 }
                 // Drive-relative / device / already-verbatim prefixes are not
                 // ones we rewrite; bail out to the original path untouched.
@@ -120,31 +128,23 @@ fn windows_long_path(path: &Path) -> PathBuf {
         }
     }
 
-    let Some(prefix_text) = prefix_text else {
+    let Some(mut verbatim) = verbatim_prefix else {
         // No drive/UNC prefix (e.g. a rooted-but-prefixless `\foo` path): not a
         // form we can safely make verbatim, so leave it unchanged.
         return path.to_path_buf();
     };
 
-    let body = stack
-        .iter()
-        .map(|part| part.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("\\");
-
-    let verbatim = if is_unc {
-        if body.is_empty() {
-            format!("\\\\?\\UNC\\{prefix_text}")
-        } else {
-            format!("\\\\?\\UNC\\{prefix_text}\\{body}")
+    if !stack.is_empty() || !is_unc {
+        verbatim.push(b'\\' as u16);
+    }
+    for (index, part) in stack.iter().enumerate() {
+        if index != 0 {
+            verbatim.push(b'\\' as u16);
         }
-    } else if body.is_empty() {
-        format!("\\\\?\\{prefix_text}\\")
-    } else {
-        format!("\\\\?\\{prefix_text}\\{body}")
-    };
+        verbatim.extend(part.encode_wide());
+    }
 
-    PathBuf::from(verbatim)
+    PathBuf::from(OsString::from_wide(&verbatim))
 }
 
 #[cfg(test)]
@@ -177,6 +177,39 @@ mod tests {
     fn dot_and_dotdot_components_are_resolved() {
         let out = long_path(Path::new("C:\\a\\.\\b\\..\\c\\file"));
         assert_eq!(out, PathBuf::from("\\\\?\\C:\\a\\c\\file"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn invalid_utf16_component_is_preserved_exactly() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+        let input = PathBuf::from(OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            0xD800,
+            b'.' as u16,
+            b'b' as u16,
+            b'i' as u16,
+            b'n' as u16,
+        ]));
+        let expected = OsString::from_wide(&[
+            b'\\' as u16,
+            b'\\' as u16,
+            b'?' as u16,
+            b'\\' as u16,
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            0xD800,
+            b'.' as u16,
+            b'b' as u16,
+            b'i' as u16,
+            b'n' as u16,
+        ]);
+
+        assert_eq!(long_path(&input).as_os_str(), expected.as_os_str());
     }
 
     #[cfg(windows)]
