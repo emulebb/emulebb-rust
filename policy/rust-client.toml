@@ -17,6 +17,7 @@ macos = "compile/test-viable target; runtime deferred pending a macOS CI runner"
 address_family = "ipv4-only"
 compatibility = "stock/community eMule owns eD2K/Kad wire behavior; Rust REST/UI/settings are Rust-native async daemon surfaces, not MFC or legacy GUI mirrors; approved permanent protocol drops are explicit review-reporting exclusions"
 omission_registry = "policy/rust-client-omissions.toml"
+extension_registry = "policy/rust-client-extensions.toml"
 
 [behavior_authority]
 wire_protocol = "stock-community-emule"

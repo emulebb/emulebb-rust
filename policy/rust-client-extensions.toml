@@ -1,0 +1,18 @@
+# Intentional Rust protocol extensions relative to stock/community eMule.
+#
+# This registry is distinct from rust-client-omissions.toml: entries here add
+# optional behavior while retaining stock interoperability. Every entry must
+# name its negotiation/fallback contract and durable backlog disposition.
+
+[[extensions]]
+id = "offerfiles-v1"
+area = "ed2k-server"
+tracking_item = "RUST-REF-015"
+wire_surface = "OP_LOGINREQUEST named offerfiles_v=1 tag and OP_SERVERIDENT offerfiles_v/offerfiles_batch_max/offerfiles_min_interval_ms tags"
+purpose = "Negotiate bounded incremental OP_OFFERFILES batch size and minimum interval for very large shared libraries."
+advertisement_policy = "Only the long-lived publishing server session advertises the extension; one-shot keyword, source, and callback sessions retain the stock four-tag login."
+stock_fallback = "Stock servers ignore the unknown login tag. Without a valid server envelope, the client uses legacy local batching and minimum-interval limits."
+compatibility = "All OP_OFFERFILES payload entries remain stock-shaped; the extension changes only optional capability negotiation and pacing."
+owner = "operator"
+introduced = "2026-10-12"
+reviewed = "2026-10-13"
