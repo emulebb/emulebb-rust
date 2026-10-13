@@ -7,6 +7,7 @@ mod identity_store;
 mod kad_publish_model;
 mod kad_publish_store;
 mod model;
+mod native_file;
 mod native_path;
 mod peer_model;
 mod peer_store;
@@ -28,6 +29,7 @@ pub use kad_publish_model::{
     MetadataKadSourcePublish,
 };
 pub use model::{MetadataIndexedFile, MetadataSharedDirectoryRoot};
+pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp};
 pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
