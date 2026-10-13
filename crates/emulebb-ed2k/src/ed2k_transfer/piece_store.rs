@@ -561,17 +561,35 @@ impl Ed2kTransferRuntime {
         let (payload_path, verified_ranges) = {
             let _guard = self.lock_manifest(&hash_hex).await;
             let manifest = self.load_manifest_unlocked(&hash_hex).await?;
-            if manifest.verified_ranges.is_empty() {
-                return Ok(None);
-            }
             // Share-in-place: serve upload bytes straight from the original
             // on-disk file (never copied into the piece store). A real download
             // reads from the internal piece store.
-            let payload_path: PathBuf = match manifest.source_path.as_deref() {
-                Some(source_path) => long_path(std::path::Path::new(source_path)),
-                None => self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
-            };
-            (payload_path, manifest.verified_ranges.clone())
+            let (payload_path, verified_ranges): (PathBuf, Vec<Ed2kSharedRange>) =
+                match manifest.source_path.as_deref() {
+                    Some(source_path) => (
+                        long_path(std::path::Path::new(source_path)),
+                        manifest.verified_ranges.clone(),
+                    ),
+                    None => match self.first_present_shared_source(&hash_hex).await? {
+                        Some(source_path) => (
+                            long_path(&source_path),
+                            vec![Ed2kSharedRange {
+                                start: 0,
+                                end: manifest.file_size,
+                            }],
+                        ),
+                        None => {
+                            if manifest.verified_ranges.is_empty() {
+                                return Ok(None);
+                            }
+                            (
+                                self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
+                                manifest.verified_ranges.clone(),
+                            )
+                        }
+                    },
+                };
+            (payload_path, verified_ranges)
         };
         let file = tokio::fs::OpenOptions::new()
             .read(true)

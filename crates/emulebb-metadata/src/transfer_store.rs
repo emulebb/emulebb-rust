@@ -467,7 +467,14 @@ impl super::MetadataStore {
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
                    known_files.last_upload_request_ms,
-                   COALESCE(source_paths.display_path, delivered_paths.display_path),
+                   COALESCE(source_paths.display_path, (
+                       SELECT local_paths.display_path
+                       FROM shared_file_sources
+                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                       WHERE shared_file_sources.known_file_id = known_files.id
+                       ORDER BY local_paths.display_path
+                       LIMIT 1
+                   ), delivered_paths.display_path),
                    known_files.media_artist, known_files.media_album,
                    known_files.media_title, known_files.media_length_seconds,
                    known_files.media_bitrate_kbps, known_files.media_codec,
@@ -476,7 +483,13 @@ impl super::MetadataStore {
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
-            WHERE known_files.completed != 0
+            WHERE (
+                    known_files.completed != 0
+                    OR EXISTS (
+                        SELECT 1 FROM shared_file_sources
+                        WHERE shared_file_sources.known_file_id = known_files.id
+                    )
+                  )
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -590,7 +603,10 @@ impl super::MetadataStore {
             FROM shared_file_sources
             JOIN known_files ON known_files.id = shared_file_sources.known_file_id
             JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-            WHERE known_files.completed != 0
+            WHERE EXISTS (
+                SELECT 1 FROM shared_file_sources
+                WHERE shared_file_sources.known_file_id = known_files.id
+            )
             ORDER BY local_paths.display_path
             "#,
         )?;
@@ -1041,6 +1057,10 @@ impl super::MetadataStore {
                         WHERE transfer_pieces.transfer_id = transfers.id
                           AND transfer_pieces.state = 'Verified'
                     )
+                    OR EXISTS (
+                        SELECT 1 FROM shared_file_sources
+                        WHERE shared_file_sources.known_file_id = known_files.id
+                    )
                   )
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
@@ -1158,7 +1178,13 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
-            WHERE known_files.completed != 0
+            WHERE (
+                    known_files.completed != 0
+                    OR EXISTS (
+                        SELECT 1 FROM shared_file_sources
+                        WHERE shared_file_sources.known_file_id = known_files.id
+                    )
+                  )
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -1217,7 +1243,13 @@ impl super::MetadataStore {
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
             WHERE known_files.ed2k_hash = ?1
-              AND known_files.completed != 0
+              AND (
+                    known_files.completed != 0
+                    OR EXISTS (
+                        SELECT 1 FROM shared_file_sources
+                        WHERE shared_file_sources.known_file_id = known_files.id
+                    )
+                  )
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -1290,7 +1322,13 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
-            WHERE known_files.completed != 0
+            WHERE (
+                    known_files.completed != 0
+                    OR EXISTS (
+                        SELECT 1 FROM shared_file_sources
+                        WHERE shared_file_sources.known_file_id = known_files.id
+                    )
+                  )
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -1364,7 +1402,13 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
-            WHERE known_files.completed != 0
+            WHERE (
+                    known_files.completed != 0
+                    OR EXISTS (
+                        SELECT 1 FROM shared_file_sources
+                        WHERE shared_file_sources.known_file_id = known_files.id
+                    )
+                  )
               AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
@@ -1405,7 +1449,13 @@ impl super::MetadataStore {
                 SELECT count(*)
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
-                WHERE known_files.completed != 0
+                WHERE (
+                        known_files.completed != 0
+                        OR EXISTS (
+                            SELECT 1 FROM shared_file_sources
+                            WHERE shared_file_sources.known_file_id = known_files.id
+                        )
+                      )
                   AND NOT EXISTS (
                       SELECT 1 FROM unshared_files
                       WHERE unshared_files.known_file_id = known_files.id
