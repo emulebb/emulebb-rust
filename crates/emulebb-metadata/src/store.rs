@@ -307,7 +307,7 @@ impl MetadataStore {
             params![now],
         )?;
         for root in roots {
-            let path_id = upsert_local_path(&tx, Path::new(&root.path), now)?;
+            let path_id = upsert_local_path(&tx, Path::new(&root.path))?;
             tx.execute(
                 r#"
                 INSERT INTO shared_directory_roots(
@@ -377,11 +377,7 @@ impl MetadataStore {
     }
 }
 
-pub(crate) fn upsert_local_path(
-    tx: &rusqlite::Transaction<'_>,
-    path: &Path,
-    now: i64,
-) -> Result<i64> {
+pub(crate) fn upsert_local_path(tx: &rusqlite::Transaction<'_>, path: &Path) -> Result<i64> {
     let native_path = NativePath::from(path);
     let display_path = native_path.display_path();
     let search_key = normalize_path_key(&display_path);
@@ -389,20 +385,18 @@ pub(crate) fn upsert_local_path(
     tx.execute(
         r#"
         INSERT INTO local_paths(
-            display_path, native_path, search_key, platform, last_stat_ms
+            display_path, native_path, search_key, platform
         )
-        VALUES (?1, ?2, ?3, ?4, ?5)
+        VALUES (?1, ?2, ?3, ?4)
         ON CONFLICT(platform, native_path) DO UPDATE SET
             display_path = excluded.display_path,
-            search_key = excluded.search_key,
-            last_stat_ms = excluded.last_stat_ms
+            search_key = excluded.search_key
         "#,
         params![
             display_path,
             native_path.storage_bytes(),
             search_key,
             platform,
-            now,
         ],
     )?;
     tx.query_row(
@@ -465,9 +459,9 @@ mod tests {
             normalize_path_key(&NativePath::from(ascii).display_path())
         );
 
-        let circled_id = upsert_local_path(&tx, circled, 1).unwrap();
-        let ascii_id = upsert_local_path(&tx, ascii, 2).unwrap();
-        let repeated_id = upsert_local_path(&tx, circled, 3).unwrap();
+        let circled_id = upsert_local_path(&tx, circled).unwrap();
+        let ascii_id = upsert_local_path(&tx, ascii).unwrap();
+        let repeated_id = upsert_local_path(&tx, circled).unwrap();
 
         assert_ne!(circled_id, ascii_id);
         assert_eq!(circled_id, repeated_id);

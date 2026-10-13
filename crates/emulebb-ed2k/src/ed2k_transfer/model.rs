@@ -6,8 +6,10 @@ use std::{
     time::Duration,
 };
 
-use emulebb_metadata::NativePath;
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::{
+    NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp, NativePath,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::block_bitmap::PartBlockBitmap;
@@ -212,12 +214,9 @@ pub struct Ed2kReloadIndexEntry {
     /// ED2K file hash of the persisted share (lowercase hex), used to resolve the
     /// reused `LocalShare` without re-hashing the payload.
     pub file_hash: String,
-    /// File size recorded in the persisted manifest, compared against the on-disk
-    /// size to detect a changed file.
-    pub file_size: u64,
-    /// Source last-modified time (Unix ms) recorded at ingest, compared against
-    /// the on-disk mtime. `None` for a pre-v9 row (always a reload miss).
-    pub source_mtime_ms: Option<i64>,
+    /// Native file identity, size, and timestamps captured when the hash was
+    /// computed. `None` is always a reload miss.
+    pub source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 /// Opaque process-local identifier for one pending callback ticket.
@@ -469,19 +468,152 @@ pub struct Ed2kResumeManifest {
     /// `None` for a real download whose payload lives in the piece store.
     #[serde(default, with = "optional_native_path_serde")]
     pub source_path: Option<PathBuf>,
-    /// Last-modified time (Unix milliseconds) captured for the incremental
-    /// shared-directory reload's reuse identity. For a share-in-place transfer
-    /// (`source_path` set) it is the source file's mtime at ingest; for a
-    /// completed DOWNLOAD (`source_path` `None`) it is the delivered file's mtime
-    /// captured at delivery, so a shared-dir rescan that re-finds the delivered
-    /// file reuses the download's hashset instead of re-hashing (HASH-2). The
-    /// reload compares this (plus `file_size` and the path key) against the
-    /// on-disk `fs::metadata` and reuses the manifest when they match. `None`
-    /// for a not-yet-delivered download or a pre-existing manifest written
-    /// before this field existed (a reload miss, so the file is re-hashed once
-    /// and the mtime is then recorded).
-    #[serde(default)]
-    pub source_mtime_ms: Option<i64>,
+    /// Native file identity, size, and nanosecond timestamps captured for the
+    /// incremental shared-directory reload. `None` forces a conservative hash.
+    #[serde(default, with = "optional_native_file_fingerprint_serde")]
+    pub source_fingerprint: Option<NativeFileFingerprint>,
+}
+
+mod optional_native_file_fingerprint_serde {
+    use super::*;
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StoredFingerprint {
+        identity: StoredIdentity,
+        size_bytes: u64,
+        modified: StoredTimestamp,
+        changed: Option<StoredTimestamp>,
+    }
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase", tag = "kind")]
+    enum StoredIdentity {
+        Unix {
+            device_id: u64,
+            inode_number: u64,
+        },
+        WindowsLowResolution {
+            volume_serial_number: u32,
+            file_index: u64,
+        },
+        WindowsHighResolution {
+            volume_serial_number: u64,
+            file_id: u128,
+        },
+    }
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StoredTimestamp {
+        seconds: i64,
+        nanoseconds: u32,
+    }
+
+    impl From<&NativeFileFingerprint> for StoredFingerprint {
+        fn from(value: &NativeFileFingerprint) -> Self {
+            Self {
+                identity: match value.identity {
+                    NativeFileIdentity::Unix {
+                        device_id,
+                        inode_number,
+                    } => StoredIdentity::Unix {
+                        device_id,
+                        inode_number,
+                    },
+                    NativeFileIdentity::WindowsLowResolution {
+                        volume_serial_number,
+                        file_index,
+                    } => StoredIdentity::WindowsLowResolution {
+                        volume_serial_number,
+                        file_index,
+                    },
+                    NativeFileIdentity::WindowsHighResolution {
+                        volume_serial_number,
+                        file_id,
+                    } => StoredIdentity::WindowsHighResolution {
+                        volume_serial_number,
+                        file_id,
+                    },
+                },
+                size_bytes: value.size_bytes,
+                modified: StoredTimestamp::from(value.modified),
+                changed: value.changed.map(StoredTimestamp::from),
+            }
+        }
+    }
+
+    impl From<NativeFileTimestamp> for StoredTimestamp {
+        fn from(value: NativeFileTimestamp) -> Self {
+            Self {
+                seconds: value.seconds,
+                nanoseconds: value.nanoseconds,
+            }
+        }
+    }
+
+    impl StoredFingerprint {
+        fn into_native(self) -> Result<NativeFileFingerprint, &'static str> {
+            Ok(NativeFileFingerprint {
+                identity: match self.identity {
+                    StoredIdentity::Unix {
+                        device_id,
+                        inode_number,
+                    } => NativeFileIdentity::Unix {
+                        device_id,
+                        inode_number,
+                    },
+                    StoredIdentity::WindowsLowResolution {
+                        volume_serial_number,
+                        file_index,
+                    } => NativeFileIdentity::WindowsLowResolution {
+                        volume_serial_number,
+                        file_index,
+                    },
+                    StoredIdentity::WindowsHighResolution {
+                        volume_serial_number,
+                        file_id,
+                    } => NativeFileIdentity::WindowsHighResolution {
+                        volume_serial_number,
+                        file_id,
+                    },
+                },
+                size_bytes: self.size_bytes,
+                modified: self.modified.into_native()?,
+                changed: self.changed.map(StoredTimestamp::into_native).transpose()?,
+            })
+        }
+    }
+
+    impl StoredTimestamp {
+        fn into_native(self) -> Result<NativeFileTimestamp, &'static str> {
+            NativeFileTimestamp::new(self.seconds, self.nanoseconds)
+                .ok_or("native file timestamp nanoseconds are out of range")
+        }
+    }
+
+    pub fn serialize<S>(
+        fingerprint: &Option<NativeFileFingerprint>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        fingerprint
+            .as_ref()
+            .map(StoredFingerprint::from)
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<NativeFileFingerprint>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<StoredFingerprint>::deserialize(deserializer)?
+            .map(StoredFingerprint::into_native)
+            .transpose()
+            .map_err(D::Error::custom)
+    }
 }
 
 mod optional_native_path_serde {
@@ -580,7 +712,7 @@ impl Ed2kResumeManifest {
             transfer_row_removed: false,
             delivered_path: None,
             source_path: None,
-            source_mtime_ms: None,
+            source_fingerprint: None,
         }
     }
 
@@ -609,6 +741,15 @@ mod tests {
             piece_size: 1,
         });
         manifest.source_path = Some(source_path);
+        manifest.source_fingerprint = Some(NativeFileFingerprint {
+            identity: NativeFileIdentity::Unix {
+                device_id: 7,
+                inode_number: 11,
+            },
+            size_bytes: 1,
+            modified: NativeFileTimestamp::new(1_700_000_000, 123_456_789).unwrap(),
+            changed: Some(NativeFileTimestamp::new(1_700_000_001, 234_567_890).unwrap()),
+        });
         manifest
     }
 
@@ -619,6 +760,7 @@ mod tests {
         let decoded = serde_json::from_str::<Ed2kResumeManifest>(&json).unwrap();
 
         assert!(json.contains("nativeHex"));
+        assert!(json.contains("source_fingerprint"));
         assert_eq!(decoded, manifest);
     }
 

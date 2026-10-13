@@ -2,10 +2,8 @@ use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
-    MetadataCurrentSharedFile, MetadataDownloadHistoryEntry,
-    native_path::path_from_row,
-    store::decode_fixed_hex,
-    transfer_model::MetadataTransferManifest,
+    MetadataCurrentSharedFile, MetadataDownloadHistoryEntry, native_path::path_from_row,
+    store::decode_fixed_hex, transfer_model::MetadataTransferManifest,
 };
 
 impl super::MetadataStore {
@@ -171,7 +169,7 @@ mod tests {
             transfer_row_removed: false,
             delivered_path: Some("C:\\incoming\\completed.bin".into()),
             source_path: None,
-            source_mtime_ms: None,
+            source_fingerprint: None,
         }
     }
 

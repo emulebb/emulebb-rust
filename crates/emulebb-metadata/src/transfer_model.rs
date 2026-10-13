@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::NativeFileFingerprint;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferManifest {
     pub file_hash: String,
@@ -33,12 +35,9 @@ pub struct MetadataTransferManifest {
     /// upload serving, it is never copied into the internal piece store, and it
     /// is never delivered to the incoming dir. `None` for a real download.
     pub source_path: Option<PathBuf>,
-    /// Last-modified time (Unix milliseconds) of the share-in-place source file
-    /// captured at ingest. Compared against the on-disk mtime on reload so an
-    /// unchanged shared file (same `source_path` + `file_size` + mtime) is reused
-    /// instead of being re-hashed. `None` means no reusable source mtime is
-    /// available.
-    pub source_mtime_ms: Option<i64>,
+    /// Native file identity, size, and nanosecond timestamps captured at ingest
+    /// or delivery. `None` forces a conservative re-hash on reload.
+    pub source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,14 +124,14 @@ pub struct MetadataShareInPlaceReloadEntry {
     pub file_hash: String,
     pub file_size: u64,
     pub source_path: PathBuf,
-    pub source_mtime_ms: Option<i64>,
+    pub source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 /// One completed download whose delivered file can be reused (not re-hashed)
 /// when a shared-directory rescan re-finds it in a configured shared Incoming /
 /// category dir. The delivered payload already carries the download's computed
-/// MD4/AICH hashset, so on reload the delivered path + `(file_size,
-/// delivered_mtime_ms)` identity is a cache hit -- the oracle
+/// MD4/AICH hashset, so on reload an exact delivered native fingerprint is a
+/// cache hit -- the oracle
 /// `FindKnownFile(name, date, size)` reuse (SharedFileList.cpp:2138), not a
 /// wasteful full re-hash of the whole payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,10 +139,7 @@ pub struct MetadataDeliveredReuseEntry {
     pub file_hash: String,
     pub file_size: u64,
     pub delivered_path: PathBuf,
-    /// Last-modified time (Unix ms) of the delivered file captured at delivery,
-    /// compared against the on-disk mtime so a delivered file the operator later
-    /// replaced (same name, different content) is re-hashed instead of reused.
-    pub delivered_mtime_ms: Option<i64>,
+    pub delivered_fingerprint: Option<NativeFileFingerprint>,
 }
 
 /// One pathless stock eMule ``known.met`` row imported into a Rust profile.
@@ -172,7 +168,7 @@ pub struct MetadataImportedKnownFileEntry {
 pub struct MetadataSharedSourceFailure {
     pub source_path: PathBuf,
     pub file_size: u64,
-    pub source_mtime_ms: Option<i64>,
+    pub source_fingerprint: Option<NativeFileFingerprint>,
     pub reason: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,

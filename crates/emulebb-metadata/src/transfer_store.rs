@@ -4,8 +4,8 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
+    NativeFileFingerprint, NativePath,
     download_history_store::record_completed_download,
-    NativePath,
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_model::{
@@ -24,9 +24,12 @@ impl super::MetadataStore {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        let delivered_path_id =
-            optional_local_path_id(&tx, manifest.delivered_path.as_deref(), now)?;
-        let source_path_id = optional_local_path_id(&tx, manifest.source_path.as_deref(), now)?;
+        let delivered_path_id = optional_local_path_id(&tx, manifest.delivered_path.as_deref())?;
+        let source_path_id = optional_local_path_id(&tx, manifest.source_path.as_deref())?;
+        let source_fingerprint = manifest
+            .source_fingerprint
+            .as_ref()
+            .map(NativeFileFingerprint::storage_bytes);
 
         tx.prepare_cached(
             r#"
@@ -83,7 +86,7 @@ impl super::MetadataStore {
             INSERT INTO transfers(
                 known_file_id, visible_state, final_rehash_pending, control_state, download_priority,
                 category_id, payload_directory, delivered_path_id, source_path_id,
-                source_mtime_ms, created_at_ms, updated_at_ms,
+                source_fingerprint, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
             VALUES (?1, ?2, ?12, ?3, 'normal', ?4, ?5, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
@@ -95,7 +98,7 @@ impl super::MetadataStore {
                 payload_directory = excluded.payload_directory,
                 delivered_path_id = excluded.delivered_path_id,
                 source_path_id = excluded.source_path_id,
-                source_mtime_ms = excluded.source_mtime_ms,
+                source_fingerprint = excluded.source_fingerprint,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = excluded.completed_at_ms,
                 removed_at_ms = excluded.removed_at_ms
@@ -116,7 +119,7 @@ impl super::MetadataStore {
                 None
             },
             source_path_id,
-            manifest.source_mtime_ms,
+            source_fingerprint,
             bool_to_i64(manifest.final_rehash_pending),
         ])?;
         let transfer_id: i64 = tx
@@ -126,14 +129,14 @@ impl super::MetadataStore {
             tx.prepare_cached(
                 r#"
                 INSERT INTO shared_file_sources(
-                    known_file_id, path_id, file_size, source_mtime_ms,
+                    known_file_id, path_id, file_size, source_fingerprint,
                     created_at_ms, updated_at_ms
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
                 ON CONFLICT(path_id) DO UPDATE SET
                     known_file_id = excluded.known_file_id,
                     file_size = excluded.file_size,
-                    source_mtime_ms = excluded.source_mtime_ms,
+                    source_fingerprint = excluded.source_fingerprint,
                     updated_at_ms = excluded.updated_at_ms
                 "#,
             )?
@@ -141,7 +144,10 @@ impl super::MetadataStore {
                 known_file_id,
                 source_path_id,
                 manifest.file_size as i64,
-                manifest.source_mtime_ms,
+                manifest
+                    .source_fingerprint
+                    .as_ref()
+                    .map(NativeFileFingerprint::storage_bytes),
                 now,
             ])?;
             tx.prepare_cached("DELETE FROM shared_file_scan_failures WHERE path_id = ?1")?
@@ -177,7 +183,7 @@ impl super::MetadataStore {
                        transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                        delivered_paths.platform, delivered_paths.native_path,
                        source_paths.platform, source_paths.native_path,
-                       transfers.source_mtime_ms, transfers.final_rehash_pending
+                       transfers.source_fingerprint, transfers.final_rehash_pending
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -206,7 +212,7 @@ impl super::MetadataStore {
                     transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
                     delivered_path: optional_path_from_row(row, 17, 18)?,
                     source_path: optional_path_from_row(row, 19, 20)?,
-                    source_mtime_ms: row.get(21)?,
+                    source_fingerprint: optional_fingerprint_from_row(row, 21)?,
                     final_rehash_pending: row.get::<_, i64>(22)? != 0,
                 })
             })
@@ -392,7 +398,7 @@ impl super::MetadataStore {
                    transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                    delivered_paths.platform, delivered_paths.native_path,
                    source_paths.platform, source_paths.native_path,
-                   transfers.source_mtime_ms, transfers.final_rehash_pending
+                   transfers.source_fingerprint, transfers.final_rehash_pending
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -423,7 +429,7 @@ impl super::MetadataStore {
                 transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
                 delivered_path: optional_path_from_row(row, 17, 18)?,
                 source_path: optional_path_from_row(row, 19, 20)?,
-                source_mtime_ms: row.get(21)?,
+                source_fingerprint: optional_fingerprint_from_row(row, 21)?,
                 final_rehash_pending: row.get::<_, i64>(22)? != 0,
             })
         })?;
@@ -607,7 +613,7 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), shared_file_sources.file_size,
                    local_paths.platform, local_paths.native_path,
-                   shared_file_sources.source_mtime_ms
+                   shared_file_sources.source_fingerprint
             FROM shared_file_sources
             JOIN known_files ON known_files.id = shared_file_sources.known_file_id
             JOIN local_paths ON local_paths.id = shared_file_sources.path_id
@@ -623,7 +629,7 @@ impl super::MetadataStore {
                 file_hash: row.get(0)?,
                 file_size: row.get::<_, i64>(1)? as u64,
                 source_path: path_from_row(row, 2, 3)?,
-                source_mtime_ms: row.get(4)?,
+                source_fingerprint: optional_fingerprint_from_row(row, 4)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -646,20 +652,21 @@ impl super::MetadataStore {
         old_source_path: &Path,
         new_source_path: &Path,
         file_size: u64,
-        source_mtime_ms: Option<i64>,
+        source_fingerprint: Option<&NativeFileFingerprint>,
         display_name: &str,
         content_type: &str,
     ) -> Result<bool> {
         // WHY: a same-hash rename must replace the old path row instead of using
         // manifest upsert, which intentionally permits duplicate source paths.
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let source_fingerprint = source_fingerprint.map(NativeFileFingerprint::storage_bytes);
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let Some(old_path_id) = local_path_id(&tx, old_source_path)? else {
             return Ok(false);
         };
-        let new_path_id = upsert_local_path(&tx, new_source_path, now)?;
+        let new_path_id = upsert_local_path(&tx, new_source_path)?;
         let Some(known_file_id) = tx
             .query_row(
                 "SELECT id FROM known_files WHERE ed2k_hash = ?1",
@@ -676,7 +683,7 @@ impl super::MetadataStore {
             UPDATE shared_file_sources
             SET path_id = ?3,
                 file_size = ?4,
-                source_mtime_ms = ?5,
+                source_fingerprint = ?5,
                 updated_at_ms = ?6
             WHERE known_file_id = ?1 AND path_id = ?2
             "#,
@@ -685,7 +692,7 @@ impl super::MetadataStore {
                 old_path_id,
                 new_path_id,
                 file_size as i64,
-                source_mtime_ms,
+                source_fingerprint,
                 now,
             ],
         )?;
@@ -696,7 +703,7 @@ impl super::MetadataStore {
             r#"
             UPDATE transfers
             SET source_path_id = ?3,
-                source_mtime_ms = ?4,
+                source_fingerprint = ?4,
                 updated_at_ms = ?5
             WHERE known_file_id = ?1 AND source_path_id = ?2
             "#,
@@ -704,7 +711,7 @@ impl super::MetadataStore {
                 known_file_id,
                 old_path_id,
                 new_path_id,
-                source_mtime_ms,
+                source_fingerprint,
                 now,
             ],
         )?;
@@ -731,8 +738,8 @@ impl super::MetadataStore {
     /// a shared-directory rescan re-finds it in a configured shared dir. A real
     /// download has NO `shared_file_sources` row, so without this it looks
     /// brand-new on reload and its whole payload is needlessly re-hashed to
-    /// convert it to a share. Only rows that recorded the delivered file's mtime
-    /// baseline (`source_mtime_ms`, captured at delivery for a delivered
+    /// convert it to a share. Only rows that recorded the delivered file's native
+    /// fingerprint (captured at delivery for a delivered
     /// download -- `source_path_id IS NULL` distinguishes it from a share-in-place
     /// source) are returned, so an unchanged delivered file is a reload cache hit.
     pub fn completed_delivered_reuse_entries(&self) -> Result<Vec<MetadataDeliveredReuseEntry>> {
@@ -741,14 +748,14 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
                    delivered_paths.platform, delivered_paths.native_path,
-                   transfers.source_mtime_ms
+                   transfers.source_fingerprint
             FROM transfers
             JOIN known_files ON known_files.id = transfers.known_file_id
             JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
             WHERE known_files.completed != 0
               AND transfers.delivered_path_id IS NOT NULL
               AND transfers.source_path_id IS NULL
-              AND transfers.source_mtime_ms IS NOT NULL
+              AND transfers.source_fingerprint IS NOT NULL
             ORDER BY delivered_paths.display_path
             "#,
         )?;
@@ -757,7 +764,7 @@ impl super::MetadataStore {
                 file_hash: row.get(0)?,
                 file_size: row.get::<_, i64>(1)? as u64,
                 delivered_path: path_from_row(row, 2, 3)?,
-                delivered_mtime_ms: row.get(4)?,
+                delivered_fingerprint: optional_fingerprint_from_row(row, 4)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -968,7 +975,7 @@ impl super::MetadataStore {
             r#"
             SELECT local_paths.platform, local_paths.native_path,
                    shared_file_scan_failures.file_size,
-                   shared_file_scan_failures.source_mtime_ms, shared_file_scan_failures.reason,
+                   shared_file_scan_failures.source_fingerprint, shared_file_scan_failures.reason,
                    shared_file_scan_failures.created_at_ms, shared_file_scan_failures.updated_at_ms
             FROM shared_file_scan_failures
             JOIN local_paths ON local_paths.id = shared_file_scan_failures.path_id
@@ -979,7 +986,7 @@ impl super::MetadataStore {
             Ok(MetadataSharedSourceFailure {
                 source_path: path_from_row(row, 0, 1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
-                source_mtime_ms: row.get(3)?,
+                source_fingerprint: optional_fingerprint_from_row(row, 3)?,
                 reason: row.get(4)?,
                 created_at_ms: row.get(5)?,
                 updated_at_ms: row.get(6)?,
@@ -992,27 +999,33 @@ impl super::MetadataStore {
         &self,
         source_path: &Path,
         file_size: u64,
-        source_mtime_ms: Option<i64>,
+        source_fingerprint: Option<&NativeFileFingerprint>,
         reason: &str,
     ) -> Result<()> {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        let path_id = upsert_local_path(&tx, source_path, now)?;
+        let path_id = upsert_local_path(&tx, source_path)?;
         tx.execute(
             r#"
             INSERT INTO shared_file_scan_failures(
-                path_id, file_size, source_mtime_ms, reason,
+                path_id, file_size, source_fingerprint, reason,
                 created_at_ms, updated_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
             ON CONFLICT(path_id) DO UPDATE SET
                 file_size = excluded.file_size,
-                source_mtime_ms = excluded.source_mtime_ms,
+                source_fingerprint = excluded.source_fingerprint,
                 reason = excluded.reason,
                 updated_at_ms = excluded.updated_at_ms
             "#,
-            params![path_id, file_size as i64, source_mtime_ms, reason, now],
+            params![
+                path_id,
+                file_size as i64,
+                source_fingerprint.map(NativeFileFingerprint::storage_bytes),
+                reason,
+                now
+            ],
         )?;
         tx.commit()?;
         Ok(())
@@ -1279,15 +1292,15 @@ impl super::MetadataStore {
                     display_name: row.get(1)?,
                     file_size: row.get::<_, i64>(2)? as u64,
                     part_count: row.get::<_, i64>(3)? as u32,
-                source_path: optional_path_from_row(row, 4, 5)?,
-                aich_root: row.get(6)?,
-                upload_priority: row.get(7)?,
-                auto_upload_priority: row.get::<_, i64>(8)? != 0,
-                all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(10)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
-                comment: row.get(12)?,
-                rating: row.get::<_, i64>(13)? as u8,
+                    source_path: optional_path_from_row(row, 4, 5)?,
+                    aich_root: row.get(6)?,
+                    upload_priority: row.get(7)?,
+                    auto_upload_priority: row.get::<_, i64>(8)? != 0,
+                    all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
+                    all_time_upload_requests: row.get::<_, i64>(10)? as u64,
+                    all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
+                    comment: row.get(12)?,
+                    rating: row.get::<_, i64>(13)? as u8,
                 })
             },
         )
@@ -1563,7 +1576,7 @@ struct TransferRow {
     transfer_row_removed: bool,
     delivered_path: Option<std::path::PathBuf>,
     source_path: Option<std::path::PathBuf>,
-    source_mtime_ms: Option<i64>,
+    source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 fn replace_transfer_children(
@@ -1705,7 +1718,7 @@ fn manifest_from_row(
         transfer_row_removed: row.transfer_row_removed,
         delivered_path: row.delivered_path,
         source_path: row.source_path,
-        source_mtime_ms: row.source_mtime_ms,
+        source_fingerprint: row.source_fingerprint,
     })
 }
 
@@ -1844,6 +1857,28 @@ fn imported_aich_hashset(conn: &rusqlite::Connection, imported_id: i64) -> Resul
     )
 }
 
+fn optional_fingerprint_from_row(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<NativeFileFingerprint>> {
+    let bytes = row.get::<_, Option<Vec<u8>>>(index)?;
+    bytes
+        .map(|bytes| {
+            NativeFileFingerprint::from_storage_bytes(&bytes).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Blob,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid native file fingerprint",
+                    )
+                    .into(),
+                )
+            })
+        })
+        .transpose()
+}
+
 fn optional_fixed_hex(
     value: Option<&str>,
     byte_len: usize,
@@ -1858,10 +1893,9 @@ fn optional_fixed_hex(
 fn optional_local_path_id(
     tx: &rusqlite::Transaction<'_>,
     path: Option<&Path>,
-    now: i64,
 ) -> Result<Option<i64>> {
     path.filter(|path| !path.as_os_str().is_empty())
-        .map(|path| upsert_local_path(tx, path, now))
+        .map(|path| upsert_local_path(tx, path))
         .transpose()
 }
 

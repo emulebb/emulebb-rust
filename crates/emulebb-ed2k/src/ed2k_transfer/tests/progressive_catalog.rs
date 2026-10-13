@@ -38,7 +38,7 @@ async fn progressive_catalog_exposes_first_cohort_before_full_hydration() {
                 transfer_row_removed: false,
                 delivered_path: None,
                 source_path: Some(root.join(format!("catalog-{sequence}.bin"))),
-                source_mtime_ms: Some(sequence as i64),
+                source_fingerprint: None,
             })
             .unwrap();
         metadata

@@ -38,6 +38,8 @@ impl KadAichSearchVotes {
 
 use tokio_util::sync::CancellationToken;
 
+use emulebb_metadata::NativeFileFingerprint;
+
 use crate::{
     Category, CoreSettings, Friend, Search, ServerInfo, ServerUpdate, SharedDirectoryRoot,
     Transfer, download_source_registry::DownloadSourceRegistry,
@@ -47,14 +49,13 @@ use crate::{
 /// Last settled on-disk identity observed for one monitored shared path.
 ///
 /// The live watcher can emit multiple events for one logical write. Retaining
-/// the cheap `(size, mtime)` identity prevents every duplicate event from
+/// the native file fingerprint prevents every duplicate event from
 /// re-reading and re-hashing the payload, while the hash still lets a later
 /// change or removal retire the previous catalog entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MonitoredSharedFile {
     pub(crate) hash: String,
-    pub(crate) file_size: u64,
-    pub(crate) source_mtime_ms: Option<i64>,
+    pub(crate) source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 #[derive(Debug)]

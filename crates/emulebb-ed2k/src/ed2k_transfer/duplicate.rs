@@ -86,7 +86,7 @@ impl Ed2kTransferRuntime {
                 &mut seen_paths,
                 shared_file.display_name,
                 shared_file.file_size,
-                PathBuf::from(shared_file.source_path),
+                shared_file.source_path,
                 Ed2kCurrentLocalFileKind::Shared,
             )
             .await?;
@@ -212,7 +212,7 @@ impl Ed2kTransferRuntime {
                 .await
                 .context("ED2K shared-source evidence query task panicked")??;
         for shared_file in shared_files {
-            let path = PathBuf::from(shared_file.source_path);
+            let path = shared_file.source_path;
             let Ok(path_metadata) = tokio::fs::metadata(&path).await else {
                 continue;
             };
