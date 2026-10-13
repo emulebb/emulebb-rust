@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     model::{MetadataIndexedFile, MetadataSharedDirectoryRoot},
+    native_path::{NativePath, current_platform},
     schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION},
     text::{normalize_path_key, normalize_search_text},
 };
@@ -306,7 +307,7 @@ impl MetadataStore {
             params![now],
         )?;
         for root in roots {
-            let path_id = upsert_local_path(&tx, &root.path, now)?;
+            let path_id = upsert_local_path(&tx, Path::new(&root.path), now)?;
             tx.execute(
                 r#"
                 INSERT INTO shared_directory_roots(
@@ -378,48 +379,38 @@ impl MetadataStore {
 
 pub(crate) fn upsert_local_path(
     tx: &rusqlite::Transaction<'_>,
-    display_path: &str,
+    path: &Path,
     now: i64,
 ) -> Result<i64> {
-    let normalized_key = normalize_path_key(display_path);
+    let native_path = NativePath::from(path);
+    let display_path = native_path.display_path();
+    let search_key = normalize_path_key(&display_path);
     let platform = current_platform();
     tx.execute(
         r#"
         INSERT INTO local_paths(
-            display_path, native_path, canonical_display_path, normalized_key,
-            platform, last_stat_ms
+            display_path, native_path, search_key, platform, last_stat_ms
         )
-        VALUES (?1, ?2, ?1, ?3, ?4, ?5)
-        ON CONFLICT(platform, normalized_key) DO UPDATE SET
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(platform, native_path) DO UPDATE SET
             display_path = excluded.display_path,
-            native_path = excluded.native_path,
-            canonical_display_path = excluded.canonical_display_path,
+            search_key = excluded.search_key,
             last_stat_ms = excluded.last_stat_ms
         "#,
         params![
             display_path,
-            display_path.as_bytes(),
-            normalized_key,
+            native_path.storage_bytes(),
+            search_key,
             platform,
             now,
         ],
     )?;
     tx.query_row(
-        "SELECT id FROM local_paths WHERE platform = ?1 AND normalized_key = ?2",
-        params![platform, normalize_path_key(display_path)],
+        "SELECT id FROM local_paths WHERE platform = ?1 AND native_path = ?2",
+        params![platform, native_path.storage_bytes()],
         |row| row.get(0),
     )
     .map_err(Into::into)
-}
-
-pub(crate) fn current_platform() -> &'static str {
-    if cfg!(windows) {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "unix"
-    }
 }
 
 pub(crate) fn bool_to_i64(value: bool) -> i64 {
@@ -459,6 +450,34 @@ mod tests {
         let store = MetadataStore::in_memory().unwrap();
         assert_eq!(store.table_count("metadata_schema").unwrap(), 1);
         assert_eq!(store.table_count("profile").unwrap(), 1);
+    }
+
+    #[test]
+    fn local_path_identity_does_not_collapse_search_equivalent_paths() {
+        let store = MetadataStore::in_memory().unwrap();
+        let mut conn = store.connection().unwrap();
+        let tx = conn.transaction().unwrap();
+        let circled = Path::new("shared/①.bin");
+        let ascii = Path::new("shared/1.bin");
+
+        assert_eq!(
+            normalize_path_key(&NativePath::from(circled).display_path()),
+            normalize_path_key(&NativePath::from(ascii).display_path())
+        );
+
+        let circled_id = upsert_local_path(&tx, circled, 1).unwrap();
+        let ascii_id = upsert_local_path(&tx, ascii, 2).unwrap();
+        let repeated_id = upsert_local_path(&tx, circled, 3).unwrap();
+
+        assert_ne!(circled_id, ascii_id);
+        assert_eq!(circled_id, repeated_id);
+        assert_eq!(
+            tx.query_row("SELECT count(*) FROM local_paths", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            2
+        );
     }
 
     #[test]

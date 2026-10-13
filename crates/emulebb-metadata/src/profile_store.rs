@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
@@ -172,7 +174,7 @@ impl super::MetadataStore {
             .path
             .as_deref()
             .filter(|path| !path.trim().is_empty())
-            .map(|path| upsert_local_path(&tx, path, now))
+            .map(|path| upsert_local_path(&tx, Path::new(path), now))
             .transpose()?;
         tx.execute(
             r#"
