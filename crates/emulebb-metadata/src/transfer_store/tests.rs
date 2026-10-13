@@ -283,7 +283,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         store
             .transfer_manifest_by_hash(&manifest.file_hash)
             .unwrap(),
-        Some(manifest)
+        Some(manifest.clone())
     );
     assert_eq!(
         store.transfer_counts().unwrap(),
@@ -293,11 +293,12 @@ fn transfer_manifest_roundtrips_sql_tables() {
             total: 1,
         }
     );
-    assert!(
-        store
-            .completed_transfer_catalog_entries()
-            .unwrap()
-            .is_empty()
+    let catalog = store.completed_transfer_catalog_entries().unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].file_hash, manifest.file_hash);
+    assert_eq!(
+        catalog[0].media_path.as_deref(),
+        Some("/library/renamed/Renamed.Sample.bin")
     );
 }
 
