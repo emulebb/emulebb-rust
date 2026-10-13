@@ -288,7 +288,7 @@ fn category_from_metadata(category: MetadataCategory) -> Category {
 
 fn normalize_daemon_settings_paths(settings: &mut emulebb_settings::DaemonSettings) {
     if let Some(path) = settings.incoming_dir.as_mut() {
-        let display = normal_path_display(&path.display().to_string());
+        let display = normal_path_display(path.display().to_string());
         *path = std::path::PathBuf::from(display);
     }
 }

@@ -407,7 +407,7 @@ fn canonical_shared_directory_root(path: &str) -> Result<String> {
     let metadata = fs::metadata(&canonical)
         .with_context(|| format!("failed to inspect {}", canonical.display()))?;
     ensure!(metadata.is_dir(), "path is not a directory");
-    Ok(normal_path_display(&canonical.display().to_string()))
+    Ok(normal_path_display(canonical.display().to_string()))
 }
 
 fn removable_shared_directory_root(path: &str) -> Result<String> {
@@ -418,7 +418,7 @@ fn removable_shared_directory_root(path: &str) -> Result<String> {
             let metadata = fs::metadata(&canonical)
                 .with_context(|| format!("failed to inspect {}", canonical.display()))?;
             ensure!(metadata.is_dir(), "path is not a directory");
-            Ok(normal_path_display(&canonical.display().to_string()))
+            Ok(normal_path_display(canonical.display().to_string()))
         }
         Err(_) => Ok(normal_path_display(path)),
     }
