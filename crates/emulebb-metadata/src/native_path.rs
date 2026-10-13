@@ -172,7 +172,9 @@ fn decode_native_path(native_path: &[u8]) -> Result<PathBuf> {
         "Windows native path byte length must be even"
     );
     let wide = native_path
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .collect::<Vec<_>>();
     Ok(PathBuf::from(OsString::from_wide(&wide)))
