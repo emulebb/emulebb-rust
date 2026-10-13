@@ -2,7 +2,8 @@ use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
-    MetadataDownloadHistoryEntry, store::decode_fixed_hex, transfer_model::MetadataTransferManifest,
+    MetadataCurrentSharedFile, MetadataDownloadHistoryEntry, store::decode_fixed_hex,
+    transfer_model::MetadataTransferManifest,
 };
 
 impl super::MetadataStore {
@@ -35,6 +36,34 @@ impl super::MetadataStore {
                 })
             })
             .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn current_shared_files_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Vec<MetadataCurrentSharedFile>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        let mut statement = conn.prepare_cached(
+            r#"
+            SELECT known_files.display_name, shared_file_sources.file_size,
+                   local_paths.display_path
+            FROM shared_file_sources
+            JOIN known_files ON known_files.id = shared_file_sources.known_file_id
+            JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+            WHERE known_files.ed2k_hash = ?1
+            ORDER BY local_paths.display_path
+            "#,
+        )?;
+        let rows = statement.query_map(params![hash], |row| {
+            Ok(MetadataCurrentSharedFile {
+                display_name: row.get(0)?,
+                file_size: row.get::<_, i64>(1)? as u64,
+                source_path: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 }

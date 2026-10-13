@@ -7,3 +7,10 @@ pub struct MetadataDownloadHistoryEntry {
     pub first_completed_at_ms: i64,
     pub last_completed_at_ms: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataCurrentSharedFile {
+    pub display_name: String,
+    pub file_size: u64,
+    pub source_path: String,
+}
