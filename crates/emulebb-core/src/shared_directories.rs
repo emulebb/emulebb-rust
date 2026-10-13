@@ -547,7 +547,7 @@ pub(crate) struct SharedScanResult {
 #[derive(Debug, Clone)]
 pub(crate) struct ScannedSharedFile {
     path: PathBuf,
-    key: String,
+    key: PathBuf,
     disk_key: String,
     file_size: u64,
     source_mtime_ms: Option<i64>,
@@ -619,7 +619,7 @@ struct ReloadHashTarget {
     /// Why this path needs hashing in the latest incremental plan.
     reason: String,
     /// Long-path-normalized source identity key used by the durable failure cache.
-    key: String,
+    key: PathBuf,
     /// File size captured at planning time.
     file_size: u64,
     /// Source mtime captured at planning time, when the filesystem reports it.
@@ -763,15 +763,14 @@ fn target_read_bytes_total(file_size: u64) -> u64 {
 }
 
 fn target_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
+    emulebb_metadata::NativePath::from(path)
+        .display_file_name()
         .unwrap_or_default()
-        .to_string()
 }
 
 fn reload_hash_target(
     path: PathBuf,
-    key: String,
+    key: PathBuf,
     disk_key: String,
     file_size: u64,
     source_mtime_ms: Option<i64>,
@@ -1005,8 +1004,8 @@ async fn load_shared_source_failures(
 }
 
 fn unchanged_failure(
-    failures: &HashMap<String, MetadataSharedSourceFailure>,
-    key: &str,
+    failures: &HashMap<PathBuf, MetadataSharedSourceFailure>,
+    key: &Path,
     file_size: u64,
     source_mtime_ms: Option<i64>,
 ) -> bool {

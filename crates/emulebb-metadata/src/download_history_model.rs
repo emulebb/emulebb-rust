@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataDownloadHistoryEntry {
     pub file_hash: String,
@@ -12,5 +14,5 @@ pub struct MetadataDownloadHistoryEntry {
 pub struct MetadataCurrentSharedFile {
     pub display_name: String,
     pub file_size: u64,
-    pub source_path: String,
+    pub source_path: PathBuf,
 }

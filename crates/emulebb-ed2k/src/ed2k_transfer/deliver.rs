@@ -118,7 +118,7 @@ impl Ed2kTransferRuntime {
         {
             let _guard = self.lock_manifest(file_hash).await;
             let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-            manifest.delivered_path = Some(final_path.to_string_lossy().into_owned());
+            manifest.delivered_path = Some(final_path.clone());
             // Record the delivered file's mtime baseline so a later
             // shared-directory rescan that re-finds this file in a shared
             // Incoming/category dir reuses the download's already-computed

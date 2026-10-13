@@ -2,7 +2,9 @@ use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
-    MetadataCurrentSharedFile, MetadataDownloadHistoryEntry, store::decode_fixed_hex,
+    MetadataCurrentSharedFile, MetadataDownloadHistoryEntry,
+    native_path::path_from_row,
+    store::decode_fixed_hex,
     transfer_model::MetadataTransferManifest,
 };
 
@@ -48,7 +50,7 @@ impl super::MetadataStore {
         let mut statement = conn.prepare_cached(
             r#"
             SELECT known_files.display_name, shared_file_sources.file_size,
-                   local_paths.display_path
+                   local_paths.platform, local_paths.native_path
             FROM shared_file_sources
             JOIN known_files ON known_files.id = shared_file_sources.known_file_id
             JOIN local_paths ON local_paths.id = shared_file_sources.path_id
@@ -60,7 +62,7 @@ impl super::MetadataStore {
             Ok(MetadataCurrentSharedFile {
                 display_name: row.get(0)?,
                 file_size: row.get::<_, i64>(1)? as u64,
-                source_path: row.get(2)?,
+                source_path: path_from_row(row, 2, 3)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -167,7 +169,7 @@ mod tests {
             category_id: 0,
             control_state: None,
             transfer_row_removed: false,
-            delivered_path: Some("C:\\incoming\\completed.bin".to_string()),
+            delivered_path: Some("C:\\incoming\\completed.bin".into()),
             source_path: None,
             source_mtime_ms: None,
         }
@@ -205,7 +207,7 @@ mod tests {
         );
 
         manifest.completed = true;
-        manifest.source_path = Some("C:\\shared\\completed.bin".to_string());
+        manifest.source_path = Some("C:\\shared\\completed.bin".into());
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert!(
             store

@@ -6,6 +6,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::{
     download_history_store::record_completed_download,
     NativePath,
+    native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_model::{
         MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
@@ -174,7 +175,8 @@ impl super::MetadataStore {
                        known_files.upload_priority, known_files.auto_upload_priority,
                        known_files.comment, known_files.rating,
                        transfers.category_id, transfers.control_state, transfers.removed_at_ms,
-                       delivered_paths.display_path, source_paths.display_path,
+                       delivered_paths.platform, delivered_paths.native_path,
+                       source_paths.platform, source_paths.native_path,
                        transfers.source_mtime_ms, transfers.final_rehash_pending
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
@@ -202,10 +204,10 @@ impl super::MetadataStore {
                     category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
                     control_state: row.get(15)?,
                     transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
-                    delivered_path: row.get(17)?,
-                    source_path: row.get(18)?,
-                    source_mtime_ms: row.get(19)?,
-                    final_rehash_pending: row.get::<_, i64>(20)? != 0,
+                    delivered_path: optional_path_from_row(row, 17, 18)?,
+                    source_path: optional_path_from_row(row, 19, 20)?,
+                    source_mtime_ms: row.get(21)?,
+                    final_rehash_pending: row.get::<_, i64>(22)? != 0,
                 })
             })
             .optional()?;
@@ -388,7 +390,8 @@ impl super::MetadataStore {
                    known_files.upload_priority, known_files.auto_upload_priority,
                    known_files.comment, known_files.rating,
                    transfers.category_id, transfers.control_state, transfers.removed_at_ms,
-                   delivered_paths.display_path, source_paths.display_path,
+                   delivered_paths.platform, delivered_paths.native_path,
+                   source_paths.platform, source_paths.native_path,
                    transfers.source_mtime_ms, transfers.final_rehash_pending
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -418,10 +421,10 @@ impl super::MetadataStore {
                 category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
                 control_state: row.get(15)?,
                 transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
-                delivered_path: row.get(17)?,
-                source_path: row.get(18)?,
-                source_mtime_ms: row.get(19)?,
-                final_rehash_pending: row.get::<_, i64>(20)? != 0,
+                delivered_path: optional_path_from_row(row, 17, 18)?,
+                source_path: optional_path_from_row(row, 19, 20)?,
+                source_mtime_ms: row.get(21)?,
+                final_rehash_pending: row.get::<_, i64>(22)? != 0,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -469,22 +472,25 @@ impl super::MetadataStore {
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
                    known_files.last_upload_request_ms,
-                   COALESCE(source_paths.display_path, (
-                       SELECT local_paths.display_path
-                       FROM shared_file_sources
-                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-                       WHERE shared_file_sources.known_file_id = known_files.id
-                       ORDER BY local_paths.display_path
-                       LIMIT 1
-                   ), delivered_paths.display_path),
+                   media_paths.platform, media_paths.native_path,
                    known_files.media_artist, known_files.media_album,
                    known_files.media_title, known_files.media_length_seconds,
                    known_files.media_bitrate_kbps, known_files.media_codec,
                    known_files.media_extractor_version
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
-            LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
+            LEFT JOIN local_paths media_paths ON media_paths.id = COALESCE(
+                transfers.source_path_id,
+                (
+                    SELECT shared_file_sources.path_id
+                    FROM shared_file_sources
+                    JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                    WHERE shared_file_sources.known_file_id = known_files.id
+                    ORDER BY local_paths.display_path, local_paths.native_path
+                    LIMIT 1
+                ),
+                transfers.delivered_path_id
+            )
             WHERE (
                     known_files.completed != 0
                     OR EXISTS (
@@ -515,15 +521,15 @@ impl super::MetadataStore {
                 all_time_upload_requests: row.get::<_, i64>(9)? as u64,
                 all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
                 last_upload_request_ms: row.get(11)?,
-                media_path: row.get(12)?,
+                media_path: optional_path_from_row(row, 12, 13)?,
                 media: MetadataTransferMediaMetadata {
-                    artist: row.get(13)?,
-                    album: row.get(14)?,
-                    title: row.get(15)?,
-                    length_seconds: row.get::<_, i64>(16)? as u32,
-                    bitrate_kbps: row.get::<_, i64>(17)? as u32,
-                    codec: row.get(18)?,
-                    extractor_version: row.get::<_, i64>(19)? as u32,
+                    artist: row.get(14)?,
+                    album: row.get(15)?,
+                    title: row.get(16)?,
+                    length_seconds: row.get::<_, i64>(17)? as u32,
+                    bitrate_kbps: row.get::<_, i64>(18)? as u32,
+                    codec: row.get(19)?,
+                    extractor_version: row.get::<_, i64>(20)? as u32,
                 },
             })
         })?;
@@ -600,7 +606,7 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), shared_file_sources.file_size,
-                   local_paths.display_path,
+                   local_paths.platform, local_paths.native_path,
                    shared_file_sources.source_mtime_ms
             FROM shared_file_sources
             JOIN known_files ON known_files.id = shared_file_sources.known_file_id
@@ -616,8 +622,8 @@ impl super::MetadataStore {
             Ok(MetadataShareInPlaceReloadEntry {
                 file_hash: row.get(0)?,
                 file_size: row.get::<_, i64>(1)? as u64,
-                source_path: row.get(2)?,
-                source_mtime_ms: row.get(3)?,
+                source_path: path_from_row(row, 2, 3)?,
+                source_mtime_ms: row.get(4)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -637,8 +643,8 @@ impl super::MetadataStore {
     pub fn relocate_shared_file_source(
         &self,
         file_hash: &str,
-        old_source_path: &str,
-        new_source_path: &str,
+        old_source_path: &Path,
+        new_source_path: &Path,
         file_size: u64,
         source_mtime_ms: Option<i64>,
         display_name: &str,
@@ -653,7 +659,7 @@ impl super::MetadataStore {
         let Some(old_path_id) = local_path_id(&tx, old_source_path)? else {
             return Ok(false);
         };
-        let new_path_id = upsert_local_path(&tx, Path::new(new_source_path), now)?;
+        let new_path_id = upsert_local_path(&tx, new_source_path, now)?;
         let Some(known_file_id) = tx
             .query_row(
                 "SELECT id FROM known_files WHERE ed2k_hash = ?1",
@@ -734,7 +740,8 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
-                   delivered_paths.display_path, transfers.source_mtime_ms
+                   delivered_paths.platform, delivered_paths.native_path,
+                   transfers.source_mtime_ms
             FROM transfers
             JOIN known_files ON known_files.id = transfers.known_file_id
             JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -749,8 +756,8 @@ impl super::MetadataStore {
             Ok(MetadataDeliveredReuseEntry {
                 file_hash: row.get(0)?,
                 file_size: row.get::<_, i64>(1)? as u64,
-                delivered_path: row.get(2)?,
-                delivered_mtime_ms: row.get(3)?,
+                delivered_path: path_from_row(row, 2, 3)?,
+                delivered_mtime_ms: row.get(4)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -959,7 +966,8 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT local_paths.display_path, shared_file_scan_failures.file_size,
+            SELECT local_paths.platform, local_paths.native_path,
+                   shared_file_scan_failures.file_size,
                    shared_file_scan_failures.source_mtime_ms, shared_file_scan_failures.reason,
                    shared_file_scan_failures.created_at_ms, shared_file_scan_failures.updated_at_ms
             FROM shared_file_scan_failures
@@ -969,12 +977,12 @@ impl super::MetadataStore {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(MetadataSharedSourceFailure {
-                source_path: row.get(0)?,
-                file_size: row.get::<_, i64>(1)? as u64,
-                source_mtime_ms: row.get(2)?,
-                reason: row.get(3)?,
-                created_at_ms: row.get(4)?,
-                updated_at_ms: row.get(5)?,
+                source_path: path_from_row(row, 0, 1)?,
+                file_size: row.get::<_, i64>(2)? as u64,
+                source_mtime_ms: row.get(3)?,
+                reason: row.get(4)?,
+                created_at_ms: row.get(5)?,
+                updated_at_ms: row.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -982,7 +990,7 @@ impl super::MetadataStore {
 
     pub fn upsert_shared_source_failure(
         &self,
-        source_path: &str,
+        source_path: &Path,
         file_size: u64,
         source_mtime_ms: Option<i64>,
         reason: &str,
@@ -990,7 +998,7 @@ impl super::MetadataStore {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        let path_id = upsert_local_path(&tx, Path::new(source_path), now)?;
+        let path_id = upsert_local_path(&tx, source_path, now)?;
         tx.execute(
             r#"
             INSERT INTO shared_file_scan_failures(
@@ -1010,7 +1018,7 @@ impl super::MetadataStore {
         Ok(())
     }
 
-    pub fn clear_shared_source_failure(&self, source_path: &str) -> Result<bool> {
+    pub fn clear_shared_source_failure(&self, source_path: &Path) -> Result<bool> {
         let conn = self.connection()?;
         let Some(path_id) = local_path_id(&conn, source_path)? else {
             return Ok(false);
@@ -1160,14 +1168,7 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
-                   COALESCE(source_paths.display_path, (
-                       SELECT local_paths.display_path
-                       FROM shared_file_sources
-                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-                       WHERE shared_file_sources.known_file_id = known_files.id
-                       ORDER BY local_paths.display_path
-                       LIMIT 1
-                   )),
+                   effective_paths.platform, effective_paths.native_path,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
@@ -1179,7 +1180,17 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
+            LEFT JOIN local_paths effective_paths ON effective_paths.id = COALESCE(
+                transfers.source_path_id,
+                (
+                    SELECT shared_file_sources.path_id
+                    FROM shared_file_sources
+                    JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                    WHERE shared_file_sources.known_file_id = known_files.id
+                    ORDER BY local_paths.display_path, local_paths.native_path
+                    LIMIT 1
+                )
+            )
             WHERE (
                     known_files.completed != 0
                     OR EXISTS (
@@ -1200,15 +1211,15 @@ impl super::MetadataStore {
                 display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 part_count: row.get::<_, i64>(3)? as u32,
-                source_path: row.get(4)?,
-                aich_root: row.get(5)?,
-                upload_priority: row.get(6)?,
-                auto_upload_priority: row.get::<_, i64>(7)? != 0,
-                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
-                comment: row.get(11)?,
-                rating: row.get::<_, i64>(12)? as u8,
+                source_path: optional_path_from_row(row, 4, 5)?,
+                aich_root: row.get(6)?,
+                upload_priority: row.get(7)?,
+                auto_upload_priority: row.get::<_, i64>(8)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(10)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
+                comment: row.get(12)?,
+                rating: row.get::<_, i64>(13)? as u8,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1224,14 +1235,7 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
-                   COALESCE(source_paths.display_path, (
-                       SELECT local_paths.display_path
-                       FROM shared_file_sources
-                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-                       WHERE shared_file_sources.known_file_id = known_files.id
-                       ORDER BY local_paths.display_path
-                       LIMIT 1
-                   )),
+                   effective_paths.platform, effective_paths.native_path,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
@@ -1243,7 +1247,17 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
+            LEFT JOIN local_paths effective_paths ON effective_paths.id = COALESCE(
+                transfers.source_path_id,
+                (
+                    SELECT shared_file_sources.path_id
+                    FROM shared_file_sources
+                    JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                    WHERE shared_file_sources.known_file_id = known_files.id
+                    ORDER BY local_paths.display_path, local_paths.native_path
+                    LIMIT 1
+                )
+            )
             WHERE known_files.ed2k_hash = ?1
               AND (
                     known_files.completed != 0
@@ -1265,15 +1279,15 @@ impl super::MetadataStore {
                     display_name: row.get(1)?,
                     file_size: row.get::<_, i64>(2)? as u64,
                     part_count: row.get::<_, i64>(3)? as u32,
-                    source_path: row.get(4)?,
-                    aich_root: row.get(5)?,
-                    upload_priority: row.get(6)?,
-                    auto_upload_priority: row.get::<_, i64>(7)? != 0,
-                    all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                    all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                    all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
-                    comment: row.get(11)?,
-                    rating: row.get::<_, i64>(12)? as u8,
+                source_path: optional_path_from_row(row, 4, 5)?,
+                aich_root: row.get(6)?,
+                upload_priority: row.get(7)?,
+                auto_upload_priority: row.get::<_, i64>(8)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(10)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
+                comment: row.get(12)?,
+                rating: row.get::<_, i64>(13)? as u8,
                 })
             },
         )
@@ -1304,14 +1318,7 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
-                   COALESCE(source_paths.display_path, (
-                       SELECT local_paths.display_path
-                       FROM shared_file_sources
-                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-                       WHERE shared_file_sources.known_file_id = known_files.id
-                       ORDER BY local_paths.display_path
-                       LIMIT 1
-                   )),
+                   effective_paths.platform, effective_paths.native_path,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
@@ -1323,7 +1330,17 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
+            LEFT JOIN local_paths effective_paths ON effective_paths.id = COALESCE(
+                transfers.source_path_id,
+                (
+                    SELECT shared_file_sources.path_id
+                    FROM shared_file_sources
+                    JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                    WHERE shared_file_sources.known_file_id = known_files.id
+                    ORDER BY local_paths.display_path, local_paths.native_path
+                    LIMIT 1
+                )
+            )
             WHERE (
                     known_files.completed != 0
                     OR EXISTS (
@@ -1345,15 +1362,15 @@ impl super::MetadataStore {
                 display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 part_count: row.get::<_, i64>(3)? as u32,
-                source_path: row.get(4)?,
-                aich_root: row.get(5)?,
-                upload_priority: row.get(6)?,
-                auto_upload_priority: row.get::<_, i64>(7)? != 0,
-                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
-                comment: row.get(11)?,
-                rating: row.get::<_, i64>(12)? as u8,
+                source_path: optional_path_from_row(row, 4, 5)?,
+                aich_root: row.get(6)?,
+                upload_priority: row.get(7)?,
+                auto_upload_priority: row.get::<_, i64>(8)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(10)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
+                comment: row.get(12)?,
+                rating: row.get::<_, i64>(13)? as u8,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1384,14 +1401,7 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
-                   COALESCE(source_paths.display_path, (
-                       SELECT local_paths.display_path
-                       FROM shared_file_sources
-                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-                       WHERE shared_file_sources.known_file_id = known_files.id
-                       ORDER BY local_paths.display_path
-                       LIMIT 1
-                   )),
+                   effective_paths.platform, effective_paths.native_path,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
@@ -1403,7 +1413,17 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
+            LEFT JOIN local_paths effective_paths ON effective_paths.id = COALESCE(
+                transfers.source_path_id,
+                (
+                    SELECT shared_file_sources.path_id
+                    FROM shared_file_sources
+                    JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                    WHERE shared_file_sources.known_file_id = known_files.id
+                    ORDER BY local_paths.display_path, local_paths.native_path
+                    LIMIT 1
+                )
+            )
             WHERE (
                     known_files.completed != 0
                     OR EXISTS (
@@ -1427,15 +1447,15 @@ impl super::MetadataStore {
                 display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 part_count: row.get::<_, i64>(3)? as u32,
-                source_path: row.get(4)?,
-                aich_root: row.get(5)?,
-                upload_priority: row.get(6)?,
-                auto_upload_priority: row.get::<_, i64>(7)? != 0,
-                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
-                comment: row.get(11)?,
-                rating: row.get::<_, i64>(12)? as u8,
+                source_path: optional_path_from_row(row, 4, 5)?,
+                aich_root: row.get(6)?,
+                upload_priority: row.get(7)?,
+                auto_upload_priority: row.get::<_, i64>(8)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(10)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
+                comment: row.get(12)?,
+                rating: row.get::<_, i64>(13)? as u8,
             })
         })?;
         let mut entries = rows.collect::<Result<Vec<_>, _>>()?;
@@ -1541,8 +1561,8 @@ struct TransferRow {
     category_id: u32,
     control_state: Option<String>,
     transfer_row_removed: bool,
-    delivered_path: Option<String>,
-    source_path: Option<String>,
+    delivered_path: Option<std::path::PathBuf>,
+    source_path: Option<std::path::PathBuf>,
     source_mtime_ms: Option<i64>,
 }
 
@@ -1837,16 +1857,16 @@ fn optional_fixed_hex(
 
 fn optional_local_path_id(
     tx: &rusqlite::Transaction<'_>,
-    path: Option<&str>,
+    path: Option<&Path>,
     now: i64,
 ) -> Result<Option<i64>> {
-    path.filter(|path| !path.trim().is_empty())
-        .map(|path| upsert_local_path(tx, Path::new(path), now))
+    path.filter(|path| !path.as_os_str().is_empty())
+        .map(|path| upsert_local_path(tx, path, now))
         .transpose()
 }
 
-fn local_path_id(conn: &rusqlite::Connection, path: &str) -> Result<Option<i64>> {
-    let native_path = NativePath::from(Path::new(path));
+fn local_path_id(conn: &rusqlite::Connection, path: &Path) -> Result<Option<i64>> {
+    let native_path = NativePath::from(path);
     conn.query_row(
         r#"
         SELECT id

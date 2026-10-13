@@ -176,7 +176,7 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
             control_state: None,
             transfer_row_removed: false,
             delivered_path: None,
-            source_path: Some(source.display().to_string()),
+            source_path: Some(source.clone()),
             source_mtime_ms: mtime_ms,
         })
         .unwrap();
@@ -335,7 +335,7 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
             category_id: 0,
             control_state: None,
             transfer_row_removed: false,
-            delivered_path: Some(delivered.display().to_string()),
+            delivered_path: Some(delivered.clone()),
             source_path: None,
             source_mtime_ms: mtime_ms,
         })
@@ -491,7 +491,7 @@ fn initial_publish_cohort_is_small_first_and_bounded() {
     let candidates = (0..205)
         .map(|sequence| ScannedSharedFile {
             path: PathBuf::from(format!("file-{sequence:03}.bin")),
-            key: format!("key-{sequence:03}"),
+            key: format!("key-{sequence:03}").into(),
             disk_key: "disk:test".to_string(),
             file_size: u64::try_from(sequence + 1).unwrap(),
             source_mtime_ms: Some(sequence.into()),
@@ -507,21 +507,21 @@ fn initial_publish_cohort_is_small_first_and_bounded() {
     let byte_bounded = select_initial_publish_cohort(vec![
         ScannedSharedFile {
             path: PathBuf::from("smallest.bin"),
-            key: "smallest".to_string(),
+            key: "smallest".into(),
             disk_key: "disk:test".to_string(),
             file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT / 2,
             source_mtime_ms: Some(1),
         },
         ScannedSharedFile {
             path: PathBuf::from("second.bin"),
-            key: "second".to_string(),
+            key: "second".into(),
             disk_key: "disk:test".to_string(),
             file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT / 2,
             source_mtime_ms: Some(2),
         },
         ScannedSharedFile {
             path: PathBuf::from("over-budget.bin"),
-            key: "over-budget".to_string(),
+            key: "over-budget".into(),
             disk_key: "disk:test".to_string(),
             file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT,
             source_mtime_ms: Some(3),

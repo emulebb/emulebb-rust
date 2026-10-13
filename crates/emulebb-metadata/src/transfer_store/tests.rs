@@ -52,8 +52,8 @@ fn transfer_manifest_roundtrips_sql_tables() {
         category_id: 2,
         control_state: Some("paused".to_string()),
         transfer_row_removed: false,
-        delivered_path: Some("/incoming/Sample.Transfer.bin".to_string()),
-        source_path: Some("/library/Sample.Transfer.bin".to_string()),
+        delivered_path: Some("/incoming/Sample.Transfer.bin".into()),
+        source_path: Some("/library/Sample.Transfer.bin".into()),
         source_mtime_ms: Some(1_700_000_000_000),
     };
 
@@ -218,7 +218,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
             .relocate_shared_file_source(
                 &manifest.file_hash,
                 &old_source_path,
-                new_source_path,
+                Path::new(new_source_path),
                 manifest.file_size,
                 Some(1_700_000_123_000),
                 "Renamed.Sample.bin",
@@ -226,7 +226,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
             )
             .unwrap()
     );
-    manifest.source_path = Some(new_source_path.to_string());
+    manifest.source_path = Some(new_source_path.into());
     manifest.source_mtime_ms = Some(1_700_000_123_000);
     manifest.display_name = "Renamed.Sample.bin".to_string();
     assert_eq!(
@@ -234,7 +234,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         vec![MetadataShareInPlaceReloadEntry {
             file_hash: manifest.file_hash.clone(),
             file_size: manifest.file_size,
-            source_path: new_source_path.to_string(),
+            source_path: new_source_path.into(),
             source_mtime_ms: manifest.source_mtime_ms,
         }]
     );
@@ -242,14 +242,14 @@ fn transfer_manifest_roundtrips_sql_tables() {
         .completed_transfer_share_entry(&manifest.file_hash)
         .unwrap()
         .unwrap();
-    assert_eq!(renamed_share.source_path.as_deref(), Some(new_source_path));
+    assert_eq!(renamed_share.source_path.as_deref(), Some(Path::new(new_source_path)));
     assert_eq!(renamed_share.display_name, manifest.display_name);
     assert!(
         !store
             .relocate_shared_file_source(
                 &manifest.file_hash,
                 &old_source_path,
-                "/library/unused.bin",
+                Path::new("/library/unused.bin"),
                 manifest.file_size,
                 manifest.source_mtime_ms,
                 "unused.bin",
@@ -298,7 +298,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
     assert_eq!(catalog[0].file_hash, manifest.file_hash);
     assert_eq!(
         catalog[0].media_path.as_deref(),
-        Some("/library/renamed/Renamed.Sample.bin")
+        Some(Path::new("/library/renamed/Renamed.Sample.bin"))
     );
 }
 
@@ -398,12 +398,12 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
         control_state: None,
         transfer_row_removed: false,
         delivered_path: None,
-        source_path: Some("/library/Alpha.bin".to_string()),
+        source_path: Some("/library/Alpha.bin".into()),
         source_mtime_ms: Some(1_700_000_000_000),
     };
 
     store.upsert_transfer_manifest(&manifest).unwrap();
-    manifest.source_path = Some("/library/Beta.bin".to_string());
+    manifest.source_path = Some("/library/Beta.bin".into());
     manifest.source_mtime_ms = Some(1_700_000_000_123);
     store.upsert_transfer_manifest(&manifest).unwrap();
 
@@ -413,13 +413,13 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
             MetadataShareInPlaceReloadEntry {
                 file_hash: manifest.file_hash.clone(),
                 file_size: manifest.file_size,
-                source_path: "/library/Alpha.bin".to_string(),
+                source_path: "/library/Alpha.bin".into(),
                 source_mtime_ms: Some(1_700_000_000_000),
             },
             MetadataShareInPlaceReloadEntry {
                 file_hash: manifest.file_hash.clone(),
                 file_size: manifest.file_size,
-                source_path: "/library/Beta.bin".to_string(),
+                source_path: "/library/Beta.bin".into(),
                 source_mtime_ms: Some(1_700_000_000_123),
             },
         ]
@@ -434,7 +434,7 @@ fn shared_source_failures_roundtrip_update_and_clear() {
 
     store
         .upsert_shared_source_failure(
-            "/library/Broken.Source.bin",
+            Path::new("/library/Broken.Source.bin"),
             1024,
             Some(1_700_000_000_000),
             "ingest failed",
@@ -442,14 +442,14 @@ fn shared_source_failures_roundtrip_update_and_clear() {
         .unwrap();
     let initial = store.shared_source_failures().unwrap();
     assert_eq!(initial.len(), 1);
-    assert_eq!(initial[0].source_path, "/library/Broken.Source.bin");
+    assert_eq!(initial[0].source_path, Path::new("/library/Broken.Source.bin"));
     assert_eq!(initial[0].file_size, 1024);
     assert_eq!(initial[0].source_mtime_ms, Some(1_700_000_000_000));
     assert_eq!(initial[0].reason, "ingest failed");
 
     store
         .upsert_shared_source_failure(
-            "/library/Broken.Source.bin",
+            Path::new("/library/Broken.Source.bin"),
             2048,
             Some(1_700_000_000_111),
             "changed identity failed",
@@ -465,13 +465,13 @@ fn shared_source_failures_roundtrip_update_and_clear() {
 
     assert!(
         store
-            .clear_shared_source_failure("/library/Broken.Source.bin")
+            .clear_shared_source_failure(Path::new("/library/Broken.Source.bin"))
             .unwrap()
     );
     assert!(store.shared_source_failures().unwrap().is_empty());
     assert!(
         !store
-            .clear_shared_source_failure("/library/Broken.Source.bin")
+            .clear_shared_source_failure(Path::new("/library/Broken.Source.bin"))
             .unwrap()
     );
 }
@@ -481,7 +481,7 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
     let store = MetadataStore::in_memory().unwrap();
     store
         .upsert_shared_source_failure(
-            "/library/Recovered.Source.bin",
+            Path::new("/library/Recovered.Source.bin"),
             1024,
             Some(1_700_000_000_000),
             "ingest failed",
@@ -516,7 +516,7 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
         control_state: None,
         transfer_row_removed: false,
         delivered_path: None,
-        source_path: Some("/library/Recovered.Source.bin".to_string()),
+        source_path: Some("/library/Recovered.Source.bin".into()),
         source_mtime_ms: Some(1_700_000_000_000),
     };
 
@@ -791,7 +791,7 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 control_state: None,
                 transfer_row_removed: false,
                 delivered_path: None,
-                source_path: Some(format!("/library/catalog-{sequence}.bin")),
+                source_path: Some(format!("/library/catalog-{sequence}.bin").into()),
                 source_mtime_ms: Some(sequence as i64),
             })
             .unwrap();

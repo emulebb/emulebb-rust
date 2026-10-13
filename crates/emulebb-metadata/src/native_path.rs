@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
+use rusqlite::{Row, types::Type};
 
 /// Exact platform-native filesystem path used by durable metadata and runtime indexes.
 ///
@@ -100,6 +101,42 @@ pub(crate) fn current_platform() -> &'static str {
     } else {
         "unix"
     }
+}
+
+pub(crate) fn path_from_row(
+    row: &Row<'_>,
+    platform_index: usize,
+    native_path_index: usize,
+) -> rusqlite::Result<PathBuf> {
+    let platform = row.get::<_, String>(platform_index)?;
+    let native_path = row.get::<_, Vec<u8>>(native_path_index)?;
+    NativePath::from_storage(&platform, &native_path)
+        .map(NativePath::into_path_buf)
+        .map_err(|error| native_path_decode_error(native_path_index, error))
+}
+
+pub(crate) fn optional_path_from_row(
+    row: &Row<'_>,
+    platform_index: usize,
+    native_path_index: usize,
+) -> rusqlite::Result<Option<PathBuf>> {
+    let platform = row.get::<_, Option<String>>(platform_index)?;
+    let native_path = row.get::<_, Option<Vec<u8>>>(native_path_index)?;
+    match (platform, native_path) {
+        (None, None) => Ok(None),
+        (Some(platform), Some(native_path)) => NativePath::from_storage(&platform, &native_path)
+            .map(NativePath::into_path_buf)
+            .map(Some)
+            .map_err(|error| native_path_decode_error(native_path_index, error)),
+        _ => Err(native_path_decode_error(
+            native_path_index,
+            anyhow::anyhow!("stored native path platform and bytes must both be null or present"),
+        )),
+    }
+}
+
+fn native_path_decode_error(index: usize, error: anyhow::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(index, Type::Blob, error.into())
 }
 
 #[cfg(unix)]

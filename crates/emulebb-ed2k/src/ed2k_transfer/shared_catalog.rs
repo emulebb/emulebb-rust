@@ -149,7 +149,7 @@ impl Ed2kTransferRuntime {
                     .source_path
                     .as_deref()
                     .or(manifest.delivered_path.as_deref())
-                    .map(std::path::PathBuf::from)
+                    .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| self.payload_path(&manifest.file_hash));
                 let display_name = manifest.display_name.clone();
                 let media = tokio::task::spawn_blocking(move || {

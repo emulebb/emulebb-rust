@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferManifest {
     pub file_hash: String,
@@ -24,13 +26,13 @@ pub struct MetadataTransferManifest {
     /// Absolute path the completed payload was materialized to by its canonical
     /// name, or `None` until the transfer is delivered. Persisted on the
     /// `transfers` row to make finished-file delivery idempotent across restarts.
-    pub delivered_path: Option<String>,
+    pub delivered_path: Option<PathBuf>,
     /// Original on-disk path of a shared, already-complete file seeded IN PLACE
     /// (added via a shared directory, never downloaded). `Some` marks a
     /// share-in-place transfer: its payload is read directly from this path for
     /// upload serving, it is never copied into the internal piece store, and it
     /// is never delivered to the incoming dir. `None` for a real download.
-    pub source_path: Option<String>,
+    pub source_path: Option<PathBuf>,
     /// Last-modified time (Unix milliseconds) of the share-in-place source file
     /// captured at ingest. Compared against the on-disk mtime on reload so an
     /// unchanged shared file (same `source_path` + `file_size` + mtime) is reused
@@ -54,7 +56,7 @@ pub struct MetadataTransferCatalogEntry {
     pub all_time_upload_accepts: u64,
     pub last_upload_request_ms: i64,
     /// Best persisted payload path for rebuilding non-durable derived metadata.
-    pub media_path: Option<String>,
+    pub media_path: Option<PathBuf>,
     pub media: MetadataTransferMediaMetadata,
 }
 
@@ -107,7 +109,7 @@ pub struct MetadataTransferShareEntry {
     pub display_name: String,
     pub file_size: u64,
     pub part_count: u32,
-    pub source_path: Option<String>,
+    pub source_path: Option<PathBuf>,
     pub aich_root: Option<String>,
     pub upload_priority: String,
     pub auto_upload_priority: bool,
@@ -122,7 +124,7 @@ pub struct MetadataTransferShareEntry {
 pub struct MetadataShareInPlaceReloadEntry {
     pub file_hash: String,
     pub file_size: u64,
-    pub source_path: String,
+    pub source_path: PathBuf,
     pub source_mtime_ms: Option<i64>,
 }
 
@@ -137,7 +139,7 @@ pub struct MetadataShareInPlaceReloadEntry {
 pub struct MetadataDeliveredReuseEntry {
     pub file_hash: String,
     pub file_size: u64,
-    pub delivered_path: String,
+    pub delivered_path: PathBuf,
     /// Last-modified time (Unix ms) of the delivered file captured at delivery,
     /// compared against the on-disk mtime so a delivered file the operator later
     /// replaced (same name, different content) is re-hashed instead of reused.
@@ -168,7 +170,7 @@ pub struct MetadataImportedKnownFileEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSharedSourceFailure {
-    pub source_path: String,
+    pub source_path: PathBuf,
     pub file_size: u64,
     pub source_mtime_ms: Option<i64>,
     pub reason: String,

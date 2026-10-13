@@ -1,5 +1,7 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
@@ -112,8 +114,8 @@ impl Ed2kTransferRuntime {
     pub async fn relocate_shared_source(
         &self,
         file_hash: &str,
-        old_source_path: &str,
-        new_source_path: &str,
+        old_source_path: &Path,
+        new_source_path: &Path,
         file_size: u64,
         source_mtime_ms: Option<i64>,
         display_name: &str,
@@ -122,8 +124,8 @@ impl Ed2kTransferRuntime {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let metadata = self.metadata.clone();
         let file_hash_owned = file_hash.to_owned();
-        let old_source_path = old_source_path.to_owned();
-        let new_source_path = new_source_path.to_owned();
+        let old_source_path = old_source_path.to_path_buf();
+        let new_source_path = new_source_path.to_path_buf();
         let display_name_owned = display_name.to_owned();
         let persisted_display_name = display_name_owned.clone();
         let content_type = content_type.to_owned();
