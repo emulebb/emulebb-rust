@@ -335,8 +335,8 @@ fn hello_misc_options1_advertises_stock_comments_but_not_preview() {
     );
     assert_eq!(
         (misc_options1 >> 2) & 1,
-        0,
-        "shared-file browsing is served, so view-allowed is advertised"
+        1,
+        "the empty/denied shared-file browse policy is advertised"
     );
     assert_eq!((misc_options1 >> 1) & 1, 1, "multipacket is implemented");
     assert_eq!(misc_options1 & 1, 0, "preview is not implemented");
@@ -363,7 +363,7 @@ fn hello_answer_matches_truthful_plaintext_profile() {
     });
 
     let expected = decode(
-            "e3540000004c73bec566140e7e6083c450c9af026f8395581b524fb606000000020100010500654d756c65030100113c000000030100f951b651b6030100fa12021334030100fe3a240000030100fb00200100b07b02ef8810",
+            "e3540000004c73bec566140e7e6083c450c9af026f8395581b524fb606000000020100010500654d756c65030100113c000000030100f951b651b6030100fa16021334030100fe3a240000030100fb00200100b07b02ef8810",
         )
         .unwrap();
 
