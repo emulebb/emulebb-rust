@@ -7,8 +7,48 @@ export type ApiError = {
   error?: {
     code?: string;
     message?: string;
+    details?: unknown;
   };
 };
+
+export type KnownFilePolicy = "reject" | "redownload";
+
+export type DownloadConflictEvidence = {
+  hash: string;
+  kind: "activeTransfer" | "presentLocalFile" | "previouslyCompleted" | "identityMismatch" | "requestDuplicate";
+  requestedName: string;
+  requestedSizeBytes: number;
+  recordedName: string;
+  recordedSizeBytes: number;
+  transferState: string | null;
+  currentPaths: string[];
+  firstCompletedAtMs: number | null;
+  lastCompletedAtMs: number | null;
+  redownloadAllowed: boolean;
+};
+
+export class RestError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string,
+    public readonly details?: unknown
+  ) {
+    super(message);
+    this.name = "RestError";
+  }
+}
+
+export function downloadConflicts(error: unknown): DownloadConflictEvidence[] | null {
+  if (!(error instanceof RestError) || error.code !== "DOWNLOAD_CONFLICT" || !isRecord(error.details)) {
+    return null;
+  }
+  const conflicts = error.details.conflicts;
+  if (!Array.isArray(conflicts) || conflicts.length === 0 || !conflicts.every(isDownloadConflictEvidence)) {
+    return null;
+  }
+  return conflicts;
+}
 
 export type Page<T> = {
   items: T[];
@@ -913,7 +953,7 @@ export class RestClient {
       const text = await response.text();
       const value = parseApiEnvelope<unknown>("GET", requestPath, response, text);
       const message = value?.error?.message ?? `GET ${requestPath} failed`;
-      throw new Error(message);
+      throw new RestError(message, response.status, value?.error?.code, value?.error?.details);
     }
     if (!isEventStreamResponse(response)) {
       throw new Error(`GET ${requestPath} returned ${describeContentType(response)}; expected text/event-stream`);
@@ -940,10 +980,32 @@ export class RestClient {
     const value = parseApiEnvelope<T>(method, requestPath, response, text);
     if (!response.ok) {
       const message = value?.error?.message ?? `${method} ${requestPath} failed`;
-      throw new Error(message);
+      throw new RestError(message, response.status, value?.error?.code, value?.error?.details);
     }
     return value?.data as T;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isDownloadConflictEvidence(value: unknown): value is DownloadConflictEvidence {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return typeof value.hash === "string"
+    && typeof value.kind === "string"
+    && typeof value.requestedName === "string"
+    && typeof value.requestedSizeBytes === "number"
+    && typeof value.recordedName === "string"
+    && typeof value.recordedSizeBytes === "number"
+    && (typeof value.transferState === "string" || value.transferState === null)
+    && Array.isArray(value.currentPaths)
+    && value.currentPaths.every((path) => typeof path === "string")
+    && (typeof value.firstCompletedAtMs === "number" || value.firstCompletedAtMs === null)
+    && (typeof value.lastCompletedAtMs === "number" || value.lastCompletedAtMs === null)
+    && typeof value.redownloadAllowed === "boolean";
 }
 
 function normalizeBasePath(basePath: string): string {
