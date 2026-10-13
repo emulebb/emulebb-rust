@@ -1,5 +1,7 @@
 //! SQLite metadata store for the Rust eMuleBB client.
 
+mod download_history_model;
+mod download_history_store;
 mod identity_model;
 mod identity_store;
 mod kad_publish_model;
@@ -17,6 +19,7 @@ mod text;
 mod transfer_model;
 mod transfer_store;
 
+pub use download_history_model::MetadataDownloadHistoryEntry;
 pub use identity_model::MetadataLocalIdentity;
 pub use kad_publish_model::{
     MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadOutboundPublish,
