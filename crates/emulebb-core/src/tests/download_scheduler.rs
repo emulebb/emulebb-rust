@@ -642,6 +642,7 @@ async fn delete_transfer_files_cancels_attempt_and_releases_hash_leases() {
     // running-attempt state we install below.
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Cancel.Me.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
             ),
@@ -733,6 +734,7 @@ async fn pause_transfer_cancels_in_flight_attempt() {
     // installed token (the attempt's own token would otherwise overwrite it).
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Pause.Me.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
             ),

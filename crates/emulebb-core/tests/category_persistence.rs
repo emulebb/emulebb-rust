@@ -29,6 +29,7 @@ async fn transfer_category_survives_restart() {
 
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Category.Restart.bin|4096|00112233445566778899aabbccddeeff|/"
                     .to_string(),
@@ -138,6 +139,7 @@ async fn create_category(core: &EmulebbCore, name: &str) -> emulebb_core::Catego
 
 async fn create_transfer(core: &EmulebbCore, hash: &str, name: &str, category_id: u32) {
     core.create_transfer(TransferCreate {
+        known_file_policy: Default::default(),
         link: Some(format!("ed2k://|file|{name}|4096|{hash}|/")),
         links: None,
         category_id: Some(category_id),

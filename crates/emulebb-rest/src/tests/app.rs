@@ -424,6 +424,7 @@ async fn events_endpoint_streams_transfer_add_events() {
 
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Route.Event.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
             ),

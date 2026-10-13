@@ -280,6 +280,7 @@ async fn create_transfer_uses_canonical_link_and_paused_state() {
 
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: KnownFilePolicy::Redownload,
             link: Some(
                 "ed2k://|file|Paused.Create.bin|4096|00112233445566778899aabbccddeeff|/"
                     .to_string(),
@@ -316,6 +317,7 @@ async fn transfer_events_publish_add_update_and_remove() {
 
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Event.Stream.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
             ),
@@ -383,6 +385,7 @@ async fn create_transfer_remembers_ed2k_link_source_hints() {
 
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Seeded.Link.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bad-source,192.0.2.10:4662,192.0.2.11:0|/"
                     .to_string(),
@@ -434,6 +437,147 @@ async fn create_transfer_remembers_ed2k_link_source_hints() {
     assert_eq!(comments[0].rating, 5);
 }
 
+#[tokio::test]
+async fn active_duplicate_rejects_batch_before_any_new_transfer_is_created() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let active_hash = "00112233445566778899aabbccddeeff";
+    let new_hash = "11112222333344445555666677778888";
+    core.create_transfer(TransferCreate {
+        known_file_policy: KnownFilePolicy::Reject,
+        link: Some(format!("ed2k://|file|Active.bin|4096|{active_hash}|/")),
+        links: None,
+        category_id: None,
+        category_name: None,
+        paused: Some(true),
+    })
+    .await
+    .unwrap();
+
+    let error = core
+        .create_transfers(TransferCreate {
+            known_file_policy: KnownFilePolicy::Reject,
+            link: None,
+            links: Some(vec![
+                format!("ed2k://|file|New.bin|4096|{new_hash}|/"),
+                format!("ed2k://|file|Active.bin|4096|{active_hash}|/"),
+            ]),
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap_err();
+    let conflict = error.downcast_ref::<DownloadConflictError>().unwrap();
+    assert!(conflict.conflicts.iter().any(|item| {
+        item.kind == DownloadConflictKind::ActiveTransfer && !item.redownload_allowed
+    }));
+    assert!(core.transfer(new_hash).await.is_none());
+
+    let override_error = core
+        .create_transfer(TransferCreate {
+            known_file_policy: KnownFilePolicy::Redownload,
+            link: Some(format!("ed2k://|file|Active.bin|4096|{active_hash}|/")),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        override_error
+            .downcast_ref::<DownloadConflictError>()
+            .unwrap()
+            .conflicts[0]
+            .kind,
+        DownloadConflictKind::ActiveTransfer
+    );
+}
+
+#[tokio::test]
+async fn removed_completed_download_requires_explicit_redownload_without_stale_path() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-historical-redownload");
+    let transfer_root = runtime_dir.join("transfers");
+    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+    let payload = b"historical completed payload".repeat(64);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
+    let link = format!(
+        "ed2k://|file|Historical.bin|{}|{}|/",
+        payload.len(),
+        file_hash
+    );
+    core.create_transfer(TransferCreate {
+        known_file_policy: KnownFilePolicy::Reject,
+        link: Some(link.clone()),
+        links: None,
+        category_id: None,
+        category_name: None,
+        paused: Some(true),
+    })
+    .await
+    .unwrap();
+    core.ed2k_transfers
+        .store_md4_hashset(&file_hash, Vec::new())
+        .await
+        .unwrap();
+    core.ed2k_transfers
+        .store_piece_data(&file_hash, 0, &payload)
+        .await
+        .unwrap();
+    core.refresh_transfer_from_manifest_default(&file_hash)
+        .await
+        .unwrap();
+    assert!(
+        core.ed2k_transfers
+            .manifest(&file_hash)
+            .await
+            .unwrap()
+            .completed
+    );
+    core.delete_transfer_files(&file_hash)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let error = core
+        .create_transfer(TransferCreate {
+            known_file_policy: KnownFilePolicy::Reject,
+            link: Some(link.clone()),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap_err();
+    let conflict = error.downcast_ref::<DownloadConflictError>().unwrap();
+    let history = conflict
+        .conflicts
+        .iter()
+        .find(|item| item.kind == DownloadConflictKind::PreviouslyCompleted)
+        .unwrap();
+    assert!(history.current_paths.is_empty());
+    assert!(history.first_completed_at_ms.is_some());
+    assert!(history.last_completed_at_ms.is_some());
+    assert!(history.redownload_allowed);
+    assert!(core.transfer(&file_hash).await.is_none());
+
+    let redownload = core
+        .create_transfer(TransferCreate {
+            known_file_policy: KnownFilePolicy::Redownload,
+            link: Some(link),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+    assert_eq!(redownload.hash, file_hash);
+    assert_eq!(redownload.state, "paused");
+    assert_eq!(redownload.completed_bytes, 0);
+}
+
 #[test]
 fn transfer_create_rejects_legacy_ed2k_link_field() {
     let error = serde_json::from_str::<TransferCreate>(
@@ -462,13 +606,14 @@ async fn delete_transfer_files_removes_manifest_and_transfer_row() {
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Delete.Me.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
             ),
             links: None,
             category_id: None,
             category_name: None,
-            paused: None,
+            paused: Some(true),
         })
         .await
         .unwrap();
@@ -498,6 +643,7 @@ async fn delete_transfer_files_removes_delivered_completed_download() {
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(format!(
                 "ed2k://|file|Delivered.Delete.bin|{}|{}|/",
                 payload.len(),
@@ -569,6 +715,7 @@ async fn delivery_failure_stays_completing_and_clears_after_retry() {
     let payload = b"delivery retry payload".repeat(32);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
     core.create_transfer(TransferCreate {
+        known_file_policy: Default::default(),
         link: Some(format!(
             "ed2k://|file|Retry.bin|{}|{}|/",
             payload.len(),
@@ -768,15 +915,14 @@ async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
     assert!(core.transfer(&share.hash).await.is_none());
     assert!(core.transfers().await.is_empty());
 
-    let restored = core
-        .create_transfer(TransferCreate {
-            link: Some(share.ed2k_link.clone()),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: None,
-        })
+    core.ed2k_transfers
+        .restore_transfer_row(&share.hash)
         .await
+        .unwrap();
+    let restored = core
+        .refresh_transfer_from_manifest_default(&share.hash)
+        .await
+        .unwrap()
         .unwrap();
     assert_eq!(restored.hash, share.hash);
     assert!(core.transfer(&share.hash).await.is_some());
@@ -811,11 +957,12 @@ async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
 
     let restored = reloaded
         .create_transfer(TransferCreate {
+            known_file_policy: KnownFilePolicy::Redownload,
             link: Some(share.ed2k_link.clone()),
             links: None,
             category_id: None,
             category_name: None,
-            paused: None,
+            paused: Some(true),
         })
         .await
         .unwrap();
@@ -828,6 +975,7 @@ async fn delete_completed_transfer_row_rejects_incomplete_transfer() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Incomplete.Row.bin|4096|00112233445566778899aabbccddeeff|/"
                     .to_string(),
@@ -858,6 +1006,7 @@ async fn stopped_transfer_cannot_be_resumed() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Stopped.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
             ),
@@ -895,6 +1044,7 @@ async fn stopped_transfer_state_survives_restart() {
     .unwrap();
     let transfer = core
         .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
             link: Some(
                 "ed2k://|file|Stopped.Restart.bin|4096|00112233445566778899aabbccddeeff|/"
                     .to_string(),
@@ -929,7 +1079,7 @@ async fn stopped_transfer_state_survives_restart() {
 }
 
 #[tokio::test]
-async fn shared_files_stay_out_of_transfer_queue_until_link_is_added() {
+async fn shared_files_require_explicit_redownload_and_remain_shared() {
     let runtime_dir = unique_runtime_dir("emulebb-core-persisted-manifests");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -965,20 +1115,43 @@ async fn shared_files_stay_out_of_transfer_queue_until_link_is_added() {
             .any(|entry| entry.hash == share.hash)
     );
 
-    let restored = reloaded
+    let request = TransferCreate {
+        known_file_policy: KnownFilePolicy::Reject,
+        link: Some(share.ed2k_link.clone()),
+        links: None,
+        category_id: None,
+        category_name: None,
+        paused: Some(true),
+    };
+    let error = reloaded.create_transfer(request.clone()).await.unwrap_err();
+    let conflict = error.downcast_ref::<DownloadConflictError>().unwrap();
+    let present = conflict
+        .conflicts
+        .iter()
+        .find(|item| item.kind == DownloadConflictKind::PresentLocalFile)
+        .unwrap();
+    assert!(present.redownload_allowed);
+    assert_eq!(present.current_paths.len(), 1);
+    assert_eq!(std::fs::read(&present.current_paths[0]).unwrap(), payload);
+    assert!(reloaded.transfers().await.is_empty());
+
+    let redownload = reloaded
         .create_transfer(TransferCreate {
-            link: Some(share.ed2k_link.clone()),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: None,
+            known_file_policy: KnownFilePolicy::Redownload,
+            ..request
         })
         .await
         .unwrap();
-    assert_eq!(restored.hash, share.hash);
-    assert_eq!(restored.state, "completed");
-    assert_eq!(restored.completed_bytes, payload.len() as u64);
-    assert_eq!(restored.progress, 1.0);
-    assert!(!restored.path.is_empty());
-    assert_eq!(std::fs::read(&restored.path).unwrap(), payload);
+    assert_eq!(redownload.hash, share.hash);
+    assert_eq!(redownload.state, "paused");
+    assert_eq!(redownload.completed_bytes, 0);
+    assert_eq!(redownload.progress, 0.0);
+    assert!(
+        reloaded
+            .shares()
+            .await
+            .iter()
+            .any(|entry| entry.hash == share.hash)
+    );
+    assert_eq!(std::fs::read(payload_path).unwrap(), payload);
 }
