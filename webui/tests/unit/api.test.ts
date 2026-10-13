@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { RestClient } from "../../src/api";
+import { downloadConflicts, RestClient, RestError } from "../../src/api";
 
 describe("RestClient", () => {
   it("unwraps successful API envelopes", async () => {
@@ -38,6 +38,46 @@ describe("RestClient", () => {
     const client = new RestClient({ fetch: fetchMock });
 
     await expect(client.patch("shared-directories", {})).rejects.toThrow("Path is required");
+  });
+
+  it("preserves structured download conflicts for deliberate retries", async () => {
+    const conflict = {
+      hash: "00112233445566778899aabbccddeeff",
+      kind: "previouslyCompleted",
+      requestedName: "Sample.bin",
+      requestedSizeBytes: 1,
+      recordedName: "Sample.bin",
+      recordedSizeBytes: 1,
+      transferState: null,
+      currentPaths: [],
+      firstCompletedAtMs: 1,
+      lastCompletedAtMs: 2,
+      redownloadAllowed: true
+    };
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          error: {
+            code: "DOWNLOAD_CONFLICT",
+            message: "download already completed",
+            details: { conflicts: [conflict] }
+          }
+        },
+        { status: 409 }
+      )
+    ) as unknown as typeof fetch;
+    const client = new RestClient({ fetch: fetchMock });
+
+    const error = await client.post("transfers", {}).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RestError);
+    expect(error).toMatchObject({
+      message: "download already completed",
+      status: 409,
+      code: "DOWNLOAD_CONFLICT",
+      details: { conflicts: [conflict] }
+    });
+    expect(downloadConflicts(error)).toEqual([conflict]);
   });
 
   it("falls back to a method and path error when no envelope message exists", async () => {
