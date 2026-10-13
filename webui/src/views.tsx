@@ -24,6 +24,7 @@ import {
   CoreSettingsUpdate,
   Category,
   DaemonSettingsUpdate,
+  DownloadConflictEvidence,
   Ed2kSettingsUpdate,
   Ed2kUploadQueueSettingsUpdate,
   Friend,
@@ -33,6 +34,7 @@ import {
   KadSettingsUpdate,
   KadNode,
   KadStatus,
+  KnownFilePolicy,
   LogRecord,
   NatSettingsUpdate,
   NatStatus,
@@ -57,6 +59,7 @@ import {
   VpnGuardMode,
   VpnGuardSettingsUpdate,
   VpnGuardStatus,
+  downloadConflicts,
   encodeSegment
 } from "./api";
 import { Action, EmptyRow, JsonPanel, Metric, StatusPill } from "./components";
@@ -81,6 +84,37 @@ export type RunFunction = (
   success: string,
   options?: { refresh?: boolean }
 ) => Promise<void>;
+
+export class OperationCancelledError extends Error {
+  constructor() {
+    super("Operation cancelled");
+    this.name = "OperationCancelledError";
+  }
+}
+
+async function createDownloadWithPolicy<T>(
+  create: (policy: KnownFilePolicy) => Promise<T>
+): Promise<T> {
+  try {
+    return await create("reject");
+  } catch (caught) {
+    const conflicts = downloadConflicts(caught);
+    if (!conflicts || conflicts.some((conflict) => !conflict.redownloadAllowed)) {
+      throw caught;
+    }
+    if (!window.confirm(redownloadConfirmation(conflicts))) {
+      throw new OperationCancelledError();
+    }
+    return create("redownload");
+  }
+}
+
+function redownloadConfirmation(conflicts: DownloadConflictEvidence[]): string {
+  const subject = conflicts.length === 1
+    ? `"${conflicts[0].recordedName}" already exists locally or was downloaded before.`
+    : `${conflicts.length} requested files already exist locally or were downloaded before.`;
+  return `${subject} Download again? Existing shared files are preserved, but managed partial-download state will be replaced.`;
+}
 
 export function Overview(props: {
   snapshot: Snapshot | null;
@@ -263,7 +297,9 @@ export function TransfersView(props: {
     if (error) {
       throw new Error(error);
     }
-    await props.client.post("transfers", { links, paused: pausedCreate });
+    await createDownloadWithPolicy((knownFilePolicy) =>
+      props.client.post("transfers", { links, paused: pausedCreate, knownFilePolicy })
+    );
     setEd2kLinks("");
   };
 
@@ -831,10 +867,13 @@ export function SearchView(props: {
                     disabled={!downloadable}
                     title={downloadable ? "Download this result" : "Download unavailable: file size was not reported"}
                     onClick={() => void props.run(
-                      () => props.client.post(`searches/${props.selectedSearch?.id}/results/${result.hash}/operations/download`, {
-                        paused,
-                        categoryId: Number(categoryId)
-                      }),
+                      () => createDownloadWithPolicy((knownFilePolicy) =>
+                        props.client.post(`searches/${props.selectedSearch?.id}/results/${result.hash}/operations/download`, {
+                          paused,
+                          categoryId: Number(categoryId),
+                          knownFilePolicy
+                        })
+                      ),
                       "Download queued"
                     )}
                   >
