@@ -97,7 +97,7 @@ fn apply_category_path(category: &mut Category, path: NullableStringField) -> Re
             let canonical =
                 fs::canonicalize(&long).with_context(|| format!("failed to resolve {path}"))?;
             ensure!(canonical.is_dir(), "path is not a directory");
-            Some(normal_path_display(&canonical.display().to_string()))
+            Some(normal_path_display(canonical.display().to_string()))
         }
         NullableStringField::Null(()) => None,
     };
