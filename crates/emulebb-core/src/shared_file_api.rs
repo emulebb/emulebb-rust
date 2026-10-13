@@ -14,22 +14,21 @@ impl EmulebbCore {
     }
 
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
-        self.share_local_file_with_progress(request, None).await
+        self.share_native_local_file_with_progress(Path::new(&request.path), request.name, None)
+            .await
     }
 
-    pub(crate) async fn share_local_file_with_progress(
+    pub(crate) async fn share_native_local_file_with_progress(
         &self,
-        request: LocalShareCreate,
+        source_path: &Path,
+        requested_name: Option<String>,
         progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
     ) -> Result<LocalShare> {
-        let source_path = Path::new(&request.path);
-        let display_name = match request.name {
+        let display_name = match requested_name {
             Some(name) => name,
-            None => source_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| anyhow::anyhow!("local share path has no valid file name"))?
-                .to_string(),
+            None => emulebb_metadata::NativePath::from(source_path)
+                .display_file_name()
+                .ok_or_else(|| anyhow::anyhow!("local share path has no valid file name"))?,
         };
         let summary = match progress {
             Some(progress) => {

@@ -561,8 +561,8 @@ pub(crate) struct ScannedSharedFile {
 // These free functions take `&EmulebbCore` and drive the full shared-directory
 // scan + MD4/ed2k hash. A child module may read its ancestor's private items, so
 // they touch the core's private `state` / `shared_hashing_count` fields directly
-// and reuse the public `share_local_file` ingest path so MD4/AICH/catalog stay
-// consistent. `lib.rs` keeps only thin entry methods that delegate here.
+// and reuse the native-path ingest primitive so MD4/AICH/catalog stay consistent.
+// `lib.rs` keeps only thin entry methods that delegate here.
 // ---------------------------------------------------------------------------
 
 use std::sync::Arc;
@@ -573,7 +573,10 @@ use emulebb_metadata::MetadataSharedSourceFailure;
 use tokio::task::JoinSet;
 
 use crate::physical_disk::physical_disk_key;
-use crate::{EmulebbCore, LocalShare, LocalShareCreate};
+use crate::{EmulebbCore, LocalShare};
+
+#[cfg(test)]
+use crate::LocalShareCreate;
 
 /// Resets the live `hashingCount` to 0 on any exit path (success, hash error, or
 /// panic unwind) so a failed/aborted reload never leaves a stale non-zero count.
@@ -1359,10 +1362,7 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
     for target in plan.to_hash {
         let source_path = target.path.clone();
         let share = core
-            .share_local_file(LocalShareCreate {
-                path: target.path.display().to_string(),
-                name: None,
-            })
+            .share_native_local_file_with_progress(&target.path, None, None)
             .await?;
         // Same HASH-1 registration for a freshly (re)hashed startup share.
         register_monitor_shared_hash(core, source_path, &share.hash, target.source_fingerprint)
@@ -1810,13 +1810,7 @@ async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
     });
     let source_path = target.path.clone();
     match core
-        .share_local_file_with_progress(
-            LocalShareCreate {
-                path: target.path.display().to_string(),
-                name: None,
-            },
-            Some(progress),
-        )
+        .share_native_local_file_with_progress(&target.path, None, Some(progress))
         .await
     {
         Ok(share) => {

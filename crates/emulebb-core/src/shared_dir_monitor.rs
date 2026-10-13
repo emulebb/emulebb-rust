@@ -399,10 +399,10 @@ where
 
 use emulebb_ed2k::long_path::long_path;
 
+use crate::EmulebbCore;
 use crate::shared_directories::{
     forget_stale_shares, refresh_shared_directory_row, register_monitor_shared_hash,
 };
-use crate::{EmulebbCore, LocalShareCreate};
 
 /// Canonical key for the `monitor_shared_hashes` source-path -> hash map.
 ///
@@ -633,10 +633,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
         return;
     }
     match core
-        .share_local_file(LocalShareCreate {
-            path: path.display().to_string(),
-            name: None,
-        })
+        .share_native_local_file_with_progress(path, None, None)
         .await
     {
         Ok(share) => {
