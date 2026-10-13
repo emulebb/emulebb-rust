@@ -542,13 +542,6 @@ mod tests {
         (driver, peer, cancel)
     }
 
-    async fn expect_buddy_ping(peer: &mut Ed2kTransport) {
-        let packet = peer.read_packet().await.unwrap().unwrap();
-        assert_eq!(packet.protocol, OP_EMULEPROT);
-        assert_eq!(packet.opcode, OP_BUDDYPING);
-        assert!(packet.payload.is_empty());
-    }
-
     /// The held buddy link follows the same stock pre-parse Kad-running gate as
     /// an ordinary inbound client session. Malformed stopped-Kad traffic is
     /// ignored and the persistent relay connection remains usable.
@@ -616,18 +609,28 @@ mod tests {
     async fn silent_buddy_expires_while_outbound_pings_succeed() {
         let (driver, mut peer, _cancel) = spawn_buddy_driver().await;
 
-        tokio::time::advance(Duration::from_secs(10 * 60)).await;
-        tokio::task::yield_now().await;
-        expect_buddy_ping(&mut peer).await;
-        tokio::time::advance(Duration::from_secs(10 * 60)).await;
-        tokio::task::yield_now().await;
-        expect_buddy_ping(&mut peer).await;
+        for _ in 0..2 {
+            tokio::time::advance(Duration::from_secs(10 * 60)).await;
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!driver.is_finished());
+        }
         tokio::time::advance(Duration::from_secs(5 * 60)).await;
 
         assert_eq!(
             driver.await.unwrap().unwrap(),
             BuddyLinkEnd::ReceiveTimedOut
         );
+
+        let mut ping_count = 0;
+        while let Some(packet) = peer.read_packet().await.unwrap() {
+            assert_eq!(packet.protocol, OP_EMULEPROT);
+            assert_eq!(packet.opcode, OP_BUDDYPING);
+            assert!(packet.payload.is_empty());
+            ping_count += 1;
+        }
+        assert_eq!(ping_count, 2);
     }
 
     #[tokio::test(start_paused = true)]
