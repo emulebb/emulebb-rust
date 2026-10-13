@@ -3,8 +3,8 @@
 //! The background shared-directory reload used to re-hash the entire shared
 //! library from disk on every daemon start / `reload`, even when nothing
 //! changed. These helpers let the reload skip that waste: each persisted
-//! share-in-place manifest records its `source_path` plus the `(file_size,
-//! source_mtime_ms)` captured at ingest, so a scanned file whose on-disk identity
+//! share-in-place manifest records its `source_path` plus a native file
+//! fingerprint captured at ingest, so a scanned file whose exact identity still
 //! matches its persisted entry is reused as-is instead of being re-read/re-hashed.
 
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use emulebb_metadata::MetadataImportedKnownFileEntry;
+use emulebb_metadata::{MetadataImportedKnownFileEntry, NativeFileFingerprint};
 
 use super::{Ed2kReloadIndexEntry, Ed2kTransferRuntime};
 
@@ -24,27 +24,26 @@ impl Ed2kTransferRuntime {
     pub fn scanned_source_identity_from_metadata(
         source_path: &Path,
         metadata: &Metadata,
-    ) -> (PathBuf, u64, Option<i64>) {
+    ) -> (PathBuf, u64, Option<NativeFileFingerprint>) {
         let normalized = crate::long_path::long_path(source_path);
         (
-            normalized,
+            normalized.clone(),
             metadata.len(),
-            super::ingest::source_mtime_ms(metadata),
+            super::ingest::native_file_fingerprint(&normalized, metadata),
         )
     }
 
     /// Build the share-in-place reload index: a map from each persisted
     /// share-in-place source path (normalized to its long-path form, the same
     /// form the directory walk produces) to all recorded identities for that
-    /// path ([`Ed2kReloadIndexEntry`]: file hash, size, and source mtime).
+    /// path ([`Ed2kReloadIndexEntry`]: file hash and native fingerprint).
     ///
     /// The incremental shared-directory reload stats each scanned file and, when
-    /// the path is present here with a matching size and mtime, skips re-hashing
+    /// the path is present here with a safely matching fingerprint, skips re-hashing
     /// and reuses the already-persisted manifest (resolving the share by the
     /// stored hash). Only manifests that recorded a `source_path` are included
-    /// (real downloads are excluded); a manifest whose `source_mtime_ms` is `None`
-    /// (pre-v9 row) still appears but will not match an on-disk mtime, so such a
-    /// file is re-hashed once and its mtime recorded.
+    /// (real downloads are excluded); a manifest with no fingerprint is always
+    /// re-hashed.
     pub async fn share_in_place_reload_index(
         &self,
     ) -> Result<HashMap<PathBuf, Vec<Ed2kReloadIndexEntry>>> {
@@ -60,8 +59,7 @@ impl Ed2kTransferRuntime {
                 .or_insert_with(Vec::new)
                 .push(Ed2kReloadIndexEntry {
                     file_hash: entry.file_hash,
-                    file_size: entry.file_size,
-                    source_mtime_ms: entry.source_mtime_ms,
+                    source_fingerprint: entry.source_fingerprint,
                 });
         }
         Ok(index)
@@ -70,14 +68,14 @@ impl Ed2kTransferRuntime {
     /// Build the delivered-download reuse index: a map from each completed
     /// download's delivered file path (normalized to its long-path form, the
     /// same form the directory walk produces) to its recorded identity
-    /// ([`Ed2kReloadIndexEntry`]: file hash, size, delivered mtime).
+    /// ([`Ed2kReloadIndexEntry`]: file hash and delivered fingerprint).
     ///
     /// A real download has no `share_in_place_sources` row, so when its delivered
     /// file lands in a configured shared dir (the standard "Incoming is shared"
     /// setup) a rescan would otherwise treat it as brand-new and re-read/re-hash
     /// the whole payload just to reshare content it already hashed during
     /// download. This index lets the reload recognize the delivered file by its
-    /// `(size, mtime)` identity and reuse the already-persisted hash instead --
+    /// exact native identity and reuse the already-persisted hash instead --
     /// the oracle `FindKnownFile(name, date, size)` cache hit
     /// (SharedFileList.cpp:2138). It is consulted for reuse ONLY: unlike the
     /// share-in-place index it never drives pruning, so a completed download
@@ -95,8 +93,7 @@ impl Ed2kTransferRuntime {
                 key,
                 Ed2kReloadIndexEntry {
                     file_hash: entry.file_hash,
-                    file_size: entry.file_size,
-                    source_mtime_ms: entry.delivered_mtime_ms,
+                    source_fingerprint: entry.delivered_fingerprint,
                 },
             );
         }
@@ -144,15 +141,19 @@ impl Ed2kTransferRuntime {
     }
 
     /// Stat one scanned shared file for the incremental reload, returning its
-    /// long-path-normalized key plus on-disk `(file_size, mtime_ms)`. The key is
+    /// long-path-normalized key plus its on-disk native fingerprint. The key is
     /// produced with the same `long_path` normalization as
     /// [`Ed2kTransferRuntime::share_in_place_reload_index`], so a hit there means
     /// the file is unchanged and can skip re-hashing. Returns `None` when the
     /// file cannot be stat-ed (treated as changed, so it is (re)hashed).
     #[must_use]
-    pub fn scanned_source_identity(source_path: &Path) -> Option<(PathBuf, u64, Option<i64>)> {
+    pub fn scanned_source_identity(
+        source_path: &Path,
+    ) -> Option<(PathBuf, u64, Option<NativeFileFingerprint>)> {
         let normalized = crate::long_path::long_path(source_path);
-        let (size, mtime_ms) = super::ingest::stat_source_identity(&normalized)?;
-        Some((normalized, size, mtime_ms))
+        let metadata = std::fs::metadata(&normalized).ok()?;
+        let size = metadata.len();
+        let fingerprint = super::ingest::native_file_fingerprint(&normalized, &metadata);
+        Some((normalized, size, fingerprint))
     }
 }

@@ -209,11 +209,6 @@ CREATE TABLE local_paths (
     native_path BLOB NOT NULL,
     search_key TEXT NOT NULL,
     platform TEXT NOT NULL,
-    file_identity_kind TEXT,
-    file_identity BLOB,
-    size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
-    mtime_ms INTEGER CHECK(mtime_ms IS NULL OR mtime_ms >= 0),
-    last_stat_ms INTEGER CHECK(last_stat_ms IS NULL OR last_stat_ms >= 0),
     UNIQUE(platform, native_path)
 );
 
@@ -272,12 +267,9 @@ CREATE TABLE transfers (
     -- Original path identity of a shared, already-complete file seeded in
     -- place. NON-NULL marks the transfer as share-in-place; NULL is a download.
     source_path_id INTEGER REFERENCES local_paths(id),
-    -- Last-modified time (Unix milliseconds) of the share-in-place source file
-    -- captured at ingest. Compared against the on-disk mtime on every reload so
-    -- an unchanged shared file (same source_path + size_bytes + mtime) is reused
-    -- from this row instead of being re-hashed. NULL means no reusable source
-    -- mtime is available.
-    source_mtime_ms INTEGER CHECK(source_mtime_ms IS NULL OR source_mtime_ms >= 0),
+    -- Versioned native file identity + size + nanosecond timestamps captured at
+    -- ingest or delivery. NULL forces a conservative re-hash on reload.
+    source_fingerprint BLOB,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
@@ -290,7 +282,7 @@ CREATE TABLE shared_file_sources (
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
     file_size INTEGER NOT NULL CHECK(file_size >= 0),
-    source_mtime_ms INTEGER CHECK(source_mtime_ms IS NULL OR source_mtime_ms >= 0),
+    source_fingerprint BLOB,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     UNIQUE(path_id)
@@ -300,7 +292,7 @@ CREATE TABLE shared_file_scan_failures (
     id INTEGER PRIMARY KEY,
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
     file_size INTEGER NOT NULL CHECK(file_size >= 0),
-    source_mtime_ms INTEGER CHECK(source_mtime_ms IS NULL OR source_mtime_ms >= 0),
+    source_fingerprint BLOB,
     reason TEXT NOT NULL DEFAULT '',
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),

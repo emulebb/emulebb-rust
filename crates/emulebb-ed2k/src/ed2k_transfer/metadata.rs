@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
     MetadataTransferCounts, MetadataTransferPublishEntry, MetadataTransferShareEntry,
+    NativeFileFingerprint,
 };
 
 use super::hashset::{
@@ -117,7 +118,7 @@ impl Ed2kTransferRuntime {
         old_source_path: &Path,
         new_source_path: &Path,
         file_size: u64,
-        source_mtime_ms: Option<i64>,
+        source_fingerprint: Option<NativeFileFingerprint>,
         display_name: &str,
         content_type: &str,
     ) -> Result<bool> {
@@ -135,7 +136,7 @@ impl Ed2kTransferRuntime {
                 &old_source_path,
                 &new_source_path,
                 file_size,
-                source_mtime_ms,
+                source_fingerprint.as_ref(),
                 &persisted_display_name,
                 &content_type,
             )

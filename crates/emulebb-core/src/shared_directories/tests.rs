@@ -30,14 +30,27 @@ fn names(mut files: Vec<ScannedSharedFile>) -> Vec<String> {
 
 fn scanned_file(path: &Path) -> ScannedSharedFile {
     let metadata = fs::metadata(path).expect("stat scanned test file");
-    let (key, file_size, source_mtime_ms) =
+    let (key, file_size, source_fingerprint) =
         Ed2kTransferRuntime::scanned_source_identity_from_metadata(path, &metadata);
     ScannedSharedFile {
         path: path.to_path_buf(),
         key,
         disk_key: "disk:test".to_string(),
         file_size,
-        source_mtime_ms,
+        source_fingerprint,
+    }
+}
+
+fn synthetic_fingerprint(size_bytes: u64, modified_nanoseconds: u32) -> NativeFileFingerprint {
+    NativeFileFingerprint {
+        identity: emulebb_metadata::NativeFileIdentity::Unix {
+            device_id: 7,
+            inode_number: 11,
+        },
+        size_bytes,
+        modified: emulebb_metadata::NativeFileTimestamp::new(1_700_000_000, modified_nanoseconds)
+            .unwrap(),
+        changed: None,
     }
 }
 
@@ -90,9 +103,9 @@ async fn incremental_reload_skips_unchanged_failed_source_and_retries_changed_id
     fs::write(&source, b"initial payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
-    let (key, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+    let (key, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
     core.metadata_store
-        .upsert_shared_source_failure(&key, size, mtime_ms, "ingest failed")
+        .upsert_shared_source_failure(&key, size, fingerprint.as_ref(), "ingest failed")
         .unwrap();
 
     let skipped = plan_incremental_reload(&core, vec![scanned_file(&source)])
@@ -147,7 +160,7 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
     fs::write(&source, b"imported payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
-    let (_, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+    let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
     let file_hash = "00112233445566778899aabbccddeeff".to_string();
     core.metadata_store
         .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
@@ -177,7 +190,7 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
             transfer_row_removed: false,
             delivered_path: None,
             source_path: Some(source.clone()),
-            source_mtime_ms: mtime_ms,
+            source_fingerprint: fingerprint,
         })
         .unwrap();
     assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
@@ -195,18 +208,75 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
 }
 
 #[tokio::test]
+async fn incremental_reload_never_reuses_same_size_coarse_timestamp() {
+    let root = scratch_dir("coarse-timestamp");
+    let source = root.join("Coarse.Timestamp.bin");
+    fs::write(&source, b"same-size").unwrap();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    let file_size = fs::metadata(&source).unwrap().len();
+    let coarse_fingerprint = synthetic_fingerprint(file_size, 0);
+    core.metadata_store
+        .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "Coarse.Timestamp.bin".to_string(),
+            file_size,
+            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+            completed: true,
+            final_rehash_pending: false,
+            md4_hashset_acquired: true,
+            md4_hashset: Vec::new(),
+            aich_hashset_acquired: false,
+            aich_root: None,
+            aich_hashset: Vec::new(),
+            verified_ranges: Vec::new(),
+            pieces: Vec::new(),
+            sources: Vec::new(),
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+            category_id: 0,
+            control_state: None,
+            transfer_row_removed: false,
+            delivered_path: None,
+            source_path: Some(source.clone()),
+            source_fingerprint: Some(coarse_fingerprint.clone()),
+        })
+        .unwrap();
+
+    let plan = plan_incremental_reload(
+        &core,
+        vec![ScannedSharedFile {
+            path: source.clone(),
+            key: long_path(&source),
+            disk_key: "disk:test".to_string(),
+            file_size,
+            source_fingerprint: Some(coarse_fingerprint),
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(plan.to_hash.len(), 1);
+    assert!(plan.reused_shares.is_empty());
+    assert_eq!(plan.stats.changed_count, 1);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
 async fn incremental_reload_promotes_unique_pathless_imported_known_file() {
     let root = scratch_dir("imported-known-pathless");
     let source = root.join("Imported.Known.bin");
     fs::write(&source, b"known payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
-    let (_, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+    let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
     let imported = MetadataImportedKnownFileEntry {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Imported.Known.bin".to_string(),
         file_size: size,
-        modified_s: mtime_ms.unwrap() / 1000,
+        modified_s: fingerprint.unwrap().modified.seconds,
         md4_hashset: Vec::new(),
         aich_root: None,
         aich_hashset: Vec::new(),
@@ -255,7 +325,7 @@ async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() 
     fs::write(&source, b"ambiguous payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
-    let (_, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+    let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
     for file_hash in [
         "00112233445566778899aabbccddeeff",
         "ffeeddccbbaa99887766554433221100",
@@ -265,7 +335,7 @@ async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() 
                 file_hash: file_hash.to_string(),
                 display_name: "Ambiguous.Known.bin".to_string(),
                 file_size: size,
-                modified_s: mtime_ms.unwrap() / 1000,
+                modified_s: fingerprint.as_ref().unwrap().modified.seconds,
                 md4_hashset: Vec::new(),
                 aich_root: None,
                 aich_hashset: Vec::new(),
@@ -294,10 +364,10 @@ async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() 
 /// A completed DOWNLOAD delivered into a shared dir has NO share-in-place
 /// source row, so it used to look brand-new on reload and its whole payload
 /// was re-hashed just to reshare content it already hashed while downloading
-/// (HASH-2). With the delivered file's `(size, mtime)` baseline recorded at
+/// (HASH-2). With the delivered file's native fingerprint recorded at
 /// delivery, an unchanged delivered file is now a reuse cache HIT (oracle
 /// FindKnownFile) -- reused, not re-hashed. If the operator later replaces
-/// the delivered file (mtime changes), it correctly falls back to a re-hash.
+/// the delivered file, it correctly falls back to a re-hash.
 #[tokio::test]
 async fn incremental_reload_reuses_delivered_download_without_rehash() {
     let root = scratch_dir("delivered-download");
@@ -305,10 +375,10 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
     fs::write(&delivered, b"completed download payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
-    let (_, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
+    let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
     let file_hash = "aabbccddeeff00112233445566778899".to_string();
     // A completed download: delivered_path set, source_path NONE, and the
-    // delivered mtime baseline recorded (as deliver.rs does at delivery).
+    // delivered native fingerprint recorded (as deliver.rs does at delivery).
     core.metadata_store
         .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
             file_hash: file_hash.clone(),
@@ -337,7 +407,7 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
             transfer_row_removed: false,
             delivered_path: Some(delivered.clone()),
             source_path: None,
-            source_mtime_ms: mtime_ms,
+            source_fingerprint: fingerprint,
         })
         .unwrap();
 
@@ -355,7 +425,7 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
     assert_eq!(plan.stats.planned_hash_count, 0);
     assert_eq!(plan.stats.new_count, 0);
 
-    // Operator replaces the delivered file (new mtime): the stale reuse
+    // Operator replaces the delivered file: the stale reuse
     // baseline no longer matches, so it is (correctly) re-hashed as new.
     std::thread::sleep(std::time::Duration::from_millis(10));
     fs::write(&delivered, b"a different payload the operator dropped in").unwrap();
@@ -494,7 +564,7 @@ fn initial_publish_cohort_is_small_first_and_bounded() {
             key: format!("key-{sequence:03}").into(),
             disk_key: "disk:test".to_string(),
             file_size: u64::try_from(sequence + 1).unwrap(),
-            source_mtime_ms: Some(sequence.into()),
+            source_fingerprint: None,
         })
         .collect::<Vec<_>>();
 
@@ -510,21 +580,21 @@ fn initial_publish_cohort_is_small_first_and_bounded() {
             key: "smallest".into(),
             disk_key: "disk:test".to_string(),
             file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT / 2,
-            source_mtime_ms: Some(1),
+            source_fingerprint: None,
         },
         ScannedSharedFile {
             path: PathBuf::from("second.bin"),
             key: "second".into(),
             disk_key: "disk:test".to_string(),
             file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT / 2,
-            source_mtime_ms: Some(2),
+            source_fingerprint: None,
         },
         ScannedSharedFile {
             path: PathBuf::from("over-budget.bin"),
             key: "over-budget".into(),
             disk_key: "disk:test".to_string(),
             file_size: INITIAL_PUBLISH_COHORT_BYTE_LIMIT,
-            source_mtime_ms: Some(3),
+            source_fingerprint: None,
         },
     ]);
     assert_eq!(byte_bounded.len(), 2);

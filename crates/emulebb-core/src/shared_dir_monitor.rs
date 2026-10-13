@@ -478,7 +478,7 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
 ///
 /// Renaming a 100k-file library cohort must be metadata-only: unshare + ingest
 /// would reread unchanged payload bytes, churn the catalog, and briefly make the
-/// file unavailable. If size/mtime changed during the move, relocate first and
+/// file unavailable. If the native fingerprint changed during the move, relocate first and
 /// then let the regular share path rehash exactly once from the destination.
 async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path) {
     // WHY: expanding a paired rename into Remove + Share globally unshares the
@@ -504,11 +504,23 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
             return;
         }
     };
-    let (_, file_size, source_mtime_ms) =
+    let (_, file_size, source_fingerprint) =
         emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity_from_metadata(
             &new_key, &metadata,
         );
-    let Some(display_name) = emulebb_metadata::NativePath::from(new_key.as_path()).display_file_name() else {
+    let identity_unchanged = previous
+        .source_fingerprint
+        .as_ref()
+        .zip(source_fingerprint.as_ref())
+        .is_some_and(|(stored, current)| stored.safely_matches(current));
+    let persisted_fingerprint = if identity_unchanged {
+        source_fingerprint.clone()
+    } else {
+        previous.source_fingerprint.clone()
+    };
+    let Some(display_name) =
+        emulebb_metadata::NativePath::from(new_key.as_path()).display_file_name()
+    else {
         tracing::warn!(path = %to.display(), "renamed shared file has no valid file name");
         return;
     };
@@ -520,28 +532,25 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
             &old_key,
             &new_key,
             file_size,
-            source_mtime_ms,
+            persisted_fingerprint,
             &display_name,
             content_type,
         )
         .await
     {
         Ok(true) => {
-            let identity_changed =
-                previous.file_size != file_size || previous.source_mtime_ms != source_mtime_ms;
             let mut state = core.state.lock().await;
             state.monitor_shared_hashes.remove(&old_key);
             state.monitor_shared_hashes.insert(
                 new_key,
                 crate::core_state::MonitoredSharedFile {
                     hash: previous.hash,
-                    file_size,
-                    source_mtime_ms,
+                    source_fingerprint,
                 },
             );
             drop(state);
             core.queue_ed2k_shared_catalog_publish();
-            if identity_changed {
+            if !identity_unchanged {
                 auto_share_monitored_path(core, to).await;
             }
         }
@@ -601,7 +610,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
             return;
         }
     };
-    let (_, file_size, source_mtime_ms) =
+    let (_, _file_size, source_fingerprint) =
         emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity_from_metadata(
             &key, &metadata,
         );
@@ -612,11 +621,13 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
         .monitor_shared_hashes
         .get(&key)
         .cloned();
-    if source_mtime_ms.is_some()
-        && previous.as_ref().is_some_and(|entry| {
-            entry.file_size == file_size && entry.source_mtime_ms == source_mtime_ms
-        })
-    {
+    if previous.as_ref().is_some_and(|entry| {
+        entry
+            .source_fingerprint
+            .as_ref()
+            .zip(source_fingerprint.as_ref())
+            .is_some_and(|(stored, current)| stored.safely_matches(current))
+    }) {
         // Another event in the same logical write burst already ingested this
         // settled identity. A stat is enough; do not re-read the payload.
         return;
@@ -630,8 +641,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
     {
         Ok(share) => {
             let replaced =
-                register_monitor_shared_hash(core, key, &share.hash, file_size, source_mtime_ms)
-                    .await;
+                register_monitor_shared_hash(core, key, &share.hash, source_fingerprint).await;
             if let Some(replaced) = replaced
                 && !replaced.hash.eq_ignore_ascii_case(&share.hash)
             {
@@ -1080,7 +1090,7 @@ mod tests {
         assert!(core.share(&old_hash).await.is_none());
         assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
 
-        // A duplicate settled event for the same size + mtime identity must not
+        // A duplicate settled event for the same native fingerprint must not
         // ingest or create another catalog row.
         auto_share_monitored_path(&core, &source).await;
         assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);

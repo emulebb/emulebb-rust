@@ -3,12 +3,11 @@
 use std::fs::Metadata;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use emulebb_metadata::{
-    MetadataImportedKnownFileEntry, NativeFileFingerprint, NativeFileIdentity,
-    NativeFileTimestamp, NativePath,
+    MetadataImportedKnownFileEntry, NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp,
+    NativePath,
 };
 
 use crate::long_path::long_path;
@@ -171,12 +170,7 @@ impl Ed2kTransferRuntime {
         // single read pass above.
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.source_path = Some(source_path.clone());
-        // Record the source file's last-modified time so the incremental
-        // shared-directory reload can compare it against the on-disk mtime and
-        // skip re-hashing an unchanged file. A platform that cannot report mtime
-        // simply leaves this `None`, which the reload treats as a miss (re-hash
-        // once), so correctness never depends on mtime being available.
-        manifest.source_mtime_ms = source_mtime_ms(&metadata);
+        manifest.source_fingerprint = native_file_fingerprint(&source_path, &metadata);
         manifest.completed = true;
         // A share-in-place file belongs in the shared catalog, not the download
         // queue. Persist that state in the initial transaction so callers do not
@@ -235,7 +229,7 @@ impl Ed2kTransferRuntime {
         &self,
         entry: MetadataImportedKnownFileEntry,
         source_path: &Path,
-        source_mtime_ms: Option<i64>,
+        source_fingerprint: Option<NativeFileFingerprint>,
     ) -> Result<Ed2kLocalIngestSummary> {
         if entry.display_name.trim().is_empty() {
             anyhow::bail!("imported known file requires a non-empty canonical name");
@@ -251,7 +245,7 @@ impl Ed2kTransferRuntime {
 
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.source_path = Some(source_path.clone());
-        manifest.source_mtime_ms = source_mtime_ms;
+        manifest.source_fingerprint = source_fingerprint;
         manifest.completed = true;
         manifest.transfer_row_removed = true;
         manifest.md4_hashset_acquired = true;
@@ -296,18 +290,6 @@ impl Ed2kTransferRuntime {
                 .map(|path| path.display_path()),
         })
     }
-}
-
-/// Convert a file's last-modified time to Unix milliseconds for the
-/// share-in-place reload comparison, or `None` when the platform/filesystem does
-/// not report it or the timestamp predates the Unix epoch. Truncating to whole
-/// milliseconds keeps the value stable across the round-trip through the
-/// `INTEGER` metadata column, so the same unchanged file compares equal on a
-/// later reload.
-pub(crate) fn source_mtime_ms(metadata: &Metadata) -> Option<i64> {
-    let modified = metadata.modified().ok()?;
-    let millis = modified.duration_since(UNIX_EPOCH).ok()?.as_millis();
-    i64::try_from(millis).ok()
 }
 
 /// Capture the native file identity and full-resolution filesystem timestamps
@@ -374,7 +356,7 @@ fn native_file_timestamps(
 
 #[cfg(windows)]
 fn system_time_timestamp(timestamp: std::time::SystemTime) -> Option<NativeFileTimestamp> {
-    match timestamp.duration_since(UNIX_EPOCH) {
+    match timestamp.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => NativeFileTimestamp::new(
             i64::try_from(duration.as_secs()).ok()?,
             duration.subsec_nanos(),
@@ -399,16 +381,6 @@ fn native_file_timestamps(
     _metadata: &Metadata,
 ) -> Option<(NativeFileTimestamp, Option<NativeFileTimestamp>)> {
     None
-}
-
-/// Stat a resolved long-path source for the incremental reload, returning
-/// `(file_size, mtime_ms)`. `None` when the file is missing/unreadable (treated
-/// as a miss, so it is (re)hashed). The size pairs with the persisted manifest
-/// `file_size` and the mtime with `source_mtime_ms` so a match on all three
-/// (plus the path key) lets the reload skip re-hashing.
-pub(crate) fn stat_source_identity(source_path: &Path) -> Option<(u64, Option<i64>)> {
-    let metadata = std::fs::metadata(source_path).ok()?;
-    Some((metadata.len(), source_mtime_ms(&metadata)))
 }
 
 #[cfg(test)]

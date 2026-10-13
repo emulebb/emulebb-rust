@@ -174,7 +174,7 @@ impl super::MetadataStore {
             .path
             .as_deref()
             .filter(|path| !path.trim().is_empty())
-            .map(|path| upsert_local_path(&tx, Path::new(path), now))
+            .map(|path| upsert_local_path(&tx, Path::new(path)))
             .transpose()?;
         tx.execute(
             r#"
@@ -630,7 +630,7 @@ mod tests {
                 transfer_row_removed: false,
                 delivered_path: None,
                 source_path: None,
-                source_mtime_ms: None,
+                source_fingerprint: None,
                 pieces: Vec::new(),
                 sources: Vec::new(),
             })

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::{IndexedFile, IndexedSharedDirectoryRoot};
-use emulebb_metadata::MetadataImportedKnownFileEntry;
+use emulebb_metadata::{MetadataImportedKnownFileEntry, NativeFileFingerprint};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -44,7 +44,7 @@ pub struct SharedDirectoryReloadProgress {
     pub reused_count: usize,
     pub new_count: usize,
     pub changed_count: usize,
-    pub missing_mtime_count: usize,
+    pub missing_fingerprint_count: usize,
     pub stat_failed_count: usize,
     pub skipped_failed_count: usize,
     pub skipped_intake_count: usize,
@@ -145,7 +145,7 @@ impl Default for SharedDirectoryReloadProgress {
             reused_count: 0,
             new_count: 0,
             changed_count: 0,
-            missing_mtime_count: 0,
+            missing_fingerprint_count: 0,
             stat_failed_count: 0,
             skipped_failed_count: 0,
             skipped_intake_count: 0,
@@ -383,14 +383,14 @@ pub(crate) fn collect_shared_directory_files(
                 continue;
             }
             let path = entry.into_path();
-            let (key, file_size, source_mtime_ms) =
+            let (key, file_size, source_fingerprint) =
                 Ed2kTransferRuntime::scanned_source_identity_from_metadata(&path, &metadata);
             output.push(ScannedSharedFile {
                 path,
                 key,
                 disk_key: disk_key.clone(),
                 file_size,
-                source_mtime_ms,
+                source_fingerprint,
             });
         }
     }
@@ -456,14 +456,14 @@ fn collect_initial_publish_candidates(
             continue;
         }
         let path = entry.into_path();
-        let (key, file_size, source_mtime_ms) =
+        let (key, file_size, source_fingerprint) =
             Ed2kTransferRuntime::scanned_source_identity_from_metadata(&path, &metadata);
         output.push(ScannedSharedFile {
             path,
             key,
             disk_key: disk_key.clone(),
             file_size,
-            source_mtime_ms,
+            source_fingerprint,
         });
         if output.len().saturating_sub(starting_candidates) >= INITIAL_PUBLISH_CANDIDATE_LIMIT {
             break;
@@ -550,7 +550,7 @@ pub(crate) struct ScannedSharedFile {
     key: PathBuf,
     disk_key: String,
     file_size: u64,
-    source_mtime_ms: Option<i64>,
+    source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 // ---------------------------------------------------------------------------
@@ -622,8 +622,8 @@ struct ReloadHashTarget {
     key: PathBuf,
     /// File size captured at planning time.
     file_size: u64,
-    /// Source mtime captured at planning time, when the filesystem reports it.
-    source_mtime_ms: Option<i64>,
+    /// Native file fingerprint captured at planning time, when available.
+    source_fingerprint: Option<NativeFileFingerprint>,
     /// Existing hashes for the same source path. Once the current identity is
     /// known, every different hash here is removed so a changed file does not
     /// leave duplicate shares for the same source path.
@@ -631,17 +631,14 @@ struct ReloadHashTarget {
 }
 
 struct ReusedReloadShare {
-    /// File hash reused from the persisted index because path, size, and mtime
-    /// still match the scanned file.
+    /// File hash reused because the persisted native fingerprint safely matches.
     file_hash: String,
     /// The scanned source path this share was reused for. Registered in
     /// `monitor_shared_hashes` at reload time so the live directory monitor can
     /// resolve and de-offer this file if its source is later deleted (HASH-1).
     source_path: PathBuf,
-    /// File size in the reused source identity.
-    file_size: u64,
-    /// Source mtime in the reused source identity.
-    source_mtime_ms: Option<i64>,
+    /// Native file fingerprint in the reused source identity.
+    source_fingerprint: Option<NativeFileFingerprint>,
     /// Older duplicate hashes for the same source path, if any.
     stale_hashes: Vec<String>,
 }
@@ -649,12 +646,11 @@ struct ReusedReloadShare {
 struct ImportedKnownPromotion {
     entry: MetadataImportedKnownFileEntry,
     source_path: PathBuf,
-    source_mtime_ms: Option<i64>,
+    source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 struct ReloadPlan {
-    /// Files that are new, changed (size/mtime), or whose persisted manifest has
-    /// no recorded mtime yet -- each gets hashed via `share_local_file`.
+    /// Files that are new, changed, coarse-timestamped, or lack a fingerprint.
     to_hash: Vec<ReloadHashTarget>,
     /// Scanned files reused from the persisted index without rehashing. Used to
     /// resolve their `Localshare`s for the reload result so an unchanged file
@@ -677,7 +673,7 @@ struct ReloadPlanStats {
     reused_count: usize,
     new_count: usize,
     changed_count: usize,
-    missing_mtime_count: usize,
+    missing_fingerprint_count: usize,
     stat_failed_count: usize,
     skipped_failed_count: usize,
     skipped_intake_count: usize,
@@ -702,7 +698,7 @@ impl ReloadPlanStats {
             reused_count: self.reused_count,
             new_count: self.new_count,
             changed_count: self.changed_count,
-            missing_mtime_count: self.missing_mtime_count,
+            missing_fingerprint_count: self.missing_fingerprint_count,
             stat_failed_count: self.stat_failed_count,
             skipped_failed_count: self.skipped_failed_count,
             skipped_intake_count: self.skipped_intake_count,
@@ -773,7 +769,7 @@ fn reload_hash_target(
     key: PathBuf,
     disk_key: String,
     file_size: u64,
-    source_mtime_ms: Option<i64>,
+    source_fingerprint: Option<NativeFileFingerprint>,
     stale_hashes: Vec<String>,
     reason: &str,
 ) -> ReloadHashTarget {
@@ -785,7 +781,7 @@ fn reload_hash_target(
         reason: reason.to_string(),
         key,
         file_size,
-        source_mtime_ms,
+        source_fingerprint,
         stale_hashes,
     }
 }
@@ -794,13 +790,13 @@ fn reload_hash_target(
 ///
 /// This is the incremental skip: a scanned file whose long-path-normalized path
 /// is already in the persisted share-in-place index with a matching on-disk
-/// `(file_size, mtime)` is reused as-is (its complete manifest, hash, catalog and
+/// native fingerprint is safely reusable (its complete manifest, hash, catalog and
 /// index entry already persist), so the (potentially hundreds-of-GB) payload is
 /// never re-read. A file that is new, resized, re-timestamped, or whose persisted
-/// manifest predates the recorded-mtime column (mtime `None`) falls through to
+/// manifest lacks a native fingerprint falls through to
 /// `to_hash` and is hashed exactly as before.
 ///
-/// The directory walk supplies the normalized path, size, and mtime used here,
+/// The directory walk supplies the normalized path and fingerprint used here,
 /// avoiding a second metadata lookup for every file. Files selected for hashing
 /// are re-stat-ed by ingest immediately before their payload is read.
 async fn plan_incremental_reload(
@@ -817,7 +813,7 @@ async fn plan_incremental_reload_with_pruning(
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
     // Completed downloads delivered into a shared dir are reuse-only (never
-    // pruned): recognized by delivered path + (size, mtime) so an unchanged
+    // pruned): recognized by delivered path + native fingerprint so an unchanged
     // delivered file is a cache hit instead of a needless whole-payload re-hash.
     let delivered_index = core.ed2k_transfers.delivered_reuse_index().await?;
     let imported_known_index = core
@@ -844,30 +840,30 @@ async fn plan_incremental_reload_with_pruning(
                 key,
                 disk_key,
                 file_size: size,
-                source_mtime_ms: mtime_ms,
+                source_fingerprint: fingerprint,
             } = file;
             scanned_source_keys.insert(key.clone());
-            if unchanged_failure(&failures, &key, size, mtime_ms) {
+            if unchanged_failure(&failures, &key, fingerprint.as_ref()) {
                 stats.skipped_failed_count += 1;
                 continue;
             }
             match index.get(&key) {
-                // Reuse only on an exact size + mtime match, and only when the
-                // persisted manifest actually recorded an mtime (pre-v9 rows
-                // store `None`, so they are rehashed once to backfill it).
+                // Reuse only when the persisted native fingerprint safely
+                // matches the current filesystem state.
                 Some(entries) => {
                     if let Some(entry) = entries.iter().find(|entry| {
-                        entry.file_size == size
-                            && entry.source_mtime_ms.is_some()
-                            && entry.source_mtime_ms == mtime_ms
+                        entry
+                            .source_fingerprint
+                            .as_ref()
+                            .zip(fingerprint.as_ref())
+                            .is_some_and(|(stored, current)| stored.safely_matches(current))
                     }) {
                         stats.reused_count += 1;
                         stats.stale_hash_count += entries.len().saturating_sub(1);
                         reused_shares.push(ReusedReloadShare {
                             file_hash: entry.file_hash.clone(),
                             source_path: path.clone(),
-                            file_size: size,
-                            source_mtime_ms: mtime_ms,
+                            source_fingerprint: fingerprint.clone(),
                             stale_hashes: entries
                                 .iter()
                                 .filter(|stale| stale.file_hash != entry.file_hash)
@@ -877,8 +873,12 @@ async fn plan_incremental_reload_with_pruning(
                     } else {
                         stats.planned_hash_count += 1;
                         stats.stale_hash_count += entries.len();
-                        if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
-                            stats.missing_mtime_count += 1;
+                        let missing_fingerprint = fingerprint.is_none()
+                            || entries
+                                .iter()
+                                .any(|entry| entry.source_fingerprint.is_none());
+                        if missing_fingerprint {
+                            stats.missing_fingerprint_count += 1;
                         } else {
                             stats.changed_count += 1;
                         }
@@ -887,13 +887,13 @@ async fn plan_incremental_reload_with_pruning(
                             key,
                             disk_key,
                             size,
-                            mtime_ms,
+                            fingerprint,
                             entries
                                 .iter()
                                 .map(|entry| entry.file_hash.clone())
                                 .collect(),
-                            if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
-                                "missingMtime"
+                            if missing_fingerprint {
+                                "missingFingerprint"
                             } else {
                                 "changed"
                             },
@@ -903,22 +903,23 @@ async fn plan_incremental_reload_with_pruning(
                 // Not a share-in-place source. Before treating it as a
                 // brand-new file to hash, check whether it is a completed
                 // download's delivered file re-found in a shared dir: if
-                // its delivered identity (size + mtime) still matches, the
+                // its delivered native fingerprint still matches, the
                 // download already computed this hashset, so reuse it
                 // (oracle FindKnownFile) rather than re-hashing the whole
                 // payload. Reuse-only: this never contributes to pruning.
                 None => match delivered_index.get(&key) {
                     Some(entry)
-                        if entry.file_size == size
-                            && entry.source_mtime_ms.is_some()
-                            && entry.source_mtime_ms == mtime_ms =>
+                        if entry
+                            .source_fingerprint
+                            .as_ref()
+                            .zip(fingerprint.as_ref())
+                            .is_some_and(|(stored, current)| stored.safely_matches(current)) =>
                     {
                         stats.reused_count += 1;
                         reused_shares.push(ReusedReloadShare {
                             file_hash: entry.file_hash.clone(),
                             source_path: path.clone(),
-                            file_size: size,
-                            source_mtime_ms: mtime_ms,
+                            source_fingerprint: fingerprint.clone(),
                             stale_hashes: Vec::new(),
                         });
                     }
@@ -927,10 +928,11 @@ async fn plan_incremental_reload_with_pruning(
                     // `(name, size, mtime_s)` rows deliberately fall
                     // through to hashing.
                     _ => {
-                        if let (Some(display_name), Some(mtime_ms)) =
-                            (path.file_name().and_then(|name| name.to_str()), mtime_ms)
-                        {
-                            let modified_s = mtime_ms / 1000;
+                        if let (Some(display_name), Some(fingerprint)) = (
+                            path.file_name().and_then(|name| name.to_str()),
+                            fingerprint.as_ref(),
+                        ) {
+                            let modified_s = fingerprint.modified.seconds;
                             let identity = (display_name.to_string(), size, modified_s);
                             if let Some(entries) = imported_known_index.get(&identity)
                                 && entries.len() == 1
@@ -939,7 +941,7 @@ async fn plan_incremental_reload_with_pruning(
                                 imported_known_promotions.push(ImportedKnownPromotion {
                                     entry: entries[0].clone(),
                                     source_path: path,
-                                    source_mtime_ms: Some(mtime_ms),
+                                    source_fingerprint: Some(fingerprint.clone()),
                                 });
                                 continue;
                             }
@@ -952,7 +954,7 @@ async fn plan_incremental_reload_with_pruning(
                             key,
                             disk_key,
                             size,
-                            mtime_ms,
+                            fingerprint,
                             Vec::new(),
                             "new",
                         ));
@@ -1006,12 +1008,13 @@ async fn load_shared_source_failures(
 fn unchanged_failure(
     failures: &HashMap<PathBuf, MetadataSharedSourceFailure>,
     key: &Path,
-    file_size: u64,
-    source_mtime_ms: Option<i64>,
+    source_fingerprint: Option<&NativeFileFingerprint>,
 ) -> bool {
-    failures.get(key).is_some_and(|failure| {
-        failure.file_size == file_size && failure.source_mtime_ms == source_mtime_ms
-    })
+    failures
+        .get(key)
+        .and_then(|failure| failure.source_fingerprint.as_ref())
+        .zip(source_fingerprint)
+        .is_some_and(|(stored, current)| stored.safely_matches(current))
 }
 
 fn refresh_reload_rates(progress: &mut SharedDirectoryReloadProgress, now_ms: i64) {
@@ -1053,7 +1056,7 @@ fn target_to_queued_file(target: &ReloadHashTarget) -> SharedDirectoryHashQueued
 }
 
 fn display_path(path: &Path) -> String {
-    normal_path_display(&path.display().to_string())
+    normal_path_display(path.display().to_string())
 }
 
 fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
@@ -1301,8 +1304,8 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         diagnostics.scanned_count = scan.files.len();
         diagnostics.skipped_intake_count = scan.skipped_intake_count;
     });
-    // Incremental skip: only (re)hash files that are new or whose size/mtime
-    // changed since the last index; unchanged files keep their persisted shares.
+    // Incremental skip: only (re)hash files whose native fingerprint is not
+    // safely reusable; unchanged files keep their persisted shares.
     let mut plan = plan_incremental_reload(core, scan.files).await?;
     plan.stats.skipped_intake_count = scan.skipped_intake_count;
     record_reload_progress(core, |diagnostics| {
@@ -1327,8 +1330,7 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
             core,
             reused.source_path.clone(),
             &reused.file_hash,
-            reused.file_size,
-            reused.source_mtime_ms,
+            reused.source_fingerprint.clone(),
         )
         .await;
         forget_stale_shares(core, &reused.stale_hashes, &reused.file_hash).await;
@@ -1346,14 +1348,8 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
             })
             .await?;
         // Same HASH-1 registration for a freshly (re)hashed startup share.
-        register_monitor_shared_hash(
-            core,
-            source_path,
-            &share.hash,
-            target.file_size,
-            target.source_mtime_ms,
-        )
-        .await;
+        register_monitor_shared_hash(core, source_path, &share.hash, target.source_fingerprint)
+            .await;
         forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
         shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
@@ -1376,8 +1372,7 @@ pub(crate) async fn register_monitor_shared_hash(
     core: &EmulebbCore,
     source_path: PathBuf,
     hash: &str,
-    file_size: u64,
-    source_mtime_ms: Option<i64>,
+    source_fingerprint: Option<NativeFileFingerprint>,
 ) -> Option<crate::core_state::MonitoredSharedFile> {
     // Normalize through `long_path` so the key matches the form the live monitor
     // resolves against (see `monitor_shared_key`): the scan already walks the
@@ -1388,8 +1383,7 @@ pub(crate) async fn register_monitor_shared_hash(
         key,
         crate::core_state::MonitoredSharedFile {
             hash: hash.to_string(),
-            file_size,
-            source_mtime_ms,
+            source_fingerprint,
         },
     )
 }
@@ -1400,12 +1394,13 @@ async fn promote_imported_known_share(
 ) -> Result<LocalShare> {
     let imported_entry = promotion.entry;
     let source_path = promotion.source_path;
+    let source_fingerprint = promotion.source_fingerprint;
     let summary = core
         .ed2k_transfers
         .promote_imported_known_file(
             imported_entry.clone(),
             &source_path,
-            promotion.source_mtime_ms,
+            source_fingerprint.clone(),
         )
         .await?;
     core.metadata_store
@@ -1426,14 +1421,7 @@ async fn promote_imported_known_share(
             .to_string(),
         availability_score: 1,
     })?;
-    register_monitor_shared_hash(
-        core,
-        source_path,
-        &summary.file_hash,
-        summary.file_size,
-        promotion.source_mtime_ms,
-    )
-    .await;
+    register_monitor_shared_hash(core, source_path, &summary.file_hash, source_fingerprint).await;
     core.queue_ed2k_shared_catalog_publish();
     core.share(&summary.file_hash).await.with_context(|| {
         format!(
@@ -1560,8 +1548,7 @@ async fn bootstrap_initial_publish_catalog(
             core,
             reused_share.source_path.clone(),
             &reused_share.file_hash,
-            reused_share.file_size,
-            reused_share.source_mtime_ms,
+            reused_share.source_fingerprint.clone(),
         )
         .await;
         forget_stale_shares(core, &reused_share.stale_hashes, &reused_share.file_hash).await;
@@ -1604,9 +1591,9 @@ fn merge_initial_publish_progress(
     diagnostics.changed_count = diagnostics
         .changed_count
         .saturating_add(prior.changed_count);
-    diagnostics.missing_mtime_count = diagnostics
-        .missing_mtime_count
-        .saturating_add(prior.missing_mtime_count);
+    diagnostics.missing_fingerprint_count = diagnostics
+        .missing_fingerprint_count
+        .saturating_add(prior.missing_fingerprint_count);
     diagnostics.hashed_count = diagnostics.hashed_count.saturating_add(prior.hashed_count);
     diagnostics.failed_hash_count = diagnostics
         .failed_hash_count
@@ -1728,8 +1715,8 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         diagnostics.scanned_count = scanned;
         diagnostics.skipped_intake_count = skipped_intake_count;
     });
-    // Incremental skip: an unchanged file (same path + size + mtime as its
-    // persisted manifest) is NOT re-hashed, so a restart over an unchanged
+    // Incremental skip: a file with a safely matching native fingerprint is NOT
+    // re-hashed, so a restart over an unchanged
     // library finishes near-instantly and `hashingCount` stays ~0.
     let mut plan = plan_incremental_reload(&core, scan.files).await?;
     plan.stats.skipped_intake_count = skipped_intake_count;
@@ -1754,8 +1741,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
             &core,
             reused.source_path.clone(),
             &reused.file_hash,
-            reused.file_size,
-            reused.source_mtime_ms,
+            reused.source_fingerprint.clone(),
         )
         .await;
         forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
@@ -1821,8 +1807,7 @@ async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
                 core,
                 source_path,
                 &share.hash,
-                target.file_size,
-                target.source_mtime_ms,
+                target.source_fingerprint.clone(),
             )
             .await;
             forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
@@ -1846,10 +1831,10 @@ async fn record_reload_target_failure(core: &EmulebbCore, target: &ReloadHashTar
     let metadata = core.metadata_store.clone();
     let key = target.key.clone();
     let file_size = target.file_size;
-    let source_mtime_ms = target.source_mtime_ms;
+    let source_fingerprint = target.source_fingerprint.clone();
     let reason = reason.to_string();
     match tokio::task::spawn_blocking(move || {
-        metadata.upsert_shared_source_failure(&key, file_size, source_mtime_ms, &reason)
+        metadata.upsert_shared_source_failure(&key, file_size, source_fingerprint.as_ref(), &reason)
     })
     .await
     {

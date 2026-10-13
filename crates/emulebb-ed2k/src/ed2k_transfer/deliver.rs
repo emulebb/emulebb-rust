@@ -82,13 +82,13 @@ impl Ed2kTransferRuntime {
             if !manifest.completed || manifest.final_rehash_pending {
                 return Ok(Ed2kDeliveryOutcome::NotCompleted);
             }
-            if let Some(recorded) = manifest.delivered_path.clone() {
-                let recorded = PathBuf::from(recorded);
-                if path_exists(&recorded).await {
-                    return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded));
-                }
-                // A delivered path was recorded but the file is gone (the
-                // operator moved or deleted it). Fall through and re-deliver.
+            // A recorded delivery that still exists is already complete. If it
+            // is gone, the operator moved or deleted it, so fall through and
+            // re-deliver.
+            if let Some(recorded) = manifest.delivered_path.clone()
+                && path_exists(&recorded).await
+            {
+                return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded));
             }
             (
                 manifest.display_name.clone(),
@@ -119,21 +119,21 @@ impl Ed2kTransferRuntime {
             let _guard = self.lock_manifest(file_hash).await;
             let mut manifest = self.load_manifest_unlocked(file_hash).await?;
             manifest.delivered_path = Some(final_path.clone());
-            // Record the delivered file's mtime baseline so a later
+            // Record the delivered file's native fingerprint so a later
             // shared-directory rescan that re-finds this file in a shared
             // Incoming/category dir reuses the download's already-computed
             // hashset instead of re-reading and re-hashing the whole payload
             // (HASH-2; oracle FindKnownFile, SharedFileList.cpp:2138). Only for a
             // real download (`source_path == None`); a share-in-place manifest
-            // keeps its own source mtime and is never delivered. The mtime is
+            // keeps its own source fingerprint and is never delivered. It is
             // read AFTER the file is in place, through the same `long_path` stat
             // the reload uses, so an unchanged delivered file compares equal on
-            // reload (a hard-link preserves the source mtime; a copy+rename sets
-            // it once at delivery and it is stable thereafter).
+            // reload (a hard-link preserves file identity; a copy+rename gets a
+            // fresh identity that is stable thereafter).
             if manifest.source_path.is_none() {
-                manifest.source_mtime_ms =
+                manifest.source_fingerprint =
                     Ed2kTransferRuntime::scanned_source_identity(&final_path)
-                        .and_then(|(_key, _size, mtime_ms)| mtime_ms);
+                        .and_then(|(_key, _size, fingerprint)| fingerprint);
             }
             self.store_manifest_unlocked(&manifest).await?;
         }
