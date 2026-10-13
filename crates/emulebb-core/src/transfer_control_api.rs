@@ -353,12 +353,11 @@ impl EmulebbCore {
                     manifest.delivered_path
                 }
             }
-            Err(_) => transfer.delivered_path.clone(),
+            Err(_) => transfer.delivered_path.as_deref().map(PathBuf::from),
         };
         let Some(path) = delivered_path.as_deref() else {
             return Ok(());
         };
-        let path = Path::new(path);
         let long = long_path(path);
         match tokio::fs::remove_file(&long).await {
             Ok(()) => Ok(()),

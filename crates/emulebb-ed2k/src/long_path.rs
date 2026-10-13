@@ -46,7 +46,8 @@ pub fn long_path(path: &Path) -> PathBuf {
 /// This is for API/UI display only. Filesystem access should keep using
 /// [`long_path`] at the operator content boundaries that need `MAX_PATH` bypass.
 #[must_use]
-pub fn normal_path_display(path: &str) -> String {
+pub fn normal_path_display(path: impl AsRef<Path>) -> String {
+    let path = emulebb_metadata::NativePath::from(path.as_ref()).display_path();
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }
@@ -56,7 +57,7 @@ pub fn normal_path_display(path: &str) -> String {
             return rest.to_string();
         }
     }
-    path.to_string()
+    path
 }
 
 #[cfg(windows)]

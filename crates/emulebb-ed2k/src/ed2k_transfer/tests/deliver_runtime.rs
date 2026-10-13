@@ -66,7 +66,7 @@ async fn materialize_completed_payload_delivers_by_name() {
     let manifest = runtime.manifest(&hash).await.unwrap();
     assert_eq!(
         manifest.delivered_path.as_deref(),
-        Some(delivered.to_string_lossy().as_ref())
+        Some(delivered.as_path())
     );
 
     // A second call is an idempotent no-op (already delivered, file present).

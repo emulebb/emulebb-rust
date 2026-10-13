@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
-use emulebb_metadata::MetadataImportedKnownFileEntry;
+use emulebb_metadata::{MetadataImportedKnownFileEntry, NativePath};
 
 use crate::long_path::long_path;
 
@@ -167,7 +167,7 @@ impl Ed2kTransferRuntime {
         // share. AICH/MD4 are computed straight from the original file in the
         // single read pass above.
         let mut manifest = Ed2kResumeManifest::new(&job);
-        manifest.source_path = Some(source_path.display().to_string());
+        manifest.source_path = Some(source_path.clone());
         // Record the source file's last-modified time so the incremental
         // shared-directory reload can compare it against the on-disk mtime and
         // skip re-hashing an unchanged file. A platform that cannot report mtime
@@ -218,7 +218,11 @@ impl Ed2kTransferRuntime {
             aich_root: manifest.aich_root.unwrap_or_default(),
             aich_hashset_count: manifest.aich_hashset.len(),
             transfer_dir: transfer_dir.display().to_string(),
-            source_path: manifest.source_path,
+            source_path: manifest
+                .source_path
+                .as_deref()
+                .map(NativePath::from)
+                .map(|path| path.display_path()),
         })
     }
 
@@ -243,7 +247,7 @@ impl Ed2kTransferRuntime {
         let transfer_dir = self.transfer_dir(&job.file_hash);
 
         let mut manifest = Ed2kResumeManifest::new(&job);
-        manifest.source_path = Some(source_path.display().to_string());
+        manifest.source_path = Some(source_path.clone());
         manifest.source_mtime_ms = source_mtime_ms;
         manifest.completed = true;
         manifest.transfer_row_removed = true;
@@ -282,7 +286,11 @@ impl Ed2kTransferRuntime {
             aich_root: manifest.aich_root.unwrap_or_default(),
             aich_hashset_count: manifest.aich_hashset.len(),
             transfer_dir: transfer_dir.display().to_string(),
-            source_path: manifest.source_path,
+            source_path: manifest
+                .source_path
+                .as_deref()
+                .map(NativePath::from)
+                .map(|path| path.display_path()),
         })
     }
 }

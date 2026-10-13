@@ -508,20 +508,20 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
         emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity_from_metadata(
             &new_key, &metadata,
         );
-    let Some(display_name) = new_key.file_name().and_then(|name| name.to_str()) else {
+    let Some(display_name) = emulebb_metadata::NativePath::from(new_key.as_path()).display_file_name() else {
         tracing::warn!(path = %to.display(), "renamed shared file has no valid file name");
         return;
     };
-    let content_type = crate::ed2k_file_type_search_term(display_name).unwrap_or("unknown");
+    let content_type = crate::ed2k_file_type_search_term(&display_name).unwrap_or("unknown");
     match core
         .ed2k_transfers
         .relocate_shared_source(
             &previous.hash,
-            &old_key.display().to_string(),
-            &new_key.display().to_string(),
+            &old_key,
+            &new_key,
             file_size,
             source_mtime_ms,
-            display_name,
+            &display_name,
             content_type,
         )
         .await

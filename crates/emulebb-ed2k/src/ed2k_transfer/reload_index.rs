@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::fs::Metadata;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use emulebb_metadata::MetadataImportedKnownFileEntry;
@@ -24,10 +24,10 @@ impl Ed2kTransferRuntime {
     pub fn scanned_source_identity_from_metadata(
         source_path: &Path,
         metadata: &Metadata,
-    ) -> (String, u64, Option<i64>) {
+    ) -> (PathBuf, u64, Option<i64>) {
         let normalized = crate::long_path::long_path(source_path);
         (
-            normalized.display().to_string(),
+            normalized,
             metadata.len(),
             super::ingest::source_mtime_ms(metadata),
         )
@@ -47,16 +47,14 @@ impl Ed2kTransferRuntime {
     /// file is re-hashed once and its mtime recorded.
     pub async fn share_in_place_reload_index(
         &self,
-    ) -> Result<HashMap<String, Vec<Ed2kReloadIndexEntry>>> {
+    ) -> Result<HashMap<PathBuf, Vec<Ed2kReloadIndexEntry>>> {
         let metadata = self.metadata.clone();
         let entries = tokio::task::spawn_blocking(move || metadata.share_in_place_reload_entries())
             .await
             .map_err(anyhow::Error::from)??;
         let mut index = HashMap::new();
         for entry in entries {
-            let key = crate::long_path::long_path(Path::new(&entry.source_path))
-                .display()
-                .to_string();
+            let key = crate::long_path::long_path(&entry.source_path);
             index
                 .entry(key)
                 .or_insert_with(Vec::new)
@@ -84,7 +82,7 @@ impl Ed2kTransferRuntime {
     /// (SharedFileList.cpp:2138). It is consulted for reuse ONLY: unlike the
     /// share-in-place index it never drives pruning, so a completed download
     /// whose Incoming dir is not shared is never dropped from serving.
-    pub async fn delivered_reuse_index(&self) -> Result<HashMap<String, Ed2kReloadIndexEntry>> {
+    pub async fn delivered_reuse_index(&self) -> Result<HashMap<PathBuf, Ed2kReloadIndexEntry>> {
         let metadata = self.metadata.clone();
         let entries =
             tokio::task::spawn_blocking(move || metadata.completed_delivered_reuse_entries())
@@ -92,9 +90,7 @@ impl Ed2kTransferRuntime {
                 .map_err(anyhow::Error::from)??;
         let mut index = HashMap::new();
         for entry in entries {
-            let key = crate::long_path::long_path(Path::new(&entry.delivered_path))
-                .display()
-                .to_string();
+            let key = crate::long_path::long_path(&entry.delivered_path);
             index.insert(
                 key,
                 Ed2kReloadIndexEntry {
@@ -154,9 +150,9 @@ impl Ed2kTransferRuntime {
     /// the file is unchanged and can skip re-hashing. Returns `None` when the
     /// file cannot be stat-ed (treated as changed, so it is (re)hashed).
     #[must_use]
-    pub fn scanned_source_identity(source_path: &Path) -> Option<(String, u64, Option<i64>)> {
+    pub fn scanned_source_identity(source_path: &Path) -> Option<(PathBuf, u64, Option<i64>)> {
         let normalized = crate::long_path::long_path(source_path);
         let (size, mtime_ms) = super::ingest::stat_source_identity(&normalized)?;
-        Some((normalized.display().to_string(), size, mtime_ms))
+        Some((normalized, size, mtime_ms))
     }
 }

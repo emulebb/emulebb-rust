@@ -41,7 +41,7 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     );
     assert_eq!(
         manifest.source_path.as_deref().map(canonicalize_lossy),
-        Some(canonicalize_lossy(source_path.to_string_lossy().as_ref())),
+        Some(canonicalize_lossy(&source_path)),
         "manifest must record the original on-disk source path",
     );
 
@@ -147,10 +147,10 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
 
 /// Best-effort canonicalization for path comparison (the ingest path is stored
 /// after canonicalize + long-path normalization).
-fn canonicalize_lossy(path: &str) -> String {
+fn canonicalize_lossy(path: &std::path::Path) -> String {
     std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
 
 /// Regression guard: sharing must not silently drop files whose paths carry

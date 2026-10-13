@@ -2,11 +2,13 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
     time::Duration,
 };
 
+use emulebb_metadata::NativePath;
 use emulebb_kad_proto::Ed2kHash;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::block_bitmap::PartBlockBitmap;
 use super::{Ed2kSharedRange, manifest::piece_count};
@@ -457,16 +459,16 @@ pub struct Ed2kResumeManifest {
     /// transfer is delivered; set once so finished-file delivery is idempotent
     /// across restarts (oracle: eMule moves the finished `.part` file into the
     /// Incoming/category folder by name).
-    #[serde(default)]
-    pub delivered_path: Option<String>,
+    #[serde(default, with = "optional_native_path_serde")]
+    pub delivered_path: Option<PathBuf>,
     /// Original on-disk path of a shared, already-complete file seeded IN PLACE
     /// (added via a shared directory, never downloaded). `Some` marks a
     /// share-in-place transfer: its payload is served directly from this path,
     /// never copied into the internal piece store (`transfer_dir/pieces.bin`),
     /// and never delivered to the incoming dir (delivery is download-only).
     /// `None` for a real download whose payload lives in the piece store.
-    #[serde(default)]
-    pub source_path: Option<String>,
+    #[serde(default, with = "optional_native_path_serde")]
+    pub source_path: Option<PathBuf>,
     /// Last-modified time (Unix milliseconds) captured for the incremental
     /// shared-directory reload's reuse identity. For a share-in-place transfer
     /// (`source_path` set) it is the source file's mtime at ingest; for a
@@ -480,6 +482,47 @@ pub struct Ed2kResumeManifest {
     /// and the mtime is then recorded).
     #[serde(default)]
     pub source_mtime_ms: Option<i64>,
+}
+
+mod optional_native_path_serde {
+    use super::*;
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StoredNativePath {
+        platform: String,
+        native_hex: String,
+    }
+
+    pub fn serialize<S>(path: &Option<PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        path.as_ref()
+            .map(|path| {
+                let native_path = NativePath::from(path.as_path());
+                StoredNativePath {
+                    platform: NativePath::platform().to_string(),
+                    native_hex: hex::encode(native_path.storage_bytes()),
+                }
+            })
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let stored = Option::<StoredNativePath>::deserialize(deserializer)?;
+        stored
+            .map(|stored| {
+                let native_path = hex::decode(&stored.native_hex).map_err(D::Error::custom)?;
+                NativePath::from_storage(&stored.platform, &native_path)
+                    .map(NativePath::into_path_buf)
+                    .map_err(D::Error::custom)
+            })
+            .transpose()
+    }
 }
 
 impl Ed2kResumeManifest {
@@ -552,4 +595,65 @@ impl Ed2kResumeManifest {
 
 fn default_shared_upload_priority() -> String {
     "normal".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest_with_source_path(source_path: PathBuf) -> Ed2kResumeManifest {
+        let mut manifest = Ed2kResumeManifest::new(&Ed2kTransferJob {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "native-path.bin".to_string(),
+            file_size: 1,
+            piece_size: 1,
+        });
+        manifest.source_path = Some(source_path);
+        manifest
+    }
+
+    #[test]
+    fn resume_manifest_native_path_json_round_trips() {
+        let manifest = manifest_with_source_path(PathBuf::from("shared/native-path.bin"));
+        let json = serde_json::to_string(&manifest).unwrap();
+        let decoded = serde_json::from_str::<Ed2kResumeManifest>(&json).unwrap();
+
+        assert!(json.contains("nativeHex"));
+        assert_eq!(decoded, manifest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resume_manifest_non_utf8_unix_path_json_round_trips() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let path = PathBuf::from(OsString::from_vec(b"shared/invalid-\xFF.bin".to_vec()));
+        let manifest = manifest_with_source_path(path);
+        let json = serde_json::to_string(&manifest).unwrap();
+        let decoded = serde_json::from_str::<Ed2kResumeManifest>(&json).unwrap();
+
+        assert_eq!(decoded, manifest);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resume_manifest_invalid_utf16_windows_path_json_round_trips() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+        let path = PathBuf::from(OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            0xD800,
+            b'.' as u16,
+            b'b' as u16,
+            b'i' as u16,
+            b'n' as u16,
+        ]));
+        let manifest = manifest_with_source_path(path);
+        let json = serde_json::to_string(&manifest).unwrap();
+        let decoded = serde_json::from_str::<Ed2kResumeManifest>(&json).unwrap();
+
+        assert_eq!(decoded, manifest);
+    }
 }
