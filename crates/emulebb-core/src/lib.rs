@@ -105,6 +105,7 @@ mod diag_kad_event;
 mod diag_sched;
 mod direct_download_runtime;
 mod disk_guard;
+mod download_duplicate;
 mod download_source_registry;
 mod ed2k_buddy_reask;
 mod ed2k_dead_source_list;
@@ -164,6 +165,9 @@ use core_settings::{
 };
 pub(crate) use core_state::{CoreState, KadAichSearchVotes};
 use direct_download_runtime::{parse_server_endpoint, run_ed2k_direct_downloads};
+pub use download_duplicate::{
+    DownloadConflictError, DownloadConflictEvidence, DownloadConflictKind, KnownFilePolicy,
+};
 use download_source_registry::DownloadSourceCandidate;
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_direct_download_types::{
@@ -394,6 +398,7 @@ pub struct EmulebbCore {
     metadata_store: MetadataStore,
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
+    transfer_creation_gate: Arc<Mutex<()>>,
     transfer_root: PathBuf,
     /// Profile/config directory whose volume must retain the MFC-compatible
     /// config free-space floor. Defaults to the transfer root's parent; the
@@ -596,6 +601,7 @@ impl EmulebbCore {
             metadata_store,
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
+            transfer_creation_gate: Arc::new(Mutex::new(())),
             transfer_root,
             profile_dir,
             incoming_dir,
@@ -681,10 +687,15 @@ impl EmulebbCore {
         size_bytes: u64,
         state_name: &str,
         category: Option<(u32, String)>,
+        redownload: bool,
     ) -> Result<Transfer> {
         let file_hash = hash.parse()?;
         let job = new_transfer_job(file_hash, name, size_bytes);
-        let mut manifest = self.ed2k_transfers.ensure_job(&job).await?;
+        let mut manifest = if redownload {
+            self.ed2k_transfers.replace_with_download_job(&job).await?
+        } else {
+            self.ed2k_transfers.ensure_job(&job).await?
+        };
         if manifest.transfer_row_removed {
             manifest = self
                 .ed2k_transfers

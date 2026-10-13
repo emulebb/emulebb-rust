@@ -322,6 +322,7 @@ mod tests {
         for (index, hash) in hashes.iter().enumerate() {
             let transfer = core
                 .create_transfer(TransferCreate {
+                    known_file_policy: Default::default(),
                     link: Some(format!("ed2k://|file|disk-{index}.bin|1024|{hash}|/")),
                     links: None,
                     category_id: None,

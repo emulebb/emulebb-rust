@@ -321,6 +321,7 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
 
     let transfers = download_core
         .create_transfers(TransferCreate {
+            known_file_policy: Default::default(),
             link: None,
             links: Some(vec![
                 share.ed2k_link.clone(),

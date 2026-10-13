@@ -796,6 +796,8 @@ pub struct TransferCreate {
         deserialize_with = "crate::rest_model_serde::deserialize_optional_paused_field"
     )]
     pub paused: Option<bool>,
+    #[serde(default)]
+    pub known_file_policy: crate::KnownFilePolicy,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -835,6 +837,8 @@ pub struct SearchResultDownloadCreate {
         deserialize_with = "crate::rest_model_serde::deserialize_optional_paused_field"
     )]
     pub paused: Option<bool>,
+    #[serde(default)]
+    pub known_file_policy: crate::KnownFilePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

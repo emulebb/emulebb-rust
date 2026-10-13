@@ -7,6 +7,7 @@ impl EmulebbCore {
         hash: &str,
         request: SearchResultDownloadCreate,
     ) -> Result<Option<Transfer>> {
+        let _creation_guard = self.transfer_creation_gate.lock().await;
         ensure_category_selector_is_unambiguous(
             request.category_id,
             request.category_name.as_deref(),
@@ -38,6 +39,18 @@ impl EmulebbCore {
             "search result has no usable file size"
         );
         let source_hints = search_result_source_hints(&result);
+        let request_identity = ParsedEd2kLink {
+            file_hash: result.hash.clone(),
+            name: result.name.clone(),
+            size_bytes: result.size_bytes,
+            sources: Vec::new(),
+        };
+        let preflight = self
+            .preflight_downloads(
+                std::slice::from_ref(&request_identity),
+                request.known_file_policy,
+            )
+            .await?;
         let transfer = self
             .upsert_transfer_from_parts(
                 result.hash,
@@ -45,6 +58,7 @@ impl EmulebbCore {
                 result.size_bytes,
                 transfer_create_state_name(request.paused),
                 Some(category),
+                preflight.should_redownload(&request_identity.file_hash),
             )
             .await?;
         if !aich_observations.is_empty() {
@@ -75,6 +89,7 @@ impl EmulebbCore {
     }
 
     pub async fn create_transfers(&self, request: TransferCreate) -> Result<Vec<Transfer>> {
+        let _creation_guard = self.transfer_creation_gate.lock().await;
         ensure_category_selector_is_unambiguous(
             request.category_id,
             request.category_name.as_deref(),
@@ -83,10 +98,18 @@ impl EmulebbCore {
             .resolve_transfer_category(request.category_id, request.category_name.as_deref())
             .await?;
         let state_name = transfer_create_state_name(request.paused);
+        let known_file_policy = request.known_file_policy;
         let links = transfer_create_links(request)?;
+        let parsed_links = links
+            .iter()
+            .map(|link| parse_ed2k_link(link))
+            .collect::<Result<Vec<_>>>()?;
+        let preflight = self
+            .preflight_downloads(&parsed_links, known_file_policy)
+            .await?;
         let mut transfers = Vec::with_capacity(links.len());
-        for link in links {
-            let parsed = parse_ed2k_link(&link)?;
+        for parsed in parsed_links {
+            let redownload = preflight.should_redownload(&parsed.file_hash);
             let transfer = self
                 .upsert_transfer_from_parts(
                     parsed.file_hash,
@@ -94,6 +117,7 @@ impl EmulebbCore {
                     parsed.size_bytes,
                     state_name,
                     Some(category.clone()),
+                    redownload,
                 )
                 .await?;
             for source in parsed.sources {

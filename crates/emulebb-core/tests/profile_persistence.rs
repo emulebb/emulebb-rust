@@ -146,16 +146,17 @@ async fn delete_category_resets_referencing_transfers_to_uncategorized() {
         })
         .await
         .unwrap();
-    // Shared files stay out of the transfer queue; re-adding the link restores
-    // the completed transfer row so this test has a real queued transfer to
-    // categorize (same restore path as the share lifecycle tests).
+    // Shared files stay out of the transfer queue. Deliberately re-download the
+    // same identity so this test has a real queued transfer to categorize while
+    // the independent shared source remains available.
     let restored = core
         .create_transfer(TransferCreate {
+            known_file_policy: emulebb_core::KnownFilePolicy::Redownload,
             link: Some(share.ed2k_link.clone()),
             links: None,
             category_id: None,
             category_name: None,
-            paused: None,
+            paused: Some(true),
         })
         .await
         .unwrap();
