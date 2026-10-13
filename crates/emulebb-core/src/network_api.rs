@@ -263,6 +263,7 @@ impl EmulebbCore {
         // disconnect), so the link + its keepalive pings stop promptly.
         let buddy_link_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>> =
             Arc::new(std::sync::Mutex::new(None));
+        let buddy_manager_wake = Arc::new(tokio::sync::Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
         let nat = Arc::new(
             NatManagerBuilder::new(network.nat_config.clone())
@@ -468,6 +469,7 @@ impl EmulebbCore {
                     kad_buddy: Arc::clone(&kad_buddy),
                     buddy_registry: buddy_registry.clone(),
                     buddy_link_cancel: Arc::clone(&buddy_link_cancel),
+                    buddy_manager_wake: Arc::clone(&buddy_manager_wake),
                     transfer_runtime: Arc::clone(&self.ed2k_transfers),
                     callback_sessions: callback_sessions.clone(),
                     reask_handle: Arc::clone(&self.ed2k_reask_handle),
@@ -506,6 +508,7 @@ impl EmulebbCore {
                     kad_buddy: Arc::clone(&kad_buddy),
                     buddy_registry: buddy_registry.clone(),
                     buddy_link_cancel: Arc::clone(&buddy_link_cancel),
+                    buddy_manager_wake: Arc::clone(&buddy_manager_wake),
                     network: network.clone(),
                 },
                 Arc::clone(&shutdown),

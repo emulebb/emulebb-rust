@@ -5613,6 +5613,7 @@ struct KadLocalStoreRuntime {
     /// with the buddy-management loop so it can tear the link down on a state
     /// change.
     buddy_link_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    buddy_manager_wake: Arc<tokio::sync::Notify>,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
     callback_sessions: Ed2kCallbackSessionHandle,
     /// Lazily-read handle to the UDP reask loop, so a buddy link established here
@@ -5657,6 +5658,7 @@ struct KadBuddyRuntime {
     buddy_registry: BuddySocketRegistry,
     /// Cancellation handle for the spawned outbound buddy link (LOWID-G8).
     buddy_link_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    buddy_manager_wake: Arc<tokio::sync::Notify>,
     network: Ed2kNetworkConfig,
 }
 
@@ -5675,8 +5677,16 @@ const KAD_BUDDY_LINK_TIMEOUT: Duration = Duration::from_secs(10);
 /// (`KADEMLIA_FINDBUDDY_REQ`). The `FINDBUDDY_RES` reply is recorded by the
 /// inbound dispatch. Re-search resumes automatically after a buddy is lost.
 async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>) {
+    let mut periodic_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(KAD_BUDDY_TICK_SECS),
+        Duration::from_secs(KAD_BUDDY_TICK_SECS),
+    );
+    periodic_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while !shutdown.load(Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_secs(KAD_BUDDY_TICK_SECS)).await;
+        tokio::select! {
+            _ = periodic_tick.tick() => {}
+            () = runtime.buddy_manager_wake.notified() => {}
+        }
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
@@ -6448,6 +6458,7 @@ async fn handle_kad_local_store_packet(
                 kad_buddy,
                 buddy_registry,
                 &runtime.buddy_link_cancel,
+                &runtime.buddy_manager_wake,
                 &runtime.reachability,
                 &runtime.transfer_runtime,
                 &runtime.callback_sessions,
@@ -6663,6 +6674,7 @@ async fn handle_kad_find_buddy_res(
     kad_buddy: &Arc<Mutex<KadBuddyState>>,
     buddy_registry: &BuddySocketRegistry,
     buddy_link_cancel: &Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    buddy_manager_wake: &Arc<tokio::sync::Notify>,
     reachability: &ExternalReachability,
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     callback_sessions: &Ed2kCallbackSessionHandle,
@@ -6719,6 +6731,7 @@ async fn handle_kad_find_buddy_res(
     let transfer_runtime = Arc::clone(transfer_runtime);
     let callback_sessions = callback_sessions.clone();
     let buddy_link_cancel = Arc::clone(buddy_link_cancel);
+    let buddy_manager_wake = Arc::clone(buddy_manager_wake);
     // LOWID-G8: install a fresh cancellation handle for this link so the
     // buddy-management loop can tear it down (and stop its keepalive pings) when
     // the buddy relationship is no longer warranted.
@@ -6745,13 +6758,15 @@ async fn handle_kad_find_buddy_res(
         {
             tracing::debug!("outbound Kad buddy link to {buddy_addr} failed: {error:#}");
         }
+        if complete_outgoing_buddy_link(
+            &kad_buddy,
+            &buddy_link_cancel,
+            &buddy_manager_wake,
+            &buddy,
+            &cancel,
+        )
+        .await
         {
-            let mut current_cancel = buddy_link_cancel.lock().unwrap();
-            if current_cancel.as_ref() == Some(&cancel) {
-                current_cancel.take();
-            }
-        }
-        if kad_buddy.lock().await.clear_outgoing_buddy_if(&buddy) {
             set_hello_buddy_snapshot(None);
             crate::diag_kad_event::buddy(false, buddy_addr);
         } else {
@@ -6760,6 +6775,26 @@ async fn handle_kad_find_buddy_res(
             );
         }
     });
+}
+
+async fn complete_outgoing_buddy_link(
+    kad_buddy: &Arc<Mutex<KadBuddyState>>,
+    buddy_link_cancel: &Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    buddy_manager_wake: &Arc<tokio::sync::Notify>,
+    buddy: &OutgoingBuddy,
+    cancel: &CancellationToken,
+) -> bool {
+    {
+        let mut current_cancel = buddy_link_cancel.lock().unwrap();
+        if current_cancel.as_ref() == Some(cancel) {
+            current_cancel.take();
+        }
+    }
+    let cleared = kad_buddy.lock().await.clear_outgoing_buddy_if(buddy);
+    if cleared {
+        buddy_manager_wake.notify_one();
+    }
+    cleared
 }
 
 /// Build the hello identity used by buddy links / callback completion, mirroring
