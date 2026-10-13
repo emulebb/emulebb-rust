@@ -65,6 +65,47 @@ mod kad_publish_runtime;
 mod search_servers;
 mod transfer_lifecycle;
 
+#[tokio::test(start_paused = true)]
+async fn outgoing_buddy_link_completion_wakes_one_reconnect_attempt() {
+    let now = chrono::Utc::now();
+    let buddy = OutgoingBuddy {
+        client_hash: emulebb_kad_proto::Ed2kHash::from_bytes([0x55; 16]),
+        tcp_addr: "192.0.2.20:4662".parse().unwrap(),
+        udp_addr: "192.0.2.20:4672".parse().unwrap(),
+        connect_options: 0,
+        acquired_at: now,
+    };
+    let need = BuddyNeedInput {
+        tcp_firewalled: true,
+        udp_firewalled_verified: true,
+        kad_connected: true,
+    };
+    let mut state = KadBuddyState::new();
+    state.mark_search_started(now);
+    state.set_outgoing_buddy(buddy.clone());
+    let state = Arc::new(Mutex::new(state));
+    let cancel = CancellationToken::new();
+    let current_cancel = Arc::new(std::sync::Mutex::new(Some(cancel.clone())));
+    let wake = Arc::new(tokio::sync::Notify::new());
+
+    assert!(complete_outgoing_buddy_link(&state, &current_cancel, &wake, &buddy, &cancel).await);
+    assert!(state.lock().await.should_search(need, now));
+    assert!(current_cancel.lock().unwrap().is_none());
+    assert!(take_buddy_wake(&wake).await);
+    assert!(!take_buddy_wake(&wake).await);
+
+    assert!(!complete_outgoing_buddy_link(&state, &current_cancel, &wake, &buddy, &cancel).await);
+    assert!(!take_buddy_wake(&wake).await);
+}
+
+async fn take_buddy_wake(wake: &tokio::sync::Notify) -> bool {
+    tokio::select! {
+        biased;
+        () = wake.notified() => true,
+        () = tokio::time::sleep(Duration::ZERO) => false,
+    }
+}
+
 #[test]
 fn path_is_within_classifies_incoming_vs_shared_dirs() {
     use std::path::Path;
