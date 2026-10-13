@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
-use super::Ed2kTransferRuntime;
+use super::{Ed2kResumeManifest, Ed2kTransferJob, Ed2kTransferRuntime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kActiveTransferEvidence {
@@ -138,6 +138,89 @@ impl Ed2kTransferRuntime {
                 last_completed_at_ms: entry.last_completed_at_ms,
             }),
         })
+    }
+
+    pub async fn replace_with_download_job(
+        &self,
+        job: &Ed2kTransferJob,
+    ) -> Result<Ed2kResumeManifest> {
+        let file_hash = job
+            .file_hash
+            .parse::<emulebb_kad_proto::Ed2kHash>()?
+            .to_string();
+        ensure!(
+            file_hash == job.file_hash,
+            "ED2K transfer job hash is not canonical"
+        );
+        let _guard = self.lock_manifest(&file_hash).await;
+        let existing = self.load_manifest_optional_unlocked(&file_hash).await?;
+        if let Some(existing) = existing.as_ref() {
+            ensure!(
+                existing.completed && !existing.final_rehash_pending,
+                "cannot replace active ED2K transfer {file_hash}"
+            );
+            ensure!(
+                existing.file_size == job.file_size,
+                "cannot replace ED2K identity {file_hash} with size {} instead of {}",
+                job.file_size,
+                existing.file_size
+            );
+        }
+
+        let shared_source = self.first_present_shared_source(&file_hash).await?;
+        self.invalidate_payload_handle(&file_hash);
+        let transfer_dir = self.transfer_dir(&file_hash);
+        if tokio::fs::try_exists(&transfer_dir).await? {
+            tokio::fs::remove_dir_all(&transfer_dir)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to reset ED2K transfer directory {}",
+                        transfer_dir.display()
+                    )
+                })?;
+        }
+
+        let mut replacement = Ed2kResumeManifest::new(job);
+        if let Some(existing) = existing {
+            replacement.md4_hashset_acquired = existing.md4_hashset_acquired;
+            replacement.md4_hashset = existing.md4_hashset;
+            replacement.aich_hashset_acquired = existing.aich_hashset_acquired;
+            replacement.aich_root = existing.aich_root;
+            replacement.aich_hashset = existing.aich_hashset;
+            replacement.upload_priority = existing.upload_priority;
+            replacement.auto_upload_priority = existing.auto_upload_priority;
+            replacement.comment = existing.comment;
+            replacement.rating = existing.rating;
+            replacement.category_id = existing.category_id;
+        }
+        self.store_manifest_unlocked(&replacement).await?;
+        if shared_source.is_none() {
+            self.remove_verified_catalog_entry(&file_hash).await;
+        }
+        Ok(replacement)
+    }
+
+    pub(super) async fn first_present_shared_source(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<PathBuf>> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_string();
+        let shared_files =
+            tokio::task::spawn_blocking(move || metadata.current_shared_files_by_hash(&file_hash))
+                .await
+                .context("ED2K shared-source evidence query task panicked")??;
+        for shared_file in shared_files {
+            let path = PathBuf::from(shared_file.source_path);
+            let Ok(path_metadata) = tokio::fs::metadata(&path).await else {
+                continue;
+            };
+            if path_metadata.is_file() && path_metadata.len() == shared_file.file_size {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -277,6 +360,59 @@ mod tests {
         assert_eq!(
             after_removal.previously_completed.unwrap().display_name,
             "download.bin"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_redownload_preserves_current_share_across_restart() {
+        let root = tempdir().unwrap();
+        let shared_path = root.path().join("shared-redownload.bin");
+        let payload = b"shared redownload payload";
+        fs::write(&shared_path, payload).unwrap();
+        let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let shared = runtime
+            .ingest_local_file(&shared_path, "shared-redownload.bin")
+            .await
+            .unwrap();
+        let file_hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
+
+        let replacement = runtime
+            .replace_with_download_job(&new_transfer_job(
+                file_hash,
+                "fresh-download.bin".to_string(),
+                payload.len() as u64,
+            ))
+            .await
+            .unwrap();
+        assert!(!replacement.completed);
+        assert!(replacement.source_path.is_none());
+        let evidence = runtime.download_evidence(&shared.file_hash).await.unwrap();
+        assert!(evidence.active_transfer.is_some());
+        assert_eq!(evidence.current_local_files.len(), 1);
+        assert_eq!(
+            runtime
+                .read_verified_range(&shared.file_hash.parse().unwrap(), 0, payload.len() as u64,)
+                .await
+                .unwrap()
+                .unwrap(),
+            payload
+        );
+        drop(runtime);
+
+        let restarted = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let restarted_evidence = restarted
+            .download_evidence(&shared.file_hash)
+            .await
+            .unwrap();
+        assert!(restarted_evidence.active_transfer.is_some());
+        assert_eq!(restarted_evidence.current_local_files.len(), 1);
+        assert!(
+            restarted
+                .shared_catalog()
+                .read()
+                .await
+                .iter()
+                .any(|entry| entry.file_hash == shared.file_hash && entry.verified_complete)
         );
     }
 }
