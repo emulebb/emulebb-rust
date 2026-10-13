@@ -79,7 +79,10 @@ impl TrackedClientIdentityStore {
         self.observe_at(ip, tcp_port, user_hash, Instant::now())
     }
 
-    fn observe_at(
+    /// `observe`, parameterised on the observation instant for deterministic
+    /// runtime maintenance tests.
+    #[must_use]
+    pub fn observe_at(
         &self,
         ip: Ipv4Addr,
         tcp_port: u16,
@@ -191,7 +194,7 @@ mod tests {
             TrackedClientIdentityObservation::FirstSeen
         );
         assert_eq!(
-            store.observe_at(IP_A, 4_662, HASH_B, start + TRACKED_CLIENT_IDENTITY_TTL,),
+            store.observe_at(IP_A, 4_662, HASH_B, start + TRACKED_CLIENT_IDENTITY_TTL),
             TrackedClientIdentityObservation::FirstSeen
         );
     }
