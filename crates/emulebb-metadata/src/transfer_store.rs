@@ -2,6 +2,7 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
+    download_history_store::record_completed_download,
     store::{bool_to_i64, current_platform, decode_fixed_hex, unix_ms, upsert_local_path},
     text::normalize_path_key,
     transfer_model::{
@@ -145,6 +146,7 @@ impl super::MetadataStore {
         }
 
         replace_transfer_children(&tx, known_file_id, transfer_id, manifest, now)?;
+        record_completed_download(&tx, manifest, &hash, aich_root.as_deref(), now)?;
         tx.commit()?;
         Ok(())
     }

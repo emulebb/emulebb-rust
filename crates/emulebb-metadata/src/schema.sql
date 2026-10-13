@@ -93,6 +93,19 @@ CREATE TABLE known_files (
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
 );
 
+-- Durable content identity for successful downloads. This intentionally has
+-- no foreign key to current known-file, transfer, share, or path rows: cleanup,
+-- moving, or deleting a payload must not erase the fact it completed, and a
+-- historical record must never imply that an obsolete path is still live.
+CREATE TABLE download_history (
+    ed2k_hash BLOB PRIMARY KEY CHECK(length(ed2k_hash) = 16),
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+    display_name TEXT NOT NULL,
+    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
+    first_completed_at_ms INTEGER NOT NULL CHECK(first_completed_at_ms >= 0),
+    last_completed_at_ms INTEGER NOT NULL CHECK(last_completed_at_ms >= first_completed_at_ms)
+);
+
 CREATE TABLE file_names (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
