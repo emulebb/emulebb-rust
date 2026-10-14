@@ -761,7 +761,7 @@ async fn server_obfuscation_handshake_encrypts_login_request() {
         &encode_login_request(
             hello_identity,
             HELLO_NICKNAME,
-            ServerLoginCapabilities::default(),
+            ServerSessionRole::KeywordSearch,
         ),
         false,
     )

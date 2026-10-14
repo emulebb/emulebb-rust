@@ -18,8 +18,8 @@ use super::{
     BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
     Ed2kServerFailure, Ed2kServerSearchInbox, Ed2kServerState, OP_FOUNDSOURCES,
     OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT,
-    PendingBackgroundServerSearch, ResolvedServerEntry, ServerLoginCapabilities, ServerSession,
-    ServerSessionPhase, ServerTransportMode, annotate_found_sources_server, decode_found_sources,
+    PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession, ServerSessionPhase,
+    ServerSessionRole, ServerTransportMode, annotate_found_sources_server, decode_found_sources,
     decode_search_result_page, dump_ed2k_server_loop_meta, dump_ed2k_server_meta,
     encode_login_request, encode_packet, fail_background_search_request,
     fail_pending_background_search, format_connect_options, handle_background_udp_packet,
@@ -113,14 +113,11 @@ async fn connect_server_transport_attempt(
     .await?;
     session.server_soft_files = server.entry.soft_files;
     session.server_hard_files = server.entry.hard_files;
-    session.configure_offer_files_capability(context.offer_files_capability_enabled);
-    let login_payload = encode_login_request(
-        login_identity,
-        &context.nickname,
-        ServerLoginCapabilities {
-            offer_files_v1: context.offer_files_capability_enabled,
-        },
-    );
+    let session_role = ServerSessionRole::Publishing {
+        offer_files_v1_enabled: context.offer_files_capability_enabled,
+    };
+    session.configure_offer_files_capability(session_role.advertises_offer_files_v1());
+    let login_payload = encode_login_request(login_identity, &context.nickname, session_role);
     info!(
         "connected to ED2K server {} name={} trace_id={} role=background bind_ip={} observed_external_ip={} transport={} connect_options={} supports_obf_tcp={} obf_port={} udp_flags=0x{:08X} udp_key_present={} chosen_port={}",
         server.base_endpoint(),

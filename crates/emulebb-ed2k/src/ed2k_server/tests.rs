@@ -28,7 +28,7 @@ use super::{
     SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES,
     SERVER_UDP_FLAG_TCPOBFUSCATION, SERVER_UDP_FLAG_UDPOBFUSCATION,
     SOURCE_OBFUSCATION_USER_HASH_PRESENT, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME,
-    ST_SOFTFILES, ServerLoginCapabilities, ServerSession, ServerTransportMode, ServerUdpPacket,
+    ST_SOFTFILES, ServerSession, ServerSessionRole, ServerTransportMode, ServerUdpPacket,
     TAG_SHORT_NAME_MASK, TAGTYPE_STR1, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16,
     TAGTYPE_UINT32, TAGTYPE_UINT64, biguint_to_fixed_be, decode_callback_request,
     decode_found_sources, decode_id_change_payload, decode_search_result_page,
