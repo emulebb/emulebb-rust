@@ -36,6 +36,7 @@ pub mod public_ip_probe;
 pub mod reachability;
 pub mod shared_publish_rank;
 pub mod stun;
+pub mod tracked_client_identity;
 
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;

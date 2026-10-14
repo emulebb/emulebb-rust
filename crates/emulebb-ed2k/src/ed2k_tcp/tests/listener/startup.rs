@@ -1,5 +1,119 @@
 use super::*;
 
+async fn close_hello_session(mut stream: TcpStream) {
+    stream.shutdown().await.unwrap();
+    let mut buffer = [0_u8; 512];
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if stream.read(&mut buffer).await.unwrap() == 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("HELLO session did not close after the peer write side shut down");
+}
+
+#[tokio::test]
+async fn listener_tracks_a_never_seen_endpoint_identity() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-tracked-identity-new",
+        listener_hello_identity(),
+        [0x41; 16],
+        0x1122_3344,
+    )
+    .await;
+    let server = runtime.spawn_listener_connections(1);
+    let stream = connect_peer_and_exchange_hello(runtime.peer_addr, peer_hello_identity()).await;
+    close_hello_session(stream).await;
+
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .tracked_client_identities()
+            .retained_entry_count(),
+        1
+    );
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn listener_accepts_the_same_identity_after_reconnect() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-tracked-identity-same",
+        listener_hello_identity(),
+        [0x42; 16],
+        0x2233_4455,
+    )
+    .await;
+    let peer_identity = peer_hello_identity();
+    let server = runtime.spawn_listener_connections(2);
+
+    let first = connect_peer_and_exchange_hello(runtime.peer_addr, peer_identity).await;
+    close_hello_session(first).await;
+    let second = connect_peer_and_exchange_hello(runtime.peer_addr, peer_identity).await;
+    close_hello_session(second).await;
+
+    assert!(
+        !runtime
+            .transfer_runtime
+            .is_client_banned(Some(test_bind_ip()), Some(&peer_identity.user_hash),)
+    );
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .tracked_client_identities()
+            .retained_entry_count(),
+        1
+    );
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn listener_bans_a_changed_identity_after_reconnect() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-tracked-identity-changed",
+        listener_hello_identity(),
+        [0x43; 16],
+        0x3344_5566,
+    )
+    .await;
+    let first_identity = peer_hello_identity();
+    let mut changed_identity = first_identity;
+    changed_identity.user_hash = [0x88; 16];
+    let server = runtime.spawn_listener_connections(2);
+
+    let first = connect_peer_and_exchange_hello(runtime.peer_addr, first_identity).await;
+    close_hello_session(first).await;
+    let mut changed_stream = TcpStream::connect(runtime.peer_addr).await.unwrap();
+    changed_stream
+        .write_all(&encode_hello_request(changed_identity))
+        .await
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(3), changed_stream.read(&mut byte))
+        .await
+        .expect("changed tracked identity connection did not close")
+        .unwrap();
+
+    assert_eq!(read, 0, "changed tracked identity received a HELLO reply");
+    assert!(
+        runtime
+            .transfer_runtime
+            .is_client_banned(Some(test_bind_ip()), Some(&changed_identity.user_hash),)
+    );
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn listener_disconnects_hash_banned_peer_before_hello_reply() {
     let peer_identity = peer_hello_identity();
