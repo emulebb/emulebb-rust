@@ -44,7 +44,8 @@ async fn non_utf8_shared_path_survives_restart_rename_and_delete() {
         .unwrap();
         core.stop_shared_directory_monitor();
 
-        let shares = core.reload_shared_directories().await.unwrap();
+        wait_for_detached_reload(&core).await;
+        let shares = core.shares().await;
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].name, r"native-\xFF.bin");
         let expected_source_path = NativePath::from(source_path.as_path()).display_path();
@@ -81,6 +82,17 @@ async fn non_utf8_shared_path_survives_restart_rename_and_delete() {
     assert!(core.shares().await.is_empty());
 
     let _ = fs::remove_dir_all(&runtime_dir);
+}
+
+async fn wait_for_detached_reload(core: &EmulebbCore) {
+    for _ in 0..600 {
+        let progress = core.shared_directories().await.reload_progress;
+        if progress.phase == "idle" && !progress.running && !progress.pending {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("detached shared-directory reload did not finish in time");
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {
