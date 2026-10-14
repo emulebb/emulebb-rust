@@ -225,7 +225,7 @@ fn login_request_matches_oracle_tag_shape() {
             direct_udp_callback: false,
         },
         HELLO_NICKNAME,
-        ServerLoginCapabilities::default(),
+        ServerSessionRole::KeywordSearch,
     );
     // CT_NAME login tag uses the stock WriteTagToFile form: TAGTYPE_STRING + u16 name-len.
     let nickname_tag_header = [TAGTYPE_STRING, 0x01, 0x00, CT_NAME];
@@ -297,8 +297,8 @@ fn login_request_opts_into_offer_files_v1_with_exact_uint32_tag() {
             direct_udp_callback: false,
         },
         HELLO_NICKNAME,
-        ServerLoginCapabilities {
-            offer_files_v1: true,
+        ServerSessionRole::Publishing {
+            offer_files_v1_enabled: true,
         },
     );
 
@@ -326,7 +326,7 @@ fn login_request_reuses_client_id_and_configured_nickname() {
             direct_udp_callback: false,
         },
         "Configured Nick",
-        ServerLoginCapabilities::default(),
+        ServerSessionRole::KeywordSearch,
     );
 
     assert_eq!(
@@ -354,7 +354,7 @@ fn login_request_omits_crypt_flags_when_obfuscation_is_off() {
             direct_udp_callback: false,
         },
         HELLO_NICKNAME,
-        ServerLoginCapabilities::default(),
+        ServerSessionRole::KeywordSearch,
     );
 
     assert!(payload.windows(4).any(
@@ -385,7 +385,7 @@ fn login_request_matches_stock_072a_plaintext_sample() {
                 direct_udp_callback: false,
             },
             HELLO_NICKNAME,
-            ServerLoginCapabilities::default(),
+            ServerSessionRole::KeywordSearch,
         ),
         false,
     )
@@ -418,7 +418,7 @@ fn login_request_matches_stock_072a_obfuscated_preference_sample() {
                 direct_udp_callback: false,
             },
             HELLO_NICKNAME,
-            ServerLoginCapabilities::default(),
+            ServerSessionRole::KeywordSearch,
         ),
         false,
     )

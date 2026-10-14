@@ -115,8 +115,8 @@ use source_utils::{
 };
 pub use startup::OfferFilesPublishStats;
 use startup::{
-    Ed2kUdpSourceRequestTarget, ServerLoginCapabilities, encode_login_request,
-    encode_source_request, encode_udp_search_request, encode_udp_source_request_batch,
+    Ed2kUdpSourceRequestTarget, ServerSessionRole, encode_login_request, encode_source_request,
+    encode_udp_search_request, encode_udp_source_request_batch,
     login_identity_for_server_transport, send_connected_server_startup,
     send_due_offer_files_advertisement, source_request_opcode, wait_for_offer_files_settle,
 };

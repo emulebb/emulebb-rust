@@ -65,21 +65,36 @@ pub(super) struct EncodedUdpSourceRequestBatch {
     pub included_large_files: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct ServerLoginCapabilities {
-    pub(super) offer_files_v1: bool,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ServerSessionRole {
+    Publishing { offer_files_v1_enabled: bool },
+    KeywordSearch,
+    SourceSearch,
+    Callback,
+}
+
+impl ServerSessionRole {
+    pub(super) const fn advertises_offer_files_v1(self) -> bool {
+        matches!(
+            self,
+            Self::Publishing {
+                offer_files_v1_enabled: true
+            }
+        )
+    }
 }
 
 pub(super) fn encode_login_request(
     identity: Ed2kHelloIdentity,
     nickname: &str,
-    capabilities: ServerLoginCapabilities,
+    role: ServerSessionRole,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     payload.extend_from_slice(&identity.user_hash);
     payload.extend_from_slice(&identity.client_id.to_le_bytes());
     payload.extend_from_slice(&identity.tcp_port.to_le_bytes());
-    let tag_count = 4 + u32::from(capabilities.offer_files_v1);
+    let offer_files_v1 = role.advertises_offer_files_v1();
+    let tag_count = 4 + u32::from(offer_files_v1);
     payload.extend_from_slice(&tag_count.to_le_bytes());
     push_string_tag(&mut payload, CT_NAME, nickname);
     push_u32_tag(&mut payload, CT_VERSION, EDONKEY_VERSION);
@@ -89,7 +104,7 @@ pub(super) fn encode_login_request(
         server_capabilities(identity.connect_options),
     );
     push_u32_tag(&mut payload, CT_EMULE_VERSION, emule_version_tag());
-    if capabilities.offer_files_v1 {
+    if offer_files_v1 {
         push_named_u32_tag(&mut payload, "offerfiles_v", OFFER_FILES_CAPABILITY_VERSION);
     }
     payload
