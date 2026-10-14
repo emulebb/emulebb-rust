@@ -25,7 +25,7 @@ const FILE_HASH: &str = "00112233445566778899aabbccddeeff";
 /// timer pushed far out so only the slot-open pacing decides promotions.
 fn pacing_config() -> Ed2kUploadQueueConfig {
     Ed2kUploadQueueConfig {
-        active_slots: 5,
+        base_slots: 5,
         elastic_percent: 0,
         upload_limit_bytes_per_sec: 0,
         elastic_underfill_bytes_per_sec: 0,
@@ -284,7 +284,7 @@ fn aggregate_pace_datarate_decays_over_thirty_seconds() {
 #[test]
 fn lower_ranked_newcomer_does_not_jump_higher_ranked_waiter() {
     let mut config = pacing_config();
-    config.active_slots = 3;
+    config.base_slots = 3;
     let mut state = Ed2kUploadQueueState::new(config);
     let t0 = Instant::now();
 
@@ -324,7 +324,7 @@ fn lower_ranked_newcomer_does_not_jump_higher_ranked_waiter() {
 #[test]
 fn reasking_waiter_keeps_its_rank() {
     let mut config = pacing_config();
-    config.active_slots = 1;
+    config.base_slots = 1;
     let mut state = Ed2kUploadQueueState::new(config);
     let t0 = Instant::now();
 

@@ -840,7 +840,7 @@ fn core_setting_path(key: &'static str) -> &'static str {
         "maxConnectionsPerFiveSeconds" => "core.maxConnectionsPerFiveSeconds",
         "maxSourcesPerFile" => "core.maxSourcesPerFile",
         "uploadClientDataRate" => "core.uploadClientDataRate",
-        "maxUploadSlots" => "core.maxUploadSlots",
+        "baseUploadSlots" => "core.baseUploadSlots",
         "uploadSlotElasticPercent" => "core.uploadSlotElasticPercent",
         "queueSize" => "core.queueSize",
         "autoConnect" => "core.autoConnect",

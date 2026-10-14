@@ -136,9 +136,9 @@ pub struct Ed2kRuntimeConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Ed2kUploadQueueRuntimeConfig {
-    pub active_slots: usize,
+    pub base_slots: usize,
     pub elastic_percent: u32,
     pub upload_limit_bytes_per_sec: u64,
     pub elastic_underfill_bytes_per_sec: u64,
@@ -300,7 +300,7 @@ impl Default for Ed2kRuntimeConfig {
 impl Default for Ed2kUploadQueueRuntimeConfig {
     fn default() -> Self {
         Self {
-            active_slots: 12,
+            base_slots: 12,
             elastic_percent: 80,
             upload_limit_bytes_per_sec: 6_200 * 1024,
             elastic_underfill_bytes_per_sec: 32 * 1024,
@@ -421,12 +421,25 @@ mod tests {
     #[test]
     fn default_upload_queue_policy_matches_core_owned_beta_defaults() {
         let queue = Ed2kUploadQueueRuntimeConfig::default();
-        assert_eq!(queue.active_slots, 12);
+        assert_eq!(queue.base_slots, 12);
         assert_eq!(queue.elastic_percent, 80);
         assert_eq!(queue.upload_limit_bytes_per_sec, 6_200 * 1024);
         assert_eq!(queue.elastic_underfill_bytes_per_sec, 32 * 1024);
         assert_eq!(queue.waiting_capacity, 10_000);
         assert_eq!(queue.granted_timeout_secs, 5);
         assert_eq!(queue.upload_timeout_secs, 30);
+    }
+
+    #[test]
+    fn upload_queue_config_uses_base_slot_semantics() {
+        let value = serde_json::to_value(Ed2kUploadQueueRuntimeConfig::default()).unwrap();
+        assert_eq!(value["baseSlots"], 12);
+        assert!(value.get("activeSlots").is_none());
+
+        let error = serde_json::from_value::<Ed2kUploadQueueRuntimeConfig>(serde_json::json!({
+            "activeSlots": 12
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `activeSlots`"));
     }
 }

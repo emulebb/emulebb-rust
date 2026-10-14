@@ -27,7 +27,7 @@ const STANDARD_BUDGET: u64 = 100 * 1024;
 /// drives the no-request recycle (and hence the cooldown/strike/ban path).
 fn cooldown_config() -> Ed2kUploadQueueConfig {
     Ed2kUploadQueueConfig {
-        active_slots: 1,
+        base_slots: 1,
         elastic_percent: 0,
         upload_limit_bytes_per_sec: STANDARD_BUDGET,
         elastic_underfill_bytes_per_sec: 50 * 1024,

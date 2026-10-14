@@ -2548,7 +2548,7 @@ type SettingsForm = {
   maxConnectionsPerFiveSeconds: string;
   maxSourcesPerFile: string;
   uploadClientDataRate: string;
-  maxUploadSlots: string;
+  baseUploadSlots: string;
   uploadSlotElasticPercent: string;
   queueSize: string;
   autoConnect: boolean;
@@ -2587,7 +2587,7 @@ type SettingsForm = {
   ed2kKeywordServerAttemptBudget: string;
   ed2kExactHashKeywordServerAttemptBudget: string;
   ed2kSourceServerAttemptBudget: string;
-  ed2kUploadQueueActiveSlots: string;
+  ed2kUploadQueueBaseSlots: string;
   ed2kUploadQueueElasticPercent: string;
   ed2kUploadQueueUploadLimitBytesPerSec: string;
   ed2kUploadQueueElasticUnderfillBytesPerSec: string;
@@ -2662,7 +2662,7 @@ const emptySettingsForm: SettingsForm = {
   maxConnectionsPerFiveSeconds: "",
   maxSourcesPerFile: "",
   uploadClientDataRate: "",
-  maxUploadSlots: "",
+  baseUploadSlots: "",
   uploadSlotElasticPercent: "",
   queueSize: "",
   autoConnect: false,
@@ -2701,7 +2701,7 @@ const emptySettingsForm: SettingsForm = {
   ed2kKeywordServerAttemptBudget: "",
   ed2kExactHashKeywordServerAttemptBudget: "",
   ed2kSourceServerAttemptBudget: "",
-  ed2kUploadQueueActiveSlots: "",
+  ed2kUploadQueueBaseSlots: "",
   ed2kUploadQueueElasticPercent: "",
   ed2kUploadQueueUploadLimitBytesPerSec: "",
   ed2kUploadQueueElasticUnderfillBytesPerSec: "",
@@ -2860,7 +2860,7 @@ export function SettingsView(props: {
           "core.downloadLimitKiBps",
           "core.maxSourcesPerFile",
           "core.uploadClientDataRate",
-          "core.maxUploadSlots",
+          "core.baseUploadSlots",
           "core.uploadSlotElasticPercent",
           "core.queueSize",
           "core.creditSystem",
@@ -2880,7 +2880,7 @@ export function SettingsView(props: {
               {renderField("core.downloadLimitKiBps", "downloadLimitKiBps", "Download limit KiB/s")}
               {renderField("core.maxSourcesPerFile", "maxSourcesPerFile", "Max sources / file")}
               {renderField("core.uploadClientDataRate", "uploadClientDataRate", "Upload client KiB/s")}
-              {renderField("core.maxUploadSlots", "maxUploadSlots", "Max upload slots")}
+              {renderField("core.baseUploadSlots", "baseUploadSlots", "Base upload slots")}
               {renderField("core.uploadSlotElasticPercent", "uploadSlotElasticPercent", "Upload elasticity %")}
               {renderField("core.queueSize", "queueSize", "Queue size")}
               {renderToggle("core.creditSystem", "creditSystem", "Credit system")}
@@ -3001,7 +3001,7 @@ export function SettingsView(props: {
           </SettingsControlSection>
         )}
         {sectionVisible([
-          "ed2k.uploadQueue.activeSlots",
+          "ed2k.uploadQueue.baseSlots",
           "ed2k.uploadQueue.elasticPercent",
           "ed2k.uploadQueue.uploadLimitBytesPerSec",
           "ed2k.uploadQueue.elasticUnderfillBytesPerSec",
@@ -3015,7 +3015,7 @@ export function SettingsView(props: {
         ]) && (
           <SettingsControlSection title="Uploads">
             <div class="settings-grid">
-              {renderField("ed2k.uploadQueue.activeSlots", "ed2kUploadQueueActiveSlots", "Startup upload slots")}
+              {renderField("ed2k.uploadQueue.baseSlots", "ed2kUploadQueueBaseSlots", "Startup base upload slots")}
               {renderField("ed2k.uploadQueue.elasticPercent", "ed2kUploadQueueElasticPercent", "Startup upload elasticity %")}
               {renderField("ed2k.uploadQueue.uploadLimitBytesPerSec", "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s")}
               {renderField("ed2k.uploadQueue.elasticUnderfillBytesPerSec", "ed2kUploadQueueElasticUnderfillBytesPerSec", "Elastic underfill B/s")}
@@ -3289,7 +3289,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "maxConnectionsPerFiveSeconds", "New connections / 5s", { min: 1, max: CORE_I32_MAX });
   validateUnsigned(errors, form, "maxSourcesPerFile", "Max sources / file", { min: 1, max: CORE_I32_MAX });
   validateUnsigned(errors, form, "uploadClientDataRate", "Upload client KiB/s", { min: 1, max: CORE_U32_MAX });
-  validateUnsigned(errors, form, "maxUploadSlots", "Max upload slots", { min: 1, max: 64 });
+  validateUnsigned(errors, form, "baseUploadSlots", "Base upload slots", { min: 1, max: 64 });
   validateUnsigned(errors, form, "uploadSlotElasticPercent", "Upload elasticity %", { max: 100 });
   validateUnsigned(errors, form, "queueSize", "Queue size", { min: 2000, max: 10000 });
   validateUnsigned(errors, form, "hostnameLookupCacheTtlSecs", "DNS cache TTL seconds", { min: 1 });
@@ -3319,7 +3319,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kKeywordServerAttemptBudget", "Keyword server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kExactHashKeywordServerAttemptBudget", "Exact-hash server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kSourceServerAttemptBudget", "Source server attempts", { min: 1 });
-  validateUnsigned(errors, form, "ed2kUploadQueueActiveSlots", "Startup upload slots", { min: 1, max: 64 });
+  validateUnsigned(errors, form, "ed2kUploadQueueBaseSlots", "Startup base upload slots", { min: 1, max: 64 });
   validateUnsigned(errors, form, "ed2kUploadQueueElasticPercent", "Startup upload elasticity %", { max: 100 });
   validateUnsigned(errors, form, "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s", {});
   validateUnsigned(errors, form, "ed2kUploadQueueElasticUnderfillBytesPerSec", "Elastic underfill B/s", {});
@@ -3494,7 +3494,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(core, "maxConnectionsPerFiveSeconds", parseNumber(form.maxConnectionsPerFiveSeconds), parseNumber(baseline.maxConnectionsPerFiveSeconds));
   putChanged(core, "maxSourcesPerFile", parseNumber(form.maxSourcesPerFile), parseNumber(baseline.maxSourcesPerFile));
   putChanged(core, "uploadClientDataRate", parseNumber(form.uploadClientDataRate), parseNumber(baseline.uploadClientDataRate));
-  putChanged(core, "maxUploadSlots", parseNumber(form.maxUploadSlots), parseNumber(baseline.maxUploadSlots));
+  putChanged(core, "baseUploadSlots", parseNumber(form.baseUploadSlots), parseNumber(baseline.baseUploadSlots));
   putChanged(core, "uploadSlotElasticPercent", parseNumber(form.uploadSlotElasticPercent), parseNumber(baseline.uploadSlotElasticPercent));
   putChanged(core, "queueSize", parseNumber(form.queueSize), parseNumber(baseline.queueSize));
   putChanged(core, "autoConnect", form.autoConnect, baseline.autoConnect);
@@ -3521,7 +3521,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   }
 
   const uploadQueue: Ed2kUploadQueueSettingsUpdate = {};
-  putChanged(uploadQueue, "activeSlots", parseNumber(form.ed2kUploadQueueActiveSlots), parseNumber(baseline.ed2kUploadQueueActiveSlots));
+  putChanged(uploadQueue, "baseSlots", parseNumber(form.ed2kUploadQueueBaseSlots), parseNumber(baseline.ed2kUploadQueueBaseSlots));
   putChanged(uploadQueue, "elasticPercent", parseNumber(form.ed2kUploadQueueElasticPercent), parseNumber(baseline.ed2kUploadQueueElasticPercent));
   putChanged(uploadQueue, "uploadLimitBytesPerSec", parseNumber(form.ed2kUploadQueueUploadLimitBytesPerSec), parseNumber(baseline.ed2kUploadQueueUploadLimitBytesPerSec));
   putChanged(uploadQueue, "elasticUnderfillBytesPerSec", parseNumber(form.ed2kUploadQueueElasticUnderfillBytesPerSec), parseNumber(baseline.ed2kUploadQueueElasticUnderfillBytesPerSec));
@@ -3656,7 +3656,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     maxConnectionsPerFiveSeconds: String(numberField(settings.core, "maxConnectionsPerFiveSeconds") ?? ""),
     maxSourcesPerFile: String(numberField(settings.core, "maxSourcesPerFile") ?? ""),
     uploadClientDataRate: String(numberField(settings.core, "uploadClientDataRate") ?? ""),
-    maxUploadSlots: String(numberField(settings.core, "maxUploadSlots") ?? ""),
+    baseUploadSlots: String(numberField(settings.core, "baseUploadSlots") ?? ""),
     uploadSlotElasticPercent: String(numberField(settings.core, "uploadSlotElasticPercent") ?? ""),
     queueSize: String(numberField(settings.core, "queueSize") ?? ""),
     autoConnect: boolField(settings.core, "autoConnect"),
@@ -3695,7 +3695,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kKeywordServerAttemptBudget: String(numberField(settings.ed2k, "keywordServerAttemptBudget") ?? ""),
     ed2kExactHashKeywordServerAttemptBudget: String(numberField(settings.ed2k, "exactHashKeywordServerAttemptBudget") ?? ""),
     ed2kSourceServerAttemptBudget: String(numberField(settings.ed2k, "sourceServerAttemptBudget") ?? ""),
-    ed2kUploadQueueActiveSlots: String(numberField(recordField(settings.ed2k, "uploadQueue"), "activeSlots") ?? ""),
+    ed2kUploadQueueBaseSlots: String(numberField(recordField(settings.ed2k, "uploadQueue"), "baseSlots") ?? ""),
     ed2kUploadQueueElasticPercent: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticPercent") ?? ""),
     ed2kUploadQueueUploadLimitBytesPerSec: String(numberField(recordField(settings.ed2k, "uploadQueue"), "uploadLimitBytesPerSec") ?? ""),
     ed2kUploadQueueElasticUnderfillBytesPerSec: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticUnderfillBytesPerSec") ?? ""),

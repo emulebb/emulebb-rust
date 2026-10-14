@@ -23,7 +23,7 @@ const FILE_HASH: &str = "00112233445566778899aabbccddeeff";
 /// isolate the 2 s underfill window from the grant-idle timer.
 fn recycle_window_config() -> Ed2kUploadQueueConfig {
     Ed2kUploadQueueConfig {
-        active_slots: 1,
+        base_slots: 1,
         elastic_percent: 100,
         upload_limit_bytes_per_sec: 100 * 1024,
         elastic_underfill_bytes_per_sec: 50 * 1024,
@@ -143,7 +143,7 @@ fn burst_then_stall_slot_is_slow_recycled_within_the_ten_second_window() {
     // reachable quickly, and a far-out granted-idle timer so ONLY the slow-rate
     // path (not the 0-byte no-request path) can recycle this productive slot.
     let config = Ed2kUploadQueueConfig {
-        active_slots: 1,
+        base_slots: 1,
         elastic_percent: 0,
         upload_limit_bytes_per_sec: 0,
         elastic_underfill_bytes_per_sec: 0,

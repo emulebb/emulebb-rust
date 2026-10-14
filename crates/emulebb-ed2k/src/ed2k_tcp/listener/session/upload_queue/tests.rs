@@ -21,7 +21,7 @@ fn emule_identity(peer_addr: SocketAddr) -> Ed2kUploadPeerIdentity {
 async fn use_one_slot_queue(runtime: &Ed2kTransferRuntime) {
     runtime
         .configure_upload_queue(Ed2kUploadQueueConfig {
-            active_slots: 1,
+            base_slots: 1,
             waiting_capacity: 8,
             ..Default::default()
         })

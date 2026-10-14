@@ -175,7 +175,7 @@ async fn settings_use_typed_get_and_patch_route() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false},"daemon":{"p2pBindInterface":"hide.me","ed2kUserHash":"00112233440e66778899aabbccdd6fff"},"ed2k":{"nickname":"Phase B Mule","useServerPriorities":false,"autoConnectStaticOnly":true,"minFreeConfigSpaceBytes":2147483648,"minFreeTransferSpaceBytes":6442450944,"minFreeIncomingSpaceBytes":7516192768},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"8.8.8.0/24 1.1.1.1"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
+                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"baseUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false},"daemon":{"p2pBindInterface":"hide.me","ed2kUserHash":"00112233440e66778899aabbccdd6fff"},"ed2k":{"nickname":"Phase B Mule","useServerPriorities":false,"autoConnectStaticOnly":true,"minFreeConfigSpaceBytes":2147483648,"minFreeTransferSpaceBytes":6442450944,"minFreeIncomingSpaceBytes":7516192768},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"8.8.8.0/24 1.1.1.1"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
                 ))
                 .unwrap(),
         )
@@ -186,7 +186,7 @@ async fn settings_use_typed_get_and_patch_route() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["core"]["uploadLimitKiBps"], 2048);
     assert_eq!(value["data"]["core"]["uploadClientDataRate"], 64);
-    assert_eq!(value["data"]["core"]["maxUploadSlots"], 4);
+    assert_eq!(value["data"]["core"]["baseUploadSlots"], 4);
     assert_eq!(value["data"]["core"]["queueSize"], 3000);
     assert_eq!(value["data"]["core"]["reconnect"], false);
     assert_eq!(value["data"]["core"]["networkEd2k"], false);

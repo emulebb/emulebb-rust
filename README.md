@@ -164,7 +164,7 @@ API payloads or profile automation to use their `core` equivalents:
 
 | Removed field | Replacement |
 | --- | --- |
-| `ed2k.uploadQueue.activeSlots` | `core.maxUploadSlots` |
+| `ed2k.uploadQueue.baseSlots` | `core.baseUploadSlots` |
 | `ed2k.uploadQueue.elasticPercent` | `core.uploadSlotElasticPercent` |
 | `ed2k.uploadQueue.uploadLimitBytesPerSec` | `core.uploadLimitKiBps` |
 | `ed2k.uploadQueue.elasticUnderfillBytesPerSec` | `core.uploadClientDataRate` |

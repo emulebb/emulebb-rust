@@ -3,10 +3,10 @@ use super::*;
 #[test]
 fn upload_queue_policy_uses_core_settings_for_slot_and_queue_limits() {
     let mut core_settings = default_core_settings();
-    core_settings.max_upload_slots = 11;
+    core_settings.base_upload_slots = 11;
     core_settings.queue_size = 6_000;
     let base = Ed2kUploadQueueRuntimeConfig {
-        active_slots: 3,
+        base_slots: 3,
         elastic_percent: 15,
         upload_limit_bytes_per_sec: 512 * 1024,
         elastic_underfill_bytes_per_sec: 16 * 1024,
@@ -21,7 +21,7 @@ fn upload_queue_policy_uses_core_settings_for_slot_and_queue_limits() {
 
     let policy = ed2k_upload_queue_policy_from_core_settings(Some(&base), &core_settings);
 
-    assert_eq!(policy.active_slots, 11);
+    assert_eq!(policy.base_slots, 11);
     assert_eq!(
         policy.elastic_percent,
         core_settings.upload_slot_elastic_percent
@@ -48,7 +48,7 @@ fn upload_queue_policy_uses_core_settings_for_slot_and_queue_limits() {
 fn initial_upload_queue_policy_always_derives_owned_fields_from_core_settings() {
     let core_settings = default_core_settings();
     let base = Ed2kUploadQueueRuntimeConfig {
-        active_slots: 3,
+        base_slots: 3,
         elastic_percent: 15,
         upload_limit_bytes_per_sec: 512 * 1024,
         elastic_underfill_bytes_per_sec: 16 * 1024,
@@ -63,7 +63,7 @@ fn initial_upload_queue_policy_always_derives_owned_fields_from_core_settings() 
 
     let policy = initial_ed2k_upload_queue_policy(Some(&base), false, &core_settings);
 
-    assert_eq!(policy.active_slots, core_settings.max_upload_slots as usize);
+    assert_eq!(policy.base_slots, core_settings.base_upload_slots as usize);
     assert_eq!(
         policy.elastic_percent,
         core_settings.upload_slot_elastic_percent
@@ -92,7 +92,7 @@ async fn persisted_core_settings_configure_upload_queue_on_startup() {
     let transfer_root = unique_runtime_dir("emulebb-core-upload-queue-startup-core_settings");
     let metadata = MetadataStore::open(transfer_root.join("metadata.sqlite")).unwrap();
     let mut core_settings = default_core_settings();
-    core_settings.max_upload_slots = 2;
+    core_settings.base_upload_slots = 2;
     core_settings.queue_size = 3_000;
     profile_state::persist_core_settings(&metadata, &core_settings).unwrap();
     let index = FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap();
@@ -100,7 +100,7 @@ async fn persisted_core_settings_configure_upload_queue_on_startup() {
     let core = EmulebbCore::new("test", index, transfer_root.join("transfers")).unwrap();
     let policy = core.ed2k_transfers.upload_queue_policy_snapshot().await;
 
-    assert_eq!(policy.active_slots, 2);
+    assert_eq!(policy.base_slots, 2);
     assert_eq!(policy.waiting_capacity, 3_000);
 }
 
@@ -110,7 +110,7 @@ async fn core_settings_update_reconfigures_live_upload_queue() {
 
     let core_settings = core
         .update_core_settings(CoreSettingsUpdate {
-            max_upload_slots: Some(4),
+            base_upload_slots: Some(4),
             queue_size: Some(4_000),
             ..CoreSettingsUpdate::default()
         })
@@ -118,9 +118,9 @@ async fn core_settings_update_reconfigures_live_upload_queue() {
         .unwrap();
     let policy = core.ed2k_transfers.upload_queue_policy_snapshot().await;
 
-    assert_eq!(core_settings.max_upload_slots, 4);
+    assert_eq!(core_settings.base_upload_slots, 4);
     assert_eq!(core_settings.queue_size, 4_000);
-    assert_eq!(policy.active_slots, 4);
+    assert_eq!(policy.base_slots, 4);
     assert_eq!(policy.waiting_capacity, 4_000);
 }
 
@@ -179,7 +179,7 @@ async fn default_core_settings_match_the_master() {
     assert_eq!(core_settings.max_connections, 500);
     assert_eq!(core_settings.max_connections_per_five_seconds, 50);
     assert_eq!(core_settings.max_sources_per_file, 600);
-    assert_eq!(core_settings.max_upload_slots, 12);
+    assert_eq!(core_settings.base_upload_slots, 12);
     assert_eq!(core_settings.upload_slot_elastic_percent, 80);
     assert_eq!(core_settings.queue_size, 10000);
     assert!(core_settings.auto_connect);

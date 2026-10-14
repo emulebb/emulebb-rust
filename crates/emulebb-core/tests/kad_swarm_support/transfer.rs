@@ -90,7 +90,7 @@ fn test_network_config(
         exact_hash_keyword_server_attempt_budget: 1,
         source_server_attempt_budget: 1,
         upload_queue: Ed2kUploadQueueRuntimeConfig {
-            active_slots: 2,
+            base_slots: 2,
             elastic_percent: 0,
             upload_limit_bytes_per_sec: 0,
             elastic_underfill_bytes_per_sec: 0,

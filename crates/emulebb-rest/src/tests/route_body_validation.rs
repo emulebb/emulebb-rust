@@ -320,8 +320,12 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "uploadClientDataRate must be an unsigned number in the range 1..4294967295",
         ),
         (
-            r#"{"core":{"maxUploadSlots":65}}"#,
-            "maxUploadSlots must be an unsigned number in the range 1..64",
+            r#"{"core":{"baseUploadSlots":65}}"#,
+            "baseUploadSlots must be an unsigned number in the range 1..64",
+        ),
+        (
+            r#"{"core":{"maxUploadSlots":12}}"#,
+            "unknown settings.core field: maxUploadSlots",
         ),
         (
             r#"{"core":{"uploadSlotElasticPercent":101}}"#,
@@ -500,6 +504,10 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         (
             r#"{"ed2k":{"uploadQueue":{"activeSlots":0}}}"#,
             "unknown settings.ed2k.uploadQueue field: activeSlots",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"baseSlots":12}}}"#,
+            "unknown settings.ed2k.uploadQueue field: baseSlots",
         ),
         (
             r#"{"ed2k":{"uploadQueue":{"elasticPercent":101}}}"#,
