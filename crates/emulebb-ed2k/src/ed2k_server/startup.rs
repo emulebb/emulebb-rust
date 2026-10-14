@@ -126,58 +126,23 @@ pub(super) fn login_identity_for_server_transport(
 pub(super) fn encode_offer_files_payload(
     shared_catalog: &[Ed2kSharedEntry],
     client_id: Option<u32>,
-    bind_ip: Ipv4Addr,
-    tcp_port: u16,
-    server_flags: Option<u32>,
-) -> Vec<u8> {
-    encode_offer_files_payload_at_cursor(
-        shared_catalog,
-        0,
-        None,
-        client_id,
-        bind_ip,
-        tcp_port,
-        server_flags,
-        MAX_OFFER_FILES_PER_ADVERTISEMENT,
-    )
-    .payload
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "flat protocol or runtime boundary"
-)]
-fn encode_offer_files_payload_at_cursor(
-    shared_catalog: &[Ed2kSharedEntry],
-    cursor: usize,
-    already_published: Option<&HashSet<[u8; 16]>>,
-    client_id: Option<u32>,
     _bind_ip: Ipv4Addr,
     tcp_port: u16,
     server_flags: Option<u32>,
-    max_offer_files: usize,
-) -> EncodedOfferFilesPayload {
+) -> Vec<u8> {
     // eMule offers a >4GB file only to a server advertising LARGEFILES TCP
     // support (SharedFileList.cpp:2649); otherwise the file is excluded from the
     // candidate set (and thus from pagination) entirely.
     let server_supports_large_files =
         server_flags.unwrap_or_default() & SERVER_TCP_FLAG_LARGEFILES != 0;
-    let offered_files = match already_published {
-        Some(already_published) => offered_files_catalog_at_cursor_skipping_published(
-            shared_catalog,
-            cursor,
-            already_published,
-            max_offer_files,
-            server_supports_large_files,
-        ),
-        None => offered_files_catalog_at_cursor(
-            shared_catalog,
-            cursor,
-            max_offer_files,
-            server_supports_large_files,
-        ),
-    };
-    encode_offered_files_catalog(offered_files, client_id, tcp_port, server_flags)
+    let ranked = ranked_offer_files(shared_catalog, server_supports_large_files);
+    let offered_files = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
+        0,
+        &HashSet::new(),
+        MAX_OFFER_FILES_PER_ADVERTISEMENT,
+    );
+    encode_offered_files_catalog(offered_files, client_id, tcp_port, server_flags).payload
 }
 
 fn encode_offered_files_catalog(
@@ -503,86 +468,6 @@ pub struct OfferFilesPublishStats {
     pub session_pump_active: bool,
 }
 
-fn offered_files_catalog_at_cursor(
-    shared_catalog: &[Ed2kSharedEntry],
-    cursor: usize,
-    max_offer_files: usize,
-    server_supports_large_files: bool,
-) -> OfferedFilesCatalog {
-    // max_offer_files is the per-server offer cap (server soft limit, clamped to
-    // <= MAX_OFFER_FILES_PER_ADVERTISEMENT); guard against a 0 so a misconfigured
-    // server can never zero out the batch.
-    let max_offer_files = max_offer_files.clamp(1, MAX_OFFER_FILES_PER_ADVERTISEMENT);
-    // Stock parity (SharedFileList::SendListToServer): an empty share advertises
-    // ZERO files, so do NOT fabricate a placeholder offer — a stock client sharing
-    // nothing sends a 0-file OP_OFFERFILES, and a synthetic sample would be a
-    // non-stock tell.
-    let all_offered_files = ranked_offer_files(shared_catalog, server_supports_large_files);
-    let total_entries = all_offered_files.len();
-    if total_entries <= max_offer_files {
-        return OfferedFilesCatalog {
-            entries: all_offered_files,
-            next_cursor: 0,
-            total_entries,
-        };
-    }
-
-    let start = cursor % total_entries;
-    let mut entries = Vec::with_capacity(max_offer_files);
-    for offset in 0..max_offer_files {
-        entries.push(all_offered_files[(start + offset) % total_entries].clone());
-    }
-    OfferedFilesCatalog {
-        entries,
-        next_cursor: (start + max_offer_files) % total_entries,
-        total_entries,
-    }
-}
-fn offered_files_catalog_at_cursor_skipping_published(
-    shared_catalog: &[Ed2kSharedEntry],
-    cursor: usize,
-    already_published: &HashSet<[u8; 16]>,
-    max_offer_files: usize,
-    server_supports_large_files: bool,
-) -> OfferedFilesCatalog {
-    let max_offer_files = max_offer_files.clamp(1, MAX_OFFER_FILES_PER_ADVERTISEMENT);
-    let all_offered_files = ranked_offer_files(shared_catalog, server_supports_large_files);
-    if all_offered_files.is_empty() {
-        return offered_files_catalog_at_cursor(
-            shared_catalog,
-            cursor,
-            max_offer_files,
-            server_supports_large_files,
-        );
-    }
-
-    let total_entries = all_offered_files.len();
-    let start = cursor % total_entries;
-    let mut entries = Vec::with_capacity(max_offer_files);
-    let mut scanned = 0usize;
-    while scanned < total_entries && entries.len() < max_offer_files {
-        let index = (start + scanned) % total_entries;
-        let entry = &all_offered_files[index];
-        if !already_published.contains(&entry.0) {
-            entries.push(entry.clone());
-        }
-        scanned += 1;
-    }
-    if entries.is_empty() && already_published.len() >= total_entries {
-        return offered_files_catalog_at_cursor(
-            shared_catalog,
-            0,
-            max_offer_files,
-            server_supports_large_files,
-        );
-    }
-    OfferedFilesCatalog {
-        entries,
-        next_cursor: (start + scanned) % total_entries,
-        total_entries,
-    }
-}
-
 fn ranked_offer_files_at_cursor_skipping_published(
     ranked: &[OfferedFileEntry],
     cursor: usize,
@@ -623,27 +508,6 @@ pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]
     // large-file support, so hash the unfiltered candidate set.
     ranked_offer_files(shared_catalog, true).hash(&mut hasher);
     hasher.finish()
-}
-
-fn offer_files_published_count(
-    shared_catalog: &[Ed2kSharedEntry],
-    already_published: &HashSet<[u8; 16]>,
-) -> usize {
-    shared_catalog
-        .iter()
-        .filter(|entry| shared_file_publish_enabled(&entry.upload_priority))
-        .filter_map(popular_hash_offer_file)
-        .filter(|entry| already_published.contains(&entry.0))
-        .count()
-}
-
-fn offer_files_cursor_wrapped(
-    total_entries: usize,
-    current_cursor: usize,
-    next_cursor: usize,
-) -> bool {
-    total_entries <= MAX_OFFER_FILES_PER_ADVERTISEMENT
-        || next_cursor <= (current_cursor % total_entries.max(1))
 }
 
 fn popular_hash_offer_file(hash: &Ed2kSharedEntry) -> Option<OfferedFileEntry> {
