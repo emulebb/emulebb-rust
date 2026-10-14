@@ -38,7 +38,7 @@ pub const FIELD_MAX_CONNECTIONS: &str = "maxConnections";
 pub const FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS: &str = "maxConnectionsPerFiveSeconds";
 pub const FIELD_MAX_SOURCES_PER_FILE: &str = "maxSourcesPerFile";
 pub const FIELD_UPLOAD_CLIENT_DATA_RATE: &str = "uploadClientDataRate";
-pub const FIELD_MAX_UPLOAD_SLOTS: &str = "maxUploadSlots";
+pub const FIELD_BASE_UPLOAD_SLOTS: &str = "baseUploadSlots";
 pub const FIELD_UPLOAD_SLOT_ELASTIC_PERCENT: &str = "uploadSlotElasticPercent";
 pub const FIELD_QUEUE_SIZE: &str = "queueSize";
 pub const FIELD_AUTO_CONNECT: &str = "autoConnect";
@@ -163,8 +163,8 @@ pub const CORE_SETTING_SPECS: &[CoreSettingSpec] = &[
         description: "Target per-peer upload rate used to derive elastic slot behavior.",
     }),
     number(NumberSettingSpec {
-        key: FIELD_MAX_UPLOAD_SLOTS,
-        label: "Maximum upload slots",
+        key: FIELD_BASE_UPLOAD_SLOTS,
+        label: "Base upload slots",
         group: CoreSettingGroup::Transfers,
         min: 1,
         max: 64,
@@ -172,7 +172,7 @@ pub const CORE_SETTING_SPECS: &[CoreSettingSpec] = &[
         default_value: 12,
         restart_required: false,
         advanced: false,
-        description: "Maximum active upload slots.",
+        description: "Baseline active upload slots before sustained-underfill elasticity.",
     }),
     number(NumberSettingSpec {
         key: FIELD_UPLOAD_SLOT_ELASTIC_PERCENT,
@@ -317,7 +317,7 @@ pub struct CoreSettings {
     pub max_connections_per_five_seconds: u32,
     pub max_sources_per_file: u32,
     pub upload_client_data_rate: u32,
-    pub max_upload_slots: u32,
+    pub base_upload_slots: u32,
     pub upload_slot_elastic_percent: u32,
     pub queue_size: u32,
     pub auto_connect: bool,
@@ -347,7 +347,7 @@ pub struct CoreSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_client_data_rate: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_upload_slots: Option<u32>,
+    pub base_upload_slots: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_slot_elastic_percent: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -896,7 +896,7 @@ pub fn default_core_settings() -> CoreSettings {
         max_connections_per_five_seconds: 50,
         max_sources_per_file: 600,
         upload_client_data_rate: 32,
-        max_upload_slots: 12,
+        base_upload_slots: 12,
         upload_slot_elastic_percent: 80,
         queue_size: 10000,
         auto_connect: true,
@@ -1190,7 +1190,7 @@ pub fn core_settings_update_is_empty(update: &CoreSettingsUpdate) -> bool {
         && update.max_connections_per_five_seconds.is_none()
         && update.max_sources_per_file.is_none()
         && update.upload_client_data_rate.is_none()
-        && update.max_upload_slots.is_none()
+        && update.base_upload_slots.is_none()
         && update.upload_slot_elastic_percent.is_none()
         && update.queue_size.is_none()
         && update.auto_connect.is_none()
@@ -1869,12 +1869,12 @@ pub fn apply_core_settings_update(
     if let Some(value) = update.upload_client_data_rate {
         validate_u32(FIELD_UPLOAD_CLIENT_DATA_RATE, value)?;
         core_settings.upload_client_data_rate = value;
-        core_settings.max_upload_slots =
-            derive_upload_slots(core_settings.upload_limit_ki_bps, value);
+        core_settings.base_upload_slots =
+            derive_base_upload_slots(core_settings.upload_limit_ki_bps, value);
     }
-    if let Some(value) = update.max_upload_slots {
-        validate_u32(FIELD_MAX_UPLOAD_SLOTS, value)?;
-        core_settings.max_upload_slots = value;
+    if let Some(value) = update.base_upload_slots {
+        validate_u32(FIELD_BASE_UPLOAD_SLOTS, value)?;
+        core_settings.base_upload_slots = value;
     }
     if let Some(value) = update.upload_slot_elastic_percent {
         validate_u32(FIELD_UPLOAD_SLOT_ELASTIC_PERCENT, value)?;
@@ -1920,7 +1920,7 @@ pub fn changed_core_settings_update(
             max_connections_per_five_seconds: Some(next.max_connections_per_five_seconds),
             max_sources_per_file: Some(next.max_sources_per_file),
             upload_client_data_rate: Some(next.upload_client_data_rate),
-            max_upload_slots: Some(next.max_upload_slots),
+            base_upload_slots: Some(next.base_upload_slots),
             upload_slot_elastic_percent: Some(next.upload_slot_elastic_percent),
             queue_size: Some(next.queue_size),
             auto_connect: Some(next.auto_connect),
@@ -1945,7 +1945,7 @@ pub fn changed_core_settings_update(
             next.upload_client_data_rate,
             baseline.upload_client_data_rate,
         ),
-        max_upload_slots: changed(next.max_upload_slots, baseline.max_upload_slots),
+        base_upload_slots: changed(next.base_upload_slots, baseline.base_upload_slots),
         upload_slot_elastic_percent: changed(
             next.upload_slot_elastic_percent,
             baseline.upload_slot_elastic_percent,
@@ -2004,7 +2004,7 @@ pub fn core_setting_field(field_name: &str) -> Option<&'static CoreSettingSpec> 
         .find(|field| field.key == field_name)
 }
 
-pub fn derive_upload_slots(upload_limit_ki_bps: u32, upload_client_data_rate: u32) -> u32 {
+pub fn derive_base_upload_slots(upload_limit_ki_bps: u32, upload_client_data_rate: u32) -> u32 {
     upload_limit_ki_bps
         .div_ceil(upload_client_data_rate)
         .clamp(1, 64)
@@ -2152,6 +2152,16 @@ mod tests {
 
         assert!(
             error.to_string().contains("unknown field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn core_settings_reject_retired_max_upload_slots_key() {
+        let error = core_settings_from_values([("maxUploadSlots", "12")]).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unknown field `maxUploadSlots`"),
             "unexpected error: {error}"
         );
     }

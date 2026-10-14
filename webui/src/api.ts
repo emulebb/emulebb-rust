@@ -570,7 +570,7 @@ export type CoreSettings = {
   maxConnectionsPerFiveSeconds?: number;
   maxSourcesPerFile?: number;
   uploadClientDataRate?: number;
-  maxUploadSlots?: number;
+  baseUploadSlots?: number;
   uploadSlotElasticPercent?: number;
   queueSize?: number;
   autoConnect?: boolean;
@@ -602,7 +602,7 @@ export type DaemonSettings = {
 };
 
 export type Ed2kUploadQueueSettings = {
-  activeSlots?: number;
+  baseSlots?: number;
   elasticPercent?: number;
   uploadLimitBytesPerSec?: number;
   elasticUnderfillBytesPerSec?: number;

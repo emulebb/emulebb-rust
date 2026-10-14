@@ -120,7 +120,7 @@ impl ListenerTestRuntime {
     pub(super) async fn use_one_slot_upload_queue(&self) {
         self.transfer_runtime
             .configure_upload_queue(Ed2kUploadQueueConfig {
-                active_slots: 1,
+                base_slots: 1,
                 elastic_percent: 0,
                 upload_limit_bytes_per_sec: 0,
                 elastic_underfill_bytes_per_sec: 0,

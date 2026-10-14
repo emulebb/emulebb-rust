@@ -7,7 +7,7 @@ use crate::ed2k_transfer::{Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig};
 
 pub(super) fn one_slot_config() -> Ed2kUploadQueueConfig {
     Ed2kUploadQueueConfig {
-        active_slots: 1,
+        base_slots: 1,
         elastic_percent: 0,
         upload_limit_bytes_per_sec: 0,
         elastic_underfill_bytes_per_sec: 0,

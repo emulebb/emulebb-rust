@@ -686,7 +686,7 @@ mod tests {
         );
         runtime
             .configure_upload_queue(Ed2kUploadQueueConfig {
-                active_slots: 1,
+                base_slots: 1,
                 elastic_percent: 0,
                 upload_limit_bytes_per_sec: 0,
                 ..Ed2kUploadQueueConfig::default()

@@ -17,7 +17,7 @@ pub(crate) fn ed2k_upload_queue_policy_from_core_settings(
     core_settings: &CoreSettings,
 ) -> Ed2kUploadQueueRuntimeConfig {
     let mut policy = base.cloned().unwrap_or_default();
-    policy.active_slots = core_settings.max_upload_slots as usize;
+    policy.base_slots = core_settings.base_upload_slots as usize;
     policy.elastic_percent = core_settings.upload_slot_elastic_percent.min(100);
     policy.upload_limit_bytes_per_sec = u64::from(core_settings.upload_limit_ki_bps) * 1024;
     policy.elastic_underfill_bytes_per_sec =

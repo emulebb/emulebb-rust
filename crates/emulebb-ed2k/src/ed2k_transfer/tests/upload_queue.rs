@@ -21,7 +21,7 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
         metadata,
         &Ed2kRuntimeConfig {
             upload_queue: Ed2kUploadQueueRuntimeConfig {
-                active_slots: 2,
+                base_slots: 2,
                 elastic_percent: 0,
                 upload_limit_bytes_per_sec: 0,
                 elastic_underfill_bytes_per_sec: 0,
@@ -72,7 +72,7 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
 
     runtime
         .apply_upload_queue_policy(&Ed2kUploadQueueRuntimeConfig {
-            active_slots: 2,
+            base_slots: 2,
             elastic_percent: 0,
             upload_limit_bytes_per_sec: 0,
             elastic_underfill_bytes_per_sec: 0,
@@ -98,7 +98,7 @@ async fn upload_queue_opens_elastic_slot_after_sustained_underfill() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime
         .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
-            active_slots: 1,
+            base_slots: 1,
             elastic_percent: 100,
             upload_limit_bytes_per_sec: 128 * 1024,
             elastic_underfill_bytes_per_sec: 32 * 1024,
@@ -149,7 +149,7 @@ async fn upload_queue_keeps_elastic_slot_closed_when_upload_budget_is_full() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime
         .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
-            active_slots: 1,
+            base_slots: 1,
             elastic_percent: 100,
             upload_limit_bytes_per_sec: 128 * 1024,
             elastic_underfill_bytes_per_sec: 32 * 1024,
@@ -207,7 +207,7 @@ async fn upload_queue_reserves_global_payload_budget() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime
         .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
-            active_slots: 1,
+            base_slots: 1,
             elastic_percent: 0,
             upload_limit_bytes_per_sec: 1024,
             elastic_underfill_bytes_per_sec: 0,
@@ -318,7 +318,7 @@ async fn upload_queue_capacity_snapshot_classifies_active_sessions() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime
         .apply_upload_queue_policy(&Ed2kUploadQueueRuntimeConfig {
-            active_slots: 2,
+            base_slots: 2,
             elastic_percent: 0,
             upload_limit_bytes_per_sec: 0,
             elastic_underfill_bytes_per_sec: 0,
@@ -549,7 +549,7 @@ async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime
         .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
-            active_slots: 1,
+            base_slots: 1,
             elastic_percent: 0,
             upload_limit_bytes_per_sec: 100 * 1024,
             elastic_underfill_bytes_per_sec: 50 * 1024,
@@ -987,7 +987,7 @@ async fn upload_queue_friend_slot_bypasses_soft_limit_gate() {
     // rejection itself is covered by the admission unit tests).
     runtime
         .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
-            active_slots: 1,
+            base_slots: 1,
             soft_queue_size: 0,
             ..one_slot_config()
         })

@@ -975,7 +975,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByText("Concurrent downloads")).toHaveCount(0);
   await expect(settingsPanel.getByText("Keyword server attempts")).toHaveCount(0);
   await expect(settingsPanel.getByText("Server connect timeout seconds")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Startup upload slots")).toHaveCount(0);
+  await expect(settingsPanel.getByText("Startup base upload slots")).toHaveCount(0);
   await expect(settingsPanel.getByText("Bootstrap contact floor")).toHaveCount(0);
   await expect(settingsPanel.getByText("Discovery timeout seconds")).toHaveCount(0);
   await settingsPanel.getByLabel(/Advanced/).check();
@@ -987,7 +987,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByLabel("Concurrent downloads")).toBeVisible();
   await expect(settingsPanel.getByLabel("Keyword server attempts")).toBeVisible();
   await expect(settingsPanel.getByLabel("Server connect timeout seconds")).toBeVisible();
-  await expect(settingsPanel.getByLabel("Startup upload slots")).toBeVisible();
+  await expect(settingsPanel.getByLabel("Startup base upload slots")).toBeVisible();
   await expect(settingsPanel.getByLabel("Bootstrap contact floor")).toBeVisible();
   await expect(settingsPanel.getByLabel("DNS tick seconds")).toBeVisible();
   await expect(settingsPanel.getByLabel("Discovery timeout seconds")).toBeVisible();
@@ -1042,11 +1042,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("Dead server retries").fill("1");
   await expect(settingsPanel.getByText("Dead server retries must be between 1 and 10.")).toHaveCount(0);
-  await settingsPanel.getByLabel("Startup upload slots").fill("0");
-  await expect(settingsPanel.getByText("Startup upload slots must be between 1 and 64.")).toBeVisible();
+  await settingsPanel.getByLabel("Startup base upload slots").fill("0");
+  await expect(settingsPanel.getByText("Startup base upload slots must be between 1 and 64.")).toBeVisible();
   await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("Startup upload slots").fill("3");
-  await expect(settingsPanel.getByText("Startup upload slots must be between 1 and 64.")).toHaveCount(0);
+  await settingsPanel.getByLabel("Startup base upload slots").fill("3");
+  await expect(settingsPanel.getByText("Startup base upload slots must be between 1 and 64.")).toHaveCount(0);
   await settingsPanel.getByLabel("NAT bind IP").fill("not-an-ip");
   await expect(settingsPanel.getByText("NAT bind IP must be an IPv4 address.")).toBeVisible();
   await expect(save).toBeDisabled();

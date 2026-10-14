@@ -864,7 +864,7 @@ pub(super) fn upload_queue_config_from_policy(
 ) -> Ed2kUploadQueueConfig {
     let soft_queue_size = u32::try_from(policy.waiting_capacity).unwrap_or(u32::MAX);
     Ed2kUploadQueueConfig {
-        active_slots: policy.active_slots.max(1),
+        base_slots: policy.base_slots.max(1),
         elastic_percent: policy.elastic_percent.min(100),
         upload_limit_bytes_per_sec: policy.upload_limit_bytes_per_sec,
         elastic_underfill_bytes_per_sec: policy.elastic_underfill_bytes_per_sec,
@@ -886,7 +886,7 @@ pub(super) fn upload_queue_policy_from_config(
     config: Ed2kUploadQueueConfig,
 ) -> Ed2kUploadQueueRuntimeConfig {
     Ed2kUploadQueueRuntimeConfig {
-        active_slots: config.active_slots,
+        base_slots: config.base_slots,
         elastic_percent: config.elastic_percent,
         upload_limit_bytes_per_sec: config.upload_limit_bytes_per_sec,
         elastic_underfill_bytes_per_sec: config.elastic_underfill_bytes_per_sec,

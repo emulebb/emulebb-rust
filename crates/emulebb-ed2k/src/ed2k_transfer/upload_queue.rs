@@ -90,7 +90,7 @@ const SHORT_FAILED_UPLOAD_COOLDOWN_MAX_PAYLOAD_BYTES: u64 = 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ed2kUploadQueueConfig {
     /// Baseline number of concurrently granted upload sessions.
-    pub active_slots: usize,
+    pub base_slots: usize,
     /// Percent of additional elastic slots allowed above the baseline.
     pub elastic_percent: u32,
     /// Global upload payload budget. Zero disables rate-aware elasticity.
@@ -127,7 +127,7 @@ pub(crate) struct Ed2kUploadQueueConfig {
 impl Default for Ed2kUploadQueueConfig {
     fn default() -> Self {
         Self {
-            active_slots: 12,
+            base_slots: 12,
             elastic_percent: 80,
             upload_limit_bytes_per_sec: 6_200 * 1024,
             elastic_underfill_bytes_per_sec: 32 * 1024,
@@ -2694,7 +2694,7 @@ impl Ed2kUploadQueueState {
     }
 
     fn base_slot_limit(&self) -> usize {
-        self.config.active_slots.clamp(1, MAX_UP_CLIENTS_ALLOWED)
+        self.config.base_slots.clamp(1, MAX_UP_CLIENTS_ALLOWED)
     }
 
     fn elastic_slot_allowance(&self) -> usize {
@@ -3028,7 +3028,7 @@ mod tests {
 
         for (configured_base, elastic_percent, expected_base, expected_elastic) in cases {
             let mut queue = Ed2kUploadQueueState::new(Ed2kUploadQueueConfig {
-                active_slots: configured_base,
+                base_slots: configured_base,
                 elastic_percent,
                 elastic_underfill: Duration::ZERO,
                 ..Ed2kUploadQueueConfig::default()
@@ -3049,7 +3049,7 @@ mod tests {
     #[test]
     fn default_upload_slot_policy_preserves_beta_two_behavior() {
         let config = Ed2kUploadQueueConfig::default();
-        assert_eq!(config.active_slots, 12);
+        assert_eq!(config.base_slots, 12);
         assert_eq!(config.elastic_percent, 80);
     }
 
