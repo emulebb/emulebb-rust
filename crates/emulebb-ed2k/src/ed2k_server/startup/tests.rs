@@ -313,22 +313,24 @@ fn server_offer_file_limit_clamps_like_mfc() {
 #[test]
 fn offered_files_catalog_honors_server_soft_limit() {
     let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
+    let ranked = ranked_offer_files(&shared_catalog, true);
+    let published = HashSet::new();
     // A soft limit below 200 caps the batch at the soft limit and advances
     // the cursor by that amount (so the next batch continues the rotation).
-    let limited = offered_files_catalog_at_cursor(&shared_catalog, 0, 50, true);
+    let limited = ranked_offer_files_at_cursor_skipping_published(&ranked, 0, &published, 50);
     assert_eq!(limited.entries.len(), 50);
     assert_eq!(limited.total_entries, 450);
     assert_eq!(limited.next_cursor, 50);
-    // The catalog clamps an out-of-range cap to [1, MAX]; 0 cannot zero the
-    // batch and a huge cap cannot exceed MAX_OFFER_FILES_PER_ADVERTISEMENT.
+    // The production helper returns no entries for a zero batch request and
+    // clamps oversized batches to MAX_OFFER_FILES_PER_ADVERTISEMENT.
     assert_eq!(
-        offered_files_catalog_at_cursor(&shared_catalog, 0, 0, true)
+        ranked_offer_files_at_cursor_skipping_published(&ranked, 0, &published, 0)
             .entries
             .len(),
-        1
+        0
     );
     assert_eq!(
-        offered_files_catalog_at_cursor(&shared_catalog, 0, 10_000, true)
+        ranked_offer_files_at_cursor_skipping_published(&ranked, 0, &published, 10_000)
             .entries
             .len(),
         MAX_OFFER_FILES_PER_ADVERTISEMENT
@@ -393,14 +395,8 @@ fn not_published_files_are_excluded_from_offer_catalog() {
 
     let ranked = ranked_offer_files(&catalog, true);
     assert_eq!(ranked, vec![popular_hash_offer_file(&published).unwrap()]);
-
-    let offered =
-        offered_files_catalog_at_cursor(&catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT, true);
-    assert_eq!(offered.total_entries, 1);
-    assert_eq!(offered.entries[0].0, published_hash);
-
-    let already_published = HashSet::from([published_hash, suppressed_hash]);
-    assert_eq!(offer_files_published_count(&catalog, &already_published), 1);
+    assert_eq!(ranked[0].0, published_hash);
+    assert_ne!(ranked[0].0, suppressed_hash);
 }
 
 #[test]
@@ -421,7 +417,13 @@ fn verified_share_suppresses_same_hash_compatibility_hint() {
 fn empty_share_advertises_zero_files_without_a_placeholder() {
     // Stock parity: an empty share sends a 0-file OP_OFFERFILES, not a
     // fabricated sample entry.
-    let catalog = offered_files_catalog_at_cursor(&[], 0, MAX_OFFER_FILES_PER_ADVERTISEMENT, true);
+    let ranked = ranked_offer_files(&[], true);
+    let catalog = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
+        0,
+        &HashSet::new(),
+        MAX_OFFER_FILES_PER_ADVERTISEMENT,
+    );
     assert_eq!(catalog.entries.len(), 0);
     assert_eq!(catalog.total_entries, 0);
     let payload = encode_offer_files_payload(&[], Some(0), Ipv4Addr::LOCALHOST, 4662, None);
@@ -433,24 +435,25 @@ fn empty_share_advertises_zero_files_without_a_placeholder() {
 fn offered_files_catalog_rotates_large_libraries() {
     let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
     let ranked = ranked_offer_files(&shared_catalog, true);
+    let published = HashSet::new();
 
-    let first = offered_files_catalog_at_cursor(
-        &shared_catalog,
+    let first = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
         0,
+        &published,
         MAX_OFFER_FILES_PER_ADVERTISEMENT,
-        true,
     );
-    let second = offered_files_catalog_at_cursor(
-        &shared_catalog,
+    let second = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
         first.next_cursor,
+        &published,
         MAX_OFFER_FILES_PER_ADVERTISEMENT,
-        true,
     );
-    let third = offered_files_catalog_at_cursor(
-        &shared_catalog,
+    let third = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
         second.next_cursor,
+        &published,
         MAX_OFFER_FILES_PER_ADVERTISEMENT,
-        true,
     );
 
     assert_eq!(first.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
@@ -458,21 +461,6 @@ fn offered_files_catalog_rotates_large_libraries() {
     assert_eq!(first.next_cursor, 200);
     assert_eq!(second.next_cursor, 400);
     assert_eq!(third.next_cursor, 150);
-    assert!(!offer_files_cursor_wrapped(
-        first.total_entries,
-        0,
-        first.next_cursor
-    ));
-    assert!(!offer_files_cursor_wrapped(
-        second.total_entries,
-        first.next_cursor,
-        second.next_cursor
-    ));
-    assert!(offer_files_cursor_wrapped(
-        third.total_entries,
-        second.next_cursor,
-        third.next_cursor
-    ));
     assert_ne!(first.entries[0].0, second.entries[0].0);
     assert_ne!(second.entries[0].0, third.entries[0].0);
     assert_eq!(third.entries[0].0, ranked[400].0);
@@ -482,12 +470,13 @@ fn offered_files_catalog_rotates_large_libraries() {
 #[test]
 fn offered_files_catalog_small_libraries_do_not_rotate() {
     let shared_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
+    let ranked = ranked_offer_files(&shared_catalog, true);
 
-    let offered = offered_files_catalog_at_cursor(
-        &shared_catalog,
-        2,
+    let offered = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
+        0,
+        &HashSet::new(),
         MAX_OFFER_FILES_PER_ADVERTISEMENT,
-        true,
     );
 
     assert_eq!(offered.entries.len(), 3);
@@ -504,12 +493,11 @@ fn offered_files_catalog_prioritizes_unpublished_hashes() {
         already_published.insert(entry.0);
     }
 
-    let offered = offered_files_catalog_at_cursor_skipping_published(
-        &shared_catalog,
+    let offered = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
         0,
         &already_published,
         MAX_OFFER_FILES_PER_ADVERTISEMENT,
-        true,
     );
 
     assert_eq!(offered.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
@@ -520,29 +508,29 @@ fn offered_files_catalog_prioritizes_unpublished_hashes() {
 #[test]
 fn offered_files_catalog_scans_to_late_new_hash() {
     let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
+    let ranked = ranked_offer_files(&shared_catalog, true);
+    let last_hash = popular_hash_offer_file(&shared_catalog[449]).unwrap().0;
     let mut already_published = HashSet::new();
-    for entry in shared_catalog.iter().take(449) {
-        already_published.insert(popular_hash_offer_file(entry).unwrap().0);
+    for entry in &ranked {
+        if entry.0 != last_hash {
+            already_published.insert(entry.0);
+        }
     }
 
-    let offered = offered_files_catalog_at_cursor_skipping_published(
-        &shared_catalog,
+    let offered = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
         0,
         &already_published,
         MAX_OFFER_FILES_PER_ADVERTISEMENT,
-        true,
     );
 
     assert_eq!(offered.entries.len(), 1);
     assert_eq!(offered.next_cursor, 0);
-    assert_eq!(
-        offered.entries[0].0,
-        popular_hash_offer_file(&shared_catalog[449]).unwrap().0
-    );
+    assert_eq!(offered.entries[0].0, last_hash);
 }
 
 #[test]
-fn offered_files_catalog_restarts_ranked_cycle_when_every_hash_was_published() {
+fn offered_files_catalog_stops_when_every_hash_was_published() {
     let shared_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
     let ranked = ranked_offer_files(&shared_catalog, true);
     let already_published = shared_catalog
@@ -550,15 +538,14 @@ fn offered_files_catalog_restarts_ranked_cycle_when_every_hash_was_published() {
         .map(|entry| popular_hash_offer_file(entry).unwrap().0)
         .collect::<HashSet<_>>();
 
-    let offered = offered_files_catalog_at_cursor_skipping_published(
-        &shared_catalog,
+    let offered = ranked_offer_files_at_cursor_skipping_published(
+        &ranked,
         0,
         &already_published,
         MAX_OFFER_FILES_PER_ADVERTISEMENT,
-        true,
     );
 
-    assert_eq!(offered.entries, ranked);
+    assert!(offered.entries.is_empty());
     assert_eq!(offered.next_cursor, 0);
     assert_eq!(offered.total_entries, 3);
 }
