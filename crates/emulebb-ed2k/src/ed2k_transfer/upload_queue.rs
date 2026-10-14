@@ -47,6 +47,9 @@ const DEFAULT_SESSION_TIME_LIMIT_SECS: u64 = 7_200;
 /// `ForceNewClient` returns true below this count before it reaches the 1/sec
 /// gate (UploadQueue.cpp:969-970), so the base slots fill without pacing.
 const MIN_UP_CLIENTS_ALLOWED: usize = 2;
+/// Absolute number of active upload clients permitted by the stock protocol
+/// policy (oracle `MAX_UP_CLIENTS_ALLOWED`, Opcodes.h:108).
+const MAX_UP_CLIENTS_ALLOWED: usize = 128;
 /// Minimum interval between opening successive upload slots while the aggregate
 /// upload datarate is below the busy-pipe threshold (oracle `m_nLastStartUpload
 /// + SEC2MS(1)` gate, UploadQueue.cpp:972): at most one new slot per second.
@@ -688,7 +691,7 @@ impl Ed2kUploadQueueState {
         self.reap_expired_sessions(now);
         self.refresh_elastic_underfill(now);
         let snapshot = Ed2kUploadQueueCapacitySnapshot {
-            base_slots: self.config.active_slots.max(1),
+            base_slots: self.base_slot_limit(),
             elastic_slots: self.elastic_slot_allowance(),
             active_slots: self.effective_active_slot_limit(now),
             active_sessions: self.active_session_count(),
@@ -2590,7 +2593,7 @@ impl Ed2kUploadQueueState {
     /// with no configured budget any idle base slot qualifies, so an all-cooled
     /// queue never permanently starves an open slot.
     fn open_base_slot_underfill(&self) -> bool {
-        let base_slots = self.config.active_slots.max(1);
+        let base_slots = self.base_slot_limit();
         if self.active_session_count() >= base_slots {
             return false;
         }
@@ -2690,17 +2693,21 @@ impl Ed2kUploadQueueState {
             .count()
     }
 
+    fn base_slot_limit(&self) -> usize {
+        self.config.active_slots.clamp(1, MAX_UP_CLIENTS_ALLOWED)
+    }
+
     fn elastic_slot_allowance(&self) -> usize {
         let percent = self.config.elastic_percent.min(100) as usize;
-        self.config
-            .active_slots
-            .max(1)
+        let base_slots = self.base_slot_limit();
+        base_slots
             .saturating_mul(percent)
             .div_ceil(100)
+            .min(MAX_UP_CLIENTS_ALLOWED - base_slots)
     }
 
     fn effective_active_slot_limit(&self, now: Instant) -> usize {
-        let base_slots = self.config.active_slots.max(1);
+        let base_slots = self.base_slot_limit();
         if self.elastic_underfill_ready(now) {
             base_slots.saturating_add(self.elastic_slot_allowance())
         } else {
@@ -3006,6 +3013,44 @@ mod tests {
         let config = Ed2kUploadQueueConfig::default();
         assert_eq!(config.session_transfer_percent, 90);
         assert_eq!(config.session_time_limit.as_secs(), 7_200);
+    }
+
+    #[test]
+    fn upload_slot_limits_cap_at_mfc_hard_ceiling() {
+        let cases = [
+            (0, 100, 1, 1),
+            (12, 80, 12, 10),
+            (64, 100, 64, 64),
+            (100, 100, 100, 28),
+            (128, 100, 128, 0),
+            (usize::MAX, u32::MAX, 128, 0),
+        ];
+
+        for (configured_base, elastic_percent, expected_base, expected_elastic) in cases {
+            let mut queue = Ed2kUploadQueueState::new(Ed2kUploadQueueConfig {
+                active_slots: configured_base,
+                elastic_percent,
+                elastic_underfill: Duration::ZERO,
+                ..Ed2kUploadQueueConfig::default()
+            });
+            let now = Instant::now();
+            queue.underfill_since = Some(now);
+
+            assert_eq!(queue.base_slot_limit(), expected_base);
+            assert_eq!(queue.elastic_slot_allowance(), expected_elastic);
+            assert_eq!(
+                queue.effective_active_slot_limit(now),
+                expected_base + expected_elastic
+            );
+            assert!(queue.effective_active_slot_limit(now) <= MAX_UP_CLIENTS_ALLOWED);
+        }
+    }
+
+    #[test]
+    fn default_upload_slot_policy_preserves_beta_two_behavior() {
+        let config = Ed2kUploadQueueConfig::default();
+        assert_eq!(config.active_slots, 12);
+        assert_eq!(config.elastic_percent, 80);
     }
 
     #[test]
