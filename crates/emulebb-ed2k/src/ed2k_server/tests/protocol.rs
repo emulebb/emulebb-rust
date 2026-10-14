@@ -313,6 +313,61 @@ fn login_request_opts_into_offer_files_v1_with_exact_uint32_tag() {
 }
 
 #[test]
+fn login_request_capability_tags_are_owned_by_session_role() {
+    let cases = [
+        (
+            "publishing-enabled",
+            ServerSessionRole::Publishing {
+                offer_files_v1_enabled: true,
+            },
+            5,
+            true,
+        ),
+        (
+            "publishing-disabled",
+            ServerSessionRole::Publishing {
+                offer_files_v1_enabled: false,
+            },
+            4,
+            false,
+        ),
+        ("keyword", ServerSessionRole::KeywordSearch, 4, false),
+        ("source", ServerSessionRole::SourceSearch, 4, false),
+        ("callback", ServerSessionRole::Callback, 4, false),
+    ];
+
+    for (label, role, expected_tag_count, expected_offer_files_v1) in cases {
+        let payload = encode_login_request(
+            Ed2kHelloIdentity {
+                user_hash: [0x11; 16],
+                client_id: 0,
+                tcp_port: 41001,
+                udp_port: 41000,
+                server_ip: 0,
+                server_port: 0,
+                connect_options: emule_connect_options(true),
+                direct_udp_callback: false,
+            },
+            HELLO_NICKNAME,
+            role,
+        );
+
+        assert_eq!(
+            u32::from_le_bytes(payload[22..26].try_into().unwrap()),
+            expected_tag_count,
+            "{label} login tag count"
+        );
+        assert_eq!(
+            payload
+                .windows("offerfiles_v".len())
+                .any(|window| window == b"offerfiles_v"),
+            expected_offer_files_v1,
+            "{label} offerfiles_v advertisement"
+        );
+    }
+}
+
+#[test]
 fn login_request_reuses_client_id_and_configured_nickname() {
     let payload = encode_login_request(
         Ed2kHelloIdentity {
