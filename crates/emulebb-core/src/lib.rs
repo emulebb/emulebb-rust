@@ -26,14 +26,14 @@ use emulebb_ed2k::{
     config::Ed2kRuntimeConfig,
     ed2k_server::{
         Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundSearchInterrupted, Ed2kFoundSource,
-        Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
-        Ed2kUdpCallbackRequestOptions, Ed2kUdpKeywordSearchOptions,
-        Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats, SearchCriteria,
-        ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
-        publish_shared_catalog_via_background_session, request_callback_via_background_session,
-        request_callback_via_udp_server, run_ed2k_server_loop, search_keyword_udp_servers,
-        search_keyword_via_background_session, search_source_batch_via_background_session,
-        search_source_udp_server_batches,
+        Ed2kServerConnectMode, Ed2kServerConnectPlan, Ed2kServerLoopOptions,
+        Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpCallbackRequestOptions,
+        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
+        SearchCriteria, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
+        parse_server_met, publish_shared_catalog_via_background_session,
+        request_callback_via_background_session, request_callback_via_udp_server,
+        run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
+        search_source_batch_via_background_session, search_source_udp_server_batches,
     },
     ed2k_tcp::{
         Ed2kCallbackSessionHandle, Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile,
@@ -329,7 +329,7 @@ struct Ed2kRuntime {
     nat: Arc<NatManager>,
     shutdown: Arc<AtomicBool>,
     server_reconnect_signal: Arc<tokio::sync::Notify>,
-    target_server_endpoint: Arc<RwLock<Option<String>>>,
+    server_connect_plan: tokio::sync::watch::Sender<Ed2kServerConnectPlan>,
     /// Trigger to run a Kad UDP firewall self-check round on demand. `None` when
     /// the firewall check is disabled in config.
     kad_firewall_recheck: Option<Arc<tokio::sync::Notify>>,
@@ -968,7 +968,7 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(Ed2kServerSearchOutcome::Unavailable);
         };
-        let config = self.effective_ed2k_config(&network.ed2k, None).await?;
+        let config = self.effective_ed2k_config(&network.ed2k).await?;
         if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             return Ok(Ed2kServerSearchOutcome::Unavailable);
         }
@@ -1149,7 +1149,7 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(Some("queued"));
         };
-        let config = self.effective_ed2k_config(&network.ed2k, None).await?;
+        let config = self.effective_ed2k_config(&network.ed2k).await?;
         if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             return Ok(Some("queued"));
         }
@@ -2593,7 +2593,7 @@ impl EmulebbCore {
         allow_server_source_refresh: bool,
     ) -> Result<Vec<Ed2kFoundSource>> {
         let cancel = CancellationToken::new();
-        let config = self.effective_ed2k_config(&network.ed2k, None).await?;
+        let config = self.effective_ed2k_config(&network.ed2k).await?;
         let mut sources = Vec::new();
         let (preferred_endpoint, background_search) =
             if let Some(handle) = self.connected_ed2k_search_handle().await {

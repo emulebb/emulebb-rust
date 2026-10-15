@@ -20,12 +20,12 @@ use super::{
     OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT,
     PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession, ServerSessionPhase,
     ServerSessionRole, ServerTransportMode, annotate_found_sources_server, decode_found_sources,
-    decode_search_result_page, dump_ed2k_server_loop_meta, dump_ed2k_server_meta,
-    encode_login_request, encode_packet, fail_background_search_request,
-    fail_pending_background_search, format_connect_options, handle_background_udp_packet,
-    handle_server_packet, log_search_result_page, login_identity_for_server_transport,
-    run_server_transport_attempts, send_due_offer_files_advertisement, server_transport_attempts,
-    server_udp_endpoint, start_background_server_search, validate_found_sources,
+    decode_search_result_page, dump_ed2k_server_loop_meta, encode_login_request, encode_packet,
+    fail_background_search_request, fail_pending_background_search, format_connect_options,
+    handle_background_udp_packet, handle_server_packet, log_search_result_page,
+    login_identity_for_server_transport, run_server_transport_attempts,
+    send_due_offer_files_advertisement, server_transport_attempts, server_udp_endpoint,
+    start_background_server_search, validate_found_sources,
 };
 
 /// Wakeup cadence used to drive the periodic UDP server-status ping when the
@@ -39,7 +39,6 @@ const PENDING_LOGIN_SHUTDOWN_POLL_INTERVAL: std::time::Duration =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServerSessionExit {
     ContinueOrder,
-    RestartPreferredOrder,
     IntentionalShutdown,
 }
 
@@ -321,32 +320,6 @@ pub(super) async fn run_one_server_session(
                 );
                 clear_server_connection_state(&context.state).await;
                 return Ok(ServerSessionExit::ContinueOrder);
-            }
-            _ = context.reconnect_signal.notified() => {
-                // Drop the session and reconnect now: used both when advertised
-                // ports change and when REST/UI requests a different server.
-                dump_ed2k_server_meta(
-                    &session,
-                    "server session drop reason=reconnect_signal",
-                );
-                fail_background_search_request(
-                    &mut queued_background_search,
-                    &BackgroundSearchFailure::interrupted(
-                        "ED2K background session reconnecting before search dispatch",
-                    ),
-                );
-                fail_pending_background_search(
-                    &mut pending_background_search,
-                    &BackgroundSearchFailure::interrupted(
-                        "ED2K background session reconnecting before search completion",
-                    ),
-                );
-                info!(
-                    "re-login requested for ED2K server {}; dropping session to reconnect",
-                    server.base_endpoint(),
-                );
-                clear_server_connection_state(&context.state).await;
-                return Ok(ServerSessionExit::RestartPreferredOrder);
             }
             _ = async {
                 if let Some(cancel) = queued_background_search

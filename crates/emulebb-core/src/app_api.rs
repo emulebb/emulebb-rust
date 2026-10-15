@@ -124,6 +124,7 @@ impl EmulebbCore {
         // when off, upload scoring uses the neutral 1.0 credit ratio for everyone.
         self.ed2k_transfers
             .set_credit_system_enabled(core_settings.credit_system);
+        self.refresh_ed2k_server_connect_plan().await?;
         Ok(core_settings)
     }
 

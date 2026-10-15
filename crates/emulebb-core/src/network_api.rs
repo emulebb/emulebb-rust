@@ -189,53 +189,48 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.clone() else {
             anyhow::bail!("ED2K network is not configured");
         };
-        let config = self.effective_ed2k_config(&network.ed2k, endpoint).await?;
+        if let Some(endpoint) = endpoint {
+            let _ = parse_server_endpoint(endpoint)?;
+        }
+        let config = self.effective_ed2k_config(&network.ed2k).await?;
         if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             anyhow::bail!("ED2K connect requires at least one configured server");
         }
+        let connect_mode = match endpoint {
+            Some(endpoint) => Ed2kServerConnectMode::Directed(endpoint.to_string()),
+            None if automatic_connection => Ed2kServerConnectMode::Automatic,
+            None => Ed2kServerConnectMode::Manual,
+        };
+        let next_connect_plan = Ed2kServerConnectPlan::new(config.clone(), connect_mode);
 
         let mut runtime_guard = self.ed2k_runtime.lock().await;
         if let Some(runtime) = runtime_guard.as_ref() {
             runtime.server_enabled.store(true, Ordering::SeqCst);
-            let mut reconnect_needed;
-            if let Some(endpoint) = endpoint {
+            let same_live_endpoint = if let Some(endpoint) = endpoint {
                 let requested_endpoint = endpoint.parse::<SocketAddr>().ok();
-                let same_live_endpoint = {
+                {
                     let server_state = runtime.server_state.read().await;
                     requested_endpoint.is_some_and(|requested| {
                         server_state.endpoint == Some(requested)
                             && (server_state.connected || server_state.connecting)
                     })
-                };
-                *runtime.target_server_endpoint.write().await = Some(endpoint.to_string());
-                // WHY: an explicit REST/UI server connect must interrupt the
-                // current background session and make the loop try that endpoint
-                // next, matching MFC's directed ConnectToServer behavior. Asking
-                // for the already-live endpoint is a status-confirming no-op; do
-                // not drop a healthy persistent server session just because a
-                // controller re-sent the same connect command.
-                reconnect_needed = !same_live_endpoint;
+                }
             } else {
-                // A global Connect returns the loop to automatic selection. This
-                // is also the escape hatch when a directed server is full or
-                // disappears after accepting the TCP connection.
-                reconnect_needed = runtime
-                    .target_server_endpoint
-                    .write()
-                    .await
-                    .take()
-                    .is_some();
-            }
-            let server_state = runtime.server_state.read().await;
-            if !server_state.connected && !server_state.connecting {
-                // WHY: REST connect must behave like eMule's explicit connect button.
-                // A disconnected background session can otherwise sit in its normal
-                // reconnect backoff while the controller observes a no-op response.
-                reconnect_needed = true;
-            }
-            drop(server_state);
-            if reconnect_needed {
-                runtime.server_reconnect_signal.notify_one();
+                false
+            };
+            if same_live_endpoint {
+                // WHY: a repeated directed connect to the already-live endpoint
+                // is a status-confirming no-op, but still refreshes directory and
+                // policy data without canceling the healthy session.
+                let current = runtime.server_connect_plan.borrow().clone();
+                if current != next_connect_plan {
+                    runtime.server_connect_plan.send_replace(next_connect_plan);
+                }
+            } else {
+                // A watch publication is both the complete selection generation
+                // and the scheduler wakeup. Pending attempts from the previous
+                // generation are canceled before the new mode can select a winner.
+                runtime.server_connect_plan.send_replace(next_connect_plan);
             }
             drop(runtime_guard);
             let status = self.ed2k_status().await;
@@ -400,7 +395,8 @@ impl EmulebbCore {
         // in with the new HighID callback port instead of waiting for a reconnect.
         let server_reconnect_signal = Arc::new(tokio::sync::Notify::new());
         let server_enabled = Arc::new(AtomicBool::new(true));
-        let target_server_endpoint = Arc::new(RwLock::new(endpoint.map(str::to_string)));
+        let (server_connect_plan, server_connect_plan_rx) =
+            tokio::sync::watch::channel(next_connect_plan);
         // Keep the advertised external eD2k TCP + UDP ports in sync with the NAT
         // mappings so peers/servers can reach us (incoming TCP + HighID callback)
         // and locate us for UDP source-reask by (ip, udp_port) even when the
@@ -557,8 +553,7 @@ impl EmulebbCore {
         tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
             bind_ip: network.bind_ip,
             nat: Arc::clone(&nat),
-            config,
-            automatic_connection,
+            server_connect_plan: server_connect_plan_rx,
             hello_identity,
             shared_catalog: self.ed2k_transfers.shared_catalog(),
             state: Arc::clone(&server_state),
@@ -568,7 +563,6 @@ impl EmulebbCore {
             server_enabled: Arc::clone(&server_enabled),
             public_ip: ed2k_public_ip.clone(),
             reconnect_signal: Arc::clone(&server_reconnect_signal),
-            target_server_endpoint: Arc::clone(&target_server_endpoint),
             server_list_events: Some(server_list_events_tx),
             callback_sessions: callback_sessions.clone(),
         })));
@@ -705,7 +699,7 @@ impl EmulebbCore {
             nat,
             shutdown,
             server_reconnect_signal,
-            target_server_endpoint,
+            server_connect_plan,
             kad_firewall_recheck,
             tasks,
             download_tasks: Arc::clone(&self.ed2k_download_tasks),
