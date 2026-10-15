@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
 
 concurrency:
@@ -21,8 +22,72 @@ env:
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
 jobs:
+  single-active-pr:
+    name: Single active PR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Enforce one human pull request per author
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const pullRequest = context.payload.pull_request;
+            if (pullRequest.user.type === "Bot") {
+              core.info(`Bot-authored pull request #${pullRequest.number} is exempt.`);
+              return;
+            }
+
+            const exceptionLabel = "parallel-approved";
+            const hasException = (candidate) =>
+              candidate.labels.some((label) => label.name === exceptionLabel);
+            const openPullRequests = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              base: pullRequest.base.ref,
+              per_page: 100,
+            });
+            const parallelPullRequests = openPullRequests.filter(
+              (candidate) =>
+                candidate.number !== pullRequest.number &&
+                candidate.user.login === pullRequest.user.login &&
+                candidate.user.type !== "Bot",
+            );
+
+            if (parallelPullRequests.length === 0) {
+              core.info(`Pull request #${pullRequest.number} is the author's only open pull request.`);
+              return;
+            }
+
+            const unapprovedPullRequests = [pullRequest, ...parallelPullRequests].filter(
+              (candidate) => !hasException(candidate),
+            );
+            if (unapprovedPullRequests.length === 0) {
+              core.notice(
+                `Parallel work is approved on every open pull request by ${pullRequest.user.login}.`,
+              );
+              return;
+            }
+
+            const parallelSummary = parallelPullRequests
+              .map((candidate) => `#${candidate.number} (${candidate.html_url})`)
+              .join(", ");
+            core.setFailed(
+              `@${pullRequest.user.login} already has open pull request(s): ${parallelSummary}. ` +
+                `Close or merge them before continuing, or apply '${exceptionLabel}' to every ` +
+                "affected pull request after recording the maintainer-approved reason on each one.",
+            );
+
+      - name: Skip pull request policy outside pull requests
+        if: ${{ github.event_name != 'pull_request' }}
+        run: echo "The single-active-PR policy applies only to pull requests."
+
   workflow-lint:
     name: GitHub Actions workflow lint
+    needs: single-active-pr
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -40,6 +105,7 @@ jobs:
 
   build-test:
     name: build+test (${{ matrix.os }})
+    needs: single-active-pr
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -169,6 +235,7 @@ jobs:
 
   quality:
     name: policy + format + clippy
+    needs: single-active-pr
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -222,6 +289,7 @@ jobs:
 
   supply-chain:
     name: cargo-deny (advisories, licenses, sources)
+    needs: single-active-pr
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -236,13 +304,14 @@ jobs:
   required-ci:
     name: Required CI
     if: ${{ always() }}
-    needs: [workflow-lint, build-test, rest-openapi, quality, supply-chain]
+    needs: [single-active-pr, workflow-lint, build-test, rest-openapi, quality, supply-chain]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every CI job
         shell: bash
         env:
+          SINGLE_ACTIVE_PR_RESULT: ${{ needs.single-active-pr.result }}
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
           BUILD_TEST_RESULT: ${{ needs.build-test.result }}
           REST_OPENAPI_RESULT: ${{ needs.rest-openapi.result }}
@@ -251,6 +320,7 @@ jobs:
         run: |
           set -euo pipefail
           for result in \
+            "$SINGLE_ACTIVE_PR_RESULT" \
             "$WORKFLOW_LINT_RESULT" \
             "$BUILD_TEST_RESULT" \
             "$REST_OPENAPI_RESULT" \
