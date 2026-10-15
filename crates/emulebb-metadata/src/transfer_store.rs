@@ -369,6 +369,13 @@ impl super::MetadataStore {
         self.transfer_manifests_filtered("")
     }
 
+    /// Persisted transfer-list rows only. Completed shared catalog entries whose
+    /// transfer row was removed remain available to upload/sharing code but do
+    /// not belong in the operator-facing transfer list.
+    pub fn active_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
+        self.transfer_manifests_filtered("WHERE transfers.removed_at_ms IS NULL")
+    }
+
     /// Persisted INCOMPLETE download manifests only (`known_files.completed = 0`) —
     /// the startup-resume set. Orders of magnitude smaller than the full (mostly
     /// completed) library, so this can be loaded on startup without hauling every

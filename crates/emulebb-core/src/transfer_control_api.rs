@@ -384,6 +384,7 @@ impl EmulebbCore {
     }
 
     pub async fn clear_completed_transfer_rows(&self) -> Result<()> {
+        self.hydrate_persisted_transfer_rows().await?;
         let hashes = {
             let state = self.state.lock().await;
             state

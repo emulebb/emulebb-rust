@@ -1,6 +1,49 @@
 use super::*;
 
 impl EmulebbCore {
+    /// Populate the in-memory transfer view from persisted, non-removed rows.
+    ///
+    /// This is deliberately separate from the completed shared catalog: a
+    /// profile may seed 100k files while exposing only a small transfer list.
+    /// The barrier is shared by startup, list, and bulk-clear so endpoint call
+    /// order cannot decide which persisted transfers are visible.
+    pub async fn hydrate_persisted_transfer_rows(&self) -> Result<usize> {
+        if self.persisted_transfers_hydrated.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        let _hydration_guard = self.persisted_transfer_hydration_gate.lock().await;
+        if self.persisted_transfers_hydrated.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+
+        let manifests = self.ed2k_transfers.active_manifests().await?;
+        let categories = self.state.lock().await.categories.clone();
+        let mut hydrated = Vec::with_capacity(manifests.len());
+        for manifest in manifests {
+            let mut transfer = self.transfer_from_manifest(
+                &manifest,
+                crate::views::manifest_default_state_name(&manifest),
+            );
+            apply_persisted_transfer_category(&mut transfer, &manifest, &categories);
+            hydrated.push(transfer);
+        }
+
+        let mut inserted = 0usize;
+        let mut state = self.state.lock().await;
+        for transfer in hydrated {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                state.transfers.entry(transfer.hash.clone())
+            {
+                entry.insert(transfer);
+                inserted = inserted.saturating_add(1);
+            }
+        }
+        drop(state);
+        self.persisted_transfers_hydrated
+            .store(true, Ordering::Release);
+        Ok(inserted)
+    }
+
     pub(crate) fn transfer_from_manifest(
         &self,
         manifest: &Ed2kResumeManifest,
@@ -129,10 +172,9 @@ impl EmulebbCore {
     /// partial download is abandoned across restarts (evidence: 39 multi-GB partials
     /// stranded on a single restart). Returns the number resumed.
     ///
-    /// Skips: completed transfers (delivered/shared, not downloads), user
-    /// paused/stopped transfers (`control_state`), share-in-place shared files
-    /// (`source_path` set — served from their original path, not downloaded), and
-    /// any transfer already present in memory (a REST resume racing startup).
+    /// Persisted transfer rows are hydrated independently before this queueing
+    /// pass. This method skips completed transfers, user paused/stopped transfers
+    /// (`control_state`), and share-in-place shared files (`source_path` set).
     pub async fn resume_persisted_downloads(&self) -> usize {
         // Load ONLY the incomplete rows, off the async runtime (spawn_blocking) — see
         // `incomplete_manifests`. Loading the full library inline (`manifests`) blocks
@@ -168,16 +210,18 @@ impl EmulebbCore {
                 &manifest,
                 crate::views::manifest_default_state_name(&manifest),
             );
-            {
+            let transfer = {
                 let mut state = self.state.lock().await;
-                if state.transfers.contains_key(&transfer.hash) {
-                    continue;
+                if let Some(existing) = state.transfers.get(&transfer.hash) {
+                    existing.clone()
+                } else {
+                    apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+                    state
+                        .transfers
+                        .insert(transfer.hash.clone(), transfer.clone());
+                    transfer
                 }
-                apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
-                state
-                    .transfers
-                    .insert(transfer.hash.clone(), transfer.clone());
-            }
+            };
             self.queue_ed2k_download_attempt(transfer);
             resumed = resumed.saturating_add(1);
             tokio::time::sleep(Duration::from_millis(RESUME_DOWNLOADS_STAGGER_MS)).await;
