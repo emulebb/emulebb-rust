@@ -781,6 +781,90 @@ async fn completed_transfer_list_and_clear_are_persisted_across_restart() {
 }
 
 #[tokio::test]
+async fn startup_reconciliation_redelivers_replaced_completed_output() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-startup-delivery-reconcile");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let incoming_dir = runtime_dir.join("incoming");
+    let payload = b"startup delivery reconciliation payload".repeat(32);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
+    let recorded_path = incoming_dir.join("Reconcile.Completed.bin");
+    {
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap()
+        .with_incoming_dir(incoming_dir.clone());
+        core.create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
+            link: Some(format!(
+                "ed2k://|file|Reconcile.Completed.bin|{}|{}|/",
+                payload.len(),
+                file_hash
+            )),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+        core.ed2k_transfers
+            .store_md4_hashset(&file_hash, Vec::new())
+            .await
+            .unwrap();
+        core.ed2k_transfers
+            .store_piece_data(&file_hash, 0, &payload)
+            .await
+            .unwrap();
+        core.deliver_completed_transfer(&file_hash).await;
+        assert_eq!(std::fs::read(&recorded_path).unwrap(), payload);
+    }
+
+    std::fs::remove_file(&recorded_path).unwrap();
+    let unrelated_replacement = vec![0x5A; payload.len()];
+    std::fs::write(&recorded_path, &unrelated_replacement).unwrap();
+
+    let reloaded = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap()
+    .with_incoming_dir(incoming_dir.clone());
+    reloaded.hydrate_persisted_transfer_rows().await.unwrap();
+    assert_eq!(
+        reloaded
+            .reconcile_persisted_completed_deliveries()
+            .await
+            .unwrap(),
+        1
+    );
+
+    let redelivered_path = incoming_dir.join("Reconcile.Completed (1).bin");
+    assert_eq!(
+        std::fs::read(&recorded_path).unwrap(),
+        unrelated_replacement
+    );
+    assert_eq!(std::fs::read(&redelivered_path).unwrap(), payload);
+    let manifest = reloaded.ed2k_transfers.manifest(&file_hash).await.unwrap();
+    assert_eq!(
+        manifest.delivery_state,
+        emulebb_ed2k::ed2k_transfer::Ed2kDeliveryState::Delivered
+    );
+    assert_eq!(
+        manifest.delivered_path.as_deref(),
+        Some(redelivered_path.as_path())
+    );
+    assert_eq!(
+        reloaded.transfer(&file_hash).await.unwrap().state,
+        "completed"
+    );
+}
+
+#[tokio::test]
 async fn delivery_failure_stays_completing_and_clears_after_retry() {
     let runtime_dir = unique_runtime_dir("emulebb-core-delivery-retry-state");
     let transfer_root = runtime_dir.join("transfers");

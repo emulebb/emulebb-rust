@@ -768,6 +768,14 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             "hydrated persisted transfer rows before REST startup"
         );
     }
+    let delivery_reconciliation_candidates =
+        core.reconcile_persisted_completed_deliveries().await?;
+    if delivery_reconciliation_candidates > 0 {
+        info!(
+            delivery_reconciliation_candidates,
+            "processed persisted completed delivery candidates before REST startup"
+        );
+    }
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(

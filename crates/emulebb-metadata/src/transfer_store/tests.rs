@@ -389,6 +389,14 @@ fn upload_demand_counters_persist_on_known_files() {
     };
 
     store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store.pending_completed_delivery_hashes().unwrap(),
+        vec![manifest.file_hash.clone()]
+    );
+    assert_eq!(
+        store.completed_delivery_reconciliation_hashes().unwrap(),
+        vec![manifest.file_hash.clone()]
+    );
     assert!(
         store
             .add_file_upload_request(&manifest.file_hash, 1_700_000_001_000)

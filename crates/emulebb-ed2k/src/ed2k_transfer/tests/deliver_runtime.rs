@@ -168,6 +168,134 @@ async fn materialize_completed_payload_persists_across_reload() {
 }
 
 #[tokio::test]
+async fn materialize_reconciles_replaced_output_without_overwriting_it() {
+    let root = unique_test_dir("ed2k-deliver-reconcile-replaced");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Replaced.mkv").await;
+    let incoming = root.join("incoming");
+    let verified_payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let delivered = incoming.join("Replaced.mkv");
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+
+    fs::remove_file(&delivered).unwrap();
+    let unrelated_replacement = vec![0xA5; verified_payload.len()];
+    fs::write(&delivered, &unrelated_replacement).unwrap();
+
+    let reconciled = runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let redelivered = incoming.join("Replaced (1).mkv");
+    assert_eq!(
+        reconciled,
+        Ed2kDeliveryOutcome::Delivered(redelivered.clone())
+    );
+    assert_eq!(fs::read(&delivered).unwrap(), unrelated_replacement);
+    assert_eq!(fs::read(&redelivered).unwrap(), verified_payload);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
+    assert_eq!(
+        manifest.delivered_path.as_deref(),
+        Some(redelivered.as_path())
+    );
+}
+
+#[tokio::test]
+async fn materialize_recreates_deleted_recorded_output() {
+    let root = unique_test_dir("ed2k-deliver-reconcile-missing");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Missing.Output.mkv").await;
+    let incoming = root.join("incoming");
+    let verified_payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let delivered = incoming.join("Missing.Output.mkv");
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    fs::remove_file(&delivered).unwrap();
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(delivered.clone())
+    );
+    assert_eq!(fs::read(&delivered).unwrap(), verified_payload);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
+    assert_eq!(
+        manifest.delivered_path.as_deref(),
+        Some(delivered.as_path())
+    );
+}
+
+#[tokio::test]
+async fn failed_redelivery_leaves_mismatched_output_pending() {
+    let root = unique_test_dir("ed2k-deliver-reconcile-pending");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Pending.Output.mkv").await;
+    let incoming = root.join("incoming");
+    let delivered = incoming.join("Pending.Output.mkv");
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+
+    fs::remove_file(&delivered).unwrap();
+    let unrelated_replacement = vec![0xC3; 1_048_576];
+    fs::write(&delivered, &unrelated_replacement).unwrap();
+    fs::remove_file(runtime.payload_path(&hash)).unwrap();
+
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap_err();
+    assert_eq!(fs::read(&delivered).unwrap(), unrelated_replacement);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
+    assert!(manifest.delivered_path.is_none());
+    assert!(manifest.source_fingerprint.is_none());
+}
+
+#[tokio::test]
+async fn materialize_adopts_byte_identical_replacement_without_duplicate() {
+    let root = unique_test_dir("ed2k-deliver-reconcile-identical");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Identical.mkv").await;
+    let incoming = root.join("incoming");
+    let verified_payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let delivered = incoming.join("Identical.mkv");
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let recorded_fingerprint = runtime.manifest(&hash).await.unwrap().source_fingerprint;
+
+    fs::remove_file(&delivered).unwrap();
+    fs::write(&delivered, &verified_payload).unwrap();
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(delivered.clone())
+    );
+    assert!(!incoming.join("Identical (1).mkv").exists());
+    let refreshed = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(refreshed.delivery_state, Ed2kDeliveryState::Delivered);
+    assert_eq!(
+        refreshed.delivered_path.as_deref(),
+        Some(delivered.as_path())
+    );
+    assert_ne!(refreshed.source_fingerprint, recorded_fingerprint);
+}
+
+#[tokio::test]
 async fn concurrent_materialization_of_one_transfer_is_idempotent() {
     let root = unique_test_dir("ed2k-deliver-concurrent");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

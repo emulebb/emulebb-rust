@@ -1518,18 +1518,27 @@ impl super::MetadataStore {
     }
 
     pub fn pending_completed_delivery_hashes(&self) -> Result<Vec<String>> {
+        self.completed_delivery_hashes("transfers.delivery_state = 'pending'")
+    }
+
+    pub fn completed_delivery_reconciliation_hashes(&self) -> Result<Vec<String>> {
+        self.completed_delivery_hashes("transfers.delivery_state IN ('pending', 'delivered')")
+    }
+
+    fn completed_delivery_hashes(&self, delivery_predicate: &str) -> Result<Vec<String>> {
         let conn = self.connection()?;
-        let mut stmt = conn.prepare(
+        let sql = format!(
             r#"
             SELECT lower(hex(known_files.ed2k_hash))
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE known_files.completed != 0
-              AND transfers.delivery_state = 'pending'
+              AND {delivery_predicate}
               AND transfers.removed_at_ms IS NULL
             ORDER BY known_files.ed2k_hash
-            "#,
-        )?;
+            "#
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
