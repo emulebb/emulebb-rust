@@ -66,6 +66,17 @@ impl ExternalReachability {
         self.inner.server_public_ip.swap(0, Ordering::Relaxed) != 0
     }
 
+    /// Revoke every reachability fact owned by the current network runtime.
+    pub fn clear_all(&self) {
+        self.inner.server_public_ip.store(0, Ordering::Relaxed);
+        self.inner.fallback_public_ip.store(0, Ordering::Relaxed);
+        self.inner.nat_mapped_tcp_port.store(0, Ordering::Relaxed);
+        self.inner.nat_mapped_udp_port.store(0, Ordering::Relaxed);
+        self.inner
+            .peer_confirmed_udp_port
+            .store(0, Ordering::Relaxed);
+    }
+
     /// Record or refresh public IPv4 evidence from STUN/Kad/peer observation.
     /// Returns whether the fallback value changed.
     pub fn set_fallback_public_ip(&self, ip: Ipv4Addr) -> bool {
@@ -228,6 +239,23 @@ mod tests {
         assert!(!r.udp_port_is_peer_confirmed());
         assert_eq!(r.advertised_udp_port(4672), 46000);
         assert!(!r.clear_peer_confirmed_udp_port());
+    }
+
+    #[test]
+    fn clear_all_revokes_every_runtime_owned_fact() {
+        let r = ExternalReachability::new();
+        r.set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
+        r.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 2));
+        r.set_nat_mapped_tcp_port(Some(45000));
+        r.set_nat_mapped_udp_port(Some(46000));
+        r.set_peer_confirmed_udp_port(51000);
+
+        r.clear_all();
+
+        assert_eq!(r.get(), None);
+        assert_eq!(r.advertised_tcp_port(4662), 4662);
+        assert_eq!(r.advertised_udp_port(4672), 4672);
+        assert!(!r.udp_port_is_peer_confirmed());
     }
 
     #[test]
