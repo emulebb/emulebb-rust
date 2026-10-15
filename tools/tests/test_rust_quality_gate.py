@@ -47,6 +47,22 @@ class TestDiagnosticsGate(unittest.TestCase):
         labels = [label for label, _ in QUALITY_GATE.commands_for_gate("ci-test")]
         self.assertNotIn("WebUI SPA tests", labels)
 
+    def test_workspace_gate_includes_local_kad_swarm(self) -> None:
+        label, command = QUALITY_GATE.test_workspace_step()
+        self.assertEqual(label, "workspace tests")
+        self.assertEqual(command, ["cargo", "test", "--workspace", "--locked"])
+
+    def test_composite_gates_do_not_duplicate_kad_swarm(self) -> None:
+        for gate in ("ci", "ci-test"):
+            with self.subTest(gate=gate):
+                labels = [label for label, _ in QUALITY_GATE.commands_for_gate(gate)]
+                self.assertEqual(labels.count("workspace tests"), 1)
+                self.assertNotIn("focused kad_swarm tests", labels)
+
+    def test_kad_swarm_gate_remains_individually_addressable(self) -> None:
+        labels = [label for label, _ in QUALITY_GATE.commands_for_gate("test-kad-swarm")]
+        self.assertEqual(labels, ["focused kad_swarm tests"])
+
     def test_clippy_uses_the_committed_lockfile(self) -> None:
         _, command = QUALITY_GATE.clippy_step()
         self.assertIn("--locked", command)
