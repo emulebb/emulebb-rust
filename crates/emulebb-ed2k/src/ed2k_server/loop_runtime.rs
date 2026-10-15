@@ -102,6 +102,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
 
     'server_loop: while !shutdown.load(Ordering::Relaxed) {
         if !server_enabled.load(Ordering::SeqCst) {
+            session_context_base.public_ip.clear_server_public_ip();
             clear_server_connection_state(&state).await;
             tokio::select! {
                 () = reconnect_signal.notified() => {},
@@ -158,6 +159,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                 &reconnect_signal,
             )
             .await;
+            session_context.public_ip.clear_server_public_ip();
             match outcome {
                 ParallelServerCycleOutcome::Shutdown => break,
                 ParallelServerCycleOutcome::PlanChanged => continue,
@@ -227,7 +229,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             };
             match resolve_result {
                 Ok(server) => {
-                    match run_controlled_server_session(
+                    let outcome = run_controlled_server_session(
                         &server,
                         &configured_server,
                         &session_context,
@@ -235,8 +237,9 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                         &mut server_connect_plan,
                         &reconnect_signal,
                     )
-                    .await
-                    {
+                    .await;
+                    session_context.public_ip.clear_server_public_ip();
+                    match outcome {
                         ControlledServerSessionOutcome::Finished {
                             result: Ok(ServerSessionExit::ContinueOrder),
                             plan_changed,
@@ -942,6 +945,7 @@ mod tests {
     struct TestServerLoop {
         plan: watch::Sender<Ed2kServerConnectPlan>,
         state: Arc<RwLock<Ed2kServerState>>,
+        reachability: ExternalReachability,
         shutdown: Arc<AtomicBool>,
         reconnect: Arc<Notify>,
         events: Ed2kServerListEventReceiver,
@@ -968,6 +972,7 @@ mod tests {
         let (_, search_inbox) = new_ed2k_server_search_channel(1);
         let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
         let (server_list_events, events) = ed2k_server_list_event_channel();
+        let reachability = ExternalReachability::default();
         let options = Ed2kServerLoopOptions {
             bind_ip: crate::test_bind_ip(),
             nat: Arc::new(NatManager::default()),
@@ -988,7 +993,7 @@ mod tests {
             kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
             shutdown: Arc::clone(&shutdown),
             server_enabled: Arc::new(AtomicBool::new(true)),
-            public_ip: ExternalReachability::default(),
+            public_ip: reachability.clone(),
             reconnect_signal: Arc::clone(&reconnect),
             server_list_events: Some(server_list_events),
             callback_sessions,
@@ -997,6 +1002,7 @@ mod tests {
         TestServerLoop {
             plan,
             state,
+            reachability,
             shutdown,
             reconnect,
             events,
@@ -1223,6 +1229,7 @@ mod tests {
             Ed2kServerConnectMode::Manual,
         ));
         wait_for_connected_endpoint(&runtime.state, initial_endpoint).await;
+        assert!(runtime.reachability.is_known());
         close_initial.send(()).unwrap();
         initial_server.await.unwrap();
         timeout(Duration::from_secs(5), async {
@@ -1236,6 +1243,7 @@ mod tests {
         })
         .await
         .expect("failed session should return to idle state");
+        assert_eq!(runtime.reachability.get(), None);
 
         let mut replacement_config = test_config(vec![replacement_endpoint.to_string()], true);
         replacement_config.reconnect_enabled = false;
@@ -1245,6 +1253,7 @@ mod tests {
         ));
 
         wait_for_connected_endpoint(&runtime.state, replacement_endpoint).await;
+        assert!(runtime.reachability.is_known());
         stop_test_server_loop(runtime).await;
         timeout(Duration::from_secs(2), replacement_server)
             .await

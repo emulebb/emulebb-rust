@@ -727,6 +727,7 @@ impl EmulebbCore {
                 Arc::clone(&runtime.server_state)
             })
         };
+        self.ed2k_reachability.clear_server_public_ip();
         if let Some(state) = state {
             *state.write().await = Ed2kServerState::default();
         }
@@ -775,6 +776,7 @@ impl EmulebbCore {
             }
             for task in runtime.tasks {
                 task.abort();
+                let _ = task.await;
             }
             // Abort this session's detached background-download tasks (FIX B3) so
             // downloads do not survive disconnect or orphan on shutdown.
@@ -783,6 +785,7 @@ impl EmulebbCore {
             // server dial; the runtime has already been removed and tasks aborted.
             let _ = tokio::time::timeout(Duration::from_secs(2), runtime.nat.stop()).await;
         }
+        self.ed2k_reachability.clear_all();
         self.ed2k_status().await
     }
 }

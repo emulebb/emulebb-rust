@@ -491,6 +491,13 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     drop(runtime);
 
     core.set_kad_running(true).await;
+    let fallback_ip = Ipv4Addr::new(198, 51, 100, 4);
+    core.ed2k_reachability.set_fallback_public_ip(fallback_ip);
+    core.ed2k_reachability
+        .set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
+    core.ed2k_reachability.set_nat_mapped_tcp_port(Some(45000));
+    core.ed2k_reachability.set_nat_mapped_udp_port(Some(46000));
+    core.ed2k_reachability.set_peer_confirmed_udp_port(51000);
     {
         let runtime = core.ed2k_runtime.lock().await;
         let mut server = runtime.as_ref().unwrap().server_state.write().await;
@@ -499,6 +506,10 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     }
     let ed2k = core.disconnect_ed2k_server().await;
     assert!(!ed2k.running);
+    assert_eq!(core.ed2k_reachability.get(), Some(fallback_ip));
+    assert_eq!(core.ed2k_reachability.advertised_tcp_port(4662), 45000);
+    assert_eq!(core.ed2k_reachability.advertised_udp_port(4672), 51000);
+    assert!(core.ed2k_reachability.udp_port_is_peer_confirmed());
     let status = core.status().await;
     assert!(status.kad.running);
     assert!(
@@ -513,6 +524,10 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
 
     shutdown.store(true, Ordering::SeqCst);
     let _ = core.disconnect_ed2k().await;
+    assert_eq!(core.ed2k_reachability.get(), None);
+    assert_eq!(core.ed2k_reachability.advertised_tcp_port(4662), 4662);
+    assert_eq!(core.ed2k_reachability.advertised_udp_port(4672), 4672);
+    assert!(!core.ed2k_reachability.udp_port_is_peer_confirmed());
 }
 
 #[tokio::test]
