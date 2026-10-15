@@ -2,6 +2,13 @@ use std::path::PathBuf;
 
 use crate::NativeFileFingerprint;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataTransferDeliveryState {
+    NotApplicable,
+    Pending,
+    Delivered,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferManifest {
     pub file_hash: String,
@@ -25,6 +32,9 @@ pub struct MetadataTransferManifest {
     pub category_id: u32,
     pub control_state: Option<String>,
     pub transfer_row_removed: bool,
+    /// Explicit lifecycle for materializing a download outside the internal
+    /// piece store. This is independent from temporary completion/rehash state.
+    pub delivery_state: MetadataTransferDeliveryState,
     /// Absolute path the completed payload was materialized to by its canonical
     /// name, or `None` until the transfer is delivered. Persisted on the
     /// `transfers` row to make finished-file delivery idempotent across restarts.

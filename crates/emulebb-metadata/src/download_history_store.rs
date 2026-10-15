@@ -132,7 +132,8 @@ pub(crate) fn record_completed_download(
 #[cfg(test)]
 mod tests {
     use crate::{
-        MetadataStore, MetadataTransferManifest, MetadataTransferPiece, MetadataTransferRange,
+        MetadataStore, MetadataTransferDeliveryState, MetadataTransferManifest,
+        MetadataTransferPiece, MetadataTransferRange,
     };
 
     fn completed_download_manifest() -> MetadataTransferManifest {
@@ -167,6 +168,7 @@ mod tests {
             category_id: 0,
             control_state: None,
             transfer_row_removed: false,
+            delivery_state: MetadataTransferDeliveryState::Delivered,
             delivered_path: Some("C:\\incoming\\completed.bin".into()),
             source_path: None,
             source_fingerprint: None,
@@ -205,6 +207,8 @@ mod tests {
         );
 
         manifest.completed = true;
+        manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
+        manifest.delivered_path = None;
         manifest.source_path = Some("C:\\shared\\completed.bin".into());
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert!(

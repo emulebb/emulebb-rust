@@ -261,6 +261,11 @@ CREATE TABLE transfers (
         CHECK(download_priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'veryhigh')),
     target_path_id INTEGER REFERENCES local_paths(id),
     payload_directory TEXT NOT NULL DEFAULT '',
+    -- Materialization lifecycle for downloads. Share-in-place files never need
+    -- an external delivered copy; downloads remain pending until a verified
+    -- output path is committed.
+    delivery_state TEXT NOT NULL
+        CHECK(delivery_state IN ('not_applicable', 'pending', 'delivered')),
     -- Absolute path identity for the completed payload materialized under a
     -- category path or the global incoming dir. NULL until delivery completes.
     delivered_path_id INTEGER REFERENCES local_paths(id),
@@ -274,6 +279,11 @@ CREATE TABLE transfers (
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
     removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
+    CHECK(
+        (delivery_state = 'not_applicable' AND source_path_id IS NOT NULL AND delivered_path_id IS NULL)
+        OR (delivery_state = 'pending' AND source_path_id IS NULL AND delivered_path_id IS NULL)
+        OR (delivery_state = 'delivered' AND source_path_id IS NULL AND delivered_path_id IS NOT NULL)
+    ),
     UNIQUE(known_file_id)
 );
 

@@ -9,7 +9,10 @@ use std::fs;
 use emulebb_kad_proto::Ed2kHash;
 use std::str::FromStr;
 
-use super::super::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
+use super::super::{
+    ED2K_EMBLOCK_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kTransferRuntime,
+    PAYLOAD_FILE_NAME,
+};
 use super::write_repeating_pattern_file;
 use crate::paths::unique_test_dir;
 
@@ -38,6 +41,7 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     // (1) The manifest is a completed share that records the ORIGINAL path.
     let manifest = runtime.manifest(&file_hash).await.unwrap();
     assert!(manifest.completed, "shared complete file must be completed");
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::NotApplicable);
     assert!(
         manifest.transfer_row_removed,
         "shared complete file must stay out of the download queue from its first write",
@@ -61,6 +65,16 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         !runtime.transfer_dir_path(&file_hash).exists(),
         "share-in-place must not create an empty per-hash transfer directory",
     );
+
+    let incoming = root.join("incoming");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&file_hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::NotRequired,
+    );
+    assert!(!incoming.exists());
 
     // (3) The original file is untouched and still its full size.
     assert_eq!(fs::metadata(&source_path).unwrap().len(), size);

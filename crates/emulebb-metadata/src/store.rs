@@ -612,9 +612,12 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO transfers(id, known_file_id, visible_state, created_at_ms, updated_at_ms, removed_at_ms)
-                 VALUES (1, 1, 'downloading', 0, 0, NULL),
-                        (2, 2, 'downloading', 0, 0, ?1)",
+                "INSERT INTO transfers(
+                     id, known_file_id, visible_state, delivery_state,
+                     created_at_ms, updated_at_ms, removed_at_ms
+                 )
+                 VALUES (1, 1, 'downloading', 'pending', 0, 0, NULL),
+                        (2, 2, 'downloading', 'pending', 0, 0, ?1)",
                 params![now],
             )
             .unwrap();

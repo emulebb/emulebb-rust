@@ -6,8 +6,8 @@
 //! -> the gap scan returns `true`).
 
 use crate::ed2k_transfer::{
-    ED2K_PART_SIZE, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange,
-    Ed2kTransferState, ed2k_part_count,
+    ED2K_PART_SIZE, Ed2kDeliveryState, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry,
+    Ed2kSharedRange, Ed2kTransferState, ed2k_part_count,
 };
 
 /// Decode an OP_FILESTATUS body (u16 ED2K part count + LSB-first bits) back into
@@ -67,6 +67,7 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivery_state: Ed2kDeliveryState::Pending,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,

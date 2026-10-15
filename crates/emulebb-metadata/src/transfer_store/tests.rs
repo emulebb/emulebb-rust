@@ -74,10 +74,20 @@ fn transfer_manifest_roundtrips_sql_tables() {
         category_id: 2,
         control_state: Some("paused".to_string()),
         transfer_row_removed: false,
-        delivered_path: Some("/incoming/Sample.Transfer.bin".into()),
+        delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivered_path: None,
         source_path: Some("/library/Sample.Transfer.bin".into()),
         source_fingerprint: Some(fingerprint(1024, 0)),
     };
+
+    let mut invalid = manifest.clone();
+    invalid.delivery_state = MetadataTransferDeliveryState::Delivered;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid.delivery_state = MetadataTransferDeliveryState::Pending;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid.delivery_state = MetadataTransferDeliveryState::NotApplicable;
+    invalid.source_path = None;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
 
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert_eq!(
@@ -310,6 +320,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
     manifest.completed = false;
     manifest.final_rehash_pending = true;
     manifest.control_state = None;
+    manifest.delivery_state = MetadataTransferDeliveryState::Pending;
     manifest.delivered_path = None;
     manifest.source_path = None;
     manifest.source_fingerprint = None;
@@ -371,6 +382,7 @@ fn upload_demand_counters_persist_on_known_files() {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivery_state: MetadataTransferDeliveryState::Pending,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -432,6 +444,7 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivery_state: MetadataTransferDeliveryState::NotApplicable,
         delivered_path: None,
         source_path: Some("/library/Alpha.bin".into()),
         source_fingerprint: Some(fingerprint(1024, 0)),
@@ -559,6 +572,7 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivery_state: MetadataTransferDeliveryState::NotApplicable,
         delivered_path: None,
         source_path: Some("/library/Recovered.Source.bin".into()),
         source_fingerprint: Some(recovered_fingerprint),
@@ -670,6 +684,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivery_state: MetadataTransferDeliveryState::Pending,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -724,6 +739,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivery_state: MetadataTransferDeliveryState::Pending,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -834,6 +850,7 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 category_id: 0,
                 control_state: None,
                 transfer_row_removed: false,
+                delivery_state: MetadataTransferDeliveryState::NotApplicable,
                 delivered_path: None,
                 source_path: Some(format!("/library/catalog-{sequence}.bin").into()),
                 source_fingerprint: Some(fingerprint(sequence as u64, sequence as u64)),
