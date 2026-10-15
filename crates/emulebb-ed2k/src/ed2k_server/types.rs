@@ -23,35 +23,44 @@ use super::{Ed2kServerSearchInbox, is_low_id};
 
 #[derive(Clone)]
 pub(super) struct ServerSessionActivation {
-    active: watch::Receiver<bool>,
+    state: watch::Receiver<ServerSessionActivationState>,
 }
 
 pub(super) struct ServerSessionActivator {
-    active: watch::Sender<bool>,
+    state: watch::Sender<ServerSessionActivationState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerSessionActivationState {
+    Pending,
+    Active,
+    Retired,
 }
 
 impl ServerSessionActivation {
     pub(super) fn active() -> Self {
-        let (_, active) = watch::channel(true);
-        Self { active }
+        let (_, state) = watch::channel(ServerSessionActivationState::Active);
+        Self { state }
     }
 
     pub(super) fn pending() -> (Self, ServerSessionActivator) {
-        let (sender, active) = watch::channel(false);
-        (Self { active }, ServerSessionActivator { active: sender })
+        let (sender, state) = watch::channel(ServerSessionActivationState::Pending);
+        (Self { state }, ServerSessionActivator { state: sender })
     }
 
     pub(super) fn is_active(&self) -> bool {
-        *self.active.borrow()
+        *self.state.borrow() == ServerSessionActivationState::Active
     }
 
     pub(super) async fn wait_until_active(&self) -> bool {
-        let mut active = self.active.clone();
+        let mut state = self.state.clone();
         loop {
-            if *active.borrow_and_update() {
-                return true;
+            match *state.borrow_and_update() {
+                ServerSessionActivationState::Active => return true,
+                ServerSessionActivationState::Retired => return false,
+                ServerSessionActivationState::Pending => {}
             }
-            if active.changed().await.is_err() {
+            if state.changed().await.is_err() {
                 return false;
             }
         }
@@ -60,7 +69,15 @@ impl ServerSessionActivation {
 
 impl ServerSessionActivator {
     pub(super) fn activate(&self) {
-        self.active.send_replace(true);
+        if *self.state.borrow() != ServerSessionActivationState::Retired {
+            self.state
+                .send_replace(ServerSessionActivationState::Active);
+        }
+    }
+
+    pub(super) fn retire(&self) {
+        self.state
+            .send_replace(ServerSessionActivationState::Retired);
     }
 }
 
