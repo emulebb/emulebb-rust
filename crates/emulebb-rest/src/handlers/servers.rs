@@ -49,8 +49,15 @@ pub(crate) async fn servers_connect(State(state): State<RestState>) -> impl Into
 }
 
 pub(crate) async fn servers_disconnect(State(state): State<RestState>) -> impl IntoResponse {
-    state.core.disconnect_ed2k_server().await;
-    api_ok(server_status_response(&state).await)
+    match state.core.disconnect_ed2k_server().await {
+        Ok(_status) => api_ok(server_status_response(&state).await).into_response(),
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EMULE_ERROR",
+            error.to_string(),
+        )
+        .into_response(),
+    }
 }
 
 pub(crate) async fn servers_import_met_url(

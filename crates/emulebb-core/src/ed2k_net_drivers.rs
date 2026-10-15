@@ -21,7 +21,7 @@ use std::{
 
 use anyhow::Result;
 use emulebb_ed2k::ed2k_server::{
-    Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerState,
+    Ed2kServerControlHandle, Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerState,
 };
 use emulebb_ed2k::ed2k_tcp::{
     Ed2kCallbackSessionHandle, Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest,
@@ -185,7 +185,7 @@ pub(crate) async fn run_advertised_ports_sync(
     nat: Arc<NatManager>,
     reachability: ExternalReachability,
     reachability_writer: RuntimeReachabilityWriter,
-    reconnect_signal: Arc<tokio::sync::Notify>,
+    server_control: Ed2kServerControlHandle,
     internal_tcp_port: u16,
     internal_udp_port: u16,
     shutdown: Arc<AtomicBool>,
@@ -214,7 +214,7 @@ pub(crate) async fn run_advertised_ports_sync(
                 tracing::info!(
                     "ED2K advertised TCP port changed {last_advertised_tcp} -> {advertised_tcp}; requesting server re-login"
                 );
-                reconnect_signal.notify_one();
+                server_control.request_reconnect();
                 last_relogin = Some(now);
                 last_advertised_tcp = advertised_tcp;
             }

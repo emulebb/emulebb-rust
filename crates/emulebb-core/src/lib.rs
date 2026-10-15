@@ -26,14 +26,16 @@ use emulebb_ed2k::{
     config::Ed2kRuntimeConfig,
     ed2k_server::{
         Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundSearchInterrupted, Ed2kFoundSource,
-        Ed2kServerConnectMode, Ed2kServerConnectPlan, Ed2kServerLoopOptions,
-        Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpCallbackRequestOptions,
-        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
-        SearchCriteria, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
-        parse_server_met, publish_shared_catalog_via_background_session,
-        request_callback_via_background_session, request_callback_via_udp_server,
-        run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
-        search_source_batch_via_background_session, search_source_udp_server_batches,
+        Ed2kServerConnectMode, Ed2kServerConnectPlan, Ed2kServerControlHandle,
+        Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
+        Ed2kUdpCallbackRequestOptions, Ed2kUdpKeywordSearchOptions,
+        Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats, SearchCriteria,
+        ed2k_server_control_channel, ed2k_server_list_event_channel,
+        new_ed2k_server_search_channel, parse_server_met,
+        publish_shared_catalog_via_background_session, request_callback_via_background_session,
+        request_callback_via_udp_server, run_ed2k_server_loop, search_keyword_udp_servers,
+        search_keyword_via_background_session, search_source_batch_via_background_session,
+        search_source_udp_server_batches,
     },
     ed2k_tcp::{
         Ed2kCallbackSessionHandle, Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile,
@@ -320,7 +322,7 @@ struct Ed2kRuntime {
     server_state: Arc<RwLock<Ed2kServerState>>,
     /// Operator-facing server connection gate. This is deliberately separate
     /// from `shutdown`, which tears down the complete shared server/Kad stack.
-    server_enabled: Arc<AtomicBool>,
+    server_control: Ed2kServerControlHandle,
     dht: DhtNode,
     /// Profile-local `nodes.dat` destination for the shutdown routing sample.
     kad_nodes_dat_path: Option<PathBuf>,
@@ -332,7 +334,6 @@ struct Ed2kRuntime {
     reachability: ReachabilityRuntimeLease,
     nat: Arc<NatManager>,
     shutdown: Arc<AtomicBool>,
-    server_reconnect_signal: Arc<tokio::sync::Notify>,
     server_connect_plan: tokio::sync::watch::Sender<Ed2kServerConnectPlan>,
     /// Top-level server supervisor. It owns and drains all description/session
     /// descendants before completing.
@@ -2877,7 +2878,7 @@ impl EmulebbCore {
         let (handle, server_state) = {
             let runtime_guard = self.ed2k_runtime.lock().await;
             let runtime = runtime_guard.as_ref()?;
-            if !runtime.server_enabled.load(Ordering::SeqCst) {
+            if !runtime.server_control.is_enabled() {
                 return None;
             }
             (
@@ -3482,7 +3483,7 @@ impl EmulebbCore {
             let Some(runtime) = runtime_guard.as_ref() else {
                 return ed2k_stopped_status();
             };
-            if !runtime.server_enabled.load(Ordering::SeqCst) {
+            if !runtime.server_control.is_enabled() {
                 return ed2k_stopped_status();
             }
             Arc::clone(&runtime.server_state)

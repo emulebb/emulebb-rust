@@ -77,6 +77,10 @@ fn test_server_task() -> JoinHandle<()> {
     tokio::spawn(async {})
 }
 
+fn test_server_control_handle() -> Ed2kServerControlHandle {
+    ed2k_server_control_channel(true).0
+}
+
 #[tokio::test(start_paused = true)]
 async fn outgoing_buddy_link_completion_wakes_one_reconnect_attempt() {
     let now = chrono::Utc::now();
@@ -359,14 +363,13 @@ async fn ed2k_shared_catalog_publish_waits_for_connected_server() {
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
         server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
-        server_enabled: Arc::new(AtomicBool::new(true)),
+        server_control: test_server_control_handle(),
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         reachability: core.ed2k_reachability.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
-        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
         server_connect_plan: test_server_connect_plan_sender(),
         server_task: test_server_task(),
         kad_firewall_recheck: None,

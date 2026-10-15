@@ -84,13 +84,14 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         search_inbox,
         kad_firewall,
         shutdown,
-        server_enabled,
+        server_control,
         public_ip,
         reachability_writer,
-        reconnect_signal,
         server_list_events,
         callback_sessions,
     } = options;
+    let server_enabled = server_control.enabled_flag();
+    let reconnect_signal = server_control.wake_signal();
     let search_inbox = Arc::new(tokio::sync::Mutex::new(search_inbox));
     let initial_plan = server_connect_plan.borrow().clone();
     let initial_config = initial_plan.config();
@@ -136,6 +137,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
     'server_loop: while !shutdown.load(Ordering::Relaxed) {
         if !server_enabled.load(Ordering::SeqCst) {
             clear_server_connection_state(&state).await;
+            server_control.acknowledge_disabled();
             tokio::select! {
                 () = reconnect_signal.notified() => {},
                 changed = server_connect_plan.changed() => {
@@ -1082,8 +1084,9 @@ mod tests {
     use crate::{
         NatManager,
         ed2k_server::{
-            Ed2kBackgroundSearchInterrupted, Ed2kServerConnectMode, Ed2kServerListEventReceiver,
-            Ed2kServerSearchHandle, OP_IDCHANGE, OP_LOGINREQUEST, OP_SEARCHREQUEST, OP_SERVERLIST,
+            Ed2kBackgroundSearchInterrupted, Ed2kServerConnectMode, Ed2kServerControlHandle,
+            Ed2kServerListEventReceiver, Ed2kServerSearchHandle, OP_IDCHANGE, OP_LOGINREQUEST,
+            OP_SEARCHREQUEST, OP_SERVERLIST, ed2k_server_control_channel,
             ed2k_server_list_event_channel, encode_packet, new_ed2k_server_search_channel,
             search_keyword_via_background_session,
         },
@@ -1098,7 +1101,7 @@ mod tests {
         state: Arc<RwLock<Ed2kServerState>>,
         reachability: ExternalReachability,
         shutdown: Arc<AtomicBool>,
-        reconnect: Arc<Notify>,
+        server_control: Ed2kServerControlHandle,
         search: Ed2kServerSearchHandle,
         events: Ed2kServerListEventReceiver,
         _reachability_lease: ReachabilityRuntimeLease,
@@ -1121,7 +1124,7 @@ mod tests {
         let (plan, plan_rx) = watch::channel(initial_plan);
         let state = Arc::new(RwLock::new(Ed2kServerState::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let reconnect = Arc::new(Notify::new());
+        let (server_control, server_control_rx) = ed2k_server_control_channel(true);
         let (search, search_inbox) = new_ed2k_server_search_channel(1);
         let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
         let (server_list_events, events) = ed2k_server_list_event_channel();
@@ -1146,10 +1149,9 @@ mod tests {
             search_inbox,
             kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
             shutdown: Arc::clone(&shutdown),
-            server_enabled: Arc::new(AtomicBool::new(true)),
+            server_control: server_control_rx,
             public_ip: reachability.clone(),
             reachability_writer: reachability_lease.writer(),
-            reconnect_signal: Arc::clone(&reconnect),
             server_list_events: Some(server_list_events),
             callback_sessions,
         };
@@ -1159,7 +1161,7 @@ mod tests {
             state,
             reachability,
             shutdown,
-            reconnect,
+            server_control,
             search,
             events,
             _reachability_lease: reachability_lease,
@@ -1169,7 +1171,7 @@ mod tests {
 
     async fn stop_test_server_loop(runtime: TestServerLoop) {
         runtime.shutdown.store(true, Ordering::SeqCst);
-        runtime.reconnect.notify_waiters();
+        runtime.server_control.wake_supervisor();
         timeout(Duration::from_secs(2), runtime.task)
             .await
             .expect("server loop should stop promptly")

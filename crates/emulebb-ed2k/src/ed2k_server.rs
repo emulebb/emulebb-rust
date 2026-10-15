@@ -33,6 +33,7 @@ mod packet_codec;
 mod packet_handler;
 mod result_decoder;
 mod search_expr;
+mod server_control;
 mod server_description;
 mod server_description_poll;
 mod server_entry;
@@ -95,6 +96,9 @@ use result_decoder::{
 };
 pub use search_expr::{SearchCriteria, encode_kad_search_expression, flat_and_search_terms};
 use search_expr::{encode_search_request, encode_search_request_with_criteria};
+pub use server_control::{
+    Ed2kServerControlHandle, Ed2kServerControlReceiver, ed2k_server_control_channel,
+};
 #[cfg(test)]
 use server_entry::ConfiguredServerEntry;
 use server_entry::{
