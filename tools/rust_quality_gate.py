@@ -38,7 +38,8 @@ def main(argv: list[str] | None = None) -> int:
         ],
         help=(
             "quick=policy+fmt+clippy+diagnostics+webui-test; ci=quick+build+tests; "
-            "ci-test=build+workspace tests+isolated kad_swarm+VPN leak test"
+            "ci-test=build+full workspace tests+VPN leak test; "
+            "test-kad-swarm=focused serialized Kad diagnostics"
         ),
     )
     parser.add_argument(
@@ -145,7 +146,6 @@ def commands_for_gate(
         "ci-test": [
             build_step(env, force_rebuild=force_rebuild),
             test_workspace_step(),
-            test_kad_swarm_step(),
             test_vpn_leak_step(),
         ],
     }
@@ -159,7 +159,6 @@ def commands_for_gate(
             webui_test_step(),
             build_step(env, force_rebuild=force_rebuild),
             test_workspace_step(),
-            test_kad_swarm_step(),
             test_vpn_leak_step(),
         ]
     return steps[gate]
@@ -245,13 +244,13 @@ def release_stage_bin_dir(env: dict[str, str]) -> Path:
 def test_workspace_step() -> tuple[str, list[str]]:
     return (
         "workspace tests",
-        ["cargo", "test", "--workspace", "--locked", "--", "--skip", "local_kad_swarm"],
+        ["cargo", "test", "--workspace", "--locked"],
     )
 
 
 def test_kad_swarm_step() -> tuple[str, list[str]]:
     return (
-        "isolated kad_swarm tests",
+        "focused kad_swarm tests",
         [
             "cargo",
             "test",
