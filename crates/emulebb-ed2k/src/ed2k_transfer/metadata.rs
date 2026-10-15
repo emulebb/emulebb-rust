@@ -89,6 +89,15 @@ impl Ed2kTransferRuntime {
             .map_err(anyhow::Error::from)?
     }
 
+    /// Return active completed download hashes whose persisted delivery state
+    /// must be verified during startup (`pending` or `delivered`).
+    pub async fn completed_delivery_reconciliation_hashes(&self) -> Result<Vec<String>> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.completed_delivery_reconciliation_hashes())
+            .await
+            .map_err(anyhow::Error::from)?
+    }
+
     /// Return a keyset page ordered by ED2K hash.
     pub async fn share_entries_after(
         &self,

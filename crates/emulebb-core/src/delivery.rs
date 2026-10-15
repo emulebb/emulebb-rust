@@ -164,4 +164,21 @@ impl EmulebbCore {
             tokio::task::yield_now().await;
         }
     }
+
+    /// Verify every active completed download's persisted delivery state before
+    /// the transfer view is published. Pending rows are delivered, while
+    /// delivered rows use their native fingerprint as a fast path and fall back
+    /// to a full ED2K rehash when the recorded filesystem identity changed.
+    pub async fn reconcile_persisted_completed_deliveries(&self) -> anyhow::Result<usize> {
+        let hashes = self
+            .ed2k_transfers
+            .completed_delivery_reconciliation_hashes()
+            .await?;
+        let count = hashes.len();
+        for hash in hashes {
+            self.deliver_completed_transfer(&hash).await;
+            tokio::task::yield_now().await;
+        }
+        Ok(count)
+    }
 }

@@ -34,6 +34,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::NativeFileFingerprint;
 use md4::{Digest, Md4};
 
 use crate::long_path::long_path;
@@ -54,6 +55,12 @@ pub enum Ed2kDeliveryOutcome {
     AlreadyDelivered(PathBuf),
     /// The payload was materialized to this path.
     Delivered(PathBuf),
+}
+
+#[derive(Debug)]
+enum RecordedDeliveryVerification {
+    Valid(Option<NativeFileFingerprint>),
+    Invalid,
 }
 
 impl Ed2kTransferRuntime {
@@ -80,7 +87,7 @@ impl Ed2kTransferRuntime {
         let _delivery_guard = delivery_lock.lock_owned().await;
         // Phase 1: snapshot what we need under the manifest IO lock, then
         // release it before touching the destination filesystem.
-        let (display_name, expected_size, expected_hash) = {
+        let (display_name, expected_size, expected_hash, recorded_path, recorded_fingerprint) = {
             let _guard = self.lock_manifest(file_hash).await;
             let manifest = self.load_manifest_unlocked(file_hash).await?;
             if manifest.delivery_state == super::Ed2kDeliveryState::NotApplicable {
@@ -89,22 +96,73 @@ impl Ed2kTransferRuntime {
             if !manifest.completed || manifest.final_rehash_pending {
                 return Ok(Ed2kDeliveryOutcome::NotCompleted);
             }
-            // A recorded delivery that still exists is already complete. If it
-            // is gone, the operator moved or deleted it, so fall through and
-            // re-deliver.
-            if let Some(recorded) = manifest.delivered_path.clone()
-                && path_exists(&recorded).await
-            {
-                return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded));
-            }
+            let recorded_path = match manifest.delivery_state {
+                super::Ed2kDeliveryState::NotApplicable => unreachable!(),
+                super::Ed2kDeliveryState::Pending => None,
+                super::Ed2kDeliveryState::Delivered => {
+                    Some(manifest.delivered_path.clone().with_context(|| {
+                        format!(
+                            "delivered transfer {} has no recorded output path",
+                            manifest.file_hash
+                        )
+                    })?)
+                }
+            };
             (
                 manifest.display_name.clone(),
                 manifest.file_size,
                 Ed2kHash::from_str(&manifest.file_hash)
                     .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
                     .0,
+                recorded_path,
+                manifest.source_fingerprint.clone(),
             )
         };
+
+        if let Some(recorded_path) = recorded_path {
+            match verify_recorded_delivery(
+                &recorded_path,
+                recorded_fingerprint.as_ref(),
+                expected_size,
+                expected_hash,
+            )
+            .await
+            {
+                Ok(RecordedDeliveryVerification::Valid(current_fingerprint)) => {
+                    if current_fingerprint != recorded_fingerprint {
+                        let _guard = self.lock_manifest(file_hash).await;
+                        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+                        if manifest.delivery_state == super::Ed2kDeliveryState::Delivered
+                            && manifest.delivered_path.as_ref() == Some(&recorded_path)
+                        {
+                            manifest.source_fingerprint = current_fingerprint;
+                            self.store_manifest_unlocked(&manifest).await?;
+                        }
+                    }
+                    return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded_path));
+                }
+                Ok(RecordedDeliveryVerification::Invalid) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        file_hash,
+                        path = %recorded_path.display(),
+                        "recorded delivered output could not be verified; scheduling redelivery"
+                    );
+                }
+            }
+
+            let _guard = self.lock_manifest(file_hash).await;
+            let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+            if manifest.delivery_state == super::Ed2kDeliveryState::Delivered
+                && manifest.delivered_path.as_ref() == Some(&recorded_path)
+            {
+                manifest.delivery_state = super::Ed2kDeliveryState::Pending;
+                manifest.delivered_path = None;
+                manifest.source_fingerprint = None;
+                self.store_manifest_unlocked(&manifest).await?;
+            }
+        }
 
         let source = self.payload_path(file_hash);
         let pending_path = self
@@ -139,15 +197,66 @@ impl Ed2kTransferRuntime {
             // reload (the copy+rename gets a fresh identity that is stable
             // thereafter).
             if manifest.source_path.is_none() {
-                manifest.source_fingerprint =
-                    Ed2kTransferRuntime::scanned_source_identity(&final_path)
-                        .and_then(|(_key, _size, fingerprint)| fingerprint);
+                manifest.source_fingerprint = delivered_file_fingerprint(&final_path);
             }
             self.store_manifest_unlocked(&manifest).await?;
         }
         remove_if_exists(&pending_path).await?;
         Ok(Ed2kDeliveryOutcome::Delivered(final_path))
     }
+}
+
+async fn verify_recorded_delivery(
+    path: &Path,
+    recorded_fingerprint: Option<&NativeFileFingerprint>,
+    expected_size: u64,
+    expected_hash: [u8; 16],
+) -> Result<RecordedDeliveryVerification> {
+    let path = long_path(path);
+    let recorded_fingerprint = recorded_fingerprint.cloned();
+    tokio::task::spawn_blocking(move || {
+        let metadata = match path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RecordedDeliveryVerification::Invalid);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to stat {}", path.display()));
+            }
+        };
+        if !metadata.file_type().is_file() || metadata.len() != expected_size {
+            return Ok(RecordedDeliveryVerification::Invalid);
+        }
+        let current_fingerprint = super::ingest::native_file_fingerprint(&path, &metadata);
+        if recorded_fingerprint
+            .as_ref()
+            .zip(current_fingerprint.as_ref())
+            .is_some_and(|(recorded, current)| recorded.safely_matches(current))
+        {
+            return Ok(RecordedDeliveryVerification::Valid(current_fingerprint));
+        }
+        if compute_ed2k_hash(&path, expected_size)? != Some(expected_hash) {
+            return Ok(RecordedDeliveryVerification::Invalid);
+        }
+        let post_hash_fingerprint = path
+            .symlink_metadata()
+            .ok()
+            .filter(|metadata| metadata.file_type().is_file() && metadata.len() == expected_size)
+            .and_then(|metadata| super::ingest::native_file_fingerprint(&path, &metadata));
+        if current_fingerprint.is_some() && current_fingerprint != post_hash_fingerprint {
+            return Ok(RecordedDeliveryVerification::Invalid);
+        }
+        Ok(RecordedDeliveryVerification::Valid(post_hash_fingerprint))
+    })
+    .await
+    .context("recorded delivered-file verification task failed")?
+}
+
+fn delivered_file_fingerprint(path: &Path) -> Option<NativeFileFingerprint> {
+    let path = long_path(path);
+    let metadata = path.symlink_metadata().ok()?;
+    metadata.file_type().is_file().then_some(())?;
+    super::ingest::native_file_fingerprint(&path, &metadata)
 }
 
 /// Copy/link `source` (`pieces.bin`) into `dest_dir` under a collision-free
