@@ -175,16 +175,9 @@ pub(crate) fn sync_advertised_ports_from_nat(
     internal_tcp_port: u16,
     internal_udp_port: u16,
 ) {
-    reachability.set_nat_mapped_tcp_port(external_port_for(
-        &status.mappings,
-        TransportProtocol::Tcp,
-        internal_tcp_port,
-    ));
-    reachability.set_nat_mapped_udp_port(external_port_for(
-        &status.mappings,
-        TransportProtocol::Udp,
-        internal_udp_port,
-    ));
+    let tcp_port = external_port_for(&status.mappings, TransportProtocol::Tcp, internal_tcp_port);
+    let udp_port = external_port_for(&status.mappings, TransportProtocol::Udp, internal_udp_port);
+    reachability.set_nat_mapped_ports(tcp_port, udp_port);
 }
 
 pub(crate) async fn run_advertised_ports_sync(
@@ -543,8 +536,7 @@ mod tests {
             ..Default::default()
         };
         let reachability = ExternalReachability::new();
-        reachability.set_nat_mapped_tcp_port(Some(41000));
-        reachability.set_nat_mapped_udp_port(Some(42000));
+        reachability.set_nat_mapped_ports(Some(41000), Some(42000));
         sync_advertised_ports_from_nat(&status, &reachability, 4662, 4672);
         assert_eq!(reachability.advertised_tcp_port(4662), 4662);
         assert_eq!(reachability.advertised_udp_port(4672), 4672);

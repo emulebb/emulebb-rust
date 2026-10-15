@@ -137,17 +137,15 @@ impl ExternalReachability {
 
     // --- Advertised external ports. ---
 
-    /// Replace the current NAT-mapped eD2k TCP port snapshot.
-    pub fn set_nat_mapped_tcp_port(&self, port: Option<u16>) {
-        self.inner.write().nat_mapped_tcp_port = nonzero_port(port);
-    }
-
-    /// Record the externally-reachable eD2k UDP port from the UPnP mapping. This
-    /// local evidence is retained while a peer-confirmed value takes precedence,
-    /// so it is available immediately if that remote verification expires.
-    /// `None` revokes a mapping that disappeared from the latest NAT snapshot.
-    pub fn set_nat_mapped_udp_port(&self, port: Option<u16>) {
-        self.inner.write().nat_mapped_udp_port = nonzero_port(port);
+    /// Replace both externally-reachable ports from one NAT status snapshot.
+    ///
+    /// The UDP mapping is retained while a peer-confirmed value takes precedence,
+    /// so it is available immediately if that remote verification expires. A
+    /// missing or zero port revokes the corresponding previous mapping.
+    pub fn set_nat_mapped_ports(&self, tcp_port: Option<u16>, udp_port: Option<u16>) {
+        let mut state = self.inner.write();
+        state.nat_mapped_tcp_port = nonzero_port(tcp_port);
+        state.nat_mapped_udp_port = nonzero_port(udp_port);
     }
 
     /// Record the externally-reachable eD2k/Kad UDP port confirmed by a remote
@@ -220,11 +218,10 @@ mod tests {
         let r = ExternalReachability::new();
         assert_eq!(r.advertised_tcp_port(4662), 4662);
         assert_eq!(r.advertised_udp_port(4672), 4672);
-        r.set_nat_mapped_tcp_port(Some(45000));
-        r.set_nat_mapped_udp_port(Some(51000));
+        r.set_nat_mapped_ports(Some(45000), Some(51000));
         assert_eq!(r.advertised_tcp_port(4662), 45000);
         assert_eq!(r.advertised_udp_port(4672), 51000);
-        r.set_nat_mapped_udp_port(None);
+        r.set_nat_mapped_ports(Some(45000), None);
         assert_eq!(r.advertised_udp_port(4672), 4672);
     }
 
@@ -232,7 +229,7 @@ mod tests {
     fn peer_confirmed_udp_port_takes_precedence_over_upnp() {
         let r = ExternalReachability::new();
         // UPnP-derived value applies while no peer confirmation is in force.
-        r.set_nat_mapped_udp_port(Some(45000));
+        r.set_nat_mapped_ports(None, Some(45000));
         assert_eq!(r.advertised_udp_port(4672), 45000);
         assert!(!r.udp_port_is_peer_confirmed());
         // A peer-confirmed port pins the value.
@@ -240,7 +237,7 @@ mod tests {
         assert!(r.udp_port_is_peer_confirmed());
         assert_eq!(r.advertised_udp_port(4672), 51000);
         // Subsequent UPnP syncs are retained but cannot supersede it.
-        r.set_nat_mapped_udp_port(Some(46000));
+        r.set_nat_mapped_ports(None, Some(46000));
         assert_eq!(r.advertised_udp_port(4672), 51000);
         // A zero peer confirmation is a no-op.
         r.set_peer_confirmed_udp_port(0);
@@ -257,8 +254,7 @@ mod tests {
         let r = ExternalReachability::new();
         r.set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
         r.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 2));
-        r.set_nat_mapped_tcp_port(Some(45000));
-        r.set_nat_mapped_udp_port(Some(46000));
+        r.set_nat_mapped_ports(Some(45000), Some(46000));
         r.set_peer_confirmed_udp_port(51000);
 
         r.clear_all();
@@ -274,7 +270,7 @@ mod tests {
         let a = ExternalReachability::new();
         let b = a.clone();
         a.set_server_public_ip(Ipv4Addr::new(192, 0, 2, 5));
-        a.set_nat_mapped_udp_port(Some(40000));
+        a.set_nat_mapped_ports(None, Some(40000));
         assert_eq!(b.get(), Some(Ipv4Addr::new(192, 0, 2, 5)));
         assert_eq!(b.advertised_udp_port(4672), 40000);
     }
@@ -283,13 +279,11 @@ mod tests {
     fn snapshots_remain_stable_after_new_evidence_is_published() {
         let reachability = ExternalReachability::new();
         reachability.set_fallback_public_ip(Ipv4Addr::new(192, 0, 2, 5));
-        reachability.set_nat_mapped_tcp_port(Some(45000));
-        reachability.set_nat_mapped_udp_port(Some(46000));
+        reachability.set_nat_mapped_ports(Some(45000), Some(46000));
         let before = reachability.snapshot();
 
         reachability.set_server_public_ip(Ipv4Addr::new(198, 51, 100, 9));
-        reachability.set_nat_mapped_tcp_port(Some(55000));
-        reachability.set_nat_mapped_udp_port(Some(56000));
+        reachability.set_nat_mapped_ports(Some(55000), Some(56000));
 
         assert_eq!(before.public_ip(), Some(Ipv4Addr::new(192, 0, 2, 5)));
         assert_eq!(before.advertised_tcp_port(4662), 45000);

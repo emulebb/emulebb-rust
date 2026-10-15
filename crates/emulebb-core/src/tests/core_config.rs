@@ -495,8 +495,8 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     core.ed2k_reachability.set_fallback_public_ip(fallback_ip);
     core.ed2k_reachability
         .set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
-    core.ed2k_reachability.set_nat_mapped_tcp_port(Some(45000));
-    core.ed2k_reachability.set_nat_mapped_udp_port(Some(46000));
+    core.ed2k_reachability
+        .set_nat_mapped_ports(Some(45000), Some(46000));
     core.ed2k_reachability.set_peer_confirmed_udp_port(51000);
     {
         let runtime = core.ed2k_runtime.lock().await;
