@@ -457,6 +457,7 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
         shutdown: Arc::clone(&shutdown),
         server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
         server_connect_plan: test_server_connect_plan_sender(),
+        server_task: test_server_task(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
         download_tasks: Arc::clone(&core.ed2k_download_tasks),
@@ -531,6 +532,63 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
 }
 
 #[tokio::test]
+async fn full_disconnect_waits_for_server_supervisor_retirement() {
+    let transfer_root = unique_runtime_dir("emulebb-core-server-retirement-barrier");
+    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+    let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some("0.0.0.0:0".parse().unwrap()),
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_for_task = Arc::clone(&shutdown);
+    let (allow_exit, allow_exit_rx) = tokio::sync::oneshot::channel();
+    let retirement_started = Arc::new(AtomicBool::new(false));
+    let retirement_started_for_task = Arc::clone(&retirement_started);
+    let server_task = tokio::spawn(async move {
+        while !shutdown_for_task.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        retirement_started_for_task.store(true, Ordering::SeqCst);
+        allow_exit_rx.await.unwrap();
+    });
+    *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+        search_handle,
+        server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        server_enabled: Arc::new(AtomicBool::new(true)),
+        dht,
+        kad_nodes_dat_path: None,
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        nat: Arc::new(NatManager::default()),
+        shutdown,
+        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
+        server_connect_plan: test_server_connect_plan_sender(),
+        server_task,
+        kad_firewall_recheck: None,
+        tasks: Vec::new(),
+        download_tasks: Arc::clone(&core.ed2k_download_tasks),
+    });
+    let core_for_disconnect = core.clone();
+    let disconnect = tokio::spawn(async move { core_for_disconnect.disconnect_ed2k().await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !retirement_started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server supervisor should observe runtime shutdown");
+
+    assert!(!disconnect.is_finished());
+    allow_exit.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), disconnect)
+        .await
+        .expect("disconnect should finish after supervisor retirement")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn nodes_dat_import_persists_while_kad_is_stopped() {
     let transfer_root = unique_runtime_dir("emulebb-core-kad-stopped-import");
     let nodes_path = transfer_root.join("nodes.dat");
@@ -592,6 +650,7 @@ async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() 
         shutdown: Arc::clone(&shutdown),
         server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
         server_connect_plan: test_server_connect_plan_sender(),
+        server_task: test_server_task(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
         download_tasks: Arc::clone(&core.ed2k_download_tasks),

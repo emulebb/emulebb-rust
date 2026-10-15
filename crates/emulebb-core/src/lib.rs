@@ -312,6 +312,7 @@ const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 /// the 5s default discovery timeout, while bounding startup if the gateway is slow
 /// or absent.
 const ED2K_NAT_INITIAL_RECONCILE_TIMEOUT: Duration = Duration::from_secs(20);
+const ED2K_SERVER_RETIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const TRANSFER_EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 struct Ed2kRuntime {
@@ -330,6 +331,9 @@ struct Ed2kRuntime {
     shutdown: Arc<AtomicBool>,
     server_reconnect_signal: Arc<tokio::sync::Notify>,
     server_connect_plan: tokio::sync::watch::Sender<Ed2kServerConnectPlan>,
+    /// Top-level server supervisor. It owns and drains all description/session
+    /// descendants before completing.
+    server_task: JoinHandle<()>,
     /// Trigger to run a Kad UDP firewall self-check round on demand. `None` when
     /// the firewall check is disabled in config.
     kad_firewall_recheck: Option<Arc<tokio::sync::Notify>>,

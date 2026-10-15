@@ -53,6 +53,24 @@ impl Drop for Ed2kStartupCandidate {
     }
 }
 
+async fn retire_ed2k_server_task(mut server_task: JoinHandle<()>) {
+    match tokio::time::timeout(ED2K_SERVER_RETIRE_TIMEOUT, &mut server_task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {}
+        Ok(Err(error)) => {
+            tracing::warn!("ED2K server supervisor failed during retirement: {error}")
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = ED2K_SERVER_RETIRE_TIMEOUT.as_millis(),
+                "ED2K server supervisor exceeded retirement deadline; aborting"
+            );
+            server_task.abort();
+            let _ = server_task.await;
+        }
+    }
+}
+
 /// Prune expired ban and tracked-identity entries until shutdown.
 async fn run_ed2k_client_state_prune_loop(
     ban_store: Arc<emulebb_ed2k::ban_store::BanStore>,
@@ -622,7 +640,7 @@ impl EmulebbCore {
         // outcomes; this consumer applies them to the core's persisted store.
         let dead_server_retries = config.dead_server_retries;
         let (server_list_events_tx, server_list_events_rx) = ed2k_server_list_event_channel();
-        tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
+        let server_task = tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
             bind_ip: network.bind_ip,
             nat: Arc::clone(&nat),
             server_connect_plan: server_connect_plan_rx,
@@ -637,7 +655,7 @@ impl EmulebbCore {
             reconnect_signal: Arc::clone(&server_reconnect_signal),
             server_list_events: Some(server_list_events_tx),
             callback_sessions: callback_sessions.clone(),
-        })));
+        }));
         tasks.push(tokio::spawn(
             Self::run_ed2k_shared_catalog_demand_publish_loop(
                 self.clone(),
@@ -772,6 +790,7 @@ impl EmulebbCore {
             shutdown,
             server_reconnect_signal,
             server_connect_plan,
+            server_task,
             kad_firewall_recheck,
             tasks,
             download_tasks: Arc::clone(&self.ed2k_download_tasks),
@@ -825,6 +844,7 @@ impl EmulebbCore {
         }
         if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
             runtime.shutdown.store(true, Ordering::SeqCst);
+            runtime.server_reconnect_signal.notify_waiters();
             // Capture the final reachability value and persist the live routing
             // sample before aborting the Kad tasks. A write failure must not
             // strand shutdown, but it is visible in logs and the previous file
@@ -846,16 +866,24 @@ impl EmulebbCore {
                     ),
                 }
             }
-            for task in runtime.tasks {
+            let Ed2kRuntime {
+                server_task,
+                tasks,
+                download_tasks,
+                nat,
+                ..
+            } = runtime;
+            retire_ed2k_server_task(server_task).await;
+            for task in tasks {
                 task.abort();
                 let _ = task.await;
             }
             // Abort this session's detached background-download tasks (FIX B3) so
             // downloads do not survive disconnect or orphan on shutdown.
-            runtime.download_tasks.lock().await.abort_all();
+            download_tasks.lock().await.abort_all();
             // WHY: REST disconnect must not hang behind network cleanup after a failed
             // server dial; the runtime has already been removed and tasks aborted.
-            let _ = tokio::time::timeout(Duration::from_secs(2), runtime.nat.stop()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), nat.stop()).await;
         }
         self.ed2k_reachability.clear_all();
         self.ed2k_status().await
@@ -988,7 +1016,7 @@ mod ed2k_startup_candidate_tests {
     use std::{
         future::Future,
         pin::Pin,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use emulebb_ed2k::{
@@ -1000,6 +1028,14 @@ mod ed2k_startup_candidate_tests {
 
     struct StartupProvider {
         release_calls: AtomicUsize,
+    }
+
+    struct TaskDropProbe(Arc<AtomicBool>);
+
+    impl Drop for TaskDropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     impl PortMappingProvider for StartupProvider {
@@ -1096,6 +1132,24 @@ mod ed2k_startup_candidate_tests {
             reachability.snapshot(),
             ExternalReachability::new().snapshot()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn server_retirement_timeout_aborts_and_joins_supervisor() {
+        let task_dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped_for_task = Arc::clone(&task_dropped);
+        let server_task = tokio::spawn(async move {
+            let _drop_probe = TaskDropProbe(task_dropped_for_task);
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        let retirement = tokio::spawn(retire_ed2k_server_task(server_task));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(ED2K_SERVER_RETIRE_TIMEOUT + Duration::from_millis(1)).await;
+        retirement.await.unwrap();
+
+        assert!(task_dropped.load(Ordering::SeqCst));
     }
 }
 
