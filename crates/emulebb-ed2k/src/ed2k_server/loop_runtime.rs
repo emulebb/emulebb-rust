@@ -85,26 +85,17 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         callback_sessions,
     };
 
-    let initial_configured_servers = match configured_server_entries(initial_plan.config()) {
-        Ok(entries) => entries,
-        Err(error) => {
-            warn!("ED2K server session disabled: invalid server configuration: {error}");
-            return;
-        }
-    };
-    if !initial_configured_servers.is_empty() {
-        tokio::spawn(poll_server_descriptions(
-            bind_ip,
-            initial_configured_servers,
-            Arc::clone(&state),
-            session_context_base.public_ip.clone(),
-            session_context_base.hello_identity.connect_options & 0x01 != 0,
-            session_context_base.add_servers_from_server,
-            Arc::clone(&shutdown),
-            Arc::clone(&server_enabled),
-            session_context_base.server_list_events.clone(),
-        ));
-    }
+    let description_cancel = CancellationToken::new();
+    let description_task = tokio::spawn(poll_server_descriptions(
+        bind_ip,
+        server_connect_plan.clone(),
+        Arc::clone(&state),
+        session_context_base.public_ip.clone(),
+        Arc::clone(&shutdown),
+        Arc::clone(&server_enabled),
+        session_context_base.server_list_events.clone(),
+        description_cancel.clone(),
+    ));
 
     'server_loop: while !shutdown.load(Ordering::Relaxed) {
         if !server_enabled.load(Ordering::SeqCst) {
@@ -443,6 +434,8 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             );
         }
     }
+    description_cancel.cancel();
+    let _ = description_task.await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

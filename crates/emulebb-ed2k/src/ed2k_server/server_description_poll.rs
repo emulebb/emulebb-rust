@@ -8,15 +8,19 @@ use std::{
     time::Duration,
 };
 
-use tokio::{net::UdpSocket, sync::RwLock};
+use tokio::{
+    net::UdpSocket,
+    sync::{RwLock, watch},
+};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::reachability::ExternalReachability;
 
-use super::server_entry::ConfiguredServerEntry;
 use super::{
-    Ed2kServerListEvent, Ed2kServerListEventSender, Ed2kServerState, OP_GLOBSERVSTATRES,
-    OP_SERVER_DESC_RES, OP_SERVER_LIST_RES, ResolvedServerEntry, decode_server_list,
+    Ed2kServerConnectPlan, Ed2kServerListEvent, Ed2kServerListEventSender, Ed2kServerState,
+    OP_GLOBSERVSTATRES, OP_SERVER_DESC_RES, OP_SERVER_LIST_RES, ResolvedServerEntry,
+    configured_server_entries, decode_server_list, ed2k_server_list_event_channel,
     resolve_server_entry,
     server_description::decode_server_description_response,
     server_status::decode_server_status_response,
@@ -38,30 +42,17 @@ const SERVER_CONNECTION_WAIT_POLL: Duration = Duration::from_millis(100);
 )]
 pub(super) async fn poll_server_descriptions(
     bind_ip: std::net::Ipv4Addr,
-    configured_servers: Vec<ConfiguredServerEntry>,
+    mut server_connect_plan: watch::Receiver<Ed2kServerConnectPlan>,
     state: Arc<RwLock<Ed2kServerState>>,
     public_ip: ExternalReachability,
-    crypt_enabled: bool,
-    add_servers_from_server: bool,
     shutdown: Arc<AtomicBool>,
     server_enabled: Arc<AtomicBool>,
     events: Option<Ed2kServerListEventSender>,
+    task_cancel: CancellationToken,
 ) {
     let Some(events) = events else {
         return;
     };
-    // Stock's server-stat walk is active only while an ED2K server session is
-    // established. Waiting also gives OP_IDCHANGE a chance to establish the
-    // public IPv4 needed to bind a newly learned UDP key.
-    loop {
-        if shutdown.load(Ordering::Relaxed) || !server_enabled.load(Ordering::SeqCst) {
-            return;
-        }
-        if state.read().await.connected {
-            break;
-        }
-        tokio::time::sleep(SERVER_CONNECTION_WAIT_POLL).await;
-    }
     let socket = match bind_server_udp_socket(bind_ip).await {
         Ok(socket) => socket,
         Err(error) => {
@@ -69,43 +60,181 @@ pub(super) async fn poll_server_descriptions(
             return;
         }
     };
-    for configured in configured_servers {
-        if shutdown.load(Ordering::Relaxed) || !server_enabled.load(Ordering::SeqCst) {
+    let mut last_polled = None;
+    'runtime: loop {
+        if task_cancel.is_cancelled() || shutdown.load(Ordering::Relaxed) {
             return;
         }
-        let mut server = match resolve_server_entry(&configured).await {
-            Ok(server) => server,
+        let plan = server_connect_plan.borrow_and_update().clone();
+        let state_snapshot = state.read().await.clone();
+        if !server_enabled.load(Ordering::SeqCst) || !state_snapshot.connected {
+            if !wait_for_poll_trigger(&mut server_connect_plan, &task_cancel).await {
+                return;
+            }
+            continue;
+        }
+        let poll_key = (plan.clone(), state_snapshot.session_generation);
+        if last_polled.as_ref() == Some(&poll_key) {
+            if !wait_for_poll_trigger(&mut server_connect_plan, &task_cancel).await {
+                return;
+            }
+            continue;
+        }
+        last_polled = Some(poll_key);
+        let configured_servers = match configured_server_entries(plan.config()) {
+            Ok(servers) => servers,
             Err(error) => {
-                debug!(
-                    "skipping server description poll for {}: {error}",
-                    configured.base_endpoint_text()
-                );
+                warn!("server description poll skipped invalid live plan: {error}");
                 continue;
             }
         };
-        let connected_endpoint = {
-            let guard = state.read().await;
-            guard.connected.then_some(guard.endpoint).flatten()
-        };
-        if connected_endpoint == Some(server.base_endpoint()) {
-            continue;
+
+        for configured in configured_servers {
+            match observe_plan(&server_connect_plan) {
+                PlanObservation::Current => {}
+                PlanObservation::Changed => continue 'runtime,
+                PlanObservation::Closed => return,
+            }
+            let mut server = tokio::select! {
+                result = resolve_server_entry(&configured) => match result {
+                    Ok(server) => server,
+                    Err(error) => {
+                        debug!(
+                            "skipping server description poll for {}: {error}",
+                            configured.base_endpoint_text()
+                        );
+                        continue;
+                    }
+                },
+                changed = server_connect_plan.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue 'runtime;
+                }
+                () = wait_for_session_invalidation(
+                    &state,
+                    &server_enabled,
+                    &shutdown,
+                    state_snapshot.session_generation,
+                ) => continue 'runtime,
+                () = task_cancel.cancelled() => return,
+            };
+            if state_snapshot.endpoint == Some(server.base_endpoint()) {
+                continue;
+            }
+
+            let (transaction_events, mut transaction_inbox) = ed2k_server_list_event_channel();
+            let result = tokio::select! {
+                result = poll_one_server(
+                    &socket,
+                    &mut server,
+                    public_ip.get(),
+                    plan.config().obfuscation_enabled,
+                    plan.config().add_servers_from_server,
+                    &transaction_events,
+                ) => result,
+                changed = server_connect_plan.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue 'runtime;
+                }
+                () = wait_for_session_invalidation(
+                    &state,
+                    &server_enabled,
+                    &shutdown,
+                    state_snapshot.session_generation,
+                ) => continue 'runtime,
+                () = task_cancel.cancelled() => return,
+            };
+            let current_state = state.read().await.clone();
+            match observe_plan(&server_connect_plan) {
+                PlanObservation::Current => {}
+                PlanObservation::Changed => continue 'runtime,
+                PlanObservation::Closed => return,
+            }
+            if !server_enabled.load(Ordering::SeqCst)
+                || !current_state.connected
+                || current_state.session_generation != state_snapshot.session_generation
+            {
+                continue 'runtime;
+            }
+            drop(transaction_events);
+            while let Ok(event) = transaction_inbox.try_recv() {
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
+            if let Err(error) = result {
+                debug!(
+                    "server description poll failed for {}: {error}",
+                    server.base_endpoint()
+                );
+            }
+            tokio::select! {
+                () = tokio::time::sleep(SERVER_METADATA_PACING) => {}
+                changed = server_connect_plan.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue 'runtime;
+                }
+                () = wait_for_session_invalidation(
+                    &state,
+                    &server_enabled,
+                    &shutdown,
+                    state_snapshot.session_generation,
+                ) => continue 'runtime,
+                () = task_cancel.cancelled() => return,
+            }
         }
-        if let Err(error) = poll_one_server(
-            &socket,
-            &mut server,
-            public_ip.get(),
-            crypt_enabled,
-            add_servers_from_server,
-            &events,
-        )
-        .await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanObservation {
+    Current,
+    Changed,
+    Closed,
+}
+
+fn observe_plan(server_connect_plan: &watch::Receiver<Ed2kServerConnectPlan>) -> PlanObservation {
+    match server_connect_plan.has_changed() {
+        Ok(false) => PlanObservation::Current,
+        Ok(true) => PlanObservation::Changed,
+        Err(_) => PlanObservation::Closed,
+    }
+}
+
+async fn wait_for_session_invalidation(
+    state: &Arc<RwLock<Ed2kServerState>>,
+    server_enabled: &AtomicBool,
+    shutdown: &AtomicBool,
+    expected_generation: u64,
+) {
+    loop {
+        let current_state = state.read().await;
+        if shutdown.load(Ordering::Relaxed)
+            || !server_enabled.load(Ordering::SeqCst)
+            || !current_state.connected
+            || current_state.session_generation != expected_generation
         {
-            debug!(
-                "server description poll failed for {}: {error}",
-                server.base_endpoint()
-            );
+            return;
         }
-        tokio::time::sleep(SERVER_METADATA_PACING).await;
+        drop(current_state);
+        tokio::time::sleep(SERVER_CONNECTION_WAIT_POLL).await;
+    }
+}
+
+async fn wait_for_poll_trigger(
+    server_connect_plan: &mut watch::Receiver<Ed2kServerConnectPlan>,
+    task_cancel: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        changed = server_connect_plan.changed() => changed.is_ok(),
+        () = task_cancel.cancelled() => false,
+        () = tokio::time::sleep(SERVER_CONNECTION_WAIT_POLL) => true,
     }
 }
 
@@ -277,14 +406,24 @@ async fn receive_opcode(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        sync::{Arc, atomic::AtomicBool},
+        time::Duration,
+    };
 
-    use tokio::net::UdpSocket;
+    use tokio::{net::UdpSocket, sync::watch};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::ed2k_server::{
-        OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
-        server_entry::ConfiguredServerEntry, server_events::ed2k_server_list_event_channel,
+    use crate::{
+        config::Ed2kRuntimeConfig,
+        ed2k_server::{
+            Ed2kServerConnectMode, Ed2kServerConnectPlan, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ,
+            OP_SERVER_DESC_REQ, server_entry::ConfiguredServerEntry,
+            server_events::ed2k_server_list_event_channel,
+        },
+        reachability::ExternalReachability,
     };
 
     async fn bind_plain_and_crypt_ports() -> (u16, UdpSocket, UdpSocket) {
@@ -308,6 +447,117 @@ mod tests {
         packet.push(opcode);
         packet.extend_from_slice(payload);
         packet
+    }
+
+    fn automatic_plan(endpoint: Option<String>) -> Ed2kServerConnectPlan {
+        let mut config = Ed2kRuntimeConfig::default();
+        config.obfuscation_enabled = false;
+        config.server_endpoints = endpoint.into_iter().collect();
+        Ed2kServerConnectPlan::new(config, Ed2kServerConnectMode::Automatic)
+    }
+
+    #[tokio::test]
+    async fn live_plan_replacement_discards_stale_events_and_polls_added_server() {
+        let (removed_port, removed, _removed_crypt) = bind_plain_and_crypt_ports().await;
+        let (added_port, added, _added_crypt) = bind_plain_and_crypt_ports().await;
+        let (plan_sender, plan_receiver) =
+            watch::channel(automatic_plan(Some(format!("127.0.0.1:{removed_port}"))));
+        let state = Arc::new(RwLock::new(Ed2kServerState {
+            endpoint: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 1))),
+            connected: true,
+            session_generation: 7,
+            ..Ed2kServerState::default()
+        }));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_enabled = Arc::new(AtomicBool::new(true));
+        let (events, mut inbox) = ed2k_server_list_event_channel();
+        let task_cancel = CancellationToken::new();
+        let poller = tokio::spawn(poll_server_descriptions(
+            Ipv4Addr::LOCALHOST,
+            plan_receiver,
+            Arc::clone(&state),
+            ExternalReachability::default(),
+            Arc::clone(&shutdown),
+            Arc::clone(&server_enabled),
+            Some(events),
+            task_cancel.clone(),
+        ));
+
+        let mut buffer = [0u8; 256];
+        let (removed_len, _) =
+            tokio::time::timeout(Duration::from_secs(1), removed.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(removed_len, 6);
+        assert_eq!(buffer[..2], [OP_EDONKEYPROT, OP_GLOBSERVSTATREQ]);
+
+        plan_sender.send_replace(automatic_plan(None));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), inbox.recv())
+                .await
+                .is_err()
+        );
+
+        let added_responder = tokio::spawn(async move {
+            let mut buffer = [0u8; 256];
+            let (status_len, client) = added.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(status_len, 6);
+            assert_eq!(buffer[..2], [OP_EDONKEYPROT, OP_GLOBSERVSTATREQ]);
+            let challenge = u32::from_le_bytes(buffer[2..6].try_into().unwrap());
+            let mut status = challenge.to_le_bytes().to_vec();
+            status.extend_from_slice(&123u32.to_le_bytes());
+            status.extend_from_slice(&456u32.to_le_bytes());
+            status.extend_from_slice(&[0u8; 12]);
+            added
+                .send_to(&framed(OP_GLOBSERVSTATRES, &status), client)
+                .await
+                .unwrap();
+
+            let (description_len, client) = added.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(description_len, 6);
+            assert_eq!(buffer[..2], [OP_EDONKEYPROT, OP_SERVER_DESC_REQ]);
+            let mut description = 6u16.to_le_bytes().to_vec();
+            description.extend_from_slice(b"Server");
+            description.extend_from_slice(&5u16.to_le_bytes());
+            description.extend_from_slice(b"Added");
+            added
+                .send_to(&framed(OP_SERVER_DESC_RES, &description), client)
+                .await
+                .unwrap();
+        });
+        plan_sender.send_replace(automatic_plan(Some(format!("127.0.0.1:{added_port}"))));
+
+        let added_endpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, added_port)).to_string();
+        let status = tokio::time::timeout(Duration::from_secs(1), inbox.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            status,
+            Ed2kServerListEvent::StatusUpdated { endpoint, .. } if endpoint == added_endpoint
+        ));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), inbox.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Ed2kServerListEvent::MetadataUpdated {
+                endpoint: added_endpoint,
+                name: Some("Server".to_string()),
+                description: Some("Added".to_string()),
+                dynamic_host: None,
+                version: None,
+                auxiliary_ports: Vec::new(),
+            }
+        );
+
+        added_responder.await.unwrap();
+        task_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), poller)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
