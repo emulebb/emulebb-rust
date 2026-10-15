@@ -54,10 +54,11 @@ pub enum Ed2kDeliveryOutcome {
     Delivered(PathBuf),
 }
 
-#[derive(Debug)]
-enum RecordedDeliveryVerification {
-    Valid(Option<NativeFileFingerprint>),
-    Invalid,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DeliveredOutputIdentity {
+    Missing,
+    Matching(Option<NativeFileFingerprint>),
+    Foreign,
 }
 
 impl Ed2kTransferRuntime {
@@ -113,7 +114,7 @@ impl Ed2kTransferRuntime {
         };
 
         if let Some(recorded_path) = recorded_path {
-            match verify_recorded_delivery(
+            match classify_delivered_output(
                 &recorded_path,
                 recorded_fingerprint.as_ref(),
                 expected_size,
@@ -121,7 +122,7 @@ impl Ed2kTransferRuntime {
             )
             .await
             {
-                Ok(RecordedDeliveryVerification::Valid(current_fingerprint)) => {
+                Ok(DeliveredOutputIdentity::Matching(current_fingerprint)) => {
                     if current_fingerprint != recorded_fingerprint {
                         let _guard = self.lock_manifest(file_hash).await;
                         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
@@ -134,7 +135,7 @@ impl Ed2kTransferRuntime {
                     }
                     return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded_path));
                 }
-                Ok(RecordedDeliveryVerification::Invalid) => {}
+                Ok(DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign) => {}
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -199,26 +200,26 @@ impl Ed2kTransferRuntime {
     }
 }
 
-async fn verify_recorded_delivery(
+pub(super) async fn classify_delivered_output(
     path: &Path,
     recorded_fingerprint: Option<&NativeFileFingerprint>,
     expected_size: u64,
     expected_hash: [u8; 16],
-) -> Result<RecordedDeliveryVerification> {
+) -> Result<DeliveredOutputIdentity> {
     let path = long_path(path);
     let recorded_fingerprint = recorded_fingerprint.cloned();
     tokio::task::spawn_blocking(move || {
         let metadata = match path.symlink_metadata() {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(RecordedDeliveryVerification::Invalid);
+                return Ok(DeliveredOutputIdentity::Missing);
             }
             Err(error) => {
                 return Err(error).with_context(|| format!("failed to stat {}", path.display()));
             }
         };
         if !metadata.file_type().is_file() || metadata.len() != expected_size {
-            return Ok(RecordedDeliveryVerification::Invalid);
+            return Ok(DeliveredOutputIdentity::Foreign);
         }
         let current_fingerprint = super::ingest::native_file_fingerprint(&path, &metadata);
         if recorded_fingerprint
@@ -226,10 +227,10 @@ async fn verify_recorded_delivery(
             .zip(current_fingerprint.as_ref())
             .is_some_and(|(recorded, current)| recorded.safely_matches(current))
         {
-            return Ok(RecordedDeliveryVerification::Valid(current_fingerprint));
+            return Ok(DeliveredOutputIdentity::Matching(current_fingerprint));
         }
         if compute_ed2k_hash(&path, expected_size)? != Some(expected_hash) {
-            return Ok(RecordedDeliveryVerification::Invalid);
+            return Ok(DeliveredOutputIdentity::Foreign);
         }
         let post_hash_fingerprint = path
             .symlink_metadata()
@@ -237,12 +238,12 @@ async fn verify_recorded_delivery(
             .filter(|metadata| metadata.file_type().is_file() && metadata.len() == expected_size)
             .and_then(|metadata| super::ingest::native_file_fingerprint(&path, &metadata));
         if current_fingerprint.is_some() && current_fingerprint != post_hash_fingerprint {
-            return Ok(RecordedDeliveryVerification::Invalid);
+            return Ok(DeliveredOutputIdentity::Foreign);
         }
-        Ok(RecordedDeliveryVerification::Valid(post_hash_fingerprint))
+        Ok(DeliveredOutputIdentity::Matching(post_hash_fingerprint))
     })
     .await
-    .context("recorded delivered-file verification task failed")?
+    .context("delivered-output identity task failed")?
 }
 
 fn delivered_file_fingerprint(path: &Path) -> Option<NativeFileFingerprint> {
@@ -486,11 +487,9 @@ async fn delivered_file_matches(
     expected_size: u64,
     expected_hash: [u8; 16],
 ) -> Result<bool> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || compute_ed2k_hash(&path, expected_size))
+    classify_delivered_output(path, None, expected_size, expected_hash)
         .await
-        .context("delivered-file verification task failed")?
-        .map(|hash| hash == Some(expected_hash))
+        .map(|identity| matches!(identity, DeliveredOutputIdentity::Matching(_)))
 }
 
 fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>> {
@@ -815,6 +814,38 @@ mod tests {
 
         assert_eq!(delivered, installed);
         assert!(!dest.join("recovered (1).bin").exists());
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn delivered_output_identity_distinguishes_missing_matching_and_foreign() {
+        let dir = temp_dir();
+        let matching = dir.join("matching.bin");
+        let foreign = dir.join("foreign.bin");
+        let missing = dir.join("missing.bin");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(&matching, b"canonical").await.unwrap();
+        tokio::fs::write(&foreign, b"unrelated").await.unwrap();
+        let expected_hash = Md4::digest(b"canonical").into();
+
+        assert!(matches!(
+            classify_delivered_output(&matching, None, 9, expected_hash)
+                .await
+                .unwrap(),
+            DeliveredOutputIdentity::Matching(_)
+        ));
+        assert_eq!(
+            classify_delivered_output(&foreign, None, 9, expected_hash)
+                .await
+                .unwrap(),
+            DeliveredOutputIdentity::Foreign
+        );
+        assert_eq!(
+            classify_delivered_output(&missing, None, 9, expected_hash)
+                .await
+                .unwrap(),
+            DeliveredOutputIdentity::Missing
+        );
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
 
