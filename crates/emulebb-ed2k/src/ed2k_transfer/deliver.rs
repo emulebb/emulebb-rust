@@ -9,11 +9,12 @@
 //! (`CPartFile::CompleteFile` / `PerformFileComplete`), expressed for the
 //! headless piece-store model.
 //!
-//! MECHANICS. Same-volume delivery hard-links `pieces.bin` to the destination
-//! (cheap, and it leaves the internal piece store intact for continued upload
-//! seeding). Cross-volume delivery copies to a temp sibling and atomically
-//! renames it into place. A name collision in the destination is resolved by
-//! appending ` (1)`, ` (2)`, … before the extension, matching eMule.
+//! MECHANICS. Delivery copies `pieces.bin` to a temp sibling and atomically
+//! renames it into place. The operator-facing file must not alias the verified
+//! piece store: normal edits to a completed file cannot be allowed to mutate
+//! bytes later served under the transfer's ED2K hash. A name collision in the
+//! destination is resolved by appending ` (1)`, ` (2)`, … before the extension,
+//! matching eMule.
 //!
 //! The destination directory and the final delivered file path are
 //! operator-facing content paths, so every filesystem operation goes through
@@ -128,8 +129,8 @@ impl Ed2kTransferRuntime {
             // keeps its own source fingerprint and is never delivered. It is
             // read AFTER the file is in place, through the same `long_path` stat
             // the reload uses, so an unchanged delivered file compares equal on
-            // reload (a hard-link preserves file identity; a copy+rename gets a
-            // fresh identity that is stable thereafter).
+            // reload (the copy+rename gets a fresh identity that is stable
+            // thereafter).
             if manifest.source_path.is_none() {
                 manifest.source_fingerprint =
                     Ed2kTransferRuntime::scanned_source_identity(&final_path)
@@ -180,7 +181,7 @@ async fn deliver_payload_file(
             continue;
         }
         persist_pending_delivery_path(pending_path, &candidate).await?;
-        match link_or_copy_noclobber(source, &candidate).await? {
+        match copy_noclobber(source, &candidate).await? {
             InstallOutcome::Installed => return Ok(candidate),
             InstallOutcome::AlreadyExists => {
                 if delivered_file_matches(&candidate, expected_size, expected_hash).await? {
@@ -201,11 +202,11 @@ enum InstallOutcome {
     AlreadyExists,
 }
 
-/// Install without replacing an existing destination. Same-volume delivery is
-/// one atomic hard-link operation. Cross-volume delivery copies into a unique
-/// temporary sibling and uses `persist_noclobber`, so two transfers selecting
-/// the same visible name cannot overwrite or alias each other.
-async fn link_or_copy_noclobber(source: &Path, dest: &Path) -> Result<InstallOutcome> {
+/// Install an independent payload copy without replacing an existing
+/// destination. Delivery uses a unique temporary sibling and
+/// `persist_noclobber`, so two transfers selecting the same visible name cannot
+/// overwrite or alias each other.
+async fn copy_noclobber(source: &Path, dest: &Path) -> Result<InstallOutcome> {
     let source_lp = long_path(source);
     let dest_lp = long_path(dest);
 
@@ -228,14 +229,6 @@ async fn link_or_copy_noclobber(source: &Path, dest: &Path) -> Result<InstallOut
                 format!("failed to create empty delivered file {}", dest.display())
             }),
         };
-    }
-
-    match tokio::fs::hard_link(&source_lp, &dest_lp).await {
-        Ok(()) => return Ok(InstallOutcome::Installed),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Ok(InstallOutcome::AlreadyExists);
-        }
-        Err(_) => {}
     }
 
     let parent = dest.parent().unwrap_or_else(|| Path::new("."));
