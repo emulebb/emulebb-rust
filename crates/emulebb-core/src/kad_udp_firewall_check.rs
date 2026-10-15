@@ -364,7 +364,7 @@ mod tests {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let reachability = ExternalReachability::new();
         // A prior UPnP guess that must be overridden by the peer-confirmed result.
-        reachability.set_external_udp_port(45000);
+        reachability.set_nat_mapped_udp_port(Some(45000));
 
         apply_kad_udp_firewall_check_result(
             &firewall,
@@ -376,7 +376,7 @@ mod tests {
         assert!(reachability.udp_port_is_peer_confirmed());
         assert_eq!(reachability.advertised_udp_port(4672), 53000);
         // The UPnP sync can no longer clobber it.
-        reachability.set_external_udp_port(46000);
+        reachability.set_nat_mapped_udp_port(Some(46000));
         assert_eq!(reachability.advertised_udp_port(4672), 53000);
     }
 
@@ -384,7 +384,7 @@ mod tests {
     async fn open_on_internal_port_does_not_pin_a_port() {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let reachability = ExternalReachability::new();
-        reachability.set_external_udp_port(45000);
+        reachability.set_nat_mapped_udp_port(Some(45000));
         reachability.set_peer_confirmed_udp_port(53000);
 
         apply_kad_udp_firewall_check_result(&firewall, &reachability, Some(summary(true, None)))
@@ -398,7 +398,7 @@ mod tests {
     async fn conclusive_firewalled_verdict_revokes_peer_confirmed_port() {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let reachability = ExternalReachability::new();
-        reachability.set_external_udp_port(45000);
+        reachability.set_nat_mapped_udp_port(Some(45000));
         reachability.set_peer_confirmed_udp_port(53000);
 
         apply_kad_udp_firewall_check_result(&firewall, &reachability, Some(summary(false, None)))
@@ -419,7 +419,7 @@ mod tests {
         state.record_udp_check_inconclusive("second inconclusive check");
         let firewall = Arc::new(Mutex::new(state));
         let reachability = ExternalReachability::new();
-        reachability.set_external_udp_port(45000);
+        reachability.set_nat_mapped_udp_port(Some(45000));
         reachability.set_peer_confirmed_udp_port(53000);
 
         apply_kad_udp_firewall_check_result(&firewall, &reachability, None).await;

@@ -322,7 +322,9 @@ async fn client_id_reassignment_republishes_catalog_with_new_endpoint() {
     let low_id = 0x0000_0001;
     let high_id = 0x0102_0304;
 
-    context.public_ip.set(Ipv4Addr::new(203, 0, 113, 1));
+    context
+        .public_ip
+        .set_server_public_ip(Ipv4Addr::new(203, 0, 113, 1));
     handle_server_packet(
         &mut session,
         id_change_packet(low_id, 0, None),
