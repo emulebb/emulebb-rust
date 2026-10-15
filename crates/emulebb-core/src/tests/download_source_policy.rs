@@ -39,7 +39,7 @@ async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
-        reachability: core.ed2k_reachability.begin_runtime(),
+        reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::new(AtomicBool::new(false)),
         server_connect_plan: test_server_connect_plan_sender(),

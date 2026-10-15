@@ -345,7 +345,6 @@ mod tests {
     use super::{apply_kad_udp_firewall_check_result, expire_stale_kad_udp_verification};
     use chrono::Utc;
     use emulebb_ed2k::kad_firewall::{KadFirewallState, UdpFirewallCheckSummary};
-    use emulebb_ed2k::reachability::ExternalReachability;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -366,8 +365,9 @@ mod tests {
     #[tokio::test]
     async fn open_with_discovered_port_pins_peer_confirmed_reachability() {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
-        let reachability = ExternalReachability::new();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         let reachability_writer = reachability_lease.writer();
         // A prior UPnP guess that must be overridden by the peer-confirmed result.
         reachability_writer.set_nat_mapped_ports(None, Some(45000));
@@ -389,8 +389,9 @@ mod tests {
     #[tokio::test]
     async fn open_on_internal_port_does_not_pin_a_port() {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
-        let reachability = ExternalReachability::new();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         let reachability_writer = reachability_lease.writer();
         reachability_writer.set_nat_mapped_ports(None, Some(45000));
         reachability_writer.set_peer_confirmed_udp_port(53000);
@@ -409,8 +410,9 @@ mod tests {
     #[tokio::test]
     async fn conclusive_firewalled_verdict_revokes_peer_confirmed_port() {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
-        let reachability = ExternalReachability::new();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         let reachability_writer = reachability_lease.writer();
         reachability_writer.set_nat_mapped_ports(None, Some(45000));
         reachability_writer.set_peer_confirmed_udp_port(53000);
@@ -436,8 +438,9 @@ mod tests {
         state.record_udp_check_inconclusive("first inconclusive check");
         state.record_udp_check_inconclusive("second inconclusive check");
         let firewall = Arc::new(Mutex::new(state));
-        let reachability = ExternalReachability::new();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         let reachability_writer = reachability_lease.writer();
         reachability_writer.set_nat_mapped_ports(None, Some(45000));
         reachability_writer.set_peer_confirmed_udp_port(53000);

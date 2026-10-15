@@ -249,7 +249,7 @@ async fn vpn_guard_allows_kad_start_until_public_ip_disproves_allowed_cidr() {
     );
     core.set_kad_running(false).await;
 
-    let reachability = core.ed2k_reachability.begin_runtime();
+    let reachability = core.ed2k_reachability_authority.begin_runtime();
     let reachability_writer = reachability.writer();
     reachability_writer.set_fallback_public_ip(Ipv4Addr::new(1, 1, 1, 1));
     let err = core
@@ -446,7 +446,7 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let dht_task = dht.start();
     let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
-    let reachability = core.ed2k_reachability.begin_runtime();
+    let reachability = core.ed2k_reachability_authority.begin_runtime();
     let reachability_writer = reachability.writer();
     let mut server_reachability = reachability_writer.begin_server_session().unwrap();
     server_reachability.activate();
@@ -564,7 +564,7 @@ async fn server_disconnect_waits_for_supervisor_retirement_ack() {
         connected: true,
         ..Ed2kServerState::default()
     }));
-    let reachability = core.ed2k_reachability.begin_runtime();
+    let reachability = core.ed2k_reachability_authority.begin_runtime();
     let reachability_writer = reachability.writer();
     let fallback_ip = Ipv4Addr::new(198, 51, 100, 4);
     let server_ip = Ipv4Addr::new(203, 0, 113, 9);
@@ -663,7 +663,7 @@ async fn full_disconnect_waits_for_server_supervisor_retirement() {
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
-        reachability: core.ed2k_reachability.begin_runtime(),
+        reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown,
         server_connect_plan: test_server_connect_plan_sender(),
@@ -748,7 +748,7 @@ async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() 
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
-        reachability: core.ed2k_reachability.begin_runtime(),
+        reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
         server_connect_plan: test_server_connect_plan_sender(),

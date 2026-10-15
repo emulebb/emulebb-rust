@@ -858,7 +858,7 @@ async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
     assert_eq!(persisted.obfuscation_tcp_port, Some(4711));
     assert_eq!(persisted.obfuscation_udp_port, Some(4723));
 
-    let reachability = reloaded.ed2k_reachability.begin_runtime();
+    let reachability = reloaded.ed2k_reachability_authority.begin_runtime();
     let runtime_writer = reachability.writer();
     let mut server_reachability = runtime_writer.begin_server_session().unwrap();
     server_reachability.activate();
@@ -923,7 +923,7 @@ async fn install_test_server_plan_runtime(
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
-        reachability: core.ed2k_reachability.begin_runtime(),
+        reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
         server_connect_plan: server_connect_plan.clone(),
@@ -1227,7 +1227,7 @@ async fn explicit_server_connect_targets_running_server_loop() {
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
-        reachability: core.ed2k_reachability.begin_runtime(),
+        reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
         server_connect_plan: server_connect_plan.clone(),
@@ -1318,7 +1318,7 @@ async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
-        reachability: core.ed2k_reachability.begin_runtime(),
+        reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
         server_connect_plan: server_connect_plan.clone(),

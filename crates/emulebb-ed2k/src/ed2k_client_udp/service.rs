@@ -129,7 +129,7 @@ pub(crate) struct TransferReaskInfo {
 }
 
 /// Owns the downloader-side reask state across all transfers.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ReaskService {
     our_user_hash: [u8; 16],
     our_udp_version: u8,

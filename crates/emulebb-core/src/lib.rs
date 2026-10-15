@@ -52,7 +52,10 @@ use emulebb_ed2k::{
         Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
-    reachability::{ExternalReachability, ReachabilityRuntimeLease, RuntimeReachabilityWriter},
+    reachability::{
+        ExternalReachability, ReachabilityRuntimeAuthority, ReachabilityRuntimeLease,
+        RuntimeReachabilityWriter,
+    },
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
     shared_publish_rank::{
         SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank,
@@ -438,6 +441,9 @@ pub struct EmulebbCore {
     /// external eD2k TCP/UDP ports), read at hello/login-encode time. Fed by the
     /// server (OP_IDCHANGE), the STUN fallback, and the NAT-mapping sync.
     ed2k_reachability: ExternalReachability,
+    /// Sole capability for replacing the active runtime reachability generation.
+    /// Kept private to core lifecycle code; consumers receive readers or writers.
+    ed2k_reachability_authority: Arc<ReachabilityRuntimeAuthority>,
     /// Latest bound dual-plane egress-probe report (STUN UDP + HTTP TCP) that the
     /// VPN Guard monitor runs to verify the public egress (eMuleBB PublicIpProbe).
     /// Read by `vpn_guard_status`; refreshed by `run_vpn_guard_egress_probe`.
@@ -603,6 +609,8 @@ impl EmulebbCore {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| transfer_root.clone());
         let (transfer_events, _) = broadcast::channel(TRANSFER_EVENT_CHANNEL_CAPACITY);
+        let ed2k_reachability_authority = Arc::new(ReachabilityRuntimeAuthority::new());
+        let ed2k_reachability = ed2k_reachability_authority.reader();
         Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
@@ -620,7 +628,8 @@ impl EmulebbCore {
             kad_snoop_queue,
             ed2k_runtime: Arc::new(Mutex::new(None)),
             ed2k_reask_handle: Arc::new(std::sync::Mutex::new(None)),
-            ed2k_reachability: ExternalReachability::new(),
+            ed2k_reachability,
+            ed2k_reachability_authority,
             vpn_guard_egress: Arc::new(std::sync::Mutex::new(
                 vpn_guard::EgressProbeReport::default(),
             )),

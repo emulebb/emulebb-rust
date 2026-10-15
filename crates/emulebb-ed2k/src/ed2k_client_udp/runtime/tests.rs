@@ -1,9 +1,10 @@
 use super::*;
-use crate::reachability::{ExternalReachability, ReachabilityRuntimeLease};
+use crate::reachability::{ReachabilityRuntimeAuthority, ReachabilityRuntimeLease};
 
 fn service() -> (ReaskService, ReachabilityRuntimeLease) {
-    let public_ip = ExternalReachability::new();
-    let lease = public_ip.begin_runtime();
+    let authority = ReachabilityRuntimeAuthority::new();
+    let public_ip = authority.reader();
+    let lease = authority.begin_runtime();
     lease
         .writer()
         .set_fallback_public_ip(std::net::Ipv4Addr::new(203, 0, 113, 9));

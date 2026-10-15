@@ -520,8 +520,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        let reachability = ExternalReachability::new();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         sync_advertised_ports_from_nat(&status, &reachability_lease.writer(), 4662, 4672);
         assert_eq!(reachability.advertised_tcp_port(4662), 49662);
         assert_eq!(reachability.advertised_udp_port(4672), 49672);
@@ -538,8 +539,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        let reachability = ExternalReachability::new();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         let reachability_writer = reachability_lease.writer();
         reachability_writer.set_nat_mapped_ports(Some(41000), Some(42000));
         sync_advertised_ports_from_nat(&status, &reachability_writer, 4662, 4672);

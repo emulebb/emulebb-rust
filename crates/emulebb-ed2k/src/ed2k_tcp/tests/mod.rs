@@ -154,7 +154,7 @@ macro_rules! handle_connection_test {
                 secure_ident: $secure_ident,
                 transfer_runtime: $transfer_runtime,
                 hello_identity: $hello_identity,
-                reachability: &crate::reachability::ExternalReachability::new(),
+                reachability: &crate::reachability::ReachabilityRuntimeAuthority::new().reader(),
                 buddy_registry: &crate::buddy_socket::BuddySocketRegistry::new(),
                 port_test_registry: &crate::PortTestRegistry::new(),
                 callback_sessions: callback_session_handle_for_test(),
