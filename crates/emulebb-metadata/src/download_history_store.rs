@@ -51,8 +51,10 @@ impl super::MetadataStore {
                    local_paths.platform, local_paths.native_path
             FROM shared_file_sources
             JOIN known_files ON known_files.id = shared_file_sources.known_file_id
+            JOIN transfers ON transfers.known_file_id = known_files.id
             JOIN local_paths ON local_paths.id = shared_file_sources.path_id
             WHERE known_files.ed2k_hash = ?1
+              AND transfers.delete_requested_at_ms IS NULL
             ORDER BY local_paths.display_path
             "#,
         )?;

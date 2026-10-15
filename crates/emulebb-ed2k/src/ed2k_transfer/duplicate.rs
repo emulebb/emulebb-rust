@@ -152,6 +152,11 @@ impl Ed2kTransferRuntime {
             file_hash == job.file_hash,
             "ED2K transfer job hash is not canonical"
         );
+        let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
+        ensure!(
+            !self.transfer_deletion_requested(&file_hash).await?,
+            "cannot replace ED2K transfer {file_hash} while destructive deletion is pending"
+        );
         let _guard = self.lock_manifest(&file_hash).await;
         let existing = self.load_manifest_optional_unlocked(&file_hash).await?;
         if let Some(existing) = existing.as_ref() {
@@ -360,6 +365,31 @@ mod tests {
         assert_eq!(
             after_removal.previously_completed.unwrap().display_name,
             "download.bin"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_deletion_rejects_job_recreation_and_replacement() {
+        let root = tempdir().unwrap();
+        let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let file_hash = Ed2kHash([0x44; 16]);
+        let hash = file_hash.to_string();
+        let job = new_transfer_job(file_hash, "pending-delete.bin".to_string(), 8);
+        runtime.ensure_job(&job).await.unwrap();
+        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+
+        let ensure_error = runtime.ensure_job(&job).await.unwrap_err();
+        assert!(
+            ensure_error
+                .to_string()
+                .contains("destructive deletion is pending")
+        );
+
+        let replacement_error = runtime.replace_with_download_job(&job).await.unwrap_err();
+        assert!(
+            replacement_error
+                .to_string()
+                .contains("destructive deletion is pending")
         );
     }
 
