@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant as TokioInstant};
 
 use crate::ed2k_server::{
-    OP_CALLBACKREQUEST,
+    Ed2kServerSearchInbox, OP_CALLBACKREQUEST,
     background::{BackgroundServerSearchContext, start_background_server_search},
 };
 
@@ -897,6 +897,32 @@ fn background_test_context(
     }
 }
 
+async fn run_test_server_session(
+    server: &ResolvedServerEntry,
+    context: &ServerSessionContext,
+    inbox: &Arc<Mutex<Ed2kServerSearchInbox>>,
+) -> anyhow::Result<ServerSessionExit> {
+    let reachability = active_server_reachability(&context.public_ip);
+    run_one_server_session(server, context, inbox, &reachability.writer).await
+}
+
+async fn handle_test_server_packet(
+    session: &mut ServerSession,
+    packet: Ed2kPacket,
+    context: &ServerSessionContext,
+    allow_probe_search: bool,
+) -> anyhow::Result<()> {
+    let reachability = active_server_reachability(&context.public_ip);
+    handle_server_packet(
+        session,
+        packet,
+        context,
+        &reachability.writer,
+        allow_probe_search,
+    )
+    .await
+}
+
 fn background_test_server(endpoint: SocketAddr) -> ResolvedServerEntry {
     let SocketAddr::V4(endpoint_v4) = endpoint else {
         panic!("ED2K test server must use IPv4");
@@ -1023,7 +1049,7 @@ async fn background_offer_files_v1_waits_for_server_ident_before_first_batch() {
     let (_, inbox) = new_ed2k_server_search_channel(1);
     let server = background_test_server(endpoint);
     let inbox = Arc::new(Mutex::new(inbox));
-    let session = run_one_server_session(&server, &context, &inbox);
+    let session = run_test_server_session(&server, &context, &inbox);
 
     let (session_result, server_result) = tokio::time::timeout(Duration::from_secs(3), async {
         tokio::join!(session, server_task)
@@ -1050,7 +1076,7 @@ async fn background_login_stall_expires_the_whole_pending_attempt() {
     let context = background_test_context(Arc::clone(&state), Duration::from_millis(75));
     let (_, inbox) = new_ed2k_server_search_channel(1);
 
-    let error = run_one_server_session(
+    let error = run_test_server_session(
         &background_test_server(endpoint),
         &context,
         &Arc::new(Mutex::new(inbox)),
@@ -1108,7 +1134,7 @@ async fn zero_id_stays_connecting_until_the_pending_attempt_times_out() {
         .expect("zero ID should leave the session visibly pending");
     };
     let (result, ()) = tokio::join!(
-        run_one_server_session(&server, &context, &inbox),
+        run_test_server_session(&server, &context, &inbox),
         observe_pending
     );
 
@@ -1166,7 +1192,7 @@ async fn valid_id_after_zero_accepts_the_still_pending_login() {
         snapshot
     };
     let (result, snapshot) = tokio::join!(
-        run_one_server_session(&server, &context, &inbox),
+        run_test_server_session(&server, &context, &inbox),
         observe_connected
     );
 
@@ -1204,7 +1230,7 @@ async fn shutdown_preempts_a_silent_pending_login() {
         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
     };
     let (result, ()) = tokio::join!(
-        run_one_server_session(&server, &context, &inbox),
+        run_test_server_session(&server, &context, &inbox),
         request_shutdown
     );
 
@@ -1254,7 +1280,7 @@ async fn reject_before_id_change_does_not_abort_login() {
         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
     };
     let (result, ()) = tokio::join!(
-        run_one_server_session(&server, &context, &inbox),
+        run_test_server_session(&server, &context, &inbox),
         observe_connected
     );
 
@@ -1318,7 +1344,7 @@ async fn reject_does_not_complete_or_disconnect_pending_background_search() {
         result
     };
     let (session_result, search_result) =
-        tokio::join!(run_one_server_session(&server, &context, &inbox), search);
+        tokio::join!(run_test_server_session(&server, &context, &inbox), search);
 
     assert_eq!(
         session_result.unwrap(),
@@ -1336,7 +1362,7 @@ async fn uncorrelated_reject_does_not_downgrade_negotiated_offer_pacing() {
     session.offer_files_pacing = OfferFilesPacingMode::Negotiated(policy);
     let context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
 
-    handle_server_packet(
+    handle_test_server_packet(
         &mut session,
         Ed2kPacket {
             opcode: OP_REJECT,
@@ -1359,7 +1385,7 @@ async fn malformed_uncorrelated_search_result_is_packet_local() {
     let (mut session, _peer) = connected_background_test_session().await;
     let context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
 
-    handle_server_packet(
+    handle_test_server_packet(
         &mut session,
         Ed2kPacket {
             opcode: OP_SEARCHRESULT,
@@ -1373,7 +1399,7 @@ async fn malformed_uncorrelated_search_result_is_packet_local() {
 
     let mut status = 123u32.to_le_bytes().to_vec();
     status.extend_from_slice(&456u32.to_le_bytes());
-    handle_server_packet(
+    handle_test_server_packet(
         &mut session,
         Ed2kPacket {
             opcode: OP_SERVERSTATUS,
@@ -1501,7 +1527,7 @@ async fn malformed_typed_replies_preserve_pending_request_and_session() {
         results
     };
     let (session_result, results) =
-        tokio::join!(run_one_server_session(&server, &context, &inbox), requests);
+        tokio::join!(run_test_server_session(&server, &context, &inbox), requests);
 
     assert_eq!(
         session_result.unwrap(),
@@ -1592,7 +1618,7 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
         results
     };
     let (session_result, results) =
-        tokio::join!(run_one_server_session(&server, &context, &inbox), request);
+        tokio::join!(run_test_server_session(&server, &context, &inbox), request);
 
     assert_eq!(
         session_result.unwrap(),

@@ -453,6 +453,9 @@ pub struct Ed2kServerLoopOptions {
     /// Learned public-IP cell (eMule `theApp` public IP), set from the HighID
     /// `OP_IDCHANGE`. Created by core and shared with the UDP reask loop.
     pub public_ip: crate::reachability::ExternalReachability,
+    /// Runtime-scoped authority used to issue one pending reachability lease per
+    /// server attempt. Only the selected session's lease is activated.
+    pub reachability_writer: crate::reachability::RuntimeReachabilityWriter,
     /// "Reconnect now" signal (shared with the advertised-ports sync task): fired
     /// when the external port changes so the session re-logs in promptly.
     pub reconnect_signal: Arc<tokio::sync::Notify>,

@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::Ed2kRuntimeConfig;
+use crate::reachability::{ReachabilityUpdate, RuntimeReachabilityWriter, ServerReachabilityLease};
 
 use super::server_description_poll::poll_server_descriptions;
 use super::server_entry::{ConfiguredServerEntry, ResolvedServerEntry};
@@ -85,6 +86,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         shutdown,
         server_enabled,
         public_ip,
+        reachability_writer,
         reconnect_signal,
         server_list_events,
         callback_sessions,
@@ -133,7 +135,6 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
 
     'server_loop: while !shutdown.load(Ordering::Relaxed) {
         if !server_enabled.load(Ordering::SeqCst) {
-            session_context_base.public_ip.clear_server_public_ip();
             clear_server_connection_state(&state).await;
             tokio::select! {
                 () = reconnect_signal.notified() => {},
@@ -188,9 +189,9 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                 &state,
                 &mut server_connect_plan,
                 &reconnect_signal,
+                &reachability_writer,
             )
             .await;
-            session_context.public_ip.clear_server_public_ip();
             match outcome {
                 ParallelServerCycleOutcome::Shutdown => break,
                 ParallelServerCycleOutcome::PlanChanged => continue,
@@ -267,9 +268,9 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                         &search_inbox,
                         &mut server_connect_plan,
                         &reconnect_signal,
+                        &reachability_writer,
                     )
                     .await;
-                    session_context.public_ip.clear_server_public_ip();
                     match outcome {
                         ControlledServerSessionOutcome::Finished {
                             result: Ok(ServerSessionExit::ContinueOrder),
@@ -553,20 +554,31 @@ async fn run_controlled_server_session(
     search_inbox: &Arc<Mutex<Ed2kServerSearchInbox>>,
     server_connect_plan: &mut watch::Receiver<Ed2kServerConnectPlan>,
     reconnect_signal: &Notify,
+    runtime_reachability: &RuntimeReachabilityWriter,
 ) -> ControlledServerSessionOutcome {
+    let Some(mut reachability) = runtime_reachability.begin_server_session() else {
+        return ControlledServerSessionOutcome::Shutdown;
+    };
+    if reachability.activate() == ReachabilityUpdate::RejectedStale {
+        return ControlledServerSessionOutcome::Shutdown;
+    }
+    let reachability_writer = reachability.writer();
     let mut session_context = context.clone();
     let session_cancel = CancellationToken::new();
     session_context.session_cancel = session_cancel.clone();
-    let session = run_one_server_session(server, &session_context, search_inbox);
+    let session =
+        run_one_server_session(server, &session_context, search_inbox, &reachability_writer);
     tokio::pin!(session);
     let mut plan_changed = false;
     loop {
         tokio::select! {
             result = &mut session => {
+                reachability.retire();
                 return ControlledServerSessionOutcome::Finished { result, plan_changed };
             }
             changed = server_connect_plan.changed() => {
                 if changed.is_err() {
+                    reachability.retire();
                     session_cancel.cancel();
                     let _ = (&mut session).await;
                     return ControlledServerSessionOutcome::Shutdown;
@@ -574,6 +586,7 @@ async fn run_controlled_server_session(
                 let next_plan = server_connect_plan.borrow_and_update().clone();
                 let connected = context.state.read().await.connected;
                 if !connected || !plan_allows_configured_server(&next_plan, configured_server) {
+                    reachability.retire();
                     session_cancel.cancel();
                     let _ = (&mut session).await;
                     return ControlledServerSessionOutcome::PlanChanged;
@@ -581,11 +594,13 @@ async fn run_controlled_server_session(
                 plan_changed = true;
             }
             () = reconnect_signal.notified() => {
+                reachability.retire();
                 session_cancel.cancel();
                 let _ = (&mut session).await;
                 return ControlledServerSessionOutcome::ReconnectRequested;
             }
             () = wait_for_shutdown(&context.shutdown) => {
+                reachability.retire();
                 session_cancel.cancel();
                 let _ = (&mut session).await;
                 return ControlledServerSessionOutcome::Shutdown;
@@ -609,6 +624,7 @@ struct ParallelServerAttempt {
     state: Arc<RwLock<Ed2kServerState>>,
     activation: ServerSessionActivator,
     cancel: CancellationToken,
+    reachability: ServerReachabilityLease,
     task: AbortOnDropTask<Result<ServerSessionExit, Error>>,
 }
 
@@ -622,6 +638,7 @@ async fn run_parallel_server_cycle(
     public_state: &Arc<RwLock<Ed2kServerState>>,
     server_connect_plan: &mut watch::Receiver<Ed2kServerConnectPlan>,
     reconnect_signal: &Notify,
+    runtime_reachability: &RuntimeReachabilityWriter,
 ) -> ParallelServerCycleOutcome {
     {
         let mut state = public_state.write().await;
@@ -683,6 +700,15 @@ async fn run_parallel_server_cycle(
             };
             match resolve_result.expect("resolve branch returns a result") {
                 Ok(server) => {
+                    let Some(reachability) = runtime_reachability.begin_server_session() else {
+                        return retire_parallel_cycle(
+                            &mut active,
+                            public_state,
+                            ParallelServerCycleOutcome::Shutdown,
+                        )
+                        .await;
+                    };
+                    let reachability_writer = reachability.writer();
                     let attempt_state = Arc::new(RwLock::new(Ed2kServerState::default()));
                     let mut attempt_context = context.clone();
                     attempt_context.state = Arc::clone(&attempt_state);
@@ -693,8 +719,13 @@ async fn run_parallel_server_cycle(
                     let attempt_server = server.clone();
                     let attempt_inbox = Arc::clone(search_inbox);
                     let task = AbortOnDropTask::new(tokio::spawn(async move {
-                        run_one_server_session(&attempt_server, &attempt_context, &attempt_inbox)
-                            .await
+                        run_one_server_session(
+                            &attempt_server,
+                            &attempt_context,
+                            &attempt_inbox,
+                            &reachability_writer,
+                        )
+                        .await
                     }));
                     active.push(ParallelServerAttempt {
                         configured,
@@ -702,6 +733,7 @@ async fn run_parallel_server_cycle(
                         state: attempt_state,
                         activation: activator,
                         cancel,
+                        reachability,
                         task,
                     });
                 }
@@ -821,7 +853,8 @@ async fn run_parallel_server_cycle(
 }
 
 async fn retire_parallel_attempts(attempts: &mut Vec<ParallelServerAttempt>) {
-    for attempt in attempts.iter() {
+    for attempt in attempts.iter_mut() {
+        attempt.reachability.retire();
         attempt.activation.retire();
         attempt.cancel.cancel();
     }
@@ -865,6 +898,13 @@ async fn mirror_winning_server_session(
 ) -> ParallelServerCycleOutcome {
     let mut plan_changed = false;
     *public_state.write().await = winner.state.read().await.clone();
+    if winner.reachability.activate() == ReachabilityUpdate::RejectedStale {
+        winner.activation.retire();
+        winner.cancel.cancel();
+        let _ = winner.task.join().await;
+        clear_server_connection_state(public_state).await;
+        return ParallelServerCycleOutcome::Shutdown;
+    }
     winner.activation.activate();
     loop {
         *public_state.write().await = winner.state.read().await.clone();
@@ -893,6 +933,7 @@ async fn mirror_winning_server_session(
             if plan_changed && matches!(outcome, ParallelServerCycleOutcome::SessionEnded) {
                 outcome = ParallelServerCycleOutcome::PlanChanged;
             }
+            winner.reachability.retire();
             clear_server_connection_state(public_state).await;
             return outcome;
         }
@@ -900,6 +941,7 @@ async fn mirror_winning_server_session(
             () = tokio::time::sleep(PARALLEL_ATTEMPT_POLL_INTERVAL) => {}
             changed = server_connect_plan.changed() => {
                 if changed.is_err() {
+                    winner.reachability.retire();
                     winner.activation.retire();
                     winner.cancel.cancel();
                     let _ = winner.task.join().await;
@@ -909,6 +951,7 @@ async fn mirror_winning_server_session(
                 let next_plan = server_connect_plan.borrow_and_update().clone();
                 let connected = winner.state.read().await.connected;
                 if !connected || !plan_allows_configured_server(&next_plan, &winner.configured) {
+                    winner.reachability.retire();
                     winner.activation.retire();
                     winner.cancel.cancel();
                     let _ = winner.task.join().await;
@@ -918,6 +961,7 @@ async fn mirror_winning_server_session(
                 plan_changed = true;
             }
             () = reconnect_signal.notified() => {
+                winner.reachability.retire();
                 winner.activation.retire();
                 winner.cancel.cancel();
                 let _ = winner.task.join().await;
@@ -925,6 +969,7 @@ async fn mirror_winning_server_session(
                 return ParallelServerCycleOutcome::ReconnectRequested;
             }
             () = wait_for_shutdown(&context.shutdown) => {
+                winner.reachability.retire();
                 winner.activation.retire();
                 winner.cancel.cancel();
                 let _ = winner.task.join().await;
@@ -1045,7 +1090,7 @@ mod tests {
         ed2k_tcp::{Ed2kHelloIdentity, ed2k_callback_session_channel},
         ed2k_transfer::IndexedSharedCatalog,
         kad_firewall::KadFirewallState,
-        reachability::ExternalReachability,
+        reachability::{ExternalReachability, ReachabilityRuntimeLease},
     };
 
     struct TestServerLoop {
@@ -1056,6 +1101,7 @@ mod tests {
         reconnect: Arc<Notify>,
         search: Ed2kServerSearchHandle,
         events: Ed2kServerListEventReceiver,
+        _reachability_lease: ReachabilityRuntimeLease,
         task: JoinHandle<()>,
     }
 
@@ -1080,6 +1126,7 @@ mod tests {
         let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
         let (server_list_events, events) = ed2k_server_list_event_channel();
         let reachability = ExternalReachability::default();
+        let reachability_lease = reachability.begin_runtime();
         let options = Ed2kServerLoopOptions {
             bind_ip: crate::test_bind_ip(),
             nat: Arc::new(NatManager::default()),
@@ -1101,6 +1148,7 @@ mod tests {
             shutdown: Arc::clone(&shutdown),
             server_enabled: Arc::new(AtomicBool::new(true)),
             public_ip: reachability.clone(),
+            reachability_writer: reachability_lease.writer(),
             reconnect_signal: Arc::clone(&reconnect),
             server_list_events: Some(server_list_events),
             callback_sessions,
@@ -1114,6 +1162,7 @@ mod tests {
             reconnect,
             search,
             events,
+            _reachability_lease: reachability_lease,
             task,
         }
     }
@@ -1491,7 +1540,13 @@ mod tests {
             "the losing attempt must not publish pre-activation server-list work"
         );
 
+        let reachability = runtime.reachability.clone();
         stop_test_server_loop(runtime).await;
+        assert_eq!(
+            reachability.get(),
+            None,
+            "retired parallel winner must revoke its server public IP"
+        );
         for server in [losing_server, winning_server] {
             timeout(Duration::from_secs(2), server)
                 .await

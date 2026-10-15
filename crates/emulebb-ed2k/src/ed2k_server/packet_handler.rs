@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use tracing::{debug, error, info, warn};
 
 use crate::ed2k_tcp::{Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest};
+use crate::reachability::ServerReachabilityWriter;
 
 use super::offer_policy::{OfferFilesCapabilityAdvertisement, OfferFilesPolicy};
 use super::server_description::valid_dynamic_host;
@@ -35,6 +36,7 @@ pub(super) async fn handle_server_packet(
     session: &mut ServerSession,
     packet: Ed2kPacket,
     context: &ServerSessionContext,
+    reachability_writer: &ServerReachabilityWriter,
     allow_probe_search: bool,
 ) -> Result<()> {
     if !context.activation.is_active() && packet.opcode != OP_IDCHANGE {
@@ -53,7 +55,7 @@ pub(super) async fn handle_server_packet(
                     context
                         .last_client_id
                         .store(0, std::sync::atomic::Ordering::Relaxed);
-                    context.public_ip.clear_server_public_ip();
+                    reachability_writer.clear_server_public_ip();
                 }
                 {
                     let mut guard = session.state.write().await;
@@ -132,15 +134,15 @@ pub(super) async fn handle_server_packet(
                     .reported_client_ip
                     .filter(|ip| !is_low_id(u32::from_le_bytes(ip.octets())))
                 {
-                    Some(reported_ip) => context.public_ip.set_server_public_ip(reported_ip),
+                    Some(reported_ip) => {
+                        reachability_writer.set_server_public_ip(reported_ip);
+                    }
                     None => {
-                        context.public_ip.clear_server_public_ip();
+                        reachability_writer.clear_server_public_ip();
                     }
                 }
             } else {
-                context
-                    .public_ip
-                    .set_server_public_ip(ipv4_from_client_id(id_change.client_id));
+                reachability_writer.set_server_public_ip(ipv4_from_client_id(id_change.client_id));
             }
             if connected_transition {
                 send_connected_server_startup(
