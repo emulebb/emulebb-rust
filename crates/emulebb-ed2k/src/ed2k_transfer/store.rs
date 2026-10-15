@@ -29,6 +29,18 @@ const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 const ED2K_RESUME_CHECKPOINT_BYTES: u64 = 8 * ED2K_EMBLOCK_SIZE;
 
 impl Ed2kTransferRuntime {
+    /// Acquire the lifecycle gate for one transfer. Delivery, row-only
+    /// removal, and destructive deletion must hold this gate before taking the
+    /// manifest lock so their filesystem and persisted-state transitions
+    /// cannot interleave.
+    pub(super) async fn lock_lifecycle(&self, file_hash: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.lifecycle_locks.lock().unwrap();
+            Arc::clone(locks.entry(file_hash.to_ascii_lowercase()).or_default())
+        };
+        lock.lock_owned().await
+    }
+
     /// Acquire the manifest IO lock for one transfer. Manifest state (cache,
     /// checkpoint bookkeeping, payload handle, SQL rows) is always keyed by a
     /// single file hash, so the lock is per hash: concurrent transfers no

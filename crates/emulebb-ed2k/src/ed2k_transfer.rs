@@ -214,9 +214,10 @@ pub struct Ed2kTransferRuntime {
     /// block append of every concurrent download (and upload reader opens)
     /// behind one mutex.
     manifest_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Per-transfer delivery serialization. Unlike the manifest IO lock this
-    /// may be held across a cross-volume copy without delaying manifest reads.
-    delivery_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Per-transfer lifecycle serialization for delivery, row removal, and
+    /// destructive deletion. Unlike the manifest IO lock this may be held
+    /// across slow filesystem work without delaying unrelated manifest reads.
+    lifecycle_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
     manifest_cache: Arc<Mutex<HashMap<String, Ed2kResumeManifest>>>,
     manifest_checkpoint_state: Arc<Mutex<HashMap<String, Ed2kManifestCheckpointState>>>,
     /// Process-local download block reservations. Durable manifests describe
@@ -515,7 +516,7 @@ impl Ed2kTransferRuntime {
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_tickets: Arc::new(StdMutex::new(callback::CallbackTicketStore::default())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
-            delivery_locks: Arc::new(StdMutex::new(HashMap::new())),
+            lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
             download_block_leases: block_lease::DownloadBlockLeaseRegistry::default(),

@@ -9,6 +9,8 @@ use emulebb_metadata::{
     NativeFileFingerprint,
 };
 
+use crate::long_path::long_path;
+
 use super::hashset::{
     decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
     validate_aich_hashset, validate_md4_hashset,
@@ -580,10 +582,17 @@ impl Ed2kTransferRuntime {
     ) -> Result<Option<Ed2kResumeManifest>> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let file_hash = parsed_hash.to_string();
+        let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
         let _guard = self.lock_manifest(&file_hash).await;
         let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
         if !manifest.completed {
             anyhow::bail!("only completed transfers can be removed without deleting files");
+        }
+        if manifest.delivery_state == super::Ed2kDeliveryState::Pending {
+            anyhow::bail!(
+                "completed download {} must be delivered before its transfer row can be removed",
+                manifest.file_hash
+            );
         }
         if manifest.transfer_row_removed {
             return Ok(None);
@@ -597,15 +606,32 @@ impl Ed2kTransferRuntime {
     pub async fn delete_transfer_files(&self, file_hash: &str) -> Result<bool> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let file_hash = parsed_hash.to_string();
+        let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
         let _guard = self.lock_manifest(&file_hash).await;
         let transfer_dir = self.transfer_dir(&file_hash);
-        if self
-            .load_manifest_optional_unlocked(&file_hash)
-            .await?
-            .is_none()
-            && !tokio::fs::try_exists(&transfer_dir).await?
-        {
+        let manifest = self.load_manifest_optional_unlocked(&file_hash).await?;
+        if manifest.is_none() && !tokio::fs::try_exists(&transfer_dir).await? {
             return Ok(false);
+        }
+        if let Some(delivered_path) = manifest.and_then(|manifest| {
+            manifest
+                .source_path
+                .is_none()
+                .then_some(manifest.delivered_path)
+                .flatten()
+        }) {
+            match tokio::fs::remove_file(long_path(&delivered_path)).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to delete delivered transfer file {}",
+                            delivered_path.display()
+                        )
+                    });
+                }
+            }
         }
         // Drop the cached payload handle FIRST: on Windows a pending handle
         // would leave pieces.bin delete-pending and the directory removal

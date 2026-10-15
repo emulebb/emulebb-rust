@@ -3,7 +3,7 @@
 //! store is materialized into an operator-facing file by its canonical name,
 //! idempotently and long-path aware.
 
-use std::{fs, path::Path};
+use std::{fs, path::Path, sync::Arc, time::Duration};
 
 use emulebb_kad_proto::Ed2kHash;
 use md4::{Digest, Md4};
@@ -293,6 +293,79 @@ async fn materialize_adopts_byte_identical_replacement_without_duplicate() {
         Some(delivered.as_path())
     );
     assert_ne!(refreshed.source_fingerprint, recorded_fingerprint);
+}
+
+#[tokio::test]
+async fn pending_completed_download_cannot_hide_its_transfer_row() {
+    let root = unique_test_dir("ed2k-deliver-pending-row-removal");
+    let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let hash = ingest_completed(&runtime, &root, "Pending.Row.mkv").await;
+    let lifecycle_guard = runtime.lock_lifecycle(&hash).await;
+    let removal_runtime = Arc::clone(&runtime);
+    let removal_hash = hash.clone();
+    let mut removal = tokio::spawn(async move {
+        removal_runtime
+            .remove_completed_transfer_row(&removal_hash)
+            .await
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut removal)
+            .await
+            .is_err(),
+        "row removal must wait for the transfer lifecycle gate"
+    );
+    drop(lifecycle_guard);
+    let error = removal.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("must be delivered"));
+    assert!(!runtime.manifest(&hash).await.unwrap().transfer_row_removed);
+
+    runtime
+        .materialize_completed_payload(&hash, &root.join("incoming"))
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .remove_completed_transfer_row(&hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(runtime.manifest(&hash).await.unwrap().transfer_row_removed);
+}
+
+#[tokio::test]
+async fn destructive_delete_uses_lifecycle_gate_and_removes_both_authorities() {
+    let root = unique_test_dir("ed2k-deliver-serialized-delete");
+    let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let hash = ingest_completed(&runtime, &root, "Serialized.Delete.mkv").await;
+    let incoming = root.join("incoming");
+    let delivered = incoming.join("Serialized.Delete.mkv");
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let transfer_dir = runtime.transfer_dir(&hash);
+
+    let lifecycle_guard = runtime.lock_lifecycle(&hash).await;
+    let delete_runtime = Arc::clone(&runtime);
+    let delete_hash = hash.clone();
+    let mut deletion =
+        tokio::spawn(async move { delete_runtime.delete_transfer_files(&delete_hash).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut deletion)
+            .await
+            .is_err(),
+        "destructive deletion must wait for the transfer lifecycle gate"
+    );
+    assert!(delivered.exists());
+    assert!(transfer_dir.exists());
+
+    drop(lifecycle_guard);
+    assert!(deletion.await.unwrap().unwrap());
+    assert!(!delivered.exists());
+    assert!(!transfer_dir.exists());
+    assert!(runtime.manifest(&hash).await.is_err());
 }
 
 #[tokio::test]

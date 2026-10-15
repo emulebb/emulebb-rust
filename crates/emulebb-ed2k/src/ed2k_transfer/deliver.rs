@@ -26,10 +26,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result};
@@ -80,11 +77,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         dest_dir: &Path,
     ) -> Result<Ed2kDeliveryOutcome> {
-        let delivery_lock = {
-            let mut locks = self.delivery_locks.lock().unwrap();
-            Arc::clone(locks.entry(file_hash.to_ascii_lowercase()).or_default())
-        };
-        let _delivery_guard = delivery_lock.lock_owned().await;
+        let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
         // Phase 1: snapshot what we need under the manifest IO lock, then
         // release it before touching the destination filesystem.
         let (display_name, expected_size, expected_hash, recorded_path, recorded_fingerprint) = {

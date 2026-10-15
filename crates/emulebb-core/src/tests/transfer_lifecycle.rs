@@ -1164,6 +1164,59 @@ async fn delete_completed_transfer_row_rejects_incomplete_transfer() {
 }
 
 #[tokio::test]
+async fn delete_completed_transfer_row_rejects_pending_delivery() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-pending-delivery-row");
+    let transfer_root = runtime_dir.join("transfers");
+    let incoming_dir = runtime_dir.join("incoming");
+    let payload = b"completed but not delivered row".repeat(32);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
+    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
+        .unwrap()
+        .with_incoming_dir(incoming_dir);
+    core.create_transfer(TransferCreate {
+        known_file_policy: Default::default(),
+        link: Some(format!(
+            "ed2k://|file|Pending.Row.bin|{}|{}|/",
+            payload.len(),
+            file_hash
+        )),
+        links: None,
+        category_id: None,
+        category_name: None,
+        paused: Some(true),
+    })
+    .await
+    .unwrap();
+    core.ed2k_transfers
+        .store_md4_hashset(&file_hash, Vec::new())
+        .await
+        .unwrap();
+    core.ed2k_transfers
+        .store_piece_data(&file_hash, 0, &payload)
+        .await
+        .unwrap();
+    core.refresh_transfer_from_manifest_default(&file_hash)
+        .await
+        .unwrap();
+
+    let error = core
+        .delete_completed_transfer_row(&file_hash)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("must be delivered"));
+    assert_eq!(core.transfer(&file_hash).await.unwrap().state, "completing");
+    assert!(
+        !core
+            .ed2k_transfers
+            .manifest(&file_hash)
+            .await
+            .unwrap()
+            .transfer_row_removed
+    );
+}
+
+#[tokio::test]
 async fn stopped_transfer_cannot_be_resumed() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let transfer = core

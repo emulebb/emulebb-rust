@@ -326,7 +326,6 @@ impl EmulebbCore {
             let state_name = manifest_default_state_name(&manifest);
             self.transfer_from_manifest(&manifest, state_name)
         };
-        self.delete_delivered_transfer_file(hash, &transfer).await?;
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
             return Ok(None);
         }
@@ -344,40 +343,18 @@ impl EmulebbCore {
         Ok(Some(transfer))
     }
 
-    async fn delete_delivered_transfer_file(&self, hash: &str, transfer: &Transfer) -> Result<()> {
-        let delivered_path = match self.ed2k_transfers.manifest(hash).await {
-            Ok(manifest) => {
-                if manifest.source_path.is_some() {
-                    None
-                } else {
-                    manifest.delivered_path
-                }
-            }
-            Err(_) => transfer.delivered_path.as_deref().map(PathBuf::from),
-        };
-        let Some(path) = delivered_path.as_deref() else {
-            return Ok(());
-        };
-        let long = long_path(path);
-        match tokio::fs::remove_file(&long).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| {
-                format!(
-                    "failed to delete delivered transfer file {}",
-                    path.display()
-                )
-            }),
-        }
-    }
-
     pub async fn delete_completed_transfer_row(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(transfer) = self.transfer(hash).await else {
+        let Some(current_transfer) = self.transfer(hash).await else {
             return Ok(None);
         };
-        self.ed2k_transfers
+        let removed_manifest = self
+            .ed2k_transfers
             .remove_completed_transfer_row(hash)
             .await?;
+        let transfer = removed_manifest.map_or(current_transfer, |manifest| {
+            let state_name = manifest_default_state_name(&manifest);
+            self.transfer_from_manifest(&manifest, state_name)
+        });
         self.state.lock().await.transfers.remove(hash);
         self.publish_transfer_removed(hash);
         Ok(Some(transfer))
