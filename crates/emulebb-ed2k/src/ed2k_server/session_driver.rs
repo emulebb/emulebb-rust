@@ -95,12 +95,12 @@ async fn connect_server_transport_attempt(
     login_identity.client_id = context
         .last_client_id
         .load(std::sync::atomic::Ordering::Relaxed);
-    login_identity.tcp_port = context
+    let ports = context
         .public_ip
-        .advertised_tcp_port(login_identity.tcp_port);
-    login_identity.udp_port = context
-        .public_ip
-        .advertised_udp_port(login_identity.udp_port);
+        .snapshot()
+        .advertised_ports(login_identity.tcp_port, login_identity.udp_port);
+    login_identity.tcp_port = ports.tcp;
+    login_identity.udp_port = ports.udp;
     let transport_endpoint = server.transport_endpoint(use_server_obfuscation);
     let mut session = ServerSession::connect_until(
         context.bind_ip,

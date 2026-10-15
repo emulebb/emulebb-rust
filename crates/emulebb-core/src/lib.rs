@@ -1486,30 +1486,32 @@ impl EmulebbCore {
                                 )
                             }
                         }
-                        Ed2kServerCallbackRoute::GlobalUdp => match self.ed2k_reachability.get() {
-                            Some(requester_public_ip) => match request_callback_via_udp_server(
-                                Ed2kUdpCallbackRequestOptions {
-                                    bind_ip: network.bind_ip,
-                                    config: &config,
-                                    requester_public_ip,
-                                    requester_tcp_port: self
-                                        .ed2k_reachability
-                                        .advertised_tcp_port(network.listen_port),
-                                    server_endpoint: source_server,
-                                    target_client_id: source.client_id,
+                        Ed2kServerCallbackRoute::GlobalUdp => {
+                            let reachability = self.ed2k_reachability.snapshot();
+                            match reachability.public_ip() {
+                                Some(requester_public_ip) => match request_callback_via_udp_server(
+                                    Ed2kUdpCallbackRequestOptions {
+                                        bind_ip: network.bind_ip,
+                                        config: &config,
+                                        requester_public_ip,
+                                        requester_tcp_port: reachability
+                                            .advertised_tcp_port(network.listen_port),
+                                        server_endpoint: source_server,
+                                        target_client_id: source.client_id,
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(()) => Ed2kServerCallbackDispatch::Sent,
+                                    Err(error) => {
+                                        Ed2kServerCallbackDispatch::KnownNotSent(error.to_string())
+                                    }
                                 },
-                            )
-                            .await
-                            {
-                                Ok(()) => Ed2kServerCallbackDispatch::Sent,
-                                Err(error) => {
-                                    Ed2kServerCallbackDispatch::KnownNotSent(error.to_string())
-                                }
-                            },
-                            None => Ed2kServerCallbackDispatch::KnownNotSent(
-                                "ED2K global callback requires a known public IPv4".to_string(),
-                            ),
-                        },
+                                None => Ed2kServerCallbackDispatch::KnownNotSent(
+                                    "ED2K global callback requires a known public IPv4".to_string(),
+                                ),
+                            }
+                        }
                         Ed2kServerCallbackRoute::Unavailable => {
                             Ed2kServerCallbackDispatch::KnownNotSent(
                                 "ED2K server callback route became unavailable".to_string(),
@@ -2755,11 +2757,10 @@ impl EmulebbCore {
         let own_identity = OwnSourceIdentity {
             user_hash: network.user_hash,
             endpoints: {
-                let advertised_tcp = self
-                    .ed2k_reachability
-                    .advertised_tcp_port(network.listen_port);
+                let reachability = self.ed2k_reachability.snapshot();
+                let advertised_tcp = reachability.advertised_tcp_port(network.listen_port);
                 let mut endpoints = vec![(network.bind_ip, network.listen_port)];
-                if let Some(public_ip) = self.ed2k_reachability.get() {
+                if let Some(public_ip) = reachability.public_ip() {
                     endpoints.push((public_ip, advertised_tcp));
                 }
                 endpoints
@@ -2844,6 +2845,10 @@ impl EmulebbCore {
     }
 
     fn ed2k_hello_identity(&self, network: &Ed2kNetworkConfig) -> Ed2kHelloIdentity {
+        let ports = self
+            .ed2k_reachability
+            .snapshot()
+            .advertised_ports(network.listen_port, network.kad_bind_addr.port());
         Ed2kHelloIdentity {
             user_hash: network.user_hash,
             client_id: 0,
@@ -2852,12 +2857,8 @@ impl EmulebbCore {
             // incoming connections + HighID callback on tcp_port, and locate us for
             // UDP source-reask by the (ip, udp_port) we advertise; the gateway can
             // remap either external port (see advertised_ports).
-            tcp_port: self
-                .ed2k_reachability
-                .advertised_tcp_port(network.listen_port),
-            udp_port: self
-                .ed2k_reachability
-                .advertised_udp_port(network.kad_bind_addr.port()),
+            tcp_port: ports.tcp,
+            udp_port: ports.udp,
             server_ip: 0,
             server_port: 0,
             connect_options: emule_connect_options(network.ed2k.obfuscation_enabled),
@@ -6814,11 +6815,14 @@ fn buddy_hello_identity(
     network: &Ed2kNetworkConfig,
     reachability: &ExternalReachability,
 ) -> Ed2kHelloIdentity {
+    let ports = reachability
+        .snapshot()
+        .advertised_ports(network.listen_port, network.kad_bind_addr.port());
     Ed2kHelloIdentity {
         user_hash: network.user_hash,
         client_id: 0,
-        tcp_port: reachability.advertised_tcp_port(network.listen_port),
-        udp_port: reachability.advertised_udp_port(network.kad_bind_addr.port()),
+        tcp_port: ports.tcp,
+        udp_port: ports.udp,
         server_ip: 0,
         server_port: 0,
         connect_options: emule_connect_options(network.ed2k.obfuscation_enabled),

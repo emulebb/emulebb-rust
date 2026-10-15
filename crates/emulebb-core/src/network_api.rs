@@ -292,12 +292,14 @@ impl EmulebbCore {
                         network.listen_port,
                         network.kad_bind_addr.port(),
                     );
+                    let ports = self
+                        .ed2k_reachability
+                        .snapshot()
+                        .advertised_ports(network.listen_port, network.kad_bind_addr.port());
                     tracing::info!(
                         "NAT initial reconcile complete before ED2K login: advertised_tcp_port={} advertised_udp_port={}",
-                        self.ed2k_reachability
-                            .advertised_tcp_port(network.listen_port),
-                        self.ed2k_reachability
-                            .advertised_udp_port(network.kad_bind_addr.port()),
+                        ports.tcp,
+                        ports.udp,
                     );
                 }
                 Ok(Err(error)) => {
