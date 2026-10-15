@@ -29,6 +29,7 @@ impl EmulebbCore {
         state.disabled_servers.remove(&endpoint);
         state.servers.insert(endpoint, server.clone());
         drop(state);
+        self.refresh_ed2k_server_connect_plan().await?;
         if request.connect.unwrap_or(false) {
             let _ = self.connect_ed2k_server(&server.endpoint).await?;
         }
@@ -62,12 +63,11 @@ impl EmulebbCore {
         state
             .server_overrides
             .insert(server.endpoint.clone(), request);
-        let disconnect_current = !enabled && server.current;
         drop(state);
-        if disconnect_current {
-            self.disconnect_ed2k().await;
-            return Ok(self.server(&server.endpoint).await);
-        }
+        // WHY: server-list edits must not tear down Kad, peer transfers, or the
+        // shared ED2K runtime. Publishing the complete plan lets the server
+        // scheduler cancel an ineligible current/pending attempt and fail over.
+        self.refresh_ed2k_server_connect_plan().await?;
         Ok(Some(server))
     }
 
@@ -85,9 +85,7 @@ impl EmulebbCore {
             state.server_overrides.remove(&server.endpoint);
             state.disabled_servers.insert(server.endpoint.clone());
         }
-        if server.current {
-            self.disconnect_ed2k().await;
-        }
+        self.refresh_ed2k_server_connect_plan().await?;
         Ok(Some(server))
     }
 
@@ -154,6 +152,9 @@ impl EmulebbCore {
         }
         if added > 0 {
             tracing::info!("added {added} ED2K server(s) discovered via OP_SERVERLIST");
+            if let Err(error) = self.refresh_ed2k_server_connect_plan().await {
+                tracing::warn!("failed to refresh ED2K server plan after discovery: {error}");
+            }
         }
     }
 
@@ -265,6 +266,11 @@ impl EmulebbCore {
                 threshold,
                 "dropped dead ED2K server"
             );
+            if let Err(error) = self.refresh_ed2k_server_connect_plan().await {
+                tracing::warn!(
+                    "failed to refresh ED2K server plan after dead-server drop: {error}"
+                );
+            }
         } else {
             tracing::debug!(
                 endpoint = %stored_endpoint,
@@ -333,6 +339,9 @@ impl EmulebbCore {
             .await
             .servers
             .insert(stored_endpoint, server);
+        if let Err(error) = self.refresh_ed2k_server_connect_plan().await {
+            tracing::warn!("failed to refresh ED2K server plan after metadata update: {error}");
+        }
     }
 
     #[expect(
@@ -391,6 +400,9 @@ impl EmulebbCore {
             .await
             .servers
             .insert(stored_endpoint, server);
+        if let Err(error) = self.refresh_ed2k_server_connect_plan().await {
+            tracing::warn!("failed to refresh ED2K server plan after status update: {error}");
+        }
     }
 
     /// Endpoints whose consecutive-failure count is at or over the dead-server
