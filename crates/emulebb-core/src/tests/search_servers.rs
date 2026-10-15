@@ -858,7 +858,7 @@ async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
     assert_eq!(persisted.obfuscation_tcp_port, Some(4711));
     assert_eq!(persisted.obfuscation_udp_port, Some(4723));
 
-    reloaded.ed2k_reachability.set(key_ip);
+    reloaded.ed2k_reachability.set_server_public_ip(key_ip);
     let current = reloaded
         .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await
@@ -875,7 +875,7 @@ async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
 
     reloaded
         .ed2k_reachability
-        .set(Ipv4Addr::new(198, 51, 100, 8));
+        .set_server_public_ip(Ipv4Addr::new(198, 51, 100, 8));
     let stale = reloaded
         .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await

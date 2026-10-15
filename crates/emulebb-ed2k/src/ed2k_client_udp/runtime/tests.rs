@@ -3,7 +3,7 @@ use crate::reachability::ExternalReachability;
 
 fn service() -> ReaskService {
     let public_ip = ExternalReachability::new();
-    public_ip.set(std::net::Ipv4Addr::new(203, 0, 113, 9));
+    public_ip.set_fallback_public_ip(std::net::Ipv4Addr::new(203, 0, 113, 9));
     ReaskService::new([0x10; 16], 4, public_ip)
 }
 

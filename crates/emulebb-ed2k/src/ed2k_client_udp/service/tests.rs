@@ -24,7 +24,7 @@ fn peer_lease_v4() -> (Ipv4Addr, u16) {
 
 fn service() -> ReaskService {
     let public_ip = ExternalReachability::new();
-    public_ip.set(Ipv4Addr::new(203, 0, 113, 9));
+    public_ip.set_fallback_public_ip(Ipv4Addr::new(203, 0, 113, 9));
     ReaskService::new(OUR_HASH, 4, public_ip)
 }
 

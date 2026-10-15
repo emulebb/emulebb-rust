@@ -57,7 +57,7 @@ pub(super) async fn handle_server_packet(
                 session.server_flags = id_change.server_flags;
                 session.login_accepted = false;
                 // No public IP without a client id (eMule SetPublicIP(0)).
-                context.public_ip.clear();
+                context.public_ip.clear_server_public_ip();
                 info!(
                     "ED2K server {} returned zero client_id in OP_IDCHANGE; login not accepted",
                     session.endpoint
@@ -120,13 +120,15 @@ pub(super) async fn handle_server_packet(
                     .reported_client_ip
                     .filter(|ip| !is_low_id(u32::from_le_bytes(ip.octets())))
                 {
-                    Some(reported_ip) => context.public_ip.set(reported_ip),
-                    None => context.public_ip.clear(),
+                    Some(reported_ip) => context.public_ip.set_server_public_ip(reported_ip),
+                    None => {
+                        context.public_ip.clear_server_public_ip();
+                    }
                 }
             } else {
                 context
                     .public_ip
-                    .set(ipv4_from_client_id(id_change.client_id));
+                    .set_server_public_ip(ipv4_from_client_id(id_change.client_id));
             }
             if connected_transition {
                 send_connected_server_startup(

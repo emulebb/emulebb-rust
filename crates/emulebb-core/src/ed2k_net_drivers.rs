@@ -86,26 +86,26 @@ const ED2K_PUBLIC_IP_PROBE_KNOWN_SECS: u64 = 600;
 /// (server-ban-safe, in the spirit of the live-wire ≤1-connect/5min guard).
 const ED2K_RELOGIN_MIN_INTERVAL: Duration = Duration::from_secs(300);
 
-/// STUN-probe the data-plane egress and record the reflexive public IP when it is
-/// otherwise unknown. The reask obfuscation key is our public IP (eMule
+/// STUN-probe the data-plane egress and refresh independent fallback public-IP
+/// evidence. The reask obfuscation key is our public IP (eMule
 /// `EncryptSendClient`), normally learned from the server `OP_IDCHANGE`; in
 /// Kad-only / pre-connect / LowID it is unknown, which blocks obfuscated reasks.
-/// `set_if_unset` keeps the server path authoritative (eMule `GetPublicIP` order:
-/// cached server/peer value, then the Kad/STUN fallback). Gentle: one STUN race
-/// per interval, more often only while still unknown.
+/// The server slot remains authoritative while present; retaining a refreshed
+/// fallback lets session invalidation reveal current probe evidence rather than
+/// a stale server address. Gentle: one STUN race per interval, more often only
+/// while the effective address is unknown.
 pub(crate) async fn run_ed2k_public_ip_probe(
     bind_ip: Ipv4Addr,
     public_ip: ExternalReachability,
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
-        let known = public_ip.is_known();
-        if !known
-            && let Ok(ip) = stun_probe(bind_ip, DEFAULT_STUN_TIMEOUT).await
-            && public_ip.set_if_unset(ip)
+        if let Ok(ip) = stun_probe(bind_ip, DEFAULT_STUN_TIMEOUT).await
+            && public_ip.set_fallback_public_ip(ip)
         {
-            tracing::info!("ED2K public IP learned via STUN fallback: {ip}");
+            tracing::info!("ED2K fallback public IP refreshed via STUN: {ip}");
         }
+        let known = public_ip.is_known();
         let secs = if known {
             ED2K_PUBLIC_IP_PROBE_KNOWN_SECS
         } else {
@@ -175,16 +175,16 @@ pub(crate) fn sync_advertised_ports_from_nat(
     internal_tcp_port: u16,
     internal_udp_port: u16,
 ) {
-    if let Some(external) =
-        external_port_for(&status.mappings, TransportProtocol::Tcp, internal_tcp_port)
-    {
-        reachability.set_external_tcp_port(external);
-    }
-    if let Some(external) =
-        external_port_for(&status.mappings, TransportProtocol::Udp, internal_udp_port)
-    {
-        reachability.set_external_udp_port(external);
-    }
+    reachability.set_nat_mapped_tcp_port(external_port_for(
+        &status.mappings,
+        TransportProtocol::Tcp,
+        internal_tcp_port,
+    ));
+    reachability.set_nat_mapped_udp_port(external_port_for(
+        &status.mappings,
+        TransportProtocol::Udp,
+        internal_udp_port,
+    ));
 }
 
 pub(crate) async fn run_advertised_ports_sync(
@@ -532,9 +532,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_advertised_ports_ignores_nonmatching_internal_and_zero_external() {
-        // A mapping for a different internal port, or a zero/placeholder external
-        // port, must not overwrite the advertised port (it falls back to internal).
+    fn sync_advertised_ports_clears_disappeared_or_invalid_mappings() {
+        // A later snapshot without either exact mapping must revoke both stale
+        // advertised ports while preserving independent peer-confirmed evidence.
         let status = emulebb_ed2k::NatStatus {
             mappings: vec![
                 mapped("ed2k_tcp", TransportProtocol::Tcp, 9999, 49662),
@@ -543,6 +543,8 @@ mod tests {
             ..Default::default()
         };
         let reachability = ExternalReachability::new();
+        reachability.set_nat_mapped_tcp_port(Some(41000));
+        reachability.set_nat_mapped_udp_port(Some(42000));
         sync_advertised_ports_from_nat(&status, &reachability, 4662, 4672);
         assert_eq!(reachability.advertised_tcp_port(4662), 4662);
         assert_eq!(reachability.advertised_udp_port(4672), 4672);
