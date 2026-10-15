@@ -713,6 +713,79 @@ fn delete_transfer_manifest_removes_transfer_rows() {
 }
 
 #[test]
+fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
+    let store = MetadataStore::in_memory().unwrap();
+    let hash = "00112233445566778899aabbccddeeff";
+    let manifest = MetadataTransferManifest {
+        file_hash: hash.to_string(),
+        display_name: "Delete.Intent.bin".to_string(),
+        file_size: 1,
+        piece_size: 1,
+        completed: false,
+        final_rehash_pending: false,
+        md4_hashset_acquired: false,
+        md4_hashset: Vec::new(),
+        aich_hashset_acquired: false,
+        aich_root: None,
+        aich_hashset: Vec::new(),
+        verified_ranges: Vec::new(),
+        pieces: vec![MetadataTransferPiece {
+            piece_index: 0,
+            state: "Missing".to_string(),
+            bytes_written: 0,
+            block_bitmap: None,
+            ich_corrupted: false,
+        }],
+        sources: Vec::new(),
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+        category_id: 0,
+        control_state: None,
+        transfer_row_removed: false,
+        delivery_state: MetadataTransferDeliveryState::Pending,
+        delivered_path: None,
+        source_path: None,
+        source_fingerprint: None,
+    };
+    store.upsert_transfer_manifest(&manifest).unwrap();
+
+    assert!(!store.finalize_transfer_deletion(hash).unwrap());
+    assert!(store.request_transfer_deletion(hash).unwrap());
+    assert_eq!(
+        store.pending_transfer_deletion_hashes().unwrap(),
+        vec![hash.to_string()]
+    );
+
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    {
+        let conn = store.connection().unwrap();
+        conn.execute(
+            "UPDATE transfers SET delete_requested_at_ms = 7, updated_at_ms = 11",
+            [],
+        )
+        .unwrap();
+    }
+    assert!(store.request_transfer_deletion(hash).unwrap());
+    let timestamps = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT delete_requested_at_ms, updated_at_ms FROM transfers",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(timestamps, (7, 11));
+
+    assert!(store.finalize_transfer_deletion(hash).unwrap());
+    assert!(!store.finalize_transfer_deletion(hash).unwrap());
+    assert!(store.pending_transfer_deletion_hashes().unwrap().is_empty());
+    assert!(store.transfer_manifest_by_hash(hash).unwrap().is_none());
+}
+
+#[test]
 fn delete_transfer_manifest_clears_soft_known_file_references() {
     // A search result links to the known file by hash. Deleting the transfer
     // (and its known_files row) must not fail the foreign key check; the soft
