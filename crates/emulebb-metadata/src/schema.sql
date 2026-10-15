@@ -279,6 +279,11 @@ CREATE TABLE transfers (
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
     removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
+    -- Terminal destructive-delete intent. Once set, active selectors suppress
+    -- the transfer until cleanup removes the row; ordinary manifest upserts
+    -- deliberately preserve the marker.
+    delete_requested_at_ms INTEGER
+        CHECK(delete_requested_at_ms IS NULL OR delete_requested_at_ms >= 0),
     CHECK(
         (delivery_state = 'not_applicable' AND source_path_id IS NOT NULL AND delivered_path_id IS NULL)
         OR (delivery_state = 'pending' AND source_path_id IS NULL AND delivered_path_id IS NULL)
@@ -533,6 +538,9 @@ CREATE INDEX known_files_hash_idx ON known_files(ed2k_hash);
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
 CREATE INDEX shared_file_memberships_file_idx ON shared_file_memberships(known_file_id);
 CREATE INDEX transfer_sources_transfer_idx ON transfer_sources(transfer_id);
+CREATE INDEX transfers_pending_delete_idx
+ON transfers(delete_requested_at_ms)
+WHERE delete_requested_at_ms IS NOT NULL;
 CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_ms);
 CREATE INDEX kad_source_file_idx ON kad_source_publishes(file_hash, observed_at_ms);
 CREATE INDEX kad_note_file_idx ON kad_note_publishes(file_hash, observed_at_ms);

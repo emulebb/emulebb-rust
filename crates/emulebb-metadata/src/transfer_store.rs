@@ -1544,36 +1544,110 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
+    /// Persist a terminal destructive-delete request before either filesystem
+    /// authority is touched. Repeating the request preserves the original
+    /// timestamp and remains successful while the transfer row exists.
+    pub fn request_transfer_deletion(&self, file_hash: &str) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let conn = self.connection()?;
+        let changed = conn.execute(
+            r#"
+            UPDATE transfers
+            SET delete_requested_at_ms = coalesce(delete_requested_at_ms, ?2),
+                updated_at_ms = CASE
+                    WHEN delete_requested_at_ms IS NULL THEN ?2
+                    ELSE updated_at_ms
+                END
+            WHERE known_file_id = (
+                SELECT id FROM known_files WHERE ed2k_hash = ?1
+            )
+            "#,
+            params![hash, now],
+        )?;
+        Ok(changed != 0)
+    }
+
+    /// Return every transfer whose destructive-delete intent must be resumed.
+    pub fn pending_transfer_deletion_hashes(&self) -> Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash))
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE transfers.delete_requested_at_ms IS NOT NULL
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Commit metadata removal only for a transfer with a durable destructive
+    /// intent. A missing row or a row without intent is an idempotent no-op.
+    pub fn finalize_transfer_deletion(&self, file_hash: &str) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let known_file_id = tx
+            .query_row(
+                r#"
+                SELECT known_files.id
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.delete_requested_at_ms IS NOT NULL
+                "#,
+                params![hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(known_file_id) = known_file_id else {
+            return Ok(false);
+        };
+        delete_known_file(&tx, known_file_id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn delete_transfer_manifest(&self, file_hash: &str) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        if let Some(known_file_id) = tx
+        let known_file_id = tx
             .query_row(
                 "SELECT id FROM known_files WHERE ed2k_hash = ?1",
                 params![hash],
                 |row| row.get::<_, i64>(0),
             )
-            .optional()?
-        {
-            tx.execute(
-                "DELETE FROM shared_file_scan_failures WHERE path_id IN (
-                    SELECT path_id FROM shared_file_sources WHERE known_file_id = ?1
-                )",
-                params![known_file_id],
-            )?;
-            tx.execute(
-                "DELETE FROM shared_file_sources WHERE known_file_id = ?1",
-                params![known_file_id],
-            )?;
-        }
-        let changed = tx.execute(
-            "DELETE FROM known_files WHERE ed2k_hash = ?1",
-            params![hash],
-        )?;
+            .optional()?;
+        let Some(known_file_id) = known_file_id else {
+            return Ok(false);
+        };
+        delete_known_file(&tx, known_file_id)?;
         tx.commit()?;
-        Ok(changed != 0)
+        Ok(true)
     }
+}
+
+fn delete_known_file(tx: &rusqlite::Transaction<'_>, known_file_id: i64) -> Result<()> {
+    tx.execute(
+        "DELETE FROM shared_file_scan_failures WHERE path_id IN (
+            SELECT path_id FROM shared_file_sources WHERE known_file_id = ?1
+        )",
+        params![known_file_id],
+    )?;
+    tx.execute(
+        "DELETE FROM shared_file_sources WHERE known_file_id = ?1",
+        params![known_file_id],
+    )?;
+    tx.execute(
+        "DELETE FROM known_files WHERE id = ?1",
+        params![known_file_id],
+    )?;
+    Ok(())
 }
 
 #[derive(Debug)]
