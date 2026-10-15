@@ -10,7 +10,7 @@ use std::{
 use anyhow::Error;
 use tokio::{
     sync::{Mutex, Notify, RwLock, watch},
-    task::JoinHandle,
+    task::{JoinError, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -32,6 +32,40 @@ use super::{
 
 const ESTABLISHED_SESSION_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const PARALLEL_ATTEMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+struct AbortOnDropTask<T> {
+    handle: Option<JoinHandle<T>>,
+}
+
+impl<T> AbortOnDropTask<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    async fn join(&mut self) -> Result<T, JoinError> {
+        let result = self
+            .handle
+            .as_mut()
+            .expect("owned task cannot be joined twice")
+            .await;
+        self.handle.take();
+        result
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.as_ref() {
+            handle.abort();
+        }
+    }
+}
 
 /// Runs the minimal oracle-shaped ED2K server session loop for the configured endpoints.
 #[expect(
@@ -86,7 +120,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
     };
 
     let description_cancel = CancellationToken::new();
-    let description_task = tokio::spawn(poll_server_descriptions(
+    let mut description_task = AbortOnDropTask::new(tokio::spawn(poll_server_descriptions(
         bind_ip,
         server_connect_plan.clone(),
         Arc::clone(&state),
@@ -95,7 +129,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         Arc::clone(&server_enabled),
         session_context_base.server_list_events.clone(),
         description_cancel.clone(),
-    ));
+    )));
 
     'server_loop: while !shutdown.load(Ordering::Relaxed) {
         if !server_enabled.load(Ordering::SeqCst) {
@@ -435,7 +469,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         }
     }
     description_cancel.cancel();
-    let _ = description_task.await;
+    let _ = description_task.join().await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -575,7 +609,7 @@ struct ParallelServerAttempt {
     state: Arc<RwLock<Ed2kServerState>>,
     activation: ServerSessionActivator,
     cancel: CancellationToken,
-    task: JoinHandle<Result<ServerSessionExit, Error>>,
+    task: AbortOnDropTask<Result<ServerSessionExit, Error>>,
 }
 
 /// MFC keeps two automatic server attempts in flight when Safe Connect is off.
@@ -602,15 +636,21 @@ async fn run_parallel_server_cycle(
         while active.len() < 2 {
             match server_connect_plan.has_changed() {
                 Ok(true) => {
-                    abort_parallel_attempts(&active);
-                    clear_server_connection_state(public_state).await;
-                    return ParallelServerCycleOutcome::PlanChanged;
+                    return retire_parallel_cycle(
+                        &mut active,
+                        public_state,
+                        ParallelServerCycleOutcome::PlanChanged,
+                    )
+                    .await;
                 }
                 Ok(false) => {}
                 Err(_) => {
-                    abort_parallel_attempts(&active);
-                    clear_server_connection_state(public_state).await;
-                    return ParallelServerCycleOutcome::Shutdown;
+                    return retire_parallel_cycle(
+                        &mut active,
+                        public_state,
+                        ParallelServerCycleOutcome::Shutdown,
+                    )
+                    .await;
                 }
             }
             let Some(configured) = pending.pop_front() else {
@@ -619,23 +659,26 @@ async fn run_parallel_server_cycle(
             let resolve_result = tokio::select! {
                 result = resolve_server_entry(&configured) => Some(result),
                 changed = server_connect_plan.changed() => {
-                    abort_parallel_attempts(&active);
-                    clear_server_connection_state(public_state).await;
-                    return if changed.is_ok() {
+                    let outcome = if changed.is_ok() {
                         ParallelServerCycleOutcome::PlanChanged
                     } else {
                         ParallelServerCycleOutcome::Shutdown
                     };
+                    return retire_parallel_cycle(&mut active, public_state, outcome).await;
                 }
                 () = reconnect_signal.notified() => {
-                    abort_parallel_attempts(&active);
-                    clear_server_connection_state(public_state).await;
-                    return ParallelServerCycleOutcome::ReconnectRequested;
+                    return retire_parallel_cycle(
+                        &mut active,
+                        public_state,
+                        ParallelServerCycleOutcome::ReconnectRequested,
+                    ).await;
                 }
                 () = wait_for_shutdown(&context.shutdown) => {
-                    abort_parallel_attempts(&active);
-                    clear_server_connection_state(public_state).await;
-                    return ParallelServerCycleOutcome::Shutdown;
+                    return retire_parallel_cycle(
+                        &mut active,
+                        public_state,
+                        ParallelServerCycleOutcome::Shutdown,
+                    ).await;
                 }
             };
             match resolve_result.expect("resolve branch returns a result") {
@@ -649,10 +692,10 @@ async fn run_parallel_server_cycle(
                     attempt_context.session_cancel = cancel.clone();
                     let attempt_server = server.clone();
                     let attempt_inbox = Arc::clone(search_inbox);
-                    let task = tokio::spawn(async move {
+                    let task = AbortOnDropTask::new(tokio::spawn(async move {
                         run_one_server_session(&attempt_server, &attempt_context, &attempt_inbox)
                             .await
-                    });
+                    }));
                     active.push(ParallelServerAttempt {
                         configured,
                         server,
@@ -672,22 +715,31 @@ async fn run_parallel_server_cycle(
         }
 
         if context.shutdown.load(Ordering::Relaxed) {
-            abort_parallel_attempts(&active);
-            clear_server_connection_state(public_state).await;
-            return ParallelServerCycleOutcome::Shutdown;
+            return retire_parallel_cycle(
+                &mut active,
+                public_state,
+                ParallelServerCycleOutcome::Shutdown,
+            )
+            .await;
         }
 
         match server_connect_plan.has_changed() {
             Ok(true) => {
-                abort_parallel_attempts(&active);
-                clear_server_connection_state(public_state).await;
-                return ParallelServerCycleOutcome::PlanChanged;
+                return retire_parallel_cycle(
+                    &mut active,
+                    public_state,
+                    ParallelServerCycleOutcome::PlanChanged,
+                )
+                .await;
             }
             Ok(false) => {}
             Err(_) => {
-                abort_parallel_attempts(&active);
-                clear_server_connection_state(public_state).await;
-                return ParallelServerCycleOutcome::Shutdown;
+                return retire_parallel_cycle(
+                    &mut active,
+                    public_state,
+                    ParallelServerCycleOutcome::Shutdown,
+                )
+                .await;
             }
         }
 
@@ -700,7 +752,7 @@ async fn run_parallel_server_cycle(
         }
         if let Some(winner_index) = winner_index {
             let winner = active.swap_remove(winner_index);
-            abort_parallel_attempts(&active);
+            retire_parallel_attempts(&mut active).await;
             return mirror_winning_server_session(
                 winner,
                 public_state,
@@ -719,7 +771,8 @@ async fn run_parallel_server_cycle(
             }
             let attempt = active.swap_remove(index);
             let was_connected = attempt.state.read().await.connected;
-            match attempt.task.await {
+            let mut attempt = attempt;
+            match attempt.task.join().await {
                 Ok(Ok(ServerSessionExit::IntentionalShutdown)) => {
                     return ParallelServerCycleOutcome::Shutdown;
                 }
@@ -742,32 +795,54 @@ async fn run_parallel_server_cycle(
         tokio::select! {
             () = tokio::time::sleep(PARALLEL_ATTEMPT_POLL_INTERVAL) => {}
             changed = server_connect_plan.changed() => {
-                abort_parallel_attempts(&active);
-                clear_server_connection_state(public_state).await;
-                return if changed.is_ok() {
+                let outcome = if changed.is_ok() {
                     ParallelServerCycleOutcome::PlanChanged
                 } else {
                     ParallelServerCycleOutcome::Shutdown
                 };
+                return retire_parallel_cycle(&mut active, public_state, outcome).await;
             }
             () = reconnect_signal.notified() => {
-                abort_parallel_attempts(&active);
-                clear_server_connection_state(public_state).await;
-                return ParallelServerCycleOutcome::ReconnectRequested;
+                return retire_parallel_cycle(
+                    &mut active,
+                    public_state,
+                    ParallelServerCycleOutcome::ReconnectRequested,
+                ).await;
             }
             () = wait_for_shutdown(&context.shutdown) => {
-                abort_parallel_attempts(&active);
-                clear_server_connection_state(public_state).await;
-                return ParallelServerCycleOutcome::Shutdown;
+                return retire_parallel_cycle(
+                    &mut active,
+                    public_state,
+                    ParallelServerCycleOutcome::Shutdown,
+                ).await;
             }
         }
     }
 }
 
-fn abort_parallel_attempts(attempts: &[ParallelServerAttempt]) {
-    for attempt in attempts {
-        attempt.task.abort();
+async fn retire_parallel_attempts(attempts: &mut Vec<ParallelServerAttempt>) {
+    for attempt in attempts.iter() {
+        attempt.activation.retire();
+        attempt.cancel.cancel();
     }
+    for attempt in attempts.iter_mut() {
+        if let Err(error) = attempt.task.join().await
+            && !error.is_cancelled()
+        {
+            warn!("ED2K parallel server task failed during retirement: {error}");
+        }
+    }
+    attempts.clear();
+}
+
+async fn retire_parallel_cycle(
+    attempts: &mut Vec<ParallelServerAttempt>,
+    public_state: &Arc<RwLock<Ed2kServerState>>,
+    outcome: ParallelServerCycleOutcome,
+) -> ParallelServerCycleOutcome {
+    retire_parallel_attempts(attempts).await;
+    clear_server_connection_state(public_state).await;
+    outcome
 }
 
 fn max_simultaneous_server_attempts(
@@ -794,7 +869,7 @@ async fn mirror_winning_server_session(
     loop {
         *public_state.write().await = winner.state.read().await.clone();
         if winner.task.is_finished() {
-            let mut outcome = match (&mut winner.task).await {
+            let mut outcome = match winner.task.join().await {
                 Ok(Ok(ServerSessionExit::IntentionalShutdown)) => {
                     ParallelServerCycleOutcome::Shutdown
                 }
@@ -825,30 +900,34 @@ async fn mirror_winning_server_session(
             () = tokio::time::sleep(PARALLEL_ATTEMPT_POLL_INTERVAL) => {}
             changed = server_connect_plan.changed() => {
                 if changed.is_err() {
+                    winner.activation.retire();
                     winner.cancel.cancel();
-                    let _ = (&mut winner.task).await;
+                    let _ = winner.task.join().await;
                     clear_server_connection_state(public_state).await;
                     return ParallelServerCycleOutcome::Shutdown;
                 }
                 let next_plan = server_connect_plan.borrow_and_update().clone();
                 let connected = winner.state.read().await.connected;
                 if !connected || !plan_allows_configured_server(&next_plan, &winner.configured) {
+                    winner.activation.retire();
                     winner.cancel.cancel();
-                    let _ = (&mut winner.task).await;
+                    let _ = winner.task.join().await;
                     clear_server_connection_state(public_state).await;
                     return ParallelServerCycleOutcome::PlanChanged;
                 }
                 plan_changed = true;
             }
             () = reconnect_signal.notified() => {
+                winner.activation.retire();
                 winner.cancel.cancel();
-                let _ = (&mut winner.task).await;
+                let _ = winner.task.join().await;
                 clear_server_connection_state(public_state).await;
                 return ParallelServerCycleOutcome::ReconnectRequested;
             }
             () = wait_for_shutdown(&context.shutdown) => {
+                winner.activation.retire();
                 winner.cancel.cancel();
-                let _ = (&mut winner.task).await;
+                let _ = winner.task.join().await;
                 clear_server_connection_state(public_state).await;
                 return ParallelServerCycleOutcome::Shutdown;
             }
@@ -1046,6 +1125,66 @@ mod tests {
             .await
             .expect("server loop should stop promptly")
             .expect("server loop task should not panic");
+    }
+
+    #[tokio::test]
+    async fn retired_parallel_activation_wakes_pending_session() {
+        let (activation, activator) = ServerSessionActivation::pending();
+        let waiter = tokio::spawn(async move { activation.wait_until_active().await });
+
+        activator.retire();
+
+        assert!(
+            !timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("retired activation waiter should complete")
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_outer_abort_aborts_parallel_session_tasks() {
+        let first_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let first_endpoint = first_listener.local_addr().unwrap();
+        let second_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let second_endpoint = second_listener.local_addr().unwrap();
+        let (accepted, mut accepted_rx) = tokio::sync::mpsc::channel(2);
+        let mut servers = Vec::new();
+        for listener in [first_listener, second_listener] {
+            let accepted = accepted.clone();
+            servers.push(tokio::spawn(async move {
+                let stream = accept_login(listener).await;
+                accepted.send(()).await.unwrap();
+                drain_until_closed(stream).await;
+            }));
+        }
+        drop(accepted);
+        let runtime = spawn_test_server_loop(Ed2kServerConnectPlan::new(
+            test_config(
+                vec![first_endpoint.to_string(), second_endpoint.to_string()],
+                false,
+            ),
+            Ed2kServerConnectMode::Manual,
+        ));
+        for _ in 0..2 {
+            timeout(Duration::from_secs(5), accepted_rx.recv())
+                .await
+                .expect("parallel attempts should both connect")
+                .expect("parallel attempt signal should remain open");
+        }
+
+        runtime.task.abort();
+        timeout(Duration::from_secs(1), runtime.task)
+            .await
+            .expect("outer server loop should abort")
+            .expect_err("outer server loop should report cancellation");
+
+        for server in servers {
+            timeout(Duration::from_secs(2), server)
+                .await
+                .expect("parallel server should observe descendant task closure")
+                .unwrap();
+        }
     }
 
     async fn accept_login(listener: TcpListener) -> TcpStream {
