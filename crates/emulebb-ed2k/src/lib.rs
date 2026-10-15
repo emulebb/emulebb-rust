@@ -54,6 +54,10 @@ pub use networking::{
     ResolvedInterfaceBindingReport, build_interface_binding_report, detect_interfaces,
     recommend_interface, resolve_bind_ip,
 };
+pub use reachability::{
+    ReachabilityRuntimeLease, ReachabilityUpdate, RuntimeReachabilityWriter,
+    ServerReachabilityLease, ServerReachabilityWriter,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HashType {
