@@ -175,13 +175,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         .bind_addr()
         .context("failed to resolve Kad bind address for eD2k hello response")?
         .port();
+    let ports = reachability
+        .snapshot()
+        .advertised_ports(hello_identity.tcp_port, kad_udp_port);
     let response_identity = Ed2kHelloIdentity {
         // Advertise the externally-reachable ports (UPnP-mapped when known), read
         // dynamically here so a mapping learned after startup is reflected: peers
         // locate us for UDP source-reask by (ip, udp_port) and reach us for
         // incoming connections on the advertised tcp_port.
-        udp_port: reachability.advertised_udp_port(kad_udp_port),
-        tcp_port: reachability.advertised_tcp_port(hello_identity.tcp_port),
+        udp_port: ports.udp,
+        tcp_port: ports.tcp,
         ..hello_identity
     };
     let response_identity =

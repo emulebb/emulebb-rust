@@ -42,6 +42,13 @@ pub struct ReachabilitySnapshot {
     peer_confirmed_udp_port: Option<u16>,
 }
 
+/// Effective external ports derived from one [`ReachabilitySnapshot`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdvertisedPorts {
+    pub tcp: u16,
+    pub udp: u16,
+}
+
 impl ReachabilitySnapshot {
     /// Current public IPv4, preferring live server evidence over fallback probes.
     pub fn public_ip(self) -> Option<Ipv4Addr> {
@@ -75,6 +82,18 @@ impl ReachabilitySnapshot {
         self.peer_confirmed_udp_port
             .or(self.nat_mapped_udp_port)
             .unwrap_or(internal_port)
+    }
+
+    /// Derive both advertised ports from this one point-in-time view.
+    pub fn advertised_ports(
+        self,
+        internal_tcp_port: u16,
+        internal_udp_port: u16,
+    ) -> AdvertisedPorts {
+        AdvertisedPorts {
+            tcp: self.advertised_tcp_port(internal_tcp_port),
+            udp: self.advertised_udp_port(internal_udp_port),
+        }
     }
 }
 
@@ -292,5 +311,29 @@ mod tests {
         assert_eq!(after.public_ip(), Some(Ipv4Addr::new(198, 51, 100, 9)));
         assert_eq!(after.advertised_tcp_port(4662), 55000);
         assert_eq!(after.advertised_udp_port(4672), 56000);
+    }
+
+    #[test]
+    fn advertised_port_pairs_come_from_one_snapshot() {
+        let reachability = ExternalReachability::new();
+        reachability.set_nat_mapped_ports(Some(45000), Some(46000));
+        let before = reachability.snapshot();
+
+        reachability.set_nat_mapped_ports(Some(55000), None);
+
+        assert_eq!(
+            before.advertised_ports(4662, 4672),
+            AdvertisedPorts {
+                tcp: 45000,
+                udp: 46000,
+            }
+        );
+        assert_eq!(
+            reachability.snapshot().advertised_ports(4662, 4672),
+            AdvertisedPorts {
+                tcp: 55000,
+                udp: 4672,
+            }
+        );
     }
 }
