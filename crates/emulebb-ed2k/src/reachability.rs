@@ -8,7 +8,8 @@
 //! This consolidates the previously-scattered state (`SharedPublicIp` + the
 //! process-wide advertised-port statics) that let the reask/HighID reachability
 //! bugs slip in: a site could advertise an internal/stale value while the truth
-//! lived elsewhere. One cheaply-clonable `Arc` cell, threaded where needed.
+//! lived elsewhere. One cheaply-clonable `Arc` cell, threaded where needed, owns
+//! an atomically replaced state value so readers can take a coherent snapshot.
 //!
 //! Semantics mirror eMule:
 //! - **Public IP** (`Emule.cpp` `GetPublicIP`/`SetPublicIP`): the obfuscation key
@@ -23,28 +24,64 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
-#[derive(Debug, Default)]
-struct ReachabilityInner {
-    /// Server-observed public IPv4; `0` = no current server-session evidence.
-    server_public_ip: AtomicU32,
-    /// Independently probed public IPv4; `0` = no current fallback evidence.
-    fallback_public_ip: AtomicU32,
-    /// NAT-mapped eD2k TCP listener port; `0` = no current mapping.
-    nat_mapped_tcp_port: AtomicU16,
-    /// NAT-mapped eD2k UDP port; `0` = no current mapping.
-    nat_mapped_udp_port: AtomicU16,
-    /// Remotely-observed external UDP port from the Kad firewall check; `0` = no
-    /// current peer confirmation. Kept separately so expiring stale verification
-    /// can reveal, rather than destroy, a concurrently refreshed UPnP mapping.
-    peer_confirmed_udp_port: AtomicU16,
+use parking_lot::RwLock;
+
+/// Immutable point-in-time view of all external reachability evidence.
+///
+/// Copy this once when one protocol message depends on more than one field. The
+/// copy remains stable even if another task publishes a newer state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReachabilitySnapshot {
+    server_public_ip: Option<Ipv4Addr>,
+    fallback_public_ip: Option<Ipv4Addr>,
+    nat_mapped_tcp_port: Option<u16>,
+    nat_mapped_udp_port: Option<u16>,
+    /// Kept separately so expiring stale peer verification reveals, rather than
+    /// destroys, a concurrently refreshed NAT mapping.
+    peer_confirmed_udp_port: Option<u16>,
+}
+
+impl ReachabilitySnapshot {
+    /// Current public IPv4, preferring live server evidence over fallback probes.
+    pub fn public_ip(self) -> Option<Ipv4Addr> {
+        self.server_public_ip.or(self.fallback_public_ip)
+    }
+
+    /// Octets `a.b.c.d` for obfuscation key material; `[0,0,0,0]` when unknown.
+    pub fn octets(self) -> [u8; 4] {
+        self.public_ip().map_or([0, 0, 0, 0], |ip| ip.octets())
+    }
+
+    /// Whether a public IP is known (HighID established).
+    pub fn is_known(self) -> bool {
+        self.public_ip().is_some()
+    }
+
+    /// Whether the external UDP port has been confirmed by a remote peer.
+    pub fn udp_port_is_peer_confirmed(self) -> bool {
+        self.peer_confirmed_udp_port.is_some()
+    }
+
+    /// The eD2k TCP port to advertise: the learned external port when known, else
+    /// the given internal socket port (hello `tcp_port` / server login port).
+    pub fn advertised_tcp_port(self, internal_port: u16) -> u16 {
+        self.nat_mapped_tcp_port.unwrap_or(internal_port)
+    }
+
+    /// The eD2k UDP port to advertise: the learned external port when known, else
+    /// the given internal socket port (`CT_EMULE_UDPPORTS` / `ET_UDPPORT`).
+    pub fn advertised_udp_port(self, internal_port: u16) -> u16 {
+        self.peer_confirmed_udp_port
+            .or(self.nat_mapped_udp_port)
+            .unwrap_or(internal_port)
+    }
 }
 
 /// Cheaply-clonable handle to this client's external reachability facts.
 #[derive(Clone, Default, Debug)]
 pub struct ExternalReachability {
-    inner: Arc<ReachabilityInner>,
+    inner: Arc<RwLock<ReachabilitySnapshot>>,
 }
 
 impl ExternalReachability {
@@ -52,69 +89,57 @@ impl ExternalReachability {
         Self::default()
     }
 
+    /// Copy one coherent point-in-time view of every reachability fact.
+    pub fn snapshot(&self) -> ReachabilitySnapshot {
+        *self.inner.read()
+    }
+
     // --- Public IP evidence. ---
 
     /// Record public IPv4 evidence owned by the current server session.
     pub fn set_server_public_ip(&self, ip: Ipv4Addr) {
-        self.inner
-            .server_public_ip
-            .store(u32::from(ip), Ordering::Relaxed);
+        self.inner.write().server_public_ip = Some(ip);
     }
 
     /// Revoke only server-session evidence, preserving any independent fallback.
     pub fn clear_server_public_ip(&self) -> bool {
-        self.inner.server_public_ip.swap(0, Ordering::Relaxed) != 0
+        self.inner.write().server_public_ip.take().is_some()
     }
 
     /// Revoke every reachability fact owned by the current network runtime.
     pub fn clear_all(&self) {
-        self.inner.server_public_ip.store(0, Ordering::Relaxed);
-        self.inner.fallback_public_ip.store(0, Ordering::Relaxed);
-        self.inner.nat_mapped_tcp_port.store(0, Ordering::Relaxed);
-        self.inner.nat_mapped_udp_port.store(0, Ordering::Relaxed);
-        self.inner
-            .peer_confirmed_udp_port
-            .store(0, Ordering::Relaxed);
+        *self.inner.write() = ReachabilitySnapshot::default();
     }
 
     /// Record or refresh public IPv4 evidence from STUN/Kad/peer observation.
     /// Returns whether the fallback value changed.
     pub fn set_fallback_public_ip(&self, ip: Ipv4Addr) -> bool {
-        self.inner
-            .fallback_public_ip
-            .swap(u32::from(ip), Ordering::Relaxed)
-            != u32::from(ip)
+        let mut state = self.inner.write();
+        let changed = state.fallback_public_ip != Some(ip);
+        state.fallback_public_ip = Some(ip);
+        changed
     }
 
     /// Current public IPv4, preferring live server evidence over fallback probes.
     pub fn get(&self) -> Option<Ipv4Addr> {
-        let server = self.inner.server_public_ip.load(Ordering::Relaxed);
-        if server != 0 {
-            return Some(Ipv4Addr::from(server));
-        }
-        match self.inner.fallback_public_ip.load(Ordering::Relaxed) {
-            0 => None,
-            fallback => Some(Ipv4Addr::from(fallback)),
-        }
+        self.snapshot().public_ip()
     }
 
     /// Octets `a.b.c.d` for obfuscation key material; `[0,0,0,0]` when unknown.
     pub fn octets(&self) -> [u8; 4] {
-        self.get().map_or([0, 0, 0, 0], |ip| ip.octets())
+        self.snapshot().octets()
     }
 
     /// Whether a public IP is known (HighID established).
     pub fn is_known(&self) -> bool {
-        self.get().is_some()
+        self.snapshot().is_known()
     }
 
     // --- Advertised external ports. ---
 
     /// Replace the current NAT-mapped eD2k TCP port snapshot.
     pub fn set_nat_mapped_tcp_port(&self, port: Option<u16>) {
-        self.inner
-            .nat_mapped_tcp_port
-            .store(port.unwrap_or(0), Ordering::Relaxed);
+        self.inner.write().nat_mapped_tcp_port = nonzero_port(port);
     }
 
     /// Record the externally-reachable eD2k UDP port from the UPnP mapping. This
@@ -122,59 +147,45 @@ impl ExternalReachability {
     /// so it is available immediately if that remote verification expires.
     /// `None` revokes a mapping that disappeared from the latest NAT snapshot.
     pub fn set_nat_mapped_udp_port(&self, port: Option<u16>) {
-        self.inner
-            .nat_mapped_udp_port
-            .store(port.unwrap_or(0), Ordering::Relaxed);
+        self.inner.write().nat_mapped_udp_port = nonzero_port(port);
     }
 
     /// Record the externally-reachable eD2k/Kad UDP port confirmed by a remote
     /// peer during the Kad UDP firewall check. This is the most authoritative
     /// source and pins the value so the periodic UPnP sync cannot overwrite it.
     pub fn set_peer_confirmed_udp_port(&self, port: u16) {
-        if port == 0 {
-            return;
+        if let Some(port) = nonzero_port(Some(port)) {
+            self.inner.write().peer_confirmed_udp_port = Some(port);
         }
-        self.inner
-            .peer_confirmed_udp_port
-            .store(port, Ordering::Relaxed);
     }
 
     /// Revoke the remotely-confirmed UDP port while preserving any independent
     /// UPnP mapping learned in parallel. Returns whether a confirmation existed.
     pub fn clear_peer_confirmed_udp_port(&self) -> bool {
-        self.inner
-            .peer_confirmed_udp_port
-            .swap(0, Ordering::Relaxed)
-            != 0
+        self.inner.write().peer_confirmed_udp_port.take().is_some()
     }
 
     /// Whether the external UDP port has been confirmed by a remote peer.
     #[must_use]
     pub fn udp_port_is_peer_confirmed(&self) -> bool {
-        self.inner.peer_confirmed_udp_port.load(Ordering::Relaxed) != 0
+        self.snapshot().udp_port_is_peer_confirmed()
     }
 
     /// The eD2k TCP port to advertise: the learned external port when known, else
     /// the given internal socket port (hello `tcp_port` / server login port).
     pub fn advertised_tcp_port(&self, internal_port: u16) -> u16 {
-        match self.inner.nat_mapped_tcp_port.load(Ordering::Relaxed) {
-            0 => internal_port,
-            port => port,
-        }
+        self.snapshot().advertised_tcp_port(internal_port)
     }
 
     /// The eD2k UDP port to advertise: the learned external port when known, else
     /// the given internal socket port (`CT_EMULE_UDPPORTS` / `ET_UDPPORT`).
     pub fn advertised_udp_port(&self, internal_port: u16) -> u16 {
-        let peer_confirmed = self.inner.peer_confirmed_udp_port.load(Ordering::Relaxed);
-        if peer_confirmed != 0 {
-            return peer_confirmed;
-        }
-        match self.inner.nat_mapped_udp_port.load(Ordering::Relaxed) {
-            0 => internal_port,
-            port => port,
-        }
+        self.snapshot().advertised_udp_port(internal_port)
     }
+}
+
+fn nonzero_port(port: Option<u16>) -> Option<u16> {
+    port.filter(|port| *port != 0)
 }
 
 #[cfg(test)]
@@ -266,5 +277,26 @@ mod tests {
         a.set_nat_mapped_udp_port(Some(40000));
         assert_eq!(b.get(), Some(Ipv4Addr::new(192, 0, 2, 5)));
         assert_eq!(b.advertised_udp_port(4672), 40000);
+    }
+
+    #[test]
+    fn snapshots_remain_stable_after_new_evidence_is_published() {
+        let reachability = ExternalReachability::new();
+        reachability.set_fallback_public_ip(Ipv4Addr::new(192, 0, 2, 5));
+        reachability.set_nat_mapped_tcp_port(Some(45000));
+        reachability.set_nat_mapped_udp_port(Some(46000));
+        let before = reachability.snapshot();
+
+        reachability.set_server_public_ip(Ipv4Addr::new(198, 51, 100, 9));
+        reachability.set_nat_mapped_tcp_port(Some(55000));
+        reachability.set_nat_mapped_udp_port(Some(56000));
+
+        assert_eq!(before.public_ip(), Some(Ipv4Addr::new(192, 0, 2, 5)));
+        assert_eq!(before.advertised_tcp_port(4662), 45000);
+        assert_eq!(before.advertised_udp_port(4672), 46000);
+        let after = reachability.snapshot();
+        assert_eq!(after.public_ip(), Some(Ipv4Addr::new(198, 51, 100, 9)));
+        assert_eq!(after.advertised_tcp_port(4662), 55000);
+        assert_eq!(after.advertised_udp_port(4672), 56000);
     }
 }
