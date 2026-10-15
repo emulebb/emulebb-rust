@@ -51,3 +51,11 @@ gh api --method POST repos/emulebb/emulebb-rust/rulesets \
 Do not repeat the create command when the ruleset already exists. Update the
 existing ruleset by ID and review the normalized API response against the
 tracked configuration instead.
+
+## Enforcement proof
+
+The initial rollout was verified with disposable pull request
+[`#116`](https://github.com/emulebb/emulebb-rust/pull/116) while implementation
+pull request `#115` was open from the same human author. `Single active PR`
+failed on the disposable pull request, every dependent normal CI job was
+skipped, and the proof pull request and branch were then closed and deleted.
