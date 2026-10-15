@@ -104,6 +104,34 @@ async fn materialize_completed_payload_isolated_from_piece_store() {
 }
 
 #[tokio::test]
+async fn materialize_completed_payload_rejects_missing_nonempty_piece_store() {
+    let root = unique_test_dir("ed2k-deliver-missing-source");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Missing.mkv").await;
+    fs::remove_file(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+
+    let error = runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("missing delivery payload"),
+        "unexpected error: {error:#}"
+    );
+    assert!(!incoming.exists());
+    assert!(
+        runtime
+            .manifest(&hash)
+            .await
+            .unwrap()
+            .delivered_path
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn materialize_completed_payload_persists_across_reload() {
     let root = unique_test_dir("ed2k-deliver-reload");
     let incoming = root.join("incoming");

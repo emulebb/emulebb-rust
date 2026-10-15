@@ -153,6 +153,7 @@ async fn deliver_payload_file(
     expected_hash: [u8; 16],
     pending_path: &Path,
 ) -> Result<PathBuf> {
+    validate_delivery_source(source, expected_size).await?;
     tokio::fs::create_dir_all(long_path(dest_dir))
         .await
         .with_context(|| format!("failed to create delivery directory {}", dest_dir.display()))?;
@@ -182,7 +183,10 @@ async fn deliver_payload_file(
         }
         persist_pending_delivery_path(pending_path, &candidate).await?;
         match copy_noclobber(source, &candidate).await? {
-            InstallOutcome::Installed => return Ok(candidate),
+            InstallOutcome::Installed => {
+                verify_installed_delivery(&candidate, expected_size, expected_hash).await?;
+                return Ok(candidate);
+            }
             InstallOutcome::AlreadyExists => {
                 if delivered_file_matches(&candidate, expected_size, expected_hash).await? {
                     return Ok(candidate);
@@ -194,6 +198,72 @@ async fn deliver_payload_file(
         "exhausted collision-free delivery names in {}",
         dest_dir.display()
     )
+}
+
+async fn validate_delivery_source(source: &Path, expected_size: u64) -> Result<()> {
+    let metadata = match tokio::fs::symlink_metadata(source).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && expected_size == 0 => {
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("missing delivery payload {}", source.display());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to stat delivery payload {}", source.display()));
+        }
+    };
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "delivery payload is not a regular file: {}",
+            source.display()
+        );
+    }
+    if metadata.len() != expected_size {
+        anyhow::bail!(
+            "delivery payload size mismatch for {}: expected {expected_size} bytes, found {}",
+            source.display(),
+            metadata.len()
+        );
+    }
+    Ok(())
+}
+
+async fn verify_installed_delivery(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: [u8; 16],
+) -> Result<()> {
+    match delivered_file_matches(path, expected_size, expected_hash).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            remove_if_exists(path).await.with_context(|| {
+                format!(
+                    "failed to remove unverified delivered file {}",
+                    path.display()
+                )
+            })?;
+            anyhow::bail!(
+                "installed delivered file failed verification: {}",
+                path.display()
+            );
+        }
+        Err(error) => {
+            remove_if_exists(path).await.with_context(|| {
+                format!(
+                    "failed to remove unverifiable delivered file {}",
+                    path.display()
+                )
+            })?;
+            Err(error).with_context(|| {
+                format!(
+                    "failed to verify installed delivered file {}",
+                    path.display()
+                )
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,14 +385,14 @@ async fn delivered_file_matches(
 }
 
 fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>> {
-    let metadata = match path.metadata() {
+    let metadata = match path.symlink_metadata() {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("failed to stat {}", path.display()));
         }
     };
-    if metadata.len() != expected_size {
+    if !metadata.is_file() || metadata.len() != expected_size {
         return Ok(None);
     }
     let mut file = File::open(path)?;
@@ -547,6 +617,61 @@ mod tests {
 
         assert_eq!(delivered, dest.join("empty.dat"));
         assert_eq!(tokio::fs::read(&delivered).await.unwrap(), b"");
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn truncated_payload_is_rejected_before_destination_creation() {
+        let dir = temp_dir();
+        let source = dir.join("pieces.bin");
+        let dest = dir.join("incoming");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(&source, b"short").await.unwrap();
+
+        let error = deliver_payload_file(
+            &source,
+            &dest,
+            "truncated.bin",
+            10,
+            Md4::digest(b"ten-bytes!").into(),
+            &dir.join(DELIVERY_PENDING_FILE_NAME),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("delivery payload size mismatch"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!dest.exists());
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn installed_payload_is_removed_when_hash_verification_fails() {
+        let dir = temp_dir();
+        let source = dir.join("pieces.bin");
+        let dest = dir.join("incoming");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(&source, b"payload-bytes").await.unwrap();
+        let delivered = dest.join("wrong-hash.bin");
+
+        let error = deliver_payload_file(
+            &source,
+            &dest,
+            "wrong-hash.bin",
+            13,
+            [0x55; 16],
+            &dir.join(DELIVERY_PENDING_FILE_NAME),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("installed delivered file failed verification"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!delivered.exists());
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
 
