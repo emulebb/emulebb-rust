@@ -68,7 +68,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, Notify, RwLock},
+    sync::{Mutex, RwLock},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -214,7 +214,6 @@ async fn connected_id_change_fixture() -> (
         rotation_interval: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         public_ip: ExternalReachability::new(),
-        reconnect_signal: Arc::new(Notify::new()),
         server_list_events: Some(server_list_events),
         add_servers_from_server: false,
         offer_files_capability_enabled: false,

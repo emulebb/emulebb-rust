@@ -643,7 +643,7 @@ async fn effective_ed2k_config_includes_runtime_servers() {
     .await
     .unwrap();
 
-    let config = core.effective_ed2k_config(&base, None).await.unwrap();
+    let config = core.effective_ed2k_config(&base).await.unwrap();
 
     assert!(
         config
@@ -683,7 +683,7 @@ async fn effective_ed2k_config_excludes_disabled_runtime_servers() {
     assert!(!server.enabled);
 
     let config = core
-        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await
         .unwrap();
     assert!(config.server_entries.is_empty());
@@ -719,7 +719,7 @@ async fn server_update_reenables_disabled_runtime_servers() {
 
     assert!(updated.enabled);
     let config = core
-        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await
         .unwrap();
     assert!(
@@ -741,7 +741,7 @@ async fn effective_ed2k_config_honors_reconnect_core_setting() {
     .unwrap();
 
     let config = core
-        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await
         .unwrap();
 
@@ -759,7 +759,7 @@ async fn effective_ed2k_config_honors_safe_server_connect_core_setting() {
     .unwrap();
 
     let config = core
-        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await
         .unwrap();
 
@@ -860,7 +860,7 @@ async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
 
     reloaded.ed2k_reachability.set(key_ip);
     let current = reloaded
-        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await
         .unwrap();
     let current = current
@@ -877,7 +877,7 @@ async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
         .ed2k_reachability
         .set(Ipv4Addr::new(198, 51, 100, 8));
     let stale = reloaded
-        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await
         .unwrap();
     let stale = stale
@@ -917,8 +917,13 @@ async fn explicit_server_connect_targets_running_server_loop() {
     .unwrap();
     let shutdown = Arc::new(AtomicBool::new(false));
     let dht_task = dht.start();
-    let target_server_endpoint = Arc::new(RwLock::new(None));
-    let server_reconnect_signal = Arc::new(tokio::sync::Notify::new());
+    let initial_config = core
+        .effective_ed2k_config(&core.ed2k_network.as_ref().unwrap().ed2k)
+        .await
+        .unwrap();
+    let (server_connect_plan, mut server_connect_plan_rx) = tokio::sync::watch::channel(
+        Ed2kServerConnectPlan::new(initial_config, Ed2kServerConnectMode::Manual),
+    );
 
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
@@ -929,8 +934,8 @@ async fn explicit_server_connect_targets_running_server_loop() {
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
-        server_reconnect_signal: Arc::clone(&server_reconnect_signal),
-        target_server_endpoint: Arc::clone(&target_server_endpoint),
+        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
+        server_connect_plan: server_connect_plan.clone(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
         download_tasks: Arc::clone(&core.ed2k_download_tasks),
@@ -940,29 +945,30 @@ async fn explicit_server_connect_targets_running_server_loop() {
 
     assert!(result.is_some());
     assert_eq!(
-        target_server_endpoint.read().await.as_deref(),
+        server_connect_plan.borrow().mode().directed_endpoint(),
         Some("203.0.113.20:4661")
     );
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(50),
-            server_reconnect_signal.notified()
-        )
-        .await
-        .is_ok(),
-        "retargeting a running server loop must signal reconnect"
+        tokio::time::timeout(Duration::from_millis(50), server_connect_plan_rx.changed())
+            .await
+            .is_ok(),
+        "retargeting a running server loop must publish a new selection generation"
+    );
+    assert_eq!(
+        server_connect_plan.borrow().config().server_endpoints.len(),
+        2
     );
 
     core.connect_ed2k().await.unwrap();
 
-    assert_eq!(target_server_endpoint.read().await.as_deref(), None);
+    assert_eq!(
+        server_connect_plan.borrow().mode(),
+        &Ed2kServerConnectMode::Manual
+    );
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(50),
-            server_reconnect_signal.notified()
-        )
-        .await
-        .is_ok(),
+        tokio::time::timeout(Duration::from_millis(50), server_connect_plan_rx.changed())
+            .await
+            .is_ok(),
         "global connect must clear a directed target and resume automatic selection"
     );
     shutdown.store(true, Ordering::SeqCst);
@@ -994,8 +1000,15 @@ async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
     .unwrap();
     let shutdown = Arc::new(AtomicBool::new(false));
     let dht_task = dht.start();
-    let target_server_endpoint = Arc::new(RwLock::new(None));
-    let server_reconnect_signal = Arc::new(tokio::sync::Notify::new());
+    let initial_config = core
+        .effective_ed2k_config(&core.ed2k_network.as_ref().unwrap().ed2k)
+        .await
+        .unwrap();
+    let (server_connect_plan, mut server_connect_plan_rx) =
+        tokio::sync::watch::channel(Ed2kServerConnectPlan::new(
+            initial_config,
+            Ed2kServerConnectMode::Directed("203.0.113.20:4661".to_string()),
+        ));
     let server_state = Arc::new(RwLock::new(Ed2kServerState {
         endpoint: Some("203.0.113.20:4661".parse().unwrap()),
         connected: true,
@@ -1011,8 +1024,8 @@ async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
-        server_reconnect_signal: Arc::clone(&server_reconnect_signal),
-        target_server_endpoint: Arc::clone(&target_server_endpoint),
+        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
+        server_connect_plan: server_connect_plan.clone(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
         download_tasks: Arc::clone(&core.ed2k_download_tasks),
@@ -1022,16 +1035,13 @@ async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
 
     assert!(result.is_some());
     assert_eq!(
-        target_server_endpoint.read().await.as_deref(),
+        server_connect_plan.borrow().mode().directed_endpoint(),
         Some("203.0.113.20:4661")
     );
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(50),
-            server_reconnect_signal.notified()
-        )
-        .await
-        .is_err(),
+        tokio::time::timeout(Duration::from_millis(50), server_connect_plan_rx.changed())
+            .await
+            .is_err(),
         "same-endpoint connect must not drop a live server session"
     );
     shutdown.store(true, Ordering::SeqCst);

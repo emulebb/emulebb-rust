@@ -65,6 +65,14 @@ mod kad_publish_runtime;
 mod search_servers;
 mod transfer_lifecycle;
 
+fn test_server_connect_plan_sender() -> tokio::sync::watch::Sender<Ed2kServerConnectPlan> {
+    tokio::sync::watch::channel(Ed2kServerConnectPlan::new(
+        Ed2kRuntimeConfig::default(),
+        Ed2kServerConnectMode::Manual,
+    ))
+    .0
+}
+
 #[tokio::test(start_paused = true)]
 async fn outgoing_buddy_link_completion_wakes_one_reconnect_attempt() {
     let now = chrono::Utc::now();
@@ -354,7 +362,7 @@ async fn ed2k_shared_catalog_publish_waits_for_connected_server() {
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
         server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
-        target_server_endpoint: Arc::new(RwLock::new(None)),
+        server_connect_plan: test_server_connect_plan_sender(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
         download_tasks: Arc::clone(&core.ed2k_download_tasks),

@@ -42,7 +42,7 @@ async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::new(AtomicBool::new(false)),
         server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
-        target_server_endpoint: Arc::new(RwLock::new(None)),
+        server_connect_plan: test_server_connect_plan_sender(),
         kad_firewall_recheck: None,
         tasks: Vec::new(),
         download_tasks: Arc::clone(&core.ed2k_download_tasks),

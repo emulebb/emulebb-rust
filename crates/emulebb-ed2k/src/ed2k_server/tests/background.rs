@@ -888,7 +888,6 @@ fn background_test_context(
         rotation_interval: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         public_ip: ExternalReachability::default(),
-        reconnect_signal: Arc::new(Notify::new()),
         server_list_events: None,
         add_servers_from_server: false,
         offer_files_capability_enabled: true,
@@ -1144,7 +1143,7 @@ async fn valid_id_after_zero_accepts_the_still_pending_login() {
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let context = background_test_context(Arc::clone(&state), Duration::from_millis(500));
-    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let shutdown = Arc::clone(&context.shutdown);
     let (_, inbox) = new_ed2k_server_search_channel(1);
     let inbox = Arc::new(Mutex::new(inbox));
     let server = background_test_server(endpoint);
@@ -1161,7 +1160,7 @@ async fn valid_id_after_zero_accepts_the_still_pending_login() {
         })
         .await
         .expect("a valid ID after zero should accept the pending login");
-        reconnect_signal.notify_one();
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
         snapshot
     };
     let (result, snapshot) = tokio::join!(
@@ -1169,7 +1168,7 @@ async fn valid_id_after_zero_accepts_the_still_pending_login() {
         observe_connected
     );
 
-    assert_eq!(result.unwrap(), ServerSessionExit::RestartPreferredOrder);
+    assert_eq!(result.unwrap(), ServerSessionExit::IntentionalShutdown);
     assert!(!snapshot.connecting);
     assert!(snapshot.connected);
     assert_eq!(
@@ -1234,7 +1233,7 @@ async fn reject_before_id_change_does_not_abort_login() {
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
-    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let shutdown = Arc::clone(&context.shutdown);
     let (_, inbox) = new_ed2k_server_search_channel(1);
     let inbox = Arc::new(Mutex::new(inbox));
     let server = background_test_server(endpoint);
@@ -1250,14 +1249,14 @@ async fn reject_before_id_change_does_not_abort_login() {
         })
         .await
         .expect("OP_REJECT must leave the login attempt awaiting OP_IDCHANGE");
-        reconnect_signal.notify_one();
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
     };
     let (result, ()) = tokio::join!(
         run_one_server_session(&server, &context, &inbox),
         observe_connected
     );
 
-    assert_eq!(result.unwrap(), ServerSessionExit::RestartPreferredOrder);
+    assert_eq!(result.unwrap(), ServerSessionExit::IntentionalShutdown);
     server_task.abort();
 }
 
@@ -1288,7 +1287,7 @@ async fn reject_does_not_complete_or_disconnect_pending_background_search() {
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
-    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let shutdown = Arc::clone(&context.shutdown);
     let (handle, inbox) = new_ed2k_server_search_channel(1);
     let inbox = Arc::new(Mutex::new(inbox));
     let server = background_test_server(endpoint);
@@ -1313,7 +1312,7 @@ async fn reject_does_not_complete_or_disconnect_pending_background_search() {
             &cancel,
         )
         .await;
-        reconnect_signal.notify_one();
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
         result
     };
     let (session_result, search_result) =
@@ -1321,7 +1320,7 @@ async fn reject_does_not_complete_or_disconnect_pending_background_search() {
 
     assert_eq!(
         session_result.unwrap(),
-        ServerSessionExit::RestartPreferredOrder
+        ServerSessionExit::IntentionalShutdown
     );
     assert!(search_result.unwrap().is_empty());
     server_task.abort();
@@ -1457,7 +1456,7 @@ async fn malformed_typed_replies_preserve_pending_request_and_session() {
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
-    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let shutdown = Arc::clone(&context.shutdown);
     let (handle, inbox) = new_ed2k_server_search_channel(1);
     let inbox = Arc::new(Mutex::new(inbox));
     let server = background_test_server(endpoint);
@@ -1496,7 +1495,7 @@ async fn malformed_typed_replies_preserve_pending_request_and_session() {
         )
         .await
         .expect("valid matching reply must complete the original source request");
-        reconnect_signal.notify_one();
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
         results
     };
     let (session_result, results) =
@@ -1504,7 +1503,7 @@ async fn malformed_typed_replies_preserve_pending_request_and_session() {
 
     assert_eq!(
         session_result.unwrap(),
-        ServerSessionExit::RestartPreferredOrder
+        ServerSessionExit::IntentionalShutdown
     );
     assert!(results.is_empty());
     server_task.abort();
@@ -1552,7 +1551,7 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
-    let reconnect_signal = Arc::clone(&context.reconnect_signal);
+    let shutdown = Arc::clone(&context.shutdown);
     let (handle, inbox) = new_ed2k_server_search_channel(1);
     let inbox = Arc::new(Mutex::new(inbox));
     let server = background_test_server(endpoint);
@@ -1587,7 +1586,7 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
         )
         .await
         .expect("valid replies must complete the original batch");
-        reconnect_signal.notify_one();
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
         results
     };
     let (session_result, results) =
@@ -1595,7 +1594,7 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
 
     assert_eq!(
         session_result.unwrap(),
-        ServerSessionExit::RestartPreferredOrder
+        ServerSessionExit::IntentionalShutdown
     );
     assert_eq!(results.len(), 2);
     assert_eq!(results.get(&file_hash_a), Some(&Vec::new()));

@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 use crate::NatManager;
 use emulebb_kad_proto::Ed2kHash;
@@ -108,10 +108,6 @@ pub(super) struct ServerSessionContext {
     /// Learned public IP (eMule `theApp.SetPublicIP`): set from the HighID
     /// `OP_IDCHANGE` client_id, cleared on disconnect/LowID.
     pub(super) public_ip: crate::reachability::ExternalReachability,
-    /// "Reconnect now" signal: notified when the advertised external port changes
-    /// (UPnP became ready / was remapped) so the session drops and re-logs in with
-    /// the new HighID callback port instead of waiting for a natural reconnect.
-    pub(super) reconnect_signal: Arc<tokio::sync::Notify>,
     /// Optional feedback channel to the core's server store for discovered
     /// servers (`OP_SERVERLIST`) and connect/ping outcomes (fail-count / dead
     /// server drop). `None` when the loop is run without a core store wired.
@@ -316,15 +312,67 @@ impl Ed2kFoundSource {
     }
 }
 
+/// Selection mode for the long-lived ED2K server connection scheduler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ed2kServerConnectMode {
+    /// Application startup auto-connect. Stock's static-server-only preference
+    /// applies only in this mode.
+    Automatic,
+    /// Operator-requested connection to any eligible server.
+    Manual,
+    /// Operator-requested connection to one enabled server.
+    Directed(String),
+}
+
+impl Ed2kServerConnectMode {
+    #[must_use]
+    pub fn directed_endpoint(&self) -> Option<&str> {
+        match self {
+            Self::Directed(endpoint) => Some(endpoint),
+            Self::Automatic | Self::Manual => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_automatic(&self) -> bool {
+        matches!(self, Self::Automatic)
+    }
+}
+
+/// Current ED2K server directory and selection policy.
+///
+/// The core publishes replacements through a Tokio watch channel. The server
+/// scheduler therefore observes one coherent generation for directory entries,
+/// Safe Server Connect, reconnect policy, static-only policy, and selection mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kServerConnectPlan {
+    config: Ed2kRuntimeConfig,
+    mode: Ed2kServerConnectMode,
+}
+
+impl Ed2kServerConnectPlan {
+    #[must_use]
+    pub fn new(config: Ed2kRuntimeConfig, mode: Ed2kServerConnectMode) -> Self {
+        Self { config, mode }
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &Ed2kRuntimeConfig {
+        &self.config
+    }
+
+    #[must_use]
+    pub fn mode(&self) -> &Ed2kServerConnectMode {
+        &self.mode
+    }
+}
+
 /// Inputs for the long-lived ED2K server session loop.
 pub struct Ed2kServerLoopOptions {
     pub bind_ip: Ipv4Addr,
     pub nat: Arc<NatManager>,
-    pub config: Ed2kRuntimeConfig,
-    /// Whether this loop was started by application auto-connect. Stock applies
-    /// `AutoConnectStaticOnly` only to automatic connection cycles, not a
-    /// directed operator connection.
-    pub automatic_connection: bool,
+    /// Live server directory, policy, and operator selection mode.
+    pub server_connect_plan: watch::Receiver<Ed2kServerConnectPlan>,
     pub hello_identity: Ed2kHelloIdentity,
     pub shared_catalog: Ed2kSharedCatalog,
     pub state: Arc<RwLock<Ed2kServerState>>,
@@ -340,8 +388,6 @@ pub struct Ed2kServerLoopOptions {
     /// "Reconnect now" signal (shared with the advertised-ports sync task): fired
     /// when the external port changes so the session re-logs in promptly.
     pub reconnect_signal: Arc<tokio::sync::Notify>,
-    /// Optional explicit REST/UI target for the next server connection attempt.
-    pub target_server_endpoint: Arc<RwLock<Option<String>>>,
     /// Optional feedback channel to the core's server store (server discovery +
     /// connect/ping outcome). `None` disables server-list feedback.
     pub server_list_events: Option<Ed2kServerListEventSender>,
