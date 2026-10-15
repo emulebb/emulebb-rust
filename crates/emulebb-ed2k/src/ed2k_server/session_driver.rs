@@ -184,8 +184,13 @@ pub(super) async fn run_one_server_session(
 ) -> Result<ServerSessionExit> {
     let nat_status = context.nat.status().await;
     let observed_external_ip = nat_status.observed_external_addresses.first().cloned();
-    let mut session =
-        connect_server_transport(server, context, observed_external_ip.as_deref()).await?;
+    let mut session = tokio::select! {
+        result = connect_server_transport(server, context, observed_external_ip.as_deref()) => result?,
+        () = context.session_cancel.cancelled() => {
+            clear_server_connection_state(&context.state).await;
+            return Ok(ServerSessionExit::ContinueOrder);
+        }
+    };
     let mut live_server = server.clone();
     if !live_server
         .entry
@@ -256,10 +261,28 @@ pub(super) async fn run_one_server_session(
             clear_server_connection_state(&context.state).await;
             return Ok(ServerSessionExit::IntentionalShutdown);
         }
+        if context.session_cancel.is_cancelled() {
+            let failure = BackgroundSearchFailure::interrupted(
+                "ED2K server session was superseded before background work completed",
+            );
+            fail_background_search_request(&mut queued_background_search, &failure);
+            fail_pending_background_search(&mut pending_background_search, &failure);
+            clear_server_connection_state(&context.state).await;
+            return Ok(ServerSessionExit::ContinueOrder);
+        }
 
         let offer_files_wakeup = session.offer_files_wakeup_at();
         let pending_login_deadline = session.pending_login_deadline;
         tokio::select! {
+            () = context.session_cancel.cancelled() => {
+                let failure = BackgroundSearchFailure::interrupted(
+                    "ED2K server session was superseded before background work completed",
+                );
+                fail_background_search_request(&mut queued_background_search, &failure);
+                fail_pending_background_search(&mut pending_background_search, &failure);
+                clear_server_connection_state(&context.state).await;
+                return Ok(ServerSessionExit::ContinueOrder);
+            }
             _ = tokio::time::sleep(PENDING_LOGIN_SHUTDOWN_POLL_INTERVAL), if !session.login_accepted => {
                 // The shutdown flag is atomic rather than a Notify. Poll only
                 // while login is pending so shutdown cannot be held hostage by

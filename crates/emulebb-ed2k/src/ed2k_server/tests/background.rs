@@ -887,6 +887,7 @@ fn background_test_context(
         connect_timeout,
         rotation_interval: None,
         shutdown: Arc::new(AtomicBool::new(false)),
+        session_cancel: CancellationToken::new(),
         public_ip: ExternalReachability::default(),
         activation: super::super::types::ServerSessionActivation::active(),
         server_list_events: None,

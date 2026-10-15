@@ -8,6 +8,7 @@ use std::{
 };
 
 use tokio::sync::{Mutex, RwLock, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::NatManager;
 use emulebb_kad_proto::Ed2kHash;
@@ -149,6 +150,9 @@ pub(super) struct ServerSessionContext {
     pub(super) connect_timeout: Duration,
     pub(super) rotation_interval: Option<Duration>,
     pub(super) shutdown: Arc<AtomicBool>,
+    /// Cancels only this connection attempt/session when its live plan is
+    /// superseded; distinct from whole-runtime shutdown.
+    pub(super) session_cancel: CancellationToken,
     /// Learned public IP (eMule `theApp.SetPublicIP`): set from the HighID
     /// `OP_IDCHANGE` client_id, cleared on disconnect/LowID.
     pub(super) public_ip: crate::reachability::ExternalReachability,

@@ -213,6 +213,7 @@ async fn connected_id_change_fixture() -> (
         connect_timeout: Duration::from_secs(25),
         rotation_interval: None,
         shutdown: Arc::new(AtomicBool::new(false)),
+        session_cancel: CancellationToken::new(),
         public_ip: ExternalReachability::new(),
         activation: ServerSessionActivation::active(),
         server_list_events: Some(server_list_events),
