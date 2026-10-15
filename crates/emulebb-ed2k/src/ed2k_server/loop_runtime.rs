@@ -12,6 +12,7 @@ use tokio::{
     sync::{Mutex, Notify, RwLock, watch},
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::Ed2kRuntimeConfig;
@@ -75,6 +76,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         rotation_interval: (initial_config.session_rotation_secs > 0)
             .then(|| Duration::from_secs(initial_config.session_rotation_secs)),
         shutdown: Arc::clone(&shutdown),
+        session_cancel: CancellationToken::new(),
         public_ip,
         activation: ServerSessionActivation::active(),
         server_list_events,
@@ -525,7 +527,10 @@ async fn run_controlled_server_session(
     server_connect_plan: &mut watch::Receiver<Ed2kServerConnectPlan>,
     reconnect_signal: &Notify,
 ) -> ControlledServerSessionOutcome {
-    let session = run_one_server_session(server, context, search_inbox);
+    let mut session_context = context.clone();
+    let session_cancel = CancellationToken::new();
+    session_context.session_cancel = session_cancel.clone();
+    let session = run_one_server_session(server, &session_context, search_inbox);
     tokio::pin!(session);
     let mut plan_changed = false;
     loop {
@@ -535,19 +540,27 @@ async fn run_controlled_server_session(
             }
             changed = server_connect_plan.changed() => {
                 if changed.is_err() {
+                    session_cancel.cancel();
+                    let _ = (&mut session).await;
                     return ControlledServerSessionOutcome::Shutdown;
                 }
                 let next_plan = server_connect_plan.borrow_and_update().clone();
                 let connected = context.state.read().await.connected;
                 if !connected || !plan_allows_configured_server(&next_plan, configured_server) {
+                    session_cancel.cancel();
+                    let _ = (&mut session).await;
                     return ControlledServerSessionOutcome::PlanChanged;
                 }
                 plan_changed = true;
             }
             () = reconnect_signal.notified() => {
+                session_cancel.cancel();
+                let _ = (&mut session).await;
                 return ControlledServerSessionOutcome::ReconnectRequested;
             }
             () = wait_for_shutdown(&context.shutdown) => {
+                session_cancel.cancel();
+                let _ = (&mut session).await;
                 return ControlledServerSessionOutcome::Shutdown;
             }
         }
@@ -568,6 +581,7 @@ struct ParallelServerAttempt {
     server: ResolvedServerEntry,
     state: Arc<RwLock<Ed2kServerState>>,
     activation: ServerSessionActivator,
+    cancel: CancellationToken,
     task: JoinHandle<Result<ServerSessionExit, Error>>,
 }
 
@@ -638,6 +652,8 @@ async fn run_parallel_server_cycle(
                     attempt_context.state = Arc::clone(&attempt_state);
                     let (activation, activator) = ServerSessionActivation::pending();
                     attempt_context.activation = activation;
+                    let cancel = CancellationToken::new();
+                    attempt_context.session_cancel = cancel.clone();
                     let attempt_server = server.clone();
                     let attempt_inbox = Arc::clone(search_inbox);
                     let task = tokio::spawn(async move {
@@ -649,6 +665,7 @@ async fn run_parallel_server_cycle(
                         server,
                         state: attempt_state,
                         activation: activator,
+                        cancel,
                         task,
                     });
                 }
@@ -772,7 +789,7 @@ fn max_simultaneous_server_attempts(
 }
 
 async fn mirror_winning_server_session(
-    winner: ParallelServerAttempt,
+    mut winner: ParallelServerAttempt,
     public_state: &Arc<RwLock<Ed2kServerState>>,
     context: &ServerSessionContext,
     server_connect_plan: &mut watch::Receiver<Ed2kServerConnectPlan>,
@@ -784,7 +801,7 @@ async fn mirror_winning_server_session(
     loop {
         *public_state.write().await = winner.state.read().await.clone();
         if winner.task.is_finished() {
-            let mut outcome = match winner.task.await {
+            let mut outcome = match (&mut winner.task).await {
                 Ok(Ok(ServerSessionExit::IntentionalShutdown)) => {
                     ParallelServerCycleOutcome::Shutdown
                 }
@@ -815,26 +832,30 @@ async fn mirror_winning_server_session(
             () = tokio::time::sleep(PARALLEL_ATTEMPT_POLL_INTERVAL) => {}
             changed = server_connect_plan.changed() => {
                 if changed.is_err() {
-                    winner.task.abort();
+                    winner.cancel.cancel();
+                    let _ = (&mut winner.task).await;
                     clear_server_connection_state(public_state).await;
                     return ParallelServerCycleOutcome::Shutdown;
                 }
                 let next_plan = server_connect_plan.borrow_and_update().clone();
                 let connected = winner.state.read().await.connected;
                 if !connected || !plan_allows_configured_server(&next_plan, &winner.configured) {
-                    winner.task.abort();
+                    winner.cancel.cancel();
+                    let _ = (&mut winner.task).await;
                     clear_server_connection_state(public_state).await;
                     return ParallelServerCycleOutcome::PlanChanged;
                 }
                 plan_changed = true;
             }
             () = reconnect_signal.notified() => {
-                winner.task.abort();
+                winner.cancel.cancel();
+                let _ = (&mut winner.task).await;
                 clear_server_connection_state(public_state).await;
                 return ParallelServerCycleOutcome::ReconnectRequested;
             }
             () = wait_for_shutdown(&context.shutdown) => {
-                winner.task.abort();
+                winner.cancel.cancel();
+                let _ = (&mut winner.task).await;
                 clear_server_connection_state(public_state).await;
                 return ParallelServerCycleOutcome::Shutdown;
             }
@@ -938,14 +959,16 @@ mod tests {
         task::JoinHandle,
         time::timeout,
     };
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::{
         NatManager,
         ed2k_server::{
-            Ed2kServerConnectMode, Ed2kServerListEventReceiver, OP_IDCHANGE, OP_LOGINREQUEST,
-            OP_SERVERLIST, ed2k_server_list_event_channel, encode_packet,
-            new_ed2k_server_search_channel,
+            Ed2kBackgroundSearchInterrupted, Ed2kServerConnectMode, Ed2kServerListEventReceiver,
+            Ed2kServerSearchHandle, OP_IDCHANGE, OP_LOGINREQUEST, OP_SEARCHREQUEST, OP_SERVERLIST,
+            ed2k_server_list_event_channel, encode_packet, new_ed2k_server_search_channel,
+            search_keyword_via_background_session,
         },
         ed2k_tcp::{Ed2kHelloIdentity, ed2k_callback_session_channel},
         ed2k_transfer::IndexedSharedCatalog,
@@ -959,6 +982,7 @@ mod tests {
         reachability: ExternalReachability,
         shutdown: Arc<AtomicBool>,
         reconnect: Arc<Notify>,
+        search: Ed2kServerSearchHandle,
         events: Ed2kServerListEventReceiver,
         task: JoinHandle<()>,
     }
@@ -980,7 +1004,7 @@ mod tests {
         let state = Arc::new(RwLock::new(Ed2kServerState::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(Notify::new());
-        let (_, search_inbox) = new_ed2k_server_search_channel(1);
+        let (search, search_inbox) = new_ed2k_server_search_channel(1);
         let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
         let (server_list_events, events) = ed2k_server_list_event_channel();
         let reachability = ExternalReachability::default();
@@ -1016,6 +1040,7 @@ mod tests {
             reachability,
             shutdown,
             reconnect,
+            search,
             events,
             task,
         }
@@ -1057,6 +1082,16 @@ mod tests {
             .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
             .await
             .unwrap();
+    }
+
+    async fn read_client_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 6];
+        stream.read_exact(&mut header).await.unwrap();
+        let payload_len =
+            u32::from_le_bytes(header[1..5].try_into().unwrap()).saturating_sub(1) as usize;
+        let mut payload = vec![0; payload_len];
+        stream.read_exact(&mut payload).await.unwrap();
+        (header[5], payload)
     }
 
     async fn drain_until_closed(mut stream: TcpStream) {
@@ -1329,6 +1364,83 @@ mod tests {
             timeout(Duration::from_secs(2), server)
                 .await
                 .expect("parallel test server should observe connection closure")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_change_interrupts_claimed_background_work_before_replacement() {
+        let initial_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let initial_endpoint = initial_listener.local_addr().unwrap();
+        let replacement_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let replacement_endpoint = replacement_listener.local_addr().unwrap();
+        let (request_observed, request_observed_rx) = oneshot::channel();
+        let initial_server = tokio::spawn(async move {
+            let mut stream = accept_login(initial_listener).await;
+            establish_login(&mut stream).await;
+            loop {
+                let (opcode, _) = read_client_frame(&mut stream).await;
+                if opcode == OP_SEARCHREQUEST {
+                    request_observed.send(()).unwrap();
+                    break;
+                }
+            }
+            drain_until_closed(stream).await;
+        });
+        let replacement_server = tokio::spawn(async move {
+            let mut stream = accept_login(replacement_listener).await;
+            establish_login(&mut stream).await;
+            drain_until_closed(stream).await;
+        });
+        let mut initial_config = test_config(vec![initial_endpoint.to_string()], true);
+        initial_config.reconnect_enabled = false;
+        let runtime = spawn_test_server_loop(Ed2kServerConnectPlan::new(
+            initial_config,
+            Ed2kServerConnectMode::Manual,
+        ));
+        wait_for_connected_endpoint(&runtime.state, initial_endpoint).await;
+
+        let search_handle = runtime.search.clone();
+        let search = tokio::spawn(async move {
+            search_keyword_via_background_session(
+                &search_handle,
+                "superseded query",
+                Default::default(),
+                Duration::from_secs(10),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        timeout(Duration::from_secs(2), request_observed_rx)
+            .await
+            .expect("initial server should receive the claimed search")
+            .unwrap();
+
+        let mut replacement_config = test_config(vec![replacement_endpoint.to_string()], true);
+        replacement_config.reconnect_enabled = false;
+        runtime.plan.send_replace(Ed2kServerConnectPlan::new(
+            replacement_config,
+            Ed2kServerConnectMode::Directed(replacement_endpoint.to_string()),
+        ));
+
+        let error = timeout(Duration::from_secs(2), search)
+            .await
+            .expect("superseded search should complete promptly")
+            .unwrap()
+            .expect_err("superseded search should be retryable-interrupted");
+        assert!(
+            error
+                .downcast_ref::<Ed2kBackgroundSearchInterrupted>()
+                .is_some(),
+            "unexpected superseded search error: {error:#}"
+        );
+        wait_for_connected_endpoint(&runtime.state, replacement_endpoint).await;
+
+        stop_test_server_loop(runtime).await;
+        for server in [initial_server, replacement_server] {
+            timeout(Duration::from_secs(2), server)
+                .await
+                .expect("test server should observe session closure")
                 .unwrap();
         }
     }
