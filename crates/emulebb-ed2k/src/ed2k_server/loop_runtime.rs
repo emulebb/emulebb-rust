@@ -166,7 +166,18 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                 | ParallelServerCycleOutcome::ReconnectRequested => {}
             }
             if !reconnect_enabled {
-                return;
+                if matches!(outcome, ParallelServerCycleOutcome::ReconnectRequested) {
+                    continue;
+                }
+                info!(
+                    "ED2K automatic server reconnect disabled by settings; waiting for an explicit retry request"
+                );
+                if wait_for_explicit_retry(&mut server_connect_plan, &reconnect_signal, &shutdown)
+                    .await
+                {
+                    continue;
+                }
+                break;
             }
             let delay = if matches!(
                 outcome,
@@ -385,8 +396,14 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             }
         }
         if !reconnect_enabled {
-            info!("ED2K server reconnect disabled by settings; leaving background session stopped");
-            return;
+            info!(
+                "ED2K automatic server reconnect disabled by settings; waiting for an explicit retry request"
+            );
+            if wait_for_explicit_retry(&mut server_connect_plan, &reconnect_signal, &shutdown).await
+            {
+                continue;
+            }
+            break;
         }
 
         if !attempted_any && !shutdown.load(Ordering::Relaxed) {
@@ -468,6 +485,18 @@ async fn wait_for_loop_control(
         }
         () = reconnect_signal.notified() => ServerLoopControl::ReconnectRequested,
         () = wait_for_shutdown(shutdown) => ServerLoopControl::Shutdown,
+    }
+}
+
+async fn wait_for_explicit_retry(
+    server_connect_plan: &mut watch::Receiver<Ed2kServerConnectPlan>,
+    reconnect_signal: &Notify,
+    shutdown: &Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
+    tokio::select! {
+        changed = server_connect_plan.changed() => changed.is_ok(),
+        () = reconnect_signal.notified() => true,
+        () = wait_for_shutdown(shutdown) => false,
     }
 }
 
@@ -901,8 +930,8 @@ mod tests {
     use crate::{
         NatManager,
         ed2k_server::{
-            Ed2kServerConnectMode, OP_IDCHANGE, OP_LOGINREQUEST, encode_packet,
-            new_ed2k_server_search_channel,
+            Ed2kServerConnectMode, Ed2kServerListEventReceiver, OP_IDCHANGE, OP_LOGINREQUEST,
+            ed2k_server_list_event_channel, encode_packet, new_ed2k_server_search_channel,
         },
         ed2k_tcp::{Ed2kHelloIdentity, ed2k_callback_session_channel},
         ed2k_transfer::IndexedSharedCatalog,
@@ -915,6 +944,7 @@ mod tests {
         state: Arc<RwLock<Ed2kServerState>>,
         shutdown: Arc<AtomicBool>,
         reconnect: Arc<Notify>,
+        events: Ed2kServerListEventReceiver,
         task: JoinHandle<()>,
     }
 
@@ -937,6 +967,7 @@ mod tests {
         let reconnect = Arc::new(Notify::new());
         let (_, search_inbox) = new_ed2k_server_search_channel(1);
         let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
+        let (server_list_events, events) = ed2k_server_list_event_channel();
         let options = Ed2kServerLoopOptions {
             bind_ip: crate::test_bind_ip(),
             nat: Arc::new(NatManager::default()),
@@ -959,7 +990,7 @@ mod tests {
             server_enabled: Arc::new(AtomicBool::new(true)),
             public_ip: ExternalReachability::default(),
             reconnect_signal: Arc::clone(&reconnect),
-            server_list_events: None,
+            server_list_events: Some(server_list_events),
             callback_sessions,
         };
         let task = tokio::spawn(run_ed2k_server_loop(options));
@@ -968,6 +999,7 @@ mod tests {
             state,
             shutdown,
             reconnect,
+            events,
             task,
         }
     }
@@ -1032,6 +1064,25 @@ mod tests {
         })
         .await
         .expect("server loop should establish the selected endpoint");
+    }
+
+    async fn wait_for_connection_failures(
+        events: &mut Ed2kServerListEventReceiver,
+        expected: usize,
+    ) {
+        timeout(Duration::from_secs(5), async {
+            let mut failures = 0;
+            while failures < expected {
+                if matches!(
+                    events.recv().await,
+                    Some(Ed2kServerListEvent::ConnectionFailed { .. })
+                ) {
+                    failures += 1;
+                }
+            }
+        })
+        .await
+        .expect("server loop should report all failed attempts");
     }
 
     fn server(endpoint: &str) -> ConfiguredServerEntry {
@@ -1145,6 +1196,115 @@ mod tests {
             .await
             .expect("test server should observe loop shutdown")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_disabled_loop_accepts_later_directed_plan() {
+        let initial_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let initial_endpoint = initial_listener.local_addr().unwrap();
+        let replacement_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let replacement_endpoint = replacement_listener.local_addr().unwrap();
+        let (close_initial, close_initial_rx) = oneshot::channel();
+        let initial_server = tokio::spawn(async move {
+            let mut stream = accept_login(initial_listener).await;
+            establish_login(&mut stream).await;
+            let _ = close_initial_rx.await;
+            drop(stream);
+        });
+        let replacement_server = tokio::spawn(async move {
+            let mut stream = accept_login(replacement_listener).await;
+            establish_login(&mut stream).await;
+            drain_until_closed(stream).await;
+        });
+        let mut initial_config = test_config(vec![initial_endpoint.to_string()], true);
+        initial_config.reconnect_enabled = false;
+        let runtime = spawn_test_server_loop(Ed2kServerConnectPlan::new(
+            initial_config,
+            Ed2kServerConnectMode::Manual,
+        ));
+        wait_for_connected_endpoint(&runtime.state, initial_endpoint).await;
+        close_initial.send(()).unwrap();
+        initial_server.await.unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = runtime.state.read().await.clone();
+                if snapshot.endpoint.is_none() && !snapshot.connecting && !snapshot.connected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed session should return to idle state");
+
+        let mut replacement_config = test_config(vec![replacement_endpoint.to_string()], true);
+        replacement_config.reconnect_enabled = false;
+        runtime.plan.send_replace(Ed2kServerConnectPlan::new(
+            replacement_config,
+            Ed2kServerConnectMode::Directed(replacement_endpoint.to_string()),
+        ));
+
+        wait_for_connected_endpoint(&runtime.state, replacement_endpoint).await;
+        stop_test_server_loop(runtime).await;
+        timeout(Duration::from_secs(2), replacement_server)
+            .await
+            .expect("replacement server should observe loop shutdown")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_disabled_parallel_exhaustion_accepts_later_directed_plan() {
+        let first_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let first_endpoint = first_listener.local_addr().unwrap();
+        let second_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let second_endpoint = second_listener.local_addr().unwrap();
+        let replacement_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let replacement_endpoint = replacement_listener.local_addr().unwrap();
+        let mut failed_servers = Vec::new();
+        for listener in [first_listener, second_listener] {
+            failed_servers.push(tokio::spawn(async move {
+                let stream = accept_login(listener).await;
+                drop(stream);
+            }));
+        }
+        let replacement_server = tokio::spawn(async move {
+            let mut stream = accept_login(replacement_listener).await;
+            establish_login(&mut stream).await;
+            drain_until_closed(stream).await;
+        });
+        let mut initial_config = test_config(
+            vec![first_endpoint.to_string(), second_endpoint.to_string()],
+            false,
+        );
+        initial_config.reconnect_enabled = false;
+        let mut runtime = spawn_test_server_loop(Ed2kServerConnectPlan::new(
+            initial_config,
+            Ed2kServerConnectMode::Manual,
+        ));
+        wait_for_connection_failures(&mut runtime.events, 2).await;
+        assert!(
+            timeout(Duration::from_millis(250), runtime.plan.closed())
+                .await
+                .is_err(),
+            "parallel exhaustion must retain the live plan receiver"
+        );
+
+        let mut replacement_config = test_config(vec![replacement_endpoint.to_string()], false);
+        replacement_config.reconnect_enabled = false;
+        runtime.plan.send_replace(Ed2kServerConnectPlan::new(
+            replacement_config,
+            Ed2kServerConnectMode::Directed(replacement_endpoint.to_string()),
+        ));
+
+        wait_for_connected_endpoint(&runtime.state, replacement_endpoint).await;
+        stop_test_server_loop(runtime).await;
+        failed_servers.push(replacement_server);
+        for server in failed_servers {
+            timeout(Duration::from_secs(2), server)
+                .await
+                .expect("test server should observe connection closure")
+                .unwrap();
+        }
     }
 
     #[tokio::test]
