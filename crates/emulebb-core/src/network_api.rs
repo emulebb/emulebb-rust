@@ -1152,6 +1152,38 @@ mod ed2k_startup_candidate_tests {
         );
     }
 
+    #[tokio::test]
+    async fn reconnect_candidate_rejects_delayed_old_generation_write() {
+        let reachability_authority = ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+
+        let first =
+            Ed2kStartupCandidate::new(Arc::new(NatManager::default()), &reachability_authority);
+        let first_writer = first.reachability_writer();
+        first_writer.set_fallback_public_ip(Ipv4Addr::new(192, 0, 2, 10));
+        let (_first_nat, first_lease) = first.install();
+
+        let (release_old_writer, release_old_writer_rx) = tokio::sync::oneshot::channel();
+        let delayed_write = tokio::spawn(async move {
+            release_old_writer_rx.await.unwrap();
+            first_writer.set_fallback_public_ip(Ipv4Addr::new(192, 0, 2, 11))
+        });
+
+        let second =
+            Ed2kStartupCandidate::new(Arc::new(NatManager::default()), &reachability_authority);
+        let second_writer = second.reachability_writer();
+        second_writer.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 20));
+        let (_second_nat, _second_lease) = second.install();
+
+        release_old_writer.send(()).unwrap();
+        assert_eq!(
+            delayed_write.await.unwrap(),
+            emulebb_ed2k::reachability::ReachabilityUpdate::RejectedStale
+        );
+        drop(first_lease);
+        assert_eq!(reachability.get(), Some(Ipv4Addr::new(198, 51, 100, 20)));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn server_retirement_timeout_aborts_and_joins_supervisor() {
         let task_dropped = Arc::new(AtomicBool::new(false));
