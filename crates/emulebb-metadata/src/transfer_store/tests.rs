@@ -482,6 +482,33 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
     );
     assert_eq!(store.completed_transfer_publish_entries().unwrap().len(), 1);
     assert_eq!(store.completed_transfer_share_entries().unwrap().len(), 1);
+    assert_eq!(
+        store
+            .current_shared_files_by_hash(&manifest.file_hash)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    assert!(
+        store
+            .request_transfer_deletion(&manifest.file_hash)
+            .unwrap()
+    );
+    assert!(store.share_in_place_reload_entries().unwrap().is_empty());
+    assert!(
+        store
+            .current_shared_files_by_hash(&manifest.file_hash)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .completed_transfer_publish_entries()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.completed_transfer_share_entries().unwrap().is_empty());
 }
 
 #[test]
@@ -721,18 +748,18 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         display_name: "Delete.Intent.bin".to_string(),
         file_size: 1,
         piece_size: 1,
-        completed: false,
+        completed: true,
         final_rehash_pending: false,
-        md4_hashset_acquired: false,
+        md4_hashset_acquired: true,
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
         aich_root: None,
         aich_hashset: Vec::new(),
-        verified_ranges: Vec::new(),
+        verified_ranges: vec![MetadataTransferRange { start: 0, end: 1 }],
         pieces: vec![MetadataTransferPiece {
             piece_index: 0,
-            state: "Missing".to_string(),
-            bytes_written: 0,
+            state: "Verified".to_string(),
+            bytes_written: 1,
             block_bitmap: None,
             ich_corrupted: false,
         }],
@@ -744,12 +771,70 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
-        delivery_state: MetadataTransferDeliveryState::Pending,
-        delivered_path: None,
+        delivery_state: MetadataTransferDeliveryState::Delivered,
+        delivered_path: Some("/incoming/Delete.Intent.bin".into()),
         source_path: None,
-        source_fingerprint: None,
+        source_fingerprint: Some(fingerprint(1, 9)),
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
+
+    assert_eq!(
+        store.transfer_manifest_by_hash(hash).unwrap(),
+        Some(manifest.clone())
+    );
+    assert_eq!(store.transfer_manifests().unwrap(), vec![manifest.clone()]);
+    assert_eq!(
+        store.active_transfer_manifests().unwrap(),
+        vec![manifest.clone()]
+    );
+    assert!(store.incomplete_transfer_manifests().unwrap().is_empty());
+    assert_eq!(store.completed_transfer_catalog_entries().unwrap().len(), 1);
+    assert_eq!(store.completed_delivered_reuse_entries().unwrap().len(), 1);
+    assert_eq!(store.completed_transfer_publish_entries().unwrap().len(), 1);
+    assert_eq!(
+        store
+            .try_completed_transfer_publish_entries()
+            .unwrap()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(store.completed_transfer_share_entries().unwrap().len(), 1);
+    assert!(
+        store
+            .completed_transfer_share_entry(hash)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .completed_transfer_share_entries_page(0, 1)
+            .unwrap()
+            .0
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .completed_transfer_share_entries_after(None, 1)
+            .unwrap()
+            .0
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.transfer_counts().unwrap(),
+        MetadataTransferCounts {
+            active: 0,
+            completed: 1,
+            total: 1,
+        }
+    );
+    assert_eq!(
+        store.completed_delivery_reconciliation_hashes().unwrap(),
+        vec![hash.to_string()]
+    );
+    assert!(store.transfer_timestamps_by_hash(hash).unwrap().is_some());
 
     assert!(!store.finalize_transfer_deletion(hash).unwrap());
     assert!(store.request_transfer_deletion(hash).unwrap());
@@ -757,8 +842,84 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         store.pending_transfer_deletion_hashes().unwrap(),
         vec![hash.to_string()]
     );
+    assert!(store.transfer_deletion_requested(hash).unwrap());
+    assert!(store.transfer_timestamps_by_hash(hash).unwrap().is_none());
+    assert!(store.transfer_manifest_by_hash(hash).unwrap().is_none());
+    assert_eq!(
+        store
+            .pending_transfer_deletion_manifest_by_hash(hash)
+            .unwrap(),
+        Some(manifest.clone())
+    );
+    assert!(store.transfer_manifests().unwrap().is_empty());
+    assert!(store.active_transfer_manifests().unwrap().is_empty());
+    assert!(store.incomplete_transfer_manifests().unwrap().is_empty());
+    assert!(
+        store
+            .completed_transfer_catalog_entries()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .completed_delivered_reuse_entries()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .completed_transfer_publish_entries()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .try_completed_transfer_publish_entries()
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.completed_transfer_share_entries().unwrap().is_empty());
+    assert!(
+        store
+            .completed_transfer_share_entry(hash)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.completed_transfer_share_entries_page(0, 1).unwrap(),
+        (Vec::new(), 0)
+    );
+    assert_eq!(
+        store
+            .completed_transfer_share_entries_after(None, 1)
+            .unwrap(),
+        (Vec::new(), 0, false)
+    );
+    assert_eq!(
+        store.transfer_counts().unwrap(),
+        MetadataTransferCounts::default()
+    );
+    assert!(
+        store
+            .pending_completed_delivery_hashes()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .completed_delivery_reconciliation_hashes()
+            .unwrap()
+            .is_empty()
+    );
 
-    store.upsert_transfer_manifest(&manifest).unwrap();
+    let checkpointed = store
+        .checkpoint_transfer_piece_progress(hash, &manifest.pieces[0])
+        .unwrap();
+    assert!(!checkpointed);
+
+    let error = store.upsert_transfer_manifest(&manifest).unwrap_err();
+    assert!(error.to_string().contains("pending destructive deletion"));
     {
         let conn = store.connection().unwrap();
         conn.execute(
@@ -783,6 +944,12 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     assert!(!store.finalize_transfer_deletion(hash).unwrap());
     assert!(store.pending_transfer_deletion_hashes().unwrap().is_empty());
     assert!(store.transfer_manifest_by_hash(hash).unwrap().is_none());
+    assert!(
+        store
+            .pending_transfer_deletion_manifest_by_hash(hash)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

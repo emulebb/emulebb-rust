@@ -100,6 +100,14 @@ impl Ed2kTransferRuntime {
             .map_err(anyhow::Error::from)?
     }
 
+    pub async fn transfer_deletion_requested(&self, file_hash: &str) -> Result<bool> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_string();
+        tokio::task::spawn_blocking(move || metadata.transfer_deletion_requested(&file_hash))
+            .await
+            .map_err(anyhow::Error::from)?
+    }
+
     /// Return a keyset page ordered by ED2K hash.
     pub async fn share_entries_after(
         &self,
@@ -177,6 +185,12 @@ impl Ed2kTransferRuntime {
 
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
+        let _lifecycle_guard = self.lock_lifecycle(&job.file_hash).await;
+        anyhow::ensure!(
+            !self.transfer_deletion_requested(&job.file_hash).await?,
+            "cannot create ED2K transfer {} while destructive deletion is pending",
+            job.file_hash
+        );
         let _guard = self.lock_manifest(&job.file_hash).await;
         // The store creates a payload directory only when it creates a new
         // download manifest. An existing share-in-place manifest needs no

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
@@ -25,6 +25,24 @@ impl super::MetadataStore {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        let deletion_requested = tx
+            .query_row(
+                r#"
+                SELECT transfers.delete_requested_at_ms IS NOT NULL
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                "#,
+                params![hash],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        ensure!(
+            !deletion_requested,
+            "transfer {} has a pending destructive deletion",
+            manifest.file_hash
+        );
         let delivered_path_id = optional_local_path_id(&tx, manifest.delivered_path.as_deref())?;
         let source_path_id = optional_local_path_id(&tx, manifest.source_path.as_deref())?;
         let source_fingerprint = manifest
@@ -167,6 +185,23 @@ impl super::MetadataStore {
         &self,
         file_hash: &str,
     ) -> Result<Option<MetadataTransferManifest>> {
+        self.transfer_manifest_by_hash_for_deletion_state(file_hash, false)
+    }
+
+    /// Read the manifest retained solely to resume a pending destructive
+    /// deletion. Normal manifest reads deliberately suppress this row.
+    pub fn pending_transfer_deletion_manifest_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferManifest>> {
+        self.transfer_manifest_by_hash_for_deletion_state(file_hash, true)
+    }
+
+    fn transfer_manifest_by_hash_for_deletion_state(
+        &self,
+        file_hash: &str,
+        deletion_requested: bool,
+    ) -> Result<Option<MetadataTransferManifest>> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
         let row = conn
@@ -193,9 +228,13 @@ impl super::MetadataStore {
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
                 LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
                 WHERE known_files.ed2k_hash = ?1
+                  AND (
+                      (?2 = 0 AND transfers.delete_requested_at_ms IS NULL)
+                      OR (?2 != 0 AND transfers.delete_requested_at_ms IS NOT NULL)
+                  )
                 "#,
             )?
-            .query_row(params![hash], |row| {
+            .query_row(params![hash, bool_to_i64(deletion_requested)], |row| {
                 Ok(TransferRow {
                     known_file_id: row.get(0)?,
                     transfer_id: row.get(1)?,
@@ -256,6 +295,7 @@ impl super::MetadataStore {
                       FROM transfers
                       JOIN known_files ON known_files.id = transfers.known_file_id
                       WHERE known_files.ed2k_hash = ?1
+                        AND transfers.delete_requested_at_ms IS NULL
                   )
                 "#,
             )?
@@ -362,6 +402,7 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE known_files.ed2k_hash = ?1
+              AND transfers.delete_requested_at_ms IS NULL
             "#,
             params![hash],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
@@ -378,7 +419,7 @@ impl super::MetadataStore {
     /// transfer row was removed remain available to upload/sharing code but do
     /// not belong in the operator-facing transfer list.
     pub fn active_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
-        self.transfer_manifests_filtered("WHERE transfers.removed_at_ms IS NULL")
+        self.transfer_manifests_filtered("AND transfers.removed_at_ms IS NULL")
     }
 
     /// Persisted INCOMPLETE download manifests only (`known_files.completed = 0`) —
@@ -386,7 +427,7 @@ impl super::MetadataStore {
     /// completed) library, so this can be loaded on startup without hauling every
     /// row like `transfer_manifests`.
     pub fn incomplete_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
-        self.transfer_manifests_filtered("WHERE known_files.completed = 0")
+        self.transfer_manifests_filtered("AND known_files.completed = 0")
     }
 
     fn transfer_manifests_filtered(
@@ -416,6 +457,7 @@ impl super::MetadataStore {
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
             LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
+            WHERE transfers.delete_requested_at_ms IS NULL
             {where_clause}
             ORDER BY known_files.ed2k_hash
             "#
@@ -518,6 +560,7 @@ impl super::MetadataStore {
                         WHERE shared_file_sources.known_file_id = known_files.id
                     )
                   )
+              AND transfers.delete_requested_at_ms IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -630,11 +673,9 @@ impl super::MetadataStore {
                    shared_file_sources.source_fingerprint
             FROM shared_file_sources
             JOIN known_files ON known_files.id = shared_file_sources.known_file_id
+            JOIN transfers ON transfers.known_file_id = known_files.id
             JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-            WHERE EXISTS (
-                SELECT 1 FROM shared_file_sources
-                WHERE shared_file_sources.known_file_id = known_files.id
-            )
+            WHERE transfers.delete_requested_at_ms IS NULL
             ORDER BY local_paths.display_path
             "#,
         )?;
@@ -767,6 +808,7 @@ impl super::MetadataStore {
             JOIN known_files ON known_files.id = transfers.known_file_id
             JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
             WHERE known_files.completed != 0
+              AND transfers.delete_requested_at_ms IS NULL
               AND transfers.delivered_path_id IS NOT NULL
               AND transfers.source_path_id IS NULL
               AND transfers.source_fingerprint IS NOT NULL
@@ -1099,6 +1141,7 @@ impl super::MetadataStore {
                         WHERE shared_file_sources.known_file_id = known_files.id
                     )
                   )
+              AND transfers.delete_requested_at_ms IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -1158,6 +1201,7 @@ impl super::MetadataStore {
                           AND transfer_pieces.state = 'Verified'
                     )
                   )
+              AND transfers.delete_requested_at_ms IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -1225,6 +1269,7 @@ impl super::MetadataStore {
                         WHERE shared_file_sources.known_file_id = known_files.id
                     )
                   )
+              AND transfers.delete_requested_at_ms IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -1286,6 +1331,7 @@ impl super::MetadataStore {
                 )
             )
             WHERE known_files.ed2k_hash = ?1
+              AND transfers.delete_requested_at_ms IS NULL
               AND (
                     known_files.completed != 0
                     OR EXISTS (
@@ -1375,6 +1421,7 @@ impl super::MetadataStore {
                         WHERE shared_file_sources.known_file_id = known_files.id
                     )
                   )
+              AND transfers.delete_requested_at_ms IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -1458,6 +1505,7 @@ impl super::MetadataStore {
                         WHERE shared_file_sources.known_file_id = known_files.id
                     )
                   )
+              AND transfers.delete_requested_at_ms IS NULL
               AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
@@ -1505,6 +1553,7 @@ impl super::MetadataStore {
                             WHERE shared_file_sources.known_file_id = known_files.id
                         )
                       )
+                  AND transfers.delete_requested_at_ms IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM unshared_files
                       WHERE unshared_files.known_file_id = known_files.id
@@ -1535,6 +1584,7 @@ impl super::MetadataStore {
             WHERE known_files.completed != 0
               AND {delivery_predicate}
               AND transfers.removed_at_ms IS NULL
+              AND transfers.delete_requested_at_ms IS NULL
             ORDER BY known_files.ed2k_hash
             "#
         );
@@ -1566,6 +1616,24 @@ impl super::MetadataStore {
             params![hash, now],
         )?;
         Ok(changed != 0)
+    }
+
+    pub fn transfer_deletion_requested(&self, file_hash: &str) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        self.connection()?
+            .query_row(
+                r#"
+                SELECT transfers.delete_requested_at_ms IS NOT NULL
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                "#,
+                params![hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+            .map_err(Into::into)
     }
 
     /// Return every transfer whose destructive-delete intent must be resumed.
@@ -1834,6 +1902,7 @@ fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<Metada
         FROM transfers
         JOIN known_files ON known_files.id = transfers.known_file_id
         WHERE transfers.removed_at_ms IS NULL
+          AND transfers.delete_requested_at_ms IS NULL
         "#,
         [],
         |row| {
