@@ -50,7 +50,7 @@ use emulebb_ed2k::{
         Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
-    reachability::ExternalReachability,
+    reachability::{ExternalReachability, ReachabilityRuntimeLease, RuntimeReachabilityWriter},
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
     shared_publish_rank::{
         SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank,
@@ -327,6 +327,9 @@ struct Ed2kRuntime {
     /// Shared Kad firewall verification state, read by `kad_status` to report the
     /// real UDP-firewall verdict (oracle `CUDPFirewallTester::IsFirewalledUDP`).
     kad_firewall: Arc<Mutex<KadFirewallState>>,
+    /// Exclusive ownership of reachability facts published by this runtime.
+    /// Retired before shutdown begins so late task writes are generation-fenced.
+    reachability: ReachabilityRuntimeLease,
     nat: Arc<NatManager>,
     shutdown: Arc<AtomicBool>,
     server_reconnect_signal: Arc<tokio::sync::Notify>,
@@ -5623,6 +5626,7 @@ struct KadLocalStoreRuntime {
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     reachability: ExternalReachability,
+    reachability_writer: RuntimeReachabilityWriter,
     kad_buddy: Arc<Mutex<KadBuddyState>>,
     buddy_registry: BuddySocketRegistry,
     /// Cancellation handle for the spawned outbound buddy link (LOWID-G8), shared
@@ -6190,10 +6194,10 @@ async fn handle_kad_local_store_packet(
                     // immediately.)
                     if let Some(external_udp_port) = summary.external_udp_port {
                         runtime
-                            .reachability
+                            .reachability_writer
                             .set_peer_confirmed_udp_port(external_udp_port);
                     } else {
-                        runtime.reachability.clear_peer_confirmed_udp_port();
+                        runtime.reachability_writer.clear_peer_confirmed_udp_port();
                     }
                     tracing::info!(
                         helpers_selected = summary.helpers_selected,

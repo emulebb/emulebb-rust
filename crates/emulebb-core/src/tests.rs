@@ -363,6 +363,7 @@ async fn ed2k_shared_catalog_publish_waits_for_connected_server() {
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        reachability: core.ed2k_reachability.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
         server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
