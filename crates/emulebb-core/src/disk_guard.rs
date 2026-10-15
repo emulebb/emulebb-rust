@@ -173,7 +173,6 @@ impl EmulebbCore {
         settings: &Ed2kSettings,
         categories: &std::collections::BTreeMap<u32, crate::Category>,
     ) -> HashMap<String, ProtectedVolume> {
-        let transfer_volume = volume_key(&self.transfer_root);
         let mut volumes = HashMap::new();
         reserve_on_volume(
             &mut volumes,
@@ -182,13 +181,7 @@ impl EmulebbCore {
             settings.min_free_config_space_bytes,
         );
         for manifest in manifests {
-            self.reserve_incomplete_manifest(
-                &mut volumes,
-                manifest,
-                settings,
-                categories,
-                &transfer_volume,
-            );
+            self.reserve_incomplete_manifest(&mut volumes, manifest, settings, categories);
         }
         volumes
     }
@@ -199,7 +192,6 @@ impl EmulebbCore {
         manifest: &Ed2kResumeManifest,
         settings: &Ed2kSettings,
         categories: &std::collections::BTreeMap<u32, crate::Category>,
-        transfer_volume: &str,
     ) {
         if manifest.completed || manifest.source_path.is_some() {
             return;
@@ -220,25 +212,15 @@ impl EmulebbCore {
             .filter(|path| !path.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| self.incoming_dir.clone());
-        if volume_key(&destination) == transfer_volume {
-            // Same-volume delivery is a no-copy hard link, but the volume must
-            // still honor the stricter of the two operator floors.
-            reserve_on_volume(
-                volumes,
-                self.transfer_root.clone(),
-                0,
-                settings.min_free_incoming_space_bytes,
-            );
-        } else {
-            // Cross-volume delivery needs a second full payload while the
-            // verified part file remains the upload authority.
-            reserve_on_volume(
-                volumes,
-                destination,
-                manifest.file_size,
-                settings.min_free_incoming_space_bytes,
-            );
-        }
+        // Delivery always needs a second full payload while the verified piece
+        // store remains the immutable upload authority. On the same volume this
+        // reservation merges with the remaining piece-store reservation.
+        reserve_on_volume(
+            volumes,
+            destination,
+            manifest.file_size,
+            settings.min_free_incoming_space_bytes,
+        );
     }
 }
 
@@ -246,6 +228,7 @@ impl EmulebbCore {
 mod tests {
     use super::*;
     use crate::{FileIndex, TransferCreate, unique_runtime_dir};
+    use emulebb_ed2k::ed2k_transfer::Ed2kTransferJob;
 
     #[test]
     fn aggregate_reservation_honors_floor_and_unknown_space_fails_closed() {
@@ -309,6 +292,33 @@ mod tests {
             config_volume.free_floor_bytes,
             emulebb_settings::MIN_FREE_CONFIG_SPACE_BYTES
         );
+    }
+
+    #[test]
+    fn same_volume_download_reserves_piece_store_and_delivered_copy() {
+        let root = unique_runtime_dir("emulebb-same-volume-delivery-reservation");
+        let profile_dir = root.join("profile");
+        let transfer_root = root.join("transfers");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::create_dir_all(&transfer_root).unwrap();
+        let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
+            .unwrap()
+            .with_profile_dir(profile_dir);
+        let manifest = Ed2kResumeManifest::new(&Ed2kTransferJob {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "reserved.bin".to_string(),
+            file_size: 1024,
+            piece_size: 1024,
+        });
+
+        let volumes = core.protected_volumes(
+            &[manifest],
+            &Ed2kSettings::default(),
+            &std::collections::BTreeMap::new(),
+        );
+        let shared_volume = &volumes[&volume_key(&transfer_root)];
+
+        assert_eq!(shared_volume.reserved_bytes, 2048);
     }
 
     #[tokio::test]

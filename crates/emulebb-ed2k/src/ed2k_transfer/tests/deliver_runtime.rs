@@ -60,7 +60,7 @@ async fn materialize_completed_payload_delivers_by_name() {
     // The delivered file is byte-identical to the internal piece store.
     let expected = fs::read(runtime.payload_path(&hash)).unwrap();
     assert_eq!(fs::read(&delivered).unwrap(), expected);
-    // The internal piece store is kept (hard-link or copy never removes it).
+    // The internal piece store is kept as the verified upload authority.
     assert!(runtime.payload_path(&hash).exists());
     // The delivered path is recorded on the manifest.
     let manifest = runtime.manifest(&hash).await.unwrap();
@@ -75,6 +75,32 @@ async fn materialize_completed_payload_delivers_by_name() {
         .await
         .unwrap();
     assert_eq!(again, Ed2kDeliveryOutcome::AlreadyDelivered(delivered));
+}
+
+#[tokio::test]
+async fn materialize_completed_payload_isolated_from_piece_store() {
+    let root = unique_test_dir("ed2k-deliver-isolated-copy");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Editable.mkv").await;
+    let payload_path = runtime.payload_path(&hash);
+    let verified_payload = fs::read(&payload_path).unwrap();
+    let incoming = root.join("incoming");
+
+    let outcome = runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let Ed2kDeliveryOutcome::Delivered(delivered) = outcome else {
+        panic!("expected a fresh delivery");
+    };
+
+    fs::write(&delivered, b"operator-owned edited bytes").unwrap();
+
+    assert_eq!(
+        fs::read(payload_path).unwrap(),
+        verified_payload,
+        "editing the delivered file must not mutate verified upload bytes"
+    );
 }
 
 #[tokio::test]
