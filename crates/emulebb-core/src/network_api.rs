@@ -663,6 +663,7 @@ impl EmulebbCore {
             shutdown: Arc::clone(&shutdown),
             server_enabled: Arc::clone(&server_enabled),
             public_ip: ed2k_public_ip.clone(),
+            reachability_writer: reachability_writer.clone(),
             reconnect_signal: Arc::clone(&server_reconnect_signal),
             server_list_events: Some(server_list_events_tx),
             callback_sessions: callback_sessions.clone(),

@@ -181,6 +181,7 @@ pub(super) async fn run_one_server_session(
     server: &ResolvedServerEntry,
     context: &ServerSessionContext,
     search_inbox: &Arc<Mutex<Ed2kServerSearchInbox>>,
+    reachability_writer: &crate::reachability::ServerReachabilityWriter,
 ) -> Result<ServerSessionExit> {
     let nat_status = context.nat.status().await;
     let observed_external_ip = nat_status.observed_external_addresses.first().cloned();
@@ -808,6 +809,7 @@ pub(super) async fn run_one_server_session(
                     &mut session,
                     packet,
                     context,
+                    reachability_writer,
                     queued_background_search.is_none() && pending_background_search.is_none(),
                 )
                 .await?;

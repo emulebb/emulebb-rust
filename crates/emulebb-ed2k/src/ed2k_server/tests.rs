@@ -51,8 +51,32 @@ use crate::{
     ed2k_tcp::{Ed2kHelloIdentity, ed2k_callback_session_channel, emule_connect_options},
     ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
     kad_firewall::KadFirewallState,
-    reachability::ExternalReachability,
+    reachability::{
+        ExternalReachability, ReachabilityRuntimeLease, ServerReachabilityLease,
+        ServerReachabilityWriter,
+    },
 };
+
+struct TestServerReachability {
+    _runtime: ReachabilityRuntimeLease,
+    _server: ServerReachabilityLease,
+    writer: ServerReachabilityWriter,
+}
+
+fn active_server_reachability(reachability: &ExternalReachability) -> TestServerReachability {
+    let runtime = reachability.begin_runtime();
+    let mut server = runtime
+        .writer()
+        .begin_server_session()
+        .expect("test runtime must issue a server reachability lease");
+    server.activate();
+    let writer = server.writer();
+    TestServerReachability {
+        _runtime: runtime,
+        _server: server,
+        writer,
+    }
+}
 use flate2::{Compression, write::ZlibEncoder};
 use hex::decode;
 use num_bigint::BigUint;
@@ -268,12 +292,14 @@ fn id_change_packet(
 #[tokio::test]
 async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
     let (mut session, mut peer, mut events, context) = connected_id_change_fixture().await;
+    let reachability = active_server_reachability(&context.public_ip);
     let client_id = 0x0102_0304;
 
     handle_server_packet(
         &mut session,
         id_change_packet(client_id, 0, None),
         &context,
+        &reachability.writer,
         false,
     )
     .await
@@ -300,6 +326,7 @@ async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
         &mut session,
         id_change_packet(client_id, 0, None),
         &context,
+        &reachability.writer,
         false,
     )
     .await
@@ -321,16 +348,18 @@ async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
 #[tokio::test]
 async fn client_id_reassignment_republishes_catalog_with_new_endpoint() {
     let (mut session, mut peer, mut events, context) = connected_id_change_fixture().await;
+    let reachability = active_server_reachability(&context.public_ip);
     let low_id = 0x0000_0001;
     let high_id = 0x0102_0304;
 
-    context
-        .public_ip
+    reachability
+        .writer
         .set_server_public_ip(Ipv4Addr::new(203, 0, 113, 1));
     handle_server_packet(
         &mut session,
         id_change_packet(low_id, 0, None),
         &context,
+        &reachability.writer,
         false,
     )
     .await
@@ -351,6 +380,7 @@ async fn client_id_reassignment_republishes_catalog_with_new_endpoint() {
         &mut session,
         id_change_packet(high_id, 0, None),
         &context,
+        &reachability.writer,
         false,
     )
     .await
