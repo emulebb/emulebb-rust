@@ -19,7 +19,10 @@ use crate::config::Ed2kRuntimeConfig;
 use super::server_description_poll::poll_server_descriptions;
 use super::server_entry::{ConfiguredServerEntry, ResolvedServerEntry};
 use super::server_events::Ed2kServerListEvent;
-use super::types::{Ed2kServerConnectPlan, Ed2kServerState, ServerSessionContext};
+use super::types::{
+    Ed2kServerConnectPlan, Ed2kServerState, ServerSessionActivation, ServerSessionActivator,
+    ServerSessionContext,
+};
 use super::{
     Ed2kServerFailure, Ed2kServerLoopOptions, Ed2kServerSearchInbox, clear_server_connection_state,
     configured_server_entries, dump_ed2k_server_loop_meta, resolve_server_entry,
@@ -73,6 +76,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             .then(|| Duration::from_secs(initial_config.session_rotation_secs)),
         shutdown: Arc::clone(&shutdown),
         public_ip,
+        activation: ServerSessionActivation::active(),
         server_list_events,
         add_servers_from_server: initial_config.add_servers_from_server,
         offer_files_capability_enabled: initial_config.offer_files_capability_enabled,
@@ -563,6 +567,7 @@ struct ParallelServerAttempt {
     configured: ConfiguredServerEntry,
     server: ResolvedServerEntry,
     state: Arc<RwLock<Ed2kServerState>>,
+    activation: ServerSessionActivator,
     task: JoinHandle<Result<ServerSessionExit, Error>>,
 }
 
@@ -631,6 +636,8 @@ async fn run_parallel_server_cycle(
                     let attempt_state = Arc::new(RwLock::new(Ed2kServerState::default()));
                     let mut attempt_context = context.clone();
                     attempt_context.state = Arc::clone(&attempt_state);
+                    let (activation, activator) = ServerSessionActivation::pending();
+                    attempt_context.activation = activation;
                     let attempt_server = server.clone();
                     let attempt_inbox = Arc::clone(search_inbox);
                     let task = tokio::spawn(async move {
@@ -641,6 +648,7 @@ async fn run_parallel_server_cycle(
                         configured,
                         server,
                         state: attempt_state,
+                        activation: activator,
                         task,
                     });
                 }
@@ -771,6 +779,8 @@ async fn mirror_winning_server_session(
     reconnect_signal: &Notify,
 ) -> ParallelServerCycleOutcome {
     let mut plan_changed = false;
+    *public_state.write().await = winner.state.read().await.clone();
+    winner.activation.activate();
     loop {
         *public_state.write().await = winner.state.read().await.clone();
         if winner.task.is_finished() {
@@ -934,7 +944,8 @@ mod tests {
         NatManager,
         ed2k_server::{
             Ed2kServerConnectMode, Ed2kServerListEventReceiver, OP_IDCHANGE, OP_LOGINREQUEST,
-            ed2k_server_list_event_channel, encode_packet, new_ed2k_server_search_channel,
+            OP_SERVERLIST, ed2k_server_list_event_channel, encode_packet,
+            new_ed2k_server_search_channel,
         },
         ed2k_tcp::{Ed2kHelloIdentity, ed2k_callback_session_channel},
         ed2k_transfer::IndexedSharedCatalog,
@@ -1038,7 +1049,10 @@ mod tests {
     }
 
     async fn establish_login(stream: &mut TcpStream) {
-        let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+        establish_login_with_id(stream, u32::from_le_bytes([0x10, 0x20, 0x30, 0x40])).await;
+    }
+
+    async fn establish_login_with_id(stream: &mut TcpStream, high_id: u32) {
         stream
             .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
             .await
@@ -1259,6 +1273,64 @@ mod tests {
             .await
             .expect("replacement server should observe loop shutdown")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn parallel_attempt_publishes_only_selected_session_side_effects() {
+        let losing_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let losing_endpoint = losing_listener.local_addr().unwrap();
+        let winning_listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let winning_endpoint = winning_listener.local_addr().unwrap();
+        let losing_server = tokio::spawn(async move {
+            let mut stream = accept_login(losing_listener).await;
+            let mut server_list = vec![1, 192, 0, 2, 44];
+            server_list.extend_from_slice(&4661u16.to_le_bytes());
+            stream
+                .write_all(&encode_packet(OP_SERVERLIST, &server_list, false).unwrap())
+                .await
+                .unwrap();
+            drain_until_closed(stream).await;
+        });
+        let winning_id = u32::from_le_bytes([0x44, 0x33, 0x22, 0x11]);
+        let winning_server = tokio::spawn(async move {
+            let mut stream = accept_login(winning_listener).await;
+            establish_login_with_id(&mut stream, winning_id).await;
+            drain_until_closed(stream).await;
+        });
+        let mut config = test_config(
+            vec![losing_endpoint.to_string(), winning_endpoint.to_string()],
+            false,
+        );
+        config.add_servers_from_server = true;
+        let mut runtime = spawn_test_server_loop(Ed2kServerConnectPlan::new(
+            config,
+            Ed2kServerConnectMode::Automatic,
+        ));
+
+        wait_for_connected_endpoint(&runtime.state, winning_endpoint).await;
+        assert_eq!(runtime.reachability.octets(), [0x44, 0x33, 0x22, 0x11]);
+        assert_eq!(
+            timeout(Duration::from_secs(2), runtime.events.recv())
+                .await
+                .expect("winning login should publish a server event"),
+            Some(Ed2kServerListEvent::ConnectSucceeded {
+                endpoint: winning_endpoint.to_string(),
+            })
+        );
+        assert!(
+            timeout(Duration::from_millis(250), runtime.events.recv())
+                .await
+                .is_err(),
+            "the losing attempt must not publish pre-activation server-list work"
+        );
+
+        stop_test_server_loop(runtime).await;
+        for server in [losing_server, winning_server] {
+            timeout(Duration::from_secs(2), server)
+                .await
+                .expect("parallel test server should observe connection closure")
+                .unwrap();
+        }
     }
 
     #[tokio::test]

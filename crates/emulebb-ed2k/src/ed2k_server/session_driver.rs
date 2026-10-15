@@ -371,7 +371,9 @@ pub(super) async fn run_one_server_session(
             }
             request = async {
                 search_inbox.lock().await.receiver.recv().await
-            }, if queued_background_search.is_none() && pending_background_search.is_none() => {
+            }, if context.activation.is_active()
+                && queued_background_search.is_none()
+                && pending_background_search.is_none() => {
                 if let Some(request) = request {
                     if session.login_accepted {
                         match start_background_server_search(

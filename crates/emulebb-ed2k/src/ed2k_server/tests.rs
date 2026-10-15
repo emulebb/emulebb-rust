@@ -5,7 +5,7 @@ use super::offer_policy::{
 };
 use super::session::{OfferFilesPacingMode, ServerSessionPhase};
 use super::session_driver::ServerSessionExit;
-use super::types::ServerSessionContext;
+use super::types::{ServerSessionActivation, ServerSessionContext};
 use super::{
     BackgroundServerSearchRequest, CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS,
     CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION, ConfiguredServerEntry, ED2K_FILETYPE_PROGRAM,
@@ -214,6 +214,7 @@ async fn connected_id_change_fixture() -> (
         rotation_interval: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         public_ip: ExternalReachability::new(),
+        activation: ServerSessionActivation::active(),
         server_list_events: Some(server_list_events),
         add_servers_from_server: false,
         offer_files_capability_enabled: false,
