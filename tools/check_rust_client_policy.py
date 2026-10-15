@@ -680,9 +680,16 @@ def check_required_ci_gates(
         else codeql_text
     )
     required = {
+        "single-active-pr:": (ci, "single-active-PR job"),
+        "name: Single active PR": (ci, "stable single-active-PR check name"),
+        "pull-requests: read": (ci, "read-only pull-request policy permission"),
+        'const exceptionLabel = "parallel-approved";': (
+            ci,
+            "maintainer-approved parallel-work label",
+        ),
         "required-ci:": (ci, "CI aggregate job"),
         "name: Required CI": (ci, "stable CI check name"),
-        "needs: [workflow-lint, build-test, rest-openapi, quality, supply-chain]": (
+        "needs: [single-active-pr, workflow-lint, build-test, rest-openapi, quality, supply-chain]": (
             ci,
             "complete CI aggregate dependency set",
         ),
@@ -696,11 +703,22 @@ def check_required_ci_gates(
             "strict CodeQL result verification",
         ),
     }
-    return [
+    errors = [
         f"required branch gate is missing {description}"
         for fragment, (source, description) in required.items()
         if fragment not in source
     ]
+    for job in ("workflow-lint", "build-test", "quality", "supply-chain"):
+        match = re.search(
+            rf"(?ms)^  {re.escape(job)}:\s*$\n"
+            r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+            ci,
+        )
+        if match is None or "needs: single-active-pr" not in match.group("body"):
+            errors.append(
+                f"required branch gate is missing {job} fail-fast PR policy dependency"
+            )
+    return errors
 
 
 def check_default_branch_policy(
@@ -748,6 +766,7 @@ def check_default_branch_policy(
                 "parameters": {
                     "do_not_enforce_on_create": False,
                     "required_status_checks": [
+                        {"context": "Single active PR", "integration_id": 15368},
                         {"context": "Required CI", "integration_id": 15368},
                         {"context": "Required CodeQL", "integration_id": 15368},
                     ],
@@ -771,6 +790,7 @@ def check_default_branch_policy(
         "There are no standing bypass actors": "normal bypass policy",
         "emergency security update": "break-glass procedure",
         "Restore active enforcement immediately": "enforcement restoration step",
+        "Single active PR": "required PR policy check documentation",
         "Required CI": "required CI check documentation",
         "Required CodeQL": "required CodeQL check documentation",
     }.items():
@@ -788,6 +808,7 @@ def check_workflow_job_timeouts(
 
     expected = {
         "ci.yml": {
+            "single-active-pr": 5,
             "workflow-lint": 10,
             "build-test": 45,
             "rest-openapi": 15,
@@ -848,7 +869,7 @@ def check_ci_linux_runner_pin(workflow_text: str | None = None) -> list[str]:
         errors.append(
             ".github/workflows/ci.yml must not use the mutable ubuntu-latest runner"
         )
-    if text.count("ubuntu-24.04") < 5:
+    if text.count("ubuntu-24.04") < 6:
         errors.append(
             ".github/workflows/ci.yml must pin every Linux matrix and job runner to ubuntu-24.04"
         )
