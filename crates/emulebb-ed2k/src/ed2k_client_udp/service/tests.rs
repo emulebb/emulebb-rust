@@ -1,6 +1,6 @@
 use super::*;
 use crate::ed2k_client_udp::outbound::{OutboundReaskTarget, build_reask_ack_datagram};
-use crate::reachability::ReachabilityRuntimeLease;
+use crate::reachability::{ReachabilityRuntimeAuthority, ReachabilityRuntimeLease};
 
 const OUR_HASH: [u8; 16] = [0x10; 16];
 const PEER_HASH: [u8; 16] = [0x55; 16];
@@ -24,8 +24,9 @@ fn peer_lease_v4() -> (Ipv4Addr, u16) {
 }
 
 fn service() -> (ReaskService, ReachabilityRuntimeLease) {
-    let public_ip = ExternalReachability::new();
-    let lease = public_ip.begin_runtime();
+    let authority = ReachabilityRuntimeAuthority::new();
+    let public_ip = authority.reader();
+    let lease = authority.begin_runtime();
     lease
         .writer()
         .set_fallback_public_ip(Ipv4Addr::new(203, 0, 113, 9));

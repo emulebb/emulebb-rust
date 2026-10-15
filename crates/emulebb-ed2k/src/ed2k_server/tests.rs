@@ -52,7 +52,7 @@ use crate::{
     ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
     kad_firewall::KadFirewallState,
     reachability::{
-        ExternalReachability, ReachabilityRuntimeLease, ServerReachabilityLease,
+        ReachabilityRuntimeAuthority, ReachabilityRuntimeLease, ServerReachabilityLease,
         ServerReachabilityWriter,
     },
 };
@@ -63,8 +63,8 @@ struct TestServerReachability {
     writer: ServerReachabilityWriter,
 }
 
-fn active_server_reachability(reachability: &ExternalReachability) -> TestServerReachability {
-    let runtime = reachability.begin_runtime();
+fn active_server_reachability(authority: &ReachabilityRuntimeAuthority) -> TestServerReachability {
+    let runtime = authority.begin_runtime();
     let mut server = runtime
         .writer()
         .begin_server_session()
@@ -186,6 +186,7 @@ async fn connected_id_change_fixture() -> (
     TcpStream,
     tokio::sync::mpsc::UnboundedReceiver<Ed2kServerListEvent>,
     ServerSessionContext,
+    ReachabilityRuntimeAuthority,
 ) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -214,6 +215,7 @@ async fn connected_id_change_fixture() -> (
         complete_parts: Vec::new(),
         publish: Default::default(),
     }]);
+    let reachability_authority = ReachabilityRuntimeAuthority::new();
     let context = ServerSessionContext {
         bind_ip: Ipv4Addr::LOCALHOST,
         nat: Arc::new(NatManager::default()),
@@ -238,14 +240,14 @@ async fn connected_id_change_fixture() -> (
         rotation_interval: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         session_cancel: CancellationToken::new(),
-        public_ip: ExternalReachability::new(),
+        public_ip: reachability_authority.reader(),
         activation: ServerSessionActivation::active(),
         server_list_events: Some(server_list_events),
         add_servers_from_server: false,
         offer_files_capability_enabled: false,
         callback_sessions,
     };
-    (session, peer, events, context)
+    (session, peer, events, context, reachability_authority)
 }
 
 async fn read_client_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
@@ -291,8 +293,9 @@ fn id_change_packet(
 
 #[tokio::test]
 async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
-    let (mut session, mut peer, mut events, context) = connected_id_change_fixture().await;
-    let reachability = active_server_reachability(&context.public_ip);
+    let (mut session, mut peer, mut events, context, reachability_authority) =
+        connected_id_change_fixture().await;
+    let reachability = active_server_reachability(&reachability_authority);
     let client_id = 0x0102_0304;
 
     handle_server_packet(
@@ -347,8 +350,9 @@ async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
 
 #[tokio::test]
 async fn client_id_reassignment_republishes_catalog_with_new_endpoint() {
-    let (mut session, mut peer, mut events, context) = connected_id_change_fixture().await;
-    let reachability = active_server_reachability(&context.public_ip);
+    let (mut session, mut peer, mut events, context, reachability_authority) =
+        connected_id_change_fixture().await;
+    let reachability = active_server_reachability(&reachability_authority);
     let low_id = 0x0000_0001;
     let high_id = 0x0102_0304;
 

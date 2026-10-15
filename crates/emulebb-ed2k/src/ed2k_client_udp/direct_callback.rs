@@ -12,7 +12,7 @@ use emulebb_kad_dht::DhtNode;
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
 
-use crate::reachability::ExternalReachability;
+use crate::reachability::{ExternalReachability, ReachabilityRuntimeAuthority};
 
 /// Inputs for [`DirectCallbackSender::dispatch`]: everything needed to encode
 /// and address one `OP_DIRECTCALLBACKREQ`.
@@ -174,7 +174,7 @@ mod tests {
     async fn sender_emits_plaintext_callback_without_reask_runtime() {
         let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let dest = receiver.local_addr().unwrap();
-        let sender = sender(ExternalReachability::new()).await;
+        let sender = sender(ReachabilityRuntimeAuthority::new().reader()).await;
 
         assert_eq!(
             sender
@@ -210,7 +210,7 @@ mod tests {
     #[tokio::test]
     async fn sender_fails_closed_when_obfuscation_public_ip_is_unknown() {
         let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let sender = sender(ExternalReachability::new()).await;
+        let sender = sender(ReachabilityRuntimeAuthority::new().reader()).await;
 
         let outcome = sender
             .dispatch(
@@ -229,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn sender_classifies_pre_send_stops_as_known_not_sent() {
-        let sender = sender(ExternalReachability::new()).await;
+        let sender = sender(ReachabilityRuntimeAuthority::new().reader()).await;
         let cancel = CancellationToken::new();
         cancel.cancel();
         assert!(matches!(

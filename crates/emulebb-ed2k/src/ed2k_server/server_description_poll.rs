@@ -423,7 +423,6 @@ mod tests {
             OP_SERVER_DESC_REQ, server_entry::ConfiguredServerEntry,
             server_events::ed2k_server_list_event_channel,
         },
-        reachability::ExternalReachability,
     };
 
     async fn bind_plain_and_crypt_ports() -> (u16, UdpSocket, UdpSocket) {
@@ -478,7 +477,7 @@ mod tests {
             Ipv4Addr::LOCALHOST,
             plan_receiver,
             Arc::clone(&state),
-            ExternalReachability::default(),
+            crate::reachability::ReachabilityRuntimeAuthority::new().reader(),
             Arc::clone(&shutdown),
             Arc::clone(&server_enabled),
             Some(events),

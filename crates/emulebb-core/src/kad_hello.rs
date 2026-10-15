@@ -553,8 +553,9 @@ mod tests {
     async fn firewalled_request_gate_refuses_self_and_collision() {
         let our_ip = Ipv4Addr::new(198, 51, 100, 7);
         let our_tcp_port = 4662u16;
-        let reachability = ExternalReachability::new();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         reachability_lease.writer().set_fallback_public_ip(our_ip);
         let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
 
@@ -594,8 +595,9 @@ mod tests {
     /// collision) is allowed, so the responder answers with RES + the probe.
     #[tokio::test]
     async fn firewalled_request_gate_allows_normal_requester() {
-        let reachability = ExternalReachability::new();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         reachability_lease
             .writer()
             .set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 7));

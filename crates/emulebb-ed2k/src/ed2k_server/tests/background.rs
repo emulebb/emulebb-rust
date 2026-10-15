@@ -7,6 +7,19 @@ use crate::ed2k_server::{
     background::{BackgroundServerSearchContext, start_background_server_search},
 };
 
+struct BackgroundTestContext {
+    session: ServerSessionContext,
+    reachability_authority: ReachabilityRuntimeAuthority,
+}
+
+impl std::ops::Deref for BackgroundTestContext {
+    type Target = ServerSessionContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
 async fn connected_background_test_session() -> (ServerSession, TcpStream) {
     let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -861,10 +874,11 @@ async fn server_obfuscation_handshake_encrypts_login_request() {
 fn background_test_context(
     state: Arc<RwLock<Ed2kServerState>>,
     connect_timeout: Duration,
-) -> ServerSessionContext {
+) -> BackgroundTestContext {
     let (callback_sessions, _callback_session_inbox) =
         crate::ed2k_tcp::ed2k_callback_session_channel();
-    ServerSessionContext {
+    let reachability_authority = ReachabilityRuntimeAuthority::new();
+    let session = ServerSessionContext {
         bind_ip: crate::test_bind_ip(),
         nat: Arc::new(NatManager::default()),
         hello_identity: Ed2kHelloIdentity {
@@ -888,31 +902,35 @@ fn background_test_context(
         rotation_interval: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         session_cancel: CancellationToken::new(),
-        public_ip: ExternalReachability::default(),
+        public_ip: reachability_authority.reader(),
         activation: super::super::types::ServerSessionActivation::active(),
         server_list_events: None,
         add_servers_from_server: false,
         offer_files_capability_enabled: true,
         callback_sessions,
+    };
+    BackgroundTestContext {
+        session,
+        reachability_authority,
     }
 }
 
 async fn run_test_server_session(
     server: &ResolvedServerEntry,
-    context: &ServerSessionContext,
+    context: &BackgroundTestContext,
     inbox: &Arc<Mutex<Ed2kServerSearchInbox>>,
 ) -> anyhow::Result<ServerSessionExit> {
-    let reachability = active_server_reachability(&context.public_ip);
+    let reachability = active_server_reachability(&context.reachability_authority);
     run_one_server_session(server, context, inbox, &reachability.writer).await
 }
 
 async fn handle_test_server_packet(
     session: &mut ServerSession,
     packet: Ed2kPacket,
-    context: &ServerSessionContext,
+    context: &BackgroundTestContext,
     allow_probe_search: bool,
 ) -> anyhow::Result<()> {
-    let reachability = active_server_reachability(&context.public_ip);
+    let reachability = active_server_reachability(&context.reachability_authority);
     handle_server_packet(
         session,
         packet,

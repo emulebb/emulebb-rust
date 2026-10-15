@@ -367,7 +367,7 @@ async fn ed2k_shared_catalog_publish_waits_for_connected_server() {
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
-        reachability: core.ed2k_reachability.begin_runtime(),
+        reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
         server_connect_plan: test_server_connect_plan_sender(),

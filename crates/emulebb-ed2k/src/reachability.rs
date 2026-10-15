@@ -98,8 +98,17 @@ impl ReachabilitySnapshot {
 }
 
 /// Cheaply-clonable handle to this client's external reachability facts.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct ExternalReachability {
+    inner: Arc<RwLock<ReachabilityState>>,
+}
+
+/// Root capability that creates runtime-scoped publication generations.
+///
+/// Keep this authority with the lifecycle owner. Data-plane consumers should
+/// receive only [`ExternalReachability`] readers or generation-fenced writers.
+#[derive(Debug, Default)]
+pub struct ReachabilityRuntimeAuthority {
     inner: Arc<RwLock<ReachabilityState>>,
 }
 
@@ -151,30 +160,9 @@ pub struct ServerReachabilityWriter {
 }
 
 impl ExternalReachability {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Copy one coherent point-in-time view of every reachability fact.
     pub fn snapshot(&self) -> ReachabilitySnapshot {
         self.inner.read().snapshot
-    }
-
-    /// Starts a fresh ownership generation and atomically revokes older facts.
-    pub fn begin_runtime(&self) -> ReachabilityRuntimeLease {
-        let mut state = self.inner.write();
-        state.next_runtime_generation = state
-            .next_runtime_generation
-            .checked_add(1)
-            .expect("reachability runtime generation exhausted");
-        let generation = state.next_runtime_generation;
-        state.active_runtime_generation = Some(generation);
-        state.active_server_generation = None;
-        state.snapshot = ReachabilitySnapshot::default();
-        ReachabilityRuntimeLease {
-            inner: Arc::clone(&self.inner),
-            generation: Some(generation),
-        }
     }
 
     /// Current public IPv4, preferring live server evidence over fallback probes.
@@ -208,6 +196,36 @@ impl ExternalReachability {
     /// the given internal socket port (`CT_EMULE_UDPPORTS` / `ET_UDPPORT`).
     pub fn advertised_udp_port(&self, internal_port: u16) -> u16 {
         self.snapshot().advertised_udp_port(internal_port)
+    }
+}
+
+impl ReachabilityRuntimeAuthority {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Issues a read-only handle for data-plane consumers.
+    pub fn reader(&self) -> ExternalReachability {
+        ExternalReachability {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// Starts a fresh ownership generation and atomically revokes older facts.
+    pub fn begin_runtime(&self) -> ReachabilityRuntimeLease {
+        let mut state = self.inner.write();
+        state.next_runtime_generation = state
+            .next_runtime_generation
+            .checked_add(1)
+            .expect("reachability runtime generation exhausted");
+        let generation = state.next_runtime_generation;
+        state.active_runtime_generation = Some(generation);
+        state.active_server_generation = None;
+        state.snapshot = ReachabilitySnapshot::default();
+        ReachabilityRuntimeLease {
+            inner: Arc::clone(&self.inner),
+            generation: Some(generation),
+        }
     }
 }
 
@@ -390,10 +408,16 @@ fn nonzero_port(port: Option<u16>) -> Option<u16> {
 mod tests {
     use super::*;
 
+    fn reachability_fixture() -> (ReachabilityRuntimeAuthority, ExternalReachability) {
+        let authority = ReachabilityRuntimeAuthority::new();
+        let reachability = authority.reader();
+        (authority, reachability)
+    }
+
     fn runtime_writer(
-        reachability: &ExternalReachability,
+        authority: &ReachabilityRuntimeAuthority,
     ) -> (ReachabilityRuntimeLease, RuntimeReachabilityWriter) {
-        let lease = reachability.begin_runtime();
+        let lease = authority.begin_runtime();
         let writer = lease.writer();
         (lease, writer)
     }
@@ -408,8 +432,8 @@ mod tests {
     }
 
     #[test]
-    fn public_ip_unknown_by_default() {
-        let r = ExternalReachability::new();
+    fn public_ip_unknown_before_runtime_publication() {
+        let r = ReachabilityRuntimeAuthority::new().reader();
         assert!(!r.is_known());
         assert_eq!(r.get(), None);
         assert_eq!(r.octets(), [0, 0, 0, 0]);
@@ -417,8 +441,8 @@ mod tests {
 
     #[test]
     fn server_evidence_overrides_independently_refreshed_fallback() {
-        let r = ExternalReachability::new();
-        let (_runtime, runtime_writer) = runtime_writer(&r);
+        let (authority, r) = reachability_fixture();
+        let (_runtime, runtime_writer) = runtime_writer(&authority);
         assert_eq!(
             runtime_writer.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 1)),
             ReachabilityUpdate::Changed
@@ -440,8 +464,8 @@ mod tests {
 
     #[test]
     fn ports_fall_back_to_internal_until_learned() {
-        let r = ExternalReachability::new();
-        let (_runtime, writer) = runtime_writer(&r);
+        let (authority, r) = reachability_fixture();
+        let (_runtime, writer) = runtime_writer(&authority);
         assert_eq!(r.advertised_tcp_port(4662), 4662);
         assert_eq!(r.advertised_udp_port(4672), 4672);
         writer.set_nat_mapped_ports(Some(45000), Some(51000));
@@ -453,8 +477,8 @@ mod tests {
 
     #[test]
     fn peer_confirmed_udp_port_takes_precedence_over_upnp() {
-        let r = ExternalReachability::new();
-        let (_runtime, writer) = runtime_writer(&r);
+        let (authority, r) = reachability_fixture();
+        let (_runtime, writer) = runtime_writer(&authority);
         // UPnP-derived value applies while no peer confirmation is in force.
         writer.set_nat_mapped_ports(None, Some(45000));
         assert_eq!(r.advertised_udp_port(4672), 45000);
@@ -484,8 +508,8 @@ mod tests {
 
     #[test]
     fn runtime_retirement_revokes_every_owned_fact() {
-        let r = ExternalReachability::new();
-        let (mut runtime, runtime_writer) = runtime_writer(&r);
+        let (authority, r) = reachability_fixture();
+        let (mut runtime, runtime_writer) = runtime_writer(&authority);
         let (_server, server_writer) = active_server_writer(&runtime_writer);
         server_writer.set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
         runtime_writer.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 2));
@@ -502,9 +526,9 @@ mod tests {
 
     #[test]
     fn clones_share_one_cell() {
-        let a = ExternalReachability::new();
+        let (authority, a) = reachability_fixture();
         let b = a.clone();
-        let (_runtime, runtime_writer) = runtime_writer(&a);
+        let (_runtime, runtime_writer) = runtime_writer(&authority);
         let (_server, server_writer) = active_server_writer(&runtime_writer);
         server_writer.set_server_public_ip(Ipv4Addr::new(192, 0, 2, 5));
         runtime_writer.set_nat_mapped_ports(None, Some(40000));
@@ -514,8 +538,8 @@ mod tests {
 
     #[test]
     fn snapshots_remain_stable_after_new_evidence_is_published() {
-        let reachability = ExternalReachability::new();
-        let (_runtime, runtime_writer) = runtime_writer(&reachability);
+        let (authority, reachability) = reachability_fixture();
+        let (_runtime, runtime_writer) = runtime_writer(&authority);
         runtime_writer.set_fallback_public_ip(Ipv4Addr::new(192, 0, 2, 5));
         runtime_writer.set_nat_mapped_ports(Some(45000), Some(46000));
         let before = reachability.snapshot();
@@ -535,8 +559,8 @@ mod tests {
 
     #[test]
     fn advertised_port_pairs_come_from_one_snapshot() {
-        let reachability = ExternalReachability::new();
-        let (_runtime, writer) = runtime_writer(&reachability);
+        let (authority, reachability) = reachability_fixture();
+        let (_runtime, writer) = runtime_writer(&authority);
         writer.set_nat_mapped_ports(Some(45000), Some(46000));
         let before = reachability.snapshot();
 
@@ -560,15 +584,15 @@ mod tests {
 
     #[test]
     fn retired_runtime_writer_cannot_mutate_or_clear_new_generation() {
-        let reachability = ExternalReachability::new();
-        let first_lease = reachability.begin_runtime();
+        let (authority, reachability) = reachability_fixture();
+        let first_lease = authority.begin_runtime();
         let first_writer = first_lease.writer();
         assert_eq!(
             first_writer.set_fallback_public_ip(Ipv4Addr::new(192, 0, 2, 1)),
             ReachabilityUpdate::Changed
         );
 
-        let mut second_lease = reachability.begin_runtime();
+        let mut second_lease = authority.begin_runtime();
         let second_writer = second_lease.writer();
         assert_eq!(
             second_writer.set_nat_mapped_ports(Some(45_000), Some(46_000)),
@@ -592,8 +616,8 @@ mod tests {
 
     #[test]
     fn stale_server_writer_cannot_overwrite_or_clear_new_session() {
-        let reachability = ExternalReachability::new();
-        let runtime_lease = reachability.begin_runtime();
+        let (authority, reachability) = reachability_fixture();
+        let runtime_lease = authority.begin_runtime();
         let runtime_writer = runtime_lease.writer();
         let mut first_server = runtime_writer.begin_server_session().unwrap();
         let first_writer = first_server.writer();

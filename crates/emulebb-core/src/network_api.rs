@@ -10,7 +10,7 @@ struct Ed2kStartupCandidate {
 }
 
 impl Ed2kStartupCandidate {
-    fn new(nat: Arc<NatManager>, reachability: &ExternalReachability) -> Self {
+    fn new(nat: Arc<NatManager>, reachability: &ReachabilityRuntimeAuthority) -> Self {
         Self {
             nat: Some(nat),
             reachability: Some(reachability.begin_runtime()),
@@ -349,7 +349,7 @@ impl EmulebbCore {
                     .with_providers(built_in_port_mapping_providers())
                     .build(),
             ),
-            &self.ed2k_reachability,
+            &self.ed2k_reachability_authority,
         );
         let reachability_writer = startup_candidate.reachability_writer();
         // Connection ordering (VPN guard -> NAT await -> P2P sockets -> connect):
@@ -1127,8 +1127,9 @@ mod ed2k_startup_candidate_tests {
             .with_provider(provider.clone())
             .build(),
         );
-        let reachability = ExternalReachability::new();
-        let candidate = Ed2kStartupCandidate::new(nat, &reachability);
+        let reachability_authority = ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let candidate = Ed2kStartupCandidate::new(nat, &reachability_authority);
         let reachability_writer = candidate.reachability_writer();
         candidate.nat().start().await.unwrap();
         reachability_writer.set_fallback_public_ip(Ipv4Addr::new(203, 0, 113, 10));
@@ -1143,7 +1144,7 @@ mod ed2k_startup_candidate_tests {
         assert_eq!(provider.release_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             reachability.snapshot(),
-            ExternalReachability::new().snapshot()
+            emulebb_ed2k::reachability::ReachabilitySnapshot::default()
         );
         assert_eq!(
             reachability_writer.set_fallback_public_ip(Ipv4Addr::LOCALHOST),

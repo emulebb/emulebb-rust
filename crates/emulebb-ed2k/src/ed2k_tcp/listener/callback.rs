@@ -318,7 +318,7 @@ mod tests {
                 connect_options: 0,
                 direct_udp_callback: false,
             },
-            reachability: ExternalReachability::new(),
+            reachability: crate::reachability::ReachabilityRuntimeAuthority::new().reader(),
             buddy_registry: BuddySocketRegistry::new(),
             port_test_registry: PortTestRegistry::new(),
             callback_sessions,

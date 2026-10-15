@@ -1093,7 +1093,9 @@ mod tests {
         ed2k_tcp::{Ed2kHelloIdentity, ed2k_callback_session_channel},
         ed2k_transfer::IndexedSharedCatalog,
         kad_firewall::KadFirewallState,
-        reachability::{ExternalReachability, ReachabilityRuntimeLease},
+        reachability::{
+            ExternalReachability, ReachabilityRuntimeAuthority, ReachabilityRuntimeLease,
+        },
     };
 
     struct TestServerLoop {
@@ -1128,8 +1130,9 @@ mod tests {
         let (search, search_inbox) = new_ed2k_server_search_channel(1);
         let (callback_sessions, _callback_inbox) = ed2k_callback_session_channel();
         let (server_list_events, events) = ed2k_server_list_event_channel();
-        let reachability = ExternalReachability::default();
-        let reachability_lease = reachability.begin_runtime();
+        let reachability_authority = ReachabilityRuntimeAuthority::new();
+        let reachability = reachability_authority.reader();
+        let reachability_lease = reachability_authority.begin_runtime();
         let options = Ed2kServerLoopOptions {
             bind_ip: crate::test_bind_ip(),
             nat: Arc::new(NatManager::default()),
