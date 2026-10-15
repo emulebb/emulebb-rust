@@ -450,9 +450,11 @@ mod tests {
     }
 
     fn automatic_plan(endpoint: Option<String>) -> Ed2kServerConnectPlan {
-        let mut config = Ed2kRuntimeConfig::default();
-        config.obfuscation_enabled = false;
-        config.server_endpoints = endpoint.into_iter().collect();
+        let config = Ed2kRuntimeConfig {
+            obfuscation_enabled: false,
+            server_endpoints: endpoint.into_iter().collect(),
+            ..Ed2kRuntimeConfig::default()
+        };
         Ed2kServerConnectPlan::new(config, Ed2kServerConnectMode::Automatic)
     }
 
