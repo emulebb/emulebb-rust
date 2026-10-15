@@ -177,37 +177,6 @@ impl ExternalReachability {
         }
     }
 
-    // --- Public IP evidence. ---
-
-    /// Record public IPv4 evidence owned by the current server session.
-    pub fn set_server_public_ip(&self, ip: Ipv4Addr) {
-        self.inner.write().snapshot.server_public_ip = Some(ip);
-    }
-
-    /// Revoke only server-session evidence, preserving any independent fallback.
-    pub fn clear_server_public_ip(&self) -> bool {
-        self.inner
-            .write()
-            .snapshot
-            .server_public_ip
-            .take()
-            .is_some()
-    }
-
-    /// Revoke every reachability fact owned by the current network runtime.
-    pub fn clear_all(&self) {
-        self.inner.write().snapshot = ReachabilitySnapshot::default();
-    }
-
-    /// Record or refresh public IPv4 evidence from STUN/Kad/peer observation.
-    /// Returns whether the fallback value changed.
-    pub fn set_fallback_public_ip(&self, ip: Ipv4Addr) -> bool {
-        let mut state = self.inner.write();
-        let changed = state.snapshot.fallback_public_ip != Some(ip);
-        state.snapshot.fallback_public_ip = Some(ip);
-        changed
-    }
-
     /// Current public IPv4, preferring live server evidence over fallback probes.
     pub fn get(&self) -> Option<Ipv4Addr> {
         self.snapshot().public_ip()
@@ -221,39 +190,6 @@ impl ExternalReachability {
     /// Whether a public IP is known (HighID established).
     pub fn is_known(&self) -> bool {
         self.snapshot().is_known()
-    }
-
-    // --- Advertised external ports. ---
-
-    /// Replace both externally-reachable ports from one NAT status snapshot.
-    ///
-    /// The UDP mapping is retained while a peer-confirmed value takes precedence,
-    /// so it is available immediately if that remote verification expires. A
-    /// missing or zero port revokes the corresponding previous mapping.
-    pub fn set_nat_mapped_ports(&self, tcp_port: Option<u16>, udp_port: Option<u16>) {
-        let mut state = self.inner.write();
-        state.snapshot.nat_mapped_tcp_port = nonzero_port(tcp_port);
-        state.snapshot.nat_mapped_udp_port = nonzero_port(udp_port);
-    }
-
-    /// Record the externally-reachable eD2k/Kad UDP port confirmed by a remote
-    /// peer during the Kad UDP firewall check. This is the most authoritative
-    /// source and pins the value so the periodic UPnP sync cannot overwrite it.
-    pub fn set_peer_confirmed_udp_port(&self, port: u16) {
-        if let Some(port) = nonzero_port(Some(port)) {
-            self.inner.write().snapshot.peer_confirmed_udp_port = Some(port);
-        }
-    }
-
-    /// Revoke the remotely-confirmed UDP port while preserving any independent
-    /// UPnP mapping learned in parallel. Returns whether a confirmation existed.
-    pub fn clear_peer_confirmed_udp_port(&self) -> bool {
-        self.inner
-            .write()
-            .snapshot
-            .peer_confirmed_udp_port
-            .take()
-            .is_some()
     }
 
     /// Whether the external UDP port has been confirmed by a remote peer.
@@ -454,6 +390,23 @@ fn nonzero_port(port: Option<u16>) -> Option<u16> {
 mod tests {
     use super::*;
 
+    fn runtime_writer(
+        reachability: &ExternalReachability,
+    ) -> (ReachabilityRuntimeLease, RuntimeReachabilityWriter) {
+        let lease = reachability.begin_runtime();
+        let writer = lease.writer();
+        (lease, writer)
+    }
+
+    fn active_server_writer(
+        runtime_writer: &RuntimeReachabilityWriter,
+    ) -> (ServerReachabilityLease, ServerReachabilityWriter) {
+        let mut lease = runtime_writer.begin_server_session().unwrap();
+        assert_eq!(lease.activate(), ReachabilityUpdate::Changed);
+        let writer = lease.writer();
+        (lease, writer)
+    }
+
     #[test]
     fn public_ip_unknown_by_default() {
         let r = ExternalReachability::new();
@@ -465,63 +418,81 @@ mod tests {
     #[test]
     fn server_evidence_overrides_independently_refreshed_fallback() {
         let r = ExternalReachability::new();
-        assert!(r.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 1)));
-        assert!(!r.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 1)));
+        let (_runtime, runtime_writer) = runtime_writer(&r);
+        assert_eq!(
+            runtime_writer.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 1)),
+            ReachabilityUpdate::Changed
+        );
+        assert_eq!(
+            runtime_writer.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 1)),
+            ReachabilityUpdate::Unchanged
+        );
         assert_eq!(r.get(), Some(Ipv4Addr::new(198, 51, 100, 1)));
-        r.set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
+        let (mut server, server_writer) = active_server_writer(&runtime_writer);
+        server_writer.set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
         assert_eq!(r.octets(), [203, 0, 113, 9]);
-        r.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 2));
+        runtime_writer.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 2));
         assert_eq!(r.octets(), [203, 0, 113, 9]);
-        assert!(r.clear_server_public_ip());
+        assert_eq!(server.retire(), ReachabilityUpdate::Changed);
         assert_eq!(r.get(), Some(Ipv4Addr::new(198, 51, 100, 2)));
-        assert!(!r.clear_server_public_ip());
+        assert_eq!(server.retire(), ReachabilityUpdate::Unchanged);
     }
 
     #[test]
     fn ports_fall_back_to_internal_until_learned() {
         let r = ExternalReachability::new();
+        let (_runtime, writer) = runtime_writer(&r);
         assert_eq!(r.advertised_tcp_port(4662), 4662);
         assert_eq!(r.advertised_udp_port(4672), 4672);
-        r.set_nat_mapped_ports(Some(45000), Some(51000));
+        writer.set_nat_mapped_ports(Some(45000), Some(51000));
         assert_eq!(r.advertised_tcp_port(4662), 45000);
         assert_eq!(r.advertised_udp_port(4672), 51000);
-        r.set_nat_mapped_ports(Some(45000), None);
+        writer.set_nat_mapped_ports(Some(45000), None);
         assert_eq!(r.advertised_udp_port(4672), 4672);
     }
 
     #[test]
     fn peer_confirmed_udp_port_takes_precedence_over_upnp() {
         let r = ExternalReachability::new();
+        let (_runtime, writer) = runtime_writer(&r);
         // UPnP-derived value applies while no peer confirmation is in force.
-        r.set_nat_mapped_ports(None, Some(45000));
+        writer.set_nat_mapped_ports(None, Some(45000));
         assert_eq!(r.advertised_udp_port(4672), 45000);
         assert!(!r.udp_port_is_peer_confirmed());
         // A peer-confirmed port pins the value.
-        r.set_peer_confirmed_udp_port(51000);
+        writer.set_peer_confirmed_udp_port(51000);
         assert!(r.udp_port_is_peer_confirmed());
         assert_eq!(r.advertised_udp_port(4672), 51000);
         // Subsequent UPnP syncs are retained but cannot supersede it.
-        r.set_nat_mapped_ports(None, Some(46000));
+        writer.set_nat_mapped_ports(None, Some(46000));
         assert_eq!(r.advertised_udp_port(4672), 51000);
         // A zero peer confirmation is a no-op.
-        r.set_peer_confirmed_udp_port(0);
+        writer.set_peer_confirmed_udp_port(0);
         assert_eq!(r.advertised_udp_port(4672), 51000);
         // Expiring the peer evidence reveals the latest UPnP mapping.
-        assert!(r.clear_peer_confirmed_udp_port());
+        assert_eq!(
+            writer.clear_peer_confirmed_udp_port(),
+            ReachabilityUpdate::Changed
+        );
         assert!(!r.udp_port_is_peer_confirmed());
         assert_eq!(r.advertised_udp_port(4672), 46000);
-        assert!(!r.clear_peer_confirmed_udp_port());
+        assert_eq!(
+            writer.clear_peer_confirmed_udp_port(),
+            ReachabilityUpdate::Unchanged
+        );
     }
 
     #[test]
-    fn clear_all_revokes_every_runtime_owned_fact() {
+    fn runtime_retirement_revokes_every_owned_fact() {
         let r = ExternalReachability::new();
-        r.set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
-        r.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 2));
-        r.set_nat_mapped_ports(Some(45000), Some(46000));
-        r.set_peer_confirmed_udp_port(51000);
+        let (mut runtime, runtime_writer) = runtime_writer(&r);
+        let (_server, server_writer) = active_server_writer(&runtime_writer);
+        server_writer.set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
+        runtime_writer.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 2));
+        runtime_writer.set_nat_mapped_ports(Some(45000), Some(46000));
+        runtime_writer.set_peer_confirmed_udp_port(51000);
 
-        r.clear_all();
+        assert_eq!(runtime.retire(), ReachabilityUpdate::Changed);
 
         assert_eq!(r.get(), None);
         assert_eq!(r.advertised_tcp_port(4662), 4662);
@@ -533,8 +504,10 @@ mod tests {
     fn clones_share_one_cell() {
         let a = ExternalReachability::new();
         let b = a.clone();
-        a.set_server_public_ip(Ipv4Addr::new(192, 0, 2, 5));
-        a.set_nat_mapped_ports(None, Some(40000));
+        let (_runtime, runtime_writer) = runtime_writer(&a);
+        let (_server, server_writer) = active_server_writer(&runtime_writer);
+        server_writer.set_server_public_ip(Ipv4Addr::new(192, 0, 2, 5));
+        runtime_writer.set_nat_mapped_ports(None, Some(40000));
         assert_eq!(b.get(), Some(Ipv4Addr::new(192, 0, 2, 5)));
         assert_eq!(b.advertised_udp_port(4672), 40000);
     }
@@ -542,12 +515,14 @@ mod tests {
     #[test]
     fn snapshots_remain_stable_after_new_evidence_is_published() {
         let reachability = ExternalReachability::new();
-        reachability.set_fallback_public_ip(Ipv4Addr::new(192, 0, 2, 5));
-        reachability.set_nat_mapped_ports(Some(45000), Some(46000));
+        let (_runtime, runtime_writer) = runtime_writer(&reachability);
+        runtime_writer.set_fallback_public_ip(Ipv4Addr::new(192, 0, 2, 5));
+        runtime_writer.set_nat_mapped_ports(Some(45000), Some(46000));
         let before = reachability.snapshot();
 
-        reachability.set_server_public_ip(Ipv4Addr::new(198, 51, 100, 9));
-        reachability.set_nat_mapped_ports(Some(55000), Some(56000));
+        let (_server, server_writer) = active_server_writer(&runtime_writer);
+        server_writer.set_server_public_ip(Ipv4Addr::new(198, 51, 100, 9));
+        runtime_writer.set_nat_mapped_ports(Some(55000), Some(56000));
 
         assert_eq!(before.public_ip(), Some(Ipv4Addr::new(192, 0, 2, 5)));
         assert_eq!(before.advertised_tcp_port(4662), 45000);
@@ -561,10 +536,11 @@ mod tests {
     #[test]
     fn advertised_port_pairs_come_from_one_snapshot() {
         let reachability = ExternalReachability::new();
-        reachability.set_nat_mapped_ports(Some(45000), Some(46000));
+        let (_runtime, writer) = runtime_writer(&reachability);
+        writer.set_nat_mapped_ports(Some(45000), Some(46000));
         let before = reachability.snapshot();
 
-        reachability.set_nat_mapped_ports(Some(55000), None);
+        writer.set_nat_mapped_ports(Some(55000), None);
 
         assert_eq!(
             before.advertised_ports(4662, 4672),

@@ -1,15 +1,18 @@
 use super::*;
-use crate::reachability::ExternalReachability;
+use crate::reachability::{ExternalReachability, ReachabilityRuntimeLease};
 
-fn service() -> ReaskService {
+fn service() -> (ReaskService, ReachabilityRuntimeLease) {
     let public_ip = ExternalReachability::new();
-    public_ip.set_fallback_public_ip(std::net::Ipv4Addr::new(203, 0, 113, 9));
-    ReaskService::new([0x10; 16], 4, public_ip)
+    let lease = public_ip.begin_runtime();
+    lease
+        .writer()
+        .set_fallback_public_ip(std::net::Ipv4Addr::new(203, 0, 113, 9));
+    (ReaskService::new([0x10; 16], 4, public_ip), lease)
 }
 
 #[test]
 fn register_command_adds_a_source_and_remove_drops_it() {
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
     let file_hash = Ed2kHash::from_bytes([0xAB; 16]);
     // Distinct UDP routing port (4672) vs TCP lease port (4662): core's lease
@@ -51,7 +54,7 @@ fn register_command_adds_a_source_and_remove_drops_it() {
 
 #[test]
 fn register_command_respects_initial_reask_delay() {
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
     let file_hash = Ed2kHash::from_bytes([0xAC; 16]);
     let endpoint = (Ipv4Addr::new(198, 51, 100, 8), 4672);
@@ -99,7 +102,7 @@ fn udp_reask_sent_body_matches_mfc_diag_shape() {
 
 #[test]
 fn remove_command_for_unknown_endpoint_releases_no_lease() {
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
     apply_reask_command(
         &mut svc,
@@ -183,7 +186,7 @@ fn dropped_source_is_dead_listed_then_releases_its_lease() {
 
 #[test]
 fn retry_tcp_timeout_releases_held_lease() {
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
     let file_hash = Ed2kHash::from_bytes([0x66; 16]);
     let endpoint = (Ipv4Addr::new(198, 51, 100, 12), 4672);

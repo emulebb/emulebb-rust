@@ -1,5 +1,6 @@
 use super::*;
 use crate::ed2k_client_udp::outbound::{OutboundReaskTarget, build_reask_ack_datagram};
+use crate::reachability::ReachabilityRuntimeLease;
 
 const OUR_HASH: [u8; 16] = [0x10; 16];
 const PEER_HASH: [u8; 16] = [0x55; 16];
@@ -22,10 +23,13 @@ fn peer_lease_v4() -> (Ipv4Addr, u16) {
     (Ipv4Addr::new(198, 51, 100, 7), 4662)
 }
 
-fn service() -> ReaskService {
+fn service() -> (ReaskService, ReachabilityRuntimeLease) {
     let public_ip = ExternalReachability::new();
-    public_ip.set_fallback_public_ip(Ipv4Addr::new(203, 0, 113, 9));
-    ReaskService::new(OUR_HASH, 4, public_ip)
+    let lease = public_ip.begin_runtime();
+    lease
+        .writer()
+        .set_fallback_public_ip(Ipv4Addr::new(203, 0, 113, 9));
+    (ReaskService::new(OUR_HASH, 4, public_ip), lease)
 }
 
 fn register(svc: &mut ReaskService, now: Instant) {
@@ -41,7 +45,7 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
     use super::super::state::ReaskSource;
 
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     let source_endpoint = (Ipv4Addr::new(198, 51, 100, 50), 4672);
     let buddy_endpoint = (Ipv4Addr::new(203, 0, 113, 80), 5000);
     let buddy_id = [0x99u8; 16];
@@ -74,7 +78,7 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
 #[test]
 fn tick_emits_due_ping_then_routes_the_ack() {
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     register(&mut svc, now);
 
     let out = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
@@ -109,7 +113,7 @@ fn tick_emits_due_ping_then_routes_the_ack() {
 #[test]
 fn tick_paced_suppresses_sends_when_the_udp_cap_denies_a_file() {
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     register(&mut svc, now);
     let deny = |_h: &Ed2kHash, _n: usize| false;
     let out = svc.tick_paced(
@@ -145,7 +149,7 @@ fn tick_paced_suppresses_sends_when_the_udp_cap_denies_a_file() {
 #[test]
 fn unsolicited_reply_without_pending_is_ignored() {
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     register(&mut svc, now);
     let ack = build_reask_ack_datagram(
         None,
@@ -167,7 +171,7 @@ fn unsolicited_reply_without_pending_is_ignored() {
 fn inbound_file_ping_is_handed_back_for_the_caller_to_answer() {
     use crate::ed2k_client_udp::outbound::build_reask_file_ping_datagram;
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     let ping = build_reask_file_ping_datagram(
         &file_hash(),
         None,
@@ -191,7 +195,7 @@ fn inbound_file_ping_is_handed_back_for_the_caller_to_answer() {
 #[test]
 fn file_not_found_drops_source_and_clears_routing() {
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     register(&mut svc, now);
     let _ = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
         part_status: None,
@@ -219,7 +223,7 @@ fn file_not_found_drops_source_and_clears_routing() {
 fn inbound_callback_udp_is_handed_back_for_buddy_relay() {
     use crate::ed2k_client_udp::outbound::build_reask_callback_udp_datagram;
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     let buddy_id = Ed2kHash::from_bytes([0x77; 16]);
     let datagram =
         build_reask_callback_udp_datagram(&buddy_id, &file_hash(), Some(&[true, false]), 3, 4);
@@ -237,7 +241,7 @@ fn inbound_callback_udp_is_handed_back_for_buddy_relay() {
 fn inbound_direct_callback_req_is_handed_back_for_connect_out() {
     use crate::ed2k_client_udp::codec::OP_DIRECTCALLBACKREQ;
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     let mut body = Vec::new();
     body.extend_from_slice(&4662u16.to_le_bytes());
     body.extend_from_slice(&PEER_HASH);
@@ -257,7 +261,7 @@ fn inbound_direct_callback_req_is_handed_back_for_connect_out() {
 #[test]
 fn junk_and_non_ipv4_are_ignored() {
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     register(&mut svc, now);
     assert_eq!(
         svc.handle_inbound(&[0x42; 30], peer_addr(), now),
@@ -274,7 +278,7 @@ fn junk_and_non_ipv4_are_ignored() {
 fn mark_no_needed_parts_routes_by_endpoint_and_doubles_the_cadence() {
     use crate::ed2k_client_udp::state::FILE_REASK_TIME;
     let now = Instant::now();
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     register(&mut svc, now);
     let (ip, port) = peer_v4();
 
@@ -303,7 +307,7 @@ fn mark_no_needed_parts_routes_by_endpoint_and_doubles_the_cadence() {
 fn timed_out_reask_surfaces_in_tick_output() {
     let now = Instant::now();
     let timeout = Duration::from_secs(20);
-    let mut svc = service();
+    let (mut svc, _reachability) = service();
     register(&mut svc, now);
     let _ = svc.tick(now, timeout, |_| TransferReaskInfo {
         part_status: None,
