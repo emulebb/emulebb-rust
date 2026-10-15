@@ -4,6 +4,55 @@ use super::*;
 /// eMule `CClientList::Process` `BAN_CLEANUP_TIME` = `MIN2MS(20)` (20 minutes).
 const ED2K_CLIENT_STATE_PRUNE_INTERVAL: Duration = Duration::from_secs(20 * 60);
 
+struct Ed2kStartupCandidate {
+    nat: Option<Arc<NatManager>>,
+    reachability: ExternalReachability,
+}
+
+impl Ed2kStartupCandidate {
+    fn new(nat: Arc<NatManager>, reachability: ExternalReachability) -> Self {
+        Self {
+            nat: Some(nat),
+            reachability,
+        }
+    }
+
+    fn nat(&self) -> &Arc<NatManager> {
+        self.nat
+            .as_ref()
+            .expect("ED2K startup candidate must own NAT until installation")
+    }
+
+    async fn rollback(mut self, startup_error: anyhow::Error) -> anyhow::Error {
+        self.reachability.clear_all();
+        if let Some(nat) = self.nat.as_ref()
+            && let Err(cleanup_error) = nat.stop().await
+        {
+            tracing::warn!(
+                %cleanup_error,
+                %startup_error,
+                "ED2K startup rollback could not stop NAT cleanly"
+            );
+        }
+        self.nat.take();
+        startup_error
+    }
+
+    fn install(mut self) -> Arc<NatManager> {
+        self.nat
+            .take()
+            .expect("ED2K startup candidate must own NAT until installation")
+    }
+}
+
+impl Drop for Ed2kStartupCandidate {
+    fn drop(&mut self) {
+        if self.nat.is_some() {
+            self.reachability.clear_all();
+        }
+    }
+}
+
 /// Prune expired ban and tracked-identity entries until shutdown.
 async fn run_ed2k_client_state_prune_loop(
     ban_store: Arc<emulebb_ed2k::ban_store::BanStore>,
@@ -267,11 +316,14 @@ impl EmulebbCore {
             Arc::new(std::sync::Mutex::new(None));
         let buddy_manager_wake = Arc::new(tokio::sync::Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
-        let nat = Arc::new(
-            NatManagerBuilder::new(network.nat_config.clone())
-                .with_mappings(ed2k_nat_mappings(&network))
-                .with_providers(built_in_port_mapping_providers())
-                .build(),
+        let startup_candidate = Ed2kStartupCandidate::new(
+            Arc::new(
+                NatManagerBuilder::new(network.nat_config.clone())
+                    .with_mappings(ed2k_nat_mappings(&network))
+                    .with_providers(built_in_port_mapping_providers())
+                    .build(),
+            ),
+            self.ed2k_reachability.clone(),
         );
         // Connection ordering (VPN guard -> NAT await -> P2P sockets -> connect):
         // the eD2k server login must announce an already-forwarded listen port to
@@ -283,9 +335,14 @@ impl EmulebbCore {
         // Kad UDP or the eD2K TCP listener. Profiles that intentionally run
         // best-effort can set nat.requireInitialMapping=false.
         if network.nat_config.enabled {
-            match tokio::time::timeout(ED2K_NAT_INITIAL_RECONCILE_TIMEOUT, nat.start()).await {
+            let initial_reconcile = tokio::time::timeout(
+                ED2K_NAT_INITIAL_RECONCILE_TIMEOUT,
+                startup_candidate.nat().start(),
+            )
+            .await;
+            match initial_reconcile {
                 Ok(Ok(())) => {
-                    let status = nat.status().await;
+                    let status = startup_candidate.nat().status().await;
                     crate::ed2k_net_drivers::sync_advertised_ports_from_nat(
                         &status,
                         &self.ed2k_reachability,
@@ -304,8 +361,10 @@ impl EmulebbCore {
                 }
                 Ok(Err(error)) => {
                     if network.nat_config.require_initial_mapping {
-                        let _ = nat.stop().await;
-                        bail!("NAT initial reconcile failed before ED2K/Kad startup: {error:#}");
+                        let error = anyhow::anyhow!(
+                            "NAT initial reconcile failed before ED2K/Kad startup: {error:#}"
+                        );
+                        return Err(startup_candidate.rollback(error).await);
                     }
                     tracing::warn!(
                         "NAT initial reconcile failed before ED2K login; connecting with internal ports (may be LowID until mapping succeeds): {error:#}"
@@ -313,11 +372,11 @@ impl EmulebbCore {
                 }
                 Err(_) => {
                     if network.nat_config.require_initial_mapping {
-                        let _ = nat.stop().await;
-                        bail!(
+                        let error = anyhow::anyhow!(
                             "NAT initial reconcile timed out after {}s before ED2K/Kad startup",
                             ED2K_NAT_INITIAL_RECONCILE_TIMEOUT.as_secs()
                         );
+                        return Err(startup_candidate.rollback(error).await);
                     }
                     tracing::warn!(
                         "NAT initial reconcile timed out after {}s before ED2K login; connecting with internal ports (may be LowID until mapping succeeds)",
@@ -326,45 +385,56 @@ impl EmulebbCore {
                 }
             }
         } else {
-            nat.start().await?;
+            if let Err(error) = startup_candidate.nat().start().await {
+                return Err(startup_candidate.rollback(error).await);
+            }
         }
-        let configured_bootstrap_endpoints_text =
-            configured_kad_bootstrap_endpoints_text(&network.kad_bootstrap_endpoints);
-        let kad_bind_if_index =
-            emulebb_ed2k::networking::require_bind_if_index(network.bind_ip, "Kad UDP")?;
-        let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some(network.kad_bind_addr),
-            obfuscation_enabled: network.ed2k.obfuscation_enabled,
-            bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
-            max_concurrent_searches: KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP,
-            nodes_dat: current_kad_nodes_dat(&network),
-            nodes_text: configured_bootstrap_endpoints_text.clone(),
-            class_budgets: kad_rpc_class_budgets(),
-            // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
-            bind_if_index: Some(kad_bind_if_index),
-            ..DhtConfig::default()
-        })
-        .await
-        .context("failed to initialize Kad runtime for ED2K listener")?;
-        // Bridge the live ed2k IpFilter into the Kad traversal layer so per-RES
-        // contacts from filtered/banned IPs are dropped (oracle
-        // KademliaUDPListener.cpp:830-857). The IpFilter lives in emulebb-ed2k
-        // which depends on emulebb-kad-dht, so core (depending on both) bridges it
-        // via a closure hook rather than moving the filter across the boundary.
-        {
-            let kad_ip_filter = network.ip_filter.clone();
-            dht.set_ip_filter(std::sync::Arc::new(move |ip| kad_ip_filter.is_filtered(ip)));
+        let prerequisites = async {
+            let configured_bootstrap_endpoints_text =
+                configured_kad_bootstrap_endpoints_text(&network.kad_bootstrap_endpoints);
+            let kad_bind_if_index =
+                emulebb_ed2k::networking::require_bind_if_index(network.bind_ip, "Kad UDP")?;
+            let dht = DhtNode::new(DhtConfig {
+                bind_addr: Some(network.kad_bind_addr),
+                obfuscation_enabled: network.ed2k.obfuscation_enabled,
+                bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
+                max_concurrent_searches: KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP,
+                nodes_dat: current_kad_nodes_dat(&network),
+                nodes_text: configured_bootstrap_endpoints_text,
+                class_budgets: kad_rpc_class_budgets(),
+                // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
+                bind_if_index: Some(kad_bind_if_index),
+                ..DhtConfig::default()
+            })
+            .await
+            .context("failed to initialize Kad runtime for ED2K listener")?;
+            // Bridge the live ed2k IpFilter into the Kad traversal layer so per-RES
+            // contacts from filtered/banned IPs are dropped (oracle
+            // KademliaUDPListener.cpp:830-857). The IpFilter lives in emulebb-ed2k
+            // which depends on emulebb-kad-dht, so core (depending on both) bridges it
+            // via a closure hook rather than moving the filter across the boundary.
+            {
+                let kad_ip_filter = network.ip_filter.clone();
+                dht.set_ip_filter(std::sync::Arc::new(move |ip| kad_ip_filter.is_filtered(ip)));
+            }
+            // Seed `CKadUDPKey` binding state before any bootstrap packet can use a
+            // restored key. This may be unknown at startup; the sync task below
+            // applies server/STUN changes as reachability learns or clears it.
+            dht.set_public_ip_for_udp_keys(self.ed2k_reachability.get())
+                .await;
+            let ed2k_bind_addr = SocketAddr::new(IpAddr::V4(network.bind_ip), network.listen_port);
+            let ed2k_listener =
+                Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {
+                    format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
+                })?);
+            Ok::<_, anyhow::Error>((dht, ed2k_listener))
         }
-        // Seed `CKadUDPKey` binding state before any bootstrap packet can use a
-        // restored key. This may be unknown at startup; the sync task below
-        // applies server/STUN changes as reachability learns or clears it.
-        dht.set_public_ip_for_udp_keys(self.ed2k_reachability.get())
-            .await;
-        let ed2k_bind_addr = SocketAddr::new(IpAddr::V4(network.bind_ip), network.listen_port);
-        let ed2k_listener =
-            Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {
-                format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
-            })?);
+        .await;
+        let (dht, ed2k_listener) = match prerequisites {
+            Ok(prerequisites) => prerequisites,
+            Err(error) => return Err(startup_candidate.rollback(error).await),
+        };
+        let nat = startup_candidate.install();
         let hello_identity = self.ed2k_hello_identity(&network);
         let (callback_sessions, callback_session_inbox) = ed2k_callback_session_channel();
         let mut tasks = Vec::new();
@@ -910,6 +980,122 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result
         Err(std::io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ed2k_startup_candidate_tests {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use emulebb_ed2k::{
+        MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatStatus, PCP_NATPMP_BACKEND,
+        PortMappingProvider, TransportProtocol,
+    };
+
+    use super::*;
+
+    struct StartupProvider {
+        release_calls: AtomicUsize,
+    }
+
+    impl PortMappingProvider for StartupProvider {
+        fn name(&self) -> &'static str {
+            PCP_NATPMP_BACKEND
+        }
+
+        fn reconcile<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            config: &'life1 NatConfig,
+            mappings: &'life2 [MappingSpec],
+            status: Arc<RwLock<NatStatus>>,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let mut status = status.write().await;
+                status.enabled = true;
+                status.backend = Some(PCP_NATPMP_BACKEND.to_string());
+                status.mappings = mappings
+                    .iter()
+                    .map(|mapping| MappedEndpoint {
+                        name: mapping.name.clone(),
+                        protocol: mapping.protocol,
+                        local_addr: mapping.local_addr,
+                        external_addr: mapping.local_addr,
+                        lease_expires_in_secs: config.lease_duration_secs,
+                        backend: PCP_NATPMP_BACKEND.to_string(),
+                    })
+                    .collect();
+                Ok(())
+            })
+        }
+
+        fn release<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            _config: &'life1 NatConfig,
+            _mappings: &'life2 [MappedEndpoint],
+            _status: Arc<RwLock<NatStatus>>,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.release_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_post_nat_startup_releases_mapping_and_clears_reachability() {
+        let provider = Arc::new(StartupProvider {
+            release_calls: AtomicUsize::new(0),
+        });
+        let nat = Arc::new(
+            NatManagerBuilder::new(NatConfig {
+                enabled: true,
+                backend_order: vec![PCP_NATPMP_BACKEND.to_string()],
+                lease_duration_secs: 3_600,
+                ..NatConfig::default()
+            })
+            .with_mappings(vec![MappingSpec {
+                name: "ed2k_tcp".to_string(),
+                local_addr: "192.0.2.10:4662".parse().unwrap(),
+                protocol: TransportProtocol::Tcp,
+                exposure: MappingExposure::Required,
+                preferred_external_port: None,
+            }])
+            .with_provider(provider.clone())
+            .build(),
+        );
+        let reachability = ExternalReachability::new();
+        let candidate = Ed2kStartupCandidate::new(nat, reachability.clone());
+        candidate.nat().start().await.unwrap();
+        reachability.set_fallback_public_ip(Ipv4Addr::new(203, 0, 113, 10));
+        reachability.set_nat_mapped_ports(Some(46_620), Some(46_630));
+        reachability.set_peer_confirmed_udp_port(46_640);
+
+        let error = candidate
+            .rollback(anyhow::anyhow!("forced post-NAT startup failure"))
+            .await;
+
+        assert_eq!(error.to_string(), "forced post-NAT startup failure");
+        assert_eq!(provider.release_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            reachability.snapshot(),
+            ExternalReachability::new().snapshot()
+        );
     }
 }
 
