@@ -249,8 +249,9 @@ async fn vpn_guard_allows_kad_start_until_public_ip_disproves_allowed_cidr() {
     );
     core.set_kad_running(false).await;
 
-    core.ed2k_reachability
-        .set_fallback_public_ip(Ipv4Addr::new(1, 1, 1, 1));
+    let reachability = core.ed2k_reachability.begin_runtime();
+    let reachability_writer = reachability.writer();
+    reachability_writer.set_fallback_public_ip(Ipv4Addr::new(1, 1, 1, 1));
     let err = core
         .start_kad()
         .await
@@ -261,8 +262,7 @@ async fn vpn_guard_allows_kad_start_until_public_ip_disproves_allowed_cidr() {
             .contains("outside VPN Guard allowed public IP CIDRs")
     );
 
-    core.ed2k_reachability
-        .set_fallback_public_ip(Ipv4Addr::new(8, 8, 8, 8));
+    reachability_writer.set_fallback_public_ip(Ipv4Addr::new(8, 8, 8, 8));
     assert!(core.start_kad().await.is_ok());
 }
 

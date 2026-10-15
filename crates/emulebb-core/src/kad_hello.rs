@@ -554,7 +554,8 @@ mod tests {
         let our_ip = Ipv4Addr::new(198, 51, 100, 7);
         let our_tcp_port = 4662u16;
         let reachability = ExternalReachability::new();
-        reachability.set_fallback_public_ip(our_ip);
+        let reachability_lease = reachability.begin_runtime();
+        reachability_lease.writer().set_fallback_public_ip(our_ip);
         let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
 
         // (a) self-endpoint: same IP + our TCP port -> refused.
@@ -594,7 +595,10 @@ mod tests {
     #[tokio::test]
     async fn firewalled_request_gate_allows_normal_requester() {
         let reachability = ExternalReachability::new();
-        reachability.set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 7));
+        let reachability_lease = reachability.begin_runtime();
+        reachability_lease
+            .writer()
+            .set_fallback_public_ip(Ipv4Addr::new(198, 51, 100, 7));
         let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 30)), 55000);
         assert!(
