@@ -703,6 +703,84 @@ async fn delete_transfer_files_removes_delivered_completed_download() {
 }
 
 #[tokio::test]
+async fn completed_transfer_list_and_clear_are_persisted_across_restart() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-persisted-completed-list");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let incoming_dir = runtime_dir.join("incoming");
+    let payload = b"persisted completed transfer payload".repeat(32);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
+    {
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap()
+        .with_incoming_dir(incoming_dir.clone());
+        core.create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
+            link: Some(format!(
+                "ed2k://|file|Persisted.Completed.bin|{}|{}|/",
+                payload.len(),
+                file_hash
+            )),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+        core.ed2k_transfers
+            .store_md4_hashset(&file_hash, Vec::new())
+            .await
+            .unwrap();
+        core.ed2k_transfers
+            .store_piece_data(&file_hash, 0, &payload)
+            .await
+            .unwrap();
+        core.deliver_completed_transfer(&file_hash).await;
+        assert_eq!(core.transfer(&file_hash).await.unwrap().state, "completed");
+    }
+
+    let reloaded = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap()
+    .with_incoming_dir(incoming_dir.clone());
+    let listed = reloaded.transfers().await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].hash, file_hash);
+    assert_eq!(listed[0].state, "completed");
+
+    let clear_without_prior_lookup = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap()
+    .with_incoming_dir(incoming_dir.clone());
+    clear_without_prior_lookup
+        .clear_completed_transfer_rows()
+        .await
+        .unwrap();
+
+    assert!(clear_without_prior_lookup.transfers().await.is_empty());
+    assert!(incoming_dir.join("Persisted.Completed.bin").exists());
+    let final_reload = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap()
+    .with_incoming_dir(incoming_dir);
+    assert!(final_reload.transfers().await.is_empty());
+}
+
+#[tokio::test]
 async fn delivery_failure_stays_completing_and_clears_after_retry() {
     let runtime_dir = unique_runtime_dir("emulebb-core-delivery-retry-state");
     let transfer_root = runtime_dir.join("transfers");

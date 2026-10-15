@@ -131,6 +131,9 @@ impl EmulebbCore {
     }
 
     pub async fn transfers(&self) -> Vec<Transfer> {
+        if let Err(error) = self.hydrate_persisted_transfer_rows().await {
+            tracing::warn!("failed to hydrate persisted transfer rows: {error:#}");
+        }
         let mut transfers: Vec<Transfer> = self
             .state
             .lock()

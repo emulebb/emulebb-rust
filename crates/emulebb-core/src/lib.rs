@@ -410,6 +410,8 @@ pub struct EmulebbCore {
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
     transfer_creation_gate: Arc<Mutex<()>>,
+    persisted_transfers_hydrated: Arc<AtomicBool>,
+    persisted_transfer_hydration_gate: Arc<Mutex<()>>,
     transfer_root: PathBuf,
     /// Profile/config directory whose volume must retain the MFC-compatible
     /// config free-space floor. Defaults to the transfer root's parent; the
@@ -618,6 +620,8 @@ impl EmulebbCore {
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
             transfer_creation_gate: Arc::new(Mutex::new(())),
+            persisted_transfers_hydrated: Arc::new(AtomicBool::new(false)),
+            persisted_transfer_hydration_gate: Arc::new(Mutex::new(())),
             transfer_root,
             profile_dir,
             incoming_dir,

@@ -761,6 +761,13 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         .with_profile_dir(profile.profile_dir.clone())
         .with_incoming_dir(incoming_dir),
     );
+    let hydrated_transfers = core.hydrate_persisted_transfer_rows().await?;
+    if hydrated_transfers > 0 {
+        info!(
+            hydrated_transfers,
+            "hydrated persisted transfer rows before REST startup"
+        );
+    }
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(

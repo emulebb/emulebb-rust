@@ -796,6 +796,31 @@ impl Ed2kTransferRuntime {
         Ok(manifests)
     }
 
+    /// Persisted manifests whose transfer-list row has not been removed.
+    ///
+    /// This intentionally excludes the potentially very large completed shared
+    /// catalog while retaining every row the transfer REST surface must expose.
+    /// Live cached manifests win over their SQL snapshot so hydration cannot
+    /// roll batched download progress backward.
+    pub async fn active_manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
+        let metadata = self.metadata.clone();
+        let raw = tokio::task::spawn_blocking(move || metadata.active_transfer_manifests())
+            .await
+            .map_err(anyhow::Error::from)??;
+        let mut manifests = Vec::with_capacity(raw.len());
+        {
+            let cache = self.manifest_cache.lock().await;
+            for manifest in raw {
+                match cache.get(&manifest.file_hash) {
+                    Some(cached) => manifests.push(cached.clone()),
+                    None => manifests.push(manifest_from_metadata(manifest)?),
+                }
+            }
+        }
+        manifests.sort_by(|left, right| left.file_hash.cmp(&right.file_hash));
+        Ok(manifests)
+    }
+
     /// Persisted INCOMPLETE download manifests for startup resume. Unlike
     /// [`manifests`], this filters to incomplete rows IN SQL (a handful vs the whole
     /// library) and runs the blocking `rusqlite` load in `spawn_blocking`, so startup

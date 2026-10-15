@@ -80,6 +80,15 @@ fn transfer_manifest_roundtrips_sql_tables() {
     };
 
     store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store.active_transfer_manifests().unwrap(),
+        vec![manifest.clone()]
+    );
+    manifest.transfer_row_removed = true;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(store.active_transfer_manifests().unwrap().is_empty());
+    manifest.transfer_row_removed = false;
+    store.upsert_transfer_manifest(&manifest).unwrap();
     let restored = store
         .transfer_manifest_by_hash("00112233445566778899aabbccddeeff")
         .unwrap()
