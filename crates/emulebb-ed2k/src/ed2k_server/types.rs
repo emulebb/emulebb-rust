@@ -19,6 +19,50 @@ use crate::{
 
 use super::server_events::Ed2kServerListEventSender;
 use super::{Ed2kServerSearchInbox, is_low_id};
+
+#[derive(Clone)]
+pub(super) struct ServerSessionActivation {
+    active: watch::Receiver<bool>,
+}
+
+pub(super) struct ServerSessionActivator {
+    active: watch::Sender<bool>,
+}
+
+impl ServerSessionActivation {
+    pub(super) fn active() -> Self {
+        let (_, active) = watch::channel(true);
+        Self { active }
+    }
+
+    pub(super) fn pending() -> (Self, ServerSessionActivator) {
+        let (sender, active) = watch::channel(false);
+        (Self { active }, ServerSessionActivator { active: sender })
+    }
+
+    pub(super) fn is_active(&self) -> bool {
+        *self.active.borrow()
+    }
+
+    pub(super) async fn wait_until_active(&self) -> bool {
+        let mut active = self.active.clone();
+        loop {
+            if *active.borrow_and_update() {
+                return true;
+            }
+            if active.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+}
+
+impl ServerSessionActivator {
+    pub(super) fn activate(&self) {
+        self.active.send_replace(true);
+    }
+}
+
 /// Live ED2K server session view used by the Rust client to decide whether TCP is
 /// still effectively firewalled from the network's point of view.
 #[derive(Debug, Clone, Default)]
@@ -108,6 +152,9 @@ pub(super) struct ServerSessionContext {
     /// Learned public IP (eMule `theApp.SetPublicIP`): set from the HighID
     /// `OP_IDCHANGE` client_id, cleared on disconnect/LowID.
     pub(super) public_ip: crate::reachability::ExternalReachability,
+    /// Serial sessions are active immediately. Parallel attempts remain private
+    /// until the loop selects exactly one winner and opens this gate.
+    pub(super) activation: ServerSessionActivation,
     /// Optional feedback channel to the core's server store for discovered
     /// servers (`OP_SERVERLIST`) and connect/ping outcomes (fail-count / dead
     /// server drop). `None` when the loop is run without a core store wired.

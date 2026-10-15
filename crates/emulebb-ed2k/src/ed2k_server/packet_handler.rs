@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use tracing::{debug, error, info, warn};
 
 use crate::ed2k_tcp::{Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest};
@@ -37,13 +37,24 @@ pub(super) async fn handle_server_packet(
     context: &ServerSessionContext,
     allow_probe_search: bool,
 ) -> Result<()> {
+    if !context.activation.is_active() && packet.opcode != OP_IDCHANGE {
+        debug!(
+            endpoint = %session.endpoint,
+            opcode = packet.opcode,
+            "ignoring ED2K server packet from an unselected parallel attempt"
+        );
+        return Ok(());
+    }
     match packet.opcode {
         OP_IDCHANGE => {
             let id_change = decode_id_change_payload(&packet.payload)?;
             if id_change.client_id == 0 {
-                context
-                    .last_client_id
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                if context.activation.is_active() {
+                    context
+                        .last_client_id
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    context.public_ip.clear_server_public_ip();
+                }
                 {
                     let mut guard = session.state.write().await;
                     // Stock stays in CS_WAITFORLOGIN after a zero ID and lets
@@ -56,8 +67,6 @@ pub(super) async fn handle_server_packet(
                 session.assigned_client_id = None;
                 session.server_flags = id_change.server_flags;
                 session.login_accepted = false;
-                // No public IP without a client id (eMule SetPublicIP(0)).
-                context.public_ip.clear_server_public_ip();
                 info!(
                     "ED2K server {} returned zero client_id in OP_IDCHANGE; login not accepted",
                     session.endpoint
@@ -97,12 +106,15 @@ pub(super) async fn handle_server_packet(
                     .unwrap_or_else(|| "unknown".to_string())
             );
             session.assigned_client_id = Some(id_change.client_id);
-            context
-                .last_client_id
-                .store(id_change.client_id, std::sync::atomic::Ordering::Relaxed);
             session.server_flags = id_change.server_flags;
             session.login_accepted = true;
             session.pending_login_deadline = None;
+            if !context.activation.wait_until_active().await {
+                bail!("ED2K server attempt retired before session activation");
+            }
+            context
+                .last_client_id
+                .store(id_change.client_id, std::sync::atomic::Ordering::Relaxed);
             // eMule `CServerList::ServerStats`: a successful connect resets the
             // server's fail-count. Report the login so the core clears it.
             if connected_transition && let Some(sender) = context.server_list_events.as_ref() {

@@ -888,6 +888,7 @@ fn background_test_context(
         rotation_interval: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         public_ip: ExternalReachability::default(),
+        activation: super::super::types::ServerSessionActivation::active(),
         server_list_events: None,
         add_servers_from_server: false,
         offer_files_capability_enabled: true,
