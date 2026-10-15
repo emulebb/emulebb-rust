@@ -6,14 +6,14 @@ const ED2K_CLIENT_STATE_PRUNE_INTERVAL: Duration = Duration::from_secs(20 * 60);
 
 struct Ed2kStartupCandidate {
     nat: Option<Arc<NatManager>>,
-    reachability: ExternalReachability,
+    reachability: Option<ReachabilityRuntimeLease>,
 }
 
 impl Ed2kStartupCandidate {
-    fn new(nat: Arc<NatManager>, reachability: ExternalReachability) -> Self {
+    fn new(nat: Arc<NatManager>, reachability: &ExternalReachability) -> Self {
         Self {
             nat: Some(nat),
-            reachability,
+            reachability: Some(reachability.begin_runtime()),
         }
     }
 
@@ -23,8 +23,17 @@ impl Ed2kStartupCandidate {
             .expect("ED2K startup candidate must own NAT until installation")
     }
 
+    fn reachability_writer(&self) -> RuntimeReachabilityWriter {
+        self.reachability
+            .as_ref()
+            .expect("ED2K startup candidate must own reachability until installation")
+            .writer()
+    }
+
     async fn rollback(mut self, startup_error: anyhow::Error) -> anyhow::Error {
-        self.reachability.clear_all();
+        if let Some(reachability) = self.reachability.as_mut() {
+            reachability.retire();
+        }
         if let Some(nat) = self.nat.as_ref()
             && let Err(cleanup_error) = nat.stop().await
         {
@@ -35,21 +44,20 @@ impl Ed2kStartupCandidate {
             );
         }
         self.nat.take();
+        self.reachability.take();
         startup_error
     }
 
-    fn install(mut self) -> Arc<NatManager> {
-        self.nat
+    fn install(mut self) -> (Arc<NatManager>, ReachabilityRuntimeLease) {
+        let nat = self
+            .nat
             .take()
-            .expect("ED2K startup candidate must own NAT until installation")
-    }
-}
-
-impl Drop for Ed2kStartupCandidate {
-    fn drop(&mut self) {
-        if self.nat.is_some() {
-            self.reachability.clear_all();
-        }
+            .expect("ED2K startup candidate must own NAT until installation");
+        let reachability = self
+            .reachability
+            .take()
+            .expect("ED2K startup candidate must own reachability until installation");
+        (nat, reachability)
     }
 }
 
@@ -341,8 +349,9 @@ impl EmulebbCore {
                     .with_providers(built_in_port_mapping_providers())
                     .build(),
             ),
-            self.ed2k_reachability.clone(),
+            &self.ed2k_reachability,
         );
+        let reachability_writer = startup_candidate.reachability_writer();
         // Connection ordering (VPN guard -> NAT await -> P2P sockets -> connect):
         // the eD2k server login must announce an already-forwarded listen port to
         // win HighID on the FIRST connect, and when UPnP is active the public P2P
@@ -363,7 +372,7 @@ impl EmulebbCore {
                     let status = startup_candidate.nat().status().await;
                     crate::ed2k_net_drivers::sync_advertised_ports_from_nat(
                         &status,
-                        &self.ed2k_reachability,
+                        &reachability_writer,
                         network.listen_port,
                         network.kad_bind_addr.port(),
                     );
@@ -452,7 +461,7 @@ impl EmulebbCore {
             Ok(prerequisites) => prerequisites,
             Err(error) => return Err(startup_candidate.rollback(error).await),
         };
-        let nat = startup_candidate.install();
+        let (nat, reachability) = startup_candidate.install();
         let hello_identity = self.ed2k_hello_identity(&network);
         let (callback_sessions, callback_session_inbox) = ed2k_callback_session_channel();
         let mut tasks = Vec::new();
@@ -494,6 +503,7 @@ impl EmulebbCore {
         tasks.push(tokio::spawn(run_advertised_ports_sync(
             Arc::clone(&nat),
             self.ed2k_reachability.clone(),
+            reachability_writer.clone(),
             Arc::clone(&server_reconnect_signal),
             network.listen_port,
             network.kad_bind_addr.port(),
@@ -559,6 +569,7 @@ impl EmulebbCore {
                     server_state: Arc::clone(&server_state),
                     kad_firewall: Arc::clone(&kad_firewall),
                     reachability: self.ed2k_reachability.clone(),
+                    reachability_writer: reachability_writer.clone(),
                     kad_buddy: Arc::clone(&kad_buddy),
                     buddy_registry: buddy_registry.clone(),
                     buddy_link_cancel: Arc::clone(&buddy_link_cancel),
@@ -722,6 +733,7 @@ impl EmulebbCore {
                 tasks.push(tokio::spawn(run_ed2k_public_ip_probe(
                     network.bind_ip,
                     ed2k_public_ip.clone(),
+                    reachability_writer.clone(),
                     Arc::clone(&shutdown),
                 )));
             }
@@ -750,6 +762,7 @@ impl EmulebbCore {
                         server_state: Arc::clone(&server_state),
                         kad_firewall: Arc::clone(&kad_firewall),
                         reachability: self.ed2k_reachability.clone(),
+                        reachability_writer: reachability_writer.clone(),
                         network: network.clone(),
                         recheck_signal: Arc::clone(&recheck_signal),
                         shutdown: Arc::clone(&shutdown),
@@ -786,6 +799,7 @@ impl EmulebbCore {
             dht,
             kad_nodes_dat_path: network.kad_nodes_dat_path.clone(),
             kad_firewall: Arc::clone(&kad_firewall),
+            reachability,
             nat,
             shutdown,
             server_reconnect_signal,
@@ -842,7 +856,9 @@ impl EmulebbCore {
                 state.active_download_peer_endpoints.remove(&endpoint);
             }
         }
-        if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
+        if let Some(mut runtime) = self.ed2k_runtime.lock().await.take() {
+            let final_public_ip = self.ed2k_reachability.get();
+            runtime.reachability.retire();
             runtime.shutdown.store(true, Ordering::SeqCst);
             runtime.server_reconnect_signal.notify_waiters();
             // Capture the final reachability value and persist the live routing
@@ -851,7 +867,7 @@ impl EmulebbCore {
             // remains intact because replacement is atomic.
             runtime
                 .dht
-                .set_public_ip_for_udp_keys(self.ed2k_reachability.get())
+                .set_public_ip_for_udp_keys(final_public_ip)
                 .await;
             if let Some(path) = runtime.kad_nodes_dat_path.as_deref() {
                 match persist_kad_nodes_dat(&runtime.dht, path).await {
@@ -885,7 +901,6 @@ impl EmulebbCore {
             // server dial; the runtime has already been removed and tasks aborted.
             let _ = tokio::time::timeout(Duration::from_secs(2), nat.stop()).await;
         }
-        self.ed2k_reachability.clear_all();
         self.ed2k_status().await
     }
 }
@@ -1116,11 +1131,12 @@ mod ed2k_startup_candidate_tests {
             .build(),
         );
         let reachability = ExternalReachability::new();
-        let candidate = Ed2kStartupCandidate::new(nat, reachability.clone());
+        let candidate = Ed2kStartupCandidate::new(nat, &reachability);
+        let reachability_writer = candidate.reachability_writer();
         candidate.nat().start().await.unwrap();
-        reachability.set_fallback_public_ip(Ipv4Addr::new(203, 0, 113, 10));
-        reachability.set_nat_mapped_ports(Some(46_620), Some(46_630));
-        reachability.set_peer_confirmed_udp_port(46_640);
+        reachability_writer.set_fallback_public_ip(Ipv4Addr::new(203, 0, 113, 10));
+        reachability_writer.set_nat_mapped_ports(Some(46_620), Some(46_630));
+        reachability_writer.set_peer_confirmed_udp_port(46_640);
 
         let error = candidate
             .rollback(anyhow::anyhow!("forced post-NAT startup failure"))
@@ -1131,6 +1147,10 @@ mod ed2k_startup_candidate_tests {
         assert_eq!(
             reachability.snapshot(),
             ExternalReachability::new().snapshot()
+        );
+        assert_eq!(
+            reachability_writer.set_fallback_public_ip(Ipv4Addr::LOCALHOST),
+            emulebb_ed2k::reachability::ReachabilityUpdate::RejectedStale
         );
     }
 

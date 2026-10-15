@@ -32,7 +32,7 @@ use emulebb_ed2k::stun::{
 };
 use emulebb_ed2k::{
     MappedEndpoint, MappingExposure, MappingSpec, NatManager, TransportProtocol,
-    reachability::ExternalReachability,
+    reachability::{ExternalReachability, ReachabilityUpdate, RuntimeReachabilityWriter},
 };
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
 use emulebb_kad_dht::DhtNode;
@@ -97,11 +97,12 @@ const ED2K_RELOGIN_MIN_INTERVAL: Duration = Duration::from_secs(300);
 pub(crate) async fn run_ed2k_public_ip_probe(
     bind_ip: Ipv4Addr,
     public_ip: ExternalReachability,
+    public_ip_writer: RuntimeReachabilityWriter,
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         if let Ok(ip) = stun_probe(bind_ip, DEFAULT_STUN_TIMEOUT).await
-            && public_ip.set_fallback_public_ip(ip)
+            && public_ip_writer.set_fallback_public_ip(ip) == ReachabilityUpdate::Changed
         {
             tracing::info!("ED2K fallback public IP refreshed via STUN: {ip}");
         }
@@ -171,18 +172,19 @@ fn external_port_for(
 /// very first server login already announces the forwarded HighID callback port.
 pub(crate) fn sync_advertised_ports_from_nat(
     status: &emulebb_ed2k::NatStatus,
-    reachability: &ExternalReachability,
+    reachability_writer: &RuntimeReachabilityWriter,
     internal_tcp_port: u16,
     internal_udp_port: u16,
 ) {
     let tcp_port = external_port_for(&status.mappings, TransportProtocol::Tcp, internal_tcp_port);
     let udp_port = external_port_for(&status.mappings, TransportProtocol::Udp, internal_udp_port);
-    reachability.set_nat_mapped_ports(tcp_port, udp_port);
+    reachability_writer.set_nat_mapped_ports(tcp_port, udp_port);
 }
 
 pub(crate) async fn run_advertised_ports_sync(
     nat: Arc<NatManager>,
     reachability: ExternalReachability,
+    reachability_writer: RuntimeReachabilityWriter,
     reconnect_signal: Arc<tokio::sync::Notify>,
     internal_tcp_port: u16,
     internal_udp_port: u16,
@@ -197,7 +199,7 @@ pub(crate) async fn run_advertised_ports_sync(
         let status = nat.status().await;
         sync_advertised_ports_from_nat(
             &status,
-            &reachability,
+            &reachability_writer,
             internal_tcp_port,
             internal_udp_port,
         );
@@ -519,7 +521,8 @@ mod tests {
             ..Default::default()
         };
         let reachability = ExternalReachability::new();
-        sync_advertised_ports_from_nat(&status, &reachability, 4662, 4672);
+        let reachability_lease = reachability.begin_runtime();
+        sync_advertised_ports_from_nat(&status, &reachability_lease.writer(), 4662, 4672);
         assert_eq!(reachability.advertised_tcp_port(4662), 49662);
         assert_eq!(reachability.advertised_udp_port(4672), 49672);
     }
@@ -536,8 +539,10 @@ mod tests {
             ..Default::default()
         };
         let reachability = ExternalReachability::new();
-        reachability.set_nat_mapped_ports(Some(41000), Some(42000));
-        sync_advertised_ports_from_nat(&status, &reachability, 4662, 4672);
+        let reachability_lease = reachability.begin_runtime();
+        let reachability_writer = reachability_lease.writer();
+        reachability_writer.set_nat_mapped_ports(Some(41000), Some(42000));
+        sync_advertised_ports_from_nat(&status, &reachability_writer, 4662, 4672);
         assert_eq!(reachability.advertised_tcp_port(4662), 4662);
         assert_eq!(reachability.advertised_udp_port(4672), 4672);
     }
