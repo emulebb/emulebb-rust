@@ -304,6 +304,63 @@ async fn start_waits_for_exactly_one_background_initial_reconcile() {
 }
 
 #[tokio::test]
+async fn stop_waits_for_background_task_completion() {
+    let provider = Arc::new(FakeProvider {
+        name: PCP_NATPMP_BACKEND,
+        failures_before_success: AtomicUsize::new(0),
+        reconcile_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+    });
+    let manager = NatManagerBuilder::new(NatConfig {
+        enabled: true,
+        backend_order: vec![PCP_NATPMP_BACKEND.to_string()],
+        lease_duration_secs: 3_600,
+        ..NatConfig::default()
+    })
+    .with_mappings(vec![sample_mapping()])
+    .with_provider(provider)
+    .build();
+
+    manager.start().await.unwrap();
+    let task = manager.task.lock().as_ref().unwrap().abort_handle();
+
+    manager.stop().await.unwrap();
+
+    assert!(task.is_finished());
+}
+
+#[tokio::test]
+async fn dropping_manager_aborts_background_task() {
+    let provider = Arc::new(FakeProvider {
+        name: PCP_NATPMP_BACKEND,
+        failures_before_success: AtomicUsize::new(0),
+        reconcile_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+    });
+    let manager = NatManagerBuilder::new(NatConfig {
+        enabled: true,
+        backend_order: vec![PCP_NATPMP_BACKEND.to_string()],
+        lease_duration_secs: 3_600,
+        ..NatConfig::default()
+    })
+    .with_mappings(vec![sample_mapping()])
+    .with_provider(provider)
+    .build();
+
+    manager.start().await.unwrap();
+    let task = manager.task.lock().as_ref().unwrap().abort_handle();
+
+    drop(manager);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn reconcile_now_is_noop_when_disabled() {
     // NAT disabled / no mappings is "definitively unavailable": reconcile_now
     // returns Ok immediately so connect proceeds without waiting and never calls a

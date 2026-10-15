@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
+use parking_lot::Mutex as SyncMutex;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Mutex, RwLock, oneshot},
@@ -351,7 +352,7 @@ impl NatManagerBuilder {
             providers: self.providers,
             reachability: self.reachability,
             status: Arc::new(RwLock::new(NatStatus::default())),
-            task: Arc::new(Mutex::new(None)),
+            task: SyncMutex::new(None),
             shutdown: Arc::new(AtomicBool::new(false)),
             reconcile_lock: Arc::new(Mutex::new(())),
         }
@@ -365,7 +366,7 @@ pub struct NatManager {
     providers: Vec<Arc<dyn PortMappingProvider>>,
     reachability: Arc<dyn ReachabilityStrategy>,
     status: Arc<RwLock<NatStatus>>,
-    task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    task: SyncMutex<Option<JoinHandle<()>>>,
     shutdown: Arc<AtomicBool>,
     reconcile_lock: Arc<Mutex<()>>,
 }
@@ -385,37 +386,39 @@ impl NatManager {
             return Ok(());
         }
 
-        let mut slot = self.task.lock().await;
-        if slot.is_some() {
-            return Ok(());
-        }
         self.write_config_status(None).await;
-        self.shutdown.store(false, Ordering::SeqCst);
+        let initial_rx = {
+            let mut slot = self.task.lock();
+            if slot.is_some() {
+                return Ok(());
+            }
+            self.shutdown.store(false, Ordering::SeqCst);
 
-        let config = self.config.clone();
-        let mappings = self.mappings.clone();
-        let providers = self.providers.clone();
-        let status = Arc::clone(&self.status);
-        let shutdown = Arc::clone(&self.shutdown);
-        let reachability = Arc::clone(&self.reachability);
-        let reconcile_lock = Arc::clone(&self.reconcile_lock);
-        let (initial_tx, initial_rx) = oneshot::channel();
-        *slot = Some(tokio::spawn(async move {
-            run_manager_loop(
-                ManagerLoopState {
-                    config,
-                    mappings,
-                    providers,
-                    status,
-                    reachability,
-                    shutdown,
-                    reconcile_lock,
-                },
-                initial_tx,
-            )
-            .await;
-        }));
-        drop(slot);
+            let config = self.config.clone();
+            let mappings = self.mappings.clone();
+            let providers = self.providers.clone();
+            let status = Arc::clone(&self.status);
+            let shutdown = Arc::clone(&self.shutdown);
+            let reachability = Arc::clone(&self.reachability);
+            let reconcile_lock = Arc::clone(&self.reconcile_lock);
+            let (initial_tx, initial_rx) = oneshot::channel();
+            *slot = Some(tokio::spawn(async move {
+                run_manager_loop(
+                    ManagerLoopState {
+                        config,
+                        mappings,
+                        providers,
+                        status,
+                        reachability,
+                        shutdown,
+                        reconcile_lock,
+                    },
+                    initial_tx,
+                )
+                .await;
+            }));
+            initial_rx
+        };
         initial_rx
             .await
             .map_err(|_| anyhow!("NAT manager stopped before initial reconcile completed"))?
@@ -468,9 +471,18 @@ impl NatManager {
     /// Stops NAT reconciliation and asks providers to release active mappings.
     pub async fn stop(&self) -> Result<()> {
         self.shutdown.store(true, Ordering::SeqCst);
-        if let Some(task) = self.task.lock().await.take() {
-            task.abort();
-        }
+        let task = self.task.lock().take();
+        let task_result = match task {
+            Some(task) => {
+                task.abort();
+                match task.await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.is_cancelled() => Ok(()),
+                    Err(error) => Err(anyhow!("NAT manager task failed during stop: {error}")),
+                }
+            }
+            None => Ok(()),
+        };
         let _reconcile_guard = self.reconcile_lock.lock().await;
 
         let status = self.status.read().await.clone();
@@ -480,7 +492,7 @@ impl NatManager {
             status.mappings
         };
         if mappings.is_empty() {
-            return Ok(());
+            return task_result;
         }
 
         let configured_order = self.config.effective_backend_order();
@@ -495,7 +507,7 @@ impl NatManager {
                     .await;
             }
         }
-        Ok(())
+        task_result
     }
 
     /// Returns a cloned NAT status.
@@ -530,6 +542,15 @@ impl NatManager {
         status.external_ip_override = self.config.external_ip_override.clone();
         status.last_refresh_unix_secs = Some(now);
         status.last_error = Some(last_error);
+    }
+}
+
+impl Drop for NatManager {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(task) = self.task.get_mut().take() {
+            task.abort();
+        }
     }
 }
 
