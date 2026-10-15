@@ -169,6 +169,7 @@ impl Ed2kTransferRuntime {
         // share. AICH/MD4 are computed straight from the original file in the
         // single read pass above.
         let mut manifest = Ed2kResumeManifest::new(&job);
+        manifest.delivery_state = super::Ed2kDeliveryState::NotApplicable;
         manifest.source_path = Some(source_path.clone());
         manifest.source_fingerprint = native_file_fingerprint(&source_path, &metadata);
         manifest.completed = true;
@@ -244,6 +245,7 @@ impl Ed2kTransferRuntime {
         let transfer_dir = self.transfer_dir(&job.file_hash);
 
         let mut manifest = Ed2kResumeManifest::new(&job);
+        manifest.delivery_state = super::Ed2kDeliveryState::NotApplicable;
         manifest.source_path = Some(source_path.clone());
         manifest.source_fingerprint = source_fingerprint;
         manifest.completed = true;

@@ -11,14 +11,15 @@ use crate::{
     transfer_model::{
         MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
         MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
-        MetadataTransferCounts, MetadataTransferManifest, MetadataTransferMediaMetadata,
-        MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
-        MetadataTransferShareEntry, MetadataTransferSource,
+        MetadataTransferCounts, MetadataTransferDeliveryState, MetadataTransferManifest,
+        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
+        MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
     },
 };
 
 impl super::MetadataStore {
     pub fn upsert_transfer_manifest(&self, manifest: &MetadataTransferManifest) -> Result<()> {
+        validate_delivery_state(manifest)?;
         let hash = decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?;
         let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
         let now = unix_ms();
@@ -85,17 +86,18 @@ impl super::MetadataStore {
             r#"
             INSERT INTO transfers(
                 known_file_id, visible_state, final_rehash_pending, control_state, download_priority,
-                category_id, payload_directory, delivered_path_id, source_path_id,
+                category_id, payload_directory, delivery_state, delivered_path_id, source_path_id,
                 source_fingerprint, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
-            VALUES (?1, ?2, ?12, ?3, 'normal', ?4, ?5, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?12, ?3, 'normal', ?4, ?5, ?13, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 visible_state = excluded.visible_state,
                 final_rehash_pending = excluded.final_rehash_pending,
                 control_state = excluded.control_state,
                 category_id = excluded.category_id,
                 payload_directory = excluded.payload_directory,
+                delivery_state = excluded.delivery_state,
                 delivered_path_id = excluded.delivered_path_id,
                 source_path_id = excluded.source_path_id,
                 source_fingerprint = excluded.source_fingerprint,
@@ -121,6 +123,7 @@ impl super::MetadataStore {
             source_path_id,
             source_fingerprint,
             bool_to_i64(manifest.final_rehash_pending),
+            delivery_state_to_sql(manifest.delivery_state),
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
@@ -183,7 +186,8 @@ impl super::MetadataStore {
                        transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                        delivered_paths.platform, delivered_paths.native_path,
                        source_paths.platform, source_paths.native_path,
-                       transfers.source_fingerprint, transfers.final_rehash_pending
+                       transfers.source_fingerprint, transfers.final_rehash_pending,
+                       transfers.delivery_state
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -214,6 +218,7 @@ impl super::MetadataStore {
                     source_path: optional_path_from_row(row, 19, 20)?,
                     source_fingerprint: optional_fingerprint_from_row(row, 21)?,
                     final_rehash_pending: row.get::<_, i64>(22)? != 0,
+                    delivery_state: row.get(23)?,
                 })
             })
             .optional()?;
@@ -405,7 +410,8 @@ impl super::MetadataStore {
                    transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                    delivered_paths.platform, delivered_paths.native_path,
                    source_paths.platform, source_paths.native_path,
-                   transfers.source_fingerprint, transfers.final_rehash_pending
+                   transfers.source_fingerprint, transfers.final_rehash_pending,
+                   transfers.delivery_state
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -438,6 +444,7 @@ impl super::MetadataStore {
                 source_path: optional_path_from_row(row, 19, 20)?,
                 source_fingerprint: optional_fingerprint_from_row(row, 21)?,
                 final_rehash_pending: row.get::<_, i64>(22)? != 0,
+                delivery_state: row.get(23)?,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -1518,8 +1525,7 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE known_files.completed != 0
-              AND transfers.delivered_path_id IS NULL
-              AND transfers.source_path_id IS NULL
+              AND transfers.delivery_state = 'pending'
               AND transfers.removed_at_ms IS NULL
             ORDER BY known_files.ed2k_hash
             "#,
@@ -1584,6 +1590,7 @@ struct TransferRow {
     delivered_path: Option<std::path::PathBuf>,
     source_path: Option<std::path::PathBuf>,
     source_fingerprint: Option<NativeFileFingerprint>,
+    delivery_state: String,
 }
 
 fn replace_transfer_children(
@@ -1723,6 +1730,7 @@ fn manifest_from_row(
         category_id: row.category_id,
         control_state: row.control_state,
         transfer_row_removed: row.transfer_row_removed,
+        delivery_state: delivery_state_from_sql(&row.delivery_state)?,
         delivered_path: row.delivered_path,
         source_path: row.source_path,
         source_fingerprint: row.source_fingerprint,
@@ -1919,6 +1927,47 @@ fn local_path_id(conn: &rusqlite::Connection, path: &Path) -> Result<Option<i64>
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
+    let valid = match manifest.delivery_state {
+        MetadataTransferDeliveryState::NotApplicable => {
+            manifest.source_path.is_some() && manifest.delivered_path.is_none()
+        }
+        MetadataTransferDeliveryState::Pending => {
+            manifest.source_path.is_none() && manifest.delivered_path.is_none()
+        }
+        MetadataTransferDeliveryState::Delivered => {
+            manifest.source_path.is_none() && manifest.delivered_path.is_some()
+        }
+    };
+    if !valid {
+        anyhow::bail!(
+            "invalid delivery state {:?} for transfer {}: delivered_path={}, source_path={}",
+            manifest.delivery_state,
+            manifest.file_hash,
+            manifest.delivered_path.is_some(),
+            manifest.source_path.is_some()
+        );
+    }
+    Ok(())
+}
+
+fn delivery_state_to_sql(state: MetadataTransferDeliveryState) -> &'static str {
+    match state {
+        MetadataTransferDeliveryState::NotApplicable => "not_applicable",
+        MetadataTransferDeliveryState::Pending => "pending",
+        MetadataTransferDeliveryState::Delivered => "delivered",
+    }
+}
+
+fn delivery_state_from_sql(value: &str) -> Result<MetadataTransferDeliveryState> {
+    match value {
+        "not_applicable" => Ok(MetadataTransferDeliveryState::NotApplicable),
+        "pending" => Ok(MetadataTransferDeliveryState::Pending),
+        "delivered" => Ok(MetadataTransferDeliveryState::Delivered),
+        _ => anyhow::bail!("invalid persisted transfer delivery state {value:?}"),
+    }
 }
 
 fn visible_state(manifest: &MetadataTransferManifest) -> &'static str {

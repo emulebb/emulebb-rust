@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use emulebb_ed2k::ed2k_transfer::{Ed2kDeliveryOutcome, Ed2kResumeManifest};
+use emulebb_ed2k::ed2k_transfer::{Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kResumeManifest};
 
 use crate::EmulebbCore;
 
@@ -95,10 +95,7 @@ impl EmulebbCore {
         if !manifest.completed || manifest.final_rehash_pending {
             return;
         }
-        // A shared, already-complete file is seeded IN PLACE from its original
-        // on-disk path; it was never downloaded, so it must NEVER be delivered
-        // (copied) into the incoming dir. Delivery is download-only.
-        if manifest.source_path.is_some() {
+        if manifest.delivery_state == Ed2kDeliveryState::NotApplicable {
             return;
         }
         let dest_dir = self.delivery_destination_dir(&manifest).await;
@@ -122,7 +119,7 @@ impl EmulebbCore {
                     self.publish_transfer_updated(transfer);
                 }
             }
-            Ok(Ed2kDeliveryOutcome::NotCompleted) => {}
+            Ok(Ed2kDeliveryOutcome::NotRequired | Ed2kDeliveryOutcome::NotCompleted) => {}
             Err(error) => {
                 let message = format!("{error:#}");
                 {

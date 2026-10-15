@@ -8,7 +8,9 @@ use std::{fs, path::Path};
 use emulebb_kad_proto::Ed2kHash;
 use md4::{Digest, Md4};
 
-use super::super::{ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kTransferRuntime, new_transfer_job};
+use super::super::{
+    ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kTransferRuntime, new_transfer_job,
+};
 use crate::long_path::long_path;
 use crate::paths::unique_test_dir;
 
@@ -209,6 +211,7 @@ async fn materialize_records_delivered_fingerprint_for_reload_reuse() {
     // None, so the shared-directory reload's delivered-reuse index picks it up
     // and an unchanged delivered file is a cache hit rather than a re-hash.
     let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
     assert!(
         manifest.source_path.is_none(),
         "a delivered download must stay source_path == None"

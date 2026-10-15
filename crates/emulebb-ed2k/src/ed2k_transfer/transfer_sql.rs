@@ -1,13 +1,13 @@
 use anyhow::Result;
 use emulebb_metadata::{
-    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferManifest,
-    MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferRange,
-    MetadataTransferSource,
+    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferDeliveryState,
+    MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+    MetadataTransferRange, MetadataTransferSource,
 };
 
 use super::{
-    Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kSourceHint,
-    Ed2kTransferState, catalog::Ed2kSharedPublishStats,
+    Ed2kDeliveryState, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange,
+    Ed2kSourceHint, Ed2kTransferState, catalog::Ed2kSharedPublishStats,
 };
 
 pub(super) const MEDIA_METADATA_EXTRACTOR_VERSION: u32 = 1;
@@ -53,6 +53,11 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
         category_id: manifest.category_id,
         control_state: manifest.control_state.clone(),
         transfer_row_removed: manifest.transfer_row_removed,
+        delivery_state: match manifest.delivery_state {
+            Ed2kDeliveryState::NotApplicable => MetadataTransferDeliveryState::NotApplicable,
+            Ed2kDeliveryState::Pending => MetadataTransferDeliveryState::Pending,
+            Ed2kDeliveryState::Delivered => MetadataTransferDeliveryState::Delivered,
+        },
         delivered_path: manifest.delivered_path.clone(),
         source_path: manifest.source_path.clone(),
         source_fingerprint: manifest.source_fingerprint.clone(),
@@ -137,6 +142,11 @@ pub(super) fn manifest_from_metadata(
         category_id: manifest.category_id,
         control_state: manifest.control_state,
         transfer_row_removed: manifest.transfer_row_removed,
+        delivery_state: match manifest.delivery_state {
+            MetadataTransferDeliveryState::NotApplicable => Ed2kDeliveryState::NotApplicable,
+            MetadataTransferDeliveryState::Pending => Ed2kDeliveryState::Pending,
+            MetadataTransferDeliveryState::Delivered => Ed2kDeliveryState::Delivered,
+        },
         delivered_path: manifest.delivered_path,
         source_path: manifest.source_path,
         source_fingerprint: manifest.source_fingerprint,
@@ -293,6 +303,7 @@ mod tests {
             category_id: 0,
             control_state: None,
             transfer_row_removed: false,
+            delivery_state: MetadataTransferDeliveryState::Pending,
             delivered_path: None,
             source_path: None,
             source_fingerprint: None,

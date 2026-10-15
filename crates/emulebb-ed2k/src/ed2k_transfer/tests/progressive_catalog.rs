@@ -36,6 +36,7 @@ async fn progressive_catalog_exposes_first_cohort_before_full_hydration() {
                 category_id: 0,
                 control_state: None,
                 transfer_row_removed: false,
+                delivery_state: emulebb_metadata::MetadataTransferDeliveryState::NotApplicable,
                 delivered_path: None,
                 source_path: Some(root.join(format!("catalog-{sequence}.bin"))),
                 source_fingerprint: None,
