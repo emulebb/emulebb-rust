@@ -848,9 +848,7 @@ fn selected_configured_servers(
         // leave the selected server after a disconnect.
         return vec![target.clone()];
     }
-    ConfiguredServerEntry::from_endpoint_text(target_endpoint)
-        .map(|target| vec![target])
-        .unwrap_or_default()
+    Vec::new()
 }
 
 fn plan_allows_configured_server(
@@ -1055,13 +1053,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_target_uses_target_without_fallbacks() {
+    fn unknown_target_is_not_synthesized_back_into_the_live_directory() {
         let servers = vec![server("192.0.2.1:4661"), server("192.0.2.2:4661")];
 
         let selected = selected_configured_servers(&servers, Some("192.0.2.99:4661"), true);
 
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].base_endpoint_text(), "192.0.2.99:4661");
+        assert!(selected.is_empty());
     }
 
     #[test]

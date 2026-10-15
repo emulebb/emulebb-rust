@@ -889,6 +889,297 @@ async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
     assert_eq!(stale.udp_key_ip, key_ip_client_id);
 }
 
+async fn install_test_server_plan_runtime(
+    core: &EmulebbCore,
+    mode: Ed2kServerConnectMode,
+    server_state: Ed2kServerState,
+) -> (
+    tokio::sync::watch::Sender<Ed2kServerConnectPlan>,
+    tokio::sync::watch::Receiver<Ed2kServerConnectPlan>,
+    Arc<AtomicBool>,
+) {
+    let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some("0.0.0.0:0".parse().unwrap()),
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let dht_task = dht.start();
+    let initial_config = core
+        .effective_ed2k_config(&core.ed2k_network.as_ref().unwrap().ed2k)
+        .await
+        .unwrap();
+    let (server_connect_plan, server_connect_plan_rx) =
+        tokio::sync::watch::channel(Ed2kServerConnectPlan::new(initial_config, mode));
+    *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+        search_handle,
+        server_state: Arc::new(RwLock::new(server_state)),
+        server_enabled: Arc::new(AtomicBool::new(true)),
+        dht,
+        kad_nodes_dat_path: None,
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        nat: Arc::new(NatManager::default()),
+        shutdown: Arc::clone(&shutdown),
+        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
+        server_connect_plan: server_connect_plan.clone(),
+        kad_firewall_recheck: None,
+        tasks: vec![dht_task],
+        download_tasks: Arc::clone(&core.ed2k_download_tasks),
+    });
+    (server_connect_plan, server_connect_plan_rx, shutdown)
+}
+
+async fn wait_for_server_plan_update(
+    receiver: &mut tokio::sync::watch::Receiver<Ed2kServerConnectPlan>,
+) -> Ed2kServerConnectPlan {
+    tokio::time::timeout(Duration::from_secs(1), receiver.changed())
+        .await
+        .expect("server mutation should publish a plan generation")
+        .expect("server plan sender should remain open");
+    receiver.borrow().clone()
+}
+
+#[tokio::test]
+async fn server_add_publishes_a_live_plan_generation() {
+    let transfer_root = unique_runtime_dir("emulebb-core-server-add-live-plan");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
+    .unwrap();
+    let (_plan, mut plan_rx, shutdown) = install_test_server_plan_runtime(
+        &core,
+        Ed2kServerConnectMode::Automatic,
+        Ed2kServerState::default(),
+    )
+    .await;
+
+    core.add_server(ServerCreate {
+        address: "203.0.113.70".to_string(),
+        port: 4661,
+        name: Some("Live Add".to_string()),
+        priority: Some("high".to_string()),
+        static_server: Some(true),
+        connect: None,
+    })
+    .await
+    .unwrap();
+
+    let plan = wait_for_server_plan_update(&mut plan_rx).await;
+    assert_eq!(plan.mode(), &Ed2kServerConnectMode::Automatic);
+    let added = plan
+        .config()
+        .server_entries
+        .iter()
+        .find(|entry| entry.host == "203.0.113.70" && entry.port == 4661)
+        .expect("added server should be immediately eligible");
+    assert_eq!(added.priority, "high");
+    assert!(added.static_server);
+    assert!(!shutdown.load(Ordering::SeqCst));
+
+    let _ = core.disconnect_ed2k().await;
+}
+
+#[tokio::test]
+async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
+    let transfer_root = unique_runtime_dir("emulebb-core-server-mutations-live-plan");
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let endpoint = "203.0.113.71:4661";
+    network.ed2k.server_endpoints = vec![endpoint.to_string()];
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
+    .unwrap();
+    let (_plan, mut plan_rx, shutdown) = install_test_server_plan_runtime(
+        &core,
+        Ed2kServerConnectMode::Directed(endpoint.to_string()),
+        Ed2kServerState {
+            endpoint: Some(endpoint.parse().unwrap()),
+            connected: true,
+            ..Ed2kServerState::default()
+        },
+    )
+    .await;
+
+    core.update_server(
+        endpoint,
+        ServerUpdate {
+            priority: Some("high".to_string()),
+            static_server: Some(true),
+            ..ServerUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
+    let updated = wait_for_server_plan_update(&mut plan_rx).await;
+    let updated_entry = updated
+        .config()
+        .server_entries
+        .iter()
+        .find(|entry| entry.host == "203.0.113.71" && entry.port == 4661)
+        .expect("updated server should remain eligible");
+    assert_eq!(updated_entry.priority, "high");
+    assert!(updated_entry.static_server);
+
+    core.update_server(
+        endpoint,
+        ServerUpdate {
+            enabled: Some(false),
+            ..ServerUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
+    let disabled = wait_for_server_plan_update(&mut plan_rx).await;
+    assert_eq!(
+        disabled.mode(),
+        &Ed2kServerConnectMode::Directed(endpoint.to_string())
+    );
+    assert!(disabled.config().server_entries.is_empty());
+    assert!(disabled.config().server_endpoints.is_empty());
+    assert!(core.ed2k_runtime.lock().await.is_some());
+    assert!(!shutdown.load(Ordering::SeqCst));
+
+    core.update_server(
+        endpoint,
+        ServerUpdate {
+            enabled: Some(true),
+            ..ServerUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
+    let reenabled = wait_for_server_plan_update(&mut plan_rx).await;
+    assert!(
+        reenabled
+            .config()
+            .server_entries
+            .iter()
+            .any(|entry| entry.host == "203.0.113.71" && entry.port == 4661)
+    );
+
+    core.remove_server(endpoint).await.unwrap();
+    let removed = wait_for_server_plan_update(&mut plan_rx).await;
+    assert!(removed.config().server_entries.is_empty());
+    assert!(removed.config().server_endpoints.is_empty());
+    assert!(core.ed2k_runtime.lock().await.is_some());
+    assert!(!shutdown.load(Ordering::SeqCst));
+
+    let _ = core.disconnect_ed2k().await;
+}
+
+#[tokio::test]
+async fn core_connection_settings_publish_one_coherent_plan_generation() {
+    let transfer_root = unique_runtime_dir("emulebb-core-settings-live-plan");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
+    .unwrap();
+    let (_plan, mut plan_rx, _shutdown) = install_test_server_plan_runtime(
+        &core,
+        Ed2kServerConnectMode::Manual,
+        Ed2kServerState::default(),
+    )
+    .await;
+
+    core.update_core_settings(CoreSettingsUpdate {
+        reconnect: Some(false),
+        safe_server_connect: Some(false),
+        ..CoreSettingsUpdate::default()
+    })
+    .await
+    .unwrap();
+
+    let updated = wait_for_server_plan_update(&mut plan_rx).await;
+    assert!(!updated.config().reconnect_enabled);
+    assert!(!updated.config().safe_server_connect);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), plan_rx.changed())
+            .await
+            .is_err(),
+        "one settings transaction should publish exactly one coherent plan"
+    );
+
+    let _ = core.disconnect_ed2k().await;
+}
+
+#[tokio::test]
+async fn server_status_metadata_refreshes_the_live_plan_in_place() {
+    let transfer_root = unique_runtime_dir("emulebb-core-server-status-live-plan");
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let endpoint = "203.0.113.72:4661";
+    network.ed2k.server_endpoints = vec![endpoint.to_string()];
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
+    .unwrap();
+    let (_plan, mut plan_rx, shutdown) = install_test_server_plan_runtime(
+        &core,
+        Ed2kServerConnectMode::Directed(endpoint.to_string()),
+        Ed2kServerState {
+            endpoint: Some(endpoint.parse().unwrap()),
+            connected: true,
+            ..Ed2kServerState::default()
+        },
+    )
+    .await;
+
+    core.note_ed2k_server_status(
+        endpoint, 12_345, 67_890, 20_000, 500, 42, 100_000, 120_000, 0x30, 0, 0, 4711, 4723,
+    )
+    .await;
+
+    let updated = wait_for_server_plan_update(&mut plan_rx).await;
+    let entry = updated
+        .config()
+        .server_entries
+        .iter()
+        .find(|entry| entry.host == "203.0.113.72" && entry.port == 4661)
+        .expect("status-updated server should remain eligible");
+    assert_eq!(entry.udp_flags, 0x30);
+    assert_eq!(entry.obfuscation_port_tcp, 4711);
+    assert_eq!(entry.obfuscation_port_udp, 4723);
+    assert_eq!(
+        updated.mode(),
+        &Ed2kServerConnectMode::Directed(endpoint.to_string())
+    );
+    assert!(core.ed2k_runtime.lock().await.is_some());
+    assert!(!shutdown.load(Ordering::SeqCst));
+
+    let _ = core.disconnect_ed2k().await;
+}
+
 #[tokio::test]
 async fn explicit_server_connect_targets_running_server_loop() {
     let transfer_root = unique_runtime_dir("emulebb-core-target-running-server-loop");
