@@ -11,6 +11,7 @@ use emulebb_metadata::{
 
 use crate::long_path::long_path;
 
+use super::deliver::{DeliveredOutputIdentity, classify_delivered_output};
 use super::hashset::{
     decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
     validate_aich_hashset, validate_md4_hashset,
@@ -106,6 +107,36 @@ impl Ed2kTransferRuntime {
         tokio::task::spawn_blocking(move || metadata.transfer_deletion_requested(&file_hash))
             .await
             .map_err(anyhow::Error::from)?
+    }
+
+    async fn persist_transfer_deletion_intent(&self, file_hash: &str) -> Result<bool> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_string();
+        tokio::task::spawn_blocking(move || metadata.request_transfer_deletion(&file_hash))
+            .await
+            .context("ED2K transfer deletion-intent task panicked")?
+    }
+
+    async fn pending_transfer_deletion_manifest(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<Ed2kResumeManifest>> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_string();
+        let manifest = tokio::task::spawn_blocking(move || {
+            metadata.pending_transfer_deletion_manifest_by_hash(&file_hash)
+        })
+        .await
+        .context("ED2K pending transfer deletion load task panicked")??;
+        manifest.map(manifest_from_metadata).transpose()
+    }
+
+    async fn finalize_transfer_deletion_intent(&self, file_hash: &str) -> Result<bool> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_string();
+        tokio::task::spawn_blocking(move || metadata.finalize_transfer_deletion(&file_hash))
+            .await
+            .context("ED2K transfer deletion-finalize task panicked")?
     }
 
     /// Return a keyset page ordered by ED2K hash.
@@ -616,41 +647,106 @@ impl Ed2kTransferRuntime {
         Ok(Some(manifest))
     }
 
-    /// Delete one transfer's manifest, payload, and upload/catalog state.
+    /// Durably accept deletion, hide the transfer, and attempt filesystem cleanup.
+    /// Cleanup failures keep the intent for a later idempotent retry.
     pub async fn delete_transfer_files(&self, file_hash: &str) -> Result<bool> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let file_hash = parsed_hash.to_string();
         let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
         let _guard = self.lock_manifest(&file_hash).await;
         let transfer_dir = self.transfer_dir(&file_hash);
-        let manifest = self.load_manifest_optional_unlocked(&file_hash).await?;
+        let manifest = match self.load_manifest_optional_unlocked(&file_hash).await? {
+            Some(manifest) => Some(manifest),
+            None => self.pending_transfer_deletion_manifest(&file_hash).await?,
+        };
         if manifest.is_none() && !tokio::fs::try_exists(&transfer_dir).await? {
             return Ok(false);
         }
-        if let Some(delivered_path) = manifest.and_then(|manifest| {
-            manifest
-                .source_path
-                .is_none()
-                .then_some(manifest.delivered_path)
-                .flatten()
-        }) {
-            match tokio::fs::remove_file(long_path(&delivered_path)).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "failed to delete delivered transfer file {}",
-                            delivered_path.display()
-                        )
-                    });
+        let Some(manifest) = manifest else {
+            self.invalidate_payload_handle(&file_hash);
+            tokio::fs::remove_dir_all(&transfer_dir)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to delete orphan ED2K transfer directory {}",
+                        transfer_dir.display()
+                    )
+                })?;
+            return Ok(true);
+        };
+        anyhow::ensure!(
+            self.persist_transfer_deletion_intent(&file_hash).await?,
+            "ED2K transfer {file_hash} disappeared before deletion intent was persisted"
+        );
+
+        self.manifest_cache.lock().await.remove(&file_hash);
+        self.manifest_checkpoint_state
+            .lock()
+            .await
+            .remove(&file_hash);
+        self.shared_catalog
+            .write()
+            .await
+            .retain(|entry| entry.file_hash != file_hash);
+        self.note_shared_catalog_entries_changed();
+
+        if let Err(error) = self
+            .complete_transfer_deletion(&file_hash, parsed_hash.0, &manifest, &transfer_dir)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                file_hash,
+                "durable ED2K transfer deletion remains pending after cleanup failure"
+            );
+        }
+        Ok(true)
+    }
+
+    async fn complete_transfer_deletion(
+        &self,
+        file_hash: &str,
+        expected_hash: [u8; 16],
+        manifest: &Ed2kResumeManifest,
+        transfer_dir: &std::path::Path,
+    ) -> Result<()> {
+        if manifest.source_path.is_none()
+            && let Some(delivered_path) = manifest.delivered_path.as_deref()
+        {
+            match classify_delivered_output(
+                delivered_path,
+                manifest.source_fingerprint.as_ref(),
+                manifest.file_size,
+                expected_hash,
+            )
+            .await?
+            {
+                DeliveredOutputIdentity::Missing => {}
+                DeliveredOutputIdentity::Matching(_) => {
+                    match tokio::fs::remove_file(long_path(delivered_path)).await {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!(
+                                    "failed to delete delivered transfer file {}",
+                                    delivered_path.display()
+                                )
+                            });
+                        }
+                    }
+                }
+                DeliveredOutputIdentity::Foreign => {
+                    tracing::warn!(
+                        file_hash,
+                        path = %delivered_path.display(),
+                        "preserving foreign file at recorded delivered path during deletion"
+                    );
                 }
             }
         }
-        // Drop the cached payload handle FIRST: on Windows a pending handle
-        // would leave pieces.bin delete-pending and the directory removal
-        // below would fail with "directory not empty".
-        self.invalidate_payload_handle(&file_hash);
+
+        self.invalidate_payload_handle(file_hash);
         if tokio::fs::try_exists(&transfer_dir).await? {
             tokio::fs::remove_dir_all(&transfer_dir)
                 .await
@@ -661,17 +757,11 @@ impl Ed2kTransferRuntime {
                     )
                 })?;
         }
-        self.metadata.delete_transfer_manifest(&file_hash)?;
-        self.manifest_cache.lock().await.remove(&file_hash);
-        self.manifest_checkpoint_state
-            .lock()
-            .await
-            .remove(&file_hash);
-        self.shared_catalog
-            .write()
-            .await
-            .retain(|entry| entry.file_hash != file_hash);
-        Ok(true)
+        anyhow::ensure!(
+            self.finalize_transfer_deletion_intent(file_hash).await?,
+            "ED2K transfer {file_hash} lost its deletion intent before finalization"
+        );
+        Ok(())
     }
 
     /// Return local manifest-backed file metadata even when only part of the

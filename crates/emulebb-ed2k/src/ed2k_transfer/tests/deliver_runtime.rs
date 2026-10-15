@@ -369,6 +369,92 @@ async fn destructive_delete_uses_lifecycle_gate_and_removes_both_authorities() {
 }
 
 #[tokio::test]
+async fn destructive_delete_preserves_foreign_delivered_path_occupant() {
+    let root = unique_test_dir("ed2k-deliver-delete-foreign-output");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Foreign.Delete.mkv").await;
+    let incoming = root.join("incoming");
+    let delivered = incoming.join("Foreign.Delete.mkv");
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let foreign = vec![0x5a; 1_048_576];
+    fs::write(&delivered, &foreign).unwrap();
+
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+
+    assert_eq!(fs::read(&delivered).unwrap(), foreign);
+    assert!(!runtime.transfer_dir(&hash).exists());
+    assert!(runtime.manifest(&hash).await.is_err());
+}
+
+#[tokio::test]
+async fn destructive_delete_resumes_a_preexisting_durable_intent() {
+    let root = unique_test_dir("ed2k-deliver-delete-resume-intent");
+    let hash;
+    let delivered;
+    {
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        hash = ingest_completed(&runtime, &root, "Resume.Delete.mkv").await;
+        let incoming = root.join("incoming");
+        delivered = incoming.join("Resume.Delete.mkv");
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap();
+        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+    }
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert!(restarted.delete_transfer_files(&hash).await.unwrap());
+    assert!(!delivered.exists());
+    assert!(!restarted.transfer_dir(&hash).exists());
+    assert!(
+        restarted
+            .metadata
+            .pending_transfer_deletion_hashes()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
+    let root = unique_test_dir("ed2k-deliver-delete-cleanup-retry");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Retry.Delete.mkv").await;
+    let incoming = root.join("incoming");
+    let delivered = incoming.join("Retry.Delete.mkv");
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let transfer_dir = runtime.transfer_dir(&hash);
+    fs::remove_dir_all(&transfer_dir).unwrap();
+    fs::write(&transfer_dir, b"cleanup blocker").unwrap();
+
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert!(!delivered.exists());
+    assert!(transfer_dir.is_file());
+    assert!(runtime.manifest(&hash).await.is_err());
+    assert_eq!(
+        runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
+        vec![hash.clone()]
+    );
+
+    fs::remove_file(&transfer_dir).unwrap();
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert!(
+        runtime
+            .metadata
+            .pending_transfer_deletion_hashes()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn concurrent_materialization_of_one_transfer_is_idempotent() {
     let root = unique_test_dir("ed2k-deliver-concurrent");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
