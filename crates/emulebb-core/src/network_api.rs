@@ -280,7 +280,7 @@ impl EmulebbCore {
 
         let mut runtime_guard = self.ed2k_runtime.lock().await;
         if let Some(runtime) = runtime_guard.as_ref() {
-            runtime.server_enabled.store(true, Ordering::SeqCst);
+            runtime.server_control.enable();
             let same_live_endpoint = if let Some(endpoint) = endpoint {
                 let requested_endpoint = endpoint.parse::<SocketAddr>().ok();
                 {
@@ -492,8 +492,7 @@ impl EmulebbCore {
         // "Reconnect now" signal: the advertised-ports sync fires it when the
         // external port changes (UPnP ready / remapped) so the server loop re-logs
         // in with the new HighID callback port instead of waiting for a reconnect.
-        let server_reconnect_signal = Arc::new(tokio::sync::Notify::new());
-        let server_enabled = Arc::new(AtomicBool::new(true));
+        let (server_control, server_control_rx) = ed2k_server_control_channel(true);
         let (server_connect_plan, server_connect_plan_rx) =
             tokio::sync::watch::channel(next_connect_plan);
         // Keep the advertised external eD2k TCP + UDP ports in sync with the NAT
@@ -504,7 +503,7 @@ impl EmulebbCore {
             Arc::clone(&nat),
             self.ed2k_reachability.clone(),
             reachability_writer.clone(),
-            Arc::clone(&server_reconnect_signal),
+            server_control.clone(),
             network.listen_port,
             network.kad_bind_addr.port(),
             Arc::clone(&shutdown),
@@ -661,10 +660,9 @@ impl EmulebbCore {
             search_inbox,
             kad_firewall: Arc::clone(&kad_firewall),
             shutdown: Arc::clone(&shutdown),
-            server_enabled: Arc::clone(&server_enabled),
+            server_control: server_control_rx,
             public_ip: ed2k_public_ip.clone(),
             reachability_writer: reachability_writer.clone(),
-            reconnect_signal: Arc::clone(&server_reconnect_signal),
             server_list_events: Some(server_list_events_tx),
             callback_sessions: callback_sessions.clone(),
         }));
@@ -796,14 +794,13 @@ impl EmulebbCore {
         *runtime_guard = Some(Ed2kRuntime {
             search_handle,
             server_state,
-            server_enabled,
+            server_control,
             dht,
             kad_nodes_dat_path: network.kad_nodes_dat_path.clone(),
             kad_firewall: Arc::clone(&kad_firewall),
             reachability,
             nat,
             shutdown,
-            server_reconnect_signal,
             server_connect_plan,
             server_task,
             kad_firewall_recheck,
@@ -824,20 +821,19 @@ impl EmulebbCore {
     /// Disconnect only the eD2K server session. Kad, the shared UDP socket,
     /// peer transfers, and NAT state remain available for an independent
     /// server reconnect.
-    pub async fn disconnect_ed2k_server(&self) -> NetworkStatus {
-        let state = {
-            let runtime_guard = self.ed2k_runtime.lock().await;
-            runtime_guard.as_ref().map(|runtime| {
-                runtime.server_enabled.store(false, Ordering::SeqCst);
-                runtime.server_reconnect_signal.notify_one();
-                Arc::clone(&runtime.server_state)
-            })
-        };
-        self.ed2k_reachability.clear_server_public_ip();
-        if let Some(state) = state {
-            *state.write().await = Ed2kServerState::default();
+    pub async fn disconnect_ed2k_server(&self) -> Result<NetworkStatus> {
+        let runtime_guard = self.ed2k_runtime.lock().await;
+        if let Some(runtime) = runtime_guard.as_ref() {
+            tokio::time::timeout(
+                ED2K_SERVER_RETIRE_TIMEOUT,
+                runtime.server_control.disable_and_wait(),
+            )
+            .await
+            .context("timed out waiting for ED2K server session retirement")?
+            .context("failed to retire ED2K server session")?;
         }
-        self.ed2k_status().await
+        drop(runtime_guard);
+        Ok(self.ed2k_status().await)
     }
 
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
@@ -861,7 +857,7 @@ impl EmulebbCore {
             let final_public_ip = self.ed2k_reachability.get();
             runtime.reachability.retire();
             runtime.shutdown.store(true, Ordering::SeqCst);
-            runtime.server_reconnect_signal.notify_waiters();
+            runtime.server_control.wake_supervisor();
             // Capture the final reachability value and persist the live routing
             // sample before aborting the Kad tasks. A write failure must not
             // strand shutdown, but it is visible in logs and the previous file

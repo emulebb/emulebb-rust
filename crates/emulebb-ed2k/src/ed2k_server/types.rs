@@ -447,18 +447,14 @@ pub struct Ed2kServerLoopOptions {
     pub search_inbox: Ed2kServerSearchInbox,
     pub kad_firewall: Arc<Mutex<KadFirewallState>>,
     pub shutdown: Arc<AtomicBool>,
-    /// Operator server lifecycle gate. This is independent from process-wide
-    /// network shutdown so Kad can remain active while the server is stopped.
-    pub server_enabled: Arc<AtomicBool>,
+    /// Operator server lifecycle gate with an explicit retirement acknowledgment.
+    pub server_control: super::Ed2kServerControlReceiver,
     /// Learned public-IP cell (eMule `theApp` public IP), set from the HighID
     /// `OP_IDCHANGE`. Created by core and shared with the UDP reask loop.
     pub public_ip: crate::reachability::ExternalReachability,
     /// Runtime-scoped authority used to issue one pending reachability lease per
     /// server attempt. Only the selected session's lease is activated.
     pub reachability_writer: crate::reachability::RuntimeReachabilityWriter,
-    /// "Reconnect now" signal (shared with the advertised-ports sync task): fired
-    /// when the external port changes so the session re-logs in promptly.
-    pub reconnect_signal: Arc<tokio::sync::Notify>,
     /// Optional feedback channel to the core's server store (server discovery +
     /// connect/ping outcome). `None` disables server-list feedback.
     pub server_list_events: Option<Ed2kServerListEventSender>,

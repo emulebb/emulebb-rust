@@ -445,20 +445,42 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     .unwrap();
     let shutdown = Arc::new(AtomicBool::new(false));
     let dht_task = dht.start();
+    let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let reachability = core.ed2k_reachability.begin_runtime();
+    let reachability_writer = reachability.writer();
+    let mut server_reachability = reachability_writer.begin_server_session().unwrap();
+    server_reachability.activate();
+    let server_reachability_writer = server_reachability.writer();
+    let (server_control, server_control_rx) = ed2k_server_control_channel(true);
+    let server_state_for_task = Arc::clone(&server_state);
+    let shutdown_for_task = Arc::clone(&shutdown);
+    let server_task = tokio::spawn(async move {
+        loop {
+            server_control_rx.wait_for_wake().await;
+            if shutdown_for_task.load(Ordering::SeqCst) {
+                break;
+            }
+            if server_control_rx.is_enabled() {
+                continue;
+            }
+            server_reachability.retire();
+            *server_state_for_task.write().await = Ed2kServerState::default();
+            assert!(server_control_rx.acknowledge_disabled());
+        }
+    });
 
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
-        server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
-        server_enabled: Arc::new(AtomicBool::new(true)),
+        server_state,
+        server_control,
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
-        reachability: core.ed2k_reachability.begin_runtime(),
+        reachability,
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
-        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
         server_connect_plan: test_server_connect_plan_sender(),
-        server_task: test_server_task(),
+        server_task,
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
         download_tasks: Arc::clone(&core.ed2k_download_tasks),
@@ -483,30 +505,22 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     assert!(!stopped.kad.running);
     let runtime = core.ed2k_runtime.lock().await;
     assert!(!runtime.as_ref().unwrap().dht.is_running());
-    assert!(
-        runtime
-            .as_ref()
-            .unwrap()
-            .server_enabled
-            .load(Ordering::SeqCst)
-    );
+    assert!(runtime.as_ref().unwrap().server_control.is_enabled());
     drop(runtime);
 
     core.set_kad_running(true).await;
     let fallback_ip = Ipv4Addr::new(198, 51, 100, 4);
-    core.ed2k_reachability.set_fallback_public_ip(fallback_ip);
-    core.ed2k_reachability
-        .set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
-    core.ed2k_reachability
-        .set_nat_mapped_ports(Some(45000), Some(46000));
-    core.ed2k_reachability.set_peer_confirmed_udp_port(51000);
+    reachability_writer.set_fallback_public_ip(fallback_ip);
+    server_reachability_writer.set_server_public_ip(Ipv4Addr::new(203, 0, 113, 9));
+    reachability_writer.set_nat_mapped_ports(Some(45000), Some(46000));
+    reachability_writer.set_peer_confirmed_udp_port(51000);
     {
         let runtime = core.ed2k_runtime.lock().await;
         let mut server = runtime.as_ref().unwrap().server_state.write().await;
         server.connected = true;
         server.endpoint = Some("127.0.0.1:4661".parse().unwrap());
     }
-    let ed2k = core.disconnect_ed2k_server().await;
+    let ed2k = core.disconnect_ed2k_server().await.unwrap();
     assert!(!ed2k.running);
     assert_eq!(core.ed2k_reachability.get(), Some(fallback_ip));
     assert_eq!(core.ed2k_reachability.advertised_tcp_port(4662), 45000);
@@ -530,6 +544,93 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     assert_eq!(core.ed2k_reachability.advertised_tcp_port(4662), 4662);
     assert_eq!(core.ed2k_reachability.advertised_udp_port(4672), 4672);
     assert!(!core.ed2k_reachability.udp_port_is_peer_confirmed());
+}
+
+#[tokio::test]
+async fn server_disconnect_waits_for_supervisor_retirement_ack() {
+    let transfer_root = unique_runtime_dir("emulebb-core-server-only-retirement-barrier");
+    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+    let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some("0.0.0.0:0".parse().unwrap()),
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    let dht_task = dht.start();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_state = Arc::new(RwLock::new(Ed2kServerState {
+        endpoint: Some("203.0.113.20:4661".parse().unwrap()),
+        connected: true,
+        ..Ed2kServerState::default()
+    }));
+    let reachability = core.ed2k_reachability.begin_runtime();
+    let reachability_writer = reachability.writer();
+    let fallback_ip = Ipv4Addr::new(198, 51, 100, 4);
+    let server_ip = Ipv4Addr::new(203, 0, 113, 9);
+    reachability_writer.set_fallback_public_ip(fallback_ip);
+    let mut server_reachability = reachability_writer.begin_server_session().unwrap();
+    server_reachability.activate();
+    let stale_server_writer = server_reachability.writer();
+    stale_server_writer.set_server_public_ip(server_ip);
+
+    let (server_control, server_control_rx) = ed2k_server_control_channel(true);
+    let (retirement_started, retirement_started_rx) = tokio::sync::oneshot::channel();
+    let (allow_retirement, allow_retirement_rx) = tokio::sync::oneshot::channel();
+    let server_state_for_task = Arc::clone(&server_state);
+    let server_task = tokio::spawn(async move {
+        server_control_rx.wait_for_wake().await;
+        assert!(!server_control_rx.is_enabled());
+        retirement_started.send(()).unwrap();
+        allow_retirement_rx.await.unwrap();
+        server_reachability.retire();
+        *server_state_for_task.write().await = Ed2kServerState::default();
+        assert!(server_control_rx.acknowledge_disabled());
+    });
+
+    *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+        search_handle,
+        server_state: Arc::clone(&server_state),
+        server_control,
+        dht,
+        kad_nodes_dat_path: None,
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        reachability,
+        nat: Arc::new(NatManager::default()),
+        shutdown,
+        server_connect_plan: test_server_connect_plan_sender(),
+        server_task,
+        kad_firewall_recheck: None,
+        tasks: vec![dht_task],
+        download_tasks: Arc::clone(&core.ed2k_download_tasks),
+    });
+
+    let core_for_disconnect = core.clone();
+    let disconnect =
+        tokio::spawn(async move { core_for_disconnect.disconnect_ed2k_server().await.unwrap() });
+    retirement_started_rx.await.unwrap();
+
+    assert!(!disconnect.is_finished());
+    assert_eq!(core.ed2k_reachability.get(), Some(server_ip));
+    allow_retirement.send(()).unwrap();
+
+    let status = tokio::time::timeout(Duration::from_secs(1), disconnect)
+        .await
+        .expect("server disconnect should finish after retirement acknowledgment")
+        .unwrap();
+    assert!(!status.running);
+    assert_eq!(core.ed2k_reachability.get(), Some(fallback_ip));
+    let retired_state = server_state.read().await;
+    assert!(!retired_state.connected);
+    assert!(!retired_state.connecting);
+    assert_eq!(retired_state.endpoint, None);
+    drop(retired_state);
+    assert_eq!(
+        stale_server_writer.set_server_public_ip(Ipv4Addr::new(192, 0, 2, 55)),
+        emulebb_ed2k::reachability::ReachabilityUpdate::RejectedStale
+    );
+
+    let _ = core.disconnect_ed2k().await;
 }
 
 #[tokio::test]
@@ -558,14 +659,13 @@ async fn full_disconnect_waits_for_server_supervisor_retirement() {
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
         server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
-        server_enabled: Arc::new(AtomicBool::new(true)),
+        server_control: test_server_control_handle(),
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         reachability: core.ed2k_reachability.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown,
-        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
         server_connect_plan: test_server_connect_plan_sender(),
         server_task,
         kad_firewall_recheck: None,
@@ -644,14 +744,13 @@ async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() 
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
         server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
-        server_enabled: Arc::new(AtomicBool::new(true)),
+        server_control: test_server_control_handle(),
         dht,
         kad_nodes_dat_path: None,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         reachability: core.ed2k_reachability.begin_runtime(),
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
-        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
         server_connect_plan: test_server_connect_plan_sender(),
         server_task: test_server_task(),
         kad_firewall_recheck: None,
