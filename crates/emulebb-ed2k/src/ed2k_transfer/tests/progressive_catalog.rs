@@ -38,6 +38,7 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
                 control_state: None,
                 transfer_row_removed: false,
                 delivery_state: emulebb_metadata::MetadataTransferDeliveryState::NotApplicable,
+                delivery_ownership: emulebb_metadata::MetadataTransferDeliveryOwnership::None,
                 delivered_path: None,
                 source_path: Some(root.join(format!("catalog-{sequence}.bin"))),
                 source_fingerprint: Some(NativeFileFingerprint {

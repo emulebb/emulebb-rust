@@ -266,6 +266,8 @@ CREATE TABLE transfers (
     -- output path is committed.
     delivery_state TEXT NOT NULL
         CHECK(delivery_state IN ('not_applicable', 'pending', 'delivered')),
+    delivery_ownership TEXT NOT NULL DEFAULT 'none'
+        CHECK(delivery_ownership IN ('none', 'owned', 'unowned')),
     -- Absolute path identity for the completed payload materialized under a
     -- category path or the global incoming dir. NULL until delivery completes.
     delivered_path_id INTEGER REFERENCES local_paths(id),
@@ -288,9 +290,9 @@ CREATE TABLE transfers (
     delete_requested_at_ms INTEGER
         CHECK(delete_requested_at_ms IS NULL OR delete_requested_at_ms >= 0),
     CHECK(
-        (delivery_state = 'not_applicable' AND source_path_id IS NOT NULL AND delivered_path_id IS NULL)
-        OR (delivery_state = 'pending' AND source_path_id IS NULL AND delivered_path_id IS NULL)
-        OR (delivery_state = 'delivered' AND source_path_id IS NULL AND delivered_path_id IS NOT NULL)
+        (delivery_state = 'not_applicable' AND delivery_ownership = 'none' AND source_path_id IS NOT NULL AND delivered_path_id IS NULL)
+        OR (delivery_state = 'pending' AND delivery_ownership = 'none' AND source_path_id IS NULL AND delivered_path_id IS NULL)
+        OR (delivery_state = 'delivered' AND delivery_ownership IN ('owned', 'unowned') AND source_path_id IS NULL AND delivered_path_id IS NOT NULL)
     ),
     UNIQUE(known_file_id)
 );
@@ -298,16 +300,18 @@ CREATE TABLE transfers (
 CREATE TABLE delivery_attempts (
     transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
     attempt_id TEXT NOT NULL UNIQUE CHECK(length(trim(attempt_id)) > 0),
-    phase TEXT NOT NULL CHECK(phase IN ('prepared', 'staged')),
+    phase TEXT NOT NULL CHECK(phase IN ('prepared', 'staged', 'published')),
     target_path_id INTEGER NOT NULL REFERENCES local_paths(id),
     staging_path_id INTEGER NOT NULL REFERENCES local_paths(id),
     staging_fingerprint BLOB,
+    published_fingerprint BLOB,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     CHECK(target_path_id != staging_path_id),
     CHECK(
-        (phase = 'prepared' AND staging_fingerprint IS NULL)
-        OR (phase = 'staged' AND staging_fingerprint IS NOT NULL)
+        (phase = 'prepared' AND staging_fingerprint IS NULL AND published_fingerprint IS NULL)
+        OR (phase = 'staged' AND staging_fingerprint IS NOT NULL AND published_fingerprint IS NULL)
+        OR (phase = 'published' AND staging_fingerprint IS NOT NULL AND published_fingerprint IS NOT NULL)
     )
 );
 

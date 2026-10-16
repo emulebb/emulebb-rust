@@ -152,8 +152,8 @@ pub(crate) fn records_download_completion(manifest: &MetadataTransferManifest) -
 #[cfg(test)]
 mod tests {
     use crate::{
-        MetadataStore, MetadataTransferDeliveryState, MetadataTransferManifest,
-        MetadataTransferPiece, MetadataTransferRange,
+        MetadataStore, MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
+        MetadataTransferManifest, MetadataTransferPiece, MetadataTransferRange,
     };
 
     fn completed_download_manifest() -> MetadataTransferManifest {
@@ -189,6 +189,7 @@ mod tests {
             control_state: None,
             transfer_row_removed: false,
             delivery_state: MetadataTransferDeliveryState::Delivered,
+            delivery_ownership: MetadataTransferDeliveryOwnership::Owned,
             delivered_path: Some("C:\\incoming\\completed.bin".into()),
             source_path: None,
             source_fingerprint: None,
@@ -237,6 +238,7 @@ mod tests {
 
         manifest.completed = true;
         manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
+        manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
         manifest.delivered_path = None;
         manifest.source_path = Some("C:\\shared\\completed.bin".into());
         store.upsert_transfer_manifest(&manifest).unwrap();
@@ -302,6 +304,7 @@ mod tests {
         );
 
         manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+        manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
         manifest.delivered_path = None;
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert_eq!(
@@ -388,6 +391,7 @@ mod tests {
         let shared_store = MetadataStore::in_memory().unwrap();
         let mut shared_manifest = completed_download_manifest();
         shared_manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
+        shared_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
         shared_manifest.delivered_path = None;
         shared_manifest.source_path = Some("C:\\shared\\completed.bin".into());
         shared_store
@@ -405,6 +409,7 @@ mod tests {
         );
 
         shared_manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+        shared_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
         shared_manifest.source_path = None;
         shared_store
             .upsert_transfer_manifest(&shared_manifest)
