@@ -22,7 +22,13 @@
 //! `pieces.bin` is an internal short path and is used as-is.
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -424,10 +430,13 @@ impl Ed2kTransferRuntime {
 
             match install_staged_payload(&staging_path, &target_path).await? {
                 InstallOutcome::Installed => {
+                    #[cfg(test)]
+                    run_after_publish_move_hook(file_hash, &target_path);
                     let installed_fingerprint = capture_published_fingerprint(
                         verified_staging.file,
                         &target_path,
                         expected_size,
+                        expected_hash,
                     )
                     .await?;
                     anyhow::ensure!(
@@ -657,10 +666,13 @@ impl Ed2kTransferRuntime {
                 );
                 match install_staged_payload(&attempt.staging_path, &attempt.target_path).await? {
                     InstallOutcome::Installed => {
+                        #[cfg(test)]
+                        run_after_publish_move_hook(file_hash, &attempt.target_path);
                         let published_fingerprint = capture_published_fingerprint(
                             verified_staging.file,
                             &attempt.target_path,
                             manifest.file_size,
+                            expected_hash,
                         )
                         .await?;
                         anyhow::ensure!(
@@ -997,9 +1009,10 @@ async fn open_verified_staging_file(
 }
 
 async fn capture_published_fingerprint(
-    file: File,
+    mut file: File,
     target_path: &Path,
     expected_size: u64,
+    expected_hash: [u8; 16],
 ) -> Result<NativeFileFingerprint> {
     let target_path = long_path(target_path);
     tokio::task::spawn_blocking(move || -> Result<NativeFileFingerprint> {
@@ -1017,14 +1030,62 @@ async fn capture_published_fingerprint(
             target_path.display()
         );
         anyhow::ensure!(
-            super::ingest::native_file_fingerprint(&target_path).as_ref() == Some(&fingerprint),
+            compute_ed2k_hash_from_handle(&mut file, expected_size)? == expected_hash,
+            "published delivery failed verification: {}",
+            target_path.display()
+        );
+        let verified_metadata = file.metadata()?;
+        let verified_fingerprint =
+            super::ingest::native_file_fingerprint_from_handle(&file, &verified_metadata)
+                .with_context(|| {
+                    format!(
+                        "published delivery lost its stable native identity: {}",
+                        target_path.display()
+                    )
+                })?;
+        anyhow::ensure!(
+            fingerprint == verified_fingerprint,
+            "published delivery changed during verification: {}",
+            target_path.display()
+        );
+        anyhow::ensure!(
+            super::ingest::native_file_fingerprint(&target_path).as_ref()
+                == Some(&verified_fingerprint),
             "published delivery path does not identify the staged object: {}",
             target_path.display()
         );
-        Ok(fingerprint)
+        Ok(verified_fingerprint)
     })
     .await
     .context("delivery publication fingerprint task failed")?
+}
+
+#[cfg(test)]
+type AfterPublishMoveHook = Box<dyn FnOnce(&Path) + Send>;
+
+#[cfg(test)]
+fn after_publish_move_hooks() -> &'static Mutex<HashMap<String, AfterPublishMoveHook>> {
+    static HOOKS: OnceLock<Mutex<HashMap<String, AfterPublishMoveHook>>> = OnceLock::new();
+    HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(super) fn set_after_publish_move_hook(file_hash: &str, hook: AfterPublishMoveHook) {
+    after_publish_move_hooks()
+        .lock()
+        .expect("delivery after-publish-move hook mutex poisoned")
+        .insert(file_hash.to_owned(), hook);
+}
+
+#[cfg(test)]
+fn run_after_publish_move_hook(file_hash: &str, target_path: &Path) {
+    let hook = after_publish_move_hooks()
+        .lock()
+        .expect("delivery after-publish-move hook mutex poisoned")
+        .remove(file_hash);
+    if let Some(hook) = hook {
+        hook(target_path);
+    }
 }
 
 #[cfg(windows)]
