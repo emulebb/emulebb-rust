@@ -87,6 +87,27 @@ fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
 }
 
 #[test]
+fn owned_delivery_requires_exact_size_fingerprint_authority() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
+    manifest.delivered_path = Some("/incoming/Delivery.Attempt.bin".into());
+
+    assert!(store.upsert_transfer_manifest(&manifest).is_err());
+    manifest.source_fingerprint = Some(fingerprint(manifest.file_size + 1, 92));
+    assert!(store.upsert_transfer_manifest(&manifest).is_err());
+    manifest.source_fingerprint = Some(fingerprint(manifest.file_size, 93));
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
+}
+
+#[test]
 fn transfer_manifest_waits_for_existing_writer_before_reading_snapshot() {
     let path = unique_store_path("manifest-immediate-transaction");
     remove_store_files(&path);

@@ -292,7 +292,8 @@ CREATE TABLE transfers (
     CHECK(
         (delivery_state = 'not_applicable' AND delivery_ownership = 'none' AND source_path_id IS NOT NULL AND delivered_path_id IS NULL)
         OR (delivery_state = 'pending' AND delivery_ownership = 'none' AND source_path_id IS NULL AND delivered_path_id IS NULL)
-        OR (delivery_state = 'delivered' AND delivery_ownership IN ('owned', 'unowned') AND source_path_id IS NULL AND delivered_path_id IS NOT NULL)
+        OR (delivery_state = 'delivered' AND delivery_ownership = 'owned' AND source_path_id IS NULL AND delivered_path_id IS NOT NULL AND source_fingerprint IS NOT NULL)
+        OR (delivery_state = 'delivered' AND delivery_ownership = 'unowned' AND source_path_id IS NULL AND delivered_path_id IS NOT NULL)
     ),
     UNIQUE(known_file_id)
 );

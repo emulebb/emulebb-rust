@@ -2802,10 +2802,17 @@ fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
         (MetadataTransferDeliveryState::Pending, MetadataTransferDeliveryOwnership::None) => {
             manifest.source_path.is_none() && manifest.delivered_path.is_none()
         }
-        (
-            MetadataTransferDeliveryState::Delivered,
-            MetadataTransferDeliveryOwnership::Owned | MetadataTransferDeliveryOwnership::Unowned,
-        ) => manifest.source_path.is_none() && manifest.delivered_path.is_some(),
+        (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Owned) => {
+            manifest.source_path.is_none()
+                && manifest.delivered_path.is_some()
+                && manifest
+                    .source_fingerprint
+                    .as_ref()
+                    .is_some_and(|fingerprint| fingerprint.size_bytes == manifest.file_size)
+        }
+        (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Unowned) => {
+            manifest.source_path.is_none() && manifest.delivered_path.is_some()
+        }
         _ => false,
     };
     if !valid {
