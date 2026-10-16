@@ -330,7 +330,7 @@ async fn published_attempt_recovers_with_delete_ownership() {
 }
 
 #[tokio::test]
-async fn prepared_attempt_reclaims_only_its_exact_staging_path() {
+async fn prepared_attempt_preserves_unproven_staging_occupant() {
     let root = unique_test_dir("ed2k-deliver-recover-prepared");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let hash = ingest_completed(&runtime, &root, "Prepared.mkv").await;
@@ -359,8 +359,29 @@ async fn prepared_attempt_reclaims_only_its_exact_staging_path() {
     );
     assert_eq!(fs::read(&target_path).unwrap(), payload);
     assert_eq!(fs::read(&delivered).unwrap(), payload);
-    assert!(!staging_path.exists());
+    assert_eq!(fs::read(&staging_path).unwrap(), b"partial");
     assert_eq!(fs::read(&legacy_temp).unwrap(), b"unproven legacy artifact");
+}
+
+#[tokio::test]
+async fn destructive_delete_preserves_prepared_staging_occupant() {
+    let root = unique_test_dir("ed2k-delete-prepared-attempt");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Prepared Delete.mkv").await;
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Prepared Delete.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, b"unproven occupant").unwrap();
+
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert_eq!(fs::read(&staging_path).unwrap(), b"unproven occupant");
+    assert!(!target_path.exists());
 }
 
 #[tokio::test]
