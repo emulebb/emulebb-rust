@@ -1,12 +1,30 @@
 use std::path::PathBuf;
 
 use crate::NativeFileFingerprint;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataTransferDeliveryState {
     NotApplicable,
     Pending,
     Delivered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataTransferDeliveryAttemptPhase {
+    Prepared,
+    Staged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferDeliveryAttempt {
+    pub file_hash: String,
+    pub attempt_id: Uuid,
+    pub phase: MetadataTransferDeliveryAttemptPhase,
+    pub target_path: PathBuf,
+    pub staging_path: PathBuf,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

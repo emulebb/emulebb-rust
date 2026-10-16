@@ -295,6 +295,19 @@ CREATE TABLE transfers (
     UNIQUE(known_file_id)
 );
 
+CREATE TABLE delivery_attempts (
+    transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL UNIQUE CHECK(length(trim(attempt_id)) > 0),
+    phase TEXT NOT NULL CHECK(phase IN ('prepared', 'staged')),
+    target_path_id INTEGER NOT NULL REFERENCES local_paths(id),
+    staging_path_id INTEGER NOT NULL REFERENCES local_paths(id),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    CHECK(target_path_id != staging_path_id)
+);
+
+CREATE INDEX idx_delivery_attempts_phase ON delivery_attempts(phase, transfer_id);
+
 CREATE TABLE shared_file_sources (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
