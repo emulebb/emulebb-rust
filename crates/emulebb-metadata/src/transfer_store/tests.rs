@@ -92,6 +92,12 @@ fn transfer_manifest_roundtrips_sql_tables() {
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert!(store.managed_download_transfer_hashes().unwrap().is_empty());
     assert!(
+        store
+            .managed_download_transfer_manifests()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
         !store
             .managed_download_transfer_exists(&manifest.file_hash)
             .unwrap()
@@ -322,6 +328,12 @@ fn transfer_manifest_roundtrips_sql_tables() {
     );
     store.unmark_unshared_file(&manifest.file_hash).unwrap();
     assert_eq!(store.transfer_manifests().unwrap(), vec![manifest.clone()]);
+    assert!(
+        store
+            .managed_download_transfer_manifests()
+            .unwrap()
+            .is_empty()
+    );
 
     manifest.completed = false;
     manifest.final_rehash_pending = true;
@@ -331,6 +343,10 @@ fn transfer_manifest_roundtrips_sql_tables() {
     manifest.source_path = None;
     manifest.source_fingerprint = None;
     store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store.managed_download_transfer_manifests().unwrap(),
+        vec![manifest.clone()]
+    );
     assert_eq!(
         store
             .transfer_manifest_by_hash(&manifest.file_hash)
@@ -750,7 +766,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
 fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     let store = MetadataStore::in_memory().unwrap();
     let hash = "00112233445566778899aabbccddeeff";
-    let manifest = MetadataTransferManifest {
+    let mut manifest = MetadataTransferManifest {
         file_hash: hash.to_string(),
         display_name: "Delete.Intent.bin".to_string(),
         file_size: 1,
@@ -800,6 +816,14 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         vec![manifest.clone()]
     );
     assert!(store.incomplete_transfer_manifests().unwrap().is_empty());
+    manifest.transfer_row_removed = true;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store.managed_download_transfer_manifests().unwrap(),
+        vec![manifest.clone()]
+    );
+    manifest.transfer_row_removed = false;
+    store.upsert_transfer_manifest(&manifest).unwrap();
     assert_eq!(store.completed_transfer_catalog_entries().unwrap().len(), 1);
     assert_eq!(store.completed_delivered_reuse_entries().unwrap().len(), 1);
     assert_eq!(store.completed_transfer_publish_entries().unwrap().len(), 1);
@@ -871,6 +895,12 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     assert!(store.transfer_manifests().unwrap().is_empty());
     assert!(store.active_transfer_manifests().unwrap().is_empty());
     assert!(store.incomplete_transfer_manifests().unwrap().is_empty());
+    assert!(
+        store
+            .managed_download_transfer_manifests()
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         store
             .completed_transfer_catalog_entries()
