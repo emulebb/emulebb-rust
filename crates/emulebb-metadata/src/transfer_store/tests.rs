@@ -90,6 +90,12 @@ fn transfer_manifest_roundtrips_sql_tables() {
     assert!(store.upsert_transfer_manifest(&invalid).is_err());
 
     store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(store.managed_download_transfer_hashes().unwrap().is_empty());
+    assert!(
+        !store
+            .managed_download_transfer_exists(&manifest.file_hash)
+            .unwrap()
+    );
     assert_eq!(
         store.active_transfer_manifests().unwrap(),
         vec![manifest.clone()]
@@ -462,6 +468,7 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
     manifest.source_path = Some("/library/Beta.bin".into());
     manifest.source_fingerprint = Some(fingerprint(1024, 1));
     store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(store.managed_download_transfer_hashes().unwrap().is_empty());
 
     assert_eq!(
         store.share_in_place_reload_entries().unwrap(),
@@ -777,6 +784,11 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         source_fingerprint: Some(fingerprint(1, 9)),
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store.managed_download_transfer_hashes().unwrap(),
+        vec![hash.to_string()]
+    );
+    assert!(store.managed_download_transfer_exists(hash).unwrap());
 
     assert_eq!(
         store.transfer_manifest_by_hash(hash).unwrap(),
@@ -842,6 +854,11 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         store.pending_transfer_deletion_hashes().unwrap(),
         vec![hash.to_string()]
     );
+    assert_eq!(
+        store.managed_download_transfer_hashes().unwrap(),
+        vec![hash.to_string()]
+    );
+    assert!(store.managed_download_transfer_exists(hash).unwrap());
     assert!(store.transfer_deletion_requested(hash).unwrap());
     assert!(store.transfer_timestamps_by_hash(hash).unwrap().is_none());
     assert!(store.transfer_manifest_by_hash(hash).unwrap().is_none());
@@ -943,6 +960,8 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     assert!(store.finalize_transfer_deletion(hash).unwrap());
     assert!(!store.finalize_transfer_deletion(hash).unwrap());
     assert!(store.pending_transfer_deletion_hashes().unwrap().is_empty());
+    assert!(store.managed_download_transfer_hashes().unwrap().is_empty());
+    assert!(!store.managed_download_transfer_exists(hash).unwrap());
     assert!(store.transfer_manifest_by_hash(hash).unwrap().is_none());
     assert!(
         store

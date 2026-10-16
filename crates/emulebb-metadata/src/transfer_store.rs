@@ -1653,6 +1653,45 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
+    /// Return every hash which owns an internal download directory. Share-in-
+    /// place rows serve their source path directly and therefore do not own a
+    /// path beneath the transfer root. Pending deletion rows remain owners
+    /// until their strict filesystem cleanup finalizes the metadata row.
+    pub fn managed_download_transfer_hashes(&self) -> Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash))
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE transfers.source_path_id IS NULL
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn managed_download_transfer_exists(&self, file_hash: &str) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        self.connection()?
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM known_files
+                    JOIN transfers ON transfers.known_file_id = known_files.id
+                    WHERE known_files.ed2k_hash = ?1
+                      AND transfers.source_path_id IS NULL
+                )
+                "#,
+                params![hash],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     /// Commit metadata removal only for a transfer with a durable destructive
     /// intent. A missing row or a row without intent is an idempotent no-op.
     pub fn finalize_transfer_deletion(&self, file_hash: &str) -> Result<bool> {

@@ -193,6 +193,16 @@ struct ServableSharedHashCache {
     hashes: Option<Arc<HashSet<String>>>,
 }
 
+/// Startup reconciliation summary for canonical hash paths beneath the
+/// internal transfer root which have no owning download metadata row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ed2kTransferRootReconciliation {
+    /// Empty or retired pre-SQL paths safely removed.
+    pub reclaimed_paths: usize,
+    /// Non-empty, non-directory, or unreadable paths preserved for repair.
+    pub preserved_collisions: usize,
+}
+
 /// Runtime owner for ED2K transfer manifests, piece-store payloads, and the
 /// transfer-backed shared catalog.
 #[derive(Debug)]

@@ -13,6 +13,12 @@ impl EmulebbCore {
             .await
     }
 
+    /// Reclaim only safe crash residue beneath the internal transfer root and
+    /// report every preserved unmanaged collision before profile exposure.
+    pub async fn reconcile_transfer_root(&self) -> Result<Ed2kTransferRootReconciliation> {
+        self.ed2k_transfers.reconcile_transfer_root().await
+    }
+
     pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
         let cached = self.state.lock().await.transfers.get(hash).cloned();
         let mut transfer = match cached {

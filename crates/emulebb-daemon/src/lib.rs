@@ -768,6 +768,19 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             "recovered pending destructive transfer deletions before REST startup"
         );
     }
+    let transfer_root_reconciliation = core.reconcile_transfer_root().await?;
+    if transfer_root_reconciliation.reclaimed_paths > 0 {
+        info!(
+            reclaimed_paths = transfer_root_reconciliation.reclaimed_paths,
+            "reclaimed unmanaged empty transfer paths before REST startup"
+        );
+    }
+    if transfer_root_reconciliation.preserved_collisions > 0 {
+        warn!(
+            preserved_collisions = transfer_root_reconciliation.preserved_collisions,
+            "preserved unmanaged transfer-root collisions; affected hashes cannot be downloaded until repaired"
+        );
+    }
     let hydrated_transfers = core.hydrate_persisted_transfer_rows().await?;
     if hydrated_transfers > 0 {
         info!(
