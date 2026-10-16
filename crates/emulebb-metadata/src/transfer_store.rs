@@ -430,6 +430,14 @@ impl super::MetadataStore {
         self.transfer_manifests_filtered("AND known_files.completed = 0")
     }
 
+    /// Every persisted download whose canonical payload is owned by the
+    /// internal transfer root. Includes incomplete, completed, and
+    /// operator-hidden rows; excludes share-in-place files and pending
+    /// destructive deletions.
+    pub fn managed_download_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
+        self.transfer_manifests_filtered("AND transfers.source_path_id IS NULL")
+    }
+
     fn transfer_manifests_filtered(
         &self,
         where_clause: &str,
