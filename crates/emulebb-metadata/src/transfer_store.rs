@@ -794,8 +794,14 @@ impl super::MetadataStore {
                 last_seen_ms = ?4,
                 updated_at_ms = ?4
             WHERE id = ?1
+              AND EXISTS (
+                  SELECT 1
+                  FROM transfers
+                  WHERE transfers.known_file_id = ?1
+                    AND transfers.source_path_id = ?5
+              )
             "#,
-            params![known_file_id, display_name, content_type, now],
+            params![known_file_id, display_name, content_type, now, new_path_id],
         )?;
         tx.execute(
             "DELETE FROM shared_file_scan_failures WHERE path_id IN (?1, ?2)",
@@ -2081,7 +2087,7 @@ fn imported_aich_hashset(conn: &rusqlite::Connection, imported_id: i64) -> Resul
     )
 }
 
-fn optional_fingerprint_from_row(
+pub(crate) fn optional_fingerprint_from_row(
     row: &rusqlite::Row<'_>,
     index: usize,
 ) -> rusqlite::Result<Option<NativeFileFingerprint>> {

@@ -186,10 +186,18 @@ impl Ed2kTransferRuntime {
         content_type: &str,
     ) -> Result<bool> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
+        let file_hash = parsed_hash.to_string();
+        let old_source_path = long_path(old_source_path);
+        let new_source_path = long_path(new_source_path);
+        let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
+        let _guard = self.lock_manifest(&file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
+        let relocated_canonical_source =
+            manifest.source_path.as_deref() == Some(old_source_path.as_path());
         let metadata = self.metadata.clone();
-        let file_hash_owned = file_hash.to_owned();
-        let old_source_path = old_source_path.to_path_buf();
-        let new_source_path = new_source_path.to_path_buf();
+        let file_hash_owned = file_hash.clone();
+        let persisted_new_source_path = new_source_path.clone();
+        let persisted_source_fingerprint = source_fingerprint.clone();
         let display_name_owned = display_name.to_owned();
         let persisted_display_name = display_name_owned.clone();
         let content_type = content_type.to_owned();
@@ -210,7 +218,19 @@ impl Ed2kTransferRuntime {
             return Ok(false);
         }
 
-        self.invalidate_payload_handle(file_hash);
+        if !relocated_canonical_source {
+            return Ok(true);
+        }
+
+        manifest.display_name = display_name_owned.clone();
+        manifest.source_path = Some(persisted_new_source_path);
+        manifest.source_fingerprint = persisted_source_fingerprint;
+        self.mark_manifest_persisted_unlocked(&manifest).await;
+        self.invalidate_payload_handle(&file_hash);
+        if manifest.source_fingerprint.is_none() {
+            self.remove_verified_catalog_entry(&file_hash).await;
+            return Ok(true);
+        }
         let mut display_name_changed = false;
         self.shared_catalog
             .write()

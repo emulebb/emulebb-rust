@@ -1,3 +1,4 @@
+use super::piece_store::Ed2kIncompletePayloadFailure;
 use super::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState,
     LocalIngestProgressStage, PAYLOAD_FILE_NAME, new_transfer_job,
@@ -577,6 +578,155 @@ async fn partfile_serves_complete_parts_while_downloading() {
         .await
         .unwrap();
     assert_eq!(served, Some(vec![4u8; ED2K_EMBLOCK_SIZE as usize]));
+}
+
+#[tokio::test]
+async fn partfile_rehashes_verified_part_before_serving_replaced_bytes() {
+    let root = unique_test_dir("ed2k-transfer-partfile-replaced-part");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let last_part_len = ED2K_PART_SIZE / 2;
+    let file_size = ED2K_PART_SIZE + last_part_len;
+    let first_piece = vec![0x31; ED2K_PART_SIZE as usize];
+    let last_piece = vec![0x72; last_part_len as usize];
+    let first_piece_hash: [u8; 16] = Md4::digest(&first_piece).into();
+    let last_piece_hash: [u8; 16] = Md4::digest(&last_piece).into();
+    let mut file_hasher = Md4::new();
+    file_hasher.update(first_piece_hash);
+    file_hasher.update(last_piece_hash);
+    let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
+    let job = new_transfer_job(file_hash, "partfile.iso".to_string(), file_size);
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .await
+        .unwrap();
+
+    let payload_path = runtime.payload_path(&job.file_hash);
+    let detached_path = payload_path.with_extension("detached");
+    fs::rename(&payload_path, &detached_path).unwrap();
+    fs::write(&payload_path, vec![0xff; first_piece.len()]).unwrap();
+
+    let error = runtime
+        .read_verified_range(&file_hash, 0, ED2K_EMBLOCK_SIZE)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("verified ED2K part 0 changed before upload serving")
+    );
+    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
+    assert_eq!(manifest.pieces[0].bytes_written, 0);
+    assert!(manifest.pieces[0].ich_corrupted);
+    assert!(manifest.verified_ranges.is_empty());
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+
+    runtime
+        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(&payload_path).unwrap()[..first_piece.len()],
+        first_piece
+    );
+    assert_eq!(fs::read(detached_path).unwrap(), first_piece);
+}
+
+#[tokio::test]
+async fn missing_incomplete_payload_requeues_every_advertised_part() {
+    let root = unique_test_dir("ed2k-transfer-partfile-missing-payload");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let last_part_len = ED2K_PART_SIZE / 2;
+    let first_piece = vec![0x2a; ED2K_PART_SIZE as usize];
+    let last_piece = vec![0x6b; last_part_len as usize];
+    let first_piece_hash: [u8; 16] = Md4::digest(&first_piece).into();
+    let last_piece_hash: [u8; 16] = Md4::digest(&last_piece).into();
+    let mut file_hasher = Md4::new();
+    file_hasher.update(first_piece_hash);
+    file_hasher.update(last_piece_hash);
+    let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
+    let job = new_transfer_job(
+        file_hash,
+        "missing-partfile.iso".to_string(),
+        first_piece.len() as u64 + last_piece.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .await
+        .unwrap();
+    runtime.invalidate_payload_handle(&job.file_hash);
+    fs::remove_file(runtime.payload_path(&job.file_hash)).unwrap();
+
+    assert!(
+        runtime
+            .read_verified_range(&file_hash, 0, ED2K_EMBLOCK_SIZE)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
+    assert!(!manifest.pieces[0].ich_corrupted);
+    assert!(manifest.verified_ranges.is_empty());
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+}
+
+#[tokio::test]
+async fn stale_missing_payload_failure_preserves_restored_verified_parts() {
+    let root = unique_test_dir("ed2k-transfer-partfile-restored-payload");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let last_part_len = ED2K_PART_SIZE / 2;
+    let first_piece = vec![0x19; ED2K_PART_SIZE as usize];
+    let last_piece = vec![0x5c; last_part_len as usize];
+    let first_piece_hash: [u8; 16] = Md4::digest(&first_piece).into();
+    let last_piece_hash: [u8; 16] = Md4::digest(&last_piece).into();
+    let mut file_hasher = Md4::new();
+    file_hasher.update(first_piece_hash);
+    file_hasher.update(last_piece_hash);
+    let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
+    let job = new_transfer_job(
+        file_hash,
+        "restored-partfile.iso".to_string(),
+        first_piece.len() as u64 + last_piece.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .await
+        .unwrap();
+
+    let payload_path = runtime.payload_path(&job.file_hash);
+    let temporary_path = payload_path.with_extension("temporarily-missing");
+    fs::rename(&payload_path, &temporary_path).unwrap();
+    let stale_failure = Ed2kIncompletePayloadFailure {
+        file_hash: job.file_hash.clone(),
+        piece_index: None,
+        reason: "was temporarily unavailable".to_string(),
+    };
+    fs::rename(&temporary_path, &payload_path).unwrap();
+    runtime
+        .reconcile_incomplete_payload_failure(&stale_failure)
+        .await
+        .unwrap();
+
+    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
+    assert_eq!(manifest.verified_ranges.len(), 1);
+    assert_eq!(runtime.shared_catalog_count().await, 1);
 }
 
 #[tokio::test]

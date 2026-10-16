@@ -212,10 +212,7 @@ impl Ed2kTransferRuntime {
         else {
             return Ok(false);
         };
-        if manifest.completed
-            || manifest.final_rehash_pending
-            || manifest.verified_ranges.is_empty()
-        {
+        if manifest.completed || !manifest_has_servable_payload_authority(&manifest) {
             return Ok(false);
         }
         let entry = Ed2kSharedEntry::from_manifest(&manifest);
@@ -252,9 +249,8 @@ impl Ed2kTransferRuntime {
         };
         // Build the replacement entry (if any) before taking the write lock so the
         // lock hold covers only the in-place upsert.
-        let mut new_entry = (!manifest.final_rehash_pending
-            && (manifest.completed || !manifest.verified_ranges.is_empty()))
-        .then(|| Ed2kSharedEntry::from_manifest(manifest));
+        let mut new_entry = manifest_has_servable_payload_authority(manifest)
+            .then(|| Ed2kSharedEntry::from_manifest(manifest));
         if let Some(entry) = new_entry.as_mut() {
             let cached = self
                 .metadata
@@ -321,8 +317,8 @@ impl Ed2kTransferRuntime {
 }
 
 fn hydrated_entry_matches_manifest(entry: &Ed2kSharedEntry, manifest: &Ed2kResumeManifest) -> bool {
-    manifest.completed
-        && !manifest.final_rehash_pending
+    manifest_has_servable_payload_authority(manifest)
+        && manifest.completed
         && entry.verified_complete
         && entry.file_hash == manifest.file_hash
         && entry.display_name == manifest.display_name
@@ -332,6 +328,20 @@ fn hydrated_entry_matches_manifest(entry: &Ed2kSharedEntry, manifest: &Ed2kResum
         && entry.auto_upload_priority == manifest.auto_upload_priority
         && entry.comment == manifest.comment
         && entry.rating == manifest.rating
+}
+
+fn manifest_has_servable_payload_authority(manifest: &Ed2kResumeManifest) -> bool {
+    if manifest.final_rehash_pending {
+        return false;
+    }
+    if !manifest.completed {
+        return manifest.md4_hashset_acquired && !manifest.verified_ranges.is_empty();
+    }
+    if manifest.source_path.is_some() {
+        manifest.source_fingerprint.is_some()
+    } else {
+        manifest.payload_fingerprint.is_some()
+    }
 }
 
 fn dedupe_entries(entries: Vec<Ed2kSharedEntry>) -> Vec<Ed2kSharedEntry> {

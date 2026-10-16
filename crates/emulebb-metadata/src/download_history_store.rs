@@ -4,6 +4,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::{
     MetadataCurrentSharedFile, MetadataDownloadHistoryEntry, native_path::path_from_row,
     store::decode_fixed_hex, transfer_model::MetadataTransferManifest,
+    transfer_store::optional_fingerprint_from_row,
 };
 
 impl super::MetadataStore {
@@ -48,7 +49,8 @@ impl super::MetadataStore {
         let mut statement = conn.prepare_cached(
             r#"
             SELECT known_files.display_name, shared_file_sources.file_size,
-                   local_paths.platform, local_paths.native_path
+                   local_paths.platform, local_paths.native_path,
+                   shared_file_sources.source_fingerprint
             FROM shared_file_sources
             JOIN known_files ON known_files.id = shared_file_sources.known_file_id
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -63,6 +65,7 @@ impl super::MetadataStore {
                 display_name: row.get(0)?,
                 file_size: row.get::<_, i64>(1)? as u64,
                 source_path: path_from_row(row, 2, 3)?,
+                source_fingerprint: optional_fingerprint_from_row(row, 4)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()

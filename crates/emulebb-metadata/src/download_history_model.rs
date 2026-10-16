@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::NativeFileFingerprint;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataDownloadHistoryEntry {
     pub file_hash: String,
@@ -15,4 +17,5 @@ pub struct MetadataCurrentSharedFile {
     pub display_name: String,
     pub file_size: u64,
     pub source_path: PathBuf,
+    pub source_fingerprint: Option<NativeFileFingerprint>,
 }

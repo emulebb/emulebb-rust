@@ -1,10 +1,12 @@
 //! Piece claim, persistence, and verified-range IO for ED2K transfers.
 
-use std::{path::PathBuf, time::Instant};
+use std::{collections::BTreeSet, path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
-use tracing::debug;
+use emulebb_metadata::NativeFileFingerprint;
+use md4::{Digest, Md4};
+use tracing::{debug, warn};
 
 use crate::long_path::long_path;
 
@@ -17,6 +19,111 @@ use super::{
 
 const UPLOAD_READ_AHEAD_BYTES: u64 = ED2K_EMBLOCK_SIZE * 3;
 
+struct IncompletePayloadAuthority {
+    file_hash: String,
+    file_size: u64,
+    piece_size: u64,
+    part_hashes: Vec<[u8; 16]>,
+}
+
+impl IncompletePayloadAuthority {
+    fn from_manifest(manifest: &Ed2kResumeManifest) -> Result<Self> {
+        anyhow::ensure!(
+            manifest.md4_hashset_acquired,
+            "incomplete ED2K payload has verified ranges without an MD4 hashset"
+        );
+        let part_hashes = if manifest.md4_hashset.is_empty() {
+            vec![
+                manifest
+                    .file_hash
+                    .parse::<Ed2kHash>()
+                    .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
+                    .0,
+            ]
+        } else {
+            manifest
+                .md4_hashset
+                .iter()
+                .map(|hash| {
+                    let bytes = hex::decode(hash)
+                        .with_context(|| format!("invalid stored MD4 hashset entry {hash}"))?;
+                    bytes
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("stored MD4 hashset entry has wrong length"))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        Ok(Self {
+            file_hash: manifest.file_hash.clone(),
+            file_size: manifest.file_size,
+            piece_size: manifest.piece_size,
+            part_hashes,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct Ed2kIncompletePayloadFailure {
+    pub(super) file_hash: String,
+    pub(super) piece_index: Option<u32>,
+    pub(super) reason: String,
+}
+
+impl std::fmt::Display for Ed2kIncompletePayloadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.piece_index {
+            Some(piece_index) => write!(
+                formatter,
+                "verified ED2K part {piece_index} {}",
+                self.reason
+            ),
+            None => write!(formatter, "verified ED2K payload {}", self.reason),
+        }
+    }
+}
+
+impl std::error::Error for Ed2kIncompletePayloadFailure {}
+
+#[derive(Clone)]
+enum VerifiedPayloadAuthority {
+    ManagedIncomplete,
+    ManagedCompleted {
+        expected: Option<NativeFileFingerprint>,
+    },
+    ManifestSource {
+        path: PathBuf,
+        expected: Option<NativeFileFingerprint>,
+    },
+    SharedFallback {
+        expected: NativeFileFingerprint,
+    },
+}
+
+impl VerifiedPayloadAuthority {
+    fn expected_fingerprint(&self) -> Option<&NativeFileFingerprint> {
+        match self {
+            Self::ManagedIncomplete => None,
+            Self::ManagedCompleted { expected } | Self::ManifestSource { expected, .. } => {
+                expected.as_ref()
+            }
+            Self::SharedFallback { expected } => Some(expected),
+        }
+    }
+
+    const fn requires_fingerprint(&self) -> bool {
+        !matches!(self, Self::ManagedIncomplete)
+    }
+
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::ManagedIncomplete => "managed_incomplete",
+            Self::ManagedCompleted { .. } => "managed_completed",
+            Self::ManifestSource { .. } => "manifest_source",
+            Self::SharedFallback { .. } => "shared_fallback",
+        }
+    }
+}
+
 /// Verified upload reader for one local file.
 ///
 /// Holds a single open payload handle plus a verified-range snapshot so one
@@ -24,6 +131,8 @@ const UPLOAD_READ_AHEAD_BYTES: u64 = ED2K_EMBLOCK_SIZE * 3;
 /// reopening the same file or reloading the manifest for every fragment.
 pub(crate) struct Ed2kVerifiedRangeReader {
     file: tokio::fs::File,
+    expected_fingerprint: Option<NativeFileFingerprint>,
+    incomplete_authority: Option<IncompletePayloadAuthority>,
     verified_ranges: Vec<Ed2kSharedRange>,
     cache_start: u64,
     cache: Vec<u8>,
@@ -57,6 +166,9 @@ impl Ed2kVerifiedRangeReader {
             self.cache_hit_count = self.cache_hit_count.saturating_add(1);
             return Ok(Some(bytes));
         }
+        if self.incomplete_authority.is_some() {
+            return self.read_cryptographically_verified_range(start, end).await;
+        }
 
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let requested_len = end.saturating_sub(start);
@@ -70,6 +182,10 @@ impl Ed2kVerifiedRangeReader {
         self.cache_start = start;
         self.cache = vec![0u8; usize::try_from(read_end.saturating_sub(start)).unwrap_or(0)];
         self.file.read_exact(&mut self.cache).await?;
+        if let Err(error) = self.ensure_payload_identity_unchanged().await {
+            self.cache.clear();
+            return Err(error);
+        }
         self.cache_miss_count = self.cache_miss_count.saturating_add(1);
         self.disk_read_bytes = self
             .disk_read_bytes
@@ -79,6 +195,137 @@ impl Ed2kVerifiedRangeReader {
             self.disk_read_count = self.disk_read_count.saturating_add(1);
         }
         Ok(self.read_cached_range(start, end))
+    }
+
+    async fn read_cryptographically_verified_range(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        anyhow::ensure!(end >= start, "invalid descending ED2K upload range");
+        if start == end {
+            return Ok(Some(Vec::new()));
+        }
+        let (file_size, piece_size) = {
+            let authority = self
+                .incomplete_authority
+                .as_ref()
+                .context("missing incomplete ED2K payload authority")?;
+            (authority.file_size, authority.piece_size)
+        };
+        anyhow::ensure!(
+            piece_size != 0,
+            "incomplete ED2K payload has zero piece size"
+        );
+
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let first_piece = start / piece_size;
+        let last_piece = end.saturating_sub(1) / piece_size;
+        let mut response = Vec::with_capacity(usize::try_from(end - start).unwrap_or(0));
+        for piece_index in first_piece..=last_piece {
+            let piece_index = u32::try_from(piece_index)
+                .context("ED2K part index exceeds the supported range")?;
+            let part_hash_index = usize::try_from(piece_index)
+                .context("ED2K part index does not fit this platform")?;
+            let expected_hash = *self
+                .incomplete_authority
+                .as_ref()
+                .and_then(|authority| authority.part_hashes.get(part_hash_index))
+                .with_context(|| format!("missing MD4 hashset entry for part {piece_index}"))?;
+            let piece_start = u64::from(piece_index).saturating_mul(piece_size);
+            let piece_len = expected_piece_length(file_size, piece_size, u64::from(piece_index));
+            anyhow::ensure!(piece_len != 0, "invalid empty ED2K part {piece_index}");
+            let piece_end = piece_start.saturating_add(piece_len);
+            let mut piece_bytes = vec![0u8; usize::try_from(piece_len).unwrap_or(0)];
+            self.file
+                .seek(std::io::SeekFrom::Start(piece_start))
+                .await
+                .map_err(|error| Ed2kIncompletePayloadFailure {
+                    file_hash: self
+                        .incomplete_authority
+                        .as_ref()
+                        .map(|authority| authority.file_hash.clone())
+                        .unwrap_or_default(),
+                    piece_index: Some(piece_index),
+                    reason: format!("could not seek before upload serving: {error}"),
+                })?;
+            self.file
+                .read_exact(&mut piece_bytes)
+                .await
+                .map_err(|error| Ed2kIncompletePayloadFailure {
+                    file_hash: self
+                        .incomplete_authority
+                        .as_ref()
+                        .map(|authority| authority.file_hash.clone())
+                        .unwrap_or_default(),
+                    piece_index: Some(piece_index),
+                    reason: format!("could not be read for upload serving: {error}"),
+                })?;
+            // The contiguous partfile is mutable while later parts download, so
+            // file-wide timestamps cannot authorize its already-verified ranges.
+            // Snapshot and hash the whole requested part instead: the returned
+            // bytes then come from the exact buffer whose MD4 was accepted.
+            let (piece_bytes, digest) = tokio::task::spawn_blocking(move || {
+                let digest: [u8; 16] = Md4::digest(&piece_bytes).into();
+                (piece_bytes, digest)
+            })
+            .await
+            .context("ED2K verified upload part hash task panicked")?;
+            if digest != expected_hash {
+                self.cache.clear();
+                let file_hash = self
+                    .incomplete_authority
+                    .as_ref()
+                    .context("missing incomplete ED2K payload authority")?
+                    .file_hash
+                    .clone();
+                return Err(Ed2kIncompletePayloadFailure {
+                    file_hash,
+                    piece_index: Some(piece_index),
+                    reason: "changed before upload serving".to_string(),
+                }
+                .into());
+            }
+
+            let copy_start = start.max(piece_start).saturating_sub(piece_start);
+            let copy_end = end.min(piece_end).saturating_sub(piece_start);
+            let copy_start = usize::try_from(copy_start)
+                .context("ED2K upload range start does not fit this platform")?;
+            let copy_end = usize::try_from(copy_end)
+                .context("ED2K upload range end does not fit this platform")?;
+            response.extend_from_slice(
+                piece_bytes
+                    .get(copy_start..copy_end)
+                    .context("ED2K upload range exceeds its verified part")?,
+            );
+            self.cache_start = piece_start;
+            self.cache = piece_bytes;
+            self.disk_read_bytes = self.disk_read_bytes.saturating_add(piece_len);
+            #[cfg(test)]
+            {
+                self.disk_read_count = self.disk_read_count.saturating_add(1);
+            }
+        }
+        self.cache_miss_count = self.cache_miss_count.saturating_add(1);
+        Ok(Some(response))
+    }
+
+    async fn ensure_payload_identity_unchanged(&self) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(expected) = self.expected_fingerprint.as_ref() {
+            let metadata = self
+                .file
+                .metadata()
+                .await
+                .context("failed to re-inspect verified ED2K upload payload")?;
+            let current = super::ingest::native_file_fingerprint_from_unix_metadata(&metadata)
+                .context("verified ED2K upload payload lost regular-file identity")?;
+            anyhow::ensure!(
+                expected == &current,
+                "verified ED2K upload payload changed while being read"
+            );
+        }
+        Ok(())
     }
 
     fn read_cached_range(&self, start: u64, end: u64) -> Option<Vec<u8>> {
@@ -546,7 +793,27 @@ impl Ed2kTransferRuntime {
         let Some(mut reader) = self.open_verified_range_reader(file_hash).await? else {
             return Ok(None);
         };
-        reader.read_range(start, end).await
+        self.read_verified_range_with_reader(&mut reader, start, end, UPLOAD_READ_AHEAD_BYTES)
+            .await
+    }
+
+    pub(crate) async fn read_verified_range_with_reader(
+        &self,
+        reader: &mut Ed2kVerifiedRangeReader,
+        start: u64,
+        end: u64,
+        read_ahead_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        match reader
+            .read_range_with_read_ahead(start, end, read_ahead_bytes)
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                self.reconcile_verified_read_error(&error).await?;
+                Err(error)
+            }
+        }
     }
 
     pub(crate) async fn open_verified_range_reader(
@@ -558,42 +825,147 @@ impl Ed2kTransferRuntime {
         // the per-file manifest lock, then drop it before touching the payload, so
         // the file open/seek/read does not hold the lock and serialize concurrent
         // uploads/downloads against each other (FIX B4b).
-        let (payload_path, verified_ranges) = {
+        let (payload_path, verified_ranges, authority, incomplete_authority) = {
             let _guard = self.lock_manifest(&hash_hex).await;
             let manifest = self.load_manifest_unlocked(&hash_hex).await?;
             // Share-in-place: serve upload bytes straight from the original
             // on-disk file (never copied into the piece store). A real download
             // reads from the internal piece store.
-            let (payload_path, verified_ranges): (PathBuf, Vec<Ed2kSharedRange>) =
-                match manifest.source_path.as_deref() {
-                    Some(source_path) => (
-                        long_path(std::path::Path::new(source_path)),
+            match manifest.source_path.as_deref() {
+                Some(source_path) => {
+                    let payload_path = long_path(source_path);
+                    let authority = VerifiedPayloadAuthority::ManifestSource {
+                        path: payload_path.clone(),
+                        expected: manifest.source_fingerprint.clone(),
+                    };
+                    (
+                        payload_path,
                         manifest.verified_ranges.clone(),
-                    ),
-                    None if !manifest.verified_ranges.is_empty() => (
+                        authority,
+                        None,
+                    )
+                }
+                None if !manifest.verified_ranges.is_empty() => {
+                    let (authority, incomplete_authority) = if manifest.completed {
+                        (
+                            VerifiedPayloadAuthority::ManagedCompleted {
+                                expected: manifest.payload_fingerprint.clone(),
+                            },
+                            None,
+                        )
+                    } else {
+                        (
+                            VerifiedPayloadAuthority::ManagedIncomplete,
+                            Some(IncompletePayloadAuthority::from_manifest(&manifest)?),
+                        )
+                    };
+                    (
                         self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
                         manifest.verified_ranges.clone(),
+                        authority,
+                        incomplete_authority,
+                    )
+                }
+                None => match self.first_present_shared_source(&hash_hex).await? {
+                    Some(source) => (
+                        source.path,
+                        vec![Ed2kSharedRange {
+                            start: 0,
+                            end: manifest.file_size,
+                        }],
+                        VerifiedPayloadAuthority::SharedFallback {
+                            expected: source.fingerprint,
+                        },
+                        None,
                     ),
-                    None => match self.first_present_shared_source(&hash_hex).await? {
-                        Some(source_path) => (
-                            long_path(&source_path),
-                            vec![Ed2kSharedRange {
-                                start: 0,
-                                end: manifest.file_size,
-                            }],
-                        ),
-                        None => return Ok(None),
-                    },
-                };
-            (payload_path, verified_ranges)
+                    None => return Ok(None),
+                },
+            }
         };
-        let file = tokio::fs::OpenOptions::new()
-            .read(true)
-            .open(&payload_path)
-            .await
-            .with_context(|| format!("failed to open piece store {}", payload_path.display()))?;
+
+        if authority.requires_fingerprint() && authority.expected_fingerprint().is_none() {
+            warn!(
+                file_hash = hash_hex,
+                path = %payload_path.display(),
+                authority = authority.label(),
+                "withdrawing verified ED2K payload without reusable file identity"
+            );
+            self.withdraw_untrusted_verified_payload(&hash_hex, &authority)
+                .await?;
+            return Ok(None);
+        }
+
+        let open_path = payload_path.clone();
+        let expected_fingerprint = authority.expected_fingerprint().cloned();
+        let stable_open = authority.requires_fingerprint();
+        let opened = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+            let file = if stable_open {
+                super::ingest::open_stable_read_file_without_follow(&open_path)
+            } else {
+                super::ingest::open_regular_file_without_follow(&open_path)
+            }
+            .with_context(|| format!("failed to open piece store {}", open_path.display()))?;
+            let metadata = file.metadata().with_context(|| {
+                format!("failed to inspect piece store {}", open_path.display())
+            })?;
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "piece store is not a regular file: {}",
+                open_path.display()
+            );
+            if let Some(expected) = expected_fingerprint.as_ref() {
+                let current = super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
+                    .with_context(|| {
+                        format!(
+                            "failed to identify verified ED2K payload {}",
+                            open_path.display()
+                        )
+                    })?;
+                anyhow::ensure!(
+                    expected.safely_matches(&current),
+                    "verified ED2K payload changed before upload: {}",
+                    open_path.display()
+                );
+            }
+            Ok(file)
+        })
+        .await
+        .context("ED2K verified payload open task panicked")?;
+        let file = match opened {
+            Ok(file) => tokio::fs::File::from_std(file),
+            Err(error) if authority.requires_fingerprint() => {
+                warn!(
+                    %error,
+                    file_hash = hash_hex,
+                    path = %payload_path.display(),
+                    authority = authority.label(),
+                    "withdrawing changed or unavailable verified ED2K payload"
+                );
+                self.withdraw_untrusted_verified_payload(&hash_hex, &authority)
+                    .await?;
+                return Ok(None);
+            }
+            Err(error) if matches!(authority, VerifiedPayloadAuthority::ManagedIncomplete) => {
+                warn!(
+                    %error,
+                    file_hash = hash_hex,
+                    path = %payload_path.display(),
+                    "withdrawing unavailable incomplete ED2K payload"
+                );
+                self.reconcile_incomplete_payload_failure(&Ed2kIncompletePayloadFailure {
+                    file_hash: hash_hex,
+                    piece_index: None,
+                    reason: format!("could not be opened for upload serving: {error}"),
+                })
+                .await?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         Ok(Some(Ed2kVerifiedRangeReader {
             file,
+            expected_fingerprint: authority.expected_fingerprint().cloned(),
+            incomplete_authority,
             verified_ranges,
             cache_start: 0,
             cache: Vec::new(),
@@ -603,6 +975,179 @@ impl Ed2kTransferRuntime {
             #[cfg(test)]
             disk_read_count: 0,
         }))
+    }
+
+    async fn withdraw_untrusted_verified_payload(
+        &self,
+        file_hash: &str,
+        authority: &VerifiedPayloadAuthority,
+    ) -> Result<()> {
+        match authority {
+            VerifiedPayloadAuthority::ManagedIncomplete => Ok(()),
+            VerifiedPayloadAuthority::ManifestSource { path, expected } => {
+                let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
+                let _manifest_guard = self.lock_manifest(file_hash).await;
+                let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+                if manifest.source_path.as_deref() != Some(path.as_path())
+                    || manifest.source_fingerprint.as_ref() != expected.as_ref()
+                {
+                    return Ok(());
+                }
+                manifest.source_fingerprint = None;
+                self.store_manifest_unlocked(&manifest).await?;
+                self.upsert_verified_catalog_entry(&manifest).await;
+                Ok(())
+            }
+            VerifiedPayloadAuthority::ManagedCompleted { expected } => {
+                let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
+                let _manifest_guard = self.lock_manifest(file_hash).await;
+                let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+                if manifest.source_path.is_some()
+                    || !manifest.completed
+                    || manifest.payload_fingerprint.as_ref() != expected.as_ref()
+                {
+                    return Ok(());
+                }
+                manifest.completed = false;
+                manifest.final_rehash_pending = true;
+                manifest.payload_fingerprint = None;
+                self.invalidate_payload_handle(file_hash);
+                self.store_manifest_unlocked(&manifest).await?;
+                self.upsert_verified_catalog_entry(&manifest).await;
+                Ok(())
+            }
+            VerifiedPayloadAuthority::SharedFallback { .. } => {
+                let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
+                let _manifest_guard = self.lock_manifest(file_hash).await;
+                if self.first_present_shared_source(file_hash).await?.is_none() {
+                    self.remove_verified_catalog_entry(file_hash).await;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn reconcile_verified_read_error(&self, error: &anyhow::Error) -> Result<()> {
+        let Some(failure) = error.downcast_ref::<Ed2kIncompletePayloadFailure>() else {
+            return Ok(());
+        };
+        self.reconcile_incomplete_payload_failure(failure).await
+    }
+
+    pub(super) async fn reconcile_incomplete_payload_failure(
+        &self,
+        failure: &Ed2kIncompletePayloadFailure,
+    ) -> Result<()> {
+        let _lifecycle_guard = self.lock_lifecycle(&failure.file_hash).await;
+        let _manifest_guard = self.lock_manifest(&failure.file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(&failure.file_hash).await?;
+        if manifest.source_path.is_some() || manifest.completed || manifest.final_rehash_pending {
+            return Ok(());
+        }
+        self.invalidate_payload_handle(&failure.file_hash);
+
+        let mut damaged_pieces = BTreeSet::new();
+        if let Some(piece_index) = failure.piece_index {
+            let Some(piece) = manifest
+                .pieces
+                .iter()
+                .find(|piece| piece.piece_index == piece_index)
+            else {
+                return Ok(());
+            };
+            if piece.state != Ed2kTransferState::Verified {
+                return Ok(());
+            }
+            // The reader drops the manifest lock while doing disk IO. A
+            // downloader may have repaired this part before reconciliation
+            // acquired the lock, so confirm the current path still fails.
+            if self
+                .current_incomplete_part_matches(&manifest, piece_index)
+                .await?
+            {
+                return Ok(());
+            }
+            damaged_pieces.insert(piece_index);
+        } else {
+            let verified_pieces = manifest
+                .pieces
+                .iter()
+                .filter(|piece| piece.state == Ed2kTransferState::Verified)
+                .map(|piece| piece.piece_index)
+                .collect::<Vec<_>>();
+            for piece_index in verified_pieces {
+                if !self
+                    .current_incomplete_part_matches(&manifest, piece_index)
+                    .await?
+                {
+                    damaged_pieces.insert(piece_index);
+                }
+            }
+        }
+        if damaged_pieces.is_empty() {
+            return Ok(());
+        }
+        let ich_corrupted = failure.piece_index.is_some();
+        for piece in &mut manifest.pieces {
+            if damaged_pieces.contains(&piece.piece_index) {
+                piece.state = Ed2kTransferState::Missing;
+                piece.bytes_written = 0;
+                piece.block_bitmap = None;
+                piece.ich_corrupted = ich_corrupted;
+            }
+        }
+        rebuild_verified_ranges(&mut manifest);
+        self.store_manifest_unlocked(&manifest).await?;
+        self.upsert_verified_catalog_entry(&manifest).await;
+        warn!(
+            file_hash = failure.file_hash,
+            damaged_pieces = ?damaged_pieces,
+            reason = failure.reason,
+            "requeued ED2K parts after upload-time payload authority failure"
+        );
+        Ok(())
+    }
+
+    async fn current_incomplete_part_matches(
+        &self,
+        manifest: &Ed2kResumeManifest,
+        piece_index: u32,
+    ) -> Result<bool> {
+        let authority = IncompletePayloadAuthority::from_manifest(manifest)?;
+        let part_hash_index =
+            usize::try_from(piece_index).context("ED2K part index does not fit this platform")?;
+        let expected_hash = *authority
+            .part_hashes
+            .get(part_hash_index)
+            .with_context(|| format!("missing MD4 hashset entry for part {piece_index}"))?;
+        let piece_start = u64::from(piece_index).saturating_mul(authority.piece_size);
+        let piece_len = expected_piece_length(
+            authority.file_size,
+            authority.piece_size,
+            u64::from(piece_index),
+        );
+        let payload_path = self
+            .transfer_dir(&manifest.file_hash)
+            .join(PAYLOAD_FILE_NAME);
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            use std::io::{Read, Seek};
+
+            let mut file = match super::ingest::open_regular_file_without_follow(&payload_path) {
+                Ok(file) => file,
+                Err(_) => return Ok(false),
+            };
+            if file.seek(std::io::SeekFrom::Start(piece_start)).is_err() {
+                return Ok(false);
+            }
+            let mut bytes = vec![0u8; usize::try_from(piece_len).unwrap_or(0)];
+            if file.read_exact(&mut bytes).is_err() {
+                return Ok(false);
+            }
+            let digest: [u8; 16] = Md4::digest(&bytes).into();
+            Ok(digest == expected_hash)
+        })
+        .await
+        .context("ED2K upload failure reconciliation hash task panicked")?
     }
 }
 

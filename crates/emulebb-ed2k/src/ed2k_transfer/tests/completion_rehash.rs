@@ -181,6 +181,51 @@ async fn stale_incomplete_hydration_cannot_republish_a_pending_completion() {
 }
 
 #[tokio::test]
+async fn incomplete_hydration_requires_md4_authority() {
+    let root = unique_test_dir("ed2k-incomplete-hydration-md4-authority");
+    let payload = vec![0x4d; ED2K_PART_SIZE as usize];
+    let tail = vec![0x8a; 257];
+    let first_hash = md4(&payload);
+    let tail_hash = md4(&tail);
+    let mut composite = Md4::new();
+    composite.update(first_hash);
+    composite.update(tail_hash);
+    let file_hash = Ed2kHash::from_bytes(composite.finalize().into());
+    let job = new_transfer_job(
+        file_hash,
+        "missing-md4-authority.bin".to_string(),
+        payload.len() as u64 + tail.len() as u64,
+    );
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, vec![first_hash, tail_hash])
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(&job.file_hash, 0, &payload)
+        .await
+        .unwrap();
+    let mut manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(runtime.shared_catalog_count().await, 1);
+    manifest.md4_hashset_acquired = false;
+    manifest.md4_hashset.clear();
+    {
+        let _guard = runtime.lock_manifest(&job.file_hash).await;
+        runtime.store_manifest_unlocked(&manifest).await.unwrap();
+        runtime.remove_verified_catalog_entry(&job.file_hash).await;
+    }
+
+    assert!(
+        !runtime
+            .insert_hydrated_incomplete_entry_if_current(&manifest)
+            .await
+            .unwrap()
+    );
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+}
+
+#[tokio::test]
 async fn oversized_payload_is_quarantined_before_retry() {
     let root = unique_test_dir("ed2k-final-rehash-oversized");
     let payload = b"authoritative expected payload";
@@ -349,6 +394,56 @@ async fn forced_rehash_with_authority_failure_withdraws_catalog_without_touching
             .unwrap()
     );
     assert_eq!(runtime.shared_catalog_count().await, 0);
+}
+
+#[tokio::test]
+async fn replaced_completed_payload_is_withdrawn_before_upload() {
+    let root = unique_test_dir("ed2k-completed-payload-replaced");
+    let trusted_payload = vec![0x63; 4096];
+    let foreign_payload = vec![0xa4; trusted_payload.len()];
+    let file_hash = Ed2kHash::from_bytes(md4(&trusted_payload));
+    let job = new_transfer_job(
+        file_hash,
+        "replaced.bin".to_string(),
+        trusted_payload.len() as u64,
+    );
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, Vec::new())
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(&job.file_hash, 0, &trusted_payload)
+        .await
+        .unwrap();
+    let completed = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(completed.completed);
+    assert!(completed.payload_fingerprint.is_some());
+    assert_eq!(runtime.shared_catalog_count().await, 1);
+
+    runtime.invalidate_payload_handle(&job.file_hash);
+    let payload_path = runtime.payload_path(&job.file_hash);
+    let original_path = payload_path.with_extension("trusted");
+    std::fs::rename(&payload_path, &original_path).unwrap();
+    std::fs::write(&payload_path, &foreign_payload).unwrap();
+
+    assert!(
+        runtime
+            .read_verified_range(&file_hash, 0, trusted_payload.len() as u64)
+            .await
+            .unwrap()
+            .is_none(),
+        "foreign replacement bytes must never be served under the completed hash"
+    );
+    let withdrawn = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(!withdrawn.completed);
+    assert!(withdrawn.final_rehash_pending);
+    assert!(withdrawn.payload_fingerprint.is_none());
+    assert_eq!(withdrawn.pieces[0].state, Ed2kTransferState::Verified);
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+    assert_eq!(std::fs::read(&payload_path).unwrap(), foreign_payload);
+    assert_eq!(std::fs::read(&original_path).unwrap(), trusted_payload);
 }
 
 #[tokio::test]
