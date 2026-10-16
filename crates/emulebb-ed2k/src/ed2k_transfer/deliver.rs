@@ -21,17 +21,22 @@
 //! [`long_path`] (Windows long-path boundary; identity elsewhere). The source
 //! `pieces.bin` is an internal short path and is used as-is.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
-use emulebb_metadata::{MetadataTransferDeliveryAttempt, NativeFileFingerprint, NativePath};
+#[cfg(test)]
+use emulebb_metadata::NativePath;
+use emulebb_metadata::{
+    MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase, NativeFileFingerprint,
+};
 use md4::{Digest, Md4};
 use uuid::Uuid;
 
@@ -39,7 +44,9 @@ use crate::long_path::long_path;
 
 use super::{ED2K_PART_SIZE, Ed2kTransferRuntime};
 
+#[cfg(test)]
 pub(super) const DELIVERY_PENDING_FILE_NAME: &str = "delivery.pending";
+#[cfg(test)]
 static DELIVERY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Outcome of a delivery attempt for one completed transfer.
@@ -80,6 +87,7 @@ impl Ed2kTransferRuntime {
         dest_dir: &Path,
     ) -> Result<Ed2kDeliveryOutcome> {
         let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
+        self.recover_delivery_attempt_unlocked(file_hash).await?;
         // Phase 1: snapshot what we need under the manifest IO lock, then
         // release it before touching the destination filesystem.
         let (display_name, expected_size, expected_hash, recorded_path, recorded_fingerprint) = {
@@ -216,6 +224,31 @@ impl Ed2kTransferRuntime {
 struct InstalledDelivery {
     path: PathBuf,
     attempt_id: Uuid,
+}
+
+fn validate_delivery_attempt_paths(attempt: &MetadataTransferDeliveryAttempt) -> Result<()> {
+    anyhow::ensure!(
+        attempt.target_path.is_absolute() && attempt.staging_path.is_absolute(),
+        "delivery attempt {} contains a non-absolute path",
+        attempt.attempt_id
+    );
+    anyhow::ensure!(
+        attempt.target_path.file_name().is_some()
+            && attempt.target_path.parent().is_some()
+            && attempt.target_path.parent() == attempt.staging_path.parent(),
+        "delivery attempt {} paths do not share one target parent",
+        attempt.attempt_id
+    );
+    let expected_staging_name = format!(".emulebb-delivery-{}.tmp", attempt.attempt_id);
+    anyhow::ensure!(
+        attempt
+            .staging_path
+            .file_name()
+            .is_some_and(|name| name == std::ffi::OsStr::new(&expected_staging_name)),
+        "delivery attempt {} has an invalid staging name",
+        attempt.attempt_id
+    );
+    Ok(())
 }
 
 pub(super) async fn classify_delivered_output(
@@ -387,6 +420,143 @@ impl Ed2kTransferRuntime {
         })
         .await
         .context("ED2K delivery-attempt cleanup task panicked")?
+    }
+
+    async fn delivery_attempt(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_owned();
+        tokio::task::spawn_blocking(move || metadata.transfer_delivery_attempt_by_hash(&file_hash))
+            .await
+            .context("ED2K delivery-attempt load task panicked")?
+    }
+
+    pub(super) async fn recover_delivery_attempt_unlocked(&self, file_hash: &str) -> Result<()> {
+        let Some(attempt) = self.delivery_attempt(file_hash).await? else {
+            return Ok(());
+        };
+        validate_delivery_attempt_paths(&attempt)?;
+        let manifest = {
+            let _manifest_guard = self.lock_manifest(file_hash).await;
+            self.load_manifest_unlocked(file_hash).await?
+        };
+        if manifest.delivery_state == super::Ed2kDeliveryState::Delivered {
+            remove_if_exists(&attempt.staging_path).await?;
+            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                .await?;
+            return Ok(());
+        }
+        if manifest.delivery_state != super::Ed2kDeliveryState::Pending
+            || !manifest.completed
+            || manifest.final_rehash_pending
+        {
+            remove_if_exists(&attempt.staging_path).await?;
+            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                .await?;
+            return Ok(());
+        }
+        if attempt.phase == MetadataTransferDeliveryAttemptPhase::Prepared {
+            remove_if_exists(&attempt.staging_path).await?;
+            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                .await?;
+            return Ok(());
+        }
+
+        let expected_hash = Ed2kHash::from_str(&manifest.file_hash)
+            .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
+            .0;
+        let target_fingerprint = match classify_delivered_output(
+            &attempt.staging_path,
+            None,
+            manifest.file_size,
+            expected_hash,
+        )
+        .await?
+        {
+            DeliveredOutputIdentity::Matching(_) => {
+                match path_exists(&attempt.target_path).await {
+                    false => {
+                        match install_staged_payload(&attempt.staging_path, &attempt.target_path)
+                            .await?
+                        {
+                            InstallOutcome::Installed => {}
+                            InstallOutcome::AlreadyExists => {
+                                remove_if_exists(&attempt.staging_path).await?;
+                                self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                                    .await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    true => {
+                        if same_regular_file_identity(&attempt.staging_path, &attempt.target_path)
+                            .await?
+                        {
+                            remove_if_exists(&attempt.staging_path).await?;
+                        } else {
+                            remove_if_exists(&attempt.staging_path).await?;
+                            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                                .await?;
+                            return Ok(());
+                        }
+                    }
+                }
+                match classify_delivered_output(
+                    &attempt.target_path,
+                    None,
+                    manifest.file_size,
+                    expected_hash,
+                )
+                .await?
+                {
+                    DeliveredOutputIdentity::Matching(fingerprint) => fingerprint,
+                    DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign => {
+                        self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            }
+            DeliveredOutputIdentity::Missing => {
+                match classify_delivered_output(
+                    &attempt.target_path,
+                    None,
+                    manifest.file_size,
+                    expected_hash,
+                )
+                .await?
+                {
+                    DeliveredOutputIdentity::Matching(fingerprint) => fingerprint,
+                    DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign => {
+                        self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            }
+            DeliveredOutputIdentity::Foreign => {
+                remove_if_exists(&attempt.staging_path).await?;
+                self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let _manifest_guard = self.lock_manifest(file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        anyhow::ensure!(
+            manifest.delivery_state == super::Ed2kDeliveryState::Pending
+                && manifest.completed
+                && !manifest.final_rehash_pending,
+            "transfer {file_hash} changed while recovering delivery attempt {}",
+            attempt.attempt_id
+        );
+        manifest.delivery_state = super::Ed2kDeliveryState::Delivered;
+        manifest.delivered_path = Some(attempt.target_path);
+        manifest.source_fingerprint = target_fingerprint;
+        self.store_manifest_unlocked(&manifest).await
     }
 }
 
@@ -563,6 +733,7 @@ async fn install_staged_payload(staging_path: &Path, target_path: &Path) -> Resu
     }
 }
 
+#[cfg(test)]
 pub(super) async fn read_pending_delivery_path(path: &Path) -> Result<Option<PathBuf>> {
     let native_path = match tokio::fs::read(path).await {
         Ok(native_path) => native_path,
@@ -584,6 +755,7 @@ pub(super) async fn read_pending_delivery_path(path: &Path) -> Result<Option<Pat
     ))
 }
 
+#[cfg(test)]
 pub(super) async fn persist_pending_delivery_path(path: &Path, candidate: &Path) -> Result<()> {
     let sequence = DELIVERY_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp = path.with_extension(format!("pending-{sequence}.tmp"));
@@ -670,6 +842,30 @@ fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>
 
 async fn path_exists(path: &Path) -> bool {
     tokio::fs::metadata(long_path(path)).await.is_ok()
+}
+
+async fn same_regular_file_identity(first: &Path, second: &Path) -> Result<bool> {
+    let first_metadata = tokio::fs::symlink_metadata(long_path(first))
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect delivery staging file {}",
+                first.display()
+            )
+        })?;
+    let second_metadata = tokio::fs::symlink_metadata(long_path(second))
+        .await
+        .with_context(|| format!("failed to inspect delivery target {}", second.display()))?;
+    if !first_metadata.file_type().is_file() || !second_metadata.file_type().is_file() {
+        return Ok(false);
+    }
+    let first = long_path(first);
+    let second = long_path(second);
+    tokio::task::spawn_blocking(move || {
+        Ok::<_, anyhow::Error>(file_id::get_file_id(first)? == file_id::get_file_id(second)?)
+    })
+    .await
+    .context("delivery file-identity task panicked")?
 }
 
 /// Replace filesystem-reserved characters in a canonical name so it is safe to

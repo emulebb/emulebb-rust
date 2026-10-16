@@ -876,7 +876,7 @@ fn delivery_attempts_roundtrip_and_transition_idempotently() {
 
     let attempt_id = Uuid::new_v4();
     let target_path = std::env::temp_dir().join("Delivery.Attempt.bin");
-    let staging_path = std::env::temp_dir().join(format!(".{attempt_id}.staging"));
+    let staging_path = std::env::temp_dir().join(format!(".emulebb-delivery-{attempt_id}.tmp"));
     let prepared = store
         .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
         .unwrap();
@@ -933,6 +933,32 @@ fn delivery_attempts_roundtrip_and_transition_idempotently() {
     assert_eq!(staged.created_at_ms, prepared.created_at_ms);
     assert!(staged.updated_at_ms >= staged.created_at_ms);
 
+    let mut delivered_manifest = manifest.clone();
+    delivered_manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    delivered_manifest.delivered_path = Some(target_path.clone());
+    delivered_manifest.source_fingerprint = Some(fingerprint(delivered_manifest.file_size, 92));
+    store.upsert_transfer_manifest(&delivered_manifest).unwrap();
+    assert!(
+        store
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none(),
+        "delivered manifest commit must atomically clear its attempt"
+    );
+
+    let mut pending_manifest = delivered_manifest;
+    pending_manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+    pending_manifest.delivered_path = None;
+    pending_manifest.source_fingerprint = None;
+    store.upsert_transfer_manifest(&pending_manifest).unwrap();
+    let prepared = store
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    assert_eq!(
+        prepared.phase,
+        MetadataTransferDeliveryAttemptPhase::Prepared
+    );
+
     assert!(
         !store
             .clear_transfer_delivery_attempt(&hash, Uuid::new_v4())
@@ -958,8 +984,19 @@ fn delivery_attempt_requires_an_authoritative_pending_download() {
     let hash = manifest.file_hash.clone();
     store.upsert_transfer_manifest(&manifest).unwrap();
     let target_path = std::env::temp_dir().join("Delivery.Eligibility.bin");
-    let staging_path = std::env::temp_dir().join(".delivery-eligibility.staging");
     let attempt_id = Uuid::new_v4();
+    let staging_path = std::env::temp_dir().join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+
+    assert!(
+        store
+            .begin_transfer_delivery_attempt(
+                &hash,
+                attempt_id,
+                &target_path,
+                &std::env::temp_dir().join("unowned-staging.tmp"),
+            )
+            .is_err()
+    );
 
     store
         .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
