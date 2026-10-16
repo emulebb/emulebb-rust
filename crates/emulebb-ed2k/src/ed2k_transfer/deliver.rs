@@ -31,7 +31,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
-use emulebb_metadata::NativeFileFingerprint;
+use emulebb_metadata::{NativeFileFingerprint, NativePath};
 use md4::{Digest, Md4};
 
 use crate::long_path::long_path;
@@ -268,7 +268,7 @@ async fn deliver_payload_file(
         .await
         .with_context(|| format!("failed to create delivery directory {}", dest_dir.display()))?;
 
-    let pending_candidate = read_pending_delivery_path(pending_path).await;
+    let pending_candidate = read_pending_delivery_path(pending_path).await?;
     if let Some(candidate) = pending_candidate.as_deref()
         && path_exists(candidate).await
         && delivered_file_matches(candidate, expected_size, expected_hash).await?
@@ -447,10 +447,25 @@ async fn copy_noclobber(source: &Path, dest: &Path) -> Result<InstallOutcome> {
     }
 }
 
-async fn read_pending_delivery_path(path: &Path) -> Option<PathBuf> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
-    let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+pub(super) async fn read_pending_delivery_path(path: &Path) -> Result<Option<PathBuf>> {
+    let native_path = match tokio::fs::read(path).await {
+        Ok(native_path) => native_path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read delivery intent {}", path.display()));
+        }
+    };
+    anyhow::ensure!(
+        !native_path.is_empty(),
+        "delivery intent {} contains an empty native path",
+        path.display()
+    );
+    Ok(Some(
+        NativePath::from_storage(NativePath::platform(), &native_path)
+            .with_context(|| format!("invalid delivery intent {}", path.display()))?
+            .into_path_buf(),
+    ))
 }
 
 async fn persist_pending_delivery_path(path: &Path, candidate: &Path) -> Result<()> {
@@ -463,7 +478,7 @@ async fn persist_pending_delivery_path(path: &Path, candidate: &Path) -> Result<
         .await
         .with_context(|| format!("failed to create delivery intent {}", temp.display()))?;
     use tokio::io::AsyncWriteExt;
-    file.write_all(candidate.to_string_lossy().as_bytes())
+    file.write_all(&NativePath::from(candidate).storage_bytes())
         .await?;
     file.sync_all().await?;
     drop(file);
@@ -797,7 +812,7 @@ mod tests {
         tokio::fs::write(&installed, b"recovered-payload")
             .await
             .unwrap();
-        tokio::fs::write(&pending, installed.to_string_lossy().as_bytes())
+        persist_pending_delivery_path(&pending, &installed)
             .await
             .unwrap();
 
@@ -814,6 +829,27 @@ mod tests {
 
         assert_eq!(delivered, installed);
         assert!(!dest.join("recovered (1).bin").exists());
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pending_intent_roundtrips_non_utf8_native_path() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let dir = temp_dir();
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let pending = dir.join(DELIVERY_PENDING_FILE_NAME);
+        let candidate = dir.join(OsString::from_vec(b"delivered-\xff.bin".to_vec()));
+
+        persist_pending_delivery_path(&pending, &candidate)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_pending_delivery_path(&pending).await.unwrap(),
+            Some(candidate)
+        );
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
 
