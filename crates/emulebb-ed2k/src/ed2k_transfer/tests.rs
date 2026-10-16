@@ -272,6 +272,73 @@ async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
 }
 
 #[tokio::test]
+async fn ensure_job_reclaims_only_an_empty_unmanaged_transfer_directory() {
+    let root = unique_test_dir("ed2k-transfer-empty-unmanaged-directory");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = new_transfer_job(
+        Ed2kHash::from_bytes([0x51; 16]),
+        "empty-orphan.bin".to_string(),
+        8,
+    );
+    let transfer_dir = runtime.transfer_dir_path(&job.file_hash);
+    fs::create_dir_all(&transfer_dir).unwrap();
+
+    runtime
+        .prepare_new_download_directory(&job.file_hash)
+        .await
+        .unwrap();
+    assert!(!transfer_dir.exists());
+
+    runtime.ensure_job(&job).await.unwrap();
+    assert!(transfer_dir.is_dir());
+    assert!(runtime.manifest(&job.file_hash).await.is_ok());
+}
+
+#[tokio::test]
+async fn ensure_job_rejects_nonempty_unmanaged_transfer_directory_without_touching_bytes() {
+    let root = unique_test_dir("ed2k-transfer-nonempty-unmanaged-directory");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = new_transfer_job(
+        Ed2kHash::from_bytes([0x52; 16]),
+        "occupied-orphan.bin".to_string(),
+        8,
+    );
+    let transfer_dir = runtime.transfer_dir_path(&job.file_hash);
+    let payload_path = transfer_dir.join(PAYLOAD_FILE_NAME);
+    let foreign_bytes = b"unmanaged payload bytes";
+    fs::create_dir_all(&transfer_dir).unwrap();
+    fs::write(&payload_path, foreign_bytes).unwrap();
+
+    let error = runtime.ensure_job(&job).await.unwrap_err().to_string();
+
+    assert!(error.contains("unmanaged directory"));
+    assert!(error.contains("is not empty"));
+    assert_eq!(fs::read(&payload_path).unwrap(), foreign_bytes);
+    assert!(runtime.manifest(&job.file_hash).await.is_err());
+}
+
+#[tokio::test]
+async fn ensure_job_rejects_unmanaged_file_at_transfer_directory_path() {
+    let root = unique_test_dir("ed2k-transfer-unmanaged-file");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = new_transfer_job(
+        Ed2kHash::from_bytes([0x53; 16]),
+        "occupied-path.bin".to_string(),
+        8,
+    );
+    let transfer_path = runtime.transfer_dir_path(&job.file_hash);
+    let foreign_bytes = b"unmanaged path bytes";
+    fs::write(&transfer_path, foreign_bytes).unwrap();
+
+    let error = runtime.ensure_job(&job).await.unwrap_err().to_string();
+
+    assert!(error.contains("unmanaged path"));
+    assert!(error.contains("is not a directory"));
+    assert_eq!(fs::read(&transfer_path).unwrap(), foreign_bytes);
+    assert!(runtime.manifest(&job.file_hash).await.is_err());
+}
+
+#[tokio::test]
 async fn recheck_transfer_detects_corruption_and_marks_part_for_redownload() {
     // A complete 2-part file: recheck re-verifies both parts against the MD4
     // hashset. Corrupting part 1 on disk must demote it to Missing (0 bytes) so
@@ -745,6 +812,7 @@ async fn ensure_job_ignores_legacy_json_manifest_for_fresh_sql_profiles() {
     assert!(!rebuilt.aich_hashset_acquired);
     assert!(rebuilt.aich_root.is_none());
     assert!(rebuilt.aich_hashset.is_empty());
+    assert!(!transfer_dir.join("resume-manifest.json").exists());
 }
 
 #[tokio::test]
