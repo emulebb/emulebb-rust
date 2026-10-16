@@ -70,6 +70,14 @@ async fn materialize_completed_payload_delivers_by_name() {
         manifest.delivered_path.as_deref(),
         Some(delivered.as_path())
     );
+    assert!(
+        runtime
+            .metadata
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none(),
+        "the committed manifest must not retain an active delivery attempt"
+    );
 
     // A second call is an idempotent no-op (already delivered, file present).
     let again = runtime
@@ -262,7 +270,7 @@ async fn failed_redelivery_leaves_mismatched_output_pending() {
 }
 
 #[tokio::test]
-async fn materialize_adopts_byte_identical_replacement_without_duplicate() {
+async fn materialize_preserves_byte_identical_replacement_without_adopting_it() {
     let root = unique_test_dir("ed2k-deliver-reconcile-identical");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let hash = ingest_completed(&runtime, &root, "Identical.mkv").await;
@@ -278,19 +286,21 @@ async fn materialize_adopts_byte_identical_replacement_without_duplicate() {
     fs::remove_file(&delivered).unwrap();
     fs::write(&delivered, &verified_payload).unwrap();
 
+    let redelivered = incoming.join("Identical (1).mkv");
     assert_eq!(
         runtime
             .materialize_completed_payload(&hash, &incoming)
             .await
             .unwrap(),
-        Ed2kDeliveryOutcome::AlreadyDelivered(delivered.clone())
+        Ed2kDeliveryOutcome::Delivered(redelivered.clone())
     );
-    assert!(!incoming.join("Identical (1).mkv").exists());
+    assert_eq!(fs::read(&delivered).unwrap(), verified_payload);
+    assert_eq!(fs::read(&redelivered).unwrap(), verified_payload);
     let refreshed = runtime.manifest(&hash).await.unwrap();
     assert_eq!(refreshed.delivery_state, Ed2kDeliveryState::Delivered);
     assert_eq!(
         refreshed.delivered_path.as_deref(),
-        Some(delivered.as_path())
+        Some(redelivered.as_path())
     );
     assert_ne!(refreshed.source_fingerprint, recorded_fingerprint);
 }

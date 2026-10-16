@@ -31,8 +31,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
-use emulebb_metadata::{NativeFileFingerprint, NativePath};
+use emulebb_metadata::{MetadataTransferDeliveryAttempt, NativeFileFingerprint, NativePath};
 use md4::{Digest, Md4};
+use uuid::Uuid;
 
 use crate::long_path::long_path;
 
@@ -122,18 +123,20 @@ impl Ed2kTransferRuntime {
             )
             .await
             {
-                Ok(DeliveredOutputIdentity::Matching(current_fingerprint)) => {
-                    if current_fingerprint != recorded_fingerprint {
-                        let _guard = self.lock_manifest(file_hash).await;
-                        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-                        if manifest.delivery_state == super::Ed2kDeliveryState::Delivered
-                            && manifest.delivered_path.as_ref() == Some(&recorded_path)
-                        {
-                            manifest.source_fingerprint = current_fingerprint;
-                            self.store_manifest_unlocked(&manifest).await?;
-                        }
-                    }
+                Ok(DeliveredOutputIdentity::Matching(current_fingerprint))
+                    if recorded_fingerprint
+                        .as_ref()
+                        .zip(current_fingerprint.as_ref())
+                        .is_some_and(|(recorded, current)| recorded.safely_matches(current)) =>
+                {
                     return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded_path));
+                }
+                Ok(DeliveredOutputIdentity::Matching(_)) => {
+                    tracing::warn!(
+                        file_hash,
+                        path = %recorded_path.display(),
+                        "recorded output content matches but native identity changed; refusing to adopt unproven ownership"
+                    );
                 }
                 Ok(DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign) => {}
                 Err(error) => {
@@ -159,19 +162,18 @@ impl Ed2kTransferRuntime {
         }
 
         let source = self.payload_path(file_hash);
-        let pending_path = self
-            .transfer_dir(file_hash)
-            .join(DELIVERY_PENDING_FILE_NAME);
-        let final_path = deliver_payload_file(
-            &source,
-            dest_dir,
-            &display_name,
-            expected_size,
-            expected_hash,
-            &pending_path,
-        )
-        .await
-        .with_context(|| format!("failed to deliver completed transfer {file_hash}"))?;
+        let installed = self
+            .deliver_payload_file(
+                file_hash,
+                &source,
+                dest_dir,
+                &display_name,
+                expected_size,
+                expected_hash,
+            )
+            .await
+            .with_context(|| format!("failed to deliver completed transfer {file_hash}"))?;
+        let final_path = installed.path;
 
         // Phase 2: persist the delivered path under the lock.
         {
@@ -195,9 +197,25 @@ impl Ed2kTransferRuntime {
             }
             self.store_manifest_unlocked(&manifest).await?;
         }
-        remove_if_exists(&pending_path).await?;
+        if let Err(error) = self
+            .clear_delivery_attempt(file_hash, installed.attempt_id)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                file_hash,
+                attempt_id = %installed.attempt_id,
+                "delivered manifest committed but delivery-attempt cleanup failed"
+            );
+        }
         Ok(Ed2kDeliveryOutcome::Delivered(final_path))
     }
+}
+
+#[derive(Debug)]
+struct InstalledDelivery {
+    path: PathBuf,
+    attempt_id: Uuid,
 }
 
 pub(super) async fn classify_delivered_output(
@@ -253,29 +271,136 @@ fn delivered_file_fingerprint(path: &Path) -> Option<NativeFileFingerprint> {
     super::ingest::native_file_fingerprint(&path)
 }
 
-/// Copy/link `source` (`pieces.bin`) into `dest_dir` under a collision-free
-/// file name derived from `display_name`, returning the final path.
+impl Ed2kTransferRuntime {
+    /// Copy `source` (`pieces.bin`) into `dest_dir` under a collision-free file
+    /// name. Every temporary artifact is named and owned by a durable delivery
+    /// attempt before it is created.
+    async fn deliver_payload_file(
+        &self,
+        file_hash: &str,
+        source: &Path,
+        dest_dir: &Path,
+        display_name: &str,
+        expected_size: u64,
+        expected_hash: [u8; 16],
+    ) -> Result<InstalledDelivery> {
+        validate_delivery_source(source, expected_size).await?;
+        tokio::fs::create_dir_all(long_path(dest_dir))
+            .await
+            .with_context(|| {
+                format!("failed to create delivery directory {}", dest_dir.display())
+            })?;
+
+        let file_name = sanitize_file_name(display_name);
+        let (stem, extension) = split_stem_extension(&file_name);
+        for index in 0..=u32::MAX {
+            let candidate_name = if index == 0 {
+                file_name.clone()
+            } else {
+                match &extension {
+                    Some(extension) => format!("{stem} ({index}).{extension}"),
+                    None => format!("{stem} ({index})"),
+                }
+            };
+            let target_path = dest_dir.join(candidate_name);
+            if path_exists(&target_path).await {
+                continue;
+            }
+
+            let attempt_id = Uuid::new_v4();
+            let staging_path = dest_dir.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+            self.begin_delivery_attempt(file_hash, attempt_id, &target_path, &staging_path)
+                .await?;
+            stage_delivery_payload(source, &staging_path).await?;
+            verify_installed_delivery(&staging_path, expected_size, expected_hash).await?;
+            anyhow::ensure!(
+                self.mark_delivery_attempt_staged(file_hash, attempt_id)
+                    .await?,
+                "delivery attempt {attempt_id} disappeared before staging committed"
+            );
+
+            match install_staged_payload(&staging_path, &target_path).await? {
+                InstallOutcome::Installed => {
+                    verify_installed_delivery(&target_path, expected_size, expected_hash).await?;
+                    return Ok(InstalledDelivery {
+                        path: target_path,
+                        attempt_id,
+                    });
+                }
+                InstallOutcome::AlreadyExists => {
+                    remove_if_exists(&staging_path).await?;
+                    anyhow::ensure!(
+                        self.clear_delivery_attempt(file_hash, attempt_id).await?,
+                        "delivery attempt {attempt_id} disappeared during collision cleanup"
+                    );
+                }
+            }
+        }
+        anyhow::bail!(
+            "exhausted collision-free delivery names in {}",
+            dest_dir.display()
+        )
+    }
+
+    async fn begin_delivery_attempt(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        target_path: &Path,
+        staging_path: &Path,
+    ) -> Result<MetadataTransferDeliveryAttempt> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_owned();
+        let target_path = target_path.to_owned();
+        let staging_path = staging_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            metadata.begin_transfer_delivery_attempt(
+                &file_hash,
+                attempt_id,
+                &target_path,
+                &staging_path,
+            )
+        })
+        .await
+        .context("ED2K delivery-attempt prepare task panicked")?
+    }
+
+    async fn mark_delivery_attempt_staged(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+    ) -> Result<bool> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_owned();
+        tokio::task::spawn_blocking(move || {
+            metadata.mark_transfer_delivery_attempt_staged(&file_hash, attempt_id)
+        })
+        .await
+        .context("ED2K delivery-attempt stage task panicked")?
+    }
+
+    async fn clear_delivery_attempt(&self, file_hash: &str, attempt_id: Uuid) -> Result<bool> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_owned();
+        tokio::task::spawn_blocking(move || {
+            metadata.clear_transfer_delivery_attempt(&file_hash, attempt_id)
+        })
+        .await
+        .context("ED2K delivery-attempt cleanup task panicked")?
+    }
+}
+
+#[cfg(test)]
 async fn deliver_payload_file(
     source: &Path,
     dest_dir: &Path,
     display_name: &str,
     expected_size: u64,
     expected_hash: [u8; 16],
-    pending_path: &Path,
+    _legacy_pending_path: &Path,
 ) -> Result<PathBuf> {
     validate_delivery_source(source, expected_size).await?;
-    tokio::fs::create_dir_all(long_path(dest_dir))
-        .await
-        .with_context(|| format!("failed to create delivery directory {}", dest_dir.display()))?;
-
-    let pending_candidate = read_pending_delivery_path(pending_path).await?;
-    if let Some(candidate) = pending_candidate.as_deref()
-        && path_exists(candidate).await
-        && delivered_file_matches(candidate, expected_size, expected_hash).await?
-    {
-        return Ok(candidate.to_path_buf());
-    }
-
+    tokio::fs::create_dir_all(long_path(dest_dir)).await?;
     let file_name = sanitize_file_name(display_name);
     let (stem, extension) = split_stem_extension(&file_name);
     for index in 0..=u32::MAX {
@@ -287,21 +412,19 @@ async fn deliver_payload_file(
                 None => format!("{stem} ({index})"),
             }
         };
-        let candidate = dest_dir.join(candidate_name);
-        if path_exists(&candidate).await {
+        let target_path = dest_dir.join(candidate_name);
+        if path_exists(&target_path).await {
             continue;
         }
-        persist_pending_delivery_path(pending_path, &candidate).await?;
-        match copy_noclobber(source, &candidate).await? {
+        let staging_path = dest_dir.join(format!(".emulebb-delivery-{}.tmp", Uuid::new_v4()));
+        stage_delivery_payload(source, &staging_path).await?;
+        verify_installed_delivery(&staging_path, expected_size, expected_hash).await?;
+        match install_staged_payload(&staging_path, &target_path).await? {
             InstallOutcome::Installed => {
-                verify_installed_delivery(&candidate, expected_size, expected_hash).await?;
-                return Ok(candidate);
+                verify_installed_delivery(&target_path, expected_size, expected_hash).await?;
+                return Ok(target_path);
             }
-            InstallOutcome::AlreadyExists => {
-                if delivered_file_matches(&candidate, expected_size, expected_hash).await? {
-                    return Ok(candidate);
-                }
-            }
+            InstallOutcome::AlreadyExists => remove_if_exists(&staging_path).await?,
         }
     }
     anyhow::bail!(
@@ -382,68 +505,61 @@ enum InstallOutcome {
     AlreadyExists,
 }
 
-/// Install an independent payload copy without replacing an existing
-/// destination. Delivery uses a unique temporary sibling and
-/// `persist_noclobber`, so two transfers selecting the same visible name cannot
-/// overwrite or alias each other.
-async fn copy_noclobber(source: &Path, dest: &Path) -> Result<InstallOutcome> {
+/// Materialize one independent payload copy at an exact, attempt-owned staging
+/// path. The caller persists that path before invoking this function.
+async fn stage_delivery_payload(source: &Path, staging_path: &Path) -> Result<()> {
     let source_lp = long_path(source);
-    let dest_lp = long_path(dest);
+    let staging_lp = long_path(staging_path);
+    let mut output = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&staging_lp)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create delivery staging file {}",
+                staging_path.display()
+            )
+        })?;
 
-    if !path_exists(source).await {
-        // Empty-file transfer: no piece store on disk. Create an empty target.
-        return match tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&dest_lp)
+    if path_exists(source).await {
+        let mut input = tokio::fs::File::open(&source_lp)
             .await
-        {
-            Ok(file) => {
-                file.sync_all().await?;
-                Ok(InstallOutcome::Installed)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                Ok(InstallOutcome::AlreadyExists)
-            }
-            Err(error) => Err(error).with_context(|| {
-                format!("failed to create empty delivered file {}", dest.display())
-            }),
-        };
+            .with_context(|| format!("failed to open delivery payload {}", source.display()))?;
+        tokio::io::copy(&mut input, &mut output)
+            .await
+            .with_context(|| format!("failed to copy payload {}", source.display()))?;
     }
-
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    let prefix = format!(
-        ".{}.ed2k-delivering-{}-",
-        dest.file_name()
-            .map(|name| name.to_string_lossy())
-            .unwrap_or_else(|| "download".into()),
-        DELIVERY_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    );
-    let parent_lp = long_path(parent);
-    let named = tempfile::Builder::new()
-        .prefix(&prefix)
-        .tempfile_in(&parent_lp)
-        .with_context(|| format!("failed to create delivery temp in {}", parent.display()))?;
-    let (temp_file, temp_path) = named.into_parts();
-    let mut output = tokio::fs::File::from_std(temp_file);
-    let mut input = tokio::fs::File::open(&source_lp)
-        .await
-        .with_context(|| format!("failed to open delivery payload {}", source.display()))?;
-    tokio::io::copy(&mut input, &mut output)
-        .await
-        .with_context(|| format!("failed to copy payload {}", source.display()))?;
     output.sync_all().await?;
-    drop(output);
+    Ok(())
+}
 
-    let persist_target = dest_lp.clone();
-    match tokio::task::spawn_blocking(move || temp_path.persist_noclobber(persist_target)).await {
-        Ok(Ok(())) => Ok(InstallOutcome::Installed),
-        Ok(Err(error)) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+/// Publish a staged file without replacing a pre-existing destination. A hard
+/// link is an atomic no-clobber install within the shared parent directory; the
+/// staging name is removed immediately after the target link exists.
+async fn install_staged_payload(staging_path: &Path, target_path: &Path) -> Result<InstallOutcome> {
+    match tokio::fs::hard_link(long_path(staging_path), long_path(target_path)).await {
+        Ok(()) => {
+            tokio::fs::remove_file(long_path(staging_path))
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to remove installed delivery staging file {}",
+                        staging_path.display()
+                    )
+                })?;
+            Ok(InstallOutcome::Installed)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             Ok(InstallOutcome::AlreadyExists)
         }
-        Ok(Err(error)) => Err(error.error)
-            .with_context(|| format!("failed to finalize delivered file {}", dest.display())),
-        Err(error) => Err(error).context("delivery temp persist task failed"),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to install delivery staging file {} at {}",
+                staging_path.display(),
+                target_path.display()
+            )
+        }),
     }
 }
 
@@ -799,7 +915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_intent_adopts_verified_file_after_crash_window() {
+    async fn legacy_pending_intent_does_not_authorize_target_adoption() {
         let dir = temp_dir();
         let source = dir.join("pieces.bin");
         let dest = dir.join("incoming");
@@ -827,8 +943,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(delivered, installed);
-        assert!(!dest.join("recovered (1).bin").exists());
+        assert_eq!(delivered, dest.join("recovered (1).bin"));
+        assert_eq!(
+            tokio::fs::read(&installed).await.unwrap(),
+            b"recovered-payload"
+        );
+        assert_eq!(
+            tokio::fs::read(&delivered).await.unwrap(),
+            b"recovered-payload"
+        );
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
 
