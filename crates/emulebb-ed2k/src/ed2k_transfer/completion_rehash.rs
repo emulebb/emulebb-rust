@@ -52,11 +52,80 @@ impl Ed2kTransferRuntime {
         self.final_rehash(file_hash, false).await
     }
 
-    /// Operator-triggered full recheck. This uses the same authority path as
-    /// automatic completion and deliberately persists the pending barrier
-    /// before reading the payload.
+    /// Operator-triggered recheck. Complete or fully present payloads use the
+    /// final completion authority path; incomplete downloads revalidate every
+    /// persisted verified piece without promoting unverified data.
     pub(super) async fn final_recheck_transfer(&self, file_hash: &str) -> Result<bool> {
-        self.final_rehash(file_hash, true).await
+        let manifest = self.manifest(file_hash).await?;
+        if manifest.completed || manifest.is_fully_verified() {
+            self.final_rehash(file_hash, true).await
+        } else {
+            self.recheck_verified_partial_pieces(manifest).await
+        }
+    }
+
+    async fn recheck_verified_partial_pieces(&self, snapshot: Ed2kResumeManifest) -> Result<bool> {
+        if snapshot.source_path.is_some() {
+            return Ok(snapshot.completed);
+        }
+        if !snapshot
+            .pieces
+            .iter()
+            .any(|piece| piece.state == Ed2kTransferState::Verified)
+        {
+            return Ok(false);
+        }
+        let file_hash = snapshot.file_hash.clone();
+        let payload_path = self.payload_path(&file_hash);
+        let expected_size = snapshot.file_size;
+        self.invalidate_payload_handle(&file_hash);
+        let computation =
+            tokio::task::spawn_blocking(move || compute_final_rehash(&payload_path, expected_size))
+                .await
+                .context("ED2K partial recheck task failed")??;
+        let damaged_parts = damaged_verified_part_indexes(&snapshot, &computation)?;
+
+        let _guard = self.lock_manifest(&file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
+        anyhow::ensure!(
+            manifest.file_size == snapshot.file_size
+                && manifest.piece_size == snapshot.piece_size
+                && manifest.md4_hashset_acquired == snapshot.md4_hashset_acquired
+                && manifest.md4_hashset == snapshot.md4_hashset
+                && manifest.pieces == snapshot.pieces
+                && !manifest.completed
+                && !manifest.is_fully_verified(),
+            "ED2K transfer {file_hash} changed while its verified pieces were being rechecked"
+        );
+
+        let previous_ranges = manifest.verified_ranges.clone();
+        for piece in &mut manifest.pieces {
+            if damaged_parts.contains(&piece.piece_index) {
+                let index = usize::try_from(piece.piece_index).unwrap_or(usize::MAX);
+                piece.state = Ed2kTransferState::Missing;
+                piece.bytes_written = 0;
+                piece.block_bitmap = None;
+                piece.ich_corrupted = computation
+                    .part_hashes
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .is_some();
+            }
+        }
+        rebuild_verified_ranges(&mut manifest);
+        if damaged_parts.is_empty() && manifest.verified_ranges == previous_ranges {
+            return Ok(false);
+        }
+        self.store_manifest_unlocked(&manifest).await?;
+        self.upsert_verified_catalog_entry(&manifest).await;
+        tracing::warn!(
+            event = "partial_recheck_completed",
+            file_hash,
+            damaged_parts = ?damaged_parts,
+            "ED2K partial recheck refreshed verified piece authority"
+        );
+        Ok(false)
     }
 
     async fn final_rehash(&self, file_hash: &str, force: bool) -> Result<bool> {
@@ -158,27 +227,50 @@ fn damaged_part_indexes(
     manifest: &Ed2kResumeManifest,
     computation: &FinalRehashComputation,
 ) -> Result<Vec<u32>> {
-    let expected_file_hash = Ed2kHash::from_str(&manifest.file_hash)
-        .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
-        .0;
-    let canonical = manifest
-        .md4_hashset
-        .iter()
-        .map(|hash| decode_md4(hash))
-        .collect::<Result<Vec<_>>>()?;
     let mut damaged = Vec::new();
     for piece in &manifest.pieces {
         let index = usize::try_from(piece.piece_index).unwrap_or(usize::MAX);
-        let expected = if manifest.md4_hashset.is_empty() {
-            Some(expected_file_hash)
-        } else {
-            canonical.get(index).copied()
-        };
-        if computation.part_hashes.get(index).copied().flatten() != expected {
+        let expected = expected_part_hash(manifest, index)?;
+        if expected.is_none() || computation.part_hashes.get(index).copied().flatten() != expected {
             damaged.push(piece.piece_index);
         }
     }
     Ok(damaged)
+}
+
+fn damaged_verified_part_indexes(
+    manifest: &Ed2kResumeManifest,
+    computation: &FinalRehashComputation,
+) -> Result<Vec<u32>> {
+    let mut damaged = Vec::new();
+    for piece in manifest
+        .pieces
+        .iter()
+        .filter(|piece| piece.state == Ed2kTransferState::Verified)
+    {
+        let index = usize::try_from(piece.piece_index).unwrap_or(usize::MAX);
+        let expected = expected_part_hash(manifest, index)?;
+        if expected.is_none() || computation.part_hashes.get(index).copied().flatten() != expected {
+            damaged.push(piece.piece_index);
+        }
+    }
+    Ok(damaged)
+}
+
+fn expected_part_hash(manifest: &Ed2kResumeManifest, index: usize) -> Result<Option<[u8; 16]>> {
+    if !manifest.md4_hashset_acquired {
+        return Ok(None);
+    }
+    if manifest.md4_hashset.is_empty() {
+        return Ed2kHash::from_str(&manifest.file_hash)
+            .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))
+            .map(|hash| Some(hash.0));
+    }
+    manifest
+        .md4_hashset
+        .get(index)
+        .map(|hash| decode_md4(hash).map(Some))
+        .unwrap_or(Ok(None))
 }
 
 fn decode_md4(hash: &str) -> Result<[u8; 16]> {

@@ -315,8 +315,8 @@ impl EmulebbCore {
         // Mark hashing while the on-disk parts are re-verified (oracle forces a
         // full part re-hash on recheck; CPartFile::HashSinglePart per part).
         self.set_transfer_state(hash, "hashing").await;
-        // Drive the real re-verification: re-read every part from disk and
-        // MD4-check it against the hashset, rewriting piece states + verified
+        // Drive the real re-verification: re-read every verified part from disk
+        // and MD4-check it against the hashset, rewriting piece states + verified
         // ranges + the completed flag (and demoting any corrupted part to Missing
         // so it is re-downloaded). The piece store owns the manifest lock + IO.
         let recheck = self.ed2k_transfers.recheck_transfer(hash).await;
