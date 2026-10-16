@@ -393,7 +393,7 @@ fn verified_replaced_payload_fingerprint(
     if !metadata.file_type().is_file() {
         return None;
     }
-    let current = super::ingest::native_file_fingerprint(payload_path, &metadata)?;
+    let current = super::ingest::native_file_fingerprint(payload_path)?;
     staged_fingerprint
         .filter(|staged| {
             staged.identity == current.identity
@@ -440,7 +440,31 @@ async fn replace_file_atomically_async(source: &Path, destination: &Path) -> Res
         .with_context(|| format!("failed to replace payload {}", destination.display()))
 }
 
-async fn ensure_transfer_directory_identity(
+pub(super) async fn existing_transfer_directory_identity(
+    transfer_dir: &Path,
+) -> Result<file_id::FileId> {
+    let metadata = tokio::fs::symlink_metadata(transfer_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect ED2K transfer directory {}",
+                transfer_dir.display()
+            )
+        })?;
+    anyhow::ensure!(
+        metadata.file_type().is_dir(),
+        "ED2K transfer path {} is not a directory",
+        transfer_dir.display()
+    );
+    file_id::get_file_id(long_path(transfer_dir)).with_context(|| {
+        format!(
+            "failed to identify ED2K transfer directory {}",
+            transfer_dir.display()
+        )
+    })
+}
+
+pub(super) async fn ensure_transfer_directory_identity(
     transfer_dir: &Path,
     expected_id: &file_id::FileId,
 ) -> Result<()> {
@@ -471,7 +495,7 @@ async fn ensure_transfer_directory_identity(
     Ok(())
 }
 
-async fn quarantine_payload_if_present(payload_path: &Path) -> Result<Option<PathBuf>> {
+pub(super) async fn quarantine_payload_if_present(payload_path: &Path) -> Result<Option<PathBuf>> {
     match tokio::fs::symlink_metadata(payload_path).await {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -513,7 +537,7 @@ async fn quarantine_payload_if_present(payload_path: &Path) -> Result<Option<Pat
     }
 }
 
-async fn create_empty_payload(payload_path: &Path) -> Result<()> {
+pub(super) async fn create_empty_payload(payload_path: &Path) -> Result<()> {
     let payload = tokio::fs::OpenOptions::new()
         .create_new(true)
         .write(true)

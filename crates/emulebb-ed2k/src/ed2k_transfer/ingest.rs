@@ -1,6 +1,6 @@
 //! Local payload ingest into the ED2K transfer store.
 
-use std::fs::Metadata;
+use std::fs::{File, Metadata, OpenOptions};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -171,7 +171,7 @@ impl Ed2kTransferRuntime {
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.delivery_state = super::Ed2kDeliveryState::NotApplicable;
         manifest.source_path = Some(source_path.clone());
-        manifest.source_fingerprint = native_file_fingerprint(&source_path, &metadata);
+        manifest.source_fingerprint = native_file_fingerprint(&source_path);
         manifest.completed = true;
         // A share-in-place file belongs in the shared catalog, not the download
         // queue. Persist that state in the initial transaction so callers do not
@@ -296,33 +296,46 @@ impl Ed2kTransferRuntime {
 
 /// Capture the native file identity and full-resolution filesystem timestamps
 /// used to decide whether a persisted content hash is still reusable.
-pub(crate) fn native_file_fingerprint(
-    source_path: &Path,
+pub(crate) fn native_file_fingerprint(source_path: &Path) -> Option<NativeFileFingerprint> {
+    let file = open_regular_file_without_follow(source_path).ok()?;
+    let opened_metadata = file.metadata().ok()?;
+    native_file_fingerprint_from_handle(&file, &opened_metadata)
+}
+
+#[cfg(unix)]
+fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+pub(crate) fn native_file_fingerprint_from_handle(
+    file: &File,
     metadata: &Metadata,
 ) -> Option<NativeFileFingerprint> {
-    let identity = match file_id::get_file_id(source_path).ok()? {
-        file_id::FileId::Inode {
-            device_id,
-            inode_number,
-        } => NativeFileIdentity::Unix {
-            device_id,
-            inode_number,
-        },
-        file_id::FileId::LowRes {
-            volume_serial_number,
-            file_index,
-        } => NativeFileIdentity::WindowsLowResolution {
-            volume_serial_number,
-            file_index,
-        },
-        file_id::FileId::HighRes {
-            volume_serial_number,
-            file_id,
-        } => NativeFileIdentity::WindowsHighResolution {
-            volume_serial_number,
-            file_id,
-        },
-    };
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    let identity = native_file_identity_from_handle(file, metadata)?;
     let (modified, changed) = native_file_timestamps(metadata)?;
     Some(NativeFileFingerprint {
         identity,
@@ -330,6 +343,80 @@ pub(crate) fn native_file_fingerprint(
         modified,
         changed,
     })
+}
+
+#[cfg(unix)]
+fn native_file_identity_from_handle(
+    _file: &File,
+    metadata: &Metadata,
+) -> Option<NativeFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some(NativeFileIdentity::Unix {
+        device_id: metadata.dev(),
+        inode_number: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn native_file_identity_from_handle(
+    file: &File,
+    _metadata: &Metadata,
+) -> Option<NativeFileIdentity> {
+    use std::{
+        mem::{MaybeUninit, size_of},
+        os::windows::io::AsRawHandle,
+    };
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
+            GetFileInformationByHandleEx,
+        },
+    };
+
+    let handle = file.as_raw_handle() as HANDLE;
+    let mut high_resolution = MaybeUninit::<FILE_ID_INFO>::zeroed();
+    // SAFETY: `handle` belongs to the borrowed open file and the output buffer
+    // has the exact type and size required by `FileIdInfo`.
+    let high_resolution_result = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            high_resolution.as_mut_ptr().cast(),
+            u32::try_from(size_of::<FILE_ID_INFO>()).ok()?,
+        )
+    };
+    if high_resolution_result != 0 {
+        // SAFETY: the successful API call initialized the complete structure.
+        let high_resolution = unsafe { high_resolution.assume_init() };
+        return Some(NativeFileIdentity::WindowsHighResolution {
+            volume_serial_number: high_resolution.VolumeSerialNumber,
+            file_id: u128::from_le_bytes(high_resolution.FileId.Identifier),
+        });
+    }
+
+    let mut low_resolution = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: `handle` belongs to the borrowed open file and the output buffer
+    // has the exact type required by `GetFileInformationByHandle`.
+    if unsafe { GetFileInformationByHandle(handle, low_resolution.as_mut_ptr()) } == 0 {
+        return None;
+    }
+    // SAFETY: the successful API call initialized the complete structure.
+    let low_resolution = unsafe { low_resolution.assume_init() };
+    Some(NativeFileIdentity::WindowsLowResolution {
+        volume_serial_number: low_resolution.dwVolumeSerialNumber,
+        file_index: (u64::from(low_resolution.nFileIndexHigh) << 32)
+            | u64::from(low_resolution.nFileIndexLow),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_file_identity_from_handle(
+    _file: &File,
+    _metadata: &Metadata,
+) -> Option<NativeFileIdentity> {
+    None
 }
 
 #[cfg(unix)]
@@ -398,10 +485,8 @@ mod native_file_fingerprint_tests {
         let temp = tempdir().unwrap();
         let source = temp.path().join("payload.bin");
         fs::write(&source, b"payload").unwrap();
-        let metadata = fs::metadata(&source).unwrap();
-
-        let first = native_file_fingerprint(&source, &metadata).unwrap();
-        let second = native_file_fingerprint(&source, &fs::metadata(&source).unwrap()).unwrap();
+        let first = native_file_fingerprint(&source).unwrap();
+        let second = native_file_fingerprint(&source).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(first.size_bytes, 7);
@@ -413,14 +498,36 @@ mod native_file_fingerprint_tests {
         let source = temp.path().join("payload.bin");
         let retained = temp.path().join("retained.bin");
         fs::write(&source, b"same-size").unwrap();
-        let original = native_file_fingerprint(&source, &fs::metadata(&source).unwrap()).unwrap();
+        let original = native_file_fingerprint(&source).unwrap();
         fs::rename(&source, &retained).unwrap();
         fs::write(&source, b"different").unwrap();
-        let replacement =
-            native_file_fingerprint(&source, &fs::metadata(&source).unwrap()).unwrap();
+        let replacement = native_file_fingerprint(&source).unwrap();
 
         assert_eq!(original.size_bytes, replacement.size_bytes);
         assert_ne!(original.identity, replacement.identity);
         assert!(!original.safely_matches(&replacement));
+    }
+
+    #[test]
+    fn fingerprint_rejects_non_file_occupant() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("payload.bin");
+        fs::create_dir(&source).unwrap();
+
+        assert!(native_file_fingerprint(&source).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_does_not_follow_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target.bin");
+        let source = temp.path().join("payload.bin");
+        fs::write(&target, b"payload").unwrap();
+        symlink(&target, &source).unwrap();
+
+        assert!(native_file_fingerprint(&source).is_none());
     }
 }

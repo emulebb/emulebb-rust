@@ -221,7 +221,7 @@ pub(super) async fn classify_delivered_output(
         if !metadata.file_type().is_file() || metadata.len() != expected_size {
             return Ok(DeliveredOutputIdentity::Foreign);
         }
-        let current_fingerprint = super::ingest::native_file_fingerprint(&path, &metadata);
+        let current_fingerprint = super::ingest::native_file_fingerprint(&path);
         if recorded_fingerprint
             .as_ref()
             .zip(current_fingerprint.as_ref())
@@ -236,7 +236,7 @@ pub(super) async fn classify_delivered_output(
             .symlink_metadata()
             .ok()
             .filter(|metadata| metadata.file_type().is_file() && metadata.len() == expected_size)
-            .and_then(|metadata| super::ingest::native_file_fingerprint(&path, &metadata));
+            .and_then(|_| super::ingest::native_file_fingerprint(&path));
         if current_fingerprint.is_some() && current_fingerprint != post_hash_fingerprint {
             return Ok(DeliveredOutputIdentity::Foreign);
         }
@@ -250,7 +250,7 @@ fn delivered_file_fingerprint(path: &Path) -> Option<NativeFileFingerprint> {
     let path = long_path(path);
     let metadata = path.symlink_metadata().ok()?;
     metadata.file_type().is_file().then_some(())?;
-    super::ingest::native_file_fingerprint(&path, &metadata)
+    super::ingest::native_file_fingerprint(&path)
 }
 
 /// Copy/link `source` (`pieces.bin`) into `dest_dir` under a collision-free

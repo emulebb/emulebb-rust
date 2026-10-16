@@ -1017,7 +1017,8 @@ impl Ed2kTransferRuntime {
         // to the ed2k server, so peers cannot discover rust as a source for it.
         for manifest in &manifests {
             if !manifest.verified_ranges.is_empty() {
-                self.upsert_verified_catalog_entry(manifest).await;
+                self.insert_hydrated_incomplete_entry_if_current(manifest)
+                    .await?;
             }
         }
         Ok(manifests)
