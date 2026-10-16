@@ -1,12 +1,10 @@
 use super::*;
 
 impl EmulebbCore {
-    /// Complete every durable destructive-deletion intent before startup
-    /// hydrates or publishes any profile state.
-    ///
-    /// This barrier is startup-only: normal runtime deletion must use
-    /// [`Self::delete_transfer_files`] so in-memory state and events are torn
-    /// down together with the persisted transfer.
+    /// Complete every durable destructive-deletion intent. Startup invokes this
+    /// before profile exposure, and maintenance retries transient cleanup
+    /// failures after the ordinary delete path has already removed runtime
+    /// state and emitted its event.
     pub async fn recover_pending_transfer_deletions(&self) -> Result<usize> {
         self.ed2k_transfers
             .recover_pending_transfer_deletions()
