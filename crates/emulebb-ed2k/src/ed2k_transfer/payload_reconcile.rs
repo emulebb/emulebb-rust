@@ -24,6 +24,7 @@ use super::{
 struct VerifiedRecoveryPayload {
     path: PathBuf,
     fingerprint: Option<NativeFileFingerprint>,
+    exact_recorded_identity: bool,
 }
 
 #[derive(Debug)]
@@ -194,6 +195,11 @@ impl Ed2kTransferRuntime {
                     if manifest.source_fingerprint != recovery.fingerprint {
                         manifest.source_fingerprint = recovery.fingerprint.clone();
                     }
+                    if manifest.delivery_ownership == super::Ed2kDeliveryOwnership::Owned
+                        && !recovery.exact_recorded_identity
+                    {
+                        manifest.delivery_ownership = super::Ed2kDeliveryOwnership::Unowned;
+                    }
                     if manifest != snapshot {
                         self.store_manifest_unlocked(&manifest).await?;
                     }
@@ -269,9 +275,14 @@ async fn verified_recovery_payload(
     )
     .await?
     {
-        DeliveredOutputIdentity::Matching(fingerprint) => {
-            Ok(Some(VerifiedRecoveryPayload { path, fingerprint }))
-        }
+        DeliveredOutputIdentity::Matching(fingerprint) => Ok(Some(VerifiedRecoveryPayload {
+            exact_recorded_identity: recorded_fingerprint
+                .as_ref()
+                .zip(fingerprint.as_ref())
+                .is_some_and(|(recorded, current)| recorded.safely_matches(current)),
+            path,
+            fingerprint,
+        })),
         DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign => Ok(None),
     }
 }
@@ -935,6 +946,58 @@ mod tests {
             fs::read(runtime.payload_path(&job.file_hash)).unwrap(),
             payload
         );
+    }
+
+    #[tokio::test]
+    async fn content_only_recovery_demotes_replaced_output_ownership() {
+        let root = unique_test_dir("ed2k-restore-replaced-delivery");
+        let incoming = root.join("incoming");
+        let payload = b"operator replacement remains operator owned";
+        let delivered_path;
+        let job;
+        let recorded_fingerprint;
+        {
+            let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            job = complete_download(&runtime, "replaced.bin", payload).await;
+            delivered_path = match runtime
+                .materialize_completed_payload(&job.file_hash, &incoming)
+                .await
+                .unwrap()
+            {
+                Ed2kDeliveryOutcome::Delivered(path) => path,
+                outcome => panic!("unexpected delivery outcome: {outcome:?}"),
+            };
+            let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+            assert_eq!(
+                manifest.delivery_ownership,
+                super::super::Ed2kDeliveryOwnership::Owned
+            );
+            recorded_fingerprint = manifest.source_fingerprint.unwrap();
+
+            fs::rename(&delivered_path, incoming.join("operator-original.bin")).unwrap();
+            fs::write(&delivered_path, payload).unwrap();
+            let replacement_fingerprint =
+                super::super::ingest::native_file_fingerprint(&delivered_path).unwrap();
+            assert!(!recorded_fingerprint.safely_matches(&replacement_fingerprint));
+            fs::remove_dir_all(runtime.transfer_dir(&job.file_hash)).unwrap();
+        }
+
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        assert_eq!(report.restored_payloads, 1);
+        let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+        assert_eq!(
+            manifest.delivery_ownership,
+            super::super::Ed2kDeliveryOwnership::Unowned
+        );
+        assert!(
+            !recorded_fingerprint.safely_matches(manifest.source_fingerprint.as_ref().unwrap())
+        );
+
+        assert!(runtime.delete_transfer_files(&job.file_hash).await.unwrap());
+        assert_eq!(fs::read(&delivered_path).unwrap(), payload);
+        drop(runtime);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
