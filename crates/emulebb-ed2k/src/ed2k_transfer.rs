@@ -47,6 +47,7 @@ mod download_coordinator;
 mod download_pick;
 mod download_throttle;
 mod duplicate;
+mod fs_durability;
 mod hashset;
 mod ich_salvage;
 mod inbound_admission;

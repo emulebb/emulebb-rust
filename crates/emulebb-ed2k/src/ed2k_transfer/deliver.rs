@@ -42,6 +42,7 @@ use uuid::Uuid;
 
 use crate::long_path::long_path;
 
+use super::fs_durability::sync_parent_directory;
 use super::{ED2K_PART_SIZE, Ed2kTransferRuntime};
 
 #[cfg(test)]
@@ -771,6 +772,8 @@ async fn stage_delivery_payload(source: &Path, staging_path: &Path) -> Result<()
             .with_context(|| format!("failed to copy payload {}", source.display()))?;
     }
     output.sync_all().await?;
+    drop(output);
+    sync_parent_directory(staging_path).await?;
     Ok(())
 }
 
@@ -788,6 +791,7 @@ async fn install_staged_payload(staging_path: &Path, target_path: &Path) -> Resu
                         staging_path.display()
                     )
                 })?;
+            sync_parent_directory(target_path).await?;
             Ok(InstallOutcome::Installed)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -848,8 +852,8 @@ pub(super) async fn persist_pending_delivery_path(path: &Path, candidate: &Path)
 }
 
 async fn remove_if_exists(path: &Path) -> Result<()> {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => Ok(()),
+    match tokio::fs::remove_file(long_path(path)).await {
+        Ok(()) => sync_parent_directory(path).await,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
     }
@@ -890,6 +894,8 @@ async fn remove_delivery_target_if_unchanged(
             path = %display_path.display(),
             "preserving delivery-attempt target whose native identity changed during deletion"
         );
+    } else {
+        sync_parent_directory(path).await?;
     }
     Ok(())
 }

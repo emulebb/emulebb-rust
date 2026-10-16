@@ -12,6 +12,7 @@ use emulebb_metadata::{
 use crate::long_path::long_path;
 
 use super::deliver::{DeliveredOutputIdentity, classify_delivered_output};
+use super::fs_durability::sync_parent_directory;
 use super::hashset::{
     decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
     validate_aich_hashset, validate_md4_hashset,
@@ -735,6 +736,7 @@ impl Ed2kTransferRuntime {
                         transfer_dir.display()
                     )
                 })?;
+            sync_parent_directory(&transfer_dir).await?;
             return Ok(true);
         };
         anyhow::ensure!(
@@ -792,7 +794,7 @@ impl Ed2kTransferRuntime {
                 DeliveredOutputIdentity::Missing => {}
                 DeliveredOutputIdentity::Matching(_) => {
                     match tokio::fs::remove_file(long_path(delivered_path)).await {
-                        Ok(()) => {}
+                        Ok(()) => sync_parent_directory(delivered_path).await?,
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                         Err(error) => {
                             return Err(error).with_context(|| {
@@ -824,6 +826,7 @@ impl Ed2kTransferRuntime {
                         transfer_dir.display()
                     )
                 })?;
+            sync_parent_directory(transfer_dir).await?;
         }
         anyhow::ensure!(
             self.finalize_transfer_deletion_intent(file_hash).await?,
