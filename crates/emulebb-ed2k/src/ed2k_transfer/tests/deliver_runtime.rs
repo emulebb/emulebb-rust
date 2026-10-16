@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 #[cfg(unix)]
 use super::super::deliver::set_after_publish_move_hook;
+use super::super::deliver::set_before_fingerprint_remove_hook;
 use super::super::delivery_tombstone::set_before_move_hook;
 use super::super::ingest::native_file_fingerprint;
 use super::super::metadata::transfer_directory_tombstone_path;
@@ -858,6 +859,60 @@ async fn destructive_delete_recovers_moved_tombstone() {
     );
     assert!(!fixture.tombstone.exists());
     assert!(!restarted.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_preserves_tombstone_replacement_before_unlink() {
+    let root = unique_test_dir("ed2k-delete-tombstone-unlink-race");
+    let fixture = prepare_deletion_tombstone(&root, "Tombstone.Unlink.Race.mkv").await;
+    fs::rename(&fixture.delivered, &fixture.tombstone).unwrap();
+    let moved_fingerprint = native_file_fingerprint(&fixture.tombstone).unwrap();
+    fixture
+        .runtime
+        .metadata
+        .mark_transfer_deletion_tombstone_moved(
+            &fixture.hash,
+            fixture.tombstone_id,
+            &moved_fingerprint,
+        )
+        .unwrap();
+    let owned_backup = fixture.tombstone.with_extension("owned-backup");
+    let hook_backup = owned_backup.clone();
+    set_before_fingerprint_remove_hook(
+        &fixture.tombstone,
+        Box::new(move |tombstone_path| {
+            fs::rename(tombstone_path, &hook_backup).unwrap();
+            fs::write(tombstone_path, b"foreign replacement").unwrap();
+        }),
+    );
+
+    let error = fixture
+        .runtime
+        .recover_pending_transfer_deletions()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("changed before physical reclamation"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        fs::read(&fixture.tombstone).unwrap(),
+        b"foreign replacement"
+    );
+    assert!(owned_backup.exists());
+
+    fs::remove_file(&fixture.tombstone).unwrap();
+    fs::rename(&owned_backup, &fixture.tombstone).unwrap();
+    assert_eq!(
+        fixture
+            .runtime
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!fixture.tombstone.exists());
+    assert!(!fixture.runtime.transfer_dir(&fixture.hash).exists());
 }
 
 #[tokio::test]
