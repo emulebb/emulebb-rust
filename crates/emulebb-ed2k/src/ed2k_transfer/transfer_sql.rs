@@ -1,13 +1,13 @@
 use anyhow::Result;
 use emulebb_metadata::{
-    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferDeliveryState,
-    MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
-    MetadataTransferRange, MetadataTransferSource,
+    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferDeliveryOwnership,
+    MetadataTransferDeliveryState, MetadataTransferManifest, MetadataTransferMediaMetadata,
+    MetadataTransferPiece, MetadataTransferRange, MetadataTransferSource,
 };
 
 use super::{
-    Ed2kDeliveryState, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange,
-    Ed2kSourceHint, Ed2kTransferState, catalog::Ed2kSharedPublishStats,
+    Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry,
+    Ed2kSharedRange, Ed2kSourceHint, Ed2kTransferState, catalog::Ed2kSharedPublishStats,
 };
 
 pub(super) const MEDIA_METADATA_EXTRACTOR_VERSION: u32 = 1;
@@ -57,6 +57,11 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
             Ed2kDeliveryState::NotApplicable => MetadataTransferDeliveryState::NotApplicable,
             Ed2kDeliveryState::Pending => MetadataTransferDeliveryState::Pending,
             Ed2kDeliveryState::Delivered => MetadataTransferDeliveryState::Delivered,
+        },
+        delivery_ownership: match manifest.delivery_ownership {
+            Ed2kDeliveryOwnership::None => MetadataTransferDeliveryOwnership::None,
+            Ed2kDeliveryOwnership::Owned => MetadataTransferDeliveryOwnership::Owned,
+            Ed2kDeliveryOwnership::Unowned => MetadataTransferDeliveryOwnership::Unowned,
         },
         delivered_path: manifest.delivered_path.clone(),
         source_path: manifest.source_path.clone(),
@@ -147,6 +152,11 @@ pub(super) fn manifest_from_metadata(
             MetadataTransferDeliveryState::NotApplicable => Ed2kDeliveryState::NotApplicable,
             MetadataTransferDeliveryState::Pending => Ed2kDeliveryState::Pending,
             MetadataTransferDeliveryState::Delivered => Ed2kDeliveryState::Delivered,
+        },
+        delivery_ownership: match manifest.delivery_ownership {
+            MetadataTransferDeliveryOwnership::None => Ed2kDeliveryOwnership::None,
+            MetadataTransferDeliveryOwnership::Owned => Ed2kDeliveryOwnership::Owned,
+            MetadataTransferDeliveryOwnership::Unowned => Ed2kDeliveryOwnership::Unowned,
         },
         delivered_path: manifest.delivered_path,
         source_path: manifest.source_path,
@@ -306,6 +316,7 @@ mod tests {
             control_state: None,
             transfer_row_removed: false,
             delivery_state: MetadataTransferDeliveryState::Pending,
+            delivery_ownership: MetadataTransferDeliveryOwnership::None,
             delivered_path: None,
             source_path: None,
             source_fingerprint: None,

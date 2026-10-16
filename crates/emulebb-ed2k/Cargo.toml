@@ -55,10 +55,11 @@ tokio-stream.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ipconfig.workspace = true
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

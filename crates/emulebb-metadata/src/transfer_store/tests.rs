@@ -46,11 +46,22 @@ fn source_backed_manifest() -> MetadataTransferManifest {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: Some("/library/Concurrent.Sample.bin".into()),
         source_fingerprint: Some(fingerprint(16, 90)),
         payload_fingerprint: None,
     }
+}
+
+fn completed_pending_download_manifest() -> MetadataTransferManifest {
+    let mut manifest = source_backed_manifest();
+    manifest.display_name = "Delivery.Attempt.bin".to_string();
+    manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+    manifest.source_path = None;
+    manifest.source_fingerprint = None;
+    manifest.payload_fingerprint = Some(fingerprint(manifest.file_size, 91));
+    manifest
 }
 
 fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
@@ -73,6 +84,27 @@ fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
             .unwrap(),
         ),
     }
+}
+
+#[test]
+fn owned_delivery_requires_exact_size_fingerprint_authority() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
+    manifest.delivered_path = Some("/incoming/Delivery.Attempt.bin".into());
+
+    assert!(store.upsert_transfer_manifest(&manifest).is_err());
+    manifest.source_fingerprint = Some(fingerprint(manifest.file_size + 1, 92));
+    assert!(store.upsert_transfer_manifest(&manifest).is_err());
+    manifest.source_fingerprint = Some(fingerprint(manifest.file_size, 93));
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
 }
 
 #[test]
@@ -156,6 +188,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         control_state: Some("paused".to_string()),
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: Some("/library/Sample.Transfer.bin".into()),
         source_fingerprint: Some(fingerprint(1024, 0)),
@@ -490,6 +523,7 @@ fn upload_demand_counters_persist_on_known_files() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -567,6 +601,7 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: Some("/library/Alpha.bin".into()),
         source_fingerprint: Some(fingerprint(1024, 0)),
@@ -724,6 +759,7 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: Some("/library/Recovered.Source.bin".into()),
         source_fingerprint: Some(recovered_fingerprint),
@@ -837,6 +873,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -854,6 +891,228 @@ fn delete_transfer_manifest_removes_transfer_rows() {
             .transfer_manifest_by_hash("00112233445566778899aabbccddeeff")
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn delivery_attempts_roundtrip_and_transition_idempotently() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_pending_download_manifest();
+    let hash = manifest.file_hash.clone();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+
+    let attempt_id = Uuid::new_v4();
+    let target_path = std::env::temp_dir().join("Delivery.Attempt.bin");
+    let staging_path = std::env::temp_dir().join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    let prepared = store
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    assert_eq!(prepared.file_hash, hash);
+    assert_eq!(prepared.attempt_id, attempt_id);
+    assert_eq!(
+        prepared.phase,
+        MetadataTransferDeliveryAttemptPhase::Prepared
+    );
+    assert_eq!(prepared.target_path, target_path);
+    assert_eq!(prepared.staging_path, staging_path);
+    assert!(prepared.staging_fingerprint.is_none());
+    assert_eq!(prepared.created_at_ms, prepared.updated_at_ms);
+    assert_eq!(store.table_count("delivery_attempts").unwrap(), 1);
+    assert_eq!(
+        store.transfer_delivery_attempt_by_hash(&hash).unwrap(),
+        Some(prepared.clone())
+    );
+    assert_eq!(
+        store.transfer_delivery_attempts().unwrap(),
+        vec![prepared.clone()]
+    );
+    assert_eq!(
+        store
+            .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+            .unwrap(),
+        prepared
+    );
+    assert!(
+        store
+            .begin_transfer_delivery_attempt(&hash, Uuid::new_v4(), &target_path, &staging_path,)
+            .is_err()
+    );
+
+    let staging_fingerprint = fingerprint(manifest.file_size, 91);
+    assert!(
+        !store
+            .mark_transfer_delivery_attempt_staged(&hash, Uuid::new_v4(), &staging_fingerprint,)
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_transfer_delivery_attempt_staged(
+                &hash,
+                attempt_id,
+                &fingerprint(manifest.file_size, 93),
+            )
+            .unwrap()
+    );
+    let staged = store
+        .transfer_delivery_attempt_by_hash(&hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(staged.phase, MetadataTransferDeliveryAttemptPhase::Staged);
+    assert_eq!(
+        staged.staging_fingerprint.as_ref(),
+        Some(&staging_fingerprint)
+    );
+    assert!(staged.published_fingerprint.is_none());
+    assert_eq!(staged.created_at_ms, prepared.created_at_ms);
+    assert!(staged.updated_at_ms >= staged.created_at_ms);
+
+    let published_fingerprint = fingerprint(manifest.file_size, 94);
+    assert!(
+        store
+            .mark_transfer_delivery_attempt_published(&hash, attempt_id, &published_fingerprint,)
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_transfer_delivery_attempt_published(&hash, attempt_id, &published_fingerprint,)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_transfer_delivery_attempt_published(
+                &hash,
+                attempt_id,
+                &fingerprint(manifest.file_size, 95),
+            )
+            .unwrap()
+    );
+    let published = store
+        .transfer_delivery_attempt_by_hash(&hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published.phase,
+        MetadataTransferDeliveryAttemptPhase::Published
+    );
+    assert_eq!(
+        published.published_fingerprint.as_ref(),
+        Some(&published_fingerprint)
+    );
+
+    let mut delivered_manifest = manifest.clone();
+    delivered_manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    delivered_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
+    delivered_manifest.delivered_path = Some(target_path.clone());
+    delivered_manifest.source_fingerprint = Some(fingerprint(delivered_manifest.file_size, 92));
+    store.upsert_transfer_manifest(&delivered_manifest).unwrap();
+    assert!(
+        store
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none(),
+        "delivered manifest commit must atomically clear its attempt"
+    );
+
+    let mut pending_manifest = delivered_manifest;
+    pending_manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+    pending_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
+    pending_manifest.delivered_path = None;
+    pending_manifest.source_fingerprint = None;
+    store.upsert_transfer_manifest(&pending_manifest).unwrap();
+    let prepared = store
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    assert_eq!(
+        prepared.phase,
+        MetadataTransferDeliveryAttemptPhase::Prepared
+    );
+
+    assert!(
+        !store
+            .clear_transfer_delivery_attempt(&hash, Uuid::new_v4())
+            .unwrap()
+    );
+    assert!(
+        store
+            .clear_transfer_delivery_attempt(&hash, attempt_id)
+            .unwrap()
+    );
+    assert!(
+        store
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn delivery_attempt_requires_an_authoritative_pending_download() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    let hash = manifest.file_hash.clone();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let target_path = std::env::temp_dir().join("Delivery.Eligibility.bin");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = std::env::temp_dir().join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+
+    assert!(
+        store
+            .begin_transfer_delivery_attempt(
+                &hash,
+                attempt_id,
+                &target_path,
+                &std::env::temp_dir().join("unowned-staging.tmp"),
+            )
+            .is_err()
+    );
+
+    store
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    assert!(store.request_transfer_deletion(&hash).unwrap());
+    assert!(
+        store
+            .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path,)
+            .is_err()
+    );
+    assert!(
+        store
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_some()
+    );
+    assert!(store.finalize_transfer_deletion(&hash).unwrap());
+    assert!(
+        store
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+
+    manifest.file_hash = "ffeeddccbbaa99887766554433221100".to_string();
+    manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
+    manifest.source_path = Some(std::env::temp_dir().join("shared.bin"));
+    manifest.payload_fingerprint = None;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(
+        store
+            .begin_transfer_delivery_attempt(
+                &manifest.file_hash,
+                Uuid::new_v4(),
+                &target_path,
+                &staging_path,
+            )
+            .is_err()
     );
 }
 
@@ -890,6 +1149,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Delivered,
+        delivery_ownership: MetadataTransferDeliveryOwnership::Owned,
         delivered_path: Some("/incoming/Delete.Intent.bin".into()),
         source_path: None,
         source_fingerprint: Some(fingerprint(1, 9)),
@@ -1098,6 +1358,160 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
 }
 
 #[test]
+fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    let original_path = std::env::temp_dir().join("Delivery.Tombstone.bin");
+    let source_fingerprint = fingerprint(manifest.file_size, 101);
+    manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
+    manifest.delivered_path = Some(original_path.clone());
+    manifest.source_fingerprint = Some(source_fingerprint.clone());
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(
+        store
+            .request_transfer_deletion(&manifest.file_hash)
+            .unwrap()
+    );
+
+    let abandoned_id = Uuid::new_v4();
+    let abandoned_path = original_path
+        .parent()
+        .unwrap()
+        .join(format!(".emulebb-delete-{abandoned_id}.tmp"));
+    let prepared = store
+        .begin_transfer_deletion_tombstone(
+            &manifest.file_hash,
+            abandoned_id,
+            &original_path,
+            &abandoned_path,
+            &source_fingerprint,
+        )
+        .unwrap();
+    assert_eq!(
+        prepared.phase,
+        MetadataTransferDeletionTombstonePhase::Prepared
+    );
+    assert!(prepared.moved_fingerprint.is_none());
+    assert!(
+        store
+            .clear_prepared_transfer_deletion_tombstone(&manifest.file_hash, abandoned_id)
+            .unwrap()
+    );
+
+    let tombstone_id = Uuid::new_v4();
+    let tombstone_path = original_path
+        .parent()
+        .unwrap()
+        .join(format!(".emulebb-delete-{tombstone_id}.tmp"));
+    let prepared = store
+        .begin_transfer_deletion_tombstone(
+            &manifest.file_hash,
+            tombstone_id,
+            &original_path,
+            &tombstone_path,
+            &source_fingerprint,
+        )
+        .unwrap();
+    assert_eq!(prepared.original_path, original_path);
+    assert_eq!(prepared.tombstone_path, tombstone_path);
+    assert_eq!(prepared.source_fingerprint, source_fingerprint);
+    assert_eq!(
+        store
+            .transfer_deletion_tombstone_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(prepared.clone())
+    );
+
+    let moved_fingerprint = fingerprint(manifest.file_size, 102);
+    assert!(
+        store
+            .mark_transfer_deletion_tombstone_moved(
+                &manifest.file_hash,
+                tombstone_id,
+                &moved_fingerprint,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_transfer_deletion_tombstone_moved(
+                &manifest.file_hash,
+                tombstone_id,
+                &moved_fingerprint,
+            )
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_transfer_deletion_tombstone_moved(
+                &manifest.file_hash,
+                tombstone_id,
+                &fingerprint(manifest.file_size, 103),
+            )
+            .unwrap()
+    );
+    let moved = store
+        .transfer_deletion_tombstone_by_hash(&manifest.file_hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(moved.phase, MetadataTransferDeletionTombstonePhase::Moved);
+    assert_eq!(moved.moved_fingerprint, Some(moved_fingerprint));
+    assert!(
+        !store
+            .clear_prepared_transfer_deletion_tombstone(&manifest.file_hash, tombstone_id)
+            .unwrap()
+    );
+
+    assert!(
+        store
+            .finalize_transfer_deletion(&manifest.file_hash)
+            .unwrap()
+    );
+    assert!(
+        store
+            .transfer_deletion_tombstone_by_hash(&manifest.file_hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn deletion_tombstone_requires_owned_delivered_output() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    let original_path = std::env::temp_dir().join("Unowned.Tombstone.bin");
+    let source_fingerprint = fingerprint(manifest.file_size, 104);
+    manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Unowned;
+    manifest.delivered_path = Some(original_path.clone());
+    manifest.source_fingerprint = Some(source_fingerprint.clone());
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(
+        store
+            .request_transfer_deletion(&manifest.file_hash)
+            .unwrap()
+    );
+    let tombstone_id = Uuid::new_v4();
+    let tombstone_path = original_path
+        .parent()
+        .unwrap()
+        .join(format!(".emulebb-delete-{tombstone_id}.tmp"));
+
+    assert!(
+        store
+            .begin_transfer_deletion_tombstone(
+                &manifest.file_hash,
+                tombstone_id,
+                &original_path,
+                &tombstone_path,
+                &source_fingerprint,
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn delete_transfer_manifest_clears_soft_known_file_references() {
     // A search result links to the known file by hash. Deleting the transfer
     // (and its known_files row) must not fail the foreign key check; the soft
@@ -1133,6 +1547,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -1245,6 +1660,7 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 control_state: None,
                 transfer_row_removed: false,
                 delivery_state: MetadataTransferDeliveryState::NotApplicable,
+                delivery_ownership: MetadataTransferDeliveryOwnership::None,
                 delivered_path: None,
                 source_path: Some(format!("/library/catalog-{sequence}.bin").into()),
                 source_fingerprint: Some(fingerprint(sequence as u64, sequence as u64)),

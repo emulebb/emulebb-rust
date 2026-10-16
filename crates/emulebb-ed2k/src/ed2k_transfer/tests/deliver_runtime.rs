@@ -7,9 +7,17 @@ use std::{fs, path::Path, sync::Arc, time::Duration};
 
 use emulebb_kad_proto::Ed2kHash;
 use md4::{Digest, Md4};
+use uuid::Uuid;
 
+#[cfg(unix)]
+use super::super::deliver::set_after_publish_move_hook;
+use super::super::deliver::set_before_fingerprint_remove_hook;
+use super::super::delivery_tombstone::set_before_move_hook;
+use super::super::ingest::native_file_fingerprint;
+use super::super::metadata::transfer_directory_tombstone_path;
 use super::super::{
-    ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kTransferRuntime, new_transfer_job,
+    ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryOwnership, Ed2kDeliveryState,
+    Ed2kTransferRuntime, new_transfer_job,
 };
 use crate::long_path::long_path;
 use crate::paths::unique_test_dir;
@@ -30,7 +38,15 @@ async fn ingest_completed(
         payload.extend_from_slice(b"emulebb-delivery-payload");
     }
     payload.truncate(1_048_576);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    ingest_completed_bytes(runtime, display_name, &payload).await
+}
+
+async fn ingest_completed_bytes(
+    runtime: &Ed2kTransferRuntime,
+    display_name: &str,
+    payload: &[u8],
+) -> String {
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(payload).into());
     let file_hash_hex = file_hash.to_string();
     let job = new_transfer_job(file_hash, display_name.to_string(), payload.len() as u64);
     runtime.ensure_job(&job).await.unwrap();
@@ -39,10 +55,55 @@ async fn ingest_completed(
         .await
         .unwrap();
     runtime
-        .store_piece_data(&file_hash_hex, 0, &payload)
+        .store_piece_data(&file_hash_hex, 0, payload)
         .await
         .unwrap();
     file_hash_hex
+}
+
+struct DeletionTombstoneFixture {
+    runtime: Ed2kTransferRuntime,
+    hash: String,
+    delivered: std::path::PathBuf,
+    tombstone: std::path::PathBuf,
+    tombstone_id: Uuid,
+}
+
+async fn prepare_deletion_tombstone(root: &Path, display_name: &str) -> DeletionTombstoneFixture {
+    let runtime = Ed2kTransferRuntime::load_or_create(root).unwrap();
+    let hash = ingest_completed(&runtime, root, display_name).await;
+    let incoming = root.join("incoming");
+    let delivered = incoming.join(display_name);
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let source_fingerprint = runtime
+        .manifest(&hash)
+        .await
+        .unwrap()
+        .source_fingerprint
+        .unwrap();
+    assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+    let tombstone_id = Uuid::new_v4();
+    let tombstone = incoming.join(format!(".emulebb-delete-{tombstone_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_deletion_tombstone(
+            &hash,
+            tombstone_id,
+            &delivered,
+            &tombstone,
+            &source_fingerprint,
+        )
+        .unwrap();
+    DeletionTombstoneFixture {
+        runtime,
+        hash,
+        delivered,
+        tombstone,
+        tombstone_id,
+    }
 }
 
 #[tokio::test]
@@ -66,9 +127,18 @@ async fn materialize_completed_payload_delivers_by_name() {
     assert!(runtime.payload_path(&hash).exists());
     // The delivered path is recorded on the manifest.
     let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::Owned);
     assert_eq!(
         manifest.delivered_path.as_deref(),
         Some(delivered.as_path())
+    );
+    assert!(
+        runtime
+            .metadata
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none(),
+        "the committed manifest must not retain an active delivery attempt"
     );
 
     // A second call is an idempotent no-op (already delivered, file present).
@@ -103,6 +173,269 @@ async fn materialize_completed_payload_isolated_from_piece_store() {
         verified_payload,
         "editing the delivered file must not mutate verified upload bytes"
     );
+}
+
+#[tokio::test]
+async fn staged_attempt_is_installed_and_committed_after_interruption() {
+    let root = unique_test_dir("ed2k-deliver-recover-staged");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Recovered.Staged.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Recovered.Staged.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    assert!(
+        runtime
+            .metadata
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+            .unwrap()
+    );
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target_path.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    assert!(!staging_path.exists());
+    assert!(
+        runtime
+            .metadata
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime.manifest(&hash).await.unwrap().delivery_ownership,
+        Ed2kDeliveryOwnership::Owned
+    );
+}
+
+#[tokio::test]
+async fn staged_attempt_does_not_adopt_byte_identical_foreign_target() {
+    let root = unique_test_dir("ed2k-deliver-recover-staged-collision");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Recovered.Collision.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Recovered.Collision.mkv");
+    fs::write(&target_path, &payload).unwrap();
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+        .unwrap();
+
+    let delivered = incoming.join("Recovered.Collision (1).mkv");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(delivered.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    assert_eq!(fs::read(&delivered).unwrap(), payload);
+    assert!(!staging_path.exists());
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::Owned);
+    assert_eq!(
+        manifest.delivered_path.as_deref(),
+        Some(delivered.as_path())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn publication_rehash_rejects_equal_length_mutation_after_move() {
+    let root = unique_test_dir("ed2k-deliver-post-move-mutation");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Mutated.After.Move.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let replacement = vec![0xA5; payload.len()];
+    let incoming = root.join("incoming");
+    let target_path = incoming.join("Mutated.After.Move.mkv");
+    let hook_replacement = replacement.clone();
+    set_after_publish_move_hook(
+        &hash,
+        Box::new(move |published_path| {
+            fs::write(published_path, &hook_replacement).unwrap();
+        }),
+    );
+
+    let error = runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("published delivery failed verification"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), replacement);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::None);
+
+    let delivered = incoming.join("Mutated.After.Move (1).mkv");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(delivered.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), replacement);
+    assert_eq!(fs::read(&delivered).unwrap(), payload);
+}
+
+#[tokio::test]
+async fn interrupted_publication_is_adopted_without_delete_ownership() {
+    let root = unique_test_dir("ed2k-deliver-recover-ambiguous-publish");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Recovered.Unowned.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Recovered.Unowned.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+        .unwrap();
+    fs::rename(&staging_path, &target_path).unwrap();
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target_path.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::Unowned);
+}
+
+#[tokio::test]
+async fn published_attempt_recovers_with_delete_ownership() {
+    let root = unique_test_dir("ed2k-deliver-recover-published");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Recovered.Published.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Recovered.Published.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+        .unwrap();
+    fs::rename(&staging_path, &target_path).unwrap();
+    let published_fingerprint = native_file_fingerprint(&target_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_published(&hash, attempt_id, &published_fingerprint)
+        .unwrap();
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target_path.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::Owned);
+}
+
+#[tokio::test]
+async fn prepared_attempt_preserves_unproven_staging_occupant() {
+    let root = unique_test_dir("ed2k-deliver-recover-prepared");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Prepared.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Prepared.mkv");
+    fs::write(&target_path, &payload).unwrap();
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, b"partial").unwrap();
+    let legacy_temp = incoming.join(".Prepared.mkv.ed2k-delivering-legacy");
+    fs::write(&legacy_temp, b"unproven legacy artifact").unwrap();
+
+    let delivered = incoming.join("Prepared (1).mkv");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(delivered.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    assert_eq!(fs::read(&delivered).unwrap(), payload);
+    assert_eq!(fs::read(&staging_path).unwrap(), b"partial");
+    assert_eq!(fs::read(&legacy_temp).unwrap(), b"unproven legacy artifact");
+}
+
+#[tokio::test]
+async fn destructive_delete_preserves_prepared_staging_occupant() {
+    let root = unique_test_dir("ed2k-delete-prepared-attempt");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Prepared Delete.mkv").await;
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Prepared Delete.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, b"unproven occupant").unwrap();
+
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert_eq!(fs::read(&staging_path).unwrap(), b"unproven occupant");
+    assert!(!target_path.exists());
 }
 
 #[tokio::test]
@@ -257,12 +590,13 @@ async fn failed_redelivery_leaves_mismatched_output_pending() {
     assert_eq!(fs::read(&delivered).unwrap(), unrelated_replacement);
     let manifest = runtime.manifest(&hash).await.unwrap();
     assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::None);
     assert!(manifest.delivered_path.is_none());
     assert!(manifest.source_fingerprint.is_none());
 }
 
 #[tokio::test]
-async fn materialize_adopts_byte_identical_replacement_without_duplicate() {
+async fn materialize_preserves_byte_identical_replacement_without_adopting_it() {
     let root = unique_test_dir("ed2k-deliver-reconcile-identical");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let hash = ingest_completed(&runtime, &root, "Identical.mkv").await;
@@ -278,19 +612,21 @@ async fn materialize_adopts_byte_identical_replacement_without_duplicate() {
     fs::remove_file(&delivered).unwrap();
     fs::write(&delivered, &verified_payload).unwrap();
 
+    let redelivered = incoming.join("Identical (1).mkv");
     assert_eq!(
         runtime
             .materialize_completed_payload(&hash, &incoming)
             .await
             .unwrap(),
-        Ed2kDeliveryOutcome::AlreadyDelivered(delivered.clone())
+        Ed2kDeliveryOutcome::Delivered(redelivered.clone())
     );
-    assert!(!incoming.join("Identical (1).mkv").exists());
+    assert_eq!(fs::read(&delivered).unwrap(), verified_payload);
+    assert_eq!(fs::read(&redelivered).unwrap(), verified_payload);
     let refreshed = runtime.manifest(&hash).await.unwrap();
     assert_eq!(refreshed.delivery_state, Ed2kDeliveryState::Delivered);
     assert_eq!(
         refreshed.delivered_path.as_deref(),
-        Some(delivered.as_path())
+        Some(redelivered.as_path())
     );
     assert_ne!(refreshed.source_fingerprint, recorded_fingerprint);
 }
@@ -390,6 +726,335 @@ async fn destructive_delete_preserves_foreign_delivered_path_occupant() {
 }
 
 #[tokio::test]
+async fn destructive_delete_preserves_unowned_recovered_output() {
+    let root = unique_test_dir("ed2k-deliver-delete-unowned-output");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Unowned.Delete.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Unowned.Delete.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+        .unwrap();
+    fs::rename(&staging_path, &target_path).unwrap();
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.manifest(&hash).await.unwrap().delivery_ownership,
+        Ed2kDeliveryOwnership::Unowned
+    );
+
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    assert!(!runtime.transfer_dir(&hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_recovers_prepared_tombstone() {
+    let root = unique_test_dir("ed2k-deliver-delete-prepared-tombstone");
+    let fixture = prepare_deletion_tombstone(&root, "Prepared.Tombstone.mkv").await;
+    assert!(fixture.delivered.exists());
+    assert!(!fixture.tombstone.exists());
+    drop(fixture.runtime);
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!fixture.delivered.exists());
+    assert!(!fixture.tombstone.exists());
+    assert!(!restarted.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_recovers_rename_before_moved_checkpoint() {
+    let root = unique_test_dir("ed2k-deliver-delete-uncheckpointed-tombstone");
+    let fixture = prepare_deletion_tombstone(&root, "Uncheckpointed.Tombstone.mkv").await;
+    fs::rename(&fixture.delivered, &fixture.tombstone).unwrap();
+    drop(fixture.runtime);
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!fixture.delivered.exists());
+    assert!(!fixture.tombstone.exists());
+    assert!(!restarted.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_recovers_uncheckpointed_rename_with_changed_identity() {
+    let root = unique_test_dir("ed2k-delete-rename-unstable-identity");
+    let fixture = prepare_deletion_tombstone(&root, "Unstable.Identity.Tombstone.mkv").await;
+    let pre_rename_fingerprint = native_file_fingerprint(&fixture.delivered).unwrap();
+    fs::rename(&fixture.delivered, &fixture.tombstone).unwrap();
+    let moved_object = fixture.tombstone.with_extension("moved-object");
+    fs::rename(&fixture.tombstone, &moved_object).unwrap();
+    fs::copy(&moved_object, &fixture.tombstone).unwrap();
+    fs::remove_file(&moved_object).unwrap();
+    let changed_fingerprint = native_file_fingerprint(&fixture.tombstone).unwrap();
+    assert_ne!(
+        pre_rename_fingerprint.identity,
+        changed_fingerprint.identity
+    );
+    drop(fixture.runtime);
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!fixture.delivered.exists());
+    assert!(!fixture.tombstone.exists());
+    assert!(!restarted.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_recovers_moved_tombstone() {
+    let root = unique_test_dir("ed2k-deliver-delete-moved-tombstone");
+    let fixture = prepare_deletion_tombstone(&root, "Moved.Tombstone.mkv").await;
+    fs::rename(&fixture.delivered, &fixture.tombstone).unwrap();
+    let moved_fingerprint = native_file_fingerprint(&fixture.tombstone).unwrap();
+    fixture
+        .runtime
+        .metadata
+        .mark_transfer_deletion_tombstone_moved(
+            &fixture.hash,
+            fixture.tombstone_id,
+            &moved_fingerprint,
+        )
+        .unwrap();
+    drop(fixture.runtime);
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!fixture.tombstone.exists());
+    assert!(!restarted.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_preserves_tombstone_replacement_before_unlink() {
+    let root = unique_test_dir("ed2k-delete-tombstone-unlink-race");
+    let fixture = prepare_deletion_tombstone(&root, "Tombstone.Unlink.Race.mkv").await;
+    fs::rename(&fixture.delivered, &fixture.tombstone).unwrap();
+    let moved_fingerprint = native_file_fingerprint(&fixture.tombstone).unwrap();
+    fixture
+        .runtime
+        .metadata
+        .mark_transfer_deletion_tombstone_moved(
+            &fixture.hash,
+            fixture.tombstone_id,
+            &moved_fingerprint,
+        )
+        .unwrap();
+    let owned_backup = fixture.tombstone.with_extension("owned-backup");
+    let hook_backup = owned_backup.clone();
+    set_before_fingerprint_remove_hook(
+        &fixture.tombstone,
+        Box::new(move |tombstone_path| {
+            fs::rename(tombstone_path, &hook_backup).unwrap();
+            fs::write(tombstone_path, b"foreign replacement").unwrap();
+        }),
+    );
+
+    let error = fixture
+        .runtime
+        .recover_pending_transfer_deletions()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("changed before physical reclamation"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        fs::read(&fixture.tombstone).unwrap(),
+        b"foreign replacement"
+    );
+    assert!(owned_backup.exists());
+
+    fs::remove_file(&fixture.tombstone).unwrap();
+    fs::rename(&owned_backup, &fixture.tombstone).unwrap();
+    assert_eq!(
+        fixture
+            .runtime
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!fixture.tombstone.exists());
+    assert!(!fixture.runtime.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_recovers_tombstone_unlink_before_finalization() {
+    let root = unique_test_dir("ed2k-deliver-delete-unlinked-tombstone");
+    let fixture = prepare_deletion_tombstone(&root, "Unlinked.Tombstone.mkv").await;
+    fs::rename(&fixture.delivered, &fixture.tombstone).unwrap();
+    let moved_fingerprint = native_file_fingerprint(&fixture.tombstone).unwrap();
+    fixture
+        .runtime
+        .metadata
+        .mark_transfer_deletion_tombstone_moved(
+            &fixture.hash,
+            fixture.tombstone_id,
+            &moved_fingerprint,
+        )
+        .unwrap();
+    fs::remove_file(&fixture.tombstone).unwrap();
+    drop(fixture.runtime);
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!restarted.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_preserves_byte_identical_replacement_before_rename() {
+    let root = unique_test_dir("ed2k-deliver-delete-identical-replacement");
+    let fixture = prepare_deletion_tombstone(&root, "Identical.Replacement.mkv").await;
+    let payload = fs::read(&fixture.delivered).unwrap();
+    fs::remove_file(&fixture.delivered).unwrap();
+    fs::write(&fixture.delivered, &payload).unwrap();
+
+    assert!(
+        fixture
+            .runtime
+            .delete_transfer_files(&fixture.hash)
+            .await
+            .unwrap()
+    );
+    assert_eq!(fs::read(&fixture.delivered).unwrap(), payload);
+    assert!(!fixture.runtime.transfer_dir(&fixture.hash).exists());
+    assert!(
+        fixture
+            .runtime
+            .metadata
+            .transfer_deletion_tombstone_by_hash(&fixture.hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn destructive_delete_restores_replacement_racing_the_atomic_rename() {
+    let root = unique_test_dir("ed2k-deliver-delete-rename-race");
+    let fixture = prepare_deletion_tombstone(&root, "Rename.Race.mkv").await;
+    let replacement = fs::read(&fixture.delivered).unwrap();
+    let hook_replacement = replacement.clone();
+    set_before_move_hook(
+        &fixture.delivered,
+        Box::new(move |original_path, _tombstone_path| {
+            fs::remove_file(original_path).unwrap();
+            fs::write(original_path, &hook_replacement).unwrap();
+        }),
+    );
+
+    assert!(
+        fixture
+            .runtime
+            .delete_transfer_files(&fixture.hash)
+            .await
+            .unwrap()
+    );
+    assert_eq!(fs::read(&fixture.delivered).unwrap(), replacement);
+    assert!(!fixture.tombstone.exists());
+    assert!(!fixture.runtime.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
+async fn destructive_delete_retries_after_foreign_tombstone_collision() {
+    let root = unique_test_dir("ed2k-deliver-delete-tombstone-collision");
+    let fixture = prepare_deletion_tombstone(&root, "Tombstone.Collision.mkv").await;
+    let foreign = b"foreign tombstone occupant";
+    fs::write(&fixture.tombstone, foreign).unwrap();
+
+    assert!(
+        fixture
+            .runtime
+            .delete_transfer_files(&fixture.hash)
+            .await
+            .unwrap()
+    );
+    assert_eq!(fs::read(&fixture.tombstone).unwrap(), foreign);
+    assert!(!fixture.delivered.exists());
+    assert!(!fixture.runtime.transfer_dir(&fixture.hash).exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn destructive_delete_retries_windows_sharing_violation() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    let root = unique_test_dir("ed2k-deliver-delete-sharing-violation");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Sharing.Violation.mkv").await;
+    let incoming = root.join("incoming");
+    let delivered = incoming.join("Sharing.Violation.mkv");
+    runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let blocker = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(long_path(&delivered))
+        .unwrap();
+
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert!(delivered.exists());
+    assert_eq!(
+        runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
+        vec![hash.clone()]
+    );
+    drop(blocker);
+
+    assert_eq!(
+        runtime.recover_pending_transfer_deletions().await.unwrap(),
+        1
+    );
+    assert!(!delivered.exists());
+    assert!(!runtime.transfer_dir(&hash).exists());
+}
+
+#[tokio::test]
 async fn destructive_delete_resumes_a_preexisting_durable_intent() {
     let root = unique_test_dir("ed2k-deliver-delete-resume-intent");
     let hash;
@@ -426,6 +1091,104 @@ async fn destructive_delete_resumes_a_preexisting_durable_intent() {
 }
 
 #[tokio::test]
+async fn destructive_delete_preserves_ambiguous_staged_delivery_target() {
+    let root = unique_test_dir("ed2k-deliver-delete-staged-attempt");
+    let hash;
+    let target_path;
+    {
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        hash = ingest_completed(&runtime, &root, "Staged.Delete.mkv").await;
+        let incoming = root.join("incoming");
+        fs::create_dir_all(&incoming).unwrap();
+        target_path = incoming.join("Staged.Delete.mkv");
+        fs::copy(runtime.payload_path(&hash), &target_path).unwrap();
+        let staging_fingerprint = native_file_fingerprint(&target_path).unwrap();
+        let attempt_id = Uuid::new_v4();
+        let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+        runtime
+            .metadata
+            .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+            .unwrap();
+        assert!(
+            runtime
+                .metadata
+                .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+                .unwrap()
+        );
+        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+    }
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(target_path.exists());
+    assert!(!restarted.transfer_dir(&hash).exists());
+    assert!(
+        restarted
+            .metadata
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn destructive_delete_reclaims_preexisting_published_delivery_attempt() {
+    let root = unique_test_dir("ed2k-deliver-delete-published-attempt");
+    let hash;
+    let target_path;
+    {
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        hash = ingest_completed(&runtime, &root, "Published.Delete.mkv").await;
+        let incoming = root.join("incoming");
+        fs::create_dir_all(&incoming).unwrap();
+        target_path = incoming.join("Published.Delete.mkv");
+        let attempt_id = Uuid::new_v4();
+        let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+        runtime
+            .metadata
+            .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+            .unwrap();
+        fs::copy(runtime.payload_path(&hash), &staging_path).unwrap();
+        let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+        runtime
+            .metadata
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+            .unwrap();
+        fs::rename(&staging_path, &target_path).unwrap();
+        let published_fingerprint = native_file_fingerprint(&target_path).unwrap();
+        runtime
+            .metadata
+            .mark_transfer_delivery_attempt_published(&hash, attempt_id, &published_fingerprint)
+            .unwrap();
+        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+    }
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!target_path.exists());
+    assert!(!restarted.transfer_dir(&hash).exists());
+    assert!(
+        restarted
+            .metadata
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
     let root = unique_test_dir("ed2k-deliver-delete-cleanup-retry");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -437,12 +1200,14 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
         .await
         .unwrap();
     let transfer_dir = runtime.transfer_dir(&hash);
+    let transfer_tombstone = transfer_directory_tombstone_path(&hash, &transfer_dir);
     fs::remove_dir_all(&transfer_dir).unwrap();
     fs::write(&transfer_dir, b"cleanup blocker").unwrap();
 
     assert!(runtime.delete_transfer_files(&hash).await.unwrap());
     assert!(!delivered.exists());
-    assert!(transfer_dir.is_file());
+    assert!(!transfer_dir.exists());
+    assert!(transfer_tombstone.is_file());
     assert!(runtime.manifest(&hash).await.is_err());
     assert_eq!(
         runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
@@ -457,7 +1222,7 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
         .unwrap_err();
     let error = format!("{error:#}");
     assert!(error.contains(&hash));
-    assert!(error.contains("failed to delete ED2K transfer directory"));
+    assert!(error.contains("failed to delete ED2K transfer directory tombstone"));
     assert_eq!(
         restarted
             .metadata
@@ -466,7 +1231,7 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
         vec![hash.clone()]
     );
 
-    fs::remove_file(&transfer_dir).unwrap();
+    fs::remove_file(&transfer_tombstone).unwrap();
     assert_eq!(
         restarted
             .recover_pending_transfer_deletions()
@@ -481,6 +1246,99 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn pending_deletion_recovery_continues_after_an_earlier_failure() {
+    let root = unique_test_dir("ed2k-delete-continue-after-failure");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let incoming = root.join("incoming");
+    let hash_a = ingest_completed_bytes(&runtime, "First.bin", b"first deletion payload").await;
+    let delivered_a = match runtime
+        .materialize_completed_payload(&hash_a, &incoming)
+        .await
+        .unwrap()
+    {
+        Ed2kDeliveryOutcome::Delivered(path) => path,
+        outcome => panic!("unexpected first delivery outcome: {outcome:?}"),
+    };
+    let hash_b = ingest_completed_bytes(&runtime, "Second.bin", b"second deletion payload").await;
+    let delivered_b = match runtime
+        .materialize_completed_payload(&hash_b, &incoming)
+        .await
+        .unwrap()
+    {
+        Ed2kDeliveryOutcome::Delivered(path) => path,
+        outcome => panic!("unexpected second delivery outcome: {outcome:?}"),
+    };
+    let mut transfers = [(hash_a, delivered_a), (hash_b, delivered_b)];
+    transfers.sort_by(|left, right| left.0.cmp(&right.0));
+    let (blocked_hash, blocked_output) = transfers[0].clone();
+    let (later_hash, later_output) = transfers[1].clone();
+
+    let blocked_dir = runtime.transfer_dir(&blocked_hash);
+    let blocked_tombstone = transfer_directory_tombstone_path(&blocked_hash, &blocked_dir);
+    fs::remove_dir_all(&blocked_dir).unwrap();
+    fs::write(&blocked_dir, b"cleanup blocker").unwrap();
+    assert!(runtime.delete_transfer_files(&blocked_hash).await.unwrap());
+    assert!(
+        runtime
+            .metadata
+            .request_transfer_deletion(&later_hash)
+            .unwrap()
+    );
+
+    let error = runtime
+        .recover_pending_transfer_deletions()
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains(&blocked_hash));
+    assert!(!blocked_output.exists());
+    assert!(!later_output.exists());
+    assert!(!runtime.transfer_dir(&later_hash).exists());
+    assert!(runtime.manifest(&later_hash).await.is_err());
+    assert_eq!(
+        runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
+        vec![blocked_hash.clone()]
+    );
+
+    fs::remove_file(&blocked_tombstone).unwrap();
+    assert_eq!(
+        runtime.recover_pending_transfer_deletions().await.unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn destructive_delete_recovers_transfer_directory_tombstone() {
+    let root = unique_test_dir("ed2k-deliver-delete-transfer-dir-tombstone");
+    let hash;
+    let transfer_dir;
+    let transfer_tombstone;
+    {
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        hash = ingest_completed(&runtime, &root, "Transfer.Directory.Tombstone.mkv").await;
+        runtime
+            .materialize_completed_payload(&hash, &root.join("incoming"))
+            .await
+            .unwrap();
+        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+        transfer_dir = runtime.transfer_dir(&hash);
+        transfer_tombstone = transfer_directory_tombstone_path(&hash, &transfer_dir);
+        fs::rename(&transfer_dir, &transfer_tombstone).unwrap();
+    }
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!transfer_dir.exists());
+    assert!(!transfer_tombstone.exists());
+    assert!(restarted.manifest(&hash).await.is_err());
 }
 
 #[tokio::test]
@@ -603,4 +1461,6 @@ async fn materialize_completed_payload_under_long_incoming_path() {
     assert_eq!(outcome, Ed2kDeliveryOutcome::Delivered(delivered.clone()));
     let expected = fs::read(runtime.payload_path(&hash)).unwrap();
     assert_eq!(fs::read(long_path(&delivered)).unwrap(), expected);
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert!(!long_path(&delivered).exists());
 }

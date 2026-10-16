@@ -1,12 +1,59 @@
 use std::path::PathBuf;
 
 use crate::NativeFileFingerprint;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataTransferDeliveryState {
     NotApplicable,
     Pending,
     Delivered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataTransferDeliveryAttemptPhase {
+    Prepared,
+    Staged,
+    Published,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataTransferDeliveryOwnership {
+    None,
+    Owned,
+    Unowned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferDeliveryAttempt {
+    pub file_hash: String,
+    pub attempt_id: Uuid,
+    pub phase: MetadataTransferDeliveryAttemptPhase,
+    pub target_path: PathBuf,
+    pub staging_path: PathBuf,
+    pub staging_fingerprint: Option<NativeFileFingerprint>,
+    pub published_fingerprint: Option<NativeFileFingerprint>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataTransferDeletionTombstonePhase {
+    Prepared,
+    Moved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferDeletionTombstone {
+    pub file_hash: String,
+    pub tombstone_id: Uuid,
+    pub phase: MetadataTransferDeletionTombstonePhase,
+    pub original_path: PathBuf,
+    pub tombstone_path: PathBuf,
+    pub source_fingerprint: NativeFileFingerprint,
+    pub moved_fingerprint: Option<NativeFileFingerprint>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +82,7 @@ pub struct MetadataTransferManifest {
     /// Explicit lifecycle for materializing a download outside the internal
     /// piece store. This is independent from temporary completion/rehash state.
     pub delivery_state: MetadataTransferDeliveryState,
+    pub delivery_ownership: MetadataTransferDeliveryOwnership,
     /// Absolute path the completed payload was materialized to by its canonical
     /// name, or `None` until the transfer is delivered. Persisted on the
     /// `transfers` row to make finished-file delivery idempotent across restarts.

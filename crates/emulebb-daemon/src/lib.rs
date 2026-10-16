@@ -855,14 +855,27 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             tracing::warn!(%error, "initial shared-directory scan failed; continuing");
         }
     });
-    // Deliver completed-but-undelivered transfers in the background. A
-    // persisted sharing profile can carry tens of thousands of manifests, so
-    // the first sweep starts only after REST is bound and sharing workers have
-    // been scheduled. Later sweeps honor core's per-transfer exponential
-    // backoff and recover transient destination failures without a restart.
+    // Resume hidden destructive-deletion cleanup and deliver
+    // completed-but-undelivered transfers in the background. A persisted
+    // sharing profile can carry tens of thousands of manifests, so the first
+    // sweep starts only after REST is bound and sharing workers have been
+    // scheduled. Later sweeps recover transient sharing/AV and destination
+    // failures without a restart.
     let delivery_core = Arc::clone(&core);
     tokio::spawn(async move {
         loop {
+            match delivery_core.recover_pending_transfer_deletions().await {
+                Ok(recovered) if recovered > 0 => {
+                    tracing::info!(
+                        recovered,
+                        "recovered pending destructive transfer deletions"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "pending destructive transfer deletion retry failed");
+                }
+            }
             delivery_core.deliver_pending_completed_transfers().await;
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }

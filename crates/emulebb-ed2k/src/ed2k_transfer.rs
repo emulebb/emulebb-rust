@@ -39,6 +39,7 @@ mod completion_rehash;
 mod corruption_blackbox;
 mod credit_ledger;
 mod deliver;
+mod delivery_tombstone;
 pub(crate) mod diag_bad_peer;
 pub(crate) mod diag_sched;
 pub(crate) mod download_abuse;
@@ -47,6 +48,7 @@ mod download_coordinator;
 mod download_pick;
 mod download_throttle;
 mod duplicate;
+mod fs_durability;
 mod hashset;
 mod ich_salvage;
 mod inbound_admission;
@@ -103,9 +105,9 @@ pub use manifest::new_transfer_job;
 pub use model::{
     ED2K_CALLBACK_TICKET_MAX_LIFETIME, Ed2kCallbackDispatchOutcome, Ed2kCallbackDispatchPermit,
     Ed2kCallbackDownload, Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError,
-    Ed2kCallbackTicketId, Ed2kCallbackTicketRequest, Ed2kDeliveryState, Ed2kLocalIngestSummary,
-    Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob,
-    Ed2kTransferState,
+    Ed2kCallbackTicketId, Ed2kCallbackTicketRequest, Ed2kDeliveryOwnership, Ed2kDeliveryState,
+    Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest,
+    Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
 pub(crate) use model::{
     Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,

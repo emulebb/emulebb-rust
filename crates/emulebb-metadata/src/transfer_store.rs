@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use uuid::Uuid;
 
 use crate::{
     NativeFileFingerprint, NativePath,
@@ -11,9 +12,12 @@ use crate::{
     transfer_model::{
         MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
         MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
-        MetadataTransferCounts, MetadataTransferDeliveryState, MetadataTransferManifest,
-        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
-        MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
+        MetadataTransferCounts, MetadataTransferDeletionTombstone,
+        MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
+        MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
+        MetadataTransferDeliveryState, MetadataTransferManifest, MetadataTransferMediaMetadata,
+        MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
+        MetadataTransferShareEntry, MetadataTransferSource,
     },
 };
 
@@ -160,11 +164,12 @@ impl super::MetadataStore {
             r#"
             INSERT INTO transfers(
                 known_file_id, visible_state, final_rehash_pending, control_state, download_priority,
-                category_id, payload_directory, delivery_state, delivered_path_id, source_path_id,
+                category_id, payload_directory, delivery_state, delivery_ownership,
+                delivered_path_id, source_path_id,
                 source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
-            VALUES (?1, ?2, ?13, ?3, 'normal', ?4, ?5, ?14, ?6, ?10, ?11, ?12, ?7, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?13, ?3, 'normal', ?4, ?5, ?14, ?16, ?6, ?10, ?11, ?12, ?7, ?7, ?8, ?9)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 visible_state = excluded.visible_state,
                 final_rehash_pending = excluded.final_rehash_pending,
@@ -172,6 +177,7 @@ impl super::MetadataStore {
                 category_id = excluded.category_id,
                 payload_directory = excluded.payload_directory,
                 delivery_state = excluded.delivery_state,
+                delivery_ownership = excluded.delivery_ownership,
                 delivered_path_id = excluded.delivered_path_id,
                 source_path_id = excluded.source_path_id,
                 source_fingerprint = excluded.source_fingerprint,
@@ -204,6 +210,7 @@ impl super::MetadataStore {
             bool_to_i64(manifest.final_rehash_pending),
             delivery_state_to_sql(manifest.delivery_state),
             completion_timestamp_update,
+            delivery_ownership_to_sql(manifest.delivery_ownership),
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
@@ -291,7 +298,8 @@ impl super::MetadataStore {
                        delivered_paths.platform, delivered_paths.native_path,
                        source_paths.platform, source_paths.native_path,
                        transfers.source_fingerprint, transfers.payload_fingerprint,
-                       transfers.final_rehash_pending, transfers.delivery_state
+                       transfers.final_rehash_pending, transfers.delivery_state,
+                       transfers.delivery_ownership
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -328,6 +336,7 @@ impl super::MetadataStore {
                     payload_fingerprint: optional_fingerprint_from_row(row, 22)?,
                     final_rehash_pending: row.get::<_, i64>(23)? != 0,
                     delivery_state: row.get(24)?,
+                    delivery_ownership: row.get(25)?,
                 })
             })
             .optional()?;
@@ -530,7 +539,8 @@ impl super::MetadataStore {
                    delivered_paths.platform, delivered_paths.native_path,
                    source_paths.platform, source_paths.native_path,
                    transfers.source_fingerprint, transfers.payload_fingerprint,
-                   transfers.final_rehash_pending, transfers.delivery_state
+                   transfers.final_rehash_pending, transfers.delivery_state,
+                   transfers.delivery_ownership
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -566,6 +576,7 @@ impl super::MetadataStore {
                 payload_fingerprint: optional_fingerprint_from_row(row, 22)?,
                 final_rehash_pending: row.get::<_, i64>(23)? != 0,
                 delivery_state: row.get(24)?,
+                delivery_ownership: row.get(25)?,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -1679,6 +1690,446 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
+    pub fn begin_transfer_delivery_attempt(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        target_path: &Path,
+        staging_path: &Path,
+    ) -> Result<MetadataTransferDeliveryAttempt> {
+        ensure!(
+            target_path.is_absolute(),
+            "delivery target path must be absolute"
+        );
+        ensure!(
+            staging_path.is_absolute(),
+            "delivery staging path must be absolute"
+        );
+        ensure!(
+            target_path != staging_path,
+            "delivery target and staging paths must differ"
+        );
+        ensure!(
+            target_path.parent().is_some() && target_path.parent() == staging_path.parent(),
+            "delivery target and staging paths must share one parent directory"
+        );
+        ensure!(
+            staging_path.file_name().is_some_and(|name| {
+                name == std::ffi::OsStr::new(&format!(".emulebb-delivery-{attempt_id}.tmp"))
+            }),
+            "delivery staging path does not match attempt {attempt_id}"
+        );
+
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transfer_id = tx
+            .query_row(
+                r#"
+                SELECT transfers.id
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                  AND known_files.completed != 0
+                  AND transfers.final_rehash_pending = 0
+                  AND transfers.delivery_state = 'pending'
+                  AND transfers.source_path_id IS NULL
+                  AND transfers.delivered_path_id IS NULL
+                  AND transfers.removed_at_ms IS NULL
+                  AND transfers.delete_requested_at_ms IS NULL
+                "#,
+                params![hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(transfer_id) = transfer_id else {
+            anyhow::bail!("transfer {file_hash} is not eligible for delivery");
+        };
+        if let Some(existing) = delivery_attempt_by_hash(&tx, &hash)? {
+            ensure!(
+                existing.attempt_id == attempt_id
+                    && existing.target_path == target_path
+                    && existing.staging_path == staging_path,
+                "transfer {file_hash} already has a different delivery attempt"
+            );
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let target_path_id = upsert_local_path(&tx, target_path)?;
+        let staging_path_id = upsert_local_path(&tx, staging_path)?;
+        ensure!(
+            target_path_id != staging_path_id,
+            "delivery target and staging paths must have distinct native identities"
+        );
+        let now = unix_ms();
+        tx.execute(
+            r#"
+            INSERT INTO delivery_attempts(
+                transfer_id, attempt_id, phase, target_path_id, staging_path_id,
+                created_at_ms, updated_at_ms
+            )
+            VALUES (?1, ?2, 'prepared', ?3, ?4, ?5, ?5)
+            "#,
+            params![
+                transfer_id,
+                attempt_id.hyphenated().to_string(),
+                target_path_id,
+                staging_path_id,
+                now,
+            ],
+        )?;
+        let attempt = delivery_attempt_by_hash(&tx, &hash)?
+            .expect("inserted delivery attempt must be queryable in its transaction");
+        tx.commit()?;
+        Ok(attempt)
+    }
+
+    pub fn transfer_delivery_attempt_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        delivery_attempt_by_hash(&conn, &hash)
+    }
+
+    pub fn transfer_delivery_attempts(&self) -> Result<Vec<MetadataTransferDeliveryAttempt>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), delivery_attempts.attempt_id,
+                   delivery_attempts.phase,
+                   target_paths.platform, target_paths.native_path,
+                   staging_paths.platform, staging_paths.native_path,
+                   delivery_attempts.staging_fingerprint,
+                   delivery_attempts.published_fingerprint,
+                   delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
+            FROM delivery_attempts
+            JOIN transfers ON transfers.id = delivery_attempts.transfer_id
+            JOIN known_files ON known_files.id = transfers.known_file_id
+            JOIN local_paths target_paths ON target_paths.id = delivery_attempts.target_path_id
+            JOIN local_paths staging_paths ON staging_paths.id = delivery_attempts.staging_path_id
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        let rows = stmt.query_map([], delivery_attempt_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn mark_transfer_delivery_attempt_staged(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        staging_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let staging_fingerprint = staging_fingerprint.storage_bytes();
+        let changed = self.connection()?.execute(
+            r#"
+            UPDATE delivery_attempts
+            SET phase = 'staged',
+                staging_fingerprint = CASE
+                    WHEN phase = 'prepared' THEN ?4
+                    ELSE staging_fingerprint
+                END,
+                updated_at_ms = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_ms END
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND known_files.completed != 0
+                  AND transfers.final_rehash_pending = 0
+                  AND transfers.delivery_state = 'pending'
+                  AND transfers.source_path_id IS NULL
+                  AND transfers.delivered_path_id IS NULL
+                  AND transfers.removed_at_ms IS NULL
+                  AND transfers.delete_requested_at_ms IS NULL
+            )
+              AND attempt_id = ?2
+              AND (
+                  phase = 'prepared'
+                  OR (phase = 'staged' AND staging_fingerprint = ?4)
+              )
+            "#,
+            params![
+                hash,
+                attempt_id.hyphenated().to_string(),
+                now,
+                staging_fingerprint,
+            ],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn mark_transfer_delivery_attempt_published(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        published_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let published_fingerprint = published_fingerprint.storage_bytes();
+        let changed = self.connection()?.execute(
+            r#"
+            UPDATE delivery_attempts
+            SET phase = 'published',
+                published_fingerprint = CASE
+                    WHEN phase = 'staged' THEN ?4
+                    ELSE published_fingerprint
+                END,
+                updated_at_ms = CASE WHEN phase = 'staged' THEN ?3 ELSE updated_at_ms END
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND known_files.completed != 0
+                  AND transfers.final_rehash_pending = 0
+                  AND transfers.delivery_state = 'pending'
+                  AND transfers.source_path_id IS NULL
+                  AND transfers.delivered_path_id IS NULL
+                  AND transfers.removed_at_ms IS NULL
+                  AND transfers.delete_requested_at_ms IS NULL
+            )
+              AND attempt_id = ?2
+              AND (
+                  phase = 'staged'
+                  OR (phase = 'published' AND published_fingerprint = ?4)
+              )
+            "#,
+            params![
+                hash,
+                attempt_id.hyphenated().to_string(),
+                now,
+                published_fingerprint,
+            ],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn clear_transfer_delivery_attempt(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let changed = self.connection()?.execute(
+            r#"
+            DELETE FROM delivery_attempts
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+            )
+              AND attempt_id = ?2
+            "#,
+            params![hash, attempt_id.hyphenated().to_string()],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn begin_transfer_deletion_tombstone(
+        &self,
+        file_hash: &str,
+        tombstone_id: Uuid,
+        original_path: &Path,
+        tombstone_path: &Path,
+        source_fingerprint: &NativeFileFingerprint,
+    ) -> Result<MetadataTransferDeletionTombstone> {
+        ensure!(
+            original_path.is_absolute(),
+            "deletion source path must be absolute"
+        );
+        ensure!(
+            tombstone_path.is_absolute(),
+            "deletion tombstone path must be absolute"
+        );
+        ensure!(
+            original_path != tombstone_path,
+            "deletion source and tombstone paths must differ"
+        );
+        ensure!(
+            original_path.parent().is_some() && original_path.parent() == tombstone_path.parent(),
+            "deletion source and tombstone paths must share one parent directory"
+        );
+        ensure!(
+            tombstone_path.file_name().is_some_and(|name| {
+                name == std::ffi::OsStr::new(&format!(".emulebb-delete-{tombstone_id}.tmp"))
+            }),
+            "deletion tombstone path does not match tombstone {tombstone_id}"
+        );
+
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let original = NativePath::from(original_path);
+        let source_bytes = source_fingerprint.storage_bytes();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transfer_id = tx
+            .query_row(
+                r#"
+                SELECT transfers.id
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                LEFT JOIN local_paths delivered_paths
+                  ON delivered_paths.id = transfers.delivered_path_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.delete_requested_at_ms IS NOT NULL
+                  AND transfers.source_path_id IS NULL
+                  AND (
+                      (
+                          transfers.delivery_state = 'delivered'
+                          AND transfers.delivery_ownership = 'owned'
+                          AND transfers.source_fingerprint = ?2
+                          AND delivered_paths.platform = ?3
+                          AND delivered_paths.native_path = ?4
+                      )
+                      OR EXISTS (
+                          SELECT 1
+                          FROM delivery_attempts
+                          JOIN local_paths attempted_targets
+                            ON attempted_targets.id = delivery_attempts.target_path_id
+                          WHERE delivery_attempts.transfer_id = transfers.id
+                            AND delivery_attempts.phase = 'published'
+                            AND delivery_attempts.published_fingerprint = ?2
+                            AND attempted_targets.platform = ?3
+                            AND attempted_targets.native_path = ?4
+                      )
+                  )
+                "#,
+                params![
+                    hash,
+                    source_bytes,
+                    NativePath::platform(),
+                    original.storage_bytes(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(transfer_id) = transfer_id else {
+            anyhow::bail!(
+                "transfer {file_hash} has no owned delivered output eligible for tombstoning"
+            );
+        };
+        if let Some(existing) = transfer_deletion_tombstone_by_hash(&tx, &hash)? {
+            ensure!(
+                existing.tombstone_id == tombstone_id
+                    && existing.original_path == original_path
+                    && existing.tombstone_path == tombstone_path
+                    && existing.source_fingerprint == *source_fingerprint,
+                "transfer {file_hash} already has a different deletion tombstone"
+            );
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let original_path_id = upsert_local_path(&tx, original_path)?;
+        let tombstone_path_id = upsert_local_path(&tx, tombstone_path)?;
+        ensure!(
+            original_path_id != tombstone_path_id,
+            "deletion source and tombstone paths must have distinct native identities"
+        );
+        let now = unix_ms();
+        tx.execute(
+            r#"
+            INSERT INTO delivery_output_tombstones(
+                transfer_id, tombstone_id, phase, original_path_id,
+                tombstone_path_id, source_fingerprint, created_at_ms, updated_at_ms
+            )
+            VALUES (?1, ?2, 'prepared', ?3, ?4, ?5, ?6, ?6)
+            "#,
+            params![
+                transfer_id,
+                tombstone_id.hyphenated().to_string(),
+                original_path_id,
+                tombstone_path_id,
+                source_bytes,
+                now,
+            ],
+        )?;
+        let tombstone = transfer_deletion_tombstone_by_hash(&tx, &hash)?
+            .expect("inserted deletion tombstone must be queryable in its transaction");
+        tx.commit()?;
+        Ok(tombstone)
+    }
+
+    pub fn transfer_deletion_tombstone_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferDeletionTombstone>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        transfer_deletion_tombstone_by_hash(&conn, &hash)
+    }
+
+    pub fn mark_transfer_deletion_tombstone_moved(
+        &self,
+        file_hash: &str,
+        tombstone_id: Uuid,
+        moved_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let moved_fingerprint = moved_fingerprint.storage_bytes();
+        let changed = self.connection()?.execute(
+            r#"
+            UPDATE delivery_output_tombstones
+            SET phase = 'moved',
+                moved_fingerprint = CASE
+                    WHEN phase = 'prepared' THEN ?4
+                    ELSE moved_fingerprint
+                END,
+                updated_at_ms = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_ms END
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.delete_requested_at_ms IS NOT NULL
+            )
+              AND tombstone_id = ?2
+              AND (
+                  phase = 'prepared'
+                  OR (phase = 'moved' AND moved_fingerprint = ?4)
+              )
+            "#,
+            params![
+                hash,
+                tombstone_id.hyphenated().to_string(),
+                now,
+                moved_fingerprint,
+            ],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn clear_prepared_transfer_deletion_tombstone(
+        &self,
+        file_hash: &str,
+        tombstone_id: Uuid,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let changed = self.connection()?.execute(
+            r#"
+            DELETE FROM delivery_output_tombstones
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.delete_requested_at_ms IS NOT NULL
+            )
+              AND tombstone_id = ?2
+              AND phase = 'prepared'
+            "#,
+            params![hash, tombstone_id.hyphenated().to_string()],
+        )?;
+        Ok(changed != 0)
+    }
+
     /// Persist a terminal destructive-delete request before either filesystem
     /// authority is touched. Repeating the request preserves the original
     /// timestamp and remains successful while the transfer row exists.
@@ -1824,6 +2275,140 @@ impl super::MetadataStore {
     }
 }
 
+fn delivery_attempt_by_hash(
+    conn: &rusqlite::Connection,
+    hash: &[u8],
+) -> Result<Option<MetadataTransferDeliveryAttempt>> {
+    conn.query_row(
+        r#"
+        SELECT lower(hex(known_files.ed2k_hash)), delivery_attempts.attempt_id,
+               delivery_attempts.phase,
+               target_paths.platform, target_paths.native_path,
+               staging_paths.platform, staging_paths.native_path,
+               delivery_attempts.staging_fingerprint,
+               delivery_attempts.published_fingerprint,
+               delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
+        FROM delivery_attempts
+        JOIN transfers ON transfers.id = delivery_attempts.transfer_id
+        JOIN known_files ON known_files.id = transfers.known_file_id
+        JOIN local_paths target_paths ON target_paths.id = delivery_attempts.target_path_id
+        JOIN local_paths staging_paths ON staging_paths.id = delivery_attempts.staging_path_id
+        WHERE known_files.ed2k_hash = ?1
+        "#,
+        params![hash],
+        delivery_attempt_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn transfer_deletion_tombstone_by_hash(
+    conn: &rusqlite::Connection,
+    hash: &[u8],
+) -> Result<Option<MetadataTransferDeletionTombstone>> {
+    conn.query_row(
+        r#"
+        SELECT lower(hex(known_files.ed2k_hash)),
+               delivery_output_tombstones.tombstone_id,
+               delivery_output_tombstones.phase,
+               original_paths.platform, original_paths.native_path,
+               tombstone_paths.platform, tombstone_paths.native_path,
+               delivery_output_tombstones.source_fingerprint,
+               delivery_output_tombstones.moved_fingerprint,
+               delivery_output_tombstones.created_at_ms,
+               delivery_output_tombstones.updated_at_ms
+        FROM delivery_output_tombstones
+        JOIN transfers ON transfers.id = delivery_output_tombstones.transfer_id
+        JOIN known_files ON known_files.id = transfers.known_file_id
+        JOIN local_paths original_paths
+          ON original_paths.id = delivery_output_tombstones.original_path_id
+        JOIN local_paths tombstone_paths
+          ON tombstone_paths.id = delivery_output_tombstones.tombstone_path_id
+        WHERE known_files.ed2k_hash = ?1
+        "#,
+        params![hash],
+        |row| {
+            let tombstone_id = row.get::<_, String>(1)?.parse::<Uuid>().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?;
+            let phase = match row.get::<_, String>(2)?.as_str() {
+                "prepared" => MetadataTransferDeletionTombstonePhase::Prepared,
+                "moved" => MetadataTransferDeletionTombstonePhase::Moved,
+                value => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid deletion tombstone phase {value:?}"),
+                        )
+                        .into(),
+                    ));
+                }
+            };
+            Ok(MetadataTransferDeletionTombstone {
+                file_hash: row.get(0)?,
+                tombstone_id,
+                phase,
+                original_path: path_from_row(row, 3, 4)?,
+                tombstone_path: path_from_row(row, 5, 6)?,
+                source_fingerprint: optional_fingerprint_from_row(row, 7)?.ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Blob,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "deletion tombstone is missing its source fingerprint",
+                        )
+                        .into(),
+                    )
+                })?,
+                moved_fingerprint: optional_fingerprint_from_row(row, 8)?,
+                created_at_ms: row.get(9)?,
+                updated_at_ms: row.get(10)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn delivery_attempt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<MetadataTransferDeliveryAttempt> {
+    let attempt_id = row.get::<_, String>(1)?;
+    let attempt_id = Uuid::parse_str(&attempt_id).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, error.into())
+    })?;
+    let phase = match row.get::<_, String>(2)?.as_str() {
+        "prepared" => MetadataTransferDeliveryAttemptPhase::Prepared,
+        "staged" => MetadataTransferDeliveryAttemptPhase::Staged,
+        "published" => MetadataTransferDeliveryAttemptPhase::Published,
+        value => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                anyhow::anyhow!("invalid delivery attempt phase {value:?}").into(),
+            ));
+        }
+    };
+    Ok(MetadataTransferDeliveryAttempt {
+        file_hash: row.get(0)?,
+        attempt_id,
+        phase,
+        target_path: path_from_row(row, 3, 4)?,
+        staging_path: path_from_row(row, 5, 6)?,
+        staging_fingerprint: optional_fingerprint_from_row(row, 7)?,
+        published_fingerprint: optional_fingerprint_from_row(row, 8)?,
+        created_at_ms: row.get(9)?,
+        updated_at_ms: row.get(10)?,
+    })
+}
+
 fn delete_known_file(tx: &rusqlite::Transaction<'_>, known_file_id: i64) -> Result<()> {
     tx.execute(
         "DELETE FROM shared_file_scan_failures WHERE path_id IN (
@@ -1867,6 +2452,7 @@ struct TransferRow {
     source_fingerprint: Option<NativeFileFingerprint>,
     payload_fingerprint: Option<NativeFileFingerprint>,
     delivery_state: String,
+    delivery_ownership: String,
 }
 
 fn replace_transfer_children(
@@ -2007,6 +2593,7 @@ fn manifest_from_row(
         control_state: row.control_state,
         transfer_row_removed: row.transfer_row_removed,
         delivery_state: delivery_state_from_sql(&row.delivery_state)?,
+        delivery_ownership: delivery_ownership_from_sql(&row.delivery_ownership)?,
         delivered_path: row.delivered_path,
         source_path: row.source_path,
         source_fingerprint: row.source_fingerprint,
@@ -2208,21 +2795,31 @@ fn local_path_id(conn: &rusqlite::Connection, path: &Path) -> Result<Option<i64>
 }
 
 fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
-    let valid = match manifest.delivery_state {
-        MetadataTransferDeliveryState::NotApplicable => {
+    let valid = match (manifest.delivery_state, manifest.delivery_ownership) {
+        (MetadataTransferDeliveryState::NotApplicable, MetadataTransferDeliveryOwnership::None) => {
             manifest.source_path.is_some() && manifest.delivered_path.is_none()
         }
-        MetadataTransferDeliveryState::Pending => {
+        (MetadataTransferDeliveryState::Pending, MetadataTransferDeliveryOwnership::None) => {
             manifest.source_path.is_none() && manifest.delivered_path.is_none()
         }
-        MetadataTransferDeliveryState::Delivered => {
+        (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Owned) => {
+            manifest.source_path.is_none()
+                && manifest.delivered_path.is_some()
+                && manifest
+                    .source_fingerprint
+                    .as_ref()
+                    .is_some_and(|fingerprint| fingerprint.size_bytes == manifest.file_size)
+        }
+        (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Unowned) => {
             manifest.source_path.is_none() && manifest.delivered_path.is_some()
         }
+        _ => false,
     };
     if !valid {
         anyhow::bail!(
-            "invalid delivery state {:?} for transfer {}: delivered_path={}, source_path={}",
+            "invalid delivery state {:?}/{:?} for transfer {}: delivered_path={}, source_path={}",
             manifest.delivery_state,
+            manifest.delivery_ownership,
             manifest.file_hash,
             manifest.delivered_path.is_some(),
             manifest.source_path.is_some()
@@ -2255,6 +2852,23 @@ fn delivery_state_from_sql(value: &str) -> Result<MetadataTransferDeliveryState>
         "pending" => Ok(MetadataTransferDeliveryState::Pending),
         "delivered" => Ok(MetadataTransferDeliveryState::Delivered),
         _ => anyhow::bail!("invalid persisted transfer delivery state {value:?}"),
+    }
+}
+
+fn delivery_ownership_to_sql(ownership: MetadataTransferDeliveryOwnership) -> &'static str {
+    match ownership {
+        MetadataTransferDeliveryOwnership::None => "none",
+        MetadataTransferDeliveryOwnership::Owned => "owned",
+        MetadataTransferDeliveryOwnership::Unowned => "unowned",
+    }
+}
+
+fn delivery_ownership_from_sql(value: &str) -> Result<MetadataTransferDeliveryOwnership> {
+    match value {
+        "none" => Ok(MetadataTransferDeliveryOwnership::None),
+        "owned" => Ok(MetadataTransferDeliveryOwnership::Owned),
+        "unowned" => Ok(MetadataTransferDeliveryOwnership::Unowned),
+        _ => anyhow::bail!("invalid persisted transfer delivery ownership {value:?}"),
     }
 }
 
