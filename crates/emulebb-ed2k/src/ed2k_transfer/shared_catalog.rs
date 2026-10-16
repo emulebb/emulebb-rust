@@ -27,10 +27,71 @@ impl Ed2kTransferRuntime {
         self.shared_catalog.read().await.len()
     }
 
-    /// Append the persisted catalog pages deferred by the progressive daemon
-    /// constructor. The first legacy-sized offer cohort is already live; this
-    /// work runs off the async executor and yields between bounded pages so
-    /// network startup and publication can proceed concurrently.
+    /// Hydrate one bounded completed-catalog cohort after startup reconciliation
+    /// has validated persisted filesystem authority and before any external
+    /// surface can observe it.
+    pub async fn hydrate_initial_shared_catalog(&self) -> anyhow::Result<usize> {
+        self.hydrate_initial_shared_catalog_page(super::STARTUP_SHARED_CATALOG_BATCH)
+            .await
+    }
+
+    pub(super) async fn hydrate_initial_shared_catalog_page(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<usize> {
+        if !self
+            .shared_catalog_hydration_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            return Ok(0);
+        }
+
+        let result = async {
+            let metadata = self.metadata.clone();
+            let root_dir = self.root_dir.clone();
+            let entries = tokio::task::spawn_blocking(move || {
+                super::transfer_sql::completed_catalog_page_from_metadata_store(
+                    &metadata, &root_dir, None, limit,
+                )
+            })
+            .await??;
+            let hydrated = entries.len();
+            let has_more = hydrated == limit;
+            let cursor = has_more
+                .then(|| entries.last().map(|entry| entry.file_hash.clone()))
+                .flatten();
+            {
+                let mut catalog = self.shared_catalog.write().await;
+                for entry in entries {
+                    if let Ok(hash) = Ed2kHash::from_str(&entry.file_hash) {
+                        catalog.upsert_verified(hash, Some(entry));
+                    }
+                }
+            }
+            *self
+                .shared_catalog_hydration_cursor
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = cursor;
+            self.shared_catalog_hydration_pending
+                .store(has_more, Ordering::Release);
+            if hydrated > 0 {
+                self.note_shared_catalog_entries_changed();
+                self.notify_shared_publish_demand_changed();
+            }
+            Ok(hydrated)
+        }
+        .await;
+
+        if result.is_err() {
+            self.shared_catalog_hydration_pending
+                .store(true, Ordering::Release);
+        }
+        result
+    }
+
+    /// Append persisted catalog pages remaining after the explicit initial
+    /// cohort. This work runs off the async executor and yields between bounded
+    /// pages so normal network operation can proceed concurrently.
     pub async fn hydrate_shared_catalog(&self) -> anyhow::Result<usize> {
         const HYDRATION_PAGE_SIZE: usize = 1_024;
 

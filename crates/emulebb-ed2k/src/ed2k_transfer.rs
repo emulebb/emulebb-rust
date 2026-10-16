@@ -418,41 +418,36 @@ impl Ed2kTransferRuntime {
         metadata: MetadataStore,
         config: &Ed2kRuntimeConfig,
     ) -> Result<Self> {
-        Self::load_or_create_with_metadata_and_config_catalog_limit(
-            root_dir, metadata, config, None,
+        Self::load_or_create_with_metadata_and_config_catalog_mode(
+            root_dir, metadata, config, false,
         )
     }
 
-    /// Load only one immediately publishable persisted-catalog cohort during
-    /// synchronous daemon construction. Call [`Self::hydrate_shared_catalog`]
-    /// from a detached startup worker to append the rest without delaying REST,
-    /// ED2K, or Kad connectivity.
+    /// Defer persisted completed-catalog exposure during synchronous daemon
+    /// construction. Startup must first reconcile filesystem authority, then
+    /// call [`Self::hydrate_initial_shared_catalog`] before binding REST or
+    /// starting ED2K/Kad. The remaining pages can hydrate in the background.
     pub fn load_or_create_with_metadata_and_config_progressive_catalog(
         root_dir: &Path,
         metadata: MetadataStore,
         config: &Ed2kRuntimeConfig,
     ) -> Result<Self> {
-        Self::load_or_create_with_metadata_and_config_catalog_limit(
-            root_dir,
-            metadata,
-            config,
-            Some(STARTUP_SHARED_CATALOG_BATCH),
-        )
+        Self::load_or_create_with_metadata_and_config_catalog_mode(root_dir, metadata, config, true)
     }
 
-    fn load_or_create_with_metadata_and_config_catalog_limit(
+    fn load_or_create_with_metadata_and_config_catalog_mode(
         root_dir: &Path,
         metadata: MetadataStore,
         config: &Ed2kRuntimeConfig,
-        initial_catalog_limit: Option<usize>,
+        defer_completed_catalog: bool,
     ) -> Result<Self> {
-        Self::load_or_create_with_metadata_and_upload_queue_catalog_limit(
+        Self::load_or_create_with_metadata_and_upload_queue_catalog_mode(
             root_dir,
             metadata,
             upload_queue_config_from_policy(&config.upload_queue),
             config.download_limit_bytes_per_sec,
             download_coordinator_config_from_policy(config),
-            initial_catalog_limit,
+            defer_completed_catalog,
         )
     }
 
@@ -482,44 +477,35 @@ impl Ed2kTransferRuntime {
         download_limit_bytes_per_sec: u64,
         coordinator_config: Ed2kDownloadCoordinatorConfig,
     ) -> Result<Self> {
-        Self::load_or_create_with_metadata_and_upload_queue_catalog_limit(
+        Self::load_or_create_with_metadata_and_upload_queue_catalog_mode(
             root_dir,
             metadata,
             upload_queue_config,
             download_limit_bytes_per_sec,
             coordinator_config,
-            None,
+            false,
         )
     }
 
-    fn load_or_create_with_metadata_and_upload_queue_catalog_limit(
+    fn load_or_create_with_metadata_and_upload_queue_catalog_mode(
         root_dir: &Path,
         metadata: MetadataStore,
         upload_queue_config: Ed2kUploadQueueConfig,
         download_limit_bytes_per_sec: u64,
         coordinator_config: Ed2kDownloadCoordinatorConfig,
-        initial_catalog_limit: Option<usize>,
+        defer_completed_catalog: bool,
     ) -> Result<Self> {
         fs::create_dir_all(root_dir).with_context(|| {
             format!("failed to create ED2K transfer root {}", root_dir.display())
         })?;
-        let (initial_catalog, hydration_cursor, hydration_pending) =
-            if let Some(limit) = initial_catalog_limit {
-                let entries = transfer_sql::completed_catalog_page_from_metadata_store(
-                    &metadata, root_dir, None, limit,
-                )?;
-                let pending = entries.len() == limit;
-                let cursor = pending
-                    .then(|| entries.last().map(|entry| entry.file_hash.clone()))
-                    .flatten();
-                (entries, cursor, pending)
-            } else {
-                (
-                    transfer_sql::completed_catalog_from_metadata_store(&metadata, root_dir)?,
-                    None,
-                    false,
-                )
-            };
+        let (initial_catalog, hydration_pending) = if defer_completed_catalog {
+            (Vec::new(), true)
+        } else {
+            (
+                transfer_sql::completed_catalog_from_metadata_store(&metadata, root_dir)?,
+                false,
+            )
+        };
         let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
             initial_catalog,
         )));
@@ -536,7 +522,7 @@ impl Ed2kTransferRuntime {
             metadata,
             shared_catalog,
             shared_catalog_generation: AtomicU64::new(0),
-            shared_catalog_hydration_cursor: StdMutex::new(hydration_cursor),
+            shared_catalog_hydration_cursor: StdMutex::new(None),
             shared_catalog_hydration_pending: AtomicBool::new(hydration_pending),
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_tickets: Arc::new(StdMutex::new(callback::CallbackTicketStore::default())),

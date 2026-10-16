@@ -1,10 +1,20 @@
 use super::*;
 
 impl EmulebbCore {
+    /// Hydrate the first persisted shared-catalog cohort after startup storage
+    /// reconciliation and before REST or network publication.
+    pub async fn hydrate_initial_shared_catalog(&self) -> Result<usize> {
+        let hydrated = self.ed2k_transfers.hydrate_initial_shared_catalog().await?;
+        if hydrated > 0 {
+            self.queue_ed2k_shared_catalog_publish();
+        }
+        Ok(hydrated)
+    }
+
     /// Hydrate the persisted shared catalog pages deferred by daemon startup.
-    /// The initial cohort is already publishable; every appended page updates
-    /// the live catalog and the final queue guarantees a server refresh even if
-    /// catalog-demand notifications preceded network runtime construction.
+    /// Every appended page updates the live catalog and the final queue
+    /// guarantees a server refresh even if catalog-demand notifications
+    /// preceded network runtime construction.
     pub async fn hydrate_shared_catalog(&self) -> Result<usize> {
         let hydrated = self.ed2k_transfers.hydrate_shared_catalog().await?;
         if hydrated > 0 {
