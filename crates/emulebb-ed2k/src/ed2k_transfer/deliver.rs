@@ -272,6 +272,31 @@ fn validate_delivery_attempt_paths(attempt: &MetadataTransferDeliveryAttempt) ->
     Ok(())
 }
 
+async fn preserve_unproven_prepared_staging(
+    file_hash: &str,
+    attempt: &MetadataTransferDeliveryAttempt,
+) -> Result<()> {
+    match tokio::fs::symlink_metadata(long_path(&attempt.staging_path)).await {
+        Ok(_) => {
+            tracing::warn!(
+                file_hash,
+                path = %attempt.staging_path.display(),
+                "preserving prepared delivery staging occupant without a proven identity"
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            sync_parent_directory(&attempt.staging_path).await
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to inspect prepared delivery staging path {}",
+                attempt.staging_path.display()
+            )
+        }),
+    }
+}
+
 pub(super) async fn classify_delivered_output(
     path: &Path,
     recorded_fingerprint: Option<&NativeFileFingerprint>,
@@ -553,7 +578,7 @@ impl Ed2kTransferRuntime {
             return Ok(());
         }
         if attempt.phase == MetadataTransferDeliveryAttemptPhase::Prepared {
-            remove_if_exists(&attempt.staging_path).await?;
+            preserve_unproven_prepared_staging(file_hash, &attempt).await?;
             self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                 .await?;
             return Ok(());
@@ -758,7 +783,7 @@ impl Ed2kTransferRuntime {
         };
         validate_delivery_attempt_paths(&attempt)?;
         if attempt.phase == MetadataTransferDeliveryAttemptPhase::Prepared {
-            remove_if_exists(&attempt.staging_path).await?;
+            preserve_unproven_prepared_staging(file_hash, &attempt).await?;
             self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                 .await?;
             return Ok(None);
