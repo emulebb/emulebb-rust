@@ -163,11 +163,7 @@ impl Ed2kTransferRuntime {
                 if fingerprint == tombstone.source_fingerprint =>
             {
                 #[cfg(test)]
-                run_before_move_hook(
-                    file_hash,
-                    &tombstone.original_path,
-                    &tombstone.tombstone_path,
-                );
+                run_before_move_hook(&tombstone.original_path, &tombstone.tombstone_path);
                 match move_path_no_replace(&tombstone.original_path, &tombstone.tombstone_path)
                     .await?
                 {
@@ -334,25 +330,25 @@ impl Ed2kTransferRuntime {
 type BeforeMoveHook = Box<dyn FnOnce(&Path, &Path) + Send>;
 
 #[cfg(test)]
-fn before_move_hooks() -> &'static Mutex<HashMap<String, BeforeMoveHook>> {
-    static HOOKS: OnceLock<Mutex<HashMap<String, BeforeMoveHook>>> = OnceLock::new();
+fn before_move_hooks() -> &'static Mutex<HashMap<std::path::PathBuf, BeforeMoveHook>> {
+    static HOOKS: OnceLock<Mutex<HashMap<std::path::PathBuf, BeforeMoveHook>>> = OnceLock::new();
     HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(test)]
-pub(super) fn set_before_move_hook(file_hash: &str, hook: BeforeMoveHook) {
+pub(super) fn set_before_move_hook(original_path: &Path, hook: BeforeMoveHook) {
     before_move_hooks()
         .lock()
         .expect("deletion before-move hook mutex poisoned")
-        .insert(file_hash.to_owned(), hook);
+        .insert(long_path(original_path), hook);
 }
 
 #[cfg(test)]
-fn run_before_move_hook(file_hash: &str, original_path: &Path, tombstone_path: &Path) {
+fn run_before_move_hook(original_path: &Path, tombstone_path: &Path) {
     let hook = before_move_hooks()
         .lock()
         .expect("deletion before-move hook mutex poisoned")
-        .remove(file_hash);
+        .remove(&long_path(original_path));
     if let Some(hook) = hook {
         hook(original_path, tombstone_path);
     }
