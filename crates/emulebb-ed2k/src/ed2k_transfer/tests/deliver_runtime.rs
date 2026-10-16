@@ -978,7 +978,7 @@ async fn destructive_delete_restores_replacement_racing_the_atomic_rename() {
     let replacement = fs::read(&fixture.delivered).unwrap();
     let hook_replacement = replacement.clone();
     set_before_move_hook(
-        &fixture.hash,
+        &fixture.delivered,
         Box::new(move |original_path, _tombstone_path| {
             fs::remove_file(original_path).unwrap();
             fs::write(original_path, &hook_replacement).unwrap();
