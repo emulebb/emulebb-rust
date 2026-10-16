@@ -204,16 +204,20 @@ pub struct Ed2kTransferRootReconciliation {
     pub preserved_collisions: usize,
 }
 
-/// Startup reconciliation summary for persisted incomplete downloads and
-/// their internal `pieces.bin` authority.
+/// Startup reconciliation summary for every internally managed download and
+/// its canonical `pieces.bin` authority.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Ed2kIncompletePayloadReconciliation {
-    /// Persisted incomplete download rows inspected under their lifecycle lock.
+pub struct Ed2kDownloadStorageReconciliation {
+    /// Persisted managed download rows inspected under their lifecycle lock.
     pub inspected_downloads: usize,
     /// Missing canonical hash directories recreated for resumable downloads.
     pub recreated_directories: usize,
-    /// Manifests whose persisted progress was demoted to match durable bytes.
-    pub repaired_downloads: usize,
+    /// Completed canonical payloads restored from verified delivered output.
+    pub restored_payloads: usize,
+    /// Manifests whose completion or progress claims were demoted.
+    pub demoted_downloads: usize,
+    /// Invalid canonical payload occupants preserved under quarantine names.
+    pub quarantined_payloads: usize,
     /// Piece rows reset because their claimed bytes were no longer present.
     pub reset_pieces: usize,
 }
