@@ -521,6 +521,7 @@ impl Ed2kTransferRuntime {
                 }
             }
             DeliveredOutputIdentity::Missing => {
+                sync_parent_directory(&attempt.staging_path).await?;
                 match classify_delivered_output(
                     &attempt.target_path,
                     None,
@@ -854,7 +855,9 @@ pub(super) async fn persist_pending_delivery_path(path: &Path, candidate: &Path)
 async fn remove_if_exists(path: &Path) -> Result<()> {
     match tokio::fs::remove_file(long_path(path)).await {
         Ok(()) => sync_parent_directory(path).await,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            sync_parent_directory(path).await
+        }
         Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
     }
 }
