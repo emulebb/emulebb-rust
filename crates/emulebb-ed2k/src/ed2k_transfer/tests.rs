@@ -16,6 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 mod aich_tree;
 mod aich_trust_corroboration;
 mod ban_store_runtime;
@@ -867,6 +870,95 @@ async fn ingest_local_file_reports_md4_and_aich_read_progress() {
         events.last().map(|event| event.file_bytes_total),
         Some(summary.file_size)
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ingest_local_file_rejects_source_path_replaced_while_hashing() {
+    let root = unique_test_dir("ed2k-transfer-local-ingest-replaced");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let source_dir = Path::new(&root).join("source");
+    fs::create_dir_all(&source_dir).unwrap();
+    let source_path = source_dir.join("replace-me.bin");
+    let retained_path = source_dir.join("original.bin");
+    fs::write(&source_path, vec![0x31; 8192]).unwrap();
+
+    let replaced = Arc::new(AtomicBool::new(false));
+    let observer_replaced = Arc::clone(&replaced);
+    let observer_source = source_path.clone();
+    let observer_retained = retained_path.clone();
+    let result = runtime
+        .ingest_local_file_with_progress(
+            &source_path,
+            "replace-me.bin",
+            Arc::new(move |event| {
+                if event.stage == LocalIngestProgressStage::Md4
+                    && event.stage_bytes_read > 0
+                    && !observer_replaced.swap(true, Ordering::AcqRel)
+                {
+                    fs::rename(&observer_source, &observer_retained).unwrap();
+                    fs::write(&observer_source, vec![0x72; 8192]).unwrap();
+                }
+            }),
+        )
+        .await;
+
+    assert!(replaced.load(Ordering::Acquire));
+    assert!(result.is_err());
+    assert!(runtime.manifests().await.unwrap().is_empty());
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+    assert_eq!(fs::read(retained_path).unwrap(), vec![0x31; 8192]);
+    assert_eq!(fs::read(source_path).unwrap(), vec![0x72; 8192]);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn ingest_local_file_rejects_source_held_open_for_writing() {
+    let root = unique_test_dir("ed2k-transfer-local-ingest-writer");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let source_dir = Path::new(&root).join("source");
+    fs::create_dir_all(&source_dir).unwrap();
+    let source_path = source_dir.join("writer-open.bin");
+    fs::write(&source_path, vec![0x31; 8192]).unwrap();
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .open(&source_path)
+        .unwrap();
+
+    assert!(
+        runtime
+            .ingest_local_file(&source_path, "writer-open.bin")
+            .await
+            .is_err()
+    );
+    assert!(runtime.manifests().await.unwrap().is_empty());
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+    drop(writer);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ingest_local_file_rejects_symlink_without_reading_target() {
+    use std::os::unix::fs::symlink;
+
+    let root = unique_test_dir("ed2k-transfer-local-ingest-symlink");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let source_dir = Path::new(&root).join("source");
+    fs::create_dir_all(&source_dir).unwrap();
+    let target_path = source_dir.join("target.bin");
+    let source_path = source_dir.join("shared.bin");
+    fs::write(&target_path, b"foreign payload").unwrap();
+    symlink(&target_path, &source_path).unwrap();
+
+    assert!(
+        runtime
+            .ingest_local_file(&source_path, "shared.bin")
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(target_path).unwrap(), b"foreign payload");
+    assert!(runtime.manifests().await.unwrap().is_empty());
+    assert_eq!(runtime.shared_catalog_count().await, 0);
 }
 
 #[tokio::test]

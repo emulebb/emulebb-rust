@@ -12,7 +12,7 @@ use emulebb_metadata::{
 
 use crate::long_path::long_path;
 
-use super::hashset::build_md4_and_aich_hashsets_from_payload_with_progress;
+use super::hashset::build_md4_and_aich_hashsets_from_reader_with_progress;
 use super::manifest::{piece_count, rebuild_verified_ranges};
 use super::{
     Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kTransferRuntime,
@@ -101,16 +101,6 @@ impl Ed2kTransferRuntime {
         // stat/hash it directly and let the manifest record that same exact path
         // for in-place upload serving -- no canonicalize round-trip is needed.
         let source_path = long_path(source_path);
-        let metadata = tokio::fs::metadata(&source_path).await.with_context(|| {
-            format!(
-                "failed to stat local ingest source {}",
-                source_path.display()
-            )
-        })?;
-        if metadata.len() == 0 {
-            anyhow::bail!("local ED2K ingest does not support zero-sized payloads");
-        }
-
         // Hash OFF the manifest lock AND off the async runtime. MD4/AICH hash
         // the whole (potentially many-GB) file with blocking `std::fs`,
         // which on a slow disk takes far longer than any HTTP timeout. Holding
@@ -119,10 +109,32 @@ impl Ed2kTransferRuntime {
         // worker. We therefore compute both hashsets in one sequential read under
         // `spawn_blocking` with no lock held, and only take the manifest lock for the
         // short write below.
-        let hash_len = metadata.len();
         let hash_path = source_path.clone();
         let hash_observer = observer.clone();
-        let hashsets = tokio::task::spawn_blocking(move || {
+        let (hashsets, source_fingerprint) = tokio::task::spawn_blocking(move || {
+            let mut file = open_ingest_file_without_follow(&hash_path).with_context(|| {
+                format!(
+                    "failed to open local ingest source without following links {}",
+                    hash_path.display()
+                )
+            })?;
+            let opened_metadata = file.metadata().with_context(|| {
+                format!(
+                    "failed to inspect opened local ingest source {}",
+                    hash_path.display()
+                )
+            })?;
+            let source_fingerprint = native_file_fingerprint_from_handle(&file, &opened_metadata)
+                .with_context(|| {
+                format!(
+                    "local ingest source is not a regular file with stable native identity {}",
+                    hash_path.display()
+                )
+            })?;
+            let hash_len = source_fingerprint.size_bytes;
+            if hash_len == 0 {
+                anyhow::bail!("local ED2K ingest does not support zero-sized payloads");
+            }
             let mut bytes_read_total = 0u64;
             let progress_observer = hash_observer.clone();
             let mut progress = move |read_delta: u64| {
@@ -137,8 +149,8 @@ impl Ed2kTransferRuntime {
                     });
                 }
             };
-            let hashsets = build_md4_and_aich_hashsets_from_payload_with_progress(
-                &hash_path,
+            let hashsets = build_md4_and_aich_hashsets_from_reader_with_progress(
+                &mut file,
                 hash_len,
                 Some(&mut progress),
             )?;
@@ -151,12 +163,42 @@ impl Ed2kTransferRuntime {
                     file_bytes_total: hash_len,
                 });
             }
-            Ok::<_, anyhow::Error>(hashsets)
+            let final_metadata = file.metadata().with_context(|| {
+                format!(
+                    "failed to re-inspect opened local ingest source {}",
+                    hash_path.display()
+                )
+            })?;
+            let final_fingerprint = native_file_fingerprint_from_handle(&file, &final_metadata)
+                .context("opened local ingest source lost regular-file identity while hashing")?;
+            if source_fingerprint != final_fingerprint {
+                anyhow::bail!(
+                    "local ingest source changed while hashing {}",
+                    hash_path.display()
+                );
+            }
+            let current_fingerprint = native_file_fingerprint(&hash_path).with_context(|| {
+                format!(
+                    "local ingest source path no longer names a regular file {}",
+                    hash_path.display()
+                )
+            })?;
+            if source_fingerprint != current_fingerprint {
+                anyhow::bail!(
+                    "local ingest source path was replaced while hashing {}",
+                    hash_path.display()
+                );
+            }
+            Ok::<_, anyhow::Error>((hashsets, source_fingerprint))
         })
         .await
         .context("ED2K/AICH hashing task panicked")??;
         let file_hash = hashsets.file_hash;
-        let job = new_transfer_job(file_hash, display_name.to_string(), metadata.len());
+        let job = new_transfer_job(
+            file_hash,
+            display_name.to_string(),
+            source_fingerprint.size_bytes,
+        );
         let transfer_dir = self.transfer_dir(&job.file_hash);
         // Seed the shared, already-complete file IN PLACE: it is served for
         // upload directly from its original on-disk path. We deliberately do NOT
@@ -171,7 +213,7 @@ impl Ed2kTransferRuntime {
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.delivery_state = super::Ed2kDeliveryState::NotApplicable;
         manifest.source_path = Some(source_path.clone());
-        manifest.source_fingerprint = native_file_fingerprint(&source_path);
+        manifest.source_fingerprint = Some(source_fingerprint);
         manifest.completed = true;
         // A share-in-place file belongs in the shared catalog, not the download
         // queue. Persist that state in the initial transaction so callers do not
@@ -300,6 +342,23 @@ pub(crate) fn native_file_fingerprint(source_path: &Path) -> Option<NativeFileFi
     let file = open_regular_file_without_follow(source_path).ok()?;
     let opened_metadata = file.metadata().ok()?;
     native_file_fingerprint_from_handle(&file, &opened_metadata)
+}
+
+#[cfg(windows)]
+fn open_ingest_file_without_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_ingest_file_without_follow(path: &Path) -> std::io::Result<File> {
+    open_regular_file_without_follow(path)
 }
 
 #[cfg(unix)]

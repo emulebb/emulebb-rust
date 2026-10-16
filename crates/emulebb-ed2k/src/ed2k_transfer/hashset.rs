@@ -96,17 +96,25 @@ pub(super) fn build_md4_hashset_from_payload_with_progress(
 pub(super) fn build_md4_and_aich_hashsets_from_payload_with_progress(
     payload_path: &Path,
     file_size: u64,
-    mut progress: Option<&mut dyn FnMut(u64)>,
+    progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<Ed2kPayloadHashsets> {
-    if file_size == 0 {
-        anyhow::bail!("cannot build ED2K/AICH hashsets for zero-sized file");
-    }
     let mut file = fs::File::open(payload_path).with_context(|| {
         format!(
             "failed to open ED2K/AICH payload {}",
             payload_path.display()
         )
     })?;
+    build_md4_and_aich_hashsets_from_reader_with_progress(&mut file, file_size, progress)
+}
+
+pub(super) fn build_md4_and_aich_hashsets_from_reader_with_progress(
+    reader: &mut impl Read,
+    file_size: u64,
+    mut progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<Ed2kPayloadHashsets> {
+    if file_size == 0 {
+        anyhow::bail!("cannot build ED2K/AICH hashsets for zero-sized file");
+    }
     let aich_part_specs = aich_part_specs_for_size(file_size)?;
     let mut md4_part_hashes = Vec::with_capacity(
         usize::try_from(chunk_count_for_size(file_size, ED2K_PART_SIZE) + 1).unwrap_or(0),
@@ -122,7 +130,8 @@ pub(super) fn build_md4_and_aich_hashsets_from_payload_with_progress(
         let mut remaining = spec.size;
         while remaining > 0 {
             let chunk_len = usize::try_from(remaining.min(ED2K_EMBLOCK_SIZE)).unwrap_or(0);
-            file.read_exact(&mut buffer[..chunk_len])
+            reader
+                .read_exact(&mut buffer[..chunk_len])
                 .context("failed to read ED2K/AICH payload data")?;
             md4_hasher.update(&buffer[..chunk_len]);
             let digest = Sha1::digest(&buffer[..chunk_len]);
