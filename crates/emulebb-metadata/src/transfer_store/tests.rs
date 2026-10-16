@@ -1,5 +1,57 @@
 use super::*;
 use crate::MetadataStore;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+fn unique_store_path(label: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "emulebb-metadata-{label}-{}-{}.sqlite",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    ))
+}
+
+fn remove_store_files(path: &std::path::Path) {
+    fs::remove_file(path).ok();
+    fs::remove_file(path.with_extension("sqlite-wal")).ok();
+    fs::remove_file(path.with_extension("sqlite-shm")).ok();
+}
+
+fn source_backed_manifest() -> MetadataTransferManifest {
+    MetadataTransferManifest {
+        file_hash: "00112233445566778899aabbccddeeff".to_string(),
+        display_name: "Concurrent.Sample.bin".to_string(),
+        file_size: 16,
+        piece_size: 16,
+        completed: true,
+        final_rehash_pending: false,
+        md4_hashset_acquired: true,
+        md4_hashset: Vec::new(),
+        aich_hashset_acquired: false,
+        aich_root: None,
+        aich_hashset: Vec::new(),
+        verified_ranges: vec![MetadataTransferRange { start: 0, end: 16 }],
+        pieces: Vec::new(),
+        sources: Vec::new(),
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+        category_id: 0,
+        control_state: None,
+        transfer_row_removed: false,
+        delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivered_path: None,
+        source_path: Some("/library/Concurrent.Sample.bin".into()),
+        source_fingerprint: Some(fingerprint(16, 90)),
+        payload_fingerprint: None,
+    }
+}
 
 fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
     NativeFileFingerprint {
@@ -21,6 +73,35 @@ fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
             .unwrap(),
         ),
     }
+}
+
+#[test]
+fn transfer_manifest_waits_for_existing_writer_before_reading_snapshot() {
+    let path = unique_store_path("manifest-immediate-transaction");
+    remove_store_files(&path);
+    let writer = MetadataStore::open(&path).unwrap();
+    let contender = MetadataStore::open(&path).unwrap();
+    let mut writer_conn = writer.connection().unwrap();
+    let writer_tx = writer_conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    writer_tx
+        .execute(
+            "UPDATE metadata_schema SET created_at_ms = created_at_ms + 1",
+            [],
+        )
+        .unwrap();
+
+    let manifest = source_backed_manifest();
+    let contender_write = std::thread::spawn(move || contender.upsert_transfer_manifest(&manifest));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!contender_write.is_finished());
+
+    writer_tx.commit().unwrap();
+    assert!(contender_write.join().unwrap().is_ok());
+    drop(writer_conn);
+    drop(writer);
+    remove_store_files(&path);
 }
 
 #[test]
