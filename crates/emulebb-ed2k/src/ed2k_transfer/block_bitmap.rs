@@ -130,6 +130,16 @@ impl PartBlockBitmap {
             .sum()
     }
 
+    /// End offset of the highest present block, relative to the part start.
+    /// Zero means no block is present.
+    pub(super) fn highest_present_end(&self) -> u64 {
+        (0..self.block_count)
+            .rev()
+            .find(|&idx| self.is_present(idx))
+            .map(|idx| self.block_range(idx).1)
+            .unwrap_or(0)
+    }
+
     /// The index of the first block whose presence covers a contiguous prefix
     /// gap, i.e. the count of leading present blocks. Used to retain the
     /// existing contiguous fast path semantics (`bytes_written`).

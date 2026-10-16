@@ -1008,14 +1008,7 @@ impl Ed2kTransferRuntime {
     /// library) and runs the blocking `rusqlite` load in `spawn_blocking`, so startup
     /// hydration never blocks a tokio worker thread and starves REST.
     pub async fn incomplete_manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
-        let metadata = self.metadata.clone();
-        let raw = tokio::task::spawn_blocking(move || metadata.incomplete_transfer_manifests())
-            .await
-            .map_err(anyhow::Error::from)??;
-        let manifests: Vec<Ed2kResumeManifest> = raw
-            .into_iter()
-            .map(manifest_from_metadata)
-            .collect::<Result<_>>()?;
+        let manifests = self.incomplete_manifests_snapshot().await?;
         // Re-advertise resumable partfiles that already carry >=1 verified part into
         // the in-memory serving/offer catalog (empty at boot). This matches the
         // `upsert_verified_catalog_entry` gate (completed || verified_ranges
@@ -1028,5 +1021,15 @@ impl Ed2kTransferRuntime {
             }
         }
         Ok(manifests)
+    }
+
+    pub(super) async fn incomplete_manifests_snapshot(&self) -> Result<Vec<Ed2kResumeManifest>> {
+        let metadata = self.metadata.clone();
+        let raw = tokio::task::spawn_blocking(move || metadata.incomplete_transfer_manifests())
+            .await
+            .map_err(anyhow::Error::from)??;
+        raw.into_iter()
+            .map(manifest_from_metadata)
+            .collect::<Result<_>>()
     }
 }

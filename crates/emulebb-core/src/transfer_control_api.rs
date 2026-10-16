@@ -19,6 +19,16 @@ impl EmulebbCore {
         self.ed2k_transfers.reconcile_transfer_root().await
     }
 
+    /// Demote persisted incomplete-download progress which is no longer backed
+    /// by the canonical internal payload before startup exposes transfer state.
+    pub async fn reconcile_incomplete_download_payloads(
+        &self,
+    ) -> Result<Ed2kIncompletePayloadReconciliation> {
+        self.ed2k_transfers
+            .reconcile_incomplete_download_payloads()
+            .await
+    }
+
     pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
         let cached = self.state.lock().await.transfers.get(hash).cloned();
         let mut transfer = match cached {
