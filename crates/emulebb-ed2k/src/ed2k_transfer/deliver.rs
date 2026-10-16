@@ -1269,7 +1269,10 @@ fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>
     )?))
 }
 
-fn compute_ed2k_hash_from_handle(file: &mut File, expected_size: u64) -> Result<[u8; 16]> {
+pub(super) fn compute_ed2k_hash_from_handle(
+    file: &mut File,
+    expected_size: u64,
+) -> Result<[u8; 16]> {
     file.seek(SeekFrom::Start(0))?;
     let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
     let mut part_hashes = Vec::with_capacity(usize::try_from(part_count).unwrap_or(0));

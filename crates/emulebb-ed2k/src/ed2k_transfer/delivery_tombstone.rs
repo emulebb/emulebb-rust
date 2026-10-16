@@ -1,6 +1,7 @@
-use std::{fs::File, path::Path};
+use std::{fs::File, path::Path, str::FromStr};
 
 use anyhow::{Context, Result};
+use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
     MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
     NativeFileFingerprint,
@@ -17,7 +18,9 @@ use crate::long_path::long_path;
 
 use super::{
     Ed2kTransferRuntime,
-    deliver::{OwnedDeliveryOutput, remove_file_if_fingerprint_matches},
+    deliver::{
+        OwnedDeliveryOutput, compute_ed2k_hash_from_handle, remove_file_if_fingerprint_matches,
+    },
     fs_durability::{NoReplaceMoveOutcome, move_path_no_replace, sync_parent_directory},
 };
 
@@ -110,16 +113,30 @@ impl Ed2kTransferRuntime {
                         sync_parent_directory(&tombstone.tombstone_path).await?;
                         Ok(PreparedCleanupOutcome::Complete)
                     }
-                    InspectedFile::Regular { fingerprint, .. }
-                        if fingerprint.identity == tombstone.source_fingerprint.identity
-                            && fingerprint.size_bytes
-                                == tombstone.source_fingerprint.size_bytes =>
+                    InspectedFile::Regular { file, fingerprint }
+                        if fingerprint.size_bytes == tombstone.source_fingerprint.size_bytes =>
                     {
+                        let expected_hash = Ed2kHash::from_str(file_hash)
+                            .with_context(|| format!("invalid ED2K file hash {file_hash}"))?
+                            .0;
+                        let verified_fingerprint = verify_uncheckpointed_moved_tombstone(
+                            file,
+                            &tombstone.tombstone_path,
+                            tombstone.source_fingerprint.size_bytes,
+                            expected_hash,
+                        )
+                        .await?
+                        .with_context(|| {
+                            format!(
+                                "deletion tombstone {} does not contain the expected transferred bytes",
+                                tombstone.tombstone_id
+                            )
+                        })?;
                         anyhow::ensure!(
                             self.mark_deletion_tombstone_moved(
                                 file_hash,
                                 tombstone.tombstone_id,
-                                &fingerprint,
+                                &verified_fingerprint,
                             )
                             .await?,
                             "deletion tombstone {} disappeared before move committed",
@@ -127,7 +144,7 @@ impl Ed2kTransferRuntime {
                         );
                         reap_moved_tombstone(&MetadataTransferDeletionTombstone {
                             phase: MetadataTransferDeletionTombstonePhase::Moved,
-                            moved_fingerprint: Some(fingerprint),
+                            moved_fingerprint: Some(verified_fingerprint),
                             ..tombstone.clone()
                         })
                         .await?;
@@ -417,6 +434,43 @@ async fn inspect_file(path: &Path) -> Result<InspectedFile> {
     })
     .await
     .context("deletion path inspection task failed")?
+}
+
+async fn verify_uncheckpointed_moved_tombstone(
+    mut file: File,
+    tombstone_path: &Path,
+    expected_size: u64,
+    expected_hash: [u8; 16],
+) -> Result<Option<NativeFileFingerprint>> {
+    let tombstone_path = long_path(tombstone_path);
+    tokio::task::spawn_blocking(move || -> Result<Option<NativeFileFingerprint>> {
+        let metadata = file.metadata()?;
+        let Some(opened_fingerprint) =
+            super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
+        else {
+            return Ok(None);
+        };
+        if opened_fingerprint.size_bytes != expected_size
+            || compute_ed2k_hash_from_handle(&mut file, expected_size)? != expected_hash
+        {
+            return Ok(None);
+        }
+        let verified_metadata = file.metadata()?;
+        let Some(verified_fingerprint) =
+            super::ingest::native_file_fingerprint_from_handle(&file, &verified_metadata)
+        else {
+            return Ok(None);
+        };
+        if opened_fingerprint != verified_fingerprint
+            || super::ingest::native_file_fingerprint(&tombstone_path).as_ref()
+                != Some(&verified_fingerprint)
+        {
+            return Ok(None);
+        }
+        Ok(Some(verified_fingerprint))
+    })
+    .await
+    .context("uncheckpointed deletion tombstone verification task failed")?
 }
 
 async fn capture_moved_fingerprint(
