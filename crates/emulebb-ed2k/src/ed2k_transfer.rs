@@ -55,6 +55,7 @@ mod manifest;
 mod media_metadata;
 mod metadata;
 mod model;
+mod payload_reconcile;
 mod peer_connections;
 mod piece_store;
 mod reask_reciprocity;
@@ -201,6 +202,20 @@ pub struct Ed2kTransferRootReconciliation {
     pub reclaimed_paths: usize,
     /// Non-empty, non-directory, or unreadable paths preserved for repair.
     pub preserved_collisions: usize,
+}
+
+/// Startup reconciliation summary for persisted incomplete downloads and
+/// their internal `pieces.bin` authority.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ed2kIncompletePayloadReconciliation {
+    /// Persisted incomplete download rows inspected under their lifecycle lock.
+    pub inspected_downloads: usize,
+    /// Missing canonical hash directories recreated for resumable downloads.
+    pub recreated_directories: usize,
+    /// Manifests whose persisted progress was demoted to match durable bytes.
+    pub repaired_downloads: usize,
+    /// Piece rows reset because their claimed bytes were no longer present.
+    pub reset_pieces: usize,
 }
 
 /// Runtime owner for ED2K transfer manifests, piece-store payloads, and the

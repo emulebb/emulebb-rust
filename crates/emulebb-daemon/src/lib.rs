@@ -781,6 +781,18 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             "preserved unmanaged transfer-root collisions; affected hashes cannot be downloaded until repaired"
         );
     }
+    let incomplete_payload_reconciliation = core.reconcile_incomplete_download_payloads().await?;
+    if incomplete_payload_reconciliation.repaired_downloads > 0
+        || incomplete_payload_reconciliation.recreated_directories > 0
+    {
+        warn!(
+            inspected_downloads = incomplete_payload_reconciliation.inspected_downloads,
+            repaired_downloads = incomplete_payload_reconciliation.repaired_downloads,
+            reset_pieces = incomplete_payload_reconciliation.reset_pieces,
+            recreated_directories = incomplete_payload_reconciliation.recreated_directories,
+            "reconciled persisted incomplete downloads against internal payload authority"
+        );
+    }
     let hydrated_transfers = core.hydrate_persisted_transfer_rows().await?;
     if hydrated_transfers > 0 {
         info!(
