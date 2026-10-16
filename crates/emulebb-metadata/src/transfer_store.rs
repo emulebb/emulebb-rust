@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     NativeFileFingerprint, NativePath,
@@ -24,7 +24,11 @@ impl super::MetadataStore {
         let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
         let now = unix_ms();
         let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
+        // WHY: this transaction reads deletion authority before writing paths and
+        // transfer rows. A deferred WAL transaction can retain a stale read
+        // snapshot and fail its write upgrade with SQLITE_BUSY_SNAPSHOT after a
+        // concurrent connection commits; acquire the writer slot before reading.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let deletion_requested = tx
             .query_row(
                 r#"
