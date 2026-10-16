@@ -570,6 +570,10 @@ impl Ed2kTransferRuntime {
                         long_path(std::path::Path::new(source_path)),
                         manifest.verified_ranges.clone(),
                     ),
+                    None if !manifest.verified_ranges.is_empty() => (
+                        self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
+                        manifest.verified_ranges.clone(),
+                    ),
                     None => match self.first_present_shared_source(&hash_hex).await? {
                         Some(source_path) => (
                             long_path(&source_path),
@@ -578,15 +582,7 @@ impl Ed2kTransferRuntime {
                                 end: manifest.file_size,
                             }],
                         ),
-                        None => {
-                            if manifest.verified_ranges.is_empty() {
-                                return Ok(None);
-                            }
-                            (
-                                self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
-                                manifest.verified_ranges.clone(),
-                            )
-                        }
+                        None => return Ok(None),
                     },
                 };
             (payload_path, verified_ranges)

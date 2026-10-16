@@ -445,4 +445,42 @@ mod tests {
                 .any(|entry| entry.file_hash == shared.file_hash && entry.verified_complete)
         );
     }
+
+    #[tokio::test]
+    async fn completed_redownload_serves_canonical_payload_before_shared_duplicate() {
+        let root = tempdir().unwrap();
+        let shared_path = root.path().join("shared-then-redownloaded.bin");
+        let payload = b"canonical redownload payload";
+        fs::write(&shared_path, payload).unwrap();
+        let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let shared = runtime
+            .ingest_local_file(&shared_path, "shared-then-redownloaded.bin")
+            .await
+            .unwrap();
+        let file_hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
+
+        runtime
+            .replace_with_download_job(&new_transfer_job(
+                file_hash,
+                "redownloaded.bin".to_string(),
+                payload.len() as u64,
+            ))
+            .await
+            .unwrap();
+        runtime
+            .append_piece_block(&shared.file_hash, 0, 0, payload.len() as u64, payload)
+            .await
+            .unwrap();
+        assert!(runtime.manifest(&shared.file_hash).await.unwrap().completed);
+
+        fs::write(&shared_path, vec![b'X'; payload.len()]).unwrap();
+        assert_eq!(
+            runtime
+                .read_verified_range(&file_hash, 0, payload.len() as u64)
+                .await
+                .unwrap()
+                .unwrap(),
+            payload,
+        );
+    }
 }
