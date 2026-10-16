@@ -808,6 +808,11 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             "processed persisted completed delivery candidates before REST startup"
         );
     }
+    let initial_shared_catalog_entries = core.hydrate_initial_shared_catalog().await?;
+    info!(
+        initial_shared_catalog_entries,
+        "hydrated validated initial shared catalog before REST startup"
+    );
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(
@@ -822,11 +827,10 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
     spawn_regular_diagnostic_summary(Arc::clone(&core));
 
-    // Start the live auto-pickup monitor first, then hydrate persisted shares in
-    // bounded pages before reconciling the directory tree. Core construction
-    // loaded one immediately publishable cohort only, so the independent
-    // network task below can connect and advertise useful files without waiting
-    // for a 100k-file catalog load or exhaustive filesystem scan.
+    // Start the live auto-pickup monitor first, then hydrate the persisted
+    // catalog remainder in bounded pages before reconciling the directory tree.
+    // One validated cohort is already publishable, so network startup need not
+    // wait for a 100k-file catalog load or exhaustive filesystem scan.
     let sharing_core = Arc::clone(&core);
     let initial_shared_directory_reload = profile.initial_shared_directory_reload;
     tokio::spawn(async move {

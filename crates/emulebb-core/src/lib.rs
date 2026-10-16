@@ -517,10 +517,9 @@ impl EmulebbCore {
         Self::new_with_network_catalog_mode(version, index, transfer_root, ed2k_network, false)
     }
 
-    /// Construct the daemon-facing core after hydrating only one immediately
-    /// publishable persisted-catalog cohort. The daemon must schedule
-    /// [`Self::hydrate_shared_catalog`] after binding REST; ED2K/Kad startup can
-    /// then proceed while the remaining large-library pages load.
+    /// Construct the daemon-facing core without exposing persisted completed
+    /// catalog entries. The daemon must validate persisted storage, hydrate one
+    /// initial cohort, and only then bind REST or start ED2K/Kad.
     pub fn new_with_network_progressive_catalog(
         version: impl Into<String>,
         index: FileIndex,

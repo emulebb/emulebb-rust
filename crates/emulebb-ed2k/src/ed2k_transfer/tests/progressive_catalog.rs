@@ -5,7 +5,7 @@ use emulebb_metadata::{
 };
 
 #[tokio::test]
-async fn progressive_catalog_exposes_first_cohort_before_full_hydration() {
+async fn progressive_catalog_requires_explicit_initial_hydration() {
     let root = unique_test_dir("progressive-catalog");
     let metadata = MetadataStore::in_memory().unwrap();
     for sequence in 1..=3u128 {
@@ -53,14 +53,22 @@ async fn progressive_catalog_exposes_first_cohort_before_full_hydration() {
             .unwrap();
     }
 
-    let runtime = Ed2kTransferRuntime::load_or_create_with_metadata_and_config_catalog_limit(
+    let runtime = Ed2kTransferRuntime::load_or_create_with_metadata_and_config_catalog_mode(
         &root,
         metadata,
         &Ed2kRuntimeConfig::default(),
-        Some(2),
+        true,
     )
     .unwrap();
 
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+    assert_eq!(
+        runtime
+            .hydrate_initial_shared_catalog_page(2)
+            .await
+            .unwrap(),
+        2
+    );
     assert_eq!(runtime.shared_catalog_count().await, 2);
     assert_eq!(runtime.hydrate_shared_catalog().await.unwrap(), 1);
     assert_eq!(runtime.shared_catalog_count().await, 3);
