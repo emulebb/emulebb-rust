@@ -40,6 +40,7 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
                 delivered_path: None,
                 source_path: Some(root.join(format!("catalog-{sequence}.bin"))),
                 source_fingerprint: None,
+                payload_fingerprint: None,
             })
             .unwrap();
         metadata

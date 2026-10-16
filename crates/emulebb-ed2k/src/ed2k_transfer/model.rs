@@ -484,6 +484,11 @@ pub struct Ed2kResumeManifest {
     /// incremental shared-directory reload. `None` forces a conservative hash.
     #[serde(default, with = "optional_native_file_fingerprint_serde")]
     pub source_fingerprint: Option<NativeFileFingerprint>,
+    /// Native identity baseline for this download's canonical `pieces.bin`
+    /// after successful whole-file ED2K verification. `None` forces a
+    /// conservative startup rehash; share-in-place rows never set it.
+    #[serde(default, with = "optional_native_file_fingerprint_serde")]
+    pub payload_fingerprint: Option<NativeFileFingerprint>,
 }
 
 mod optional_native_file_fingerprint_serde {
@@ -726,6 +731,7 @@ impl Ed2kResumeManifest {
             delivered_path: None,
             source_path: None,
             source_fingerprint: None,
+            payload_fingerprint: None,
         }
     }
 

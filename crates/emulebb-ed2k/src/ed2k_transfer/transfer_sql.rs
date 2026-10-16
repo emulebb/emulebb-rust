@@ -61,6 +61,7 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
         delivered_path: manifest.delivered_path.clone(),
         source_path: manifest.source_path.clone(),
         source_fingerprint: manifest.source_fingerprint.clone(),
+        payload_fingerprint: manifest.payload_fingerprint.clone(),
     }
 }
 
@@ -150,6 +151,7 @@ pub(super) fn manifest_from_metadata(
         delivered_path: manifest.delivered_path,
         source_path: manifest.source_path,
         source_fingerprint: manifest.source_fingerprint,
+        payload_fingerprint: manifest.payload_fingerprint,
     })
 }
 
@@ -307,6 +309,7 @@ mod tests {
             delivered_path: None,
             source_path: None,
             source_fingerprint: None,
+            payload_fingerprint: None,
         }
     }
 

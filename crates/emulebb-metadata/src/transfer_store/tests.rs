@@ -78,6 +78,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         delivered_path: None,
         source_path: Some("/library/Sample.Transfer.bin".into()),
         source_fingerprint: Some(fingerprint(1024, 0)),
+        payload_fingerprint: None,
     };
 
     let mut invalid = manifest.clone();
@@ -87,6 +88,9 @@ fn transfer_manifest_roundtrips_sql_tables() {
     assert!(store.upsert_transfer_manifest(&invalid).is_err());
     invalid.delivery_state = MetadataTransferDeliveryState::NotApplicable;
     invalid.source_path = None;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid.source_path = manifest.source_path.clone();
+    invalid.payload_fingerprint = Some(fingerprint(1024, 1));
     assert!(store.upsert_transfer_manifest(&invalid).is_err());
 
     store.upsert_transfer_manifest(&manifest).unwrap();
@@ -408,8 +412,15 @@ fn upload_demand_counters_persist_on_known_files() {
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
+        payload_fingerprint: Some(fingerprint(1024, 10)),
     };
 
+    let mut invalid = manifest.clone();
+    invalid.completed = false;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid.completed = true;
+    invalid.final_rehash_pending = true;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert_eq!(
         store.pending_completed_delivery_hashes().unwrap(),
@@ -478,6 +489,7 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
         delivered_path: None,
         source_path: Some("/library/Alpha.bin".into()),
         source_fingerprint: Some(fingerprint(1024, 0)),
+        payload_fingerprint: None,
     };
 
     store.upsert_transfer_manifest(&manifest).unwrap();
@@ -634,6 +646,7 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
         delivered_path: None,
         source_path: Some("/library/Recovered.Source.bin".into()),
         source_fingerprint: Some(recovered_fingerprint),
+        payload_fingerprint: None,
     };
 
     store.upsert_transfer_manifest(&manifest).unwrap();
@@ -746,6 +759,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
+        payload_fingerprint: None,
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
 
@@ -798,6 +812,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         delivered_path: Some("/incoming/Delete.Intent.bin".into()),
         source_path: None,
         source_fingerprint: Some(fingerprint(1, 9)),
+        payload_fingerprint: Some(fingerprint(1, 10)),
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert_eq!(
@@ -1040,6 +1055,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
+        payload_fingerprint: None,
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
     store
@@ -1151,6 +1167,7 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 delivered_path: None,
                 source_path: Some(format!("/library/catalog-{sequence}.bin").into()),
                 source_fingerprint: Some(fingerprint(sequence as u64, sequence as u64)),
+                payload_fingerprint: None,
             })
             .unwrap();
     }

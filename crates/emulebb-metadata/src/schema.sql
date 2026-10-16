@@ -275,6 +275,9 @@ CREATE TABLE transfers (
     -- Versioned native file identity + size + nanosecond timestamps captured at
     -- ingest or delivery. NULL forces a conservative re-hash on reload.
     source_fingerprint BLOB,
+    -- Versioned identity baseline for the canonical internal pieces.bin after
+    -- successful whole-file verification. NULL forces a startup ED2K rehash.
+    payload_fingerprint BLOB,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),

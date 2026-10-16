@@ -29,6 +29,12 @@ struct VerifiedRecoveryPayload {
     adopt_delivery: bool,
 }
 
+#[derive(Debug)]
+struct VerifiedStagedPayload {
+    path: PathBuf,
+    fingerprint: Option<NativeFileFingerprint>,
+}
+
 static PAYLOAD_QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 impl Ed2kTransferRuntime {
@@ -144,24 +150,28 @@ impl Ed2kTransferRuntime {
             let expected_hash = Ed2kHash::from_str(&snapshot.file_hash)
                 .with_context(|| format!("invalid ED2K file hash {}", snapshot.file_hash))?
                 .0;
-            if payload_len == Some(snapshot.file_size)
-                && matches!(
-                    classify_delivered_output(
-                        &payload_path,
-                        None,
-                        snapshot.file_size,
-                        expected_hash,
-                    )
-                    .await?,
-                    DeliveredOutputIdentity::Matching(_)
+            if payload_len == Some(snapshot.file_size) {
+                let identity = classify_delivered_output(
+                    &payload_path,
+                    snapshot.payload_fingerprint.as_ref(),
+                    snapshot.file_size,
+                    expected_hash,
                 )
-            {
-                adopt_pending_delivery_if_verified(self, &snapshot, &transfer_dir).await?;
-                continue;
+                .await?;
+                if let DeliveredOutputIdentity::Matching(payload_fingerprint) = identity {
+                    persist_verified_canonical_state(
+                        self,
+                        &snapshot,
+                        &transfer_dir,
+                        payload_fingerprint,
+                    )
+                    .await?;
+                    continue;
+                }
             }
 
             if let Some(recovery) = verified_recovery_payload(&snapshot, &transfer_dir).await? {
-                let staged_path = stage_verified_payload(
+                let staged = stage_verified_payload(
                     &recovery.path,
                     &transfer_dir,
                     snapshot.file_size,
@@ -184,7 +194,11 @@ impl Ed2kTransferRuntime {
                         reconciliation.quarantined_payloads =
                             reconciliation.quarantined_payloads.saturating_add(1);
                     }
-                    replace_file_atomically_async(&staged_path, &payload_path).await?;
+                    replace_file_atomically_async(&staged.path, &payload_path).await?;
+                    manifest.payload_fingerprint = verified_replaced_payload_fingerprint(
+                        &payload_path,
+                        staged.fingerprint.as_ref(),
+                    );
                     if recovery.adopt_delivery {
                         manifest.delivery_state = Ed2kDeliveryState::Delivered;
                         manifest.delivered_path = Some(recovery.path.clone());
@@ -199,11 +213,11 @@ impl Ed2kTransferRuntime {
                 }
                 .await;
                 if restore_result.is_err()
-                    && let Err(error) = remove_file_if_exists(&staged_path).await
+                    && let Err(error) = remove_file_if_exists(&staged.path).await
                 {
                     tracing::warn!(
                         %error,
-                        path = %staged_path.display(),
+                        path = %staged.path.display(),
                         "failed to remove payload recovery temporary"
                     );
                 }
@@ -287,35 +301,43 @@ async fn verified_recovery_payload(
     }
 }
 
-async fn adopt_pending_delivery_if_verified(
+async fn persist_verified_canonical_state(
     runtime: &Ed2kTransferRuntime,
     snapshot: &Ed2kResumeManifest,
     transfer_dir: &Path,
+    payload_fingerprint: Option<NativeFileFingerprint>,
 ) -> Result<()> {
-    if snapshot.delivery_state != Ed2kDeliveryState::Pending {
-        return Ok(());
-    }
-    let Some(recovery) = verified_recovery_payload(snapshot, transfer_dir).await? else {
-        return Ok(());
+    let recovery = if snapshot.delivery_state == Ed2kDeliveryState::Pending {
+        verified_recovery_payload(snapshot, transfer_dir).await?
+    } else {
+        None
     };
-    anyhow::ensure!(
-        recovery.adopt_delivery,
-        "pending ED2K delivery recovery did not require adoption"
-    );
     {
         let _manifest_guard = runtime.lock_manifest(&snapshot.file_hash).await;
         let mut manifest = runtime.load_manifest_unlocked(&snapshot.file_hash).await?;
         anyhow::ensure!(
             manifest == *snapshot,
-            "persisted ED2K download {} changed during pending delivery adoption",
+            "persisted ED2K download {} changed during canonical payload verification",
             snapshot.file_hash
         );
-        manifest.delivery_state = Ed2kDeliveryState::Delivered;
-        manifest.delivered_path = Some(recovery.path);
-        manifest.source_fingerprint = recovery.fingerprint;
-        runtime.store_manifest_unlocked(&manifest).await?;
+        manifest.payload_fingerprint = payload_fingerprint;
+        if let Some(recovery) = recovery.as_ref() {
+            anyhow::ensure!(
+                recovery.adopt_delivery,
+                "pending ED2K delivery recovery did not require adoption"
+            );
+            manifest.delivery_state = Ed2kDeliveryState::Delivered;
+            manifest.delivered_path = Some(recovery.path.clone());
+            manifest.source_fingerprint = recovery.fingerprint.clone();
+        }
+        if manifest != *snapshot {
+            runtime.store_manifest_unlocked(&manifest).await?;
+        }
     }
-    remove_file_if_exists(&transfer_dir.join(DELIVERY_PENDING_FILE_NAME)).await
+    if recovery.is_some() {
+        remove_file_if_exists(&transfer_dir.join(DELIVERY_PENDING_FILE_NAME)).await?;
+    }
+    Ok(())
 }
 
 async fn stage_verified_payload(
@@ -323,7 +345,7 @@ async fn stage_verified_payload(
     transfer_dir: &Path,
     expected_size: u64,
     expected_hash: [u8; 16],
-) -> Result<PathBuf> {
+) -> Result<VerifiedStagedPayload> {
     let named = tempfile::Builder::new()
         .prefix(".pieces-restoring-")
         .tempfile_in(long_path(transfer_dir))
@@ -348,18 +370,38 @@ async fn stage_verified_payload(
     );
     output.sync_all().await?;
     drop(output);
-    anyhow::ensure!(
-        matches!(
-            classify_delivered_output(&temp_path, None, expected_size, expected_hash).await?,
-            DeliveredOutputIdentity::Matching(_)
-        ),
-        "copied recovery payload {} failed ED2K identity verification",
-        source.display()
-    );
-    temp_path
+    let DeliveredOutputIdentity::Matching(fingerprint) =
+        classify_delivered_output(&temp_path, None, expected_size, expected_hash).await?
+    else {
+        anyhow::bail!(
+            "copied recovery payload {} failed ED2K identity verification",
+            source.display()
+        );
+    };
+    let path = temp_path
         .keep()
         .map_err(|error| error.error)
-        .context("failed to preserve verified payload recovery temp")
+        .context("failed to preserve verified payload recovery temp")?;
+    Ok(VerifiedStagedPayload { path, fingerprint })
+}
+
+fn verified_replaced_payload_fingerprint(
+    payload_path: &Path,
+    staged_fingerprint: Option<&NativeFileFingerprint>,
+) -> Option<NativeFileFingerprint> {
+    let metadata = payload_path.symlink_metadata().ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    let current = super::ingest::native_file_fingerprint(payload_path, &metadata)?;
+    staged_fingerprint
+        .filter(|staged| {
+            staged.identity == current.identity
+                && staged.size_bytes == current.size_bytes
+                && staged.modified == current.modified
+                && staged.modified.nanoseconds != 0
+        })
+        .map(|_| current)
 }
 
 fn demote_completed_manifest(manifest: &mut Ed2kResumeManifest) -> usize {
@@ -383,6 +425,7 @@ fn demote_completed_manifest(manifest: &mut Ed2kResumeManifest) -> usize {
     manifest.delivery_state = Ed2kDeliveryState::Pending;
     manifest.delivered_path = None;
     manifest.source_fingerprint = None;
+    manifest.payload_fingerprint = None;
     rebuild_verified_ranges(manifest);
     reset_pieces
 }
@@ -555,6 +598,7 @@ async fn remove_file_if_exists(path: &Path) -> Result<()> {
 }
 
 fn reconcile_manifest_payload_len(manifest: &mut Ed2kResumeManifest, payload_len: u64) -> usize {
+    manifest.payload_fingerprint = None;
     let claimed_relative_ends = manifest
         .pieces
         .iter()
@@ -629,6 +673,7 @@ async fn persist_reconciled_manifest(
     if reset_pieces == 0
         && persisted.verified_ranges == manifest.verified_ranges
         && persisted.final_rehash_pending == manifest.final_rehash_pending
+        && persisted.payload_fingerprint == manifest.payload_fingerprint
     {
         return Ok(false);
     }
@@ -697,7 +742,9 @@ mod tests {
             .store_piece_data(&job.file_hash, 0, payload)
             .await
             .unwrap();
-        assert!(runtime.manifest(&job.file_hash).await.unwrap().completed);
+        let completed = runtime.manifest(&job.file_hash).await.unwrap();
+        assert!(completed.completed);
+        assert!(completed.payload_fingerprint.is_some());
         job
     }
 
@@ -901,6 +948,14 @@ mod tests {
             payload
         );
         assert_eq!(fs::read(&delivered_path).unwrap(), payload);
+        assert!(
+            runtime
+                .manifest(&job.file_hash)
+                .await
+                .unwrap()
+                .payload_fingerprint
+                .is_some()
+        );
 
         fs::OpenOptions::new()
             .write(true)
@@ -945,6 +1000,7 @@ mod tests {
             Some(delivered_path.as_path())
         );
         assert!(manifest.source_fingerprint.is_some());
+        assert!(manifest.payload_fingerprint.is_some());
         assert!(!pending_path.exists());
         assert_eq!(
             fs::read(runtime.payload_path(&job.file_hash)).unwrap(),
@@ -990,6 +1046,7 @@ mod tests {
             Some(delivered_path.as_path())
         );
         assert!(manifest.source_fingerprint.is_some());
+        assert!(manifest.payload_fingerprint.is_some());
         assert!(!pending_path.exists());
         assert_eq!(
             fs::read(runtime.payload_path(&job.file_hash)).unwrap(),
@@ -1037,6 +1094,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_completed_payload_fingerprint_is_rehashed_and_persisted() {
+        let root = unique_test_dir("ed2k-refresh-missing-payload-fingerprint");
+        let payload = b"missing canonical fingerprint baseline";
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let job = complete_download(&runtime, "missing-fingerprint.bin", payload).await;
+        {
+            let _guard = runtime.lock_manifest(&job.file_hash).await;
+            let mut manifest = runtime
+                .load_manifest_unlocked(&job.file_hash)
+                .await
+                .unwrap();
+            manifest.payload_fingerprint = None;
+            runtime.store_manifest_unlocked(&manifest).await.unwrap();
+        }
+
+        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+
+        assert_eq!(report.restored_payloads, 0);
+        assert_eq!(report.demoted_downloads, 0);
+        let refreshed = runtime.manifest(&job.file_hash).await.unwrap();
+        assert!(refreshed.completed);
+        assert!(refreshed.payload_fingerprint.is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_completed_payload_fingerprint_is_rehashed_and_refreshed() {
+        let root = unique_test_dir("ed2k-refresh-stale-payload-fingerprint");
+        let payload = b"stale canonical fingerprint baseline";
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let job = complete_download(&runtime, "stale-fingerprint.bin", payload).await;
+        let before = runtime
+            .manifest(&job.file_hash)
+            .await
+            .unwrap()
+            .payload_fingerprint
+            .unwrap();
+        let payload_path = runtime.payload_path(&job.file_hash);
+        let replacement = payload_path.with_extension("replacement");
+        fs::write(&replacement, payload).unwrap();
+        fs::remove_file(&payload_path).unwrap();
+        fs::rename(&replacement, &payload_path).unwrap();
+
+        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+
+        assert_eq!(report.restored_payloads, 0);
+        assert_eq!(report.demoted_downloads, 0);
+        let refreshed = runtime.manifest(&job.file_hash).await.unwrap();
+        assert!(refreshed.completed);
+        assert_ne!(refreshed.payload_fingerprint, Some(before));
+        assert!(refreshed.payload_fingerprint.is_some());
+    }
+
+    #[tokio::test]
     async fn completed_payload_without_valid_recovery_is_demoted() {
         let root = unique_test_dir("ed2k-demote-completed-payload");
         let incoming = root.join("incoming");
@@ -1075,6 +1185,7 @@ mod tests {
         assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
         assert!(manifest.delivered_path.is_none());
         assert!(manifest.source_fingerprint.is_none());
+        assert!(manifest.payload_fingerprint.is_none());
         assert!(manifest.verified_ranges.is_empty());
         assert!(manifest.pieces.iter().all(|piece| {
             piece.state == Ed2kTransferState::Missing
@@ -1128,6 +1239,14 @@ mod tests {
         let report = runtime.reconcile_managed_download_storage().await.unwrap();
 
         assert_eq!(report.inspected_downloads, 0);
+        assert!(
+            runtime
+                .manifest(&shared.file_hash)
+                .await
+                .unwrap()
+                .payload_fingerprint
+                .is_none()
+        );
         assert!(!runtime.transfer_dir(&shared.file_hash).exists());
         assert_eq!(
             runtime

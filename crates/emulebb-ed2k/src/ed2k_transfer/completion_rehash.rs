@@ -15,6 +15,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::NativeFileFingerprint;
 use md4::{Digest, Md4};
 
 use super::{
@@ -27,6 +28,7 @@ struct FinalRehashComputation {
     actual_len: u64,
     file_hash: Option<[u8; 16]>,
     part_hashes: Vec<Option<[u8; 16]>>,
+    payload_fingerprint: Option<NativeFileFingerprint>,
 }
 
 /// Refresh the durable completion barrier after a piece-state transition.
@@ -144,6 +146,7 @@ impl Ed2kTransferRuntime {
 
             manifest.completed = false;
             manifest.final_rehash_pending = true;
+            manifest.payload_fingerprint = None;
             self.invalidate_payload_handle(file_hash);
             self.store_manifest_unlocked(&manifest).await?;
             (self.payload_path(file_hash), manifest.file_size)
@@ -177,6 +180,7 @@ impl Ed2kTransferRuntime {
         if whole_file_matches {
             manifest.completed = true;
             manifest.final_rehash_pending = false;
+            manifest.payload_fingerprint = computation.payload_fingerprint;
             refresh_completed_manifest_aich_hashset(
                 &self.transfer_dir(manifest.file_hash.as_str()),
                 &mut manifest,
@@ -208,6 +212,7 @@ impl Ed2kTransferRuntime {
         }
         manifest.completed = false;
         manifest.final_rehash_pending = false;
+        manifest.payload_fingerprint = None;
         rebuild_verified_ranges(&mut manifest);
         self.store_manifest_unlocked(&manifest).await?;
         self.upsert_verified_catalog_entry(&manifest).await;
@@ -307,12 +312,18 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
     }
     let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
     let mut part_hashes = Vec::with_capacity(usize::try_from(part_count).unwrap_or(0));
+    let pre_hash_fingerprint = path
+        .symlink_metadata()
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file() && metadata.len() == expected_size)
+        .and_then(|metadata| super::ingest::native_file_fingerprint(path, &metadata));
     let Ok(mut file) = File::open(path) else {
         part_hashes.resize(usize::try_from(part_count).unwrap_or(0), None);
         return Ok(FinalRehashComputation {
             actual_len,
             file_hash: None,
             part_hashes,
+            payload_fingerprint: None,
         });
     };
     let _ = file.seek(SeekFrom::Start(0));
@@ -357,9 +368,20 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
         }
         Some(hasher.finalize().into())
     };
+    let post_hash_fingerprint = path
+        .symlink_metadata()
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file() && metadata.len() == expected_size)
+        .and_then(|metadata| super::ingest::native_file_fingerprint(path, &metadata));
+    let payload_fingerprint = pre_hash_fingerprint
+        .as_ref()
+        .zip(post_hash_fingerprint.as_ref())
+        .filter(|(before, after)| before.safely_matches(after))
+        .map(|(_, after)| after.clone());
     Ok(FinalRehashComputation {
         actual_len,
         file_hash,
         part_hashes,
+        payload_fingerprint,
     })
 }

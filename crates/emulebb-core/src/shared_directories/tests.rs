@@ -192,6 +192,7 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
             delivered_path: None,
             source_path: Some(source.clone()),
             source_fingerprint: fingerprint,
+            payload_fingerprint: None,
         })
         .unwrap();
     assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
@@ -244,6 +245,7 @@ async fn incremental_reload_never_reuses_same_size_coarse_timestamp() {
             delivered_path: None,
             source_path: Some(source.clone()),
             source_fingerprint: Some(coarse_fingerprint.clone()),
+            payload_fingerprint: None,
         })
         .unwrap();
 
@@ -411,6 +413,7 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
             delivered_path: Some(delivered.clone()),
             source_path: None,
             source_fingerprint: fingerprint,
+            payload_fingerprint: None,
         })
         .unwrap();
 

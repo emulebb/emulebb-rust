@@ -48,6 +48,9 @@ pub struct MetadataTransferManifest {
     /// Native file identity, size, and nanosecond timestamps captured at ingest
     /// or delivery. `None` forces a conservative re-hash on reload.
     pub source_fingerprint: Option<NativeFileFingerprint>,
+    /// Native identity baseline for the canonical internal payload after a
+    /// successful whole-file ED2K verification. Share-in-place rows keep `None`.
+    pub payload_fingerprint: Option<NativeFileFingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
