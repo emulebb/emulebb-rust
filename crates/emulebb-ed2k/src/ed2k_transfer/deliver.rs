@@ -1237,6 +1237,19 @@ pub(super) async fn remove_file_if_fingerprint_matches(
         if expected_fingerprint != current_fingerprint {
             return Ok(false);
         }
+        #[cfg(test)]
+        run_before_fingerprint_remove_hook(&owned_path);
+        let metadata = match owned_path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_file()
+            || super::ingest::native_file_fingerprint(&owned_path).as_ref()
+                != Some(&expected_fingerprint)
+        {
+            return Ok(false);
+        }
         match std::fs::remove_file(&owned_path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
@@ -1249,6 +1262,35 @@ pub(super) async fn remove_file_if_fingerprint_matches(
         sync_parent_directory(path).await?;
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+type BeforeFingerprintRemoveHook = Box<dyn FnOnce(&Path) + Send>;
+
+#[cfg(test)]
+fn before_fingerprint_remove_hooks() -> &'static Mutex<HashMap<PathBuf, BeforeFingerprintRemoveHook>>
+{
+    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, BeforeFingerprintRemoveHook>>> = OnceLock::new();
+    HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(super) fn set_before_fingerprint_remove_hook(path: &Path, hook: BeforeFingerprintRemoveHook) {
+    before_fingerprint_remove_hooks()
+        .lock()
+        .expect("delivery before-fingerprint-remove hook mutex poisoned")
+        .insert(long_path(path), hook);
+}
+
+#[cfg(test)]
+fn run_before_fingerprint_remove_hook(path: &Path) {
+    let hook = before_fingerprint_remove_hooks()
+        .lock()
+        .expect("delivery before-fingerprint-remove hook mutex poisoned")
+        .remove(path);
+    if let Some(hook) = hook {
+        hook(path);
+    }
 }
 
 fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>> {
