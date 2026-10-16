@@ -696,18 +696,34 @@ impl Ed2kTransferRuntime {
     /// retries them without making the hidden transfer visible again.
     pub async fn recover_pending_transfer_deletions(&self) -> Result<usize> {
         let hashes = self.pending_transfer_deletion_hashes().await?;
-        let recovered = hashes.len();
+        let mut recovered = 0usize;
+        let mut failures = Vec::new();
         for file_hash in hashes {
-            anyhow::ensure!(
-                self.delete_transfer_files_inner(
-                    &file_hash,
-                    DeletionCleanupPolicy::PropagateFailure,
-                )
-                .await
-                .with_context(|| {
-                    format!("failed to recover pending ED2K transfer deletion {file_hash}")
-                })?,
-                "pending ED2K transfer deletion {file_hash} disappeared before recovery"
+            let result = async {
+                anyhow::ensure!(
+                    self.delete_transfer_files_inner(
+                        &file_hash,
+                        DeletionCleanupPolicy::PropagateFailure,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("failed to recover pending ED2K transfer deletion {file_hash}")
+                    })?,
+                    "pending ED2K transfer deletion {file_hash} disappeared before recovery"
+                );
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => recovered = recovered.saturating_add(1),
+                Err(error) => failures.push(format!("{error:#}")),
+            }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "failed to recover {} pending ED2K transfer deletion(s) after completing {recovered}: {}",
+                failures.len(),
+                failures.join("; ")
             );
         }
         Ok(recovered)
