@@ -13,6 +13,7 @@ use emulebb_metadata::NativeFileFingerprint;
 use crate::long_path::long_path;
 
 use super::deliver::{DeliveredOutputIdentity, classify_delivered_output};
+use super::fs_durability::sync_parent_directory;
 use super::manifest::{expected_piece_length, rebuild_verified_ranges};
 use super::{
     Ed2kDeliveryState, Ed2kDownloadStorageReconciliation, Ed2kResumeManifest, Ed2kTransferRuntime,
@@ -506,23 +507,6 @@ pub(super) async fn create_empty_payload(payload_path: &Path) -> Result<()> {
         .with_context(|| format!("failed to sync reset payload {}", payload_path.display()))?;
     drop(payload);
     sync_parent_directory(payload_path).await
-}
-
-#[cfg(not(windows))]
-async fn sync_parent_directory(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("path {} has no parent directory", path.display()))?
-        .to_path_buf();
-    tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
-        .await
-        .context("directory sync task failed")??;
-    Ok(())
-}
-
-#[cfg(windows)]
-async fn sync_parent_directory(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(not(windows))]
