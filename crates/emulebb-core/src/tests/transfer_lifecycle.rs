@@ -865,6 +865,88 @@ async fn startup_reconciliation_redelivers_replaced_completed_output() {
 }
 
 #[tokio::test]
+async fn startup_deletion_recovery_precedes_hydration_and_delivery_reconciliation() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-startup-delete-recovery");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let incoming_dir = runtime_dir.join("incoming");
+    let payload = b"startup destructive deletion recovery payload".repeat(32);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
+    let delivered_path = incoming_dir.join("Delete.On.Startup.bin");
+    let transfer_dir;
+    {
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap()
+        .with_incoming_dir(incoming_dir.clone());
+        core.create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
+            link: Some(format!(
+                "ed2k://|file|Delete.On.Startup.bin|{}|{}|/",
+                payload.len(),
+                file_hash
+            )),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+        core.ed2k_transfers
+            .store_md4_hashset(&file_hash, Vec::new())
+            .await
+            .unwrap();
+        core.ed2k_transfers
+            .store_piece_data(&file_hash, 0, &payload)
+            .await
+            .unwrap();
+        core.deliver_completed_transfer(&file_hash).await;
+        transfer_dir = core.ed2k_transfers.transfer_dir_path(&file_hash);
+        assert!(delivered_path.exists());
+        assert!(transfer_dir.exists());
+        assert!(
+            core.metadata_store
+                .request_transfer_deletion(&file_hash)
+                .unwrap()
+        );
+    }
+
+    let reloaded = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap()
+    .with_incoming_dir(incoming_dir);
+    assert_eq!(
+        reloaded.recover_pending_transfer_deletions().await.unwrap(),
+        1
+    );
+    assert_eq!(reloaded.hydrate_persisted_transfer_rows().await.unwrap(), 0);
+    assert_eq!(
+        reloaded
+            .reconcile_persisted_completed_deliveries()
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(reloaded.transfers().await.is_empty());
+    assert!(!delivered_path.exists());
+    assert!(!transfer_dir.exists());
+    assert!(
+        reloaded
+            .metadata_store
+            .pending_transfer_deletion_hashes()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn delivery_failure_stays_completing_and_clears_after_retry() {
     let runtime_dir = unique_runtime_dir("emulebb-core-delivery-retry-state");
     let transfer_root = runtime_dir.join("transfers");

@@ -761,6 +761,13 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         .with_profile_dir(profile.profile_dir.clone())
         .with_incoming_dir(incoming_dir),
     );
+    let recovered_transfer_deletions = core.recover_pending_transfer_deletions().await?;
+    if recovered_transfer_deletions > 0 {
+        info!(
+            recovered_transfer_deletions,
+            "recovered pending destructive transfer deletions before REST startup"
+        );
+    }
     let hydrated_transfers = core.hydrate_persisted_transfer_rows().await?;
     if hydrated_transfers > 0 {
         info!(

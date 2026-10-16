@@ -407,7 +407,13 @@ async fn destructive_delete_resumes_a_preexisting_durable_intent() {
     }
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert!(restarted.delete_transfer_files(&hash).await.unwrap());
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
     assert!(!delivered.exists());
     assert!(!restarted.transfer_dir(&hash).exists());
     assert!(
@@ -443,14 +449,48 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
         vec![hash.clone()]
     );
 
+    drop(runtime);
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let error = restarted
+        .recover_pending_transfer_deletions()
+        .await
+        .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains(&hash));
+    assert!(error.contains("failed to delete ED2K transfer directory"));
+    assert_eq!(
+        restarted
+            .metadata
+            .pending_transfer_deletion_hashes()
+            .unwrap(),
+        vec![hash.clone()]
+    );
+
     fs::remove_file(&transfer_dir).unwrap();
-    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
     assert!(
-        runtime
+        restarted
             .metadata
             .pending_transfer_deletion_hashes()
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn pending_deletion_recovery_is_a_noop_without_intents() {
+    let root = unique_test_dir("ed2k-deliver-delete-recovery-empty");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+
+    assert_eq!(
+        runtime.recover_pending_transfer_deletions().await.unwrap(),
+        0
     );
 }
 

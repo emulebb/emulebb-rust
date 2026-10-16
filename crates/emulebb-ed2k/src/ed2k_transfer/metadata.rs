@@ -24,6 +24,12 @@ use super::{
     Ed2kTransferJob, Ed2kTransferRuntime, Ed2kTransferState,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeletionCleanupPolicy {
+    RetryLater,
+    FailStartup,
+}
+
 impl Ed2kTransferRuntime {
     /// Return persisted transfer counts without hydrating every manifest.
     pub fn transfer_counts(&self) -> Result<MetadataTransferCounts> {
@@ -107,6 +113,13 @@ impl Ed2kTransferRuntime {
         tokio::task::spawn_blocking(move || metadata.transfer_deletion_requested(&file_hash))
             .await
             .map_err(anyhow::Error::from)?
+    }
+
+    async fn pending_transfer_deletion_hashes(&self) -> Result<Vec<String>> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.pending_transfer_deletion_hashes())
+            .await
+            .context("ED2K pending transfer deletion scan task panicked")?
     }
 
     async fn persist_transfer_deletion_intent(&self, file_hash: &str) -> Result<bool> {
@@ -650,6 +663,33 @@ impl Ed2kTransferRuntime {
     /// Durably accept deletion, hide the transfer, and attempt filesystem cleanup.
     /// Cleanup failures keep the intent for a later idempotent retry.
     pub async fn delete_transfer_files(&self, file_hash: &str) -> Result<bool> {
+        self.delete_transfer_files_inner(file_hash, DeletionCleanupPolicy::RetryLater)
+            .await
+    }
+
+    /// Strictly resume every durable destructive-deletion intent before startup
+    /// publishes transfer, catalog, REST, or network state.
+    pub async fn recover_pending_transfer_deletions(&self) -> Result<usize> {
+        let hashes = self.pending_transfer_deletion_hashes().await?;
+        let recovered = hashes.len();
+        for file_hash in hashes {
+            anyhow::ensure!(
+                self.delete_transfer_files_inner(&file_hash, DeletionCleanupPolicy::FailStartup)
+                    .await
+                    .with_context(|| {
+                        format!("failed to recover pending ED2K transfer deletion {file_hash}")
+                    })?,
+                "pending ED2K transfer deletion {file_hash} disappeared before recovery"
+            );
+        }
+        Ok(recovered)
+    }
+
+    async fn delete_transfer_files_inner(
+        &self,
+        file_hash: &str,
+        cleanup_policy: DeletionCleanupPolicy,
+    ) -> Result<bool> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let file_hash = parsed_hash.to_string();
         let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
@@ -694,6 +734,9 @@ impl Ed2kTransferRuntime {
             .complete_transfer_deletion(&file_hash, parsed_hash.0, &manifest, &transfer_dir)
             .await
         {
+            if cleanup_policy == DeletionCleanupPolicy::FailStartup {
+                return Err(error);
+            }
             tracing::warn!(
                 %error,
                 file_hash,

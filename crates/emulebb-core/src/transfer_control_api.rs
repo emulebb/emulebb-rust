@@ -1,6 +1,18 @@
 use super::*;
 
 impl EmulebbCore {
+    /// Complete every durable destructive-deletion intent before startup
+    /// hydrates or publishes any profile state.
+    ///
+    /// This barrier is startup-only: normal runtime deletion must use
+    /// [`Self::delete_transfer_files`] so in-memory state and events are torn
+    /// down together with the persisted transfer.
+    pub async fn recover_pending_transfer_deletions(&self) -> Result<usize> {
+        self.ed2k_transfers
+            .recover_pending_transfer_deletions()
+            .await
+    }
+
     pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
         let cached = self.state.lock().await.transfers.get(hash).cloned();
         let mut transfer = match cached {
