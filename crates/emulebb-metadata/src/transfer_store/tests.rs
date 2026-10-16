@@ -46,6 +46,7 @@ fn source_backed_manifest() -> MetadataTransferManifest {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: Some("/library/Concurrent.Sample.bin".into()),
         source_fingerprint: Some(fingerprint(16, 90)),
@@ -166,6 +167,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         control_state: Some("paused".to_string()),
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: Some("/library/Sample.Transfer.bin".into()),
         source_fingerprint: Some(fingerprint(1024, 0)),
@@ -500,6 +502,7 @@ fn upload_demand_counters_persist_on_known_files() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -577,6 +580,7 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: Some("/library/Alpha.bin".into()),
         source_fingerprint: Some(fingerprint(1024, 0)),
@@ -734,6 +738,7 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: Some("/library/Recovered.Source.bin".into()),
         source_fingerprint: Some(recovered_fingerprint),
@@ -847,6 +852,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -945,11 +951,46 @@ fn delivery_attempts_roundtrip_and_transition_idempotently() {
         staged.staging_fingerprint.as_ref(),
         Some(&staging_fingerprint)
     );
+    assert!(staged.published_fingerprint.is_none());
     assert_eq!(staged.created_at_ms, prepared.created_at_ms);
     assert!(staged.updated_at_ms >= staged.created_at_ms);
 
+    let published_fingerprint = fingerprint(manifest.file_size, 94);
+    assert!(
+        store
+            .mark_transfer_delivery_attempt_published(&hash, attempt_id, &published_fingerprint,)
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_transfer_delivery_attempt_published(&hash, attempt_id, &published_fingerprint,)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_transfer_delivery_attempt_published(
+                &hash,
+                attempt_id,
+                &fingerprint(manifest.file_size, 95),
+            )
+            .unwrap()
+    );
+    let published = store
+        .transfer_delivery_attempt_by_hash(&hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published.phase,
+        MetadataTransferDeliveryAttemptPhase::Published
+    );
+    assert_eq!(
+        published.published_fingerprint.as_ref(),
+        Some(&published_fingerprint)
+    );
+
     let mut delivered_manifest = manifest.clone();
     delivered_manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    delivered_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
     delivered_manifest.delivered_path = Some(target_path.clone());
     delivered_manifest.source_fingerprint = Some(fingerprint(delivered_manifest.file_size, 92));
     store.upsert_transfer_manifest(&delivered_manifest).unwrap();
@@ -963,6 +1004,7 @@ fn delivery_attempts_roundtrip_and_transition_idempotently() {
 
     let mut pending_manifest = delivered_manifest;
     pending_manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+    pending_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
     pending_manifest.delivered_path = None;
     pending_manifest.source_fingerprint = None;
     store.upsert_transfer_manifest(&pending_manifest).unwrap();
@@ -1086,6 +1128,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Delivered,
+        delivery_ownership: MetadataTransferDeliveryOwnership::Owned,
         delivered_path: Some("/incoming/Delete.Intent.bin".into()),
         source_path: None,
         source_fingerprint: Some(fingerprint(1, 9)),
@@ -1329,6 +1372,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
+        delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
@@ -1441,6 +1485,7 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 control_state: None,
                 transfer_row_removed: false,
                 delivery_state: MetadataTransferDeliveryState::NotApplicable,
+                delivery_ownership: MetadataTransferDeliveryOwnership::None,
                 delivered_path: None,
                 source_path: Some(format!("/library/catalog-{sequence}.bin").into()),
                 source_fingerprint: Some(fingerprint(sequence as u64, sequence as u64)),

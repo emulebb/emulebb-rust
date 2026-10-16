@@ -399,6 +399,14 @@ pub enum Ed2kDeliveryState {
     Delivered,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ed2kDeliveryOwnership {
+    None,
+    Owned,
+    Unowned,
+}
+
 /// Durable download resume metadata stored next to the piece payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ed2kResumeManifest {
@@ -465,6 +473,10 @@ pub struct Ed2kResumeManifest {
     /// piece store. Share-in-place files use `NotApplicable`; downloads start
     /// `Pending` and become `Delivered` only with a persisted verified path.
     pub delivery_state: Ed2kDeliveryState,
+    /// Whether the delivered path is still proven to contain the exact object
+    /// this client published. Ambiguous crash recovery records `Unowned` so
+    /// later destructive cleanup never removes a possibly foreign file.
+    pub delivery_ownership: Ed2kDeliveryOwnership,
     /// Absolute path the completed payload was materialized to by its canonical
     /// name (under a category path or the global incoming dir). `None` until the
     /// transfer is delivered; set once so finished-file delivery is idempotent
@@ -728,6 +740,7 @@ impl Ed2kResumeManifest {
             control_state: None,
             transfer_row_removed: false,
             delivery_state: Ed2kDeliveryState::Pending,
+            delivery_ownership: Ed2kDeliveryOwnership::None,
             delivered_path: None,
             source_path: None,
             source_fingerprint: None,
@@ -760,6 +773,7 @@ mod tests {
             piece_size: 1,
         });
         manifest.delivery_state = Ed2kDeliveryState::NotApplicable;
+        manifest.delivery_ownership = Ed2kDeliveryOwnership::None;
         manifest.source_path = Some(source_path);
         manifest.source_fingerprint = Some(NativeFileFingerprint {
             identity: NativeFileIdentity::Unix {

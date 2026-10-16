@@ -14,6 +14,14 @@ pub enum MetadataTransferDeliveryState {
 pub enum MetadataTransferDeliveryAttemptPhase {
     Prepared,
     Staged,
+    Published,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataTransferDeliveryOwnership {
+    None,
+    Owned,
+    Unowned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +32,7 @@ pub struct MetadataTransferDeliveryAttempt {
     pub target_path: PathBuf,
     pub staging_path: PathBuf,
     pub staging_fingerprint: Option<NativeFileFingerprint>,
+    pub published_fingerprint: Option<NativeFileFingerprint>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -54,6 +63,7 @@ pub struct MetadataTransferManifest {
     /// Explicit lifecycle for materializing a download outside the internal
     /// piece store. This is independent from temporary completion/rehash state.
     pub delivery_state: MetadataTransferDeliveryState,
+    pub delivery_ownership: MetadataTransferDeliveryOwnership,
     /// Absolute path the completed payload was materialized to by its canonical
     /// name, or `None` until the transfer is delivered. Persisted on the
     /// `transfers` row to make finished-file delivery idempotent across restarts.

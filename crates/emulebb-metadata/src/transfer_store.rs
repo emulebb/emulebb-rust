@@ -13,10 +13,10 @@ use crate::{
         MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
         MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
         MetadataTransferCounts, MetadataTransferDeliveryAttempt,
-        MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryState,
-        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
-        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferShareEntry,
-        MetadataTransferSource,
+        MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
+        MetadataTransferDeliveryState, MetadataTransferManifest, MetadataTransferMediaMetadata,
+        MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
+        MetadataTransferShareEntry, MetadataTransferSource,
     },
 };
 
@@ -163,11 +163,12 @@ impl super::MetadataStore {
             r#"
             INSERT INTO transfers(
                 known_file_id, visible_state, final_rehash_pending, control_state, download_priority,
-                category_id, payload_directory, delivery_state, delivered_path_id, source_path_id,
+                category_id, payload_directory, delivery_state, delivery_ownership,
+                delivered_path_id, source_path_id,
                 source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
-            VALUES (?1, ?2, ?13, ?3, 'normal', ?4, ?5, ?14, ?6, ?10, ?11, ?12, ?7, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?13, ?3, 'normal', ?4, ?5, ?14, ?16, ?6, ?10, ?11, ?12, ?7, ?7, ?8, ?9)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 visible_state = excluded.visible_state,
                 final_rehash_pending = excluded.final_rehash_pending,
@@ -175,6 +176,7 @@ impl super::MetadataStore {
                 category_id = excluded.category_id,
                 payload_directory = excluded.payload_directory,
                 delivery_state = excluded.delivery_state,
+                delivery_ownership = excluded.delivery_ownership,
                 delivered_path_id = excluded.delivered_path_id,
                 source_path_id = excluded.source_path_id,
                 source_fingerprint = excluded.source_fingerprint,
@@ -207,6 +209,7 @@ impl super::MetadataStore {
             bool_to_i64(manifest.final_rehash_pending),
             delivery_state_to_sql(manifest.delivery_state),
             completion_timestamp_update,
+            delivery_ownership_to_sql(manifest.delivery_ownership),
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
@@ -294,7 +297,8 @@ impl super::MetadataStore {
                        delivered_paths.platform, delivered_paths.native_path,
                        source_paths.platform, source_paths.native_path,
                        transfers.source_fingerprint, transfers.payload_fingerprint,
-                       transfers.final_rehash_pending, transfers.delivery_state
+                       transfers.final_rehash_pending, transfers.delivery_state,
+                       transfers.delivery_ownership
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -331,6 +335,7 @@ impl super::MetadataStore {
                     payload_fingerprint: optional_fingerprint_from_row(row, 22)?,
                     final_rehash_pending: row.get::<_, i64>(23)? != 0,
                     delivery_state: row.get(24)?,
+                    delivery_ownership: row.get(25)?,
                 })
             })
             .optional()?;
@@ -533,7 +538,8 @@ impl super::MetadataStore {
                    delivered_paths.platform, delivered_paths.native_path,
                    source_paths.platform, source_paths.native_path,
                    transfers.source_fingerprint, transfers.payload_fingerprint,
-                   transfers.final_rehash_pending, transfers.delivery_state
+                   transfers.final_rehash_pending, transfers.delivery_state,
+                   transfers.delivery_ownership
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -569,6 +575,7 @@ impl super::MetadataStore {
                 payload_fingerprint: optional_fingerprint_from_row(row, 22)?,
                 final_rehash_pending: row.get::<_, i64>(23)? != 0,
                 delivery_state: row.get(24)?,
+                delivery_ownership: row.get(25)?,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -1794,6 +1801,7 @@ impl super::MetadataStore {
                    target_paths.platform, target_paths.native_path,
                    staging_paths.platform, staging_paths.native_path,
                    delivery_attempts.staging_fingerprint,
+                   delivery_attempts.published_fingerprint,
                    delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
             FROM delivery_attempts
             JOIN transfers ON transfers.id = delivery_attempts.transfer_id
@@ -1850,6 +1858,53 @@ impl super::MetadataStore {
                 attempt_id.hyphenated().to_string(),
                 now,
                 staging_fingerprint,
+            ],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn mark_transfer_delivery_attempt_published(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        published_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let published_fingerprint = published_fingerprint.storage_bytes();
+        let changed = self.connection()?.execute(
+            r#"
+            UPDATE delivery_attempts
+            SET phase = 'published',
+                published_fingerprint = CASE
+                    WHEN phase = 'staged' THEN ?4
+                    ELSE published_fingerprint
+                END,
+                updated_at_ms = CASE WHEN phase = 'staged' THEN ?3 ELSE updated_at_ms END
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND known_files.completed != 0
+                  AND transfers.final_rehash_pending = 0
+                  AND transfers.delivery_state = 'pending'
+                  AND transfers.source_path_id IS NULL
+                  AND transfers.delivered_path_id IS NULL
+                  AND transfers.removed_at_ms IS NULL
+                  AND transfers.delete_requested_at_ms IS NULL
+            )
+              AND attempt_id = ?2
+              AND (
+                  phase = 'staged'
+                  OR (phase = 'published' AND published_fingerprint = ?4)
+              )
+            "#,
+            params![
+                hash,
+                attempt_id.hyphenated().to_string(),
+                now,
+                published_fingerprint,
             ],
         )?;
         Ok(changed != 0)
@@ -2033,6 +2088,7 @@ fn delivery_attempt_by_hash(
                target_paths.platform, target_paths.native_path,
                staging_paths.platform, staging_paths.native_path,
                delivery_attempts.staging_fingerprint,
+               delivery_attempts.published_fingerprint,
                delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
         FROM delivery_attempts
         JOIN transfers ON transfers.id = delivery_attempts.transfer_id
@@ -2058,6 +2114,7 @@ fn delivery_attempt_from_row(
     let phase = match row.get::<_, String>(2)?.as_str() {
         "prepared" => MetadataTransferDeliveryAttemptPhase::Prepared,
         "staged" => MetadataTransferDeliveryAttemptPhase::Staged,
+        "published" => MetadataTransferDeliveryAttemptPhase::Published,
         value => {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 2,
@@ -2073,8 +2130,9 @@ fn delivery_attempt_from_row(
         target_path: path_from_row(row, 3, 4)?,
         staging_path: path_from_row(row, 5, 6)?,
         staging_fingerprint: optional_fingerprint_from_row(row, 7)?,
-        created_at_ms: row.get(8)?,
-        updated_at_ms: row.get(9)?,
+        published_fingerprint: optional_fingerprint_from_row(row, 8)?,
+        created_at_ms: row.get(9)?,
+        updated_at_ms: row.get(10)?,
     })
 }
 
@@ -2121,6 +2179,7 @@ struct TransferRow {
     source_fingerprint: Option<NativeFileFingerprint>,
     payload_fingerprint: Option<NativeFileFingerprint>,
     delivery_state: String,
+    delivery_ownership: String,
 }
 
 fn replace_transfer_children(
@@ -2261,6 +2320,7 @@ fn manifest_from_row(
         control_state: row.control_state,
         transfer_row_removed: row.transfer_row_removed,
         delivery_state: delivery_state_from_sql(&row.delivery_state)?,
+        delivery_ownership: delivery_ownership_from_sql(&row.delivery_ownership)?,
         delivered_path: row.delivered_path,
         source_path: row.source_path,
         source_fingerprint: row.source_fingerprint,
@@ -2462,21 +2522,24 @@ fn local_path_id(conn: &rusqlite::Connection, path: &Path) -> Result<Option<i64>
 }
 
 fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
-    let valid = match manifest.delivery_state {
-        MetadataTransferDeliveryState::NotApplicable => {
+    let valid = match (manifest.delivery_state, manifest.delivery_ownership) {
+        (MetadataTransferDeliveryState::NotApplicable, MetadataTransferDeliveryOwnership::None) => {
             manifest.source_path.is_some() && manifest.delivered_path.is_none()
         }
-        MetadataTransferDeliveryState::Pending => {
+        (MetadataTransferDeliveryState::Pending, MetadataTransferDeliveryOwnership::None) => {
             manifest.source_path.is_none() && manifest.delivered_path.is_none()
         }
-        MetadataTransferDeliveryState::Delivered => {
-            manifest.source_path.is_none() && manifest.delivered_path.is_some()
-        }
+        (
+            MetadataTransferDeliveryState::Delivered,
+            MetadataTransferDeliveryOwnership::Owned | MetadataTransferDeliveryOwnership::Unowned,
+        ) => manifest.source_path.is_none() && manifest.delivered_path.is_some(),
+        _ => false,
     };
     if !valid {
         anyhow::bail!(
-            "invalid delivery state {:?} for transfer {}: delivered_path={}, source_path={}",
+            "invalid delivery state {:?}/{:?} for transfer {}: delivered_path={}, source_path={}",
             manifest.delivery_state,
+            manifest.delivery_ownership,
             manifest.file_hash,
             manifest.delivered_path.is_some(),
             manifest.source_path.is_some()
@@ -2509,6 +2572,23 @@ fn delivery_state_from_sql(value: &str) -> Result<MetadataTransferDeliveryState>
         "pending" => Ok(MetadataTransferDeliveryState::Pending),
         "delivered" => Ok(MetadataTransferDeliveryState::Delivered),
         _ => anyhow::bail!("invalid persisted transfer delivery state {value:?}"),
+    }
+}
+
+fn delivery_ownership_to_sql(ownership: MetadataTransferDeliveryOwnership) -> &'static str {
+    match ownership {
+        MetadataTransferDeliveryOwnership::None => "none",
+        MetadataTransferDeliveryOwnership::Owned => "owned",
+        MetadataTransferDeliveryOwnership::Unowned => "unowned",
+    }
+}
+
+fn delivery_ownership_from_sql(value: &str) -> Result<MetadataTransferDeliveryOwnership> {
+    match value {
+        "none" => Ok(MetadataTransferDeliveryOwnership::None),
+        "owned" => Ok(MetadataTransferDeliveryOwnership::Owned),
+        "unowned" => Ok(MetadataTransferDeliveryOwnership::Unowned),
+        _ => anyhow::bail!("invalid persisted transfer delivery ownership {value:?}"),
     }
 }
 
