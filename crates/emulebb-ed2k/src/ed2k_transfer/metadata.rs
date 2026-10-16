@@ -661,6 +661,9 @@ impl Ed2kTransferRuntime {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let file_hash = parsed_hash.to_string();
         let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
+        if !self.transfer_deletion_requested(&file_hash).await? {
+            self.recover_delivery_attempt_unlocked(&file_hash).await?;
+        }
         let _guard = self.lock_manifest(&file_hash).await;
         let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
         if !manifest.completed {
@@ -738,6 +741,8 @@ impl Ed2kTransferRuntime {
             self.persist_transfer_deletion_intent(&file_hash).await?,
             "ED2K transfer {file_hash} disappeared before deletion intent was persisted"
         );
+        self.discard_delivery_attempt_for_deletion_unlocked(&file_hash, &manifest)
+            .await?;
 
         self.manifest_cache.lock().await.remove(&file_hash);
         self.manifest_checkpoint_state

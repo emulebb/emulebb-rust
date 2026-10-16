@@ -512,6 +512,52 @@ async fn destructive_delete_resumes_a_preexisting_durable_intent() {
 }
 
 #[tokio::test]
+async fn destructive_delete_resolves_preexisting_staged_delivery_attempt() {
+    let root = unique_test_dir("ed2k-deliver-delete-staged-attempt");
+    let hash;
+    let target_path;
+    {
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        hash = ingest_completed(&runtime, &root, "Staged.Delete.mkv").await;
+        let incoming = root.join("incoming");
+        fs::create_dir_all(&incoming).unwrap();
+        target_path = incoming.join("Staged.Delete.mkv");
+        fs::copy(runtime.payload_path(&hash), &target_path).unwrap();
+        let attempt_id = Uuid::new_v4();
+        let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+        runtime
+            .metadata
+            .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+            .unwrap();
+        assert!(
+            runtime
+                .metadata
+                .mark_transfer_delivery_attempt_staged(&hash, attempt_id)
+                .unwrap()
+        );
+        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+    }
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!target_path.exists());
+    assert!(!restarted.transfer_dir(&hash).exists());
+    assert!(
+        restarted
+            .metadata
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
     let root = unique_test_dir("ed2k-deliver-delete-cleanup-retry");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
