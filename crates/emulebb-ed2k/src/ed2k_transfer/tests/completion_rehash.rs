@@ -33,6 +33,7 @@ async fn clean_completion_persists_pending_before_restart_finalizer_accepts() {
         let pending = runtime.manifest(&job.file_hash).await.unwrap();
         assert!(!pending.completed);
         assert!(pending.final_rehash_pending);
+        assert!(pending.payload_fingerprint.is_none());
         assert_eq!(
             runtime
                 .materialize_completed_payload(&job.file_hash, &root.join("incoming"))
@@ -52,6 +53,7 @@ async fn clean_completion_persists_pending_before_restart_finalizer_accepts() {
     let completed = runtime.manifest(&job.file_hash).await.unwrap();
     assert!(completed.completed);
     assert!(!completed.final_rehash_pending);
+    assert!(completed.payload_fingerprint.is_some());
 }
 
 #[tokio::test]
@@ -102,6 +104,7 @@ async fn mutation_before_last_part_is_found_and_only_bad_part_is_demoted() {
     let manifest = runtime.manifest(&job.file_hash).await.unwrap();
     assert!(!manifest.completed);
     assert!(!manifest.final_rehash_pending);
+    assert!(manifest.payload_fingerprint.is_none());
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert!(manifest.pieces[0].ich_corrupted);
     assert_eq!(manifest.pieces[1].state, Ed2kTransferState::Verified);

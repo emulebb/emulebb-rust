@@ -71,6 +71,7 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         delivered_path: None,
         source_path: None,
         source_fingerprint: None,
+        payload_fingerprint: None,
     }
 }
 

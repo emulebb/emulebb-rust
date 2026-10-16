@@ -632,6 +632,7 @@ mod tests {
                 delivered_path: None,
                 source_path: None,
                 source_fingerprint: None,
+                payload_fingerprint: None,
                 pieces: Vec::new(),
                 sources: Vec::new(),
             })

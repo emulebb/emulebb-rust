@@ -49,6 +49,10 @@ impl super::MetadataStore {
             .source_fingerprint
             .as_ref()
             .map(NativeFileFingerprint::storage_bytes);
+        let payload_fingerprint = manifest
+            .payload_fingerprint
+            .as_ref()
+            .map(NativeFileFingerprint::storage_bytes);
 
         tx.prepare_cached(
             r#"
@@ -105,10 +109,10 @@ impl super::MetadataStore {
             INSERT INTO transfers(
                 known_file_id, visible_state, final_rehash_pending, control_state, download_priority,
                 category_id, payload_directory, delivery_state, delivered_path_id, source_path_id,
-                source_fingerprint, created_at_ms, updated_at_ms,
+                source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
-            VALUES (?1, ?2, ?12, ?3, 'normal', ?4, ?5, ?13, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?13, ?3, 'normal', ?4, ?5, ?14, ?6, ?10, ?11, ?12, ?7, ?7, ?8, ?9)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 visible_state = excluded.visible_state,
                 final_rehash_pending = excluded.final_rehash_pending,
@@ -119,6 +123,7 @@ impl super::MetadataStore {
                 delivered_path_id = excluded.delivered_path_id,
                 source_path_id = excluded.source_path_id,
                 source_fingerprint = excluded.source_fingerprint,
+                payload_fingerprint = excluded.payload_fingerprint,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = excluded.completed_at_ms,
                 removed_at_ms = excluded.removed_at_ms
@@ -140,6 +145,7 @@ impl super::MetadataStore {
             },
             source_path_id,
             source_fingerprint,
+            payload_fingerprint,
             bool_to_i64(manifest.final_rehash_pending),
             delivery_state_to_sql(manifest.delivery_state),
         ])?;
@@ -221,8 +227,8 @@ impl super::MetadataStore {
                        transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                        delivered_paths.platform, delivered_paths.native_path,
                        source_paths.platform, source_paths.native_path,
-                       transfers.source_fingerprint, transfers.final_rehash_pending,
-                       transfers.delivery_state
+                       transfers.source_fingerprint, transfers.payload_fingerprint,
+                       transfers.final_rehash_pending, transfers.delivery_state
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -256,8 +262,9 @@ impl super::MetadataStore {
                     delivered_path: optional_path_from_row(row, 17, 18)?,
                     source_path: optional_path_from_row(row, 19, 20)?,
                     source_fingerprint: optional_fingerprint_from_row(row, 21)?,
-                    final_rehash_pending: row.get::<_, i64>(22)? != 0,
-                    delivery_state: row.get(23)?,
+                    payload_fingerprint: optional_fingerprint_from_row(row, 22)?,
+                    final_rehash_pending: row.get::<_, i64>(23)? != 0,
+                    delivery_state: row.get(24)?,
                 })
             })
             .optional()?;
@@ -459,8 +466,8 @@ impl super::MetadataStore {
                    transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                    delivered_paths.platform, delivered_paths.native_path,
                    source_paths.platform, source_paths.native_path,
-                   transfers.source_fingerprint, transfers.final_rehash_pending,
-                   transfers.delivery_state
+                   transfers.source_fingerprint, transfers.payload_fingerprint,
+                   transfers.final_rehash_pending, transfers.delivery_state
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -493,8 +500,9 @@ impl super::MetadataStore {
                 delivered_path: optional_path_from_row(row, 17, 18)?,
                 source_path: optional_path_from_row(row, 19, 20)?,
                 source_fingerprint: optional_fingerprint_from_row(row, 21)?,
-                final_rehash_pending: row.get::<_, i64>(22)? != 0,
-                delivery_state: row.get(23)?,
+                payload_fingerprint: optional_fingerprint_from_row(row, 22)?,
+                final_rehash_pending: row.get::<_, i64>(23)? != 0,
+                delivery_state: row.get(24)?,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -1788,6 +1796,7 @@ struct TransferRow {
     delivered_path: Option<std::path::PathBuf>,
     source_path: Option<std::path::PathBuf>,
     source_fingerprint: Option<NativeFileFingerprint>,
+    payload_fingerprint: Option<NativeFileFingerprint>,
     delivery_state: String,
 }
 
@@ -1932,6 +1941,7 @@ fn manifest_from_row(
         delivered_path: row.delivered_path,
         source_path: row.source_path,
         source_fingerprint: row.source_fingerprint,
+        payload_fingerprint: row.payload_fingerprint,
     })
 }
 
@@ -2147,6 +2157,16 @@ fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
             manifest.file_hash,
             manifest.delivered_path.is_some(),
             manifest.source_path.is_some()
+        );
+    }
+    if let Some(fingerprint) = manifest.payload_fingerprint.as_ref() {
+        ensure!(
+            manifest.source_path.is_none()
+                && manifest.completed
+                && !manifest.final_rehash_pending
+                && fingerprint.size_bytes == manifest.file_size,
+            "invalid canonical payload fingerprint for transfer {}",
+            manifest.file_hash
         );
     }
     Ok(())

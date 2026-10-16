@@ -174,6 +174,7 @@ mod tests {
             delivered_path: Some("C:\\incoming\\completed.bin".into()),
             source_path: None,
             source_fingerprint: None,
+            payload_fingerprint: None,
         }
     }
 
