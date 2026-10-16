@@ -9,6 +9,8 @@ use emulebb_kad_proto::Ed2kHash;
 use md4::{Digest, Md4};
 use uuid::Uuid;
 
+#[cfg(unix)]
+use super::super::deliver::set_after_publish_move_hook;
 use super::super::delivery_tombstone::set_before_move_hook;
 use super::super::ingest::native_file_fingerprint;
 use super::super::metadata::transfer_directory_tombstone_path;
@@ -250,6 +252,49 @@ async fn staged_attempt_does_not_adopt_byte_identical_foreign_target() {
         manifest.delivered_path.as_deref(),
         Some(delivered.as_path())
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn publication_rehash_rejects_equal_length_mutation_after_move() {
+    let root = unique_test_dir("ed2k-deliver-post-move-mutation");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Mutated.After.Move.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let replacement = vec![0xA5; payload.len()];
+    let incoming = root.join("incoming");
+    let target_path = incoming.join("Mutated.After.Move.mkv");
+    let hook_replacement = replacement.clone();
+    set_after_publish_move_hook(
+        &hash,
+        Box::new(move |published_path| {
+            fs::write(published_path, &hook_replacement).unwrap();
+        }),
+    );
+
+    let error = runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("published delivery failed verification"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), replacement);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::None);
+
+    let delivered = incoming.join("Mutated.After.Move (1).mkv");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(delivered.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), replacement);
+    assert_eq!(fs::read(&delivered).unwrap(), payload);
 }
 
 #[tokio::test]
