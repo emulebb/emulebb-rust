@@ -5,7 +5,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     NativeFileFingerprint, NativePath,
-    download_history_store::record_completed_download,
+    download_history_store::{record_completed_download, records_download_completion},
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_model::{
@@ -47,6 +47,54 @@ impl super::MetadataStore {
             "transfer {} has a pending destructive deletion",
             manifest.file_hash
         );
+        let previous_completion = tx
+            .query_row(
+                r#"
+                SELECT known_files.completed, transfers.final_rehash_pending,
+                       transfers.source_path_id IS NULL, transfers.completed_at_ms
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                "#,
+                params![hash],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let previous_history_completed_at_ms = tx
+            .prepare_cached(
+                "SELECT last_completed_at_ms FROM download_history WHERE ed2k_hash = ?1",
+            )?
+            .query_row(params![hash], |row| row.get::<_, i64>(0))
+            .optional()?;
+        let previous_records_completion = previous_completion
+            .map(|(completed, final_rehash_pending, source_path_absent, _)| {
+                completed && !final_rehash_pending && source_path_absent
+            })
+            .unwrap_or(false);
+        let records_completion = records_download_completion(manifest);
+        let completion_transition = records_completion && !previous_records_completion;
+        let previous_completed_at_ms =
+            previous_completion.and_then(|(_, _, _, completed_at_ms)| completed_at_ms);
+        let completion_timestamp_repair =
+            records_completion && previous_records_completion && previous_completed_at_ms.is_none();
+        let completion_timestamp_update = completion_transition || completion_timestamp_repair;
+        let completed_at_ms = if completion_transition {
+            Some(
+                now.max(previous_completed_at_ms.unwrap_or(0))
+                    .max(previous_history_completed_at_ms.unwrap_or(0)),
+            )
+        } else if completion_timestamp_repair {
+            Some(previous_history_completed_at_ms.unwrap_or(now))
+        } else {
+            previous_completed_at_ms
+        };
         let delivered_path_id = optional_local_path_id(&tx, manifest.delivered_path.as_deref())?;
         let source_path_id = optional_local_path_id(&tx, manifest.source_path.as_deref())?;
         let source_fingerprint = manifest
@@ -129,7 +177,10 @@ impl super::MetadataStore {
                 source_fingerprint = excluded.source_fingerprint,
                 payload_fingerprint = excluded.payload_fingerprint,
                 updated_at_ms = excluded.updated_at_ms,
-                completed_at_ms = excluded.completed_at_ms,
+                completed_at_ms = CASE
+                    WHEN ?15 THEN excluded.completed_at_ms
+                    ELSE transfers.completed_at_ms
+                END,
                 removed_at_ms = excluded.removed_at_ms
             "#,
         )?
@@ -141,7 +192,7 @@ impl super::MetadataStore {
             manifest.file_hash,
             delivered_path_id,
             now,
-            if manifest.completed { Some(now) } else { None },
+            completed_at_ms,
             if manifest.transfer_row_removed {
                 Some(now)
             } else {
@@ -152,6 +203,7 @@ impl super::MetadataStore {
             payload_fingerprint,
             bool_to_i64(manifest.final_rehash_pending),
             delivery_state_to_sql(manifest.delivery_state),
+            completion_timestamp_update,
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
@@ -186,7 +238,14 @@ impl super::MetadataStore {
         }
 
         replace_transfer_children(&tx, known_file_id, transfer_id, manifest, now)?;
-        record_completed_download(&tx, manifest, &hash, aich_root.as_deref(), now)?;
+        record_completed_download(
+            &tx,
+            manifest,
+            &hash,
+            aich_root.as_deref(),
+            completed_at_ms,
+            completion_transition,
+        )?;
         tx.commit()?;
         Ok(())
     }

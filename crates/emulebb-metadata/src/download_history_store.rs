@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Result, anyhow, ensure};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
@@ -78,11 +78,18 @@ pub(crate) fn record_completed_download(
     manifest: &MetadataTransferManifest,
     hash: &[u8],
     aich_root: Option<&[u8]>,
-    now: i64,
+    completed_at_ms: Option<i64>,
+    completion_transition: bool,
 ) -> Result<()> {
-    if !manifest.completed || manifest.final_rehash_pending || manifest.source_path.is_some() {
+    if !records_download_completion(manifest) {
         return Ok(());
     }
+    let completed_at_ms = completed_at_ms.ok_or_else(|| {
+        anyhow!(
+            "completed download {} has no completion timestamp",
+            manifest.file_hash
+        )
+    })?;
 
     let existing = tx
         .prepare_cached("SELECT size_bytes, aich_root FROM download_history WHERE ed2k_hash = ?1")?
@@ -121,7 +128,10 @@ pub(crate) fn record_completed_download(
         ON CONFLICT(ed2k_hash) DO UPDATE SET
             display_name = excluded.display_name,
             aich_root = coalesce(excluded.aich_root, download_history.aich_root),
-            last_completed_at_ms = excluded.last_completed_at_ms
+            last_completed_at_ms = CASE
+                WHEN ?6 THEN excluded.last_completed_at_ms
+                ELSE download_history.last_completed_at_ms
+            END
         "#,
     )?
     .execute(params![
@@ -129,9 +139,14 @@ pub(crate) fn record_completed_download(
         manifest.file_size as i64,
         manifest.display_name,
         aich_root,
-        now,
+        completed_at_ms,
+        completion_transition,
     ])?;
     Ok(())
+}
+
+pub(crate) fn records_download_completion(manifest: &MetadataTransferManifest) -> bool {
+    manifest.completed && !manifest.final_rehash_pending && manifest.source_path.is_none()
 }
 
 #[cfg(test)]
@@ -181,6 +196,14 @@ mod tests {
         }
     }
 
+    fn transfer_completed_at_ms(store: &MetadataStore, file_hash: &str) -> Option<i64> {
+        store
+            .transfer_timestamps_by_hash(file_hash)
+            .unwrap()
+            .unwrap()
+            .1
+    }
+
     #[test]
     fn authoritative_download_completion_survives_manifest_deletion() {
         let store = MetadataStore::in_memory().unwrap();
@@ -226,26 +249,255 @@ mod tests {
     }
 
     #[test]
-    fn repeated_completion_preserves_identity_and_refreshes_metadata() {
+    fn completion_timestamps_only_advance_on_completion_transitions() {
         let store = MetadataStore::in_memory().unwrap();
         let mut manifest = completed_download_manifest();
+        manifest.completed = false;
         store.upsert_transfer_manifest(&manifest).unwrap();
-        let first = store
-            .download_history_by_hash(&manifest.file_hash)
-            .unwrap()
+        assert_eq!(transfer_completed_at_ms(&store, &manifest.file_hash), None);
+        assert!(
+            store
+                .download_history_by_hash(&manifest.file_hash)
+                .unwrap()
+                .is_none()
+        );
+
+        manifest.completed = true;
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        const FIRST_COMPLETION_MS: i64 = 1_000;
+        {
+            let conn = store.connection().unwrap();
+            conn.execute(
+                "UPDATE transfers SET completed_at_ms = ?1",
+                rusqlite::params![FIRST_COMPLETION_MS],
+            )
             .unwrap();
+            conn.execute(
+                r#"
+                UPDATE download_history
+                SET first_completed_at_ms = ?1, last_completed_at_ms = ?1
+                "#,
+                rusqlite::params![FIRST_COMPLETION_MS],
+            )
+            .unwrap();
+        }
 
         manifest.display_name = "renamed.bin".to_string();
         manifest.aich_root = None;
         store.upsert_transfer_manifest(&manifest).unwrap();
-        let refreshed = store
+        let metadata_refresh = store
             .download_history_by_hash(&manifest.file_hash)
             .unwrap()
             .unwrap();
-        assert_eq!(refreshed.display_name, "renamed.bin");
-        assert_eq!(refreshed.aich_root, first.aich_root);
-        assert_eq!(refreshed.first_completed_at_ms, first.first_completed_at_ms);
-        assert!(refreshed.last_completed_at_ms >= first.last_completed_at_ms);
+        assert_eq!(metadata_refresh.display_name, "renamed.bin");
+        assert_eq!(
+            metadata_refresh.aich_root.as_deref(),
+            Some("1111111111111111111111111111111111111111")
+        );
+        assert_eq!(metadata_refresh.first_completed_at_ms, FIRST_COMPLETION_MS);
+        assert_eq!(metadata_refresh.last_completed_at_ms, FIRST_COMPLETION_MS);
+        assert_eq!(
+            transfer_completed_at_ms(&store, &manifest.file_hash),
+            Some(FIRST_COMPLETION_MS)
+        );
+
+        manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+        manifest.delivered_path = None;
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        assert_eq!(
+            transfer_completed_at_ms(&store, &manifest.file_hash),
+            Some(FIRST_COMPLETION_MS)
+        );
+        assert_eq!(
+            store
+                .download_history_by_hash(&manifest.file_hash)
+                .unwrap()
+                .unwrap()
+                .last_completed_at_ms,
+            FIRST_COMPLETION_MS
+        );
+
+        manifest.completed = false;
+        manifest.final_rehash_pending = true;
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        assert_eq!(
+            transfer_completed_at_ms(&store, &manifest.file_hash),
+            Some(FIRST_COMPLETION_MS)
+        );
+        assert_eq!(
+            store
+                .download_history_by_hash(&manifest.file_hash)
+                .unwrap()
+                .unwrap()
+                .last_completed_at_ms,
+            FIRST_COMPLETION_MS
+        );
+
+        manifest.completed = true;
+        manifest.final_rehash_pending = false;
+        manifest.display_name = "completed-again.bin".to_string();
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        let recompleted_at_ms = transfer_completed_at_ms(&store, &manifest.file_hash).unwrap();
+        let recompleted_history = store
+            .download_history_by_hash(&manifest.file_hash)
+            .unwrap()
+            .unwrap();
+        assert!(recompleted_at_ms > FIRST_COMPLETION_MS);
+        assert_eq!(
+            recompleted_history.first_completed_at_ms,
+            FIRST_COMPLETION_MS
+        );
+        assert_eq!(recompleted_history.last_completed_at_ms, recompleted_at_ms);
+        assert_eq!(recompleted_history.display_name, "completed-again.bin");
+    }
+
+    #[test]
+    fn only_authoritative_download_completion_starts_timestamps() {
+        let rehash_store = MetadataStore::in_memory().unwrap();
+        let mut rehash_manifest = completed_download_manifest();
+        rehash_manifest.final_rehash_pending = true;
+        rehash_store
+            .upsert_transfer_manifest(&rehash_manifest)
+            .unwrap();
+        assert_eq!(
+            transfer_completed_at_ms(&rehash_store, &rehash_manifest.file_hash),
+            None
+        );
+        assert!(
+            rehash_store
+                .download_history_by_hash(&rehash_manifest.file_hash)
+                .unwrap()
+                .is_none()
+        );
+
+        rehash_manifest.final_rehash_pending = false;
+        rehash_store
+            .upsert_transfer_manifest(&rehash_manifest)
+            .unwrap();
+        let rehash_completed_at =
+            transfer_completed_at_ms(&rehash_store, &rehash_manifest.file_hash).unwrap();
+        assert_eq!(
+            rehash_store
+                .download_history_by_hash(&rehash_manifest.file_hash)
+                .unwrap()
+                .unwrap()
+                .last_completed_at_ms,
+            rehash_completed_at
+        );
+
+        let shared_store = MetadataStore::in_memory().unwrap();
+        let mut shared_manifest = completed_download_manifest();
+        shared_manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
+        shared_manifest.delivered_path = None;
+        shared_manifest.source_path = Some("C:\\shared\\completed.bin".into());
+        shared_store
+            .upsert_transfer_manifest(&shared_manifest)
+            .unwrap();
+        assert_eq!(
+            transfer_completed_at_ms(&shared_store, &shared_manifest.file_hash),
+            None
+        );
+        assert!(
+            shared_store
+                .download_history_by_hash(&shared_manifest.file_hash)
+                .unwrap()
+                .is_none()
+        );
+
+        shared_manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+        shared_manifest.source_path = None;
+        shared_store
+            .upsert_transfer_manifest(&shared_manifest)
+            .unwrap();
+        let download_completed_at =
+            transfer_completed_at_ms(&shared_store, &shared_manifest.file_hash).unwrap();
+        assert_eq!(
+            shared_store
+                .download_history_by_hash(&shared_manifest.file_hash)
+                .unwrap()
+                .unwrap()
+                .last_completed_at_ms,
+            download_completed_at
+        );
+    }
+
+    #[test]
+    fn completion_timestamp_repairs_legacy_null_without_refreshing_history() {
+        let store = MetadataStore::in_memory().unwrap();
+        let mut manifest = completed_download_manifest();
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        const HISTORICAL_COMPLETION_MS: i64 = 1_234;
+        {
+            let conn = store.connection().unwrap();
+            conn.execute("UPDATE transfers SET completed_at_ms = NULL", [])
+                .unwrap();
+            conn.execute(
+                r#"
+                UPDATE download_history
+                SET first_completed_at_ms = ?1, last_completed_at_ms = ?1
+                "#,
+                rusqlite::params![HISTORICAL_COMPLETION_MS],
+            )
+            .unwrap();
+        }
+
+        manifest.display_name = "legacy-repaired.bin".to_string();
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        assert_eq!(
+            transfer_completed_at_ms(&store, &manifest.file_hash),
+            Some(HISTORICAL_COMPLETION_MS)
+        );
+        let history = store
+            .download_history_by_hash(&manifest.file_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.first_completed_at_ms, HISTORICAL_COMPLETION_MS);
+        assert_eq!(history.last_completed_at_ms, HISTORICAL_COMPLETION_MS);
+        assert_eq!(history.display_name, "legacy-repaired.bin");
+    }
+
+    #[test]
+    fn recompletion_does_not_regress_when_wall_clock_moves_backwards() {
+        let store = MetadataStore::in_memory().unwrap();
+        let manifest = completed_download_manifest();
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        const FUTURE_COMPLETION_MS: i64 = 9_000_000_000_000;
+        {
+            let conn = store.connection().unwrap();
+            conn.execute(
+                "UPDATE transfers SET completed_at_ms = ?1",
+                rusqlite::params![FUTURE_COMPLETION_MS],
+            )
+            .unwrap();
+            conn.execute(
+                r#"
+                UPDATE download_history
+                SET first_completed_at_ms = ?1, last_completed_at_ms = ?1
+                "#,
+                rusqlite::params![FUTURE_COMPLETION_MS],
+            )
+            .unwrap();
+        }
+
+        assert!(store.delete_transfer_manifest(&manifest.file_hash).unwrap());
+        assert!(
+            store
+                .transfer_timestamps_by_hash(&manifest.file_hash)
+                .unwrap()
+                .is_none()
+        );
+        store.upsert_transfer_manifest(&manifest).unwrap();
+
+        assert_eq!(
+            transfer_completed_at_ms(&store, &manifest.file_hash),
+            Some(FUTURE_COMPLETION_MS)
+        );
+        let history = store
+            .download_history_by_hash(&manifest.file_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.first_completed_at_ms, FUTURE_COMPLETION_MS);
+        assert_eq!(history.last_completed_at_ms, FUTURE_COMPLETION_MS);
     }
 
     #[test]
