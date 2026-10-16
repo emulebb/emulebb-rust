@@ -794,6 +794,36 @@ async fn destructive_delete_recovers_rename_before_moved_checkpoint() {
 }
 
 #[tokio::test]
+async fn destructive_delete_recovers_uncheckpointed_rename_with_changed_identity() {
+    let root = unique_test_dir("ed2k-delete-rename-unstable-identity");
+    let fixture = prepare_deletion_tombstone(&root, "Unstable.Identity.Tombstone.mkv").await;
+    let pre_rename_fingerprint = native_file_fingerprint(&fixture.delivered).unwrap();
+    fs::rename(&fixture.delivered, &fixture.tombstone).unwrap();
+    let moved_object = fixture.tombstone.with_extension("moved-object");
+    fs::rename(&fixture.tombstone, &moved_object).unwrap();
+    fs::copy(&moved_object, &fixture.tombstone).unwrap();
+    fs::remove_file(&moved_object).unwrap();
+    let changed_fingerprint = native_file_fingerprint(&fixture.tombstone).unwrap();
+    assert_ne!(
+        pre_rename_fingerprint.identity,
+        changed_fingerprint.identity
+    );
+    drop(fixture.runtime);
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted
+            .recover_pending_transfer_deletions()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!fixture.delivered.exists());
+    assert!(!fixture.tombstone.exists());
+    assert!(!restarted.transfer_dir(&fixture.hash).exists());
+}
+
+#[tokio::test]
 async fn destructive_delete_recovers_moved_tombstone() {
     let root = unique_test_dir("ed2k-deliver-delete-moved-tombstone");
     let fixture = prepare_deletion_tombstone(&root, "Moved.Tombstone.mkv").await;
