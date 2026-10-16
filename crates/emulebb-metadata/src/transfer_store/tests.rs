@@ -53,6 +53,16 @@ fn source_backed_manifest() -> MetadataTransferManifest {
     }
 }
 
+fn completed_pending_download_manifest() -> MetadataTransferManifest {
+    let mut manifest = source_backed_manifest();
+    manifest.display_name = "Delivery.Attempt.bin".to_string();
+    manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+    manifest.source_path = None;
+    manifest.source_fingerprint = None;
+    manifest.payload_fingerprint = Some(fingerprint(manifest.file_size, 91));
+    manifest
+}
+
 fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
     NativeFileFingerprint {
         identity: crate::NativeFileIdentity::Unix {
@@ -854,6 +864,140 @@ fn delete_transfer_manifest_removes_transfer_rows() {
             .transfer_manifest_by_hash("00112233445566778899aabbccddeeff")
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn delivery_attempts_roundtrip_and_transition_idempotently() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_pending_download_manifest();
+    let hash = manifest.file_hash.clone();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+
+    let attempt_id = Uuid::new_v4();
+    let target_path = std::env::temp_dir().join("Delivery.Attempt.bin");
+    let staging_path = std::env::temp_dir().join(format!(".{attempt_id}.staging"));
+    let prepared = store
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    assert_eq!(prepared.file_hash, hash);
+    assert_eq!(prepared.attempt_id, attempt_id);
+    assert_eq!(
+        prepared.phase,
+        MetadataTransferDeliveryAttemptPhase::Prepared
+    );
+    assert_eq!(prepared.target_path, target_path);
+    assert_eq!(prepared.staging_path, staging_path);
+    assert_eq!(prepared.created_at_ms, prepared.updated_at_ms);
+    assert_eq!(store.table_count("delivery_attempts").unwrap(), 1);
+    assert_eq!(
+        store.transfer_delivery_attempt_by_hash(&hash).unwrap(),
+        Some(prepared.clone())
+    );
+    assert_eq!(
+        store.transfer_delivery_attempts().unwrap(),
+        vec![prepared.clone()]
+    );
+    assert_eq!(
+        store
+            .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+            .unwrap(),
+        prepared
+    );
+    assert!(
+        store
+            .begin_transfer_delivery_attempt(&hash, Uuid::new_v4(), &target_path, &staging_path,)
+            .is_err()
+    );
+
+    assert!(
+        !store
+            .mark_transfer_delivery_attempt_staged(&hash, Uuid::new_v4())
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id)
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id)
+            .unwrap()
+    );
+    let staged = store
+        .transfer_delivery_attempt_by_hash(&hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(staged.phase, MetadataTransferDeliveryAttemptPhase::Staged);
+    assert_eq!(staged.created_at_ms, prepared.created_at_ms);
+    assert!(staged.updated_at_ms >= staged.created_at_ms);
+
+    assert!(
+        !store
+            .clear_transfer_delivery_attempt(&hash, Uuid::new_v4())
+            .unwrap()
+    );
+    assert!(
+        store
+            .clear_transfer_delivery_attempt(&hash, attempt_id)
+            .unwrap()
+    );
+    assert!(
+        store
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn delivery_attempt_requires_an_authoritative_pending_download() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    let hash = manifest.file_hash.clone();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let target_path = std::env::temp_dir().join("Delivery.Eligibility.bin");
+    let staging_path = std::env::temp_dir().join(".delivery-eligibility.staging");
+    let attempt_id = Uuid::new_v4();
+
+    store
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    assert!(store.request_transfer_deletion(&hash).unwrap());
+    assert!(
+        store
+            .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path,)
+            .is_err()
+    );
+    assert!(
+        store
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_some()
+    );
+    assert!(store.finalize_transfer_deletion(&hash).unwrap());
+    assert!(
+        store
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+
+    manifest.file_hash = "ffeeddccbbaa99887766554433221100".to_string();
+    manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
+    manifest.source_path = Some(std::env::temp_dir().join("shared.bin"));
+    manifest.payload_fingerprint = None;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(
+        store
+            .begin_transfer_delivery_attempt(
+                &manifest.file_hash,
+                Uuid::new_v4(),
+                &target_path,
+                &staging_path,
+            )
+            .is_err()
     );
 }
 

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use uuid::Uuid;
 
 use crate::{
     NativeFileFingerprint, NativePath,
@@ -11,9 +12,11 @@ use crate::{
     transfer_model::{
         MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
         MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
-        MetadataTransferCounts, MetadataTransferDeliveryState, MetadataTransferManifest,
-        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
-        MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
+        MetadataTransferCounts, MetadataTransferDeliveryAttempt,
+        MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryState,
+        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferShareEntry,
+        MetadataTransferSource,
     },
 };
 
@@ -1679,6 +1682,175 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
+    pub fn begin_transfer_delivery_attempt(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        target_path: &Path,
+        staging_path: &Path,
+    ) -> Result<MetadataTransferDeliveryAttempt> {
+        ensure!(
+            target_path.is_absolute(),
+            "delivery target path must be absolute"
+        );
+        ensure!(
+            staging_path.is_absolute(),
+            "delivery staging path must be absolute"
+        );
+        ensure!(
+            target_path != staging_path,
+            "delivery target and staging paths must differ"
+        );
+
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transfer_id = tx
+            .query_row(
+                r#"
+                SELECT transfers.id
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                  AND known_files.completed != 0
+                  AND transfers.final_rehash_pending = 0
+                  AND transfers.delivery_state = 'pending'
+                  AND transfers.source_path_id IS NULL
+                  AND transfers.delivered_path_id IS NULL
+                  AND transfers.removed_at_ms IS NULL
+                  AND transfers.delete_requested_at_ms IS NULL
+                "#,
+                params![hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(transfer_id) = transfer_id else {
+            anyhow::bail!("transfer {file_hash} is not eligible for delivery");
+        };
+        if let Some(existing) = delivery_attempt_by_hash(&tx, &hash)? {
+            ensure!(
+                existing.attempt_id == attempt_id
+                    && existing.target_path == target_path
+                    && existing.staging_path == staging_path,
+                "transfer {file_hash} already has a different delivery attempt"
+            );
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let target_path_id = upsert_local_path(&tx, target_path)?;
+        let staging_path_id = upsert_local_path(&tx, staging_path)?;
+        ensure!(
+            target_path_id != staging_path_id,
+            "delivery target and staging paths must have distinct native identities"
+        );
+        let now = unix_ms();
+        tx.execute(
+            r#"
+            INSERT INTO delivery_attempts(
+                transfer_id, attempt_id, phase, target_path_id, staging_path_id,
+                created_at_ms, updated_at_ms
+            )
+            VALUES (?1, ?2, 'prepared', ?3, ?4, ?5, ?5)
+            "#,
+            params![
+                transfer_id,
+                attempt_id.hyphenated().to_string(),
+                target_path_id,
+                staging_path_id,
+                now,
+            ],
+        )?;
+        let attempt = delivery_attempt_by_hash(&tx, &hash)?
+            .expect("inserted delivery attempt must be queryable in its transaction");
+        tx.commit()?;
+        Ok(attempt)
+    }
+
+    pub fn transfer_delivery_attempt_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        delivery_attempt_by_hash(&conn, &hash)
+    }
+
+    pub fn transfer_delivery_attempts(&self) -> Result<Vec<MetadataTransferDeliveryAttempt>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), delivery_attempts.attempt_id,
+                   delivery_attempts.phase,
+                   target_paths.platform, target_paths.native_path,
+                   staging_paths.platform, staging_paths.native_path,
+                   delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
+            FROM delivery_attempts
+            JOIN transfers ON transfers.id = delivery_attempts.transfer_id
+            JOIN known_files ON known_files.id = transfers.known_file_id
+            JOIN local_paths target_paths ON target_paths.id = delivery_attempts.target_path_id
+            JOIN local_paths staging_paths ON staging_paths.id = delivery_attempts.staging_path_id
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        let rows = stmt.query_map([], delivery_attempt_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn mark_transfer_delivery_attempt_staged(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let changed = self.connection()?.execute(
+            r#"
+            UPDATE delivery_attempts
+            SET phase = 'staged',
+                updated_at_ms = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_ms END
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND known_files.completed != 0
+                  AND transfers.final_rehash_pending = 0
+                  AND transfers.delivery_state = 'pending'
+                  AND transfers.source_path_id IS NULL
+                  AND transfers.delivered_path_id IS NULL
+                  AND transfers.removed_at_ms IS NULL
+                  AND transfers.delete_requested_at_ms IS NULL
+            )
+              AND attempt_id = ?2
+            "#,
+            params![hash, attempt_id.hyphenated().to_string(), now],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn clear_transfer_delivery_attempt(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let changed = self.connection()?.execute(
+            r#"
+            DELETE FROM delivery_attempts
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+            )
+              AND attempt_id = ?2
+            "#,
+            params![hash, attempt_id.hyphenated().to_string()],
+        )?;
+        Ok(changed != 0)
+    }
+
     /// Persist a terminal destructive-delete request before either filesystem
     /// authority is touched. Repeating the request preserves the original
     /// timestamp and remains successful while the transfer row exists.
@@ -1822,6 +1994,60 @@ impl super::MetadataStore {
         tx.commit()?;
         Ok(true)
     }
+}
+
+fn delivery_attempt_by_hash(
+    conn: &rusqlite::Connection,
+    hash: &[u8],
+) -> Result<Option<MetadataTransferDeliveryAttempt>> {
+    conn.query_row(
+        r#"
+        SELECT lower(hex(known_files.ed2k_hash)), delivery_attempts.attempt_id,
+               delivery_attempts.phase,
+               target_paths.platform, target_paths.native_path,
+               staging_paths.platform, staging_paths.native_path,
+               delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
+        FROM delivery_attempts
+        JOIN transfers ON transfers.id = delivery_attempts.transfer_id
+        JOIN known_files ON known_files.id = transfers.known_file_id
+        JOIN local_paths target_paths ON target_paths.id = delivery_attempts.target_path_id
+        JOIN local_paths staging_paths ON staging_paths.id = delivery_attempts.staging_path_id
+        WHERE known_files.ed2k_hash = ?1
+        "#,
+        params![hash],
+        delivery_attempt_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn delivery_attempt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<MetadataTransferDeliveryAttempt> {
+    let attempt_id = row.get::<_, String>(1)?;
+    let attempt_id = Uuid::parse_str(&attempt_id).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, error.into())
+    })?;
+    let phase = match row.get::<_, String>(2)?.as_str() {
+        "prepared" => MetadataTransferDeliveryAttemptPhase::Prepared,
+        "staged" => MetadataTransferDeliveryAttemptPhase::Staged,
+        value => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                anyhow::anyhow!("invalid delivery attempt phase {value:?}").into(),
+            ));
+        }
+    };
+    Ok(MetadataTransferDeliveryAttempt {
+        file_hash: row.get(0)?,
+        attempt_id,
+        phase,
+        target_path: path_from_row(row, 3, 4)?,
+        staging_path: path_from_row(row, 5, 6)?,
+        created_at_ms: row.get(7)?,
+        updated_at_ms: row.get(8)?,
+    })
 }
 
 fn delete_known_file(tx: &rusqlite::Transaction<'_>, known_file_id: i64) -> Result<()> {
