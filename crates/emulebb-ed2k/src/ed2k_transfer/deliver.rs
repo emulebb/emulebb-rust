@@ -202,20 +202,9 @@ impl Ed2kTransferRuntime {
             // reload (the copy+rename gets a fresh identity that is stable
             // thereafter).
             if manifest.source_path.is_none() {
-                manifest.source_fingerprint = delivered_file_fingerprint(&final_path);
+                manifest.source_fingerprint = Some(installed.fingerprint);
             }
             self.store_manifest_unlocked(&manifest).await?;
-        }
-        if let Err(error) = self
-            .clear_delivery_attempt(file_hash, installed.attempt_id)
-            .await
-        {
-            tracing::warn!(
-                %error,
-                file_hash,
-                attempt_id = %installed.attempt_id,
-                "delivered manifest committed but delivery-attempt cleanup failed"
-            );
         }
         Ok(Ed2kDeliveryOutcome::Delivered(final_path))
     }
@@ -224,7 +213,7 @@ impl Ed2kTransferRuntime {
 #[derive(Debug)]
 struct InstalledDelivery {
     path: PathBuf,
-    attempt_id: Uuid,
+    fingerprint: NativeFileFingerprint,
 }
 
 fn validate_delivery_attempt_paths(attempt: &MetadataTransferDeliveryAttempt) -> Result<()> {
@@ -346,19 +335,27 @@ impl Ed2kTransferRuntime {
             self.begin_delivery_attempt(file_hash, attempt_id, &target_path, &staging_path)
                 .await?;
             stage_delivery_payload(source, &staging_path).await?;
-            verify_installed_delivery(&staging_path, expected_size, expected_hash).await?;
+            let staging_fingerprint =
+                verify_delivery_fingerprint(&staging_path, expected_size, expected_hash).await?;
             anyhow::ensure!(
-                self.mark_delivery_attempt_staged(file_hash, attempt_id)
+                self.mark_delivery_attempt_staged(file_hash, attempt_id, &staging_fingerprint)
                     .await?,
                 "delivery attempt {attempt_id} disappeared before staging committed"
             );
 
             match install_staged_payload(&staging_path, &target_path).await? {
                 InstallOutcome::Installed => {
-                    verify_installed_delivery(&target_path, expected_size, expected_hash).await?;
+                    let installed_fingerprint =
+                        verify_delivery_fingerprint(&target_path, expected_size, expected_hash)
+                            .await?;
+                    anyhow::ensure!(
+                        installed_fingerprint == staging_fingerprint,
+                        "installed delivery identity changed at {}",
+                        target_path.display()
+                    );
                     return Ok(InstalledDelivery {
                         path: target_path,
-                        attempt_id,
+                        fingerprint: staging_fingerprint,
                     });
                 }
                 InstallOutcome::AlreadyExists => {
@@ -403,11 +400,17 @@ impl Ed2kTransferRuntime {
         &self,
         file_hash: &str,
         attempt_id: Uuid,
+        staging_fingerprint: &NativeFileFingerprint,
     ) -> Result<bool> {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_owned();
+        let staging_fingerprint = staging_fingerprint.clone();
         tokio::task::spawn_blocking(move || {
-            metadata.mark_transfer_delivery_attempt_staged(&file_hash, attempt_id)
+            metadata.mark_transfer_delivery_attempt_staged(
+                &file_hash,
+                attempt_id,
+                &staging_fingerprint,
+            )
         })
         .await
         .context("ED2K delivery-attempt stage task panicked")?
@@ -660,10 +663,11 @@ async fn deliver_payload_file(
         }
         let staging_path = dest_dir.join(format!(".emulebb-delivery-{}.tmp", Uuid::new_v4()));
         stage_delivery_payload(source, &staging_path).await?;
-        verify_installed_delivery(&staging_path, expected_size, expected_hash).await?;
+        let _ = verify_delivery_fingerprint(&staging_path, expected_size, expected_hash).await?;
         match install_staged_payload(&staging_path, &target_path).await? {
             InstallOutcome::Installed => {
-                verify_installed_delivery(&target_path, expected_size, expected_hash).await?;
+                let _ =
+                    verify_delivery_fingerprint(&target_path, expected_size, expected_hash).await?;
                 return Ok(target_path);
             }
             InstallOutcome::AlreadyExists => remove_if_exists(&staging_path).await?,
@@ -705,38 +709,21 @@ async fn validate_delivery_source(source: &Path, expected_size: u64) -> Result<(
     Ok(())
 }
 
-async fn verify_installed_delivery(
+async fn verify_delivery_fingerprint(
     path: &Path,
     expected_size: u64,
     expected_hash: [u8; 16],
-) -> Result<()> {
-    match delivered_file_matches(path, expected_size, expected_hash).await {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            remove_if_exists(path).await.with_context(|| {
-                format!(
-                    "failed to remove unverified delivered file {}",
-                    path.display()
-                )
-            })?;
+) -> Result<NativeFileFingerprint> {
+    match classify_delivered_output(path, None, expected_size, expected_hash).await? {
+        DeliveredOutputIdentity::Matching(Some(fingerprint)) => Ok(fingerprint),
+        DeliveredOutputIdentity::Matching(None) => {
             anyhow::bail!(
-                "installed delivered file failed verification: {}",
+                "delivered file has no stable native identity: {}",
                 path.display()
             );
         }
-        Err(error) => {
-            remove_if_exists(path).await.with_context(|| {
-                format!(
-                    "failed to remove unverifiable delivered file {}",
-                    path.display()
-                )
-            })?;
-            Err(error).with_context(|| {
-                format!(
-                    "failed to verify installed delivered file {}",
-                    path.display()
-                )
-            })
+        DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign => {
+            anyhow::bail!("delivered file failed verification: {}", path.display());
         }
     }
 }
