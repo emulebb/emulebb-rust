@@ -112,7 +112,7 @@ impl Ed2kTransferRuntime {
         let hash_path = source_path.clone();
         let hash_observer = observer.clone();
         let (hashsets, source_fingerprint) = tokio::task::spawn_blocking(move || {
-            let mut file = open_ingest_file_without_follow(&hash_path).with_context(|| {
+            let mut file = open_stable_read_file_without_follow(&hash_path).with_context(|| {
                 format!(
                     "failed to open local ingest source without following links {}",
                     hash_path.display()
@@ -345,7 +345,7 @@ pub(crate) fn native_file_fingerprint(source_path: &Path) -> Option<NativeFileFi
 }
 
 #[cfg(windows)]
-fn open_ingest_file_without_follow(path: &Path) -> std::io::Result<File> {
+pub(crate) fn open_stable_read_file_without_follow(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
 
@@ -357,12 +357,12 @@ fn open_ingest_file_without_follow(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(not(windows))]
-fn open_ingest_file_without_follow(path: &Path) -> std::io::Result<File> {
+pub(crate) fn open_stable_read_file_without_follow(path: &Path) -> std::io::Result<File> {
     open_regular_file_without_follow(path)
 }
 
 #[cfg(unix)]
-fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
+pub(crate) fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
     OpenOptions::new()
@@ -372,7 +372,7 @@ fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(windows)]
-fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
+pub(crate) fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
@@ -383,7 +383,7 @@ fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
+pub(crate) fn open_regular_file_without_follow(path: &Path) -> std::io::Result<File> {
     File::open(path)
 }
 
@@ -395,6 +395,28 @@ pub(crate) fn native_file_fingerprint_from_handle(
         return None;
     }
     let identity = native_file_identity_from_handle(file, metadata)?;
+    let (modified, changed) = native_file_timestamps(metadata)?;
+    Some(NativeFileFingerprint {
+        identity,
+        size_bytes: metadata.len(),
+        modified,
+        changed,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn native_file_fingerprint_from_unix_metadata(
+    metadata: &Metadata,
+) -> Option<NativeFileFingerprint> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    let identity = NativeFileIdentity::Unix {
+        device_id: metadata.dev(),
+        inode_number: metadata.ino(),
+    };
     let (modified, changed) = native_file_timestamps(metadata)?;
     Some(NativeFileFingerprint {
         identity,

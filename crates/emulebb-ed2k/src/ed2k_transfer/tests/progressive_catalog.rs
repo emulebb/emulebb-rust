@@ -2,6 +2,7 @@ use super::*;
 use crate::config::Ed2kRuntimeConfig;
 use emulebb_metadata::{
     MetadataStore, MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferRange,
+    NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp,
 };
 
 #[tokio::test]
@@ -39,7 +40,15 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
                 delivery_state: emulebb_metadata::MetadataTransferDeliveryState::NotApplicable,
                 delivered_path: None,
                 source_path: Some(root.join(format!("catalog-{sequence}.bin"))),
-                source_fingerprint: None,
+                source_fingerprint: Some(NativeFileFingerprint {
+                    identity: NativeFileIdentity::WindowsHighResolution {
+                        volume_serial_number: 1,
+                        file_id: sequence,
+                    },
+                    size_bytes: sequence as u64,
+                    modified: NativeFileTimestamp::new(sequence as i64, 1).unwrap(),
+                    changed: None,
+                }),
                 payload_fingerprint: None,
             })
             .unwrap();

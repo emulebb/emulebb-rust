@@ -1,8 +1,14 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
 use anyhow::{Context, Result, ensure};
+use emulebb_metadata::NativeFileFingerprint;
 
 use super::{Ed2kResumeManifest, Ed2kTransferJob, Ed2kTransferRuntime};
+
+pub(super) struct PresentSharedSource {
+    pub(super) path: PathBuf,
+    pub(super) fingerprint: NativeFileFingerprint,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kActiveTransferEvidence {
@@ -209,7 +215,7 @@ impl Ed2kTransferRuntime {
     pub(super) async fn first_present_shared_source(
         &self,
         file_hash: &str,
-    ) -> Result<Option<PathBuf>> {
+    ) -> Result<Option<PresentSharedSource>> {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_string();
         let shared_files =
@@ -217,12 +223,25 @@ impl Ed2kTransferRuntime {
                 .await
                 .context("ED2K shared-source evidence query task panicked")??;
         for shared_file in shared_files {
-            let path = shared_file.source_path;
-            let Ok(path_metadata) = tokio::fs::metadata(&path).await else {
+            let Some(expected_fingerprint) = shared_file.source_fingerprint else {
                 continue;
             };
-            if path_metadata.is_file() && path_metadata.len() == shared_file.file_size {
-                return Ok(Some(path));
+            let path = crate::long_path::long_path(&shared_file.source_path);
+            let probe_path = path.clone();
+            let current_fingerprint = tokio::task::spawn_blocking(move || {
+                super::ingest::native_file_fingerprint(&probe_path)
+            })
+            .await
+            .context("ED2K shared-source fingerprint task panicked")?;
+            if expected_fingerprint.size_bytes == shared_file.file_size
+                && current_fingerprint
+                    .as_ref()
+                    .is_some_and(|current| expected_fingerprint.safely_matches(current))
+            {
+                return Ok(Some(PresentSharedSource {
+                    path,
+                    fingerprint: expected_fingerprint,
+                }));
             }
         }
         Ok(None)

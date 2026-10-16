@@ -434,7 +434,8 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 _ = work_guard.cancelled() => {
                     return Ok(UploadPayloadOutcome::Close);
                 }
-                result = verified_reader.read_range_with_read_ahead(
+                result = transfer_runtime.read_verified_range_with_reader(
+                    &mut verified_reader,
                     fragment_start,
                     fragment_end,
                     read_ahead_bytes,

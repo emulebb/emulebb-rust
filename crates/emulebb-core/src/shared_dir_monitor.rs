@@ -513,11 +513,7 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
         .as_ref()
         .zip(source_fingerprint.as_ref())
         .is_some_and(|(stored, current)| stored.safely_matches(current));
-    let persisted_fingerprint = if identity_unchanged {
-        source_fingerprint.clone()
-    } else {
-        previous.source_fingerprint.clone()
-    };
+    let persisted_fingerprint = source_fingerprint.clone().filter(|_| identity_unchanged);
     let Some(display_name) =
         emulebb_metadata::NativePath::from(new_key.as_path()).display_file_name()
     else {
