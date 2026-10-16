@@ -1793,6 +1793,7 @@ impl super::MetadataStore {
                    delivery_attempts.phase,
                    target_paths.platform, target_paths.native_path,
                    staging_paths.platform, staging_paths.native_path,
+                   delivery_attempts.staging_fingerprint,
                    delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
             FROM delivery_attempts
             JOIN transfers ON transfers.id = delivery_attempts.transfer_id
@@ -1811,13 +1812,19 @@ impl super::MetadataStore {
         &self,
         file_hash: &str,
         attempt_id: Uuid,
+        staging_fingerprint: &NativeFileFingerprint,
     ) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let now = unix_ms();
+        let staging_fingerprint = staging_fingerprint.storage_bytes();
         let changed = self.connection()?.execute(
             r#"
             UPDATE delivery_attempts
             SET phase = 'staged',
+                staging_fingerprint = CASE
+                    WHEN phase = 'prepared' THEN ?4
+                    ELSE staging_fingerprint
+                END,
                 updated_at_ms = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_ms END
             WHERE transfer_id = (
                 SELECT transfers.id
@@ -1833,8 +1840,17 @@ impl super::MetadataStore {
                   AND transfers.delete_requested_at_ms IS NULL
             )
               AND attempt_id = ?2
+              AND (
+                  phase = 'prepared'
+                  OR (phase = 'staged' AND staging_fingerprint = ?4)
+              )
             "#,
-            params![hash, attempt_id.hyphenated().to_string(), now],
+            params![
+                hash,
+                attempt_id.hyphenated().to_string(),
+                now,
+                staging_fingerprint,
+            ],
         )?;
         Ok(changed != 0)
     }
@@ -2016,6 +2032,7 @@ fn delivery_attempt_by_hash(
                delivery_attempts.phase,
                target_paths.platform, target_paths.native_path,
                staging_paths.platform, staging_paths.native_path,
+               delivery_attempts.staging_fingerprint,
                delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
         FROM delivery_attempts
         JOIN transfers ON transfers.id = delivery_attempts.transfer_id
@@ -2055,8 +2072,9 @@ fn delivery_attempt_from_row(
         phase,
         target_path: path_from_row(row, 3, 4)?,
         staging_path: path_from_row(row, 5, 6)?,
-        created_at_ms: row.get(7)?,
-        updated_at_ms: row.get(8)?,
+        staging_fingerprint: optional_fingerprint_from_row(row, 7)?,
+        created_at_ms: row.get(8)?,
+        updated_at_ms: row.get(9)?,
     })
 }
 

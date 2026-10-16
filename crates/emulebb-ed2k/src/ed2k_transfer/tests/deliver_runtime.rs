@@ -9,6 +9,7 @@ use emulebb_kad_proto::Ed2kHash;
 use md4::{Digest, Md4};
 use uuid::Uuid;
 
+use super::super::ingest::native_file_fingerprint;
 use super::super::{
     ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kTransferRuntime, new_transfer_job,
 };
@@ -130,10 +131,11 @@ async fn staged_attempt_is_installed_and_committed_after_interruption() {
         .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
         .unwrap();
     fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
     assert!(
         runtime
             .metadata
-            .mark_transfer_delivery_attempt_staged(&hash, attempt_id)
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
             .unwrap()
     );
 
@@ -523,6 +525,7 @@ async fn destructive_delete_resolves_preexisting_staged_delivery_attempt() {
         fs::create_dir_all(&incoming).unwrap();
         target_path = incoming.join("Staged.Delete.mkv");
         fs::copy(runtime.payload_path(&hash), &target_path).unwrap();
+        let staging_fingerprint = native_file_fingerprint(&target_path).unwrap();
         let attempt_id = Uuid::new_v4();
         let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
         runtime
@@ -532,7 +535,7 @@ async fn destructive_delete_resolves_preexisting_staged_delivery_attempt() {
         assert!(
             runtime
                 .metadata
-                .mark_transfer_delivery_attempt_staged(&hash, attempt_id)
+                .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
                 .unwrap()
         );
         assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());

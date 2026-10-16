@@ -888,6 +888,7 @@ fn delivery_attempts_roundtrip_and_transition_idempotently() {
     );
     assert_eq!(prepared.target_path, target_path);
     assert_eq!(prepared.staging_path, staging_path);
+    assert!(prepared.staging_fingerprint.is_none());
     assert_eq!(prepared.created_at_ms, prepared.updated_at_ms);
     assert_eq!(store.table_count("delivery_attempts").unwrap(), 1);
     assert_eq!(
@@ -910,19 +911,29 @@ fn delivery_attempts_roundtrip_and_transition_idempotently() {
             .is_err()
     );
 
+    let staging_fingerprint = fingerprint(manifest.file_size, 91);
     assert!(
         !store
-            .mark_transfer_delivery_attempt_staged(&hash, Uuid::new_v4())
+            .mark_transfer_delivery_attempt_staged(&hash, Uuid::new_v4(), &staging_fingerprint,)
             .unwrap()
     );
     assert!(
         store
-            .mark_transfer_delivery_attempt_staged(&hash, attempt_id)
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
             .unwrap()
     );
     assert!(
         store
-            .mark_transfer_delivery_attempt_staged(&hash, attempt_id)
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_transfer_delivery_attempt_staged(
+                &hash,
+                attempt_id,
+                &fingerprint(manifest.file_size, 93),
+            )
             .unwrap()
     );
     let staged = store
@@ -930,6 +941,10 @@ fn delivery_attempts_roundtrip_and_transition_idempotently() {
         .unwrap()
         .unwrap();
     assert_eq!(staged.phase, MetadataTransferDeliveryAttemptPhase::Staged);
+    assert_eq!(
+        staged.staging_fingerprint.as_ref(),
+        Some(&staging_fingerprint)
+    );
     assert_eq!(staged.created_at_ms, prepared.created_at_ms);
     assert!(staged.updated_at_ms >= staged.created_at_ms);
 

@@ -983,6 +983,8 @@ mod tests {
         fs::create_dir_all(&incoming).unwrap();
         let delivered_path = incoming.join("hidden.bin");
         fs::write(&delivered_path, payload).unwrap();
+        let staging_fingerprint =
+            super::super::ingest::native_file_fingerprint(&delivered_path).unwrap();
         let attempt_id = Uuid::new_v4();
         let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
         runtime
@@ -997,7 +999,11 @@ mod tests {
         assert!(
             runtime
                 .metadata
-                .mark_transfer_delivery_attempt_staged(&job.file_hash, attempt_id)
+                .mark_transfer_delivery_attempt_staged(
+                    &job.file_hash,
+                    attempt_id,
+                    &staging_fingerprint,
+                )
                 .unwrap()
         );
         {

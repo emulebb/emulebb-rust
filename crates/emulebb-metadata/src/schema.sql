@@ -301,9 +301,14 @@ CREATE TABLE delivery_attempts (
     phase TEXT NOT NULL CHECK(phase IN ('prepared', 'staged')),
     target_path_id INTEGER NOT NULL REFERENCES local_paths(id),
     staging_path_id INTEGER NOT NULL REFERENCES local_paths(id),
+    staging_fingerprint BLOB,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    CHECK(target_path_id != staging_path_id)
+    CHECK(target_path_id != staging_path_id),
+    CHECK(
+        (phase = 'prepared' AND staging_fingerprint IS NULL)
+        OR (phase = 'staged' AND staging_fingerprint IS NOT NULL)
+    )
 );
 
 CREATE INDEX idx_delivery_attempts_phase ON delivery_attempts(phase, transfer_id);

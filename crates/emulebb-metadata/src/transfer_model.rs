@@ -23,6 +23,7 @@ pub struct MetadataTransferDeliveryAttempt {
     pub phase: MetadataTransferDeliveryAttemptPhase,
     pub target_path: PathBuf,
     pub staging_path: PathBuf,
+    pub staging_fingerprint: Option<NativeFileFingerprint>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
