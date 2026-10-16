@@ -791,7 +791,9 @@ impl Ed2kTransferRuntime {
             )
             .await?
             {
-                DeliveredOutputIdentity::Missing => {}
+                DeliveredOutputIdentity::Missing => {
+                    sync_parent_directory(delivered_path).await?;
+                }
                 DeliveredOutputIdentity::Matching(_) => {
                     match tokio::fs::remove_file(long_path(delivered_path)).await {
                         Ok(()) => sync_parent_directory(delivered_path).await?,
@@ -826,8 +828,8 @@ impl Ed2kTransferRuntime {
                         transfer_dir.display()
                     )
                 })?;
-            sync_parent_directory(transfer_dir).await?;
         }
+        sync_parent_directory(transfer_dir).await?;
         anyhow::ensure!(
             self.finalize_transfer_deletion_intent(file_hash).await?,
             "ED2K transfer {file_hash} lost its deletion intent before finalization"
