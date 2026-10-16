@@ -1,18 +1,20 @@
 //! Manifest store, cache, and checkpoint helpers for the ED2K transfer runtime.
 
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
+use emulebb_kad_proto::Ed2kHash;
 
 use super::manifest::manifest_progress_bytes;
 use super::transfer_sql::{manifest_from_metadata, manifest_to_metadata, piece_to_metadata};
 use super::{
     ED2K_EMBLOCK_SIZE, Ed2kManifestCheckpointState, Ed2kResumeManifest, Ed2kTransferJob,
-    Ed2kTransferRuntime, PAYLOAD_FILE_NAME,
+    Ed2kTransferRootReconciliation, Ed2kTransferRuntime, PAYLOAD_FILE_NAME,
 };
 
 const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
@@ -128,6 +130,72 @@ impl Ed2kTransferRuntime {
                 )
             })?;
         Ok(())
+    }
+
+    /// Reconcile canonical hash paths which have no owning download row.
+    /// Safe crash residue is reclaimed; every path containing unknown bytes is
+    /// preserved and reported for operator repair.
+    pub async fn reconcile_transfer_root(&self) -> Result<Ed2kTransferRootReconciliation> {
+        let metadata = self.metadata.clone();
+        let managed_hashes =
+            tokio::task::spawn_blocking(move || metadata.managed_download_transfer_hashes())
+                .await
+                .context("ED2K managed transfer path scan task panicked")??
+                .into_iter()
+                .collect::<HashSet<_>>();
+
+        let mut candidates = Vec::new();
+        let mut entries = tokio::fs::read_dir(&self.root_dir).await.with_context(|| {
+            format!(
+                "failed to inventory ED2K transfer root {}",
+                self.root_dir.display()
+            )
+        })?;
+        while let Some(entry) = entries.next_entry().await? {
+            let Ok(file_name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(parsed_hash) = file_name.parse::<Ed2kHash>() else {
+                continue;
+            };
+            if parsed_hash.to_string() == file_name && !managed_hashes.contains(&file_name) {
+                candidates.push(file_name);
+            }
+        }
+        candidates.sort_unstable();
+
+        let mut reconciliation = Ed2kTransferRootReconciliation::default();
+        for file_hash in candidates {
+            let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
+            let _manifest_guard = self.lock_manifest(&file_hash).await;
+            let metadata = self.metadata.clone();
+            let owned_hash = file_hash.clone();
+            let is_managed = tokio::task::spawn_blocking(move || {
+                metadata.managed_download_transfer_exists(&owned_hash)
+            })
+            .await
+            .context("ED2K managed transfer path recheck task panicked")??;
+            if is_managed {
+                continue;
+            }
+            match self.prepare_new_download_directory(&file_hash).await {
+                Ok(()) => {
+                    reconciliation.reclaimed_paths =
+                        reconciliation.reclaimed_paths.saturating_add(1);
+                }
+                Err(error) => {
+                    reconciliation.preserved_collisions =
+                        reconciliation.preserved_collisions.saturating_add(1);
+                    tracing::warn!(
+                        %error,
+                        file_hash,
+                        path = %self.transfer_dir(&file_hash).display(),
+                        "preserving unmanaged ED2K transfer path discovered during startup"
+                    );
+                }
+            }
+        }
+        Ok(reconciliation)
     }
 
     pub(super) async fn load_manifest_optional_unlocked(

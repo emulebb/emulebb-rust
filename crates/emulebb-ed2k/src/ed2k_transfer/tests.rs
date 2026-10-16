@@ -339,6 +339,57 @@ async fn ensure_job_rejects_unmanaged_file_at_transfer_directory_path() {
 }
 
 #[tokio::test]
+async fn startup_transfer_root_reconciliation_reclaims_safe_residue_and_preserves_collisions() {
+    let root = unique_test_dir("ed2k-transfer-root-reconciliation");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let owned_job = new_transfer_job(Ed2kHash::from_bytes([0x61; 16]), "owned.bin".to_string(), 8);
+    runtime.ensure_job(&owned_job).await.unwrap();
+    let owned_dir = runtime.transfer_dir_path(&owned_job.file_hash);
+
+    let empty_hash = Ed2kHash::from_bytes([0x62; 16]).to_string();
+    let empty_dir = runtime.transfer_dir_path(&empty_hash);
+    fs::create_dir_all(&empty_dir).unwrap();
+
+    let legacy_hash = Ed2kHash::from_bytes([0x63; 16]).to_string();
+    let legacy_dir = runtime.transfer_dir_path(&legacy_hash);
+    fs::create_dir_all(&legacy_dir).unwrap();
+    fs::write(legacy_dir.join("resume-manifest.json"), b"retired").unwrap();
+
+    let occupied_hash = Ed2kHash::from_bytes([0x64; 16]).to_string();
+    let occupied_dir = runtime.transfer_dir_path(&occupied_hash);
+    let occupied_payload = occupied_dir.join(PAYLOAD_FILE_NAME);
+    fs::create_dir_all(&occupied_dir).unwrap();
+    fs::write(&occupied_payload, b"preserve me").unwrap();
+
+    let file_hash = Ed2kHash::from_bytes([0x65; 16]).to_string();
+    let occupied_file = runtime.transfer_dir_path(&file_hash);
+    fs::write(&occupied_file, b"preserve this path").unwrap();
+
+    let noncanonical_dir = Path::new(&root).join("operator-notes");
+    fs::create_dir_all(&noncanonical_dir).unwrap();
+    fs::write(noncanonical_dir.join("notes.txt"), b"not runtime state").unwrap();
+
+    let reconciliation = runtime.reconcile_transfer_root().await.unwrap();
+
+    assert_eq!(
+        reconciliation,
+        super::Ed2kTransferRootReconciliation {
+            reclaimed_paths: 2,
+            preserved_collisions: 2,
+        }
+    );
+    assert!(owned_dir.is_dir());
+    assert!(!empty_dir.exists());
+    assert!(!legacy_dir.exists());
+    assert_eq!(fs::read(&occupied_payload).unwrap(), b"preserve me");
+    assert_eq!(fs::read(&occupied_file).unwrap(), b"preserve this path");
+    assert_eq!(
+        fs::read(noncanonical_dir.join("notes.txt")).unwrap(),
+        b"not runtime state"
+    );
+}
+
+#[tokio::test]
 async fn recheck_transfer_detects_corruption_and_marks_part_for_redownload() {
     // A complete 2-part file: recheck re-verifies both parts against the MD4
     // hashset. Corrupting part 1 on disk must demote it to Missing (0 bytes) so
