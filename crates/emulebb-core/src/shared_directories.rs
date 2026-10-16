@@ -1315,6 +1315,7 @@ fn record_hash_target_finished(
 /// set to the file count up front and decremented per file as the hash completes,
 /// reaching 0 when the library is fully indexed.
 pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<LocalShare>> {
+    let _reload_guard = core.shared_reload_gate.lock().await;
     record_reload_progress(core, |diagnostics| {
         diagnostics.phase = "scanning".to_string();
     });
@@ -1720,6 +1721,7 @@ async fn hash_reload_targets(core: &EmulebbCore, mut to_hash: Vec<ReloadHashTarg
 }
 
 async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
+    let _reload_guard = core.shared_reload_gate.lock().await;
     let bootstrap = bootstrap_initial_publish_catalog(&core).await?;
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "scanning".to_string();

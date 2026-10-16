@@ -469,9 +469,10 @@ pub struct EmulebbCore {
     /// This is deliberately separate from tracing so REST can report why hashing
     /// is active without exposing operator file paths or names.
     shared_directory_reload_progress: Arc<std::sync::Mutex<SharedDirectoryReloadProgress>>,
-    /// Serializes detached shared-directory reloads. A controller may request
-    /// reload while a prior scan/hash job is still pruning stale shares; coalesce
-    /// such requests and run one follow-up pass instead of overlapping jobs.
+    /// Serializes synchronous and detached shared-directory reload execution.
+    /// Detached requests still coalesce through the running/pending flags below,
+    /// while this gate prevents either API from overlapping catalog persistence.
+    shared_reload_gate: Arc<Mutex<()>>,
     shared_reload_running: Arc<AtomicBool>,
     shared_reload_pending: Arc<AtomicBool>,
     /// Coalesces ED2K server shared-catalog refreshes caused by share/hash
@@ -643,6 +644,7 @@ impl EmulebbCore {
             shared_directory_reload_progress: Arc::new(std::sync::Mutex::new(
                 SharedDirectoryReloadProgress::default(),
             )),
+            shared_reload_gate: Arc::new(Mutex::new(())),
             shared_reload_running: Arc::new(AtomicBool::new(false)),
             shared_reload_pending: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_dirty: Arc::new(AtomicBool::new(false)),
