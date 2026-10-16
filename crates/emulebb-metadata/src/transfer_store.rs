@@ -12,7 +12,8 @@ use crate::{
     transfer_model::{
         MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
         MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
-        MetadataTransferCounts, MetadataTransferDeliveryAttempt,
+        MetadataTransferCounts, MetadataTransferDeletionTombstone,
+        MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
         MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
         MetadataTransferDeliveryState, MetadataTransferManifest, MetadataTransferMediaMetadata,
         MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
@@ -1932,6 +1933,188 @@ impl super::MetadataStore {
         Ok(changed != 0)
     }
 
+    pub fn begin_transfer_deletion_tombstone(
+        &self,
+        file_hash: &str,
+        tombstone_id: Uuid,
+        original_path: &Path,
+        tombstone_path: &Path,
+        source_fingerprint: &NativeFileFingerprint,
+    ) -> Result<MetadataTransferDeletionTombstone> {
+        ensure!(
+            original_path.is_absolute(),
+            "deletion source path must be absolute"
+        );
+        ensure!(
+            tombstone_path.is_absolute(),
+            "deletion tombstone path must be absolute"
+        );
+        ensure!(
+            original_path != tombstone_path,
+            "deletion source and tombstone paths must differ"
+        );
+        ensure!(
+            original_path.parent().is_some() && original_path.parent() == tombstone_path.parent(),
+            "deletion source and tombstone paths must share one parent directory"
+        );
+        ensure!(
+            tombstone_path.file_name().is_some_and(|name| {
+                name == std::ffi::OsStr::new(&format!(".emulebb-delete-{tombstone_id}.tmp"))
+            }),
+            "deletion tombstone path does not match tombstone {tombstone_id}"
+        );
+
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let original = NativePath::from(original_path);
+        let source_bytes = source_fingerprint.storage_bytes();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transfer_id = tx
+            .query_row(
+                r#"
+                SELECT transfers.id
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                JOIN local_paths delivered_paths
+                  ON delivered_paths.id = transfers.delivered_path_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.delete_requested_at_ms IS NOT NULL
+                  AND transfers.delivery_state = 'delivered'
+                  AND transfers.delivery_ownership = 'owned'
+                  AND transfers.source_path_id IS NULL
+                  AND transfers.source_fingerprint = ?2
+                  AND delivered_paths.platform = ?3
+                  AND delivered_paths.native_path = ?4
+                "#,
+                params![
+                    hash,
+                    source_bytes,
+                    NativePath::platform(),
+                    original.storage_bytes(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(transfer_id) = transfer_id else {
+            anyhow::bail!(
+                "transfer {file_hash} has no owned delivered output eligible for tombstoning"
+            );
+        };
+        if let Some(existing) = transfer_deletion_tombstone_by_hash(&tx, &hash)? {
+            ensure!(
+                existing.tombstone_id == tombstone_id
+                    && existing.original_path == original_path
+                    && existing.tombstone_path == tombstone_path
+                    && existing.source_fingerprint == *source_fingerprint,
+                "transfer {file_hash} already has a different deletion tombstone"
+            );
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let original_path_id = upsert_local_path(&tx, original_path)?;
+        let tombstone_path_id = upsert_local_path(&tx, tombstone_path)?;
+        ensure!(
+            original_path_id != tombstone_path_id,
+            "deletion source and tombstone paths must have distinct native identities"
+        );
+        let now = unix_ms();
+        tx.execute(
+            r#"
+            INSERT INTO delivery_output_tombstones(
+                transfer_id, tombstone_id, phase, original_path_id,
+                tombstone_path_id, source_fingerprint, created_at_ms, updated_at_ms
+            )
+            VALUES (?1, ?2, 'prepared', ?3, ?4, ?5, ?6, ?6)
+            "#,
+            params![
+                transfer_id,
+                tombstone_id.hyphenated().to_string(),
+                original_path_id,
+                tombstone_path_id,
+                source_bytes,
+                now,
+            ],
+        )?;
+        let tombstone = transfer_deletion_tombstone_by_hash(&tx, &hash)?
+            .expect("inserted deletion tombstone must be queryable in its transaction");
+        tx.commit()?;
+        Ok(tombstone)
+    }
+
+    pub fn transfer_deletion_tombstone_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferDeletionTombstone>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        transfer_deletion_tombstone_by_hash(&conn, &hash)
+    }
+
+    pub fn mark_transfer_deletion_tombstone_moved(
+        &self,
+        file_hash: &str,
+        tombstone_id: Uuid,
+        moved_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let moved_fingerprint = moved_fingerprint.storage_bytes();
+        let changed = self.connection()?.execute(
+            r#"
+            UPDATE delivery_output_tombstones
+            SET phase = 'moved',
+                moved_fingerprint = CASE
+                    WHEN phase = 'prepared' THEN ?4
+                    ELSE moved_fingerprint
+                END,
+                updated_at_ms = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_ms END
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.delete_requested_at_ms IS NOT NULL
+            )
+              AND tombstone_id = ?2
+              AND (
+                  phase = 'prepared'
+                  OR (phase = 'moved' AND moved_fingerprint = ?4)
+              )
+            "#,
+            params![
+                hash,
+                tombstone_id.hyphenated().to_string(),
+                now,
+                moved_fingerprint,
+            ],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn clear_prepared_transfer_deletion_tombstone(
+        &self,
+        file_hash: &str,
+        tombstone_id: Uuid,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let changed = self.connection()?.execute(
+            r#"
+            DELETE FROM delivery_output_tombstones
+            WHERE transfer_id = (
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.delete_requested_at_ms IS NOT NULL
+            )
+              AND tombstone_id = ?2
+              AND phase = 'prepared'
+            "#,
+            params![hash, tombstone_id.hyphenated().to_string()],
+        )?;
+        Ok(changed != 0)
+    }
+
     /// Persist a terminal destructive-delete request before either filesystem
     /// authority is touched. Repeating the request preserves the original
     /// timestamp and remains successful while the transfer row exists.
@@ -2099,6 +2282,81 @@ fn delivery_attempt_by_hash(
         "#,
         params![hash],
         delivery_attempt_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn transfer_deletion_tombstone_by_hash(
+    conn: &rusqlite::Connection,
+    hash: &[u8],
+) -> Result<Option<MetadataTransferDeletionTombstone>> {
+    conn.query_row(
+        r#"
+        SELECT lower(hex(known_files.ed2k_hash)),
+               delivery_output_tombstones.tombstone_id,
+               delivery_output_tombstones.phase,
+               original_paths.platform, original_paths.native_path,
+               tombstone_paths.platform, tombstone_paths.native_path,
+               delivery_output_tombstones.source_fingerprint,
+               delivery_output_tombstones.moved_fingerprint,
+               delivery_output_tombstones.created_at_ms,
+               delivery_output_tombstones.updated_at_ms
+        FROM delivery_output_tombstones
+        JOIN transfers ON transfers.id = delivery_output_tombstones.transfer_id
+        JOIN known_files ON known_files.id = transfers.known_file_id
+        JOIN local_paths original_paths
+          ON original_paths.id = delivery_output_tombstones.original_path_id
+        JOIN local_paths tombstone_paths
+          ON tombstone_paths.id = delivery_output_tombstones.tombstone_path_id
+        WHERE known_files.ed2k_hash = ?1
+        "#,
+        params![hash],
+        |row| {
+            let tombstone_id = row.get::<_, String>(1)?.parse::<Uuid>().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?;
+            let phase = match row.get::<_, String>(2)?.as_str() {
+                "prepared" => MetadataTransferDeletionTombstonePhase::Prepared,
+                "moved" => MetadataTransferDeletionTombstonePhase::Moved,
+                value => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid deletion tombstone phase {value:?}"),
+                        )
+                        .into(),
+                    ));
+                }
+            };
+            Ok(MetadataTransferDeletionTombstone {
+                file_hash: row.get(0)?,
+                tombstone_id,
+                phase,
+                original_path: path_from_row(row, 3, 4)?,
+                tombstone_path: path_from_row(row, 5, 6)?,
+                source_fingerprint: optional_fingerprint_from_row(row, 7)?.ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Blob,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "deletion tombstone is missing its source fingerprint",
+                        )
+                        .into(),
+                    )
+                })?,
+                moved_fingerprint: optional_fingerprint_from_row(row, 8)?,
+                created_at_ms: row.get(9)?,
+                updated_at_ms: row.get(10)?,
+            })
+        },
     )
     .optional()
     .map_err(Into::into)

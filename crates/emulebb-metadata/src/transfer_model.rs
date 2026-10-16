@@ -37,6 +37,25 @@ pub struct MetadataTransferDeliveryAttempt {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataTransferDeletionTombstonePhase {
+    Prepared,
+    Moved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferDeletionTombstone {
+    pub file_hash: String,
+    pub tombstone_id: Uuid,
+    pub phase: MetadataTransferDeletionTombstonePhase,
+    pub original_path: PathBuf,
+    pub tombstone_path: PathBuf,
+    pub source_fingerprint: NativeFileFingerprint,
+    pub moved_fingerprint: Option<NativeFileFingerprint>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferManifest {
     pub file_hash: String,

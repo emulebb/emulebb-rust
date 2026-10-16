@@ -1337,6 +1337,160 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
 }
 
 #[test]
+fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    let original_path = std::env::temp_dir().join("Delivery.Tombstone.bin");
+    let source_fingerprint = fingerprint(manifest.file_size, 101);
+    manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
+    manifest.delivered_path = Some(original_path.clone());
+    manifest.source_fingerprint = Some(source_fingerprint.clone());
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(
+        store
+            .request_transfer_deletion(&manifest.file_hash)
+            .unwrap()
+    );
+
+    let abandoned_id = Uuid::new_v4();
+    let abandoned_path = original_path
+        .parent()
+        .unwrap()
+        .join(format!(".emulebb-delete-{abandoned_id}.tmp"));
+    let prepared = store
+        .begin_transfer_deletion_tombstone(
+            &manifest.file_hash,
+            abandoned_id,
+            &original_path,
+            &abandoned_path,
+            &source_fingerprint,
+        )
+        .unwrap();
+    assert_eq!(
+        prepared.phase,
+        MetadataTransferDeletionTombstonePhase::Prepared
+    );
+    assert!(prepared.moved_fingerprint.is_none());
+    assert!(
+        store
+            .clear_prepared_transfer_deletion_tombstone(&manifest.file_hash, abandoned_id)
+            .unwrap()
+    );
+
+    let tombstone_id = Uuid::new_v4();
+    let tombstone_path = original_path
+        .parent()
+        .unwrap()
+        .join(format!(".emulebb-delete-{tombstone_id}.tmp"));
+    let prepared = store
+        .begin_transfer_deletion_tombstone(
+            &manifest.file_hash,
+            tombstone_id,
+            &original_path,
+            &tombstone_path,
+            &source_fingerprint,
+        )
+        .unwrap();
+    assert_eq!(prepared.original_path, original_path);
+    assert_eq!(prepared.tombstone_path, tombstone_path);
+    assert_eq!(prepared.source_fingerprint, source_fingerprint);
+    assert_eq!(
+        store
+            .transfer_deletion_tombstone_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(prepared.clone())
+    );
+
+    let moved_fingerprint = fingerprint(manifest.file_size, 102);
+    assert!(
+        store
+            .mark_transfer_deletion_tombstone_moved(
+                &manifest.file_hash,
+                tombstone_id,
+                &moved_fingerprint,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_transfer_deletion_tombstone_moved(
+                &manifest.file_hash,
+                tombstone_id,
+                &moved_fingerprint,
+            )
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_transfer_deletion_tombstone_moved(
+                &manifest.file_hash,
+                tombstone_id,
+                &fingerprint(manifest.file_size, 103),
+            )
+            .unwrap()
+    );
+    let moved = store
+        .transfer_deletion_tombstone_by_hash(&manifest.file_hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(moved.phase, MetadataTransferDeletionTombstonePhase::Moved);
+    assert_eq!(moved.moved_fingerprint, Some(moved_fingerprint));
+    assert!(
+        !store
+            .clear_prepared_transfer_deletion_tombstone(&manifest.file_hash, tombstone_id)
+            .unwrap()
+    );
+
+    assert!(
+        store
+            .finalize_transfer_deletion(&manifest.file_hash)
+            .unwrap()
+    );
+    assert!(
+        store
+            .transfer_deletion_tombstone_by_hash(&manifest.file_hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn deletion_tombstone_requires_owned_delivered_output() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    let original_path = std::env::temp_dir().join("Unowned.Tombstone.bin");
+    let source_fingerprint = fingerprint(manifest.file_size, 104);
+    manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Unowned;
+    manifest.delivered_path = Some(original_path.clone());
+    manifest.source_fingerprint = Some(source_fingerprint.clone());
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(
+        store
+            .request_transfer_deletion(&manifest.file_hash)
+            .unwrap()
+    );
+    let tombstone_id = Uuid::new_v4();
+    let tombstone_path = original_path
+        .parent()
+        .unwrap()
+        .join(format!(".emulebb-delete-{tombstone_id}.tmp"));
+
+    assert!(
+        store
+            .begin_transfer_deletion_tombstone(
+                &manifest.file_hash,
+                tombstone_id,
+                &original_path,
+                &tombstone_path,
+                &source_fingerprint,
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn delete_transfer_manifest_clears_soft_known_file_references() {
     // A search result links to the known file by hash. Deleting the transfer
     // (and its known_files row) must not fail the foreign key check; the soft
