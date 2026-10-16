@@ -452,6 +452,42 @@ async fn recheck_transfer_detects_corruption_and_marks_part_for_redownload() {
     assert_eq!(after.verified_ranges.len(), 1);
     assert_eq!(after.verified_ranges[0].start, 0);
     assert_eq!(after.verified_ranges[0].end, ED2K_PART_SIZE);
+
+    assert!(!runtime.recheck_transfer(&job.file_hash).await.unwrap());
+    let intact_partial = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(intact_partial.pieces[0].state, Ed2kTransferState::Verified);
+
+    fs::remove_file(&payload_path).unwrap();
+    assert!(!runtime.recheck_transfer(&job.file_hash).await.unwrap());
+    let missing_partial = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(missing_partial.pieces[0].state, Ed2kTransferState::Missing);
+    assert!(!missing_partial.pieces[0].ich_corrupted);
+
+    runtime
+        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .await
+        .unwrap();
+
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&payload_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xEEu8; 11]).unwrap();
+        file.flush().unwrap();
+    }
+
+    assert!(!runtime.recheck_transfer(&job.file_hash).await.unwrap());
+    let fully_damaged = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(fully_damaged.verified_ranges.is_empty());
+    assert!(
+        fully_damaged
+            .pieces
+            .iter()
+            .all(|piece| piece.state == Ed2kTransferState::Missing)
+    );
+    assert!(fully_damaged.pieces[0].ich_corrupted);
 }
 
 #[tokio::test]
