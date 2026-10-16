@@ -63,9 +63,71 @@ impl Ed2kTransferRuntime {
         if let Some(manifest) = self.load_manifest_optional_unlocked(&job.file_hash).await? {
             return Ok(manifest);
         }
+        self.prepare_new_download_directory(&job.file_hash).await?;
         let manifest = Ed2kResumeManifest::new(job);
         self.store_manifest_unlocked(&manifest).await?;
         Ok(manifest)
+    }
+
+    /// Remove only the empty directory that can remain when startup crashes
+    /// after directory creation but before the first manifest commit, or one
+    /// containing only the retired pre-SQL `resume-manifest.json` artifact.
+    /// Any other non-empty directory, regular file, or symlink has no provable
+    /// ownership without metadata and must never be adopted by a new download.
+    pub(super) async fn prepare_new_download_directory(&self, file_hash: &str) -> Result<()> {
+        let transfer_dir = self.transfer_dir(file_hash);
+        let metadata = match tokio::fs::symlink_metadata(&transfer_dir).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect unmanaged ED2K transfer path {}",
+                        transfer_dir.display()
+                    )
+                });
+            }
+        };
+        anyhow::ensure!(
+            metadata.file_type().is_dir(),
+            "refusing to create ED2K transfer {file_hash}: unmanaged path {} is not a directory",
+            transfer_dir.display()
+        );
+        let mut entries = tokio::fs::read_dir(&transfer_dir).await.with_context(|| {
+            format!(
+                "failed to inspect unmanaged ED2K transfer directory {}",
+                transfer_dir.display()
+            )
+        })?;
+        let first_entry = entries.next_entry().await?;
+        let second_entry = entries.next_entry().await?;
+        if let Some(entry) = first_entry {
+            let is_retired_manifest = second_entry.is_none()
+                && entry.file_name() == std::ffi::OsStr::new("resume-manifest.json")
+                && entry.file_type().await?.is_file();
+            anyhow::ensure!(
+                is_retired_manifest,
+                "refusing to create ED2K transfer {file_hash}: unmanaged directory {} is not empty",
+                transfer_dir.display()
+            );
+            tokio::fs::remove_file(entry.path())
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to remove retired ED2K resume manifest from {}",
+                        transfer_dir.display()
+                    )
+                })?;
+        }
+        tokio::fs::remove_dir(&transfer_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to reclaim empty unmanaged ED2K transfer directory {}",
+                    transfer_dir.display()
+                )
+            })?;
+        Ok(())
     }
 
     pub(super) async fn load_manifest_optional_unlocked(
