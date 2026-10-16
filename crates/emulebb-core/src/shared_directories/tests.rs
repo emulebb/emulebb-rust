@@ -81,6 +81,32 @@ async fn set_shared_directories_canonicalizes_configured_root() {
     fs::remove_dir_all(&root).ok();
 }
 
+#[tokio::test]
+async fn synchronous_and_detached_reloads_share_one_execution_gate() {
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    let reload_guard = core.shared_reload_gate.lock().await;
+
+    core.reload_shared_directories_detached().await.unwrap();
+    let synchronous_core = core.clone();
+    let synchronous_reload =
+        tokio::spawn(async move { synchronous_core.reload_shared_directories().await });
+
+    tokio::task::yield_now().await;
+    assert!(core.shared_reload_running.load(Ordering::Acquire));
+    assert!(!synchronous_reload.is_finished());
+
+    drop(reload_guard);
+    assert!(synchronous_reload.await.unwrap().unwrap().is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while core.shared_reload_running.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[test]
 fn shared_directory_root_update_rejects_retired_recursive_field() {
     let error = serde_json::from_str::<SharedDirectoriesUpdate>(
