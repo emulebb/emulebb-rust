@@ -11,7 +11,7 @@ pub(super) enum NoReplaceMoveOutcome {
     AlreadyExists,
 }
 
-pub(super) async fn move_file_no_replace(
+pub(super) async fn move_path_no_replace(
     source: &Path,
     destination: &Path,
 ) -> Result<NoReplaceMoveOutcome> {
@@ -19,7 +19,7 @@ pub(super) async fn move_file_no_replace(
     let destination = destination.to_path_buf();
     let sync_path = destination.clone();
     let outcome =
-        tokio::task::spawn_blocking(move || move_file_no_replace_blocking(&source, &destination))
+        tokio::task::spawn_blocking(move || move_path_no_replace_blocking(&source, &destination))
             .await
             .context("no-replace move task failed")??;
     if outcome == NoReplaceMoveOutcome::Moved {
@@ -105,7 +105,7 @@ fn sync_file_for_publish_blocking(file: &std::fs::File) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn move_file_no_replace_blocking(
+fn move_path_no_replace_blocking(
     source: &Path,
     destination: &Path,
 ) -> io::Result<NoReplaceMoveOutcome> {
@@ -142,7 +142,7 @@ fn move_file_no_replace_blocking(
 }
 
 #[cfg(target_os = "macos")]
-fn move_file_no_replace_blocking(
+fn move_path_no_replace_blocking(
     source: &Path,
     destination: &Path,
 ) -> io::Result<NoReplaceMoveOutcome> {
@@ -172,7 +172,7 @@ fn move_file_no_replace_blocking(
 }
 
 #[cfg(windows)]
-fn move_file_no_replace_blocking(
+fn move_path_no_replace_blocking(
     source: &Path,
     destination: &Path,
 ) -> io::Result<NoReplaceMoveOutcome> {
@@ -215,7 +215,7 @@ fn move_file_no_replace_blocking(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn move_file_no_replace_blocking(
+fn move_path_no_replace_blocking(
     _source: &Path,
     _destination: &Path,
 ) -> io::Result<NoReplaceMoveOutcome> {
@@ -245,7 +245,7 @@ mod tests {
         std::fs::write(&source, b"first").unwrap();
 
         assert_eq!(
-            move_file_no_replace(&source, &destination).await.unwrap(),
+            move_path_no_replace(&source, &destination).await.unwrap(),
             NoReplaceMoveOutcome::Moved
         );
         assert!(!source.exists());
@@ -253,7 +253,7 @@ mod tests {
 
         std::fs::write(&source, b"second").unwrap();
         assert_eq!(
-            move_file_no_replace(&source, &destination).await.unwrap(),
+            move_path_no_replace(&source, &destination).await.unwrap(),
             NoReplaceMoveOutcome::AlreadyExists
         );
         assert_eq!(std::fs::read(&source).unwrap(), b"second");

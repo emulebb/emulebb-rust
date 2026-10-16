@@ -1975,16 +1975,31 @@ impl super::MetadataStore {
                 SELECT transfers.id
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
-                JOIN local_paths delivered_paths
+                LEFT JOIN local_paths delivered_paths
                   ON delivered_paths.id = transfers.delivered_path_id
                 WHERE known_files.ed2k_hash = ?1
                   AND transfers.delete_requested_at_ms IS NOT NULL
-                  AND transfers.delivery_state = 'delivered'
-                  AND transfers.delivery_ownership = 'owned'
                   AND transfers.source_path_id IS NULL
-                  AND transfers.source_fingerprint = ?2
-                  AND delivered_paths.platform = ?3
-                  AND delivered_paths.native_path = ?4
+                  AND (
+                      (
+                          transfers.delivery_state = 'delivered'
+                          AND transfers.delivery_ownership = 'owned'
+                          AND transfers.source_fingerprint = ?2
+                          AND delivered_paths.platform = ?3
+                          AND delivered_paths.native_path = ?4
+                      )
+                      OR EXISTS (
+                          SELECT 1
+                          FROM delivery_attempts
+                          JOIN local_paths attempted_targets
+                            ON attempted_targets.id = delivery_attempts.target_path_id
+                          WHERE delivery_attempts.transfer_id = transfers.id
+                            AND delivery_attempts.phase = 'published'
+                            AND delivery_attempts.published_fingerprint = ?2
+                            AND attempted_targets.platform = ?3
+                            AND attempted_targets.native_path = ?4
+                      )
+                  )
                 "#,
                 params![
                     hash,
