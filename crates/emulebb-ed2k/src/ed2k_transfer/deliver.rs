@@ -42,7 +42,9 @@ use uuid::Uuid;
 
 use crate::long_path::long_path;
 
-use super::fs_durability::sync_parent_directory;
+use super::fs_durability::{
+    NoReplaceMoveOutcome, move_file_no_replace, sync_file_for_publish, sync_parent_directory,
+};
 use super::{ED2K_PART_SIZE, Ed2kTransferRuntime};
 
 #[cfg(test)]
@@ -70,6 +72,13 @@ pub(super) enum DeliveredOutputIdentity {
     Foreign,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptArtifactIdentity {
+    Missing,
+    Owned,
+    Foreign,
+}
+
 impl Ed2kTransferRuntime {
     /// Materialize a completed transfer's payload into `dest_dir` under its
     /// canonical name, recording the delivered path on the manifest so the
@@ -91,7 +100,14 @@ impl Ed2kTransferRuntime {
         self.recover_delivery_attempt_unlocked(file_hash).await?;
         // Phase 1: snapshot what we need under the manifest IO lock, then
         // release it before touching the destination filesystem.
-        let (display_name, expected_size, expected_hash, recorded_path, recorded_fingerprint) = {
+        let (
+            display_name,
+            expected_size,
+            expected_hash,
+            recorded_path,
+            recorded_fingerprint,
+            recorded_ownership,
+        ) = {
             let _guard = self.lock_manifest(file_hash).await;
             let manifest = self.load_manifest_unlocked(file_hash).await?;
             if manifest.delivery_state == super::Ed2kDeliveryState::NotApplicable {
@@ -120,6 +136,7 @@ impl Ed2kTransferRuntime {
                     .0,
                 recorded_path,
                 manifest.source_fingerprint.clone(),
+                manifest.delivery_ownership,
             )
         };
 
@@ -133,10 +150,11 @@ impl Ed2kTransferRuntime {
             .await
             {
                 Ok(DeliveredOutputIdentity::Matching(current_fingerprint))
-                    if recorded_fingerprint
-                        .as_ref()
-                        .zip(current_fingerprint.as_ref())
-                        .is_some_and(|(recorded, current)| recorded.safely_matches(current)) =>
+                    if recorded_ownership == super::Ed2kDeliveryOwnership::Unowned
+                        || recorded_fingerprint
+                            .as_ref()
+                            .zip(current_fingerprint.as_ref())
+                            .is_some_and(|(recorded, current)| recorded == current) =>
                 {
                     return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded_path));
                 }
@@ -164,6 +182,7 @@ impl Ed2kTransferRuntime {
                 && manifest.delivered_path.as_ref() == Some(&recorded_path)
             {
                 manifest.delivery_state = super::Ed2kDeliveryState::Pending;
+                manifest.delivery_ownership = super::Ed2kDeliveryOwnership::None;
                 manifest.delivered_path = None;
                 manifest.source_fingerprint = None;
                 self.store_manifest_unlocked(&manifest).await?;
@@ -189,6 +208,7 @@ impl Ed2kTransferRuntime {
             let _guard = self.lock_manifest(file_hash).await;
             let mut manifest = self.load_manifest_unlocked(file_hash).await?;
             manifest.delivery_state = super::Ed2kDeliveryState::Delivered;
+            manifest.delivery_ownership = super::Ed2kDeliveryOwnership::Owned;
             manifest.delivered_path = Some(final_path.clone());
             // Record the delivered file's native fingerprint so a later
             // shared-directory rescan that re-finds this file in a shared
@@ -213,6 +233,11 @@ impl Ed2kTransferRuntime {
 #[derive(Debug)]
 struct InstalledDelivery {
     path: PathBuf,
+    fingerprint: NativeFileFingerprint,
+}
+
+struct VerifiedStagingFile {
+    file: File,
     fingerprint: NativeFileFingerprint,
 }
 
@@ -287,11 +312,30 @@ pub(super) async fn classify_delivered_output(
     .context("delivered-output identity task failed")?
 }
 
-fn delivered_file_fingerprint(path: &Path) -> Option<NativeFileFingerprint> {
-    let path = long_path(path);
-    let metadata = path.symlink_metadata().ok()?;
-    metadata.file_type().is_file().then_some(())?;
-    super::ingest::native_file_fingerprint(&path)
+async fn classify_attempt_artifact(
+    path: &Path,
+    expected_fingerprint: &NativeFileFingerprint,
+    expected_size: u64,
+    expected_hash: [u8; 16],
+) -> Result<AttemptArtifactIdentity> {
+    match classify_delivered_output(
+        path,
+        Some(expected_fingerprint),
+        expected_size,
+        expected_hash,
+    )
+    .await?
+    {
+        DeliveredOutputIdentity::Missing => Ok(AttemptArtifactIdentity::Missing),
+        DeliveredOutputIdentity::Matching(Some(current_fingerprint))
+            if current_fingerprint == *expected_fingerprint =>
+        {
+            Ok(AttemptArtifactIdentity::Owned)
+        }
+        DeliveredOutputIdentity::Matching(_) | DeliveredOutputIdentity::Foreign => {
+            Ok(AttemptArtifactIdentity::Foreign)
+        }
+    }
 }
 
 impl Ed2kTransferRuntime {
@@ -335,31 +379,54 @@ impl Ed2kTransferRuntime {
             self.begin_delivery_attempt(file_hash, attempt_id, &target_path, &staging_path)
                 .await?;
             stage_delivery_payload(source, &staging_path).await?;
-            let staging_fingerprint =
-                verify_delivery_fingerprint(&staging_path, expected_size, expected_hash).await?;
+            let verified_staging =
+                open_verified_staging_file(&staging_path, expected_size, expected_hash).await?;
             anyhow::ensure!(
-                self.mark_delivery_attempt_staged(file_hash, attempt_id, &staging_fingerprint)
-                    .await?,
+                self.mark_delivery_attempt_staged(
+                    file_hash,
+                    attempt_id,
+                    &verified_staging.fingerprint,
+                )
+                .await?,
                 "delivery attempt {attempt_id} disappeared before staging committed"
             );
 
             match install_staged_payload(&staging_path, &target_path).await? {
                 InstallOutcome::Installed => {
-                    let installed_fingerprint =
-                        verify_delivery_fingerprint(&target_path, expected_size, expected_hash)
-                            .await?;
+                    let installed_fingerprint = capture_published_fingerprint(
+                        verified_staging.file,
+                        &target_path,
+                        expected_size,
+                    )
+                    .await?;
                     anyhow::ensure!(
-                        installed_fingerprint == staging_fingerprint,
-                        "installed delivery identity changed at {}",
-                        target_path.display()
+                        self.mark_delivery_attempt_published(
+                            file_hash,
+                            attempt_id,
+                            &installed_fingerprint,
+                        )
+                        .await?,
+                        "delivery attempt {attempt_id} disappeared before publication committed"
                     );
                     return Ok(InstalledDelivery {
                         path: target_path,
-                        fingerprint: staging_fingerprint,
+                        fingerprint: installed_fingerprint,
                     });
                 }
                 InstallOutcome::AlreadyExists => {
-                    remove_if_exists(&staging_path).await?;
+                    drop(verified_staging.file);
+                    if !remove_file_if_fingerprint_matches(
+                        &staging_path,
+                        &verified_staging.fingerprint,
+                    )
+                    .await?
+                    {
+                        tracing::warn!(
+                            file_hash,
+                            path = %staging_path.display(),
+                            "preserving delivery staging path whose native identity changed"
+                        );
+                    }
                     anyhow::ensure!(
                         self.clear_delivery_attempt(file_hash, attempt_id).await?,
                         "delivery attempt {attempt_id} disappeared during collision cleanup"
@@ -416,6 +483,26 @@ impl Ed2kTransferRuntime {
         .context("ED2K delivery-attempt stage task panicked")?
     }
 
+    async fn mark_delivery_attempt_published(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        published_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let metadata = self.metadata.clone();
+        let file_hash = file_hash.to_owned();
+        let published_fingerprint = published_fingerprint.clone();
+        tokio::task::spawn_blocking(move || {
+            metadata.mark_transfer_delivery_attempt_published(
+                &file_hash,
+                attempt_id,
+                &published_fingerprint,
+            )
+        })
+        .await
+        .context("ED2K delivery-attempt publish task panicked")?
+    }
+
     async fn clear_delivery_attempt(&self, file_hash: &str, attempt_id: Uuid) -> Result<bool> {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_owned();
@@ -447,7 +534,6 @@ impl Ed2kTransferRuntime {
             self.load_manifest_unlocked(file_hash).await?
         };
         if manifest.delivery_state == super::Ed2kDeliveryState::Delivered {
-            remove_if_exists(&attempt.staging_path).await?;
             self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                 .await?;
             return Ok(());
@@ -456,7 +542,6 @@ impl Ed2kTransferRuntime {
             || !manifest.completed
             || manifest.final_rehash_pending
         {
-            remove_if_exists(&attempt.staging_path).await?;
             self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                 .await?;
             return Ok(());
@@ -471,59 +556,122 @@ impl Ed2kTransferRuntime {
         let expected_hash = Ed2kHash::from_str(&manifest.file_hash)
             .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
             .0;
-        let target_fingerprint = match classify_delivered_output(
+        let staging_fingerprint = attempt.staging_fingerprint.as_ref().with_context(|| {
+            format!(
+                "delivery attempt {} has no verified staging identity",
+                attempt.attempt_id
+            )
+        })?;
+        if attempt.phase == MetadataTransferDeliveryAttemptPhase::Published {
+            let published_fingerprint =
+                attempt.published_fingerprint.as_ref().with_context(|| {
+                    format!(
+                        "published delivery attempt {} has no published identity",
+                        attempt.attempt_id
+                    )
+                })?;
+            match classify_attempt_artifact(
+                &attempt.target_path,
+                published_fingerprint,
+                manifest.file_size,
+                expected_hash,
+            )
+            .await?
+            {
+                AttemptArtifactIdentity::Owned => {
+                    return self
+                        .commit_recovered_delivery(
+                            file_hash,
+                            &attempt,
+                            published_fingerprint,
+                            super::Ed2kDeliveryOwnership::Owned,
+                        )
+                        .await;
+                }
+                AttemptArtifactIdentity::Missing => {
+                    sync_parent_directory(&attempt.target_path).await?;
+                }
+                AttemptArtifactIdentity::Foreign => {
+                    tracing::warn!(
+                        file_hash,
+                        path = %attempt.target_path.display(),
+                        "preserving delivery target whose identity changed after publication"
+                    );
+                }
+            }
+            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                .await?;
+            return Ok(());
+        }
+
+        match classify_attempt_artifact(
             &attempt.staging_path,
-            None,
+            staging_fingerprint,
             manifest.file_size,
             expected_hash,
         )
         .await?
         {
-            DeliveredOutputIdentity::Matching(_) => {
-                match path_exists(&attempt.target_path).await {
-                    false => {
-                        match install_staged_payload(&attempt.staging_path, &attempt.target_path)
-                            .await?
-                        {
-                            InstallOutcome::Installed => {}
-                            InstallOutcome::AlreadyExists => {
-                                remove_if_exists(&attempt.staging_path).await?;
-                                self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                                    .await?;
-                                return Ok(());
-                            }
-                        }
-                    }
-                    true => {
-                        if same_regular_file_identity(&attempt.staging_path, &attempt.target_path)
-                            .await?
-                        {
-                            remove_if_exists(&attempt.staging_path).await?;
-                        } else {
-                            remove_if_exists(&attempt.staging_path).await?;
-                            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                                .await?;
-                            return Ok(());
-                        }
-                    }
-                }
-                match classify_delivered_output(
-                    &attempt.target_path,
-                    None,
+            AttemptArtifactIdentity::Owned => {
+                let verified_staging = open_verified_staging_file(
+                    &attempt.staging_path,
                     manifest.file_size,
                     expected_hash,
                 )
-                .await?
-                {
-                    DeliveredOutputIdentity::Matching(fingerprint) => fingerprint,
-                    DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign => {
+                .await?;
+                anyhow::ensure!(
+                    verified_staging.fingerprint == *staging_fingerprint,
+                    "delivery staging identity changed for attempt {}",
+                    attempt.attempt_id
+                );
+                match install_staged_payload(&attempt.staging_path, &attempt.target_path).await? {
+                    InstallOutcome::Installed => {
+                        let published_fingerprint = capture_published_fingerprint(
+                            verified_staging.file,
+                            &attempt.target_path,
+                            manifest.file_size,
+                        )
+                        .await?;
+                        anyhow::ensure!(
+                            self.mark_delivery_attempt_published(
+                                file_hash,
+                                attempt.attempt_id,
+                                &published_fingerprint,
+                            )
+                            .await?,
+                            "delivery attempt {} disappeared before publication committed",
+                            attempt.attempt_id
+                        );
+                        return self
+                            .commit_recovered_delivery(
+                                file_hash,
+                                &attempt,
+                                &published_fingerprint,
+                                super::Ed2kDeliveryOwnership::Owned,
+                            )
+                            .await;
+                    }
+                    InstallOutcome::AlreadyExists => {
+                        drop(verified_staging.file);
+                        if !remove_file_if_fingerprint_matches(
+                            &attempt.staging_path,
+                            staging_fingerprint,
+                        )
+                        .await?
+                        {
+                            tracing::warn!(
+                                file_hash,
+                                path = %attempt.staging_path.display(),
+                                "preserving delivery staging path whose native identity changed"
+                            );
+                        }
                         self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                             .await?;
                         return Ok(());
                     }
                 }
             }
-            DeliveredOutputIdentity::Missing => {
+            AttemptArtifactIdentity::Missing => {
                 sync_parent_directory(&attempt.staging_path).await?;
                 match classify_delivered_output(
                     &attempt.target_path,
@@ -533,22 +681,51 @@ impl Ed2kTransferRuntime {
                 )
                 .await?
                 {
-                    DeliveredOutputIdentity::Matching(fingerprint) => fingerprint,
-                    DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign => {
-                        self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                            .await?;
-                        return Ok(());
+                    DeliveredOutputIdentity::Matching(Some(current_fingerprint)) => {
+                        return self
+                            .commit_recovered_delivery(
+                                file_hash,
+                                &attempt,
+                                &current_fingerprint,
+                                super::Ed2kDeliveryOwnership::Unowned,
+                            )
+                            .await;
+                    }
+                    DeliveredOutputIdentity::Missing => {
+                        sync_parent_directory(&attempt.target_path).await?;
+                    }
+                    DeliveredOutputIdentity::Matching(None) | DeliveredOutputIdentity::Foreign => {
+                        tracing::warn!(
+                            file_hash,
+                            path = %attempt.target_path.display(),
+                            "preserving ambiguous delivery target after interrupted publication"
+                        );
                     }
                 }
-            }
-            DeliveredOutputIdentity::Foreign => {
-                remove_if_exists(&attempt.staging_path).await?;
                 self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                     .await?;
                 return Ok(());
             }
-        };
+            AttemptArtifactIdentity::Foreign => {
+                tracing::warn!(
+                    file_hash,
+                    path = %attempt.staging_path.display(),
+                    "preserving delivery staging path whose native identity changed"
+                );
+                self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                    .await?;
+                return Ok(());
+            }
+        }
+    }
 
+    async fn commit_recovered_delivery(
+        &self,
+        file_hash: &str,
+        attempt: &MetadataTransferDeliveryAttempt,
+        fingerprint: &NativeFileFingerprint,
+        ownership: super::Ed2kDeliveryOwnership,
+    ) -> Result<()> {
         let _manifest_guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         anyhow::ensure!(
@@ -559,8 +736,9 @@ impl Ed2kTransferRuntime {
             attempt.attempt_id
         );
         manifest.delivery_state = super::Ed2kDeliveryState::Delivered;
-        manifest.delivered_path = Some(attempt.target_path);
-        manifest.source_fingerprint = target_fingerprint;
+        manifest.delivery_ownership = ownership;
+        manifest.delivered_path = Some(attempt.target_path.clone());
+        manifest.source_fingerprint = Some(fingerprint.clone());
         self.store_manifest_unlocked(&manifest).await
     }
 
@@ -573,62 +751,94 @@ impl Ed2kTransferRuntime {
             return Ok(());
         };
         validate_delivery_attempt_paths(&attempt)?;
-        let mut owned_target_fingerprint = None;
-        if attempt.phase == MetadataTransferDeliveryAttemptPhase::Staged {
-            let expected_hash = Ed2kHash::from_str(&manifest.file_hash)
-                .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
-                .0;
-            match classify_delivered_output(
-                &attempt.staging_path,
-                None,
+        if attempt.phase == MetadataTransferDeliveryAttemptPhase::Prepared {
+            remove_if_exists(&attempt.staging_path).await?;
+            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                .await?;
+            return Ok(());
+        }
+
+        let expected_hash = Ed2kHash::from_str(&manifest.file_hash)
+            .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
+            .0;
+        let staging_fingerprint = attempt.staging_fingerprint.as_ref().with_context(|| {
+            format!(
+                "staged delivery attempt {} has no verified staging identity",
+                attempt.attempt_id
+            )
+        })?;
+        match classify_attempt_artifact(
+            &attempt.staging_path,
+            staging_fingerprint,
+            manifest.file_size,
+            expected_hash,
+        )
+        .await?
+        {
+            AttemptArtifactIdentity::Owned => {
+                if !remove_file_if_fingerprint_matches(&attempt.staging_path, staging_fingerprint)
+                    .await?
+                {
+                    tracing::warn!(
+                        file_hash,
+                        path = %attempt.staging_path.display(),
+                        "preserving delivery staging artifact whose identity changed before deletion"
+                    );
+                }
+            }
+            AttemptArtifactIdentity::Missing => {
+                sync_parent_directory(&attempt.staging_path).await?;
+            }
+            AttemptArtifactIdentity::Foreign => {
+                tracing::warn!(
+                    file_hash,
+                    path = %attempt.staging_path.display(),
+                    "preserving delivery staging artifact without matching persisted native identity"
+                );
+            }
+        }
+        if attempt.phase == MetadataTransferDeliveryAttemptPhase::Published {
+            let published_fingerprint =
+                attempt.published_fingerprint.as_ref().with_context(|| {
+                    format!(
+                        "published delivery attempt {} has no published identity",
+                        attempt.attempt_id
+                    )
+                })?;
+            match classify_attempt_artifact(
+                &attempt.target_path,
+                published_fingerprint,
                 manifest.file_size,
                 expected_hash,
             )
             .await?
             {
-                DeliveredOutputIdentity::Matching(_) => {
-                    if path_exists(&attempt.target_path).await
-                        && same_regular_file_identity(&attempt.staging_path, &attempt.target_path)
-                            .await?
-                        && let DeliveredOutputIdentity::Matching(fingerprint) =
-                            classify_delivered_output(
-                                &attempt.target_path,
-                                None,
-                                manifest.file_size,
-                                expected_hash,
-                            )
-                            .await?
+                AttemptArtifactIdentity::Owned => {
+                    if !remove_file_if_fingerprint_matches(
+                        &attempt.target_path,
+                        published_fingerprint,
+                    )
+                    .await?
                     {
-                        owned_target_fingerprint = fingerprint;
+                        tracing::warn!(
+                            file_hash,
+                            path = %attempt.target_path.display(),
+                            "preserving published delivery artifact whose identity changed before deletion"
+                        );
                     }
                 }
-                DeliveredOutputIdentity::Missing => {
-                    if let DeliveredOutputIdentity::Matching(fingerprint) =
-                        classify_delivered_output(
-                            &attempt.target_path,
-                            None,
-                            manifest.file_size,
-                            expected_hash,
-                        )
-                        .await?
-                    {
-                        owned_target_fingerprint = fingerprint;
-                    }
+                AttemptArtifactIdentity::Missing => {
+                    sync_parent_directory(&attempt.target_path).await?;
                 }
-                DeliveredOutputIdentity::Foreign => {}
+                AttemptArtifactIdentity::Foreign => {
+                    tracing::warn!(
+                        file_hash,
+                        path = %attempt.target_path.display(),
+                        "preserving published delivery artifact without matching persisted native identity"
+                    );
+                }
             }
         }
-
-        if let Some(expected_fingerprint) = owned_target_fingerprint.as_ref() {
-            remove_delivery_target_if_unchanged(&attempt.target_path, expected_fingerprint).await?;
-        } else if owned_target_fingerprint.is_none() && path_exists(&attempt.target_path).await {
-            tracing::warn!(
-                file_hash,
-                path = %attempt.target_path.display(),
-                "preserving delivery-attempt target without sufficient ownership evidence during deletion"
-            );
-        }
-        remove_if_exists(&attempt.staging_path).await?;
         self.clear_delivery_attempt(file_hash, attempt.attempt_id)
             .await?;
         Ok(())
@@ -728,6 +938,113 @@ async fn verify_delivery_fingerprint(
     }
 }
 
+async fn open_verified_staging_file(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: [u8; 16],
+) -> Result<VerifiedStagingFile> {
+    let path = long_path(path);
+    tokio::task::spawn_blocking(move || -> Result<VerifiedStagingFile> {
+        let mut file = open_staging_file_without_follow(&path)
+            .with_context(|| format!("failed to open delivery staging file {}", path.display()))?;
+        let opened_metadata = file.metadata()?;
+        let opened_fingerprint =
+            super::ingest::native_file_fingerprint_from_handle(&file, &opened_metadata)
+                .with_context(|| {
+                    format!(
+                        "delivery staging file has no stable native identity: {}",
+                        path.display()
+                    )
+                })?;
+        anyhow::ensure!(
+            opened_fingerprint.size_bytes == expected_size,
+            "delivery staging file size changed at {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            compute_ed2k_hash_from_handle(&mut file, expected_size)? == expected_hash,
+            "delivery staging file failed verification: {}",
+            path.display()
+        );
+        let verified_metadata = file.metadata()?;
+        let verified_fingerprint =
+            super::ingest::native_file_fingerprint_from_handle(&file, &verified_metadata)
+                .with_context(|| {
+                    format!(
+                        "delivery staging file lost its native identity: {}",
+                        path.display()
+                    )
+                })?;
+        anyhow::ensure!(
+            opened_fingerprint == verified_fingerprint,
+            "delivery staging file changed during verification: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            super::ingest::native_file_fingerprint(&path).as_ref() == Some(&verified_fingerprint),
+            "delivery staging path changed during verification: {}",
+            path.display()
+        );
+        Ok(VerifiedStagingFile {
+            file,
+            fingerprint: verified_fingerprint,
+        })
+    })
+    .await
+    .context("delivery staging verification task failed")?
+}
+
+async fn capture_published_fingerprint(
+    file: File,
+    target_path: &Path,
+    expected_size: u64,
+) -> Result<NativeFileFingerprint> {
+    let target_path = long_path(target_path);
+    tokio::task::spawn_blocking(move || -> Result<NativeFileFingerprint> {
+        let metadata = file.metadata()?;
+        let fingerprint = super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
+            .with_context(|| {
+                format!(
+                    "published delivery has no stable native identity: {}",
+                    target_path.display()
+                )
+            })?;
+        anyhow::ensure!(
+            fingerprint.size_bytes == expected_size,
+            "published delivery size changed at {}",
+            target_path.display()
+        );
+        anyhow::ensure!(
+            super::ingest::native_file_fingerprint(&target_path).as_ref() == Some(&fingerprint),
+            "published delivery path does not identify the staged object: {}",
+            target_path.display()
+        );
+        Ok(fingerprint)
+    })
+    .await
+    .context("delivery publication fingerprint task failed")?
+}
+
+#[cfg(windows)]
+fn open_staging_file_without_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    };
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_staging_file_without_follow(path: &Path) -> std::io::Result<File> {
+    super::ingest::open_regular_file_without_follow(path)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstallOutcome {
     Installed,
@@ -759,39 +1076,26 @@ async fn stage_delivery_payload(source: &Path, staging_path: &Path) -> Result<()
             .await
             .with_context(|| format!("failed to copy payload {}", source.display()))?;
     }
-    output.sync_all().await?;
-    drop(output);
+    sync_file_for_publish(output.into_std().await).await?;
     sync_parent_directory(staging_path).await?;
     Ok(())
 }
 
-/// Publish a staged file without replacing a pre-existing destination. A hard
-/// link is an atomic no-clobber install within the shared parent directory; the
-/// staging name is removed immediately after the target link exists.
+/// Publish a staged file without replacing a pre-existing destination. The
+/// platform move is atomic within the shared parent directory and preserves the
+/// staged object's native identity at the final path.
 async fn install_staged_payload(staging_path: &Path, target_path: &Path) -> Result<InstallOutcome> {
-    match tokio::fs::hard_link(long_path(staging_path), long_path(target_path)).await {
-        Ok(()) => {
-            tokio::fs::remove_file(long_path(staging_path))
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to remove installed delivery staging file {}",
-                        staging_path.display()
-                    )
-                })?;
-            sync_parent_directory(target_path).await?;
-            Ok(InstallOutcome::Installed)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Ok(InstallOutcome::AlreadyExists)
-        }
-        Err(error) => Err(error).with_context(|| {
+    match move_file_no_replace(staging_path, target_path)
+        .await
+        .with_context(|| {
             format!(
                 "failed to install delivery staging file {} at {}",
                 staging_path.display(),
                 target_path.display()
             )
-        }),
+        })? {
+        NoReplaceMoveOutcome::Moved => Ok(InstallOutcome::Installed),
+        NoReplaceMoveOutcome::AlreadyExists => Ok(InstallOutcome::AlreadyExists),
     }
 }
 
@@ -849,12 +1153,11 @@ async fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-async fn remove_delivery_target_if_unchanged(
+pub(super) async fn remove_file_if_fingerprint_matches(
     path: &Path,
     expected_fingerprint: &NativeFileFingerprint,
-) -> Result<()> {
+) -> Result<bool> {
     let owned_path = long_path(path);
-    let display_path = path.to_path_buf();
     let expected_fingerprint = expected_fingerprint.clone();
     let removed = tokio::task::spawn_blocking(move || -> Result<bool> {
         let metadata = match owned_path.symlink_metadata() {
@@ -868,7 +1171,7 @@ async fn remove_delivery_target_if_unchanged(
         let Some(current_fingerprint) = super::ingest::native_file_fingerprint(&owned_path) else {
             return Ok(false);
         };
-        if !expected_fingerprint.safely_matches(&current_fingerprint) {
+        if expected_fingerprint != current_fingerprint {
             return Ok(false);
         }
         match std::fs::remove_file(&owned_path) {
@@ -879,25 +1182,10 @@ async fn remove_delivery_target_if_unchanged(
     })
     .await
     .context("delivery target cleanup task panicked")??;
-    if !removed {
-        tracing::warn!(
-            path = %display_path.display(),
-            "preserving delivery-attempt target whose native identity changed during deletion"
-        );
-    } else {
+    if removed {
         sync_parent_directory(path).await?;
     }
-    Ok(())
-}
-
-async fn delivered_file_matches(
-    path: &Path,
-    expected_size: u64,
-    expected_hash: [u8; 16],
-) -> Result<bool> {
-    classify_delivered_output(path, None, expected_size, expected_hash)
-        .await
-        .map(|identity| matches!(identity, DeliveredOutputIdentity::Matching(_)))
+    Ok(removed)
 }
 
 fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>> {
@@ -912,6 +1200,13 @@ fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>
         return Ok(None);
     }
     let mut file = File::open(path)?;
+    Ok(Some(compute_ed2k_hash_from_handle(
+        &mut file,
+        expected_size,
+    )?))
+}
+
+fn compute_ed2k_hash_from_handle(file: &mut File, expected_size: u64) -> Result<[u8; 16]> {
     file.seek(SeekFrom::Start(0))?;
     let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
     let mut part_hashes = Vec::with_capacity(usize::try_from(part_count).unwrap_or(0));
@@ -930,10 +1225,13 @@ fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>
         remaining = remaining.saturating_sub(ED2K_PART_SIZE);
     }
     if expected_size == 0 {
-        return Ok(Some(Md4::new().finalize().into()));
+        return Ok(Md4::new().finalize().into());
     }
     if expected_size < ED2K_PART_SIZE {
-        return Ok(part_hashes.first().copied());
+        return part_hashes
+            .first()
+            .copied()
+            .context("single-part ED2K hash was not produced");
     }
     let mut composite = Md4::new();
     for hash in part_hashes {
@@ -942,35 +1240,11 @@ fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>
     if expected_size.is_multiple_of(ED2K_PART_SIZE) {
         composite.update(<[u8; 16]>::from(Md4::new().finalize()));
     }
-    Ok(Some(composite.finalize().into()))
+    Ok(composite.finalize().into())
 }
 
 async fn path_exists(path: &Path) -> bool {
     tokio::fs::metadata(long_path(path)).await.is_ok()
-}
-
-async fn same_regular_file_identity(first: &Path, second: &Path) -> Result<bool> {
-    let first_metadata = tokio::fs::symlink_metadata(long_path(first))
-        .await
-        .with_context(|| {
-            format!(
-                "failed to inspect delivery staging file {}",
-                first.display()
-            )
-        })?;
-    let second_metadata = tokio::fs::symlink_metadata(long_path(second))
-        .await
-        .with_context(|| format!("failed to inspect delivery target {}", second.display()))?;
-    if !first_metadata.file_type().is_file() || !second_metadata.file_type().is_file() {
-        return Ok(false);
-    }
-    let first = long_path(first);
-    let second = long_path(second);
-    tokio::task::spawn_blocking(move || {
-        Ok::<_, anyhow::Error>(file_id::get_file_id(first)? == file_id::get_file_id(second)?)
-    })
-    .await
-    .context("delivery file-identity task panicked")?
 }
 
 /// Replace filesystem-reserved characters in a canonical name so it is safe to

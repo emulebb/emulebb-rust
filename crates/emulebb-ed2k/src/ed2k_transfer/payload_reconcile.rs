@@ -380,6 +380,7 @@ fn demote_completed_manifest(manifest: &mut Ed2kResumeManifest) -> usize {
     manifest.final_rehash_pending = false;
     manifest.transfer_row_removed = false;
     manifest.delivery_state = Ed2kDeliveryState::Pending;
+    manifest.delivery_ownership = super::Ed2kDeliveryOwnership::None;
     manifest.delivered_path = None;
     manifest.source_fingerprint = None;
     manifest.payload_fingerprint = None;
