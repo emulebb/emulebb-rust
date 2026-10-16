@@ -37,7 +37,15 @@ async fn ingest_completed(
         payload.extend_from_slice(b"emulebb-delivery-payload");
     }
     payload.truncate(1_048_576);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    ingest_completed_bytes(runtime, display_name, &payload).await
+}
+
+async fn ingest_completed_bytes(
+    runtime: &Ed2kTransferRuntime,
+    display_name: &str,
+    payload: &[u8],
+) -> String {
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(payload).into());
     let file_hash_hex = file_hash.to_string();
     let job = new_transfer_job(file_hash, display_name.to_string(), payload.len() as u64);
     runtime.ensure_job(&job).await.unwrap();
@@ -46,7 +54,7 @@ async fn ingest_completed(
         .await
         .unwrap();
     runtime
-        .store_piece_data(&file_hash_hex, 0, &payload)
+        .store_piece_data(&file_hash_hex, 0, payload)
         .await
         .unwrap();
     file_hash_hex
@@ -1182,6 +1190,67 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
             .pending_transfer_deletion_hashes()
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn pending_deletion_recovery_continues_after_an_earlier_failure() {
+    let root = unique_test_dir("ed2k-delete-continue-after-failure");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let incoming = root.join("incoming");
+    let hash_a = ingest_completed_bytes(&runtime, "First.bin", b"first deletion payload").await;
+    let delivered_a = match runtime
+        .materialize_completed_payload(&hash_a, &incoming)
+        .await
+        .unwrap()
+    {
+        Ed2kDeliveryOutcome::Delivered(path) => path,
+        outcome => panic!("unexpected first delivery outcome: {outcome:?}"),
+    };
+    let hash_b = ingest_completed_bytes(&runtime, "Second.bin", b"second deletion payload").await;
+    let delivered_b = match runtime
+        .materialize_completed_payload(&hash_b, &incoming)
+        .await
+        .unwrap()
+    {
+        Ed2kDeliveryOutcome::Delivered(path) => path,
+        outcome => panic!("unexpected second delivery outcome: {outcome:?}"),
+    };
+    let mut transfers = [(hash_a, delivered_a), (hash_b, delivered_b)];
+    transfers.sort_by(|left, right| left.0.cmp(&right.0));
+    let (blocked_hash, blocked_output) = transfers[0].clone();
+    let (later_hash, later_output) = transfers[1].clone();
+
+    let blocked_dir = runtime.transfer_dir(&blocked_hash);
+    let blocked_tombstone = transfer_directory_tombstone_path(&blocked_hash, &blocked_dir);
+    fs::remove_dir_all(&blocked_dir).unwrap();
+    fs::write(&blocked_dir, b"cleanup blocker").unwrap();
+    assert!(runtime.delete_transfer_files(&blocked_hash).await.unwrap());
+    assert!(
+        runtime
+            .metadata
+            .request_transfer_deletion(&later_hash)
+            .unwrap()
+    );
+
+    let error = runtime
+        .recover_pending_transfer_deletions()
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains(&blocked_hash));
+    assert!(!blocked_output.exists());
+    assert!(!later_output.exists());
+    assert!(!runtime.transfer_dir(&later_hash).exists());
+    assert!(runtime.manifest(&later_hash).await.is_err());
+    assert_eq!(
+        runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
+        vec![blocked_hash.clone()]
+    );
+
+    fs::remove_file(&blocked_tombstone).unwrap();
+    assert_eq!(
+        runtime.recover_pending_transfer_deletions().await.unwrap(),
+        1
     );
 }
 
