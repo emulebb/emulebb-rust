@@ -1439,7 +1439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn installed_payload_is_removed_when_hash_verification_fails() {
+    async fn hash_verification_failure_prevents_target_publication() {
         let dir = temp_dir();
         let source = dir.join("pieces.bin");
         let dest = dir.join("incoming");
@@ -1459,7 +1459,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            format!("{error:#}").contains("installed delivered file failed verification"),
+            format!("{error:#}").contains("delivered file failed verification"),
             "unexpected error: {error:#}"
         );
         assert!(!delivered.exists());
