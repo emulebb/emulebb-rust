@@ -1701,6 +1701,16 @@ impl super::MetadataStore {
             target_path != staging_path,
             "delivery target and staging paths must differ"
         );
+        ensure!(
+            target_path.parent().is_some() && target_path.parent() == staging_path.parent(),
+            "delivery target and staging paths must share one parent directory"
+        );
+        ensure!(
+            staging_path.file_name().is_some_and(|name| {
+                name == std::ffi::OsStr::new(&format!(".emulebb-delivery-{attempt_id}.tmp"))
+            }),
+            "delivery staging path does not match attempt {attempt_id}"
+        );
 
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;

@@ -7,6 +7,7 @@ use std::{fs, path::Path, sync::Arc, time::Duration};
 
 use emulebb_kad_proto::Ed2kHash;
 use md4::{Digest, Md4};
+use uuid::Uuid;
 
 use super::super::{
     ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kTransferRuntime, new_transfer_job,
@@ -111,6 +112,81 @@ async fn materialize_completed_payload_isolated_from_piece_store() {
         verified_payload,
         "editing the delivered file must not mutate verified upload bytes"
     );
+}
+
+#[tokio::test]
+async fn staged_attempt_is_installed_and_committed_after_interruption() {
+    let root = unique_test_dir("ed2k-deliver-recover-staged");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Recovered.Staged.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Recovered.Staged.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    assert!(
+        runtime
+            .metadata
+            .mark_transfer_delivery_attempt_staged(&hash, attempt_id)
+            .unwrap()
+    );
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target_path.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    assert!(!staging_path.exists());
+    assert!(
+        runtime
+            .metadata
+            .transfer_delivery_attempt_by_hash(&hash)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn prepared_attempt_reclaims_only_its_exact_staging_path() {
+    let root = unique_test_dir("ed2k-deliver-recover-prepared");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Prepared.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Prepared.mkv");
+    fs::write(&target_path, &payload).unwrap();
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, b"partial").unwrap();
+    let legacy_temp = incoming.join(".Prepared.mkv.ed2k-delivering-legacy");
+    fs::write(&legacy_temp, b"unproven legacy artifact").unwrap();
+
+    let delivered = incoming.join("Prepared (1).mkv");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(delivered.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    assert_eq!(fs::read(&delivered).unwrap(), payload);
+    assert!(!staging_path.exists());
+    assert_eq!(fs::read(&legacy_temp).unwrap(), b"unproven legacy artifact");
 }
 
 #[tokio::test]

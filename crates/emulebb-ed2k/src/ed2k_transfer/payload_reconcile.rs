@@ -12,10 +12,7 @@ use emulebb_metadata::NativeFileFingerprint;
 
 use crate::long_path::long_path;
 
-use super::deliver::{
-    DELIVERY_PENDING_FILE_NAME, DeliveredOutputIdentity, classify_delivered_output,
-    read_pending_delivery_path,
-};
+use super::deliver::{DeliveredOutputIdentity, classify_delivered_output};
 use super::manifest::{expected_piece_length, rebuild_verified_ranges};
 use super::{
     Ed2kDeliveryState, Ed2kDownloadStorageReconciliation, Ed2kResumeManifest, Ed2kTransferRuntime,
@@ -26,7 +23,6 @@ use super::{
 struct VerifiedRecoveryPayload {
     path: PathBuf,
     fingerprint: Option<NativeFileFingerprint>,
-    adopt_delivery: bool,
 }
 
 #[derive(Debug)]
@@ -55,6 +51,7 @@ impl Ed2kTransferRuntime {
         for candidate in candidates {
             let file_hash = candidate.file_hash;
             let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
+            self.recover_delivery_attempt_unlocked(&file_hash).await?;
             let snapshot = {
                 let _manifest_guard = self.lock_manifest(&file_hash).await;
                 let Some(manifest) = self.load_manifest_optional_unlocked(&file_hash).await? else {
@@ -159,18 +156,12 @@ impl Ed2kTransferRuntime {
                 )
                 .await?;
                 if let DeliveredOutputIdentity::Matching(payload_fingerprint) = identity {
-                    persist_verified_canonical_state(
-                        self,
-                        &snapshot,
-                        &transfer_dir,
-                        payload_fingerprint,
-                    )
-                    .await?;
+                    persist_verified_canonical_state(self, &snapshot, payload_fingerprint).await?;
                     continue;
                 }
             }
 
-            if let Some(recovery) = verified_recovery_payload(&snapshot, &transfer_dir).await? {
+            if let Some(recovery) = verified_recovery_payload(&snapshot).await? {
                 let staged = stage_verified_payload(
                     &recovery.path,
                     &transfer_dir,
@@ -199,10 +190,6 @@ impl Ed2kTransferRuntime {
                         &payload_path,
                         staged.fingerprint.as_ref(),
                     );
-                    if recovery.adopt_delivery {
-                        manifest.delivery_state = Ed2kDeliveryState::Delivered;
-                        manifest.delivered_path = Some(recovery.path.clone());
-                    }
                     if manifest.source_fingerprint != recovery.fingerprint {
                         manifest.source_fingerprint = recovery.fingerprint.clone();
                     }
@@ -222,9 +209,6 @@ impl Ed2kTransferRuntime {
                     );
                 }
                 restore_result?;
-                if recovery.adopt_delivery {
-                    remove_file_if_exists(&transfer_dir.join(DELIVERY_PENDING_FILE_NAME)).await?;
-                }
                 reconciliation.restored_payloads =
                     reconciliation.restored_payloads.saturating_add(1);
                 continue;
@@ -259,9 +243,8 @@ impl Ed2kTransferRuntime {
 
 async fn verified_recovery_payload(
     manifest: &Ed2kResumeManifest,
-    transfer_dir: &Path,
 ) -> Result<Option<VerifiedRecoveryPayload>> {
-    let (path, recorded_fingerprint, adopt_delivery) = match manifest.delivery_state {
+    let (path, recorded_fingerprint) = match manifest.delivery_state {
         Ed2kDeliveryState::NotApplicable => return Ok(None),
         Ed2kDeliveryState::Delivered => (
             manifest.delivered_path.clone().with_context(|| {
@@ -271,15 +254,8 @@ async fn verified_recovery_payload(
                 )
             })?,
             manifest.source_fingerprint.clone(),
-            false,
         ),
-        Ed2kDeliveryState::Pending => {
-            let pending_path = transfer_dir.join(DELIVERY_PENDING_FILE_NAME);
-            let Some(path) = read_pending_delivery_path(&pending_path).await? else {
-                return Ok(None);
-            };
-            (path, None, true)
-        }
+        Ed2kDeliveryState::Pending => return Ok(None),
     };
     let expected_hash = Ed2kHash::from_str(&manifest.file_hash)
         .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
@@ -292,11 +268,9 @@ async fn verified_recovery_payload(
     )
     .await?
     {
-        DeliveredOutputIdentity::Matching(fingerprint) => Ok(Some(VerifiedRecoveryPayload {
-            path,
-            fingerprint,
-            adopt_delivery,
-        })),
+        DeliveredOutputIdentity::Matching(fingerprint) => {
+            Ok(Some(VerifiedRecoveryPayload { path, fingerprint }))
+        }
         DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign => Ok(None),
     }
 }
@@ -304,14 +278,8 @@ async fn verified_recovery_payload(
 async fn persist_verified_canonical_state(
     runtime: &Ed2kTransferRuntime,
     snapshot: &Ed2kResumeManifest,
-    transfer_dir: &Path,
     payload_fingerprint: Option<NativeFileFingerprint>,
 ) -> Result<()> {
-    let recovery = if snapshot.delivery_state == Ed2kDeliveryState::Pending {
-        verified_recovery_payload(snapshot, transfer_dir).await?
-    } else {
-        None
-    };
     {
         let _manifest_guard = runtime.lock_manifest(&snapshot.file_hash).await;
         let mut manifest = runtime.load_manifest_unlocked(&snapshot.file_hash).await?;
@@ -321,21 +289,9 @@ async fn persist_verified_canonical_state(
             snapshot.file_hash
         );
         manifest.payload_fingerprint = payload_fingerprint;
-        if let Some(recovery) = recovery.as_ref() {
-            anyhow::ensure!(
-                recovery.adopt_delivery,
-                "pending ED2K delivery recovery did not require adoption"
-            );
-            manifest.delivery_state = Ed2kDeliveryState::Delivered;
-            manifest.delivered_path = Some(recovery.path.clone());
-            manifest.source_fingerprint = recovery.fingerprint.clone();
-        }
         if manifest != *snapshot {
             runtime.store_manifest_unlocked(&manifest).await?;
         }
-    }
-    if recovery.is_some() {
-        remove_file_if_exists(&transfer_dir.join(DELIVERY_PENDING_FILE_NAME)).await?;
     }
     Ok(())
 }
@@ -712,11 +668,12 @@ mod tests {
 
     use emulebb_kad_proto::Ed2kHash;
     use md4::{Digest, Md4};
+    use uuid::Uuid;
 
     use super::*;
     use crate::ed2k_transfer::{
         Ed2kDeliveryOutcome, Ed2kPieceState, Ed2kTransferJob,
-        deliver::persist_pending_delivery_path,
+        deliver::{DELIVERY_PENDING_FILE_NAME, persist_pending_delivery_path},
     };
     use crate::paths::unique_test_dir;
 
@@ -996,7 +953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_delivery_intent_restores_and_adopts_completed_payload() {
+    async fn legacy_pending_delivery_intent_is_preserved_without_adoption() {
         let root = unique_test_dir("ed2k-restore-pending-delivery");
         let incoming = root.join("incoming");
         let payload = b"pending delivery recovery authority";
@@ -1015,25 +972,25 @@ mod tests {
 
         let report = runtime.reconcile_managed_download_storage().await.unwrap();
 
-        assert_eq!(report.restored_payloads, 1);
+        assert_eq!(report.restored_payloads, 0);
+        assert_eq!(report.demoted_downloads, 1);
         let manifest = runtime.manifest(&job.file_hash).await.unwrap();
-        assert!(manifest.completed);
-        assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
-        assert_eq!(
-            manifest.delivered_path.as_deref(),
-            Some(delivered_path.as_path())
-        );
-        assert!(manifest.source_fingerprint.is_some());
-        assert!(manifest.payload_fingerprint.is_some());
-        assert!(!pending_path.exists());
-        assert_eq!(
-            fs::read(runtime.payload_path(&job.file_hash)).unwrap(),
-            payload
+        assert!(!manifest.completed);
+        assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
+        assert!(manifest.delivered_path.is_none());
+        assert!(manifest.source_fingerprint.is_none());
+        assert!(manifest.payload_fingerprint.is_none());
+        assert!(pending_path.exists());
+        assert_eq!(fs::read(&delivered_path).unwrap(), payload);
+        assert!(
+            fs::read(runtime.payload_path(&job.file_hash))
+                .unwrap()
+                .is_empty()
         );
     }
 
     #[tokio::test]
-    async fn intact_completed_payload_adopts_pending_delivery_for_hidden_row() {
+    async fn staged_delivery_attempt_restores_payload_and_commits_hidden_row() {
         let root = unique_test_dir("ed2k-adopt-pending-delivery-hidden-row");
         let incoming = root.join("incoming");
         let payload = b"hidden completed delivery recovery";
@@ -1042,12 +999,23 @@ mod tests {
         fs::create_dir_all(&incoming).unwrap();
         let delivered_path = incoming.join("hidden.bin");
         fs::write(&delivered_path, payload).unwrap();
-        let pending_path = runtime
-            .transfer_dir(&job.file_hash)
-            .join(DELIVERY_PENDING_FILE_NAME);
-        persist_pending_delivery_path(&pending_path, &delivered_path)
-            .await
+        let attempt_id = Uuid::new_v4();
+        let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+        runtime
+            .metadata
+            .begin_transfer_delivery_attempt(
+                &job.file_hash,
+                attempt_id,
+                &delivered_path,
+                &staging_path,
+            )
             .unwrap();
+        assert!(
+            runtime
+                .metadata
+                .mark_transfer_delivery_attempt_staged(&job.file_hash, attempt_id)
+                .unwrap()
+        );
         {
             let _guard = runtime.lock_manifest(&job.file_hash).await;
             let mut manifest = runtime
@@ -1057,10 +1025,11 @@ mod tests {
             manifest.transfer_row_removed = true;
             runtime.store_manifest_unlocked(&manifest).await.unwrap();
         }
+        fs::remove_file(runtime.payload_path(&job.file_hash)).unwrap();
 
         let report = runtime.reconcile_managed_download_storage().await.unwrap();
 
-        assert_eq!(report.restored_payloads, 0);
+        assert_eq!(report.restored_payloads, 1);
         let manifest = runtime.manifest(&job.file_hash).await.unwrap();
         assert!(manifest.completed);
         assert!(manifest.transfer_row_removed);
@@ -1071,7 +1040,13 @@ mod tests {
         );
         assert!(manifest.source_fingerprint.is_some());
         assert!(manifest.payload_fingerprint.is_some());
-        assert!(!pending_path.exists());
+        assert!(
+            runtime
+                .metadata
+                .transfer_delivery_attempt_by_hash(&job.file_hash)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             fs::read(runtime.payload_path(&job.file_hash)).unwrap(),
             payload

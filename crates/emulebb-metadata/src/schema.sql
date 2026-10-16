@@ -308,6 +308,13 @@ CREATE TABLE delivery_attempts (
 
 CREATE INDEX idx_delivery_attempts_phase ON delivery_attempts(phase, transfer_id);
 
+CREATE TRIGGER clear_delivery_attempt_after_delivered
+AFTER UPDATE OF delivery_state ON transfers
+WHEN NEW.delivery_state = 'delivered'
+BEGIN
+    DELETE FROM delivery_attempts WHERE transfer_id = NEW.id;
+END;
+
 CREATE TABLE shared_file_sources (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
