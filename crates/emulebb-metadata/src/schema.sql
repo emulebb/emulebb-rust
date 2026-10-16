@@ -317,6 +317,26 @@ CREATE TABLE delivery_attempts (
 
 CREATE INDEX idx_delivery_attempts_phase ON delivery_attempts(phase, transfer_id);
 
+CREATE TABLE delivery_output_tombstones (
+    transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
+    tombstone_id TEXT NOT NULL UNIQUE CHECK(length(trim(tombstone_id)) > 0),
+    phase TEXT NOT NULL CHECK(phase IN ('prepared', 'moved')),
+    original_path_id INTEGER NOT NULL REFERENCES local_paths(id),
+    tombstone_path_id INTEGER NOT NULL REFERENCES local_paths(id),
+    source_fingerprint BLOB NOT NULL,
+    moved_fingerprint BLOB,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    CHECK(original_path_id != tombstone_path_id),
+    CHECK(
+        (phase = 'prepared' AND moved_fingerprint IS NULL)
+        OR (phase = 'moved' AND moved_fingerprint IS NOT NULL)
+    )
+);
+
+CREATE INDEX idx_delivery_output_tombstones_phase
+ON delivery_output_tombstones(phase, transfer_id);
+
 CREATE TRIGGER clear_delivery_attempt_after_delivered
 AFTER UPDATE OF delivery_state ON transfers
 WHEN NEW.delivery_state = 'delivered'
