@@ -28,7 +28,7 @@ use super::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeletionCleanupPolicy {
     RetryLater,
-    FailStartup,
+    PropagateFailure,
 }
 
 impl Ed2kTransferRuntime {
@@ -691,18 +691,22 @@ impl Ed2kTransferRuntime {
             .await
     }
 
-    /// Strictly resume every durable destructive-deletion intent before startup
-    /// publishes transfer, catalog, REST, or network state.
+    /// Strictly resume every durable destructive-deletion intent. Startup uses
+    /// this as a pre-exposure barrier; runtime maintenance catches failures and
+    /// retries them without making the hidden transfer visible again.
     pub async fn recover_pending_transfer_deletions(&self) -> Result<usize> {
         let hashes = self.pending_transfer_deletion_hashes().await?;
         let recovered = hashes.len();
         for file_hash in hashes {
             anyhow::ensure!(
-                self.delete_transfer_files_inner(&file_hash, DeletionCleanupPolicy::FailStartup)
-                    .await
-                    .with_context(|| {
-                        format!("failed to recover pending ED2K transfer deletion {file_hash}")
-                    })?,
+                self.delete_transfer_files_inner(
+                    &file_hash,
+                    DeletionCleanupPolicy::PropagateFailure,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to recover pending ED2K transfer deletion {file_hash}")
+                })?,
                 "pending ED2K transfer deletion {file_hash} disappeared before recovery"
             );
         }
@@ -762,7 +766,7 @@ impl Ed2kTransferRuntime {
             .complete_transfer_deletion(&file_hash, &manifest, attempted_output, &transfer_dir)
             .await
         {
-            if cleanup_policy == DeletionCleanupPolicy::FailStartup {
+            if cleanup_policy == DeletionCleanupPolicy::PropagateFailure {
                 return Err(error);
             }
             tracing::warn!(
