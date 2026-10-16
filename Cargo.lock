@@ -634,6 +634,7 @@ dependencies = [
  "hex",
  "if-addrs",
  "ipconfig",
+ "libc",
  "md4",
  "md5",
  "num-bigint",

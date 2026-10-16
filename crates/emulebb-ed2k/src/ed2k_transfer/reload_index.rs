@@ -29,7 +29,7 @@ impl Ed2kTransferRuntime {
         (
             normalized.clone(),
             metadata.len(),
-            super::ingest::native_file_fingerprint(&normalized, metadata),
+            super::ingest::native_file_fingerprint(&normalized),
         )
     }
 
@@ -153,7 +153,7 @@ impl Ed2kTransferRuntime {
         let normalized = crate::long_path::long_path(source_path);
         let metadata = std::fs::metadata(&normalized).ok()?;
         let size = metadata.len();
-        let fingerprint = super::ingest::native_file_fingerprint(&normalized, &metadata);
+        let fingerprint = super::ingest::native_file_fingerprint(&normalized);
         Some((normalized, size, fingerprint))
     }
 }

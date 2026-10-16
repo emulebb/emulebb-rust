@@ -55,17 +55,18 @@ impl Ed2kTransferRuntime {
                 )
             })
             .await??;
-            let hydrated = entries.len();
-            let has_more = hydrated == limit;
+            let page_len = entries.len();
+            let has_more = page_len == limit;
             let cursor = has_more
                 .then(|| entries.last().map(|entry| entry.file_hash.clone()))
                 .flatten();
-            {
-                let mut catalog = self.shared_catalog.write().await;
-                for entry in entries {
-                    if let Ok(hash) = Ed2kHash::from_str(&entry.file_hash) {
-                        catalog.upsert_verified(hash, Some(entry));
-                    }
+            let mut hydrated = 0usize;
+            for entry in entries {
+                if self
+                    .insert_hydrated_completed_entry_if_current(entry)
+                    .await?
+                {
+                    hydrated = hydrated.saturating_add(1);
                 }
             }
             *self
@@ -132,17 +133,20 @@ impl Ed2kTransferRuntime {
 
                 let page_len = entries.len();
                 let next_after = entries.last().map(|entry| entry.file_hash.clone());
-                {
-                    let mut catalog = self.shared_catalog.write().await;
-                    for entry in entries {
-                        if let Ok(hash) = Ed2kHash::from_str(&entry.file_hash) {
-                            catalog.upsert_verified(hash, Some(entry));
-                        }
+                let mut inserted = 0usize;
+                for entry in entries {
+                    if self
+                        .insert_hydrated_completed_entry_if_current(entry)
+                        .await?
+                    {
+                        inserted = inserted.saturating_add(1);
                     }
                 }
-                self.note_shared_catalog_entries_changed();
-                self.notify_shared_publish_demand_changed();
-                hydrated = hydrated.saturating_add(page_len);
+                if inserted > 0 {
+                    self.note_shared_catalog_entries_changed();
+                    self.notify_shared_publish_demand_changed();
+                    hydrated = hydrated.saturating_add(inserted);
+                }
                 after_hash = next_after;
                 *self
                     .shared_catalog_hydration_cursor
@@ -169,6 +173,62 @@ impl Ed2kTransferRuntime {
         result
     }
 
+    pub(super) async fn insert_hydrated_completed_entry_if_current(
+        &self,
+        entry: Ed2kSharedEntry,
+    ) -> anyhow::Result<bool> {
+        let Ok(file_hash) = Ed2kHash::from_str(&entry.file_hash) else {
+            return Ok(false);
+        };
+        let _guard = self.lock_manifest(&entry.file_hash).await;
+        let Some(manifest) = self
+            .load_manifest_optional_unlocked(&entry.file_hash)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !hydrated_entry_matches_manifest(&entry, &manifest) {
+            return Ok(false);
+        }
+        let mut catalog = self.shared_catalog.write().await;
+        if catalog.entry_by_hash(&file_hash).is_some() {
+            return Ok(false);
+        }
+        catalog.upsert_verified(file_hash, Some(entry));
+        Ok(true)
+    }
+
+    pub(super) async fn insert_hydrated_incomplete_entry_if_current(
+        &self,
+        snapshot: &Ed2kResumeManifest,
+    ) -> anyhow::Result<bool> {
+        let Ok(file_hash) = Ed2kHash::from_str(&snapshot.file_hash) else {
+            return Ok(false);
+        };
+        let _guard = self.lock_manifest(&snapshot.file_hash).await;
+        let Some(manifest) = self
+            .load_manifest_optional_unlocked(&snapshot.file_hash)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if manifest.completed
+            || manifest.final_rehash_pending
+            || manifest.verified_ranges.is_empty()
+        {
+            return Ok(false);
+        }
+        let entry = Ed2kSharedEntry::from_manifest(&manifest);
+        let mut catalog = self.shared_catalog.write().await;
+        if catalog.entry_by_hash(&file_hash).is_some() {
+            return Ok(false);
+        }
+        catalog.upsert_verified(file_hash, Some(entry));
+        drop(catalog);
+        self.note_shared_catalog_entries_changed();
+        Ok(true)
+    }
+
     /// Replace compatibility-hint catalog entries while preserving verified
     /// local files loaded from manifests.
     pub async fn replace_catalog_hints(&self, hashes: &[PopularHash]) {
@@ -192,8 +252,9 @@ impl Ed2kTransferRuntime {
         };
         // Build the replacement entry (if any) before taking the write lock so the
         // lock hold covers only the in-place upsert.
-        let mut new_entry = (manifest.completed || !manifest.verified_ranges.is_empty())
-            .then(|| Ed2kSharedEntry::from_manifest(manifest));
+        let mut new_entry = (!manifest.final_rehash_pending
+            && (manifest.completed || !manifest.verified_ranges.is_empty()))
+        .then(|| Ed2kSharedEntry::from_manifest(manifest));
         if let Some(entry) = new_entry.as_mut() {
             let cached = self
                 .metadata
@@ -257,6 +318,20 @@ impl Ed2kTransferRuntime {
             .fetch_add(1, Ordering::AcqRel);
         self.servable_shared_hash_cache.lock().unwrap().hashes = None;
     }
+}
+
+fn hydrated_entry_matches_manifest(entry: &Ed2kSharedEntry, manifest: &Ed2kResumeManifest) -> bool {
+    manifest.completed
+        && !manifest.final_rehash_pending
+        && entry.verified_complete
+        && entry.file_hash == manifest.file_hash
+        && entry.display_name == manifest.display_name
+        && entry.file_size == manifest.file_size
+        && entry.aich_root == manifest.aich_root
+        && entry.upload_priority == manifest.upload_priority
+        && entry.auto_upload_priority == manifest.auto_upload_priority
+        && entry.comment == manifest.comment
+        && entry.rating == manifest.rating
 }
 
 fn dedupe_entries(entries: Vec<Ed2kSharedEntry>) -> Vec<Ed2kSharedEntry> {

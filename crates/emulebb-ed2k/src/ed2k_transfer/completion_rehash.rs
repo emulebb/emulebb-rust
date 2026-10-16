@@ -7,7 +7,7 @@
 //! nor a restart can skip the final MD4 pass.
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
     str::FromStr,
@@ -81,10 +81,23 @@ impl Ed2kTransferRuntime {
         let payload_path = self.payload_path(&file_hash);
         let expected_size = snapshot.file_size;
         self.invalidate_payload_handle(&file_hash);
-        let computation =
-            tokio::task::spawn_blocking(move || compute_final_rehash(&payload_path, expected_size))
+        let payload_missing = match tokio::fs::symlink_metadata(&payload_path).await {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect ED2K payload {}", payload_path.display())
+                });
+            }
+        };
+        let computation = if payload_missing {
+            failed_content_computation(expected_size, 0)
+        } else {
+            let rehash_path = payload_path.clone();
+            tokio::task::spawn_blocking(move || compute_final_rehash(&rehash_path, expected_size))
                 .await
-                .context("ED2K partial recheck task failed")??;
+                .context("ED2K partial recheck task failed")??
+        };
         let damaged_parts = damaged_verified_part_indexes(&snapshot, &computation)?;
 
         let _guard = self.lock_manifest(&file_hash).await;
@@ -131,7 +144,9 @@ impl Ed2kTransferRuntime {
     }
 
     async fn final_rehash(&self, file_hash: &str, force: bool) -> Result<bool> {
-        let (payload_path, expected_size) = {
+        let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
+        let transfer_dir = self.transfer_dir(file_hash);
+        let (payload_path, expected_size, transfer_dir_id) = {
             let _guard = self.lock_manifest(file_hash).await;
             let mut manifest = self.load_manifest_unlocked(file_hash).await?;
             if manifest.source_path.is_some() {
@@ -149,7 +164,38 @@ impl Ed2kTransferRuntime {
             manifest.payload_fingerprint = None;
             self.invalidate_payload_handle(file_hash);
             self.store_manifest_unlocked(&manifest).await?;
-            (self.payload_path(file_hash), manifest.file_size)
+            self.remove_verified_catalog_entry(file_hash).await;
+            let transfer_dir_id =
+                super::payload_reconcile::existing_transfer_directory_identity(&transfer_dir)
+                    .await?;
+            let payload_path = self.payload_path(file_hash);
+            match tokio::fs::symlink_metadata(&payload_path).await {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    super::payload_reconcile::ensure_transfer_directory_identity(
+                        &transfer_dir,
+                        &transfer_dir_id,
+                    )
+                    .await?;
+                    super::payload_reconcile::create_empty_payload(&payload_path).await?;
+                    demote_manifest_after_payload_reset(&mut manifest);
+                    self.store_manifest_unlocked(&manifest).await?;
+                    self.upsert_verified_catalog_entry(&manifest).await;
+                    tracing::warn!(
+                        event = "missing_payload_reset",
+                        file_hash,
+                        path = %payload_path.display(),
+                        "reset missing ED2K payload before reopening all pieces"
+                    );
+                    return Ok(false);
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to inspect ED2K payload {}", payload_path.display())
+                    });
+                }
+            }
+            (payload_path, manifest.file_size, transfer_dir_id)
         };
 
         tracing::info!(
@@ -159,8 +205,9 @@ impl Ed2kTransferRuntime {
             "ED2K final completion rehash started"
         );
 
+        let rehash_path = payload_path.clone();
         let computation =
-            tokio::task::spawn_blocking(move || compute_final_rehash(&payload_path, expected_size))
+            tokio::task::spawn_blocking(move || compute_final_rehash(&rehash_path, expected_size))
                 .await
                 .context("ED2K final completion rehash task failed")??;
 
@@ -196,6 +243,19 @@ impl Ed2kTransferRuntime {
             return Ok(true);
         }
 
+        let mut payload_reset = computation.actual_len == 0 && manifest.file_size > 0;
+        if computation.actual_len > manifest.file_size {
+            super::payload_reconcile::ensure_transfer_directory_identity(
+                &transfer_dir,
+                &transfer_dir_id,
+            )
+            .await?;
+            super::payload_reconcile::quarantine_payload_if_present(&payload_path).await?;
+            super::payload_reconcile::create_empty_payload(&payload_path).await?;
+            damaged_parts.clear();
+            payload_reset = true;
+        }
+
         // A validated multi-part hashset reconstructs the expected file hash.
         // If all computed parts match it but the composite does not, the local
         // state is internally inconsistent; fail closed instead of guessing.
@@ -207,7 +267,7 @@ impl Ed2kTransferRuntime {
                 piece.state = Ed2kTransferState::Missing;
                 piece.bytes_written = 0;
                 piece.block_bitmap = None;
-                piece.ich_corrupted = true;
+                piece.ich_corrupted = !payload_reset;
             }
         }
         manifest.completed = false;
@@ -286,47 +346,60 @@ fn decode_md4(hash: &str) -> Result<[u8; 16]> {
         .map_err(|_| anyhow::anyhow!("invalid MD4 hash length {len}"))
 }
 
-fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashComputation> {
-    let mut actual_len = path.metadata().map_or(0, |metadata| metadata.len());
-    if actual_len > expected_size {
-        let file = OpenOptions::new()
-            .write(true)
-            .open(path)
-            .with_context(|| format!("failed to open oversized ED2K payload {}", path.display()))?;
-        file.set_len(expected_size).with_context(|| {
-            format!(
-                "failed to truncate oversized ED2K payload {} from {actual_len} to {expected_size}",
-                path.display()
-            )
-        })?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync truncated ED2K payload {}", path.display()))?;
-        tracing::warn!(
-            event = "oversized_payload_truncated",
-            path = %path.display(),
-            previous_size = actual_len,
-            expected_size,
-            "truncated oversized ED2K payload before final rehash"
-        );
-        actual_len = expected_size;
-    }
+fn failed_content_computation(expected_size: u64, actual_len: u64) -> FinalRehashComputation {
     let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
-    let mut part_hashes = Vec::with_capacity(usize::try_from(part_count).unwrap_or(0));
-    let pre_hash_fingerprint = path
+    FinalRehashComputation {
+        actual_len,
+        file_hash: None,
+        part_hashes: vec![None; usize::try_from(part_count).unwrap_or(0)],
+        payload_fingerprint: None,
+    }
+}
+
+fn demote_manifest_after_payload_reset(manifest: &mut Ed2kResumeManifest) {
+    for piece in &mut manifest.pieces {
+        piece.state = Ed2kTransferState::Missing;
+        piece.bytes_written = 0;
+        piece.block_bitmap = None;
+        piece.ich_corrupted = false;
+    }
+    manifest.completed = false;
+    manifest.final_rehash_pending = false;
+    manifest.payload_fingerprint = None;
+    rebuild_verified_ranges(manifest);
+}
+
+fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashComputation> {
+    let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
+    let path_metadata = path
         .symlink_metadata()
-        .ok()
-        .filter(|metadata| metadata.file_type().is_file() && metadata.len() == expected_size)
-        .and_then(|metadata| super::ingest::native_file_fingerprint(path, &metadata));
-    let Ok(mut file) = File::open(path) else {
-        part_hashes.resize(usize::try_from(part_count).unwrap_or(0), None);
-        return Ok(FinalRehashComputation {
-            actual_len,
-            file_hash: None,
-            part_hashes,
-            payload_fingerprint: None,
-        });
-    };
-    let _ = file.seek(SeekFrom::Start(0));
+        .with_context(|| format!("failed to inspect ED2K payload {}", path.display()))?;
+    anyhow::ensure!(
+        path_metadata.file_type().is_file(),
+        "ED2K payload {} is not a regular file",
+        path.display()
+    );
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open ED2K payload {}", path.display()))?;
+    let pre_hash_metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect opened ED2K payload {}", path.display()))?;
+    let pre_hash_fingerprint =
+        super::ingest::native_file_fingerprint_from_handle(&file, &pre_hash_metadata)
+            .with_context(|| {
+                format!("failed to identify opened ED2K payload {}", path.display())
+            })?;
+    let opened_path_fingerprint = super::ingest::native_file_fingerprint(path)
+        .with_context(|| format!("failed to identify ED2K payload path {}", path.display()))?;
+    anyhow::ensure!(
+        pre_hash_fingerprint == opened_path_fingerprint,
+        "ED2K payload {} changed identity while opening for final rehash",
+        path.display()
+    );
+
+    let mut part_hashes = Vec::with_capacity(usize::try_from(part_count).unwrap_or(0));
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek ED2K payload {}", path.display()))?;
     let mut remaining = expected_size;
     for _ in 0..part_count {
         let part_len = remaining.min(ED2K_PART_SIZE);
@@ -336,9 +409,17 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
         let mut readable = true;
         while part_remaining > 0 {
             let chunk_len = usize::try_from(part_remaining.min(buffer.len() as u64)).unwrap_or(0);
-            if file.read_exact(&mut buffer[..chunk_len]).is_err() {
-                readable = false;
-                break;
+            match file.read_exact(&mut buffer[..chunk_len]) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    readable = false;
+                    break;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to read ED2K payload {}", path.display())
+                    });
+                }
             }
             hasher.update(&buffer[..chunk_len]);
             part_remaining -= chunk_len as u64;
@@ -351,7 +432,7 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
         }
     }
 
-    let file_hash = if part_hashes.iter().any(Option::is_none) {
+    let computed_file_hash = if part_hashes.iter().any(Option::is_none) {
         None
     } else if expected_size == 0 {
         Some(Md4::new().finalize().into())
@@ -368,19 +449,46 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
         }
         Some(hasher.finalize().into())
     };
-    let post_hash_fingerprint = path
+    let post_hash_metadata = file.metadata().with_context(|| {
+        format!(
+            "failed to re-inspect opened ED2K payload {}",
+            path.display()
+        )
+    })?;
+    let post_hash_fingerprint =
+        super::ingest::native_file_fingerprint_from_handle(&file, &post_hash_metadata)
+            .with_context(|| {
+                format!(
+                    "failed to re-identify opened ED2K payload {}",
+                    path.display()
+                )
+            })?;
+    let current_path_metadata = path
         .symlink_metadata()
-        .ok()
-        .filter(|metadata| metadata.file_type().is_file() && metadata.len() == expected_size)
-        .and_then(|metadata| super::ingest::native_file_fingerprint(path, &metadata));
+        .with_context(|| format!("failed to re-inspect ED2K payload {}", path.display()))?;
+    anyhow::ensure!(
+        current_path_metadata.file_type().is_file(),
+        "ED2K payload {} changed filesystem type during final rehash",
+        path.display()
+    );
+    let current_path_fingerprint = super::ingest::native_file_fingerprint(path)
+        .with_context(|| format!("failed to re-identify ED2K payload path {}", path.display()))?;
+    anyhow::ensure!(
+        pre_hash_fingerprint == post_hash_fingerprint,
+        "ED2K payload {} changed while final rehash was running",
+        path.display()
+    );
+    anyhow::ensure!(
+        post_hash_fingerprint == current_path_fingerprint,
+        "ED2K payload {} changed path identity during final rehash",
+        path.display()
+    );
     let payload_fingerprint = pre_hash_fingerprint
-        .as_ref()
-        .zip(post_hash_fingerprint.as_ref())
-        .filter(|(before, after)| before.safely_matches(after))
-        .map(|(_, after)| after.clone());
+        .safely_matches(&post_hash_fingerprint)
+        .then_some(post_hash_fingerprint);
     Ok(FinalRehashComputation {
-        actual_len,
-        file_hash,
+        actual_len: post_hash_metadata.len(),
+        file_hash: computed_file_hash,
         part_hashes,
         payload_fingerprint,
     })
