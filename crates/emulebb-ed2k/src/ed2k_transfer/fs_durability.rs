@@ -28,6 +28,13 @@ pub(super) async fn move_file_no_replace(
     Ok(outcome)
 }
 
+pub(super) async fn sync_file_for_publish(file: std::fs::File) -> Result<()> {
+    tokio::task::spawn_blocking(move || sync_file_for_publish_blocking(&file))
+        .await
+        .context("file durability task failed")??;
+    Ok(())
+}
+
 pub(super) async fn sync_parent_directory(path: &Path) -> Result<()> {
     let mut parent = path
         .parent()
@@ -78,6 +85,23 @@ fn sync_directory(path: &Path) -> io::Result<()> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(long_path(path))?
         .sync_all()
+}
+
+#[cfg(target_os = "macos")]
+fn sync_file_for_publish_blocking(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    file.sync_all()?;
+    // SAFETY: the descriptor belongs to `file` and remains valid for the call.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sync_file_for_publish_blocking(file: &std::fs::File) -> io::Result<()> {
+    file.sync_all()
 }
 
 #[cfg(target_os = "linux")]

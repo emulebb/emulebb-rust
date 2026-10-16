@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use super::super::ingest::native_file_fingerprint;
 use super::super::{
-    ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kTransferRuntime, new_transfer_job,
+    ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryOwnership, Ed2kDeliveryState,
+    Ed2kTransferRuntime, new_transfer_job,
 };
 use crate::long_path::long_path;
 use crate::paths::unique_test_dir;
@@ -68,6 +69,7 @@ async fn materialize_completed_payload_delivers_by_name() {
     assert!(runtime.payload_path(&hash).exists());
     // The delivered path is recorded on the manifest.
     let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::Owned);
     assert_eq!(
         manifest.delivered_path.as_deref(),
         Some(delivered.as_path())
@@ -155,6 +157,129 @@ async fn staged_attempt_is_installed_and_committed_after_interruption() {
             .unwrap()
             .is_none()
     );
+    assert_eq!(
+        runtime.manifest(&hash).await.unwrap().delivery_ownership,
+        Ed2kDeliveryOwnership::Owned
+    );
+}
+
+#[tokio::test]
+async fn staged_attempt_does_not_adopt_byte_identical_foreign_target() {
+    let root = unique_test_dir("ed2k-deliver-recover-staged-collision");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Recovered.Collision.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Recovered.Collision.mkv");
+    fs::write(&target_path, &payload).unwrap();
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+        .unwrap();
+
+    let delivered = incoming.join("Recovered.Collision (1).mkv");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(delivered.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    assert_eq!(fs::read(&delivered).unwrap(), payload);
+    assert!(!staging_path.exists());
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::Owned);
+    assert_eq!(
+        manifest.delivered_path.as_deref(),
+        Some(delivered.as_path())
+    );
+}
+
+#[tokio::test]
+async fn interrupted_publication_is_adopted_without_delete_ownership() {
+    let root = unique_test_dir("ed2k-deliver-recover-ambiguous-publish");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Recovered.Unowned.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Recovered.Unowned.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+        .unwrap();
+    fs::rename(&staging_path, &target_path).unwrap();
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target_path.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::Unowned);
+}
+
+#[tokio::test]
+async fn published_attempt_recovers_with_delete_ownership() {
+    let root = unique_test_dir("ed2k-deliver-recover-published");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Recovered.Published.mkv").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Recovered.Published.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+        .unwrap();
+    fs::rename(&staging_path, &target_path).unwrap();
+    let published_fingerprint = native_file_fingerprint(&target_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_published(&hash, attempt_id, &published_fingerprint)
+        .unwrap();
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target_path.clone())
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), payload);
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::Owned);
 }
 
 #[tokio::test]
@@ -343,6 +468,7 @@ async fn failed_redelivery_leaves_mismatched_output_pending() {
     assert_eq!(fs::read(&delivered).unwrap(), unrelated_replacement);
     let manifest = runtime.manifest(&hash).await.unwrap();
     assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
+    assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::None);
     assert!(manifest.delivered_path.is_none());
     assert!(manifest.source_fingerprint.is_none());
 }
@@ -514,7 +640,7 @@ async fn destructive_delete_resumes_a_preexisting_durable_intent() {
 }
 
 #[tokio::test]
-async fn destructive_delete_resolves_preexisting_staged_delivery_attempt() {
+async fn destructive_delete_preserves_ambiguous_staged_delivery_target() {
     let root = unique_test_dir("ed2k-deliver-delete-staged-attempt");
     let hash;
     let target_path;
@@ -549,7 +675,7 @@ async fn destructive_delete_resolves_preexisting_staged_delivery_attempt() {
             .unwrap(),
         1
     );
-    assert!(!target_path.exists());
+    assert!(target_path.exists());
     assert!(!restarted.transfer_dir(&hash).exists());
     assert!(
         restarted
