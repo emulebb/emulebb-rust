@@ -38,7 +38,7 @@ use crate::long_path::long_path;
 
 use super::{ED2K_PART_SIZE, Ed2kTransferRuntime};
 
-const DELIVERY_PENDING_FILE_NAME: &str = "delivery.pending";
+pub(super) const DELIVERY_PENDING_FILE_NAME: &str = "delivery.pending";
 static DELIVERY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Outcome of a delivery attempt for one completed transfer.
@@ -468,7 +468,7 @@ pub(super) async fn read_pending_delivery_path(path: &Path) -> Result<Option<Pat
     ))
 }
 
-async fn persist_pending_delivery_path(path: &Path, candidate: &Path) -> Result<()> {
+pub(super) async fn persist_pending_delivery_path(path: &Path, candidate: &Path) -> Result<()> {
     let sequence = DELIVERY_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp = path.with_extension(format!("pending-{sequence}.tmp"));
     let mut file = tokio::fs::OpenOptions::new()

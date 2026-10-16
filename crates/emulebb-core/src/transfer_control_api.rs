@@ -19,13 +19,13 @@ impl EmulebbCore {
         self.ed2k_transfers.reconcile_transfer_root().await
     }
 
-    /// Demote persisted incomplete-download progress which is no longer backed
-    /// by the canonical internal payload before startup exposes transfer state.
-    pub async fn reconcile_incomplete_download_payloads(
+    /// Reconcile every managed download against canonical internal or verified
+    /// delivered payload authority before startup exposes transfer state.
+    pub async fn reconcile_managed_download_storage(
         &self,
-    ) -> Result<Ed2kIncompletePayloadReconciliation> {
+    ) -> Result<Ed2kDownloadStorageReconciliation> {
         self.ed2k_transfers
-            .reconcile_incomplete_download_payloads()
+            .reconcile_managed_download_storage()
             .await
     }
 

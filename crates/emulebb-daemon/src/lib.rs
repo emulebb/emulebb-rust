@@ -781,16 +781,19 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             "preserved unmanaged transfer-root collisions; affected hashes cannot be downloaded until repaired"
         );
     }
-    let incomplete_payload_reconciliation = core.reconcile_incomplete_download_payloads().await?;
-    if incomplete_payload_reconciliation.repaired_downloads > 0
-        || incomplete_payload_reconciliation.recreated_directories > 0
+    let download_storage_reconciliation = core.reconcile_managed_download_storage().await?;
+    if download_storage_reconciliation.restored_payloads > 0
+        || download_storage_reconciliation.demoted_downloads > 0
+        || download_storage_reconciliation.recreated_directories > 0
     {
         warn!(
-            inspected_downloads = incomplete_payload_reconciliation.inspected_downloads,
-            repaired_downloads = incomplete_payload_reconciliation.repaired_downloads,
-            reset_pieces = incomplete_payload_reconciliation.reset_pieces,
-            recreated_directories = incomplete_payload_reconciliation.recreated_directories,
-            "reconciled persisted incomplete downloads against internal payload authority"
+            inspected_downloads = download_storage_reconciliation.inspected_downloads,
+            restored_payloads = download_storage_reconciliation.restored_payloads,
+            demoted_downloads = download_storage_reconciliation.demoted_downloads,
+            quarantined_payloads = download_storage_reconciliation.quarantined_payloads,
+            reset_pieces = download_storage_reconciliation.reset_pieces,
+            recreated_directories = download_storage_reconciliation.recreated_directories,
+            "reconciled persisted downloads against canonical payload authority"
         );
     }
     let hydrated_transfers = core.hydrate_persisted_transfer_rows().await?;

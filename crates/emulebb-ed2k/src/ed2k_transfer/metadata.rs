@@ -1032,4 +1032,17 @@ impl Ed2kTransferRuntime {
             .map(manifest_from_metadata)
             .collect::<Result<_>>()
     }
+
+    pub(super) async fn managed_download_manifests_snapshot(
+        &self,
+    ) -> Result<Vec<Ed2kResumeManifest>> {
+        let metadata = self.metadata.clone();
+        let raw =
+            tokio::task::spawn_blocking(move || metadata.managed_download_transfer_manifests())
+                .await
+                .map_err(anyhow::Error::from)??;
+        raw.into_iter()
+            .map(manifest_from_metadata)
+            .collect::<Result<_>>()
+    }
 }
