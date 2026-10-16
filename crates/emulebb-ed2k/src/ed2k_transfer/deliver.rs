@@ -558,6 +558,76 @@ impl Ed2kTransferRuntime {
         manifest.source_fingerprint = target_fingerprint;
         self.store_manifest_unlocked(&manifest).await
     }
+
+    pub(super) async fn discard_delivery_attempt_for_deletion_unlocked(
+        &self,
+        file_hash: &str,
+        manifest: &super::Ed2kResumeManifest,
+    ) -> Result<()> {
+        let Some(attempt) = self.delivery_attempt(file_hash).await? else {
+            return Ok(());
+        };
+        validate_delivery_attempt_paths(&attempt)?;
+        let mut owned_target_fingerprint = None;
+        if attempt.phase == MetadataTransferDeliveryAttemptPhase::Staged {
+            let expected_hash = Ed2kHash::from_str(&manifest.file_hash)
+                .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
+                .0;
+            match classify_delivered_output(
+                &attempt.staging_path,
+                None,
+                manifest.file_size,
+                expected_hash,
+            )
+            .await?
+            {
+                DeliveredOutputIdentity::Matching(_) => {
+                    if path_exists(&attempt.target_path).await
+                        && same_regular_file_identity(&attempt.staging_path, &attempt.target_path)
+                            .await?
+                        && let DeliveredOutputIdentity::Matching(fingerprint) =
+                            classify_delivered_output(
+                                &attempt.target_path,
+                                None,
+                                manifest.file_size,
+                                expected_hash,
+                            )
+                            .await?
+                    {
+                        owned_target_fingerprint = fingerprint;
+                    }
+                }
+                DeliveredOutputIdentity::Missing => {
+                    if let DeliveredOutputIdentity::Matching(fingerprint) =
+                        classify_delivered_output(
+                            &attempt.target_path,
+                            None,
+                            manifest.file_size,
+                            expected_hash,
+                        )
+                        .await?
+                    {
+                        owned_target_fingerprint = fingerprint;
+                    }
+                }
+                DeliveredOutputIdentity::Foreign => {}
+            }
+        }
+
+        if let Some(expected_fingerprint) = owned_target_fingerprint.as_ref() {
+            remove_delivery_target_if_unchanged(&attempt.target_path, expected_fingerprint).await?;
+        } else if owned_target_fingerprint.is_none() && path_exists(&attempt.target_path).await {
+            tracing::warn!(
+                file_hash,
+                path = %attempt.target_path.display(),
+                "preserving delivery-attempt target without sufficient ownership evidence during deletion"
+            );
+        }
+        remove_if_exists(&attempt.staging_path).await?;
+        self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -783,6 +853,45 @@ async fn remove_if_exists(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
     }
+}
+
+async fn remove_delivery_target_if_unchanged(
+    path: &Path,
+    expected_fingerprint: &NativeFileFingerprint,
+) -> Result<()> {
+    let owned_path = long_path(path);
+    let display_path = path.to_path_buf();
+    let expected_fingerprint = expected_fingerprint.clone();
+    let removed = tokio::task::spawn_blocking(move || -> Result<bool> {
+        let metadata = match owned_path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_file() {
+            return Ok(false);
+        }
+        let Some(current_fingerprint) = super::ingest::native_file_fingerprint(&owned_path) else {
+            return Ok(false);
+        };
+        if !expected_fingerprint.safely_matches(&current_fingerprint) {
+            return Ok(false);
+        }
+        match std::fs::remove_file(&owned_path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error.into()),
+        }
+    })
+    .await
+    .context("delivery target cleanup task panicked")??;
+    if !removed {
+        tracing::warn!(
+            path = %display_path.display(),
+            "preserving delivery-attempt target whose native identity changed during deletion"
+        );
+    }
+    Ok(())
 }
 
 async fn delivered_file_matches(
