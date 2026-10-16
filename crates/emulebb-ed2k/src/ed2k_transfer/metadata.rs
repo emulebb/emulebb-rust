@@ -11,8 +11,8 @@ use emulebb_metadata::{
 
 use crate::long_path::long_path;
 
-use super::deliver::{DeliveredOutputIdentity, classify_delivered_output};
-use super::fs_durability::sync_parent_directory;
+use super::deliver::OwnedDeliveryOutput;
+use super::fs_durability::{NoReplaceMoveOutcome, move_path_no_replace, sync_parent_directory};
 use super::hashset::{
     decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
     validate_aich_hashset, validate_md4_hashset,
@@ -743,7 +743,8 @@ impl Ed2kTransferRuntime {
             self.persist_transfer_deletion_intent(&file_hash).await?,
             "ED2K transfer {file_hash} disappeared before deletion intent was persisted"
         );
-        self.discard_delivery_attempt_for_deletion_unlocked(&file_hash, &manifest)
+        let attempted_output = self
+            .discard_delivery_attempt_for_deletion_unlocked(&file_hash, &manifest)
             .await?;
 
         self.manifest_cache.lock().await.remove(&file_hash);
@@ -758,7 +759,7 @@ impl Ed2kTransferRuntime {
         self.note_shared_catalog_entries_changed();
 
         if let Err(error) = self
-            .complete_transfer_deletion(&file_hash, parsed_hash.0, &manifest, &transfer_dir)
+            .complete_transfer_deletion(&file_hash, &manifest, attempted_output, &transfer_dir)
             .await
         {
             if cleanup_policy == DeletionCleanupPolicy::FailStartup {
@@ -776,60 +777,31 @@ impl Ed2kTransferRuntime {
     async fn complete_transfer_deletion(
         &self,
         file_hash: &str,
-        expected_hash: [u8; 16],
         manifest: &Ed2kResumeManifest,
+        attempted_output: Option<OwnedDeliveryOutput>,
         transfer_dir: &std::path::Path,
     ) -> Result<()> {
-        if manifest.source_path.is_none()
-            && let Some(delivered_path) = manifest.delivered_path.as_deref()
+        let delivered_output = if let Some(attempted_output) = attempted_output {
+            Some(attempted_output)
+        } else if manifest.source_path.is_none()
+            && manifest.delivery_ownership == super::Ed2kDeliveryOwnership::Owned
         {
-            match classify_delivered_output(
-                delivered_path,
-                manifest.source_fingerprint.as_ref(),
-                manifest.file_size,
-                expected_hash,
-            )
-            .await?
-            {
-                DeliveredOutputIdentity::Missing => {
-                    sync_parent_directory(delivered_path).await?;
-                }
-                DeliveredOutputIdentity::Matching(_) => {
-                    match tokio::fs::remove_file(long_path(delivered_path)).await {
-                        Ok(()) => sync_parent_directory(delivered_path).await?,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(error).with_context(|| {
-                                format!(
-                                    "failed to delete delivered transfer file {}",
-                                    delivered_path.display()
-                                )
-                            });
-                        }
-                    }
-                }
-                DeliveredOutputIdentity::Foreign => {
-                    tracing::warn!(
-                        file_hash,
-                        path = %delivered_path.display(),
-                        "preserving foreign file at recorded delivered path during deletion"
-                    );
-                }
-            }
-        }
+            Some(OwnedDeliveryOutput {
+                path: manifest.delivered_path.clone().with_context(|| {
+                    format!("owned delivered transfer {file_hash} has no output path")
+                })?,
+                fingerprint: manifest.source_fingerprint.clone().with_context(|| {
+                    format!("owned delivered transfer {file_hash} has no output identity")
+                })?,
+            })
+        } else {
+            None
+        };
+        self.cleanup_delivery_output_for_deletion(file_hash, delivered_output)
+            .await?;
 
         self.invalidate_payload_handle(file_hash);
-        if tokio::fs::try_exists(&transfer_dir).await? {
-            tokio::fs::remove_dir_all(&transfer_dir)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to delete ED2K transfer directory {}",
-                        transfer_dir.display()
-                    )
-                })?;
-        }
-        sync_parent_directory(transfer_dir).await?;
+        cleanup_transfer_directory(file_hash, transfer_dir).await?;
         anyhow::ensure!(
             self.finalize_transfer_deletion_intent(file_hash).await?,
             "ED2K transfer {file_hash} lost its deletion intent before finalization"
@@ -1076,4 +1048,47 @@ impl Ed2kTransferRuntime {
             .map(manifest_from_metadata)
             .collect::<Result<_>>()
     }
+}
+
+pub(super) fn transfer_directory_tombstone_path(
+    file_hash: &str,
+    transfer_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    transfer_dir.with_file_name(format!(".emulebb-delete-transfer-{file_hash}.tmp"))
+}
+
+async fn cleanup_transfer_directory(file_hash: &str, transfer_dir: &std::path::Path) -> Result<()> {
+    let tombstone = transfer_directory_tombstone_path(file_hash, transfer_dir);
+    let transfer_exists = tokio::fs::try_exists(long_path(transfer_dir)).await?;
+    let tombstone_exists = tokio::fs::try_exists(long_path(&tombstone)).await?;
+    if transfer_exists {
+        anyhow::ensure!(
+            !tombstone_exists,
+            "transfer directory tombstone already exists at {}",
+            tombstone.display()
+        );
+        match move_path_no_replace(transfer_dir, &tombstone).await? {
+            NoReplaceMoveOutcome::Moved => {}
+            NoReplaceMoveOutcome::AlreadyExists => {
+                anyhow::bail!(
+                    "transfer directory tombstone collision at {}",
+                    tombstone.display()
+                );
+            }
+        }
+    } else {
+        sync_parent_directory(transfer_dir).await?;
+    }
+    if tokio::fs::try_exists(long_path(&tombstone)).await? {
+        tokio::fs::remove_dir_all(long_path(&tombstone))
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to delete ED2K transfer directory tombstone {}",
+                    tombstone.display()
+                )
+            })?;
+    }
+    sync_parent_directory(&tombstone).await?;
+    Ok(())
 }

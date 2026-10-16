@@ -43,7 +43,7 @@ use uuid::Uuid;
 use crate::long_path::long_path;
 
 use super::fs_durability::{
-    NoReplaceMoveOutcome, move_file_no_replace, sync_file_for_publish, sync_parent_directory,
+    NoReplaceMoveOutcome, move_path_no_replace, sync_file_for_publish, sync_parent_directory,
 };
 use super::{ED2K_PART_SIZE, Ed2kTransferRuntime};
 
@@ -234,6 +234,12 @@ impl Ed2kTransferRuntime {
 struct InstalledDelivery {
     path: PathBuf,
     fingerprint: NativeFileFingerprint,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct OwnedDeliveryOutput {
+    pub(super) path: PathBuf,
+    pub(super) fingerprint: NativeFileFingerprint,
 }
 
 struct VerifiedStagingFile {
@@ -513,7 +519,7 @@ impl Ed2kTransferRuntime {
         .context("ED2K delivery-attempt cleanup task panicked")?
     }
 
-    async fn delivery_attempt(
+    pub(super) async fn delivery_attempt(
         &self,
         file_hash: &str,
     ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
@@ -667,7 +673,7 @@ impl Ed2kTransferRuntime {
                         }
                         self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                             .await?;
-                        return Ok(());
+                        Ok(())
                     }
                 }
             }
@@ -704,7 +710,7 @@ impl Ed2kTransferRuntime {
                 }
                 self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                     .await?;
-                return Ok(());
+                Ok(())
             }
             AttemptArtifactIdentity::Foreign => {
                 tracing::warn!(
@@ -714,7 +720,7 @@ impl Ed2kTransferRuntime {
                 );
                 self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                     .await?;
-                return Ok(());
+                Ok(())
             }
         }
     }
@@ -746,16 +752,16 @@ impl Ed2kTransferRuntime {
         &self,
         file_hash: &str,
         manifest: &super::Ed2kResumeManifest,
-    ) -> Result<()> {
+    ) -> Result<Option<OwnedDeliveryOutput>> {
         let Some(attempt) = self.delivery_attempt(file_hash).await? else {
-            return Ok(());
+            return Ok(None);
         };
         validate_delivery_attempt_paths(&attempt)?;
         if attempt.phase == MetadataTransferDeliveryAttemptPhase::Prepared {
             remove_if_exists(&attempt.staging_path).await?;
             self.clear_delivery_attempt(file_hash, attempt.attempt_id)
                 .await?;
-            return Ok(());
+            return Ok(None);
         }
 
         let expected_hash = Ed2kHash::from_str(&manifest.file_hash)
@@ -805,43 +811,14 @@ impl Ed2kTransferRuntime {
                         attempt.attempt_id
                     )
                 })?;
-            match classify_attempt_artifact(
-                &attempt.target_path,
-                published_fingerprint,
-                manifest.file_size,
-                expected_hash,
-            )
-            .await?
-            {
-                AttemptArtifactIdentity::Owned => {
-                    if !remove_file_if_fingerprint_matches(
-                        &attempt.target_path,
-                        published_fingerprint,
-                    )
-                    .await?
-                    {
-                        tracing::warn!(
-                            file_hash,
-                            path = %attempt.target_path.display(),
-                            "preserving published delivery artifact whose identity changed before deletion"
-                        );
-                    }
-                }
-                AttemptArtifactIdentity::Missing => {
-                    sync_parent_directory(&attempt.target_path).await?;
-                }
-                AttemptArtifactIdentity::Foreign => {
-                    tracing::warn!(
-                        file_hash,
-                        path = %attempt.target_path.display(),
-                        "preserving published delivery artifact without matching persisted native identity"
-                    );
-                }
-            }
+            return Ok(Some(OwnedDeliveryOutput {
+                path: attempt.target_path,
+                fingerprint: published_fingerprint.clone(),
+            }));
         }
         self.clear_delivery_attempt(file_hash, attempt.attempt_id)
             .await?;
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -1085,7 +1062,7 @@ async fn stage_delivery_payload(source: &Path, staging_path: &Path) -> Result<()
 /// platform move is atomic within the shared parent directory and preserves the
 /// staged object's native identity at the final path.
 async fn install_staged_payload(staging_path: &Path, target_path: &Path) -> Result<InstallOutcome> {
-    match move_file_no_replace(staging_path, target_path)
+    match move_path_no_replace(staging_path, target_path)
         .await
         .with_context(|| {
             format!(

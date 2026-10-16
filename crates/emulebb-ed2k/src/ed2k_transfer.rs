@@ -39,6 +39,7 @@ mod completion_rehash;
 mod corruption_blackbox;
 mod credit_ledger;
 mod deliver;
+mod delivery_tombstone;
 pub(crate) mod diag_bad_peer;
 pub(crate) mod diag_sched;
 pub(crate) mod download_abuse;
