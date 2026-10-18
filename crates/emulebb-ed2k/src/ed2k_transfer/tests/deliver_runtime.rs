@@ -439,6 +439,64 @@ async fn destructive_delete_preserves_prepared_staging_occupant() {
 }
 
 #[tokio::test]
+async fn destructive_delete_hides_transfer_when_attempt_cleanup_retries() {
+    let root = unique_test_dir("ed2k-delete-staged-cleanup-retry");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Staged Cleanup Retry.mkv").await;
+    let parsed_hash = hash.parse().unwrap();
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target_path = incoming.join("Staged Cleanup Retry.mkv");
+    let attempt_id = Uuid::new_v4();
+    let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
+        .unwrap();
+    fs::write(&staging_path, &payload).unwrap();
+    let staging_fingerprint = native_file_fingerprint(&staging_path).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
+        .unwrap();
+    assert!(
+        runtime
+            .local_servable_entry(&parsed_hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    set_before_fingerprint_remove_hook(
+        &staging_path,
+        Box::new(|_| Err(std::io::Error::other("injected staging cleanup failure"))),
+    );
+
+    assert!(runtime.delete_transfer_files(&hash).await.unwrap());
+    assert!(runtime.manifest(&hash).await.is_err());
+    assert!(
+        runtime
+            .local_servable_entry(&parsed_hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
+        vec![hash.clone()]
+    );
+    assert!(staging_path.exists());
+    assert!(runtime.transfer_dir(&hash).exists());
+
+    assert_eq!(
+        runtime.recover_pending_transfer_deletions().await.unwrap(),
+        1
+    );
+    assert!(!staging_path.exists());
+    assert!(!runtime.transfer_dir(&hash).exists());
+}
+
+#[tokio::test]
 async fn materialize_completed_payload_rejects_missing_nonempty_piece_store() {
     let root = unique_test_dir("ed2k-deliver-missing-source");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -883,6 +941,7 @@ async fn destructive_delete_preserves_tombstone_replacement_before_unlink() {
         Box::new(move |tombstone_path| {
             fs::rename(tombstone_path, &hook_backup).unwrap();
             fs::write(tombstone_path, b"foreign replacement").unwrap();
+            Ok(())
         }),
     );
 

@@ -763,10 +763,6 @@ impl Ed2kTransferRuntime {
             self.persist_transfer_deletion_intent(&file_hash).await?,
             "ED2K transfer {file_hash} disappeared before deletion intent was persisted"
         );
-        let attempted_output = self
-            .discard_delivery_attempt_for_deletion_unlocked(&file_hash, &manifest)
-            .await?;
-
         self.manifest_cache.lock().await.remove(&file_hash);
         self.manifest_checkpoint_state
             .lock()
@@ -777,6 +773,24 @@ impl Ed2kTransferRuntime {
             .await
             .retain(|entry| entry.file_hash != file_hash);
         self.note_shared_catalog_entries_changed();
+
+        let attempted_output = match self
+            .discard_delivery_attempt_for_deletion_unlocked(&file_hash, &manifest)
+            .await
+        {
+            Ok(attempted_output) => attempted_output,
+            Err(error) if cleanup_policy == DeletionCleanupPolicy::PropagateFailure => {
+                return Err(error);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    file_hash,
+                    "durable ED2K transfer deletion remains pending after delivery-attempt cleanup failure"
+                );
+                return Ok(true);
+            }
+        };
 
         if let Err(error) = self
             .complete_transfer_deletion(&file_hash, &manifest, attempted_output, &transfer_dir)
