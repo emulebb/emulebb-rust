@@ -1233,25 +1233,32 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         device_id: 17,
         inode_number: 29,
     };
+    let directory_authority = MetadataTransferDirectoryDeletionAuthority {
+        identity: directory_identity,
+        marker_id: Uuid::from_u128(31),
+    };
     assert!(
         store
-            .request_transfer_deletion(hash, Some(directory_identity))
+            .request_transfer_deletion(hash, Some(directory_authority))
             .unwrap()
     );
     assert!(
         store
             .request_transfer_deletion(
                 hash,
-                Some(NativeFileIdentity::Unix {
-                    device_id: 17,
-                    inode_number: 30,
+                Some(MetadataTransferDirectoryDeletionAuthority {
+                    identity: NativeFileIdentity::Unix {
+                        device_id: 17,
+                        inode_number: 30,
+                    },
+                    marker_id: Uuid::from_u128(37),
                 }),
             )
             .unwrap()
     );
     assert_eq!(
-        store.transfer_directory_tombstone_identity(hash).unwrap(),
-        Some(directory_identity)
+        store.transfer_directory_deletion_authority(hash).unwrap(),
+        Some(directory_authority)
     );
     assert_eq!(
         store.pending_transfer_deletion_hashes().unwrap(),
@@ -1390,9 +1397,12 @@ fn share_in_place_deletion_rejects_transfer_directory_identity() {
         !store
             .request_transfer_deletion(
                 &manifest.file_hash,
-                Some(NativeFileIdentity::Unix {
-                    device_id: 31,
-                    inode_number: 37,
+                Some(MetadataTransferDirectoryDeletionAuthority {
+                    identity: NativeFileIdentity::Unix {
+                        device_id: 31,
+                        inode_number: 37,
+                    },
+                    marker_id: Uuid::from_u128(41),
                 }),
             )
             .unwrap()
@@ -1419,16 +1429,19 @@ fn deletion_intent_never_adopts_a_later_transfer_directory() {
         store
             .request_transfer_deletion(
                 &manifest.file_hash,
-                Some(NativeFileIdentity::Unix {
-                    device_id: 41,
-                    inode_number: 43,
+                Some(MetadataTransferDirectoryDeletionAuthority {
+                    identity: NativeFileIdentity::Unix {
+                        device_id: 41,
+                        inode_number: 43,
+                    },
+                    marker_id: Uuid::from_u128(47),
                 }),
             )
             .unwrap()
     );
     assert_eq!(
         store
-            .transfer_directory_tombstone_identity(&manifest.file_hash)
+            .transfer_directory_deletion_authority(&manifest.file_hash)
             .unwrap(),
         None
     );

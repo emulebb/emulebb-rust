@@ -6,6 +6,7 @@
 use std::{fs, path::Path, sync::Arc, time::Duration};
 
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::MetadataTransferDirectoryDeletionAuthority;
 use md4::{Digest, Md4};
 use uuid::Uuid;
 
@@ -14,7 +15,9 @@ use super::super::deliver::set_after_publish_move_hook;
 use super::super::deliver::set_before_fingerprint_remove_hook;
 use super::super::delivery_tombstone::set_before_move_hook;
 use super::super::ingest::native_file_fingerprint;
-use super::super::metadata::transfer_directory_tombstone_path;
+use super::super::metadata::{
+    transfer_directory_authority_marker_path, transfer_directory_tombstone_path,
+};
 use super::super::{
     ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryOwnership, Ed2kDeliveryState,
     Ed2kTransferDeletionRecoveryReport, Ed2kTransferRuntime, new_transfer_job,
@@ -72,10 +75,22 @@ struct DeletionTombstoneFixture {
 fn persist_deletion_intent(runtime: &Ed2kTransferRuntime, file_hash: &str) {
     let transfer_dir = runtime.transfer_dir(file_hash);
     let identity = super::super::ingest::native_directory_identity(&transfer_dir).unwrap();
+    let marker_id = Uuid::new_v4();
+    fs::write(
+        transfer_directory_authority_marker_path(&transfer_dir, marker_id),
+        marker_id.as_bytes(),
+    )
+    .unwrap();
     assert!(
         runtime
             .metadata
-            .request_transfer_deletion(file_hash, Some(identity))
+            .request_transfer_deletion(
+                file_hash,
+                Some(MetadataTransferDirectoryDeletionAuthority {
+                    identity,
+                    marker_id,
+                }),
+            )
             .unwrap()
     );
 }
@@ -1325,7 +1340,7 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
     assert_eq!(report.failures.len(), 1);
     let error = &report.failures[0];
     assert!(error.contains(&hash));
-    assert!(error.contains("not a native directory with stable identity"));
+    assert!(error.contains("does not own the current transfer path"));
     assert_eq!(
         restarted
             .metadata
@@ -1420,13 +1435,7 @@ async fn destructive_delete_recovers_transfer_directory_tombstone() {
             .unwrap();
         transfer_dir = runtime.transfer_dir(&hash);
         transfer_tombstone = transfer_directory_tombstone_path(&hash, &transfer_dir);
-        let identity = super::super::ingest::native_directory_identity(&transfer_dir).unwrap();
-        assert!(
-            runtime
-                .metadata
-                .request_transfer_deletion(&hash, Some(identity))
-                .unwrap()
-        );
+        persist_deletion_intent(&runtime, &hash);
         fs::rename(&transfer_dir, &transfer_tombstone).unwrap();
     }
 
@@ -1454,13 +1463,7 @@ async fn destructive_delete_preserves_replaced_transfer_directory_tombstone() {
         .unwrap();
     let transfer_dir = runtime.transfer_dir(&hash);
     let transfer_tombstone = transfer_directory_tombstone_path(&hash, &transfer_dir);
-    let identity = super::super::ingest::native_directory_identity(&transfer_dir).unwrap();
-    assert!(
-        runtime
-            .metadata
-            .request_transfer_deletion(&hash, Some(identity))
-            .unwrap()
-    );
+    persist_deletion_intent(&runtime, &hash);
     fs::rename(&transfer_dir, &transfer_tombstone).unwrap();
     fs::remove_dir_all(&transfer_tombstone).unwrap();
     fs::create_dir(&transfer_tombstone).unwrap();
@@ -1470,7 +1473,7 @@ async fn destructive_delete_preserves_replaced_transfer_directory_tombstone() {
     let report = runtime.recover_pending_transfer_deletions().await.unwrap();
     assert_eq!(report.recovered, 0);
     assert_eq!(report.failures.len(), 1);
-    assert!(report.failures[0].contains("tombstone identity changed"));
+    assert!(report.failures[0].contains("deletion authority"));
     assert_eq!(fs::read(&sentinel).unwrap(), b"preserve me");
     assert_eq!(
         runtime.metadata.pending_transfer_deletion_hashes().unwrap(),

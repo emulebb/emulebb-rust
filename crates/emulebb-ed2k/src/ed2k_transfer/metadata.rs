@@ -5,9 +5,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    MetadataStore, MetadataTransferCounts, MetadataTransferPublishEntry,
-    MetadataTransferShareEntry, NativeFileFingerprint, NativeFileIdentity,
+    MetadataStore, MetadataTransferCounts, MetadataTransferDirectoryDeletionAuthority,
+    MetadataTransferPublishEntry, MetadataTransferShareEntry, NativeFileFingerprint,
+    NativeFileIdentity,
 };
+use uuid::Uuid;
 
 use crate::long_path::long_path;
 
@@ -126,12 +128,12 @@ impl Ed2kTransferRuntime {
     async fn persist_transfer_deletion_intent(
         &self,
         file_hash: &str,
-        transfer_directory_identity: Option<NativeFileIdentity>,
+        transfer_directory_authority: Option<MetadataTransferDirectoryDeletionAuthority>,
     ) -> Result<bool> {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_string();
         tokio::task::spawn_blocking(move || {
-            metadata.request_transfer_deletion(&file_hash, transfer_directory_identity)
+            metadata.request_transfer_deletion(&file_hash, transfer_directory_authority)
         })
         .await
         .context("ED2K transfer deletion-intent task panicked")?
@@ -763,9 +765,13 @@ impl Ed2kTransferRuntime {
             sync_parent_directory(&transfer_dir).await?;
             return Ok(true);
         };
-        let transfer_directory_identity = capture_directory_identity(&transfer_dir).await?;
+        let transfer_directory_authority = if self.transfer_deletion_requested(&file_hash).await? {
+            None
+        } else {
+            prepare_transfer_directory_deletion_authority(&transfer_dir).await?
+        };
         anyhow::ensure!(
-            self.persist_transfer_deletion_intent(&file_hash, transfer_directory_identity)
+            self.persist_transfer_deletion_intent(&file_hash, transfer_directory_authority)
                 .await?,
             "ED2K transfer {file_hash} disappeared before deletion intent was persisted"
         );
@@ -1097,6 +1103,16 @@ pub(super) fn transfer_directory_tombstone_path(
     transfer_dir.with_file_name(format!(".emulebb-delete-transfer-{file_hash}.tmp"))
 }
 
+pub(super) fn transfer_directory_authority_marker_path(
+    transfer_dir: &std::path::Path,
+    marker_id: Uuid,
+) -> std::path::PathBuf {
+    transfer_dir.join(format!(
+        ".emulebb-delete-authority-{}.tmp",
+        marker_id.hyphenated()
+    ))
+}
+
 async fn cleanup_transfer_directory(
     metadata: &MetadataStore,
     file_hash: &str,
@@ -1107,36 +1123,24 @@ async fn cleanup_transfer_directory(
     let tombstone_exists = tokio::fs::try_exists(long_path(&tombstone)).await?;
     let metadata_store = metadata.clone();
     let hash = file_hash.to_owned();
-    let persisted_identity = tokio::task::spawn_blocking(move || {
-        metadata_store.transfer_directory_tombstone_identity(&hash)
+    let persisted_authority = tokio::task::spawn_blocking(move || {
+        metadata_store.transfer_directory_deletion_authority(&hash)
     })
     .await
-    .context("transfer directory tombstone identity load task failed")??;
+    .context("transfer directory deletion authority load task failed")??;
     if transfer_exists {
         anyhow::ensure!(
             !tombstone_exists,
             "transfer directory tombstone already exists at {}",
             tombstone.display()
         );
-        let identity = capture_directory_identity(transfer_dir)
-            .await?
-            .with_context(|| {
-                format!(
-                    "ED2K transfer path is not a native directory with stable identity {}",
-                    transfer_dir.display()
-                )
-            })?;
-        let expected_identity = persisted_identity.with_context(|| {
+        let authority = persisted_authority.with_context(|| {
             format!(
                 "ED2K deletion intent does not own the current transfer path {}",
                 transfer_dir.display()
             )
         })?;
-        anyhow::ensure!(
-            expected_identity == identity,
-            "ED2K transfer directory identity changed before cleanup at {}",
-            transfer_dir.display()
-        );
+        validate_transfer_directory_authority(transfer_dir, authority).await?;
         match move_path_no_replace(transfer_dir, &tombstone).await? {
             NoReplaceMoveOutcome::Moved => {}
             NoReplaceMoveOutcome::AlreadyExists => {
@@ -1150,26 +1154,13 @@ async fn cleanup_transfer_directory(
         sync_parent_directory(transfer_dir).await?;
     }
     if tokio::fs::try_exists(long_path(&tombstone)).await? {
-        let expected_identity = persisted_identity.with_context(|| {
+        let authority = persisted_authority.with_context(|| {
             format!(
-                "transfer directory tombstone has no durable identity at {}",
+                "transfer directory tombstone has no durable authority at {}",
                 tombstone.display()
             )
         })?;
-        let current_identity =
-            capture_directory_identity(&tombstone)
-                .await?
-                .with_context(|| {
-                    format!(
-                        "ED2K transfer tombstone is not a native directory with stable identity {}",
-                        tombstone.display()
-                    )
-                })?;
-        anyhow::ensure!(
-            current_identity == expected_identity,
-            "ED2K transfer directory tombstone identity changed at {}",
-            tombstone.display()
-        );
+        validate_transfer_directory_authority(&tombstone, authority).await?;
         tokio::fs::remove_dir_all(long_path(&tombstone))
             .await
             .with_context(|| {
@@ -1188,4 +1179,89 @@ async fn capture_directory_identity(path: &std::path::Path) -> Result<Option<Nat
     tokio::task::spawn_blocking(move || super::ingest::native_directory_identity(&path))
         .await
         .context("native directory identity task failed")
+}
+
+async fn prepare_transfer_directory_deletion_authority(
+    transfer_dir: &std::path::Path,
+) -> Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
+    let metadata = match tokio::fs::symlink_metadata(transfer_dir).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_dir() {
+        return Ok(None);
+    }
+
+    let marker_id = Uuid::new_v4();
+    let marker_path = transfer_directory_authority_marker_path(transfer_dir, marker_id);
+    let mut marker = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&marker_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create transfer directory deletion marker {}",
+                marker_path.display()
+            )
+        })?;
+    use tokio::io::AsyncWriteExt;
+    marker.write_all(marker_id.as_bytes()).await?;
+    marker.sync_all().await?;
+    drop(marker);
+    sync_parent_directory(&marker_path).await?;
+
+    let identity = capture_directory_identity(transfer_dir)
+        .await?
+        .with_context(|| {
+            format!(
+                "ED2K transfer path is not a native directory with stable identity {}",
+                transfer_dir.display()
+            )
+        })?;
+    Ok(Some(MetadataTransferDirectoryDeletionAuthority {
+        identity,
+        marker_id,
+    }))
+}
+
+async fn validate_transfer_directory_authority(
+    path: &std::path::Path,
+    authority: MetadataTransferDirectoryDeletionAuthority,
+) -> Result<()> {
+    let current_identity = capture_directory_identity(path).await?.with_context(|| {
+        format!(
+            "ED2K transfer deletion path is not a native directory with stable identity {}",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        current_identity == authority.identity,
+        "ED2K transfer directory deletion authority identity changed at {}",
+        path.display()
+    );
+
+    let marker_path = transfer_directory_authority_marker_path(path, authority.marker_id);
+    let marker_id = authority.marker_id;
+    let matches = tokio::task::spawn_blocking(move || -> Result<bool> {
+        use std::io::Read;
+
+        let mut marker = match super::ingest::open_regular_file_without_follow(&marker_path) {
+            Ok(marker) => marker,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let mut contents = Vec::new();
+        marker.read_to_end(&mut contents)?;
+        Ok(contents == marker_id.as_bytes())
+    })
+    .await
+    .context("transfer directory deletion marker validation task failed")??;
+    anyhow::ensure!(
+        matches,
+        "ED2K transfer directory deletion authority marker changed at {}",
+        path.display()
+    );
+    Ok(())
 }

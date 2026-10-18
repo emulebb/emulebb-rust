@@ -15,9 +15,10 @@ use crate::{
         MetadataTransferCounts, MetadataTransferDeletionTombstone,
         MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
         MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
-        MetadataTransferDeliveryState, MetadataTransferManifest, MetadataTransferMediaMetadata,
-        MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
-        MetadataTransferShareEntry, MetadataTransferSource,
+        MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
+        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferShareEntry,
+        MetadataTransferSource,
     },
 };
 
@@ -2136,12 +2137,14 @@ impl super::MetadataStore {
     pub fn request_transfer_deletion(
         &self,
         file_hash: &str,
-        transfer_directory_identity: Option<NativeFileIdentity>,
+        transfer_directory_authority: Option<MetadataTransferDirectoryDeletionAuthority>,
     ) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let now = unix_ms();
         let transfer_directory_identity =
-            transfer_directory_identity.map(NativeFileIdentity::storage_bytes);
+            transfer_directory_authority.map(|authority| authority.identity.storage_bytes());
+        let transfer_directory_marker_id = transfer_directory_authority
+            .map(|authority| authority.marker_id.hyphenated().to_string());
         let conn = self.connection()?;
         let changed = conn.execute(
             r#"
@@ -2150,6 +2153,10 @@ impl super::MetadataStore {
                 transfer_directory_tombstone_identity = CASE
                     WHEN delete_requested_at_ms IS NULL THEN ?3
                     ELSE transfer_directory_tombstone_identity
+                END,
+                transfer_directory_tombstone_marker_id = CASE
+                    WHEN delete_requested_at_ms IS NULL THEN ?4
+                    ELSE transfer_directory_tombstone_marker_id
                 END,
                 updated_at_ms = CASE
                     WHEN delete_requested_at_ms IS NULL THEN ?2
@@ -2160,7 +2167,12 @@ impl super::MetadataStore {
             )
               AND (?3 IS NULL OR source_path_id IS NULL)
             "#,
-            params![hash, now, transfer_directory_identity],
+            params![
+                hash,
+                now,
+                transfer_directory_identity,
+                transfer_directory_marker_id,
+            ],
         )?;
         Ok(changed != 0)
     }
@@ -2183,22 +2195,51 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
-    pub fn transfer_directory_tombstone_identity(
+    pub fn transfer_directory_deletion_authority(
         &self,
         file_hash: &str,
-    ) -> Result<Option<NativeFileIdentity>> {
+    ) -> Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         self.connection()?
             .query_row(
                 r#"
-                SELECT transfers.transfer_directory_tombstone_identity
+                SELECT transfers.transfer_directory_tombstone_identity,
+                       transfers.transfer_directory_tombstone_marker_id
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
                   AND transfers.delete_requested_at_ms IS NOT NULL
                 "#,
                 params![hash],
-                |row| optional_identity_from_row(row, 0),
+                |row| {
+                    let identity = optional_identity_from_row(row, 0)?;
+                    let marker_id = row.get::<_, Option<String>>(1)?;
+                    match (identity, marker_id) {
+                        (None, None) => Ok(None),
+                        (Some(identity), Some(marker_id)) => {
+                            let marker_id = marker_id.parse::<Uuid>().map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    1,
+                                    rusqlite::types::Type::Text,
+                                    error.into(),
+                                )
+                            })?;
+                            Ok(Some(MetadataTransferDirectoryDeletionAuthority {
+                                identity,
+                                marker_id,
+                            }))
+                        }
+                        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Blob,
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "incomplete transfer directory deletion authority",
+                            )
+                            .into(),
+                        )),
+                    }
+                },
             )
             .optional()
             .map(Option::flatten)
