@@ -22,7 +22,7 @@ use super::transfer_sql::manifest_from_metadata;
 use super::upload_queue::upload_priority_score;
 use super::{
     Ed2kAichHashset, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint,
-    Ed2kTransferJob, Ed2kTransferRuntime, Ed2kTransferState,
+    Ed2kTransferDeletionRecoveryReport, Ed2kTransferJob, Ed2kTransferRuntime, Ed2kTransferState,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -691,10 +691,12 @@ impl Ed2kTransferRuntime {
             .await
     }
 
-    /// Strictly resume every durable destructive-deletion intent. Startup uses
-    /// this as a pre-exposure barrier; runtime maintenance catches failures and
-    /// retries them without making the hidden transfer visible again.
-    pub async fn recover_pending_transfer_deletions(&self) -> Result<usize> {
+    /// Resume every durable destructive-deletion intent without making an
+    /// already-hidden transfer visible again. Intent enumeration failures are
+    /// fatal; per-transfer cleanup failures remain pending in the report.
+    pub async fn recover_pending_transfer_deletions(
+        &self,
+    ) -> Result<Ed2kTransferDeletionRecoveryReport> {
         let hashes = self.pending_transfer_deletion_hashes().await?;
         let mut recovered = 0usize;
         let mut failures = Vec::new();
@@ -719,14 +721,10 @@ impl Ed2kTransferRuntime {
                 Err(error) => failures.push(format!("{error:#}")),
             }
         }
-        if !failures.is_empty() {
-            anyhow::bail!(
-                "failed to recover {} pending ED2K transfer deletion(s) after completing {recovered}: {}",
-                failures.len(),
-                failures.join("; ")
-            );
-        }
-        Ok(recovered)
+        Ok(Ed2kTransferDeletionRecoveryReport {
+            recovered,
+            failures,
+        })
     }
 
     async fn delete_transfer_files_inner(

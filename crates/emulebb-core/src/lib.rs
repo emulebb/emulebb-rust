@@ -49,8 +49,8 @@ use emulebb_ed2k::{
         ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackDownload,
         Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kDownloadStorageReconciliation,
         Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedPublishDemandSignal,
-        Ed2kSourceHint, Ed2kTransferRootReconciliation, Ed2kTransferRuntime,
-        Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport, Ed2kTransferRootReconciliation,
+        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::{
