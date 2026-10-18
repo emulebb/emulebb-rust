@@ -1,17 +1,20 @@
 # emulebb-rust
 
-`emulebb-rust` is the active experimental Rust eD2K/Kad client in the eMuleBB
-organization. It owns the Rust-forward `/api/v1` contract, runs as a headless
-daemon, and serves the embedded browser SPA WebUI from packaged static assets.
-It keeps local client state plus indexing data in SQLite.
+`emulebb-rust` is the active automation-first Rust eD2K/Kad client in the
+eMuleBB organization. It owns the Rust-forward `/api/v1` contract, runs as a
+headless daemon, and serves an embedded browser operations console from
+packaged static assets. It keeps the complete profile in one SQLite database.
 
 This is a Rust-native successor to the Windows eMuleBB MFC fork, not a
-line-by-line port or an MFC REST-contract mirror. Stock/community eMule peers
-are the primary wire-compatibility target. The separate maintained aMule client
-is a cross-platform source and offline-fixture reference in this workspace.
+line-by-line port or an MFC REST-contract mirror. Stock/community eMule owns
+wire behavior. Maintained eMuleBB MFC supplies only explicitly identified
+non-wire operational and I/O outcomes. Current aMule is interoperability
+evidence and optimization inspiration, not an implicit behavior authority.
 
-The repository began from earlier Kad and ED2K work, but it is intentionally a
-local client product. The `0.1.0-beta.2` line does not expose a coordinator API.
+The integrated suite is hard-gated Client → Indexer → Arr. Production remains
+in the Client phase until every active client item, including newly accepted
+work, closes. The future Indexer and Arr phases stay design-only until their
+preceding gates pass.
 
 > **Public beta:** [`rust-v0.1.0-beta.2`](https://github.com/emulebb/emulebb-rust/releases/tag/rust-v0.1.0-beta.2)
 > is published for Windows, Linux, and macOS. The release decision and retained
@@ -29,12 +32,17 @@ Update that pin, the workspace `rust-version`, and CI together in a dedicated
 toolchain commit after each stable Rust release has passed the full quality
 gate; normal development must not float independently on `stable`.
 
-The `0.1.0-beta.2` scope is eD2K/Kad protocol-operational parity: configured binding,
-interoperability, search, sharing, transfers, uploads, queues, persistence,
-local SQLite/FTS indexing, REST controller visibility, and embedded SPA WebUI
-operation. Local API, UI, settings, diagnostics, and scheduling surfaces are
-Rust-native async daemon design. Broadband-oriented async IO is the default
-runtime model, not a compatibility toggle.
+The `0.1.0-beta.2` scope is eD2K/Kad protocol-operational parity: configured
+binding, interoperability, search, sharing, transfers, uploads, queues,
+persistence, the protocol-required local Kad index, REST controller visibility,
+and embedded SPA operation. The autonomous persistent observation index is a
+future phase, not another name for the current local Kad index. Broadband-
+oriented async I/O is the baseline, not a compatibility toggle.
+
+API, configuration, and schema compatibility remain explicitly unstable
+through Client, Indexer, and Arr and freeze together only after the Arr gate.
+An incompatible schema fails startup and requires an entirely fresh profile;
+the product does not migrate, reset, repair, or partially rebuild it.
 
 Active product docs, backlog, design notes, release scope, and the Rust OpenAPI
 contract live in
@@ -54,12 +62,14 @@ process rather than the former pre-release freeze.
 - `webui`: embedded Vite/Preact SPA WebUI packaged beside the daemon.
 - `emulebb-core`: local app state, capabilities, searches, and transfer
   summaries.
-- `emulebb-index`: SQLite + FTS5 local file index plus Kad harvest/store
-  scheduling components.
+- `emulebb-index`: protocol-required local Kad keyword/source/notes storage and
+  related current client indexing components.
 - `emulebb-kad-*`: copied and renamed Kad protocol/runtime crates.
 
-Indexing is a client capability, not a separate public API. It improves
-search results returned through the eMuleBB search resources.
+The current local Kad index is a client capability. The future autonomous
+observation Indexer is a separate product domain inside the same bounded-
+monolith daemon and database; it will expose live, index, and hybrid searches
+through one canonical provenance-bearing result model.
 
 The former native Slint client has been removed. The supported product shape is
 the headless daemon plus its REST API and embedded SPA WebUI; release cleanup
@@ -67,10 +77,11 @@ still rejects stale `emulebb-rust-ui` artifacts from older build directories.
 
 ## Rust Client Policy
 
-The Rust client is multi-platform by tiered proof: Windows, Linux, and macOS
-must stay compile/test viable where practical, while platform runtime claims
-require smoke or live evidence for that platform. Platform-specific behavior
-belongs behind narrow adapters.
+The Rust client supports Windows, Linux, and macOS on x64 and ARM64. Every
+target requires compile/test viability and packaged startup, WebUI, local-
+transfer, and shutdown smoke. Deep public-network evidence remains concentrated
+on Windows x64 and Linux x64. Platform-specific behavior belongs behind narrow
+adapters.
 
 The protocol surface is IPv4-only and stock-compatible for implemented eD2K and
 Kad behavior. Historic or niche behavior may be omitted only when it is recorded
