@@ -19,6 +19,65 @@ pub enum NativeFileIdentity {
     },
 }
 
+impl NativeFileIdentity {
+    const STORAGE_VERSION: u8 = 1;
+
+    pub(crate) fn storage_bytes(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(18);
+        bytes.push(Self::STORAGE_VERSION);
+        match self {
+            Self::Unix {
+                device_id,
+                inode_number,
+            } => {
+                bytes.push(1);
+                bytes.extend_from_slice(&device_id.to_le_bytes());
+                bytes.extend_from_slice(&inode_number.to_le_bytes());
+            }
+            Self::WindowsLowResolution {
+                volume_serial_number,
+                file_index,
+            } => {
+                bytes.push(2);
+                bytes.extend_from_slice(&volume_serial_number.to_le_bytes());
+                bytes.extend_from_slice(&file_index.to_le_bytes());
+            }
+            Self::WindowsHighResolution {
+                volume_serial_number,
+                file_id,
+            } => {
+                bytes.push(3);
+                bytes.extend_from_slice(&volume_serial_number.to_le_bytes());
+                bytes.extend_from_slice(&file_id.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    pub(crate) fn from_storage_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut cursor = StorageCursor::new(bytes);
+        if cursor.read_u8()? != Self::STORAGE_VERSION {
+            return None;
+        }
+        let identity = match cursor.read_u8()? {
+            1 => Self::Unix {
+                device_id: cursor.read_u64()?,
+                inode_number: cursor.read_u64()?,
+            },
+            2 => Self::WindowsLowResolution {
+                volume_serial_number: cursor.read_u32()?,
+                file_index: cursor.read_u64()?,
+            },
+            3 => Self::WindowsHighResolution {
+                volume_serial_number: cursor.read_u64()?,
+                file_id: cursor.read_u128()?,
+            },
+            _ => return None,
+        };
+        cursor.is_finished().then_some(identity)
+    }
+}
+
 /// One filesystem timestamp with its full native subsecond value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeFileTimestamp {
@@ -201,6 +260,29 @@ impl<'a> StorageCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_identity_storage_roundtrips_every_variant() {
+        for identity in [
+            NativeFileIdentity::Unix {
+                device_id: 7,
+                inode_number: 11,
+            },
+            NativeFileIdentity::WindowsLowResolution {
+                volume_serial_number: 13,
+                file_index: 17,
+            },
+            NativeFileIdentity::WindowsHighResolution {
+                volume_serial_number: 19,
+                file_id: 23,
+            },
+        ] {
+            assert_eq!(
+                NativeFileIdentity::from_storage_bytes(&identity.storage_bytes()),
+                Some(identity)
+            );
+        }
+    }
 
     fn fingerprint(modified_ns: u32, changed_ns: Option<u32>) -> NativeFileFingerprint {
         NativeFileFingerprint {

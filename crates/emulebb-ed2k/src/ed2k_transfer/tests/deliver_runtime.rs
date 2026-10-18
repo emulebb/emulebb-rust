@@ -69,6 +69,17 @@ struct DeletionTombstoneFixture {
     tombstone_id: Uuid,
 }
 
+fn persist_deletion_intent(runtime: &Ed2kTransferRuntime, file_hash: &str) {
+    let transfer_dir = runtime.transfer_dir(file_hash);
+    let identity = super::super::ingest::native_directory_identity(&transfer_dir).unwrap();
+    assert!(
+        runtime
+            .metadata
+            .request_transfer_deletion(file_hash, Some(identity))
+            .unwrap()
+    );
+}
+
 async fn prepare_deletion_tombstone(root: &Path, display_name: &str) -> DeletionTombstoneFixture {
     let runtime = Ed2kTransferRuntime::load_or_create(root).unwrap();
     let hash = ingest_completed(&runtime, root, display_name).await;
@@ -84,7 +95,7 @@ async fn prepare_deletion_tombstone(root: &Path, display_name: &str) -> Deletion
         .unwrap()
         .source_fingerprint
         .unwrap();
-    assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+    persist_deletion_intent(&runtime, &hash);
     let tombstone_id = Uuid::new_v4();
     let tombstone = incoming.join(format!(".emulebb-delete-{tombstone_id}.tmp"));
     runtime
@@ -1158,7 +1169,7 @@ async fn destructive_delete_resumes_a_preexisting_durable_intent() {
             .materialize_completed_payload(&hash, &incoming)
             .await
             .unwrap();
-        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+        persist_deletion_intent(&runtime, &hash);
     }
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -1205,7 +1216,7 @@ async fn destructive_delete_preserves_ambiguous_staged_delivery_target() {
                 .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
                 .unwrap()
         );
-        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+        persist_deletion_intent(&runtime, &hash);
     }
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -1256,7 +1267,7 @@ async fn destructive_delete_reclaims_preexisting_published_delivery_attempt() {
             .metadata
             .mark_transfer_delivery_attempt_published(&hash, attempt_id, &published_fingerprint)
             .unwrap();
-        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+        persist_deletion_intent(&runtime, &hash);
     }
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -1296,8 +1307,8 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
 
     assert!(runtime.delete_transfer_files(&hash).await.unwrap());
     assert!(!delivered.exists());
-    assert!(!transfer_dir.exists());
-    assert!(transfer_tombstone.is_file());
+    assert!(transfer_dir.is_file());
+    assert!(!transfer_tombstone.exists());
     assert!(runtime.manifest(&hash).await.is_err());
     assert_eq!(
         runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
@@ -1314,7 +1325,7 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
     assert_eq!(report.failures.len(), 1);
     let error = &report.failures[0];
     assert!(error.contains(&hash));
-    assert!(error.contains("failed to delete ED2K transfer directory tombstone"));
+    assert!(error.contains("not a native directory with stable identity"));
     assert_eq!(
         restarted
             .metadata
@@ -1323,7 +1334,7 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
         vec![hash.clone()]
     );
 
-    fs::remove_file(&transfer_tombstone).unwrap();
+    fs::remove_file(&transfer_dir).unwrap();
     assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
@@ -1369,16 +1380,10 @@ async fn pending_deletion_recovery_continues_after_an_earlier_failure() {
     let (later_hash, later_output) = transfers[1].clone();
 
     let blocked_dir = runtime.transfer_dir(&blocked_hash);
-    let blocked_tombstone = transfer_directory_tombstone_path(&blocked_hash, &blocked_dir);
     fs::remove_dir_all(&blocked_dir).unwrap();
     fs::write(&blocked_dir, b"cleanup blocker").unwrap();
     assert!(runtime.delete_transfer_files(&blocked_hash).await.unwrap());
-    assert!(
-        runtime
-            .metadata
-            .request_transfer_deletion(&later_hash)
-            .unwrap()
-    );
+    persist_deletion_intent(&runtime, &later_hash);
 
     let report = runtime.recover_pending_transfer_deletions().await.unwrap();
     assert_eq!(report.recovered, 1);
@@ -1393,7 +1398,7 @@ async fn pending_deletion_recovery_continues_after_an_earlier_failure() {
         vec![blocked_hash.clone()]
     );
 
-    fs::remove_file(&blocked_tombstone).unwrap();
+    fs::remove_file(&blocked_dir).unwrap();
     assert_complete_deletion_recovery(
         runtime.recover_pending_transfer_deletions().await.unwrap(),
         1,
@@ -1413,9 +1418,15 @@ async fn destructive_delete_recovers_transfer_directory_tombstone() {
             .materialize_completed_payload(&hash, &root.join("incoming"))
             .await
             .unwrap();
-        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
         transfer_dir = runtime.transfer_dir(&hash);
         transfer_tombstone = transfer_directory_tombstone_path(&hash, &transfer_dir);
+        let identity = super::super::ingest::native_directory_identity(&transfer_dir).unwrap();
+        assert!(
+            runtime
+                .metadata
+                .request_transfer_deletion(&hash, Some(identity))
+                .unwrap()
+        );
         fs::rename(&transfer_dir, &transfer_tombstone).unwrap();
     }
 
@@ -1430,6 +1441,41 @@ async fn destructive_delete_recovers_transfer_directory_tombstone() {
     assert!(!transfer_dir.exists());
     assert!(!transfer_tombstone.exists());
     assert!(restarted.manifest(&hash).await.is_err());
+}
+
+#[tokio::test]
+async fn destructive_delete_preserves_replaced_transfer_directory_tombstone() {
+    let root = unique_test_dir("ed2k-delete-transfer-dir-tombstone-replaced");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Replaced.Transfer.Tombstone.mkv").await;
+    runtime
+        .materialize_completed_payload(&hash, &root.join("incoming"))
+        .await
+        .unwrap();
+    let transfer_dir = runtime.transfer_dir(&hash);
+    let transfer_tombstone = transfer_directory_tombstone_path(&hash, &transfer_dir);
+    let identity = super::super::ingest::native_directory_identity(&transfer_dir).unwrap();
+    assert!(
+        runtime
+            .metadata
+            .request_transfer_deletion(&hash, Some(identity))
+            .unwrap()
+    );
+    fs::rename(&transfer_dir, &transfer_tombstone).unwrap();
+    fs::remove_dir_all(&transfer_tombstone).unwrap();
+    fs::create_dir(&transfer_tombstone).unwrap();
+    let sentinel = transfer_tombstone.join("unrelated.txt");
+    fs::write(&sentinel, b"preserve me").unwrap();
+
+    let report = runtime.recover_pending_transfer_deletions().await.unwrap();
+    assert_eq!(report.recovered, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert!(report.failures[0].contains("tombstone identity changed"));
+    assert_eq!(fs::read(&sentinel).unwrap(), b"preserve me");
+    assert_eq!(
+        runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
+        vec![hash]
+    );
 }
 
 #[tokio::test]

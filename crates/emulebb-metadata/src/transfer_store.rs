@@ -5,7 +5,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::{
-    NativeFileFingerprint, NativePath,
+    NativeFileFingerprint, NativeFileIdentity, NativePath,
     download_history_store::{record_completed_download, records_download_completion},
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
@@ -2130,17 +2130,27 @@ impl super::MetadataStore {
         Ok(changed != 0)
     }
 
-    /// Persist a terminal destructive-delete request before either filesystem
-    /// authority is touched. Repeating the request preserves the original
-    /// timestamp and remains successful while the transfer row exists.
-    pub fn request_transfer_deletion(&self, file_hash: &str) -> Result<bool> {
+    /// Persist a terminal destructive-delete request and its initial owned
+    /// transfer-directory identity before either filesystem authority is
+    /// touched. Repeating the request preserves both original values.
+    pub fn request_transfer_deletion(
+        &self,
+        file_hash: &str,
+        transfer_directory_identity: Option<NativeFileIdentity>,
+    ) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let now = unix_ms();
+        let transfer_directory_identity =
+            transfer_directory_identity.map(NativeFileIdentity::storage_bytes);
         let conn = self.connection()?;
         let changed = conn.execute(
             r#"
             UPDATE transfers
             SET delete_requested_at_ms = coalesce(delete_requested_at_ms, ?2),
+                transfer_directory_tombstone_identity = CASE
+                    WHEN delete_requested_at_ms IS NULL THEN ?3
+                    ELSE transfer_directory_tombstone_identity
+                END,
                 updated_at_ms = CASE
                     WHEN delete_requested_at_ms IS NULL THEN ?2
                     ELSE updated_at_ms
@@ -2148,8 +2158,9 @@ impl super::MetadataStore {
             WHERE known_file_id = (
                 SELECT id FROM known_files WHERE ed2k_hash = ?1
             )
+              AND (?3 IS NULL OR source_path_id IS NULL)
             "#,
-            params![hash, now],
+            params![hash, now, transfer_directory_identity],
         )?;
         Ok(changed != 0)
     }
@@ -2169,6 +2180,28 @@ impl super::MetadataStore {
             )
             .optional()
             .map(|value| value.unwrap_or(false))
+            .map_err(Into::into)
+    }
+
+    pub fn transfer_directory_tombstone_identity(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<NativeFileIdentity>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        self.connection()?
+            .query_row(
+                r#"
+                SELECT transfers.transfer_directory_tombstone_identity
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.delete_requested_at_ms IS NOT NULL
+                "#,
+                params![hash],
+                |row| optional_identity_from_row(row, 0),
+            )
+            .optional()
+            .map(Option::flatten)
             .map_err(Into::into)
     }
 
@@ -2751,6 +2784,28 @@ pub(crate) fn optional_fingerprint_from_row(
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "invalid native file fingerprint",
+                    )
+                    .into(),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn optional_identity_from_row(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<NativeFileIdentity>> {
+    let bytes = row.get::<_, Option<Vec<u8>>>(index)?;
+    bytes
+        .map(|bytes| {
+            NativeFileIdentity::from_storage_bytes(&bytes).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Blob,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid native file identity",
                     )
                     .into(),
                 )

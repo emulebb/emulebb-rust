@@ -395,7 +395,12 @@ mod tests {
         let hash = file_hash.to_string();
         let job = new_transfer_job(file_hash, "pending-delete.bin".to_string(), 8);
         runtime.ensure_job(&job).await.unwrap();
-        assert!(runtime.metadata.request_transfer_deletion(&hash).unwrap());
+        assert!(
+            runtime
+                .metadata
+                .request_transfer_deletion(&hash, None)
+                .unwrap()
+        );
 
         let ensure_error = runtime.ensure_job(&job).await.unwrap_err();
         assert!(

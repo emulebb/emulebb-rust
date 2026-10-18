@@ -643,7 +643,7 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
 
     assert!(
         store
-            .request_transfer_deletion(&manifest.file_hash)
+            .request_transfer_deletion(&manifest.file_hash, None)
             .unwrap()
     );
     assert!(store.share_in_place_reload_entries().unwrap().is_empty());
@@ -1079,7 +1079,7 @@ fn delivery_attempt_requires_an_authoritative_pending_download() {
     store
         .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path)
         .unwrap();
-    assert!(store.request_transfer_deletion(&hash).unwrap());
+    assert!(store.request_transfer_deletion(&hash, None).unwrap());
     assert!(
         store
             .begin_transfer_delivery_attempt(&hash, attempt_id, &target_path, &staging_path,)
@@ -1229,7 +1229,30 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     assert!(store.transfer_timestamps_by_hash(hash).unwrap().is_some());
 
     assert!(!store.finalize_transfer_deletion(hash).unwrap());
-    assert!(store.request_transfer_deletion(hash).unwrap());
+    let directory_identity = NativeFileIdentity::Unix {
+        device_id: 17,
+        inode_number: 29,
+    };
+    assert!(
+        store
+            .request_transfer_deletion(hash, Some(directory_identity))
+            .unwrap()
+    );
+    assert!(
+        store
+            .request_transfer_deletion(
+                hash,
+                Some(NativeFileIdentity::Unix {
+                    device_id: 17,
+                    inode_number: 30,
+                }),
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store.transfer_directory_tombstone_identity(hash).unwrap(),
+        Some(directory_identity)
+    );
     assert_eq!(
         store.pending_transfer_deletion_hashes().unwrap(),
         vec![hash.to_string()]
@@ -1331,7 +1354,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         )
         .unwrap();
     }
-    assert!(store.request_transfer_deletion(hash).unwrap());
+    assert!(store.request_transfer_deletion(hash, None).unwrap());
     let timestamps = store
         .connection()
         .unwrap()
@@ -1358,6 +1381,60 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
 }
 
 #[test]
+fn share_in_place_deletion_rejects_transfer_directory_identity() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = source_backed_manifest();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+
+    assert!(
+        !store
+            .request_transfer_deletion(
+                &manifest.file_hash,
+                Some(NativeFileIdentity::Unix {
+                    device_id: 31,
+                    inode_number: 37,
+                }),
+            )
+            .unwrap()
+    );
+    assert!(
+        !store
+            .transfer_deletion_requested(&manifest.file_hash)
+            .unwrap()
+    );
+}
+
+#[test]
+fn deletion_intent_never_adopts_a_later_transfer_directory() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_pending_download_manifest();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+
+    assert!(
+        store
+            .request_transfer_deletion(&manifest.file_hash, None)
+            .unwrap()
+    );
+    assert!(
+        store
+            .request_transfer_deletion(
+                &manifest.file_hash,
+                Some(NativeFileIdentity::Unix {
+                    device_id: 41,
+                    inode_number: 43,
+                }),
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .transfer_directory_tombstone_identity(&manifest.file_hash)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
     let store = MetadataStore::in_memory().unwrap();
     let mut manifest = completed_pending_download_manifest();
@@ -1370,7 +1447,7 @@ fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert!(
         store
-            .request_transfer_deletion(&manifest.file_hash)
+            .request_transfer_deletion(&manifest.file_hash, None)
             .unwrap()
     );
 
@@ -1489,7 +1566,7 @@ fn deletion_tombstone_requires_owned_delivered_output() {
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert!(
         store
-            .request_transfer_deletion(&manifest.file_hash)
+            .request_transfer_deletion(&manifest.file_hash, None)
             .unwrap()
     );
     let tombstone_id = Uuid::new_v4();

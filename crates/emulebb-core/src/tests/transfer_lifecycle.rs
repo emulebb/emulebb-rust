@@ -908,11 +908,16 @@ async fn startup_deletion_recovery_precedes_hydration_and_delivery_reconciliatio
         transfer_dir = core.ed2k_transfers.transfer_dir_path(&file_hash);
         assert!(delivered_path.exists());
         assert!(transfer_dir.exists());
+        std::fs::remove_dir_all(&transfer_dir).unwrap();
+        std::fs::write(&transfer_dir, b"cleanup blocker").unwrap();
         assert!(
-            core.metadata_store
-                .request_transfer_deletion(&file_hash)
+            core.ed2k_transfers
+                .delete_transfer_files(&file_hash)
+                .await
                 .unwrap()
         );
+        assert!(!delivered_path.exists());
+        std::fs::remove_file(&transfer_dir).unwrap();
     }
 
     let reloaded = EmulebbCore::new(

@@ -289,6 +289,14 @@ CREATE TABLE transfers (
     -- deliberately preserve the marker.
     delete_requested_at_ms INTEGER
         CHECK(delete_requested_at_ms IS NULL OR delete_requested_at_ms >= 0),
+    -- Stable identity of the owned transfer directory captured before it is
+    -- renamed to the deletion tombstone. Recovery must never recursively
+    -- delete a path whose identity differs from this durable authority.
+    transfer_directory_tombstone_identity BLOB,
+    CHECK(
+        transfer_directory_tombstone_identity IS NULL
+        OR (delete_requested_at_ms IS NOT NULL AND source_path_id IS NULL)
+    ),
     CHECK(
         (delivery_state = 'not_applicable' AND delivery_ownership = 'none' AND source_path_id IS NOT NULL AND delivered_path_id IS NULL)
         OR (delivery_state = 'pending' AND delivery_ownership = 'none' AND source_path_id IS NULL AND delivered_path_id IS NULL)
