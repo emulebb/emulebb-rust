@@ -1,7 +1,18 @@
+[product]
+mission = "automation-first headless IPv4 eD2K/Kad client for reliable search, download, upload, and sharing"
+primary_audience = "automation systems operated through a browser operations console"
+delivery_phases = ["client", "indexer", "arr"]
+current_phase = "client"
+phase_gate = "production implementation of a later phase starts only after every active item in the preceding phase, including newly accepted client work, closes or is explicitly removed"
+runtime_shape = "one bounded-monolith daemon, one profile, one SQLite database, one embedded operations console, and one HTTP listener"
+ui_role = "operations console; not a native desktop UI or MFC GUI recreation"
+
 [platform]
 support_tier = "tiered"
 targets = ["windows", "linux", "macos"]
 runtime_claim = "requires smoke or live proof per platform"
+release_gate = "compile/test plus packaged startup, WebUI, local-transfer, and shutdown smoke on Windows/Linux/macOS x64 and ARM64"
+deep_evidence_targets = ["windows-x64", "linux-x64"]
 
 # Per-platform runtime evidence captured for this line. Linux runtime evidence
 # was produced on WSL2 Ubuntu 26.04 (x86_64, rustc 1.96): the workspace builds
@@ -18,6 +29,7 @@ address_family = "ipv4-only"
 compatibility = "stock/community eMule owns eD2K/Kad wire behavior; Rust REST/UI/settings are Rust-native async daemon surfaces, not MFC or legacy GUI mirrors; approved permanent protocol drops are explicit review-reporting exclusions"
 omission_registry = "policy/rust-client-omissions.toml"
 extension_registry = "policy/rust-client-extensions.toml"
+parity_model = "curated stock parity: network-critical and client-core behavior plus explicit permanent omissions"
 
 [behavior_authority]
 wire_protocol = "stock-community-emule"
@@ -26,11 +38,46 @@ io_behavior = "emulebb-mfc"
 implementation_model = "rust-native-async"
 conflict_precedence = "stock-wire-protocol"
 
+[authority_scope]
+operational_limits = "emulebb-mfc applies only where a tracked mapping names the exact non-wire default or ceiling"
+io_behavior = "emulebb-mfc applies only where a tracked mapping names the exact disk or network I/O outcome"
+amule_role = "interoperability evidence and optimization inspiration only; never implicit authority"
+
+[contracts]
+api_namespace = "/api/v1"
+stability = "breaking API, config, and schema changes are allowed through client, indexer, and arr phases"
+freeze_after = "arr gate"
+retired_shapes = "hard errors; no aliases, remaps, ignored fields, fallback reads, or compatibility bridges"
+database = "one SQLite database and one exact schema version for the entire profile"
+schema_break = "startup fails and requires a completely fresh profile, including for an index-only incompatibility"
+migrations = "no product migrations, repair, reset, or partial domain rebuild during beta phases"
+
+[suite]
+domain_model = "client, future indexer, and future compatibility adapters have explicit internal ownership boundaries inside one process"
+canonical_search = "one provenance-bearing result model with live, index, and hybrid execution modes"
+canonical_transfer = "all first-party UI/API and future adapter grabs converge on the client transfer lifecycle"
+internal_automation = "external controllers own selection, rules, schedules, media management, and post-processing"
+
+[suite.indexer]
+production_gate = "complete client gate"
+default_policy = "passive capture plus bounded active discovery enabled by default when the phase ships"
+retention = "persistent until explicit operator deletion; no product TTL, record ceiling, or configured disk quota"
+disk_failure = "pause index writes and active discovery, preserve client networking/transfers, and expose a persistent fault"
+
+[suite.arr]
+production_gate = "complete indexer gate"
+listener = "same HTTP listener as first-party API, using native Torznab and qBittorrent-compatible paths"
+qbittorrent_scope = "only the subset required by supported Prowlarr/Sonarr/Radarr workflows"
+adapter_rule = "translate to canonical search and transfer services; never own parallel state"
+
+[http]
+default_exposure = "LAN-reachable with authentication"
+authentication = "required for each applicable first-party and compatibility route family"
+
 [review_reporting]
-# Non-SX1 entries in the omission registry are known divergence records under
-# re-audit, not permanent product exclusions. Reviewers must report them until
-# a fresh disposition says "fix", "defer", or "permanent drop".
-intentional_omissions_are_not_gaps = false
+# Permanent-drop rows are accepted product boundaries, not review findings.
+# Deferred rows remain reportable until their disposition changes.
+intentional_omissions_are_not_gaps = true
 excluded_surface_ids = [
     "sx1-live-source-exchange",
     # RUST-PAR-018 round-18 disposition (2026-07-08): the oracle's LAN-mode-only
@@ -43,6 +90,9 @@ excluded_surface_ids = [
     # RUST-REF-004 beta disposition (2026-07-13): no untrusted media-decoding
     # preview surface; Rust does not advertise peer media-preview support.
     "ed2k-preview",
+    # RUST-CI-002 roadmap closure (2026-09-27): the headless operations product
+    # neither advertises nor exposes peer chat/captcha; permanent drop.
+    "peer-chat-messaging",
 ]
 
 # Windows long-path (>260 char) support is SCOPED to operator-facing content
@@ -69,11 +119,10 @@ never_classes = [
 # `\\?\` (and `\\?\UNC\`) form at exactly the three allowed boundaries.
 manifest = "embed-manifest longPathAware in crates/emulebb-daemon/build.rs"
 helper = "emulebb_ed2k::long_path::long_path"
-# Current-model note: no separate operator download/incoming output path exists
-# (completed payloads live in the internal short-path piece store), and
-# Category.path is validated/stored but not yet used to open output files; the
-# helper is wired where a category path is consumed so the boundary is ready.
-current_model_note = "incoming + category output boundaries documented; wired where the category path is consumed"
+# Completed downloads are materialized by name into their category path or the
+# configured incoming directory while the internal short-path piece store is
+# retained for continued seeding.
+current_model_note = "incoming and category delivery are implemented operator-facing long-path boundaries"
 
 [ipv4_only]
 allowed_ipv6_mentions = [
