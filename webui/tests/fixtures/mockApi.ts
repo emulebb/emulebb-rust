@@ -79,7 +79,7 @@ const snapshot = {
   transfers: [
     {
       hash: transferHash,
-      name: "Sample Transfer.bin",
+      displayName: "Sample Transfer.bin",
       state: "downloading",
       sizeBytes: 4096,
       completedBytes: 1024,
@@ -645,7 +645,7 @@ function dataFor(method: string, path: string): unknown {
     case "diagnostics":
       return snapshot.status.runtimeDiagnostics;
     case `transfers/${transferHash}/details`:
-      return { hash: transferHash, name: "Sample Transfer.bin" };
+      return { hash: transferHash, displayName: "Sample Transfer.bin" };
     case `transfers/${transferHash}/sources`:
       return { items: [{ clientId: "sample-peer", userName: "Sample Peer", state: "downloading" }] };
     default:

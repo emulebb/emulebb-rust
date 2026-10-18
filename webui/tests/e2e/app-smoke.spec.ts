@@ -311,7 +311,7 @@ test("loads a selected search session from a deep link", async ({ page }) => {
             limit: 100,
             items: [{
               hash: "00112233445566778899AABBCCDDEEFF",
-              name: "Synthetic Archive.bin",
+              displayName: "Synthetic Archive.bin",
               sizeBytes: 4096,
               sources: 3,
               fileType: "arc"
@@ -452,7 +452,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
         items: searchId === "2"
           ? [{
               hash: resultHash,
-              name: "Linux Guide.pdf",
+              displayName: "Linux Guide.pdf",
               sizeBytes: 1_048_576,
               sources: 5,
               completeSources: 2,
@@ -460,11 +460,11 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
               fileType: "doc",
               media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" },
               observations: [
-                { origin: "server", name: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 3, completeSources: 1, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 4, aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", complete: false, directory: "", observedAt: "2026-10-06T12:00:00Z" },
-                { origin: "global", name: "Linux Manual.pdf", sizeBytes: 1_048_576, sources: 5, completeSources: 2, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Manual", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 3, aichHash: null, complete: false, directory: "", observedAt: "2026-10-06T12:00:01Z" }
+                { origin: "server", rawName: "Linux Guide.pdf", normalizedName: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 3, completeSources: 1, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 4, aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", complete: false, directory: "", observedAt: "2026-10-06T12:00:00Z" },
+                { origin: "global", rawName: "Linux Manual.pdf", normalizedName: "Linux Manual.pdf", sizeBytes: 1_048_576, sources: 5, completeSources: 2, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Manual", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 3, aichHash: null, complete: false, directory: "", observedAt: "2026-10-06T12:00:01Z" }
               ]
             }]
-          : [{ hash: "00112233445566778899AABBCCDDEEFF", name: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
+          : [{ hash: "00112233445566778899AABBCCDDEEFF", displayName: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
       });
       return;
     }
@@ -485,7 +485,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       record();
       state.transfers = [{
         hash: resultHash,
-        name: "Linux Guide.pdf",
+        displayName: "Linux Guide.pdf",
         state: "downloading",
         sizeBytes: 1_048_576,
         completedBytes: 4096,
@@ -506,7 +506,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       record();
       const [deleted] = state.transfers;
       state.transfers = [];
-      await fulfill({ items: [{ hash: deleted.hash, name: deleted.name, ok: true }] });
+      await fulfill({ items: [{ hash: deleted.hash, name: deleted.displayName, ok: true }] });
       return;
     }
     if (method === "GET" && path === `transfers/${resultHash}/details`) {
