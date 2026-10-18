@@ -275,7 +275,7 @@ async fn publication_rehash_rejects_equal_length_mutation_after_move() {
     let target_path = incoming.join("Mutated.After.Move.mkv");
     let hook_replacement = replacement.clone();
     set_after_publish_move_hook(
-        &hash,
+        &target_path,
         Box::new(move |published_path| {
             fs::write(published_path, &hook_replacement).unwrap();
         }),
@@ -904,15 +904,20 @@ async fn destructive_delete_preserves_tombstone_replacement_before_unlink() {
     fs::remove_file(&fixture.tombstone).unwrap();
     fs::rename(&owned_backup, &fixture.tombstone).unwrap();
     assert_eq!(
+        native_file_fingerprint(&fixture.tombstone)
+            .unwrap()
+            .identity,
+        moved_fingerprint.identity
+    );
+    assert_eq!(
         fixture
             .runtime
-            .recover_pending_transfer_deletions()
-            .await
+            .metadata
+            .pending_transfer_deletion_hashes()
             .unwrap(),
-        1
+        vec![fixture.hash.clone()]
     );
-    assert!(!fixture.tombstone.exists());
-    assert!(!fixture.runtime.transfer_dir(&fixture.hash).exists());
+    assert!(fixture.runtime.transfer_dir(&fixture.hash).exists());
 }
 
 #[tokio::test]
