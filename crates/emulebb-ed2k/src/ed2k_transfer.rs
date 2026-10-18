@@ -224,6 +224,19 @@ pub struct Ed2kDownloadStorageReconciliation {
     pub reset_pieces: usize,
 }
 
+/// Result of one bounded destructive-deletion recovery sweep.
+///
+/// Failure to enumerate durable intents remains an error. Failures tied to one
+/// transfer are reported here so callers can keep the already-hidden transfer
+/// unavailable, finish startup, and retry cleanup later.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ed2kTransferDeletionRecoveryReport {
+    /// Durable deletion intents fully finalized by this sweep.
+    pub recovered: usize,
+    /// Per-transfer cleanup failures retained for a later retry.
+    pub failures: Vec<String>,
+}
+
 /// Runtime owner for ED2K transfer manifests, piece-store payloads, and the
 /// transfer-backed shared catalog.
 #[derive(Debug)]

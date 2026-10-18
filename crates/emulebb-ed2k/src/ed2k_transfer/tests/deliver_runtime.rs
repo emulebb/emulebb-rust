@@ -17,7 +17,7 @@ use super::super::ingest::native_file_fingerprint;
 use super::super::metadata::transfer_directory_tombstone_path;
 use super::super::{
     ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryOwnership, Ed2kDeliveryState,
-    Ed2kTransferRuntime, new_transfer_job,
+    Ed2kTransferDeletionRecoveryReport, Ed2kTransferRuntime, new_transfer_job,
 };
 use crate::long_path::long_path;
 use crate::paths::unique_test_dir;
@@ -104,6 +104,18 @@ async fn prepare_deletion_tombstone(root: &Path, display_name: &str) -> Deletion
         tombstone,
         tombstone_id,
     }
+}
+
+fn assert_complete_deletion_recovery(
+    report: Ed2kTransferDeletionRecoveryReport,
+    expected_recovered: usize,
+) {
+    assert!(
+        report.failures.is_empty(),
+        "unexpected deletion recovery failures: {:?}",
+        report.failures
+    );
+    assert_eq!(report.recovered, expected_recovered);
 }
 
 #[tokio::test]
@@ -488,9 +500,9 @@ async fn destructive_delete_hides_transfer_when_attempt_cleanup_retries() {
     assert!(staging_path.exists());
     assert!(runtime.transfer_dir(&hash).exists());
 
-    assert_eq!(
+    assert_complete_deletion_recovery(
         runtime.recover_pending_transfer_deletions().await.unwrap(),
-        1
+        1,
     );
     assert!(!staging_path.exists());
     assert!(!runtime.transfer_dir(&hash).exists());
@@ -828,12 +840,12 @@ async fn destructive_delete_recovers_prepared_tombstone() {
     drop(fixture.runtime);
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(!fixture.delivered.exists());
     assert!(!fixture.tombstone.exists());
@@ -848,12 +860,12 @@ async fn destructive_delete_recovers_rename_before_moved_checkpoint() {
     drop(fixture.runtime);
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(!fixture.delivered.exists());
     assert!(!fixture.tombstone.exists());
@@ -878,13 +890,16 @@ async fn destructive_delete_preserves_uncheckpointed_tombstone_with_changed_iden
     drop(fixture.runtime);
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let error = restarted
+    let report = restarted
         .recover_pending_transfer_deletions()
         .await
-        .unwrap_err();
+        .unwrap();
+    assert_eq!(report.recovered, 0);
+    assert_eq!(report.failures.len(), 1);
+    let error = &report.failures[0];
     assert!(
-        format!("{error:#}").contains("contains an unproven object"),
-        "unexpected error: {error:#}"
+        error.contains("contains an unproven object"),
+        "unexpected error: {error}"
     );
     assert!(!fixture.delivered.exists());
     assert!(fixture.tombstone.exists());
@@ -916,12 +931,12 @@ async fn destructive_delete_recovers_moved_tombstone() {
     drop(fixture.runtime);
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(!fixture.tombstone.exists());
     assert!(!restarted.transfer_dir(&fixture.hash).exists());
@@ -953,14 +968,17 @@ async fn destructive_delete_preserves_tombstone_replacement_before_unlink() {
         }),
     );
 
-    let error = fixture
+    let report = fixture
         .runtime
         .recover_pending_transfer_deletions()
         .await
-        .unwrap_err();
+        .unwrap();
+    assert_eq!(report.recovered, 0);
+    assert_eq!(report.failures.len(), 1);
+    let error = &report.failures[0];
     assert!(
-        format!("{error:#}").contains("changed before physical reclamation"),
-        "unexpected error: {error:#}"
+        error.contains("changed before physical reclamation"),
+        "unexpected error: {error}"
     );
     assert_eq!(
         fs::read(&fixture.tombstone).unwrap(),
@@ -1006,12 +1024,12 @@ async fn destructive_delete_recovers_tombstone_unlink_before_finalization() {
     drop(fixture.runtime);
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(!restarted.transfer_dir(&fixture.hash).exists());
 }
@@ -1118,9 +1136,9 @@ async fn destructive_delete_retries_windows_sharing_violation() {
     );
     drop(blocker);
 
-    assert_eq!(
+    assert_complete_deletion_recovery(
         runtime.recover_pending_transfer_deletions().await.unwrap(),
-        1
+        1,
     );
     assert!(!delivered.exists());
     assert!(!runtime.transfer_dir(&hash).exists());
@@ -1144,12 +1162,12 @@ async fn destructive_delete_resumes_a_preexisting_durable_intent() {
     }
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(!delivered.exists());
     assert!(!restarted.transfer_dir(&hash).exists());
@@ -1191,12 +1209,12 @@ async fn destructive_delete_preserves_ambiguous_staged_delivery_target() {
     }
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(target_path.exists());
     assert!(!restarted.transfer_dir(&hash).exists());
@@ -1242,12 +1260,12 @@ async fn destructive_delete_reclaims_preexisting_published_delivery_attempt() {
     }
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(!target_path.exists());
     assert!(!restarted.transfer_dir(&hash).exists());
@@ -1288,11 +1306,13 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
 
     drop(runtime);
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let error = restarted
+    let report = restarted
         .recover_pending_transfer_deletions()
         .await
-        .unwrap_err();
-    let error = format!("{error:#}");
+        .unwrap();
+    assert_eq!(report.recovered, 0);
+    assert_eq!(report.failures.len(), 1);
+    let error = &report.failures[0];
     assert!(error.contains(&hash));
     assert!(error.contains("failed to delete ED2K transfer directory tombstone"));
     assert_eq!(
@@ -1304,12 +1324,12 @@ async fn destructive_delete_keeps_intent_when_cleanup_must_retry() {
     );
 
     fs::remove_file(&transfer_tombstone).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(
         restarted
@@ -1360,11 +1380,10 @@ async fn pending_deletion_recovery_continues_after_an_earlier_failure() {
             .unwrap()
     );
 
-    let error = runtime
-        .recover_pending_transfer_deletions()
-        .await
-        .unwrap_err();
-    assert!(format!("{error:#}").contains(&blocked_hash));
+    let report = runtime.recover_pending_transfer_deletions().await.unwrap();
+    assert_eq!(report.recovered, 1);
+    assert_eq!(report.failures.len(), 1);
+    assert!(report.failures[0].contains(&blocked_hash));
     assert!(!blocked_output.exists());
     assert!(!later_output.exists());
     assert!(!runtime.transfer_dir(&later_hash).exists());
@@ -1375,9 +1394,9 @@ async fn pending_deletion_recovery_continues_after_an_earlier_failure() {
     );
 
     fs::remove_file(&blocked_tombstone).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         runtime.recover_pending_transfer_deletions().await.unwrap(),
-        1
+        1,
     );
 }
 
@@ -1401,12 +1420,12 @@ async fn destructive_delete_recovers_transfer_directory_tombstone() {
     }
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
+    assert_complete_deletion_recovery(
         restarted
             .recover_pending_transfer_deletions()
             .await
             .unwrap(),
-        1
+        1,
     );
     assert!(!transfer_dir.exists());
     assert!(!transfer_tombstone.exists());
@@ -1418,9 +1437,9 @@ async fn pending_deletion_recovery_is_a_noop_without_intents() {
     let root = unique_test_dir("ed2k-deliver-delete-recovery-empty");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
 
-    assert_eq!(
+    assert_complete_deletion_recovery(
         runtime.recover_pending_transfer_deletions().await.unwrap(),
-        0
+        0,
     );
 }
 

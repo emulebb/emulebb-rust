@@ -761,11 +761,18 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         .with_profile_dir(profile.profile_dir.clone())
         .with_incoming_dir(incoming_dir),
     );
-    let recovered_transfer_deletions = core.recover_pending_transfer_deletions().await?;
-    if recovered_transfer_deletions > 0 {
+    let deletion_recovery = core.recover_pending_transfer_deletions().await?;
+    if deletion_recovery.recovered > 0 {
         info!(
-            recovered_transfer_deletions,
+            recovered_transfer_deletions = deletion_recovery.recovered,
             "recovered pending destructive transfer deletions before REST startup"
+        );
+    }
+    if !deletion_recovery.failures.is_empty() {
+        warn!(
+            failed_transfer_deletions = deletion_recovery.failures.len(),
+            failures = ?deletion_recovery.failures,
+            "pending destructive transfer deletions remain hidden and will retry after startup"
         );
     }
     let transfer_root_reconciliation = core.reconcile_transfer_root().await?;
@@ -865,15 +872,23 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     tokio::spawn(async move {
         loop {
             match delivery_core.recover_pending_transfer_deletions().await {
-                Ok(recovered) if recovered > 0 => {
-                    tracing::info!(
-                        recovered,
-                        "recovered pending destructive transfer deletions"
-                    );
+                Ok(report) => {
+                    if report.recovered > 0 {
+                        tracing::info!(
+                            recovered = report.recovered,
+                            "recovered pending destructive transfer deletions"
+                        );
+                    }
+                    if !report.failures.is_empty() {
+                        tracing::warn!(
+                            failed = report.failures.len(),
+                            failures = ?report.failures,
+                            "pending destructive transfer deletion retry remains incomplete"
+                        );
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
-                    tracing::warn!(%error, "pending destructive transfer deletion retry failed");
+                    tracing::warn!(%error, "failed to enumerate pending destructive transfer deletions");
                 }
             }
             delivery_core.deliver_pending_completed_transfers().await;

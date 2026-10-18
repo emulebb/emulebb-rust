@@ -1,11 +1,11 @@
 use super::*;
 
 impl EmulebbCore {
-    /// Complete every durable destructive-deletion intent. Startup invokes this
-    /// before profile exposure, and maintenance retries transient cleanup
-    /// failures after the ordinary delete path has already removed runtime
-    /// state and emitted its event.
-    pub async fn recover_pending_transfer_deletions(&self) -> Result<usize> {
+    /// Attempt every durable destructive-deletion intent. Per-transfer cleanup
+    /// failures remain hidden and are returned for later maintenance retries.
+    pub async fn recover_pending_transfer_deletions(
+        &self,
+    ) -> Result<Ed2kTransferDeletionRecoveryReport> {
         self.ed2k_transfers
             .recover_pending_transfer_deletions()
             .await

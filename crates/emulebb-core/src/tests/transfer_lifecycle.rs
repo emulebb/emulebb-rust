@@ -922,10 +922,9 @@ async fn startup_deletion_recovery_precedes_hydration_and_delivery_reconciliatio
     )
     .unwrap()
     .with_incoming_dir(incoming_dir);
-    assert_eq!(
-        reloaded.recover_pending_transfer_deletions().await.unwrap(),
-        1
-    );
+    let deletion_recovery = reloaded.recover_pending_transfer_deletions().await.unwrap();
+    assert_eq!(deletion_recovery.recovered, 1);
+    assert!(deletion_recovery.failures.is_empty());
     assert_eq!(reloaded.hydrate_persisted_transfer_rows().await.unwrap(), 0);
     assert_eq!(
         reloaded
