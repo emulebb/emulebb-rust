@@ -1,7 +1,9 @@
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::MetadataStore;
+use md4::{Digest, Md4};
 
 use crate::{
-    ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job},
+    ed2k_transfer::{Ed2kRuntimeConfig, Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job},
     paths::unique_test_dir,
 };
 
@@ -199,4 +201,241 @@ async fn source_file_description_matches_identity_and_survives_rediscovery_and_r
     let manifest = reloaded.manifest(&job.file_hash).await.unwrap();
     assert_eq!(manifest.sources[0].file_comment, "verified source comment");
     assert_eq!(manifest.sources[0].file_rating, 5);
+}
+
+#[tokio::test]
+async fn source_filename_majority_persists_and_manual_name_stays_pinned() {
+    let root = unique_test_dir("ed2k-transfer-source-filename-majority");
+    let metadata = MetadataStore::open(root.join("metadata.sqlite")).unwrap();
+    let config = Ed2kRuntimeConfig {
+        follow_majority_filename_for_new_downloads: true,
+        follow_majority_filename_minimum_votes: 2,
+        follow_majority_filename_required_percent: 51,
+        ..Ed2kRuntimeConfig::default()
+    };
+    let runtime =
+        Ed2kTransferRuntime::load_or_create_with_metadata_and_config(&root, metadata, &config)
+            .unwrap();
+    let file_hash = Ed2kHash::from_bytes([0x69; 16]);
+    let job = new_transfer_job(file_hash, "seed.bin".to_string(), 1024);
+    runtime.ensure_job(&job).await.unwrap();
+
+    for (last_octet, raw_name, software) in [
+        (10, "Wrong.bin", "eMule v0.60d"),
+        (11, "Caf%C3%A9.bin", "aMule 2.3.3"),
+        (12, "Cafe\u{301}.bin", "eMule v0.50a"),
+    ] {
+        runtime
+            .remember_source_file_name(
+                &job.file_hash,
+                Some(Ed2kSourceHint {
+                    ip: format!("198.51.100.{last_octet}"),
+                    tcp_port: 4662,
+                    user_hash: Some(format!("{last_octet:02x}").repeat(16)),
+                    connect_options: Some(0x07),
+                    file_comment: String::new(),
+                    file_rating: 0,
+                }),
+                raw_name,
+                Some(software),
+                "peer",
+                Some("203.0.113.10:4661"),
+            )
+            .await
+            .unwrap();
+    }
+
+    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.display_name, "Café.bin");
+    assert!(!manifest.display_name_pinned);
+    assert!(manifest.follow_majority_filename);
+    assert_eq!(manifest.file_name_observations.len(), 3);
+    assert!(
+        manifest
+            .file_name_observations
+            .iter()
+            .any(|observation| observation.raw_name == "Caf%C3%A9.bin"
+                && observation.normalized_name == "Café.bin"
+                && observation.client_software == "aMule 2.3.3")
+    );
+
+    runtime
+        .pin_display_name(&job.file_hash, "Operator Choice.bin")
+        .await
+        .unwrap();
+    runtime
+        .remember_source_file_name(
+            &job.file_hash,
+            Some(Ed2kSourceHint {
+                ip: "198.51.100.13".to_string(),
+                tcp_port: 4662,
+                user_hash: Some("13".repeat(16)),
+                connect_options: None,
+                file_comment: String::new(),
+                file_rating: 0,
+            }),
+            "Another.bin",
+            None,
+            "peer",
+            None,
+        )
+        .await
+        .unwrap();
+    drop(runtime);
+
+    let reloaded = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let manifest = reloaded.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.display_name, "Operator Choice.bin");
+    assert!(manifest.display_name_pinned);
+    assert!(!manifest.follow_majority_filename);
+    assert_eq!(manifest.file_name_observations.len(), 4);
+}
+
+#[tokio::test]
+async fn source_filename_majority_honors_vote_and_percentage_thresholds() {
+    let root = unique_test_dir("ed2k-transfer-source-filename-thresholds");
+    let metadata = MetadataStore::open(root.join("metadata.sqlite")).unwrap();
+    let config = Ed2kRuntimeConfig {
+        follow_majority_filename_for_new_downloads: true,
+        follow_majority_filename_minimum_votes: 3,
+        follow_majority_filename_required_percent: 75,
+        ..Ed2kRuntimeConfig::default()
+    };
+    let runtime =
+        Ed2kTransferRuntime::load_or_create_with_metadata_and_config(&root, metadata, &config)
+            .unwrap();
+    let file_hash = Ed2kHash::from_bytes([0x6A; 16]);
+    let job = new_transfer_job(file_hash, "seed.bin".to_string(), 1024);
+    runtime.ensure_job(&job).await.unwrap();
+
+    for (last_octet, name) in [(20, "winner.bin"), (21, "winner.bin"), (22, "other.bin")] {
+        runtime
+            .remember_source_file_name(
+                &job.file_hash,
+                Some(Ed2kSourceHint {
+                    ip: format!("198.51.100.{last_octet}"),
+                    tcp_port: 4662,
+                    user_hash: None,
+                    connect_options: None,
+                    file_comment: String::new(),
+                    file_rating: 0,
+                }),
+                name,
+                None,
+                "peer",
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.manifest(&job.file_hash).await.unwrap().display_name,
+        "seed.bin"
+    );
+
+    runtime
+        .remember_source_file_name(
+            &job.file_hash,
+            Some(Ed2kSourceHint {
+                ip: "198.51.100.23".to_string(),
+                tcp_port: 4662,
+                user_hash: None,
+                connect_options: None,
+                file_comment: String::new(),
+                file_rating: 0,
+            }),
+            "winner.bin",
+            None,
+            "peer",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.manifest(&job.file_hash).await.unwrap().display_name,
+        "winner.bin"
+    );
+}
+
+#[tokio::test]
+async fn source_filename_majority_never_renames_completing_or_completed_transfers() {
+    let root = unique_test_dir("ed2k-transfer-source-filename-completion-guard");
+    let metadata = MetadataStore::open(root.join("metadata.sqlite")).unwrap();
+    let config = Ed2kRuntimeConfig {
+        follow_majority_filename_for_new_downloads: true,
+        follow_majority_filename_minimum_votes: 2,
+        follow_majority_filename_required_percent: 51,
+        ..Ed2kRuntimeConfig::default()
+    };
+    let runtime =
+        Ed2kTransferRuntime::load_or_create_with_metadata_and_config(&root, metadata, &config)
+            .unwrap();
+    let payload = b"completion guard payload";
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(payload).into());
+    let job = new_transfer_job(file_hash, "seed.bin".to_string(), payload.len() as u64);
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, Vec::new())
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data_unfinalized(&job.file_hash, 0, payload)
+        .await
+        .unwrap();
+    let pending = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(pending.final_rehash_pending);
+    assert!(!pending.completed);
+
+    for last_octet in [30, 31] {
+        runtime
+            .remember_source_file_name(
+                &job.file_hash,
+                Some(Ed2kSourceHint {
+                    ip: format!("198.51.100.{last_octet}"),
+                    tcp_port: 4662,
+                    user_hash: None,
+                    connect_options: None,
+                    file_comment: String::new(),
+                    file_rating: 0,
+                }),
+                "majority.bin",
+                None,
+                "peer",
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.manifest(&job.file_hash).await.unwrap().display_name,
+        "seed.bin"
+    );
+
+    assert!(
+        runtime
+            .finalize_pending_transfer(&job.file_hash)
+            .await
+            .unwrap()
+    );
+    runtime
+        .remember_source_file_name(
+            &job.file_hash,
+            Some(Ed2kSourceHint {
+                ip: "198.51.100.32".to_string(),
+                tcp_port: 4662,
+                user_hash: None,
+                connect_options: None,
+                file_comment: String::new(),
+                file_rating: 0,
+            }),
+            "majority.bin",
+            None,
+            "peer",
+            None,
+        )
+        .await
+        .unwrap();
+    let completed = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(completed.completed);
+    assert_eq!(completed.display_name, "seed.bin");
 }

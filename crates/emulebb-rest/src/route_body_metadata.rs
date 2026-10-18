@@ -18,8 +18,9 @@ use validators::{
     validate_paused_body_field, validate_search_create_body_fields,
     validate_server_create_body_fields, validate_server_patch_body_fields,
     validate_shared_directories_patch_body_fields, validate_shared_directory_root_body_fields,
-    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
-    validate_transfer_patch_body_fields, validate_url_import_body_fields,
+    validate_shared_file_ignore_rule_body_fields, validate_shared_file_patch_body_fields,
+    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
+    validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -122,6 +123,12 @@ fn validate_route_specific_body_fields(
     if method == "POST" && path == "/api/v1/shared-directories/roots" {
         return validate_shared_directory_root_body_fields(object);
     }
+    if method == "POST" && path == "/api/v1/shared-directories/exclusions" {
+        return validate_shared_directory_root_body_fields(object);
+    }
+    if method == "PATCH" && path_matches_shared_file_ignore_rule(path) {
+        return validate_shared_file_ignore_rule_body_fields(object);
+    }
     if method == "PATCH" && path == "/api/v1/app/settings" {
         validate_app_settings_patch_body_fields(object)?;
         return validate_destructive_confirmation_body(method, path, object);
@@ -170,12 +177,13 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         "paused",
         "knownFilePolicy",
     ];
-    const TRANSFER_PATCH: &[&str] = &["name", "priority", "categoryId", "categoryName"];
+    const TRANSFER_PATCH: &[&str] = &["displayName", "priority", "categoryId", "categoryName"];
     const SEARCH_RESULT_DOWNLOAD: &[&str] =
         &["categoryId", "categoryName", "paused", "knownFilePolicy"];
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
+    const SHARED_FILE_IGNORE_RULE: &[&str] = &["enabled"];
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
     const DIAGNOSTIC_DUMP: &[&str] = &["confirmDump", "fullMemory"];
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
@@ -215,6 +223,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         return Some(SHARED_DIRECTORIES_PATCH);
     }
     if method == "POST" && path == "/api/v1/shared-directories/roots" {
+        return Some(SHARED_DIRECTORY_ROOT);
+    }
+    if method == "POST" && path == "/api/v1/shared-directories/exclusions" {
         return Some(SHARED_DIRECTORY_ROOT);
     }
     if method == "POST" && path == "/api/v1/app/shutdown" {
@@ -266,6 +277,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     match (method, segments.as_slice()) {
         ("PATCH", ["transfers", _]) => Some(TRANSFER_PATCH),
         ("PATCH", ["shared-files", _]) => Some(SHARED_FILE_PATCH),
+        ("PATCH", ["shared-directories", "exclusions", "rules", _]) => {
+            Some(SHARED_FILE_IGNORE_RULE)
+        }
         ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
         ("PATCH", ["categories", _]) => Some(CATEGORY),
         ("POST", ["searches", _, "results", _, "operations", "download"]) => {
@@ -281,6 +295,15 @@ fn path_matches_transfer(path: &str) -> bool {
 
 fn path_matches_shared_file(path: &str) -> bool {
     api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["shared-files", _]))
+}
+
+fn path_matches_shared_file_ignore_rule(path: &str) -> bool {
+    api_segments(path).is_some_and(|segments| {
+        matches!(
+            segments.as_slice(),
+            ["shared-directories", "exclusions", "rules", _]
+        )
+    })
 }
 
 fn path_matches_server(path: &str) -> bool {

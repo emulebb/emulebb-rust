@@ -33,6 +33,7 @@ emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 emulebb-kad-net = { path = "../emulebb-kad-net" }
+encoding_rs.workspace = true
 file-id.workspace = true
 flate2.workspace = true
 fs4.workspace = true
@@ -42,6 +43,7 @@ md4.workspace = true
 md5.workspace = true
 num-bigint.workspace = true
 parking_lot.workspace = true
+percent-encoding.workspace = true
 rand.workspace = true
 rsa.workspace = true
 serde.workspace = true
@@ -55,6 +57,7 @@ tokio-stream.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
 uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]

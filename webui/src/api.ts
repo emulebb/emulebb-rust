@@ -136,7 +136,8 @@ export type TransferEventRuntimeDiagnostics = {
 
 export type Transfer = {
   hash: string;
-  name?: string;
+  displayName?: string;
+  nameConsensus?: TransferNameConsensus;
   path?: string;
   deliveredPath?: string | null;
   deliveryError?: string | null;
@@ -156,6 +157,18 @@ export type Transfer = {
   stopped?: boolean;
   ed2kLink?: string;
   [key: string]: unknown;
+};
+
+export type TransferNameConsensus = {
+  selectedName: string;
+  pinned: boolean;
+  followMajority: boolean;
+  observationCount: number;
+  candidates: Array<{
+    normalizedName: string;
+    votes: number;
+    rawNames: string[];
+  }>;
 };
 
 export type TransferAddedEvent = {
@@ -200,6 +213,14 @@ export type TransferSource = {
   downloadRateBytesPerSec?: number;
   downloadSpeedKiBps?: number;
   requestedFileName?: string | null;
+  clientSoftware?: string;
+  reportedFileNames?: Array<{
+    rawName: string;
+    normalizedName: string;
+    origin: string;
+    serverEndpoint?: string | null;
+    observedAt: string;
+  }>;
   banned?: boolean;
   friend?: boolean;
   lowId?: boolean;
@@ -209,7 +230,8 @@ export type TransferSource = {
 export type SearchResultObservation = {
   origin: string;
   serverEndpoint?: string | null;
-  name: string;
+  rawName: string;
+  normalizedName: string;
   sizeBytes: number;
   sources: number;
   completeSources: number;
@@ -237,7 +259,16 @@ export type SearchResult = {
   searchId?: string;
   type?: string;
   hash: string;
-  name?: string;
+  displayName?: string;
+  nameConsensus?: {
+    selectedName: string;
+    observationCount: number;
+    candidates: Array<{
+      normalizedName: string;
+      rawNames: string[];
+      votes: number;
+    }>;
+  };
   sizeBytes?: number;
   sources?: number;
   completeSources?: number;
@@ -563,6 +594,25 @@ export type SharedDirectories = {
   [key: string]: unknown;
 };
 
+export type SharedFileExclusion = {
+  path: string;
+  [key: string]: unknown;
+};
+
+export type SharedFileIgnoreRule = {
+  key: string;
+  matchKind: string;
+  pattern: string;
+  enabled: boolean;
+  [key: string]: unknown;
+};
+
+export type SharedFileExclusions = {
+  custom?: SharedFileExclusion[];
+  defaults?: SharedFileIgnoreRule[];
+  [key: string]: unknown;
+};
+
 export type CoreSettings = {
   uploadLimitKiBps?: number;
   downloadLimitKiBps?: number;
@@ -647,6 +697,9 @@ export type Ed2kSettings = {
   enableUdpReask?: boolean;
   publishEmuleRustIdentity?: boolean;
   offerFilesCapabilityEnabled?: boolean;
+  detectTcpErrorFlooder?: boolean;
+  tcpErrorFlooderIntervalMinutes?: number;
+  tcpErrorFlooderThreshold?: number;
   addServersFromServer?: boolean;
   deadServerRetries?: number;
   [key: string]: unknown;

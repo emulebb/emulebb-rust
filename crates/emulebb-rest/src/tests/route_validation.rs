@@ -17,6 +17,11 @@ async fn write_routes_use_canonical_json_error_envelope() {
         ("POST", "/api/v1/searches"),
         ("PATCH", "/api/v1/shared-directories"),
         ("POST", "/api/v1/shared-directories/roots"),
+        ("POST", "/api/v1/shared-directories/exclusions"),
+        (
+            "PATCH",
+            "/api/v1/shared-directories/exclusions/rules/temporary-file",
+        ),
         (
             "PATCH",
             "/api/v1/shared-files/00112233445566778899aabbccddeeff",
@@ -240,7 +245,7 @@ async fn delete_routes_reject_request_bodies_after_route_query_validation() {
     assert_eq!(unknown_route.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         unknown_route.headers().get("x-contract-version").unwrap(),
-        "1.2.0"
+        "2.0.0"
     );
 
     let method_not_allowed = test_router()
@@ -261,7 +266,7 @@ async fn delete_routes_reject_request_bodies_after_route_query_validation() {
             .headers()
             .get("x-contract-version")
             .unwrap(),
-        "1.2.0"
+        "2.0.0"
     );
 }
 
@@ -275,6 +280,10 @@ async fn query_routes_use_canonical_error_envelope() {
         (
             "DELETE",
             "/api/v1/shared-directories/roots?unsupportedQuery=true",
+        ),
+        (
+            "DELETE",
+            "/api/v1/shared-directories/exclusions?unsupportedQuery=true",
         ),
         ("GET", "/api/v1/transfers?unsupportedQuery=true"),
         ("GET", "/api/v1/upload-queue?unsupportedQuery=true"),
@@ -559,7 +568,7 @@ async fn webui_history_fallback_only_serves_html_navigation() {
     assert_eq!(api_unknown.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         api_unknown.headers().get("x-contract-version").unwrap(),
-        "1.2.0"
+        "2.0.0"
     );
     let body = to_bytes(api_unknown.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
@@ -583,7 +592,7 @@ async fn method_not_allowed_sets_allow_header_and_error_envelope() {
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(
         response.headers().get("x-contract-version").unwrap(),
-        "1.2.0"
+        "2.0.0"
     );
     // The Allow header must advertise the method registered for this path.
     let allow = response

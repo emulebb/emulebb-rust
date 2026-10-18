@@ -35,6 +35,7 @@ import {
   RuntimeDiagnostics,
   SearchItem,
   SharedDirectories,
+  SharedFileExclusions,
   SharedFile,
   SettingsSurface,
   Snapshot,
@@ -154,6 +155,7 @@ export function App() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [friends, setFriends] = useState<Friend[]>([]);
   const [sharedDirectories, setSharedDirectories] = useState<SharedDirectories | null>(null);
+  const [sharedFileExclusions, setSharedFileExclusions] = useState<SharedFileExclusions | null>(null);
   const [sharedFiles, setSharedFiles] = useState<SharedFile[]>([]);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [uploadQueue, setUploadQueue] = useState<Upload[]>([]);
@@ -183,6 +185,7 @@ export function App() {
     setCategories([]);
     setFriends([]);
     setSharedDirectories(null);
+    setSharedFileExclusions(null);
     setSharedFiles([]);
     setUploads([]);
     setUploadQueue([]);
@@ -342,9 +345,13 @@ export function App() {
     let cancelled = false;
     const loadSharing = async () => {
       try {
-        const nextSharedDirectories = await client.get<SharedDirectories>("shared-directories");
+        const [nextSharedDirectories, nextSharedFileExclusions] = await Promise.all([
+          client.get<SharedDirectories>("shared-directories"),
+          client.get<SharedFileExclusions>("shared-directories/exclusions")
+        ]);
         if (!cancelled) {
           setSharedDirectories(nextSharedDirectories);
+          setSharedFileExclusions(nextSharedFileExclusions);
         }
       } catch (caught) {
         if (!cancelled) {
@@ -922,6 +929,7 @@ export function App() {
             {tab === "sharing" && (
               <SharingView
                 directories={sharedDirectories}
+                exclusions={sharedFileExclusions}
                 stats={stats}
                 sharedFiles={sharedFiles}
                 uploads={uploads}

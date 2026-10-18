@@ -36,6 +36,7 @@ fn populated_transfer_source() -> TransferSource {
         user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
         user_name: "peer".to_string(),
         client_software: "eMule".to_string(),
+        reported_file_names: Vec::new(),
         download_state: "downloading".to_string(),
         download_speed_ki_bps: 12.5,
         available_parts: 3,
@@ -54,6 +55,7 @@ fn populated_transfer() -> Transfer {
     Transfer {
         hash: "00112233445566778899aabbccddeeff".to_string(),
         name: "Event Stream.bin".to_string(),
+        name_consensus: Default::default(),
         path: "Event Stream.bin".to_string(),
         delivered_path: None,
         delivery_error: None,
@@ -96,6 +98,7 @@ fn transfer_source_serializes_only_contract_keys() {
         "port",
         "downloadState",
         "clientSoftware",
+        "reportedFileNames",
         "downloadSpeedKiBps",
         "availableParts",
         "partCount",

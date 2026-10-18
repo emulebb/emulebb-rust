@@ -4,19 +4,22 @@
 //! JSON shapes the eMuleBB REST contract publishes. They were extracted verbatim
 //! from `lib.rs` during the maintainability restructuring; behavior is unchanged.
 
-use std::{collections::BTreeSet, path::Path as FsPath};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path as FsPath,
+};
 
 use emulebb_core::{
     AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
     Search, SearchResult, SearchSpec, ServerInfo, Status, Transfer, TransferEventDiagnostics,
     TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
-    normal_path_display,
+    normal_path_display, normalize_ed2k_file_name,
 };
 use serde_json::{Value, json};
 
 use crate::{BulkOperationResult, RestState, SearchResultsPage, SharedFileResponse};
 
-pub(crate) const CONTRACT_VERSION: &str = "1.2.0";
+pub(crate) const CONTRACT_VERSION: &str = "2.0.0";
 
 pub(crate) fn lifecycle_response(lifecycle: &AppLifecycle) -> Value {
     let shutdown = lifecycle.state == "shuttingdown" || lifecycle.state == "done";
@@ -453,7 +456,8 @@ pub(crate) fn search_result_response_with_options(
             json!({
                 "origin": observation.origin,
                 "serverEndpoint": observation.server_endpoint,
-                "name": observation.name,
+                "rawName": observation.name,
+                "normalizedName": normalize_ed2k_file_name(&observation.name),
                 "sizeBytes": observation.size_bytes,
                 "sources": observation.sources,
                 "completeSources": observation.complete_sources,
@@ -477,12 +481,16 @@ pub(crate) fn search_result_response_with_options(
             })
         })
         .collect::<Vec<_>>();
-    let observed_names = result
+    let observed_raw_names = result
         .observations
         .iter()
         .map(|observation| observation.name.clone())
-        .chain(std::iter::once(result.name.clone()))
         .filter(|name| !name.trim().is_empty())
+        .collect::<BTreeSet<_>>();
+    let observed_names = observed_raw_names
+        .iter()
+        .map(|name| normalize_ed2k_file_name(name))
+        .filter(|name| !name.is_empty())
         .collect::<BTreeSet<_>>();
     let observed_extensions = observed_names
         .iter()
@@ -494,6 +502,31 @@ pub(crate) fn search_result_response_with_options(
                 .map(str::to_ascii_lowercase)
         })
         .collect::<BTreeSet<_>>();
+    let mut candidate_votes = BTreeMap::<String, usize>::new();
+    for observation in &result.observations {
+        let normalized = normalize_ed2k_file_name(&observation.name);
+        if !normalized.is_empty() {
+            *candidate_votes.entry(normalized).or_default() += 1;
+        }
+    }
+    let name_candidates = candidate_votes
+        .into_iter()
+        .map(|(normalized_name, votes)| {
+            let raw_names = result
+                .observations
+                .iter()
+                .filter(|observation| {
+                    normalize_ed2k_file_name(&observation.name) == normalized_name
+                })
+                .map(|observation| observation.name.clone())
+                .collect::<BTreeSet<_>>();
+            json!({
+                "normalizedName": normalized_name,
+                "rawNames": raw_names,
+                "votes": votes,
+            })
+        })
+        .collect::<Vec<_>>();
     let aich_hashes = result
         .observations
         .iter()
@@ -517,7 +550,12 @@ pub(crate) fn search_result_response_with_options(
         "searchId": result.search_id,
         "type": result.r#type,
         "hash": result.hash,
-        "name": result.name,
+        "displayName": result.name,
+        "nameConsensus": {
+            "selectedName": result.name,
+            "observationCount": result.observations.len(),
+            "candidates": name_candidates,
+        },
         "sizeBytes": result.size_bytes,
         "sources": result.sources,
         "completeSources": result.complete_sources,
@@ -551,6 +589,7 @@ pub(crate) fn search_result_response_with_options(
         response["evidence"] = json!({
             "availabilityEvidence": availability,
             "nameEvidence": {
+                "observedRawNames": observed_raw_names,
                 "observedNames": observed_names,
                 "observedExtensions": observed_extensions,
                 "divergent": divergent_names,
@@ -814,6 +853,12 @@ mod tests {
 
         let complete = search_result_response(&result);
         assert_eq!(complete["complete"], true);
+        assert_eq!(complete["displayName"], "sample.bin");
+        assert_eq!(complete["nameConsensus"]["selectedName"], "sample.bin");
+        assert_eq!(complete["observations"][0]["rawName"], "sample.bin");
+        assert_eq!(complete["observations"][0]["normalizedName"], "sample.bin");
+        assert!(complete.get("name").is_none());
+        assert!(complete["observations"][0].get("name").is_none());
         assert_eq!(complete["rating"], 4);
         assert_eq!(complete["media"]["artist"], "Example Artist");
         assert_eq!(complete["media"]["album"], "Example Album");

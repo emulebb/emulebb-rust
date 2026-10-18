@@ -160,6 +160,9 @@ mod tests {
         MetadataTransferManifest {
             file_hash: "00112233445566778899aabbccddeeff".to_string(),
             display_name: "completed.bin".to_string(),
+            display_name_pinned: false,
+            follow_majority_filename: false,
+            file_name_observations: Vec::new(),
             file_size: 1024,
             piece_size: 1024,
             completed: true,

@@ -2,6 +2,8 @@ use std::{str::FromStr, time::Instant};
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
+
+use crate::normalize_ed2k_file_name;
 use md4::{Digest as Md4Digest, Md4};
 
 use super::{
@@ -53,7 +55,7 @@ pub fn new_transfer_job(
 ) -> Ed2kTransferJob {
     Ed2kTransferJob {
         file_hash: file_hash.to_string(),
-        display_name,
+        display_name: normalize_ed2k_file_name(&display_name),
         file_size,
         piece_size: ED2K_PART_SIZE,
     }

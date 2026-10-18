@@ -199,6 +199,18 @@ async fn accepted_peer_without_claimable_blocks_is_cancelled_as_no_needed_parts(
     .unwrap();
 
     assert_eq!(result, Ed2kPeerDownloadOutcome::NoNeededParts);
+    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    assert_eq!(manifest.file_name_observations.len(), 1);
+    assert_eq!(manifest.file_name_observations[0].raw_name, "claimed.epub");
+    assert_eq!(
+        manifest.file_name_observations[0].normalized_name,
+        "claimed.epub"
+    );
+    let expected_source_ip = test_bind_ip().to_string();
+    assert_eq!(
+        manifest.file_name_observations[0].source_ip.as_deref(),
+        Some(expected_source_ip.as_str())
+    );
     server.await.unwrap();
 }
 

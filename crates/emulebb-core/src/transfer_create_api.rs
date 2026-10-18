@@ -39,10 +39,12 @@ impl EmulebbCore {
             "search result has no usable file size"
         );
         let source_hints = search_result_source_hints(&result);
+        let file_name_observations = result.observations.clone();
         let request_identity = ParsedEd2kLink {
             file_hash: result.hash.clone(),
             name: result.name.clone(),
             size_bytes: result.size_bytes,
+            aich_root: None,
             sources: Vec::new(),
         };
         let preflight = self
@@ -76,7 +78,27 @@ impl EmulebbCore {
                 .remember_source(&transfer.hash, source_hint)
                 .await?;
         }
-        Ok(Some(transfer))
+        for observation in file_name_observations {
+            let source = observation
+                .source_client_id
+                .zip(observation.source_client_port)
+                .and_then(|(client_id, tcp_port)| search_source_hint(client_id, tcp_port));
+            self.ed2k_transfers
+                .remember_source_file_name(
+                    &transfer.hash,
+                    source,
+                    &observation.name,
+                    None,
+                    &observation.origin,
+                    observation.server_endpoint.as_deref(),
+                )
+                .await?;
+        }
+        let refreshed = self
+            .refresh_transfer_from_manifest_silent(&transfer.hash, &transfer.state)
+            .await?
+            .unwrap_or(transfer);
+        Ok(Some(refreshed))
     }
 
     pub async fn create_transfer(&self, request: TransferCreate) -> Result<Transfer> {
@@ -120,12 +142,21 @@ impl EmulebbCore {
                     redownload,
                 )
                 .await?;
+            if let Some(aich_root) = parsed.aich_root {
+                self.ed2k_transfers
+                    .reconcile_aich_root(&transfer.hash, Some(aich_root))
+                    .await?;
+            }
             for source in parsed.sources {
                 self.ed2k_transfers
                     .remember_source(&transfer.hash, source)
                     .await?;
             }
-            transfers.push(self.transfer(&transfer.hash).await.unwrap_or(transfer));
+            let refreshed = self
+                .refresh_transfer_from_manifest_silent(&transfer.hash, &transfer.state)
+                .await?
+                .unwrap_or(transfer);
+            transfers.push(refreshed);
         }
         Ok(transfers)
     }

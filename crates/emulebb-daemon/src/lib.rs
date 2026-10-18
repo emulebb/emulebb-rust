@@ -572,6 +572,14 @@ fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfi
         source_server_attempt_budget: settings.source_server_attempt_budget,
         upload_queue: ed2k_upload_queue_runtime_config_from_settings(settings.upload_queue),
         download_limit_bytes_per_sec: settings.download_limit_bytes_per_sec,
+        follow_majority_filename_for_new_downloads: settings
+            .follow_majority_filename_for_new_downloads,
+        follow_majority_filename_minimum_votes: settings.follow_majority_filename_minimum_votes,
+        follow_majority_filename_required_percent: settings
+            .follow_majority_filename_required_percent,
+        detect_tcp_error_flooder: settings.detect_tcp_error_flooder,
+        tcp_error_flooder_interval_minutes: settings.tcp_error_flooder_interval_minutes,
+        tcp_error_flooder_threshold: settings.tcp_error_flooder_threshold,
         enable_udp_reask: settings.enable_udp_reask,
         publish_emule_rust_identity: settings.publish_emule_rust_identity,
         offer_files_capability_enabled: settings.offer_files_capability_enabled,

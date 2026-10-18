@@ -34,6 +34,14 @@ impl EmulebbCore {
         requested_name: Option<String>,
         progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
     ) -> Result<LocalShare> {
+        let metadata = tokio::fs::metadata(long_path(source_path))
+            .await
+            .with_context(|| format!("failed to inspect {}", source_path.display()))?;
+        ensure!(metadata.is_file(), "local share path is not a file");
+        ensure!(
+            !load_shared_file_exclusion_policy(self)?.should_ignore(source_path, &metadata),
+            "local share path is excluded from sharing"
+        );
         let display_name = match requested_name {
             Some(name) => name,
             None => emulebb_metadata::NativePath::from(source_path)
@@ -140,6 +148,7 @@ impl EmulebbCore {
                 &entry.display_name,
                 entry.file_size,
                 &entry.file_hash,
+                entry.aich_root.as_deref(),
             ),
             aich_root: entry.aich_root.clone().unwrap_or_default(),
             transfer_dir: self
@@ -305,6 +314,57 @@ impl EmulebbCore {
         }
     }
 
+    pub fn shared_file_exclusions(&self) -> Result<SharedFileExclusions> {
+        let custom = self
+            .metadata_store
+            .shared_file_exclusions()?
+            .into_iter()
+            .map(|path| SharedFileExclusion {
+                path: normal_path_display(path.display_path()),
+            })
+            .collect();
+        let disabled = self
+            .metadata_store
+            .disabled_shared_default_ignore_rules()?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        Ok(SharedFileExclusions {
+            custom,
+            defaults: shared_file_ignore_rules(&disabled),
+        })
+    }
+
+    pub async fn add_shared_file_exclusion(&self, path: &str) -> Result<SharedFileExclusions> {
+        let canonical_path = canonical_shared_file_exclusion(path)?;
+        self.metadata_store
+            .add_shared_file_exclusion(&canonical_path)?;
+        self.reload_shared_directories_detached().await?;
+        self.shared_file_exclusions()
+    }
+
+    pub async fn remove_shared_file_exclusion(&self, path: &str) -> Result<SharedFileExclusions> {
+        let canonical_path = removable_shared_file_exclusion(path)?;
+        self.metadata_store
+            .remove_shared_file_exclusion(&canonical_path)?;
+        self.reload_shared_directories_detached().await?;
+        self.shared_file_exclusions()
+    }
+
+    pub async fn set_shared_file_ignore_rule_enabled(
+        &self,
+        rule_key: &str,
+        enabled: bool,
+    ) -> Result<SharedFileExclusions> {
+        ensure!(
+            is_shared_file_ignore_rule(rule_key),
+            "unknown shared-file ignore rule"
+        );
+        self.metadata_store
+            .set_shared_default_ignore_rule_enabled(rule_key, enabled)?;
+        self.reload_shared_directories_detached().await?;
+        self.shared_file_exclusions()
+    }
+
     pub async fn set_shared_directories(
         &self,
         request: SharedDirectoriesUpdate,
@@ -430,6 +490,31 @@ fn removable_shared_directory_root(path: &str) -> Result<String> {
             Ok(normal_path_display(canonical.display().to_string()))
         }
         Err(_) => Ok(normal_path_display(path)),
+    }
+}
+
+fn canonical_shared_file_exclusion(path: &str) -> Result<PathBuf> {
+    let path = path.trim();
+    ensure!(!path.is_empty(), "path must not be empty");
+    let canonical = fs::canonicalize(long_path(Path::new(path)))
+        .with_context(|| format!("failed to resolve {path}"))?;
+    let metadata = fs::metadata(&canonical)
+        .with_context(|| format!("failed to inspect {}", canonical.display()))?;
+    ensure!(metadata.is_file(), "path is not a file");
+    Ok(long_path(&canonical))
+}
+
+fn removable_shared_file_exclusion(path: &str) -> Result<PathBuf> {
+    let path = path.trim();
+    ensure!(!path.is_empty(), "path must not be empty");
+    match fs::canonicalize(long_path(Path::new(path))) {
+        Ok(canonical) => {
+            let metadata = fs::metadata(&canonical)
+                .with_context(|| format!("failed to inspect {}", canonical.display()))?;
+            ensure!(metadata.is_file(), "path is not a file");
+            Ok(long_path(&canonical))
+        }
+        Err(_) => Ok(long_path(Path::new(path))),
     }
 }
 

@@ -13,6 +13,25 @@ fn ed2k_link_parser_decodes_stock_utf8_filename() {
     assert_eq!(parsed.name, "Linux Guide é%.pdf");
     assert_eq!(parsed.size_bytes, 123);
     assert_eq!(parsed.file_hash, "00112233445566778899aabbccddeeff");
+    assert_eq!(parsed.aich_root, None);
+}
+
+#[test]
+fn ed2k_link_parser_decodes_valid_aich_root() {
+    let link = "ed2k://|file|Aich.bin|123|00112233445566778899aabbccddeeff|h=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/";
+    let parsed = parse_ed2k_link(link).expect("AICH ED2K link");
+
+    assert_eq!(parsed.aich_root, Some([0; 20]));
+}
+
+#[test]
+fn ed2k_link_parser_rejects_malformed_aich_root() {
+    let link = "ed2k://|file|Aich.bin|123|00112233445566778899aabbccddeeff|h=AAAA|/";
+
+    assert_eq!(
+        parse_ed2k_link(link).unwrap_err().to_string(),
+        "ED2K AICH root must decode to 20 bytes"
+    );
 }
 
 #[test]
@@ -732,6 +751,7 @@ fn a4af_test_transfer(hash: &str, state_name: &str) -> Transfer {
     Transfer {
         hash: hash.to_string(),
         name: "file".to_string(),
+        name_consensus: Default::default(),
         path: String::new(),
         delivered_path: None,
         delivery_error: None,

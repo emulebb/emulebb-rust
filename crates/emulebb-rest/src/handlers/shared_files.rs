@@ -12,7 +12,10 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use emulebb_core::{SharedDirectoriesUpdate, SharedDirectoryRootUpdate, SharedFileUpdate};
+use emulebb_core::{
+    SharedDirectoriesUpdate, SharedDirectoryRootUpdate, SharedFileExclusionUpdate,
+    SharedFileIgnoreRuleUpdate, SharedFileUpdate,
+};
 
 use crate::handlers::prelude::*;
 
@@ -129,6 +132,79 @@ pub(crate) async fn remove_shared_directory_root(
     };
     match state.core.remove_shared_directory_root(&path).await {
         Ok(directories) => api_ok(directories).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+pub(crate) async fn shared_file_exclusions(State(state): State<RestState>) -> impl IntoResponse {
+    match state.core.shared_file_exclusions() {
+        Ok(exclusions) => api_ok(exclusions).into_response(),
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            error.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+pub(crate) async fn add_shared_file_exclusion(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let request = match parse_required_json_body::<SharedFileExclusionUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state.core.add_shared_file_exclusion(&request.path).await {
+        Ok(exclusions) => api_ok(exclusions).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+pub(crate) async fn remove_shared_file_exclusion(
+    State(state): State<RestState>,
+    RawQuery(raw_query): RawQuery,
+) -> impl IntoResponse {
+    let query = match parse_optional_query::<SharedDirectoryRootQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    let Some(path) = query.path else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "path is required",
+        )
+        .into_response();
+    };
+    match state.core.remove_shared_file_exclusion(&path).await {
+        Ok(exclusions) => api_ok(exclusions).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+pub(crate) async fn update_shared_file_ignore_rule(
+    State(state): State<RestState>,
+    Path(rule_key): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let request = match parse_required_json_body::<SharedFileIgnoreRuleUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state
+        .core
+        .set_shared_file_ignore_rule_enabled(&rule_key, request.enabled)
+        .await
+    {
+        Ok(exclusions) => api_ok(exclusions).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }

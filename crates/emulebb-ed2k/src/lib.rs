@@ -5,6 +5,7 @@ pub mod diag_event;
 pub mod disk_space;
 mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;
+mod file_name;
 pub use ed2k_client_udp::{
     DirectCallbackArgs, DirectCallbackDispatchOutcome, DirectCallbackSender, ReaskCommand,
     ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent, ReaskEventReceiver, ReaskEventSender,
@@ -36,11 +37,13 @@ pub mod public_ip_probe;
 pub mod reachability;
 pub mod shared_publish_rank;
 pub mod stun;
+pub mod tcp_error_flood;
 pub mod tracked_client_identity;
 
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 
+pub use file_name::normalize_ed2k_file_name;
 pub use nat::{
     MappedEndpoint, MappingExposure, MappingSpec, MiniupnpcPortMappingProvider, NatCapableAgent,
     NatConfig, NatManager, NatManagerBuilder, NatStatus, NatStatusSnapshot,

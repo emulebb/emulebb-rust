@@ -8,15 +8,17 @@
 //! beyond what they had inline. Re-exported `pub(crate)` from the crate root so
 //! the `EmulebbCore` impl and the test module reach them by their bare names.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Result, ensure};
+use chrono::DateTime;
 use emulebb_ed2k::ed2k_transfer::{Ed2kLiveSource, Ed2kResumeManifest, Ed2kTransferState};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::{
     NetworkStatus, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Transfer,
-    TransferCreate, TransferPart, TransferSource, TransferUpdate,
+    TransferCreate, TransferFileNameObservation, TransferNameCandidate, TransferNameConsensus,
+    TransferPart, TransferSource, TransferUpdate,
 };
 
 // MFC EncodeUrlUtf8 escapes spaces, percent signs, and UTF-8 bytes in ED2K
@@ -25,13 +27,28 @@ use crate::{
 const ED2K_LINK_NAME_ENCODE_SET: &AsciiSet = &CONTROLS.add(b' ').add(b'%').add(b'|');
 
 /// Emit a stock-shaped eD2K link with a UTF-8-safe, delimiter-safe file name.
-pub(crate) fn format_ed2k_file_link(name: &str, size: u64, hash: &str) -> String {
-    format!(
-        "ed2k://|file|{}|{}|{}|/",
+pub(crate) fn format_ed2k_file_link(
+    name: &str,
+    size: u64,
+    hash: &str,
+    aich_root: Option<&str>,
+) -> String {
+    let mut link = format!(
+        "ed2k://|file|{}|{}|{}|",
         utf8_percent_encode(name, ED2K_LINK_NAME_ENCODE_SET),
         size,
         hash,
-    )
+    );
+    if let Some(aich_root) = aich_root.filter(|root| !root.is_empty())
+        && let Ok(bytes) = hex::decode(aich_root)
+        && bytes.len() == 20
+    {
+        link.push_str("h=");
+        link.push_str(&data_encoding::BASE32_NOPAD.encode(&bytes));
+        link.push('|');
+    }
+    link.push('/');
+    link
 }
 
 // Builds one Transfer view from a resume manifest plus a handful of live-overlay
@@ -98,9 +115,11 @@ pub(crate) fn transfer_from_manifest(
             &manifest.display_name,
             manifest.file_size,
             &manifest.file_hash,
+            manifest.aich_root.as_deref(),
         ),
         hash: manifest.file_hash.clone(),
         name: manifest.display_name.clone(),
+        name_consensus: transfer_name_consensus(manifest),
         path: payload_path,
         delivered_path: manifest
             .delivered_path
@@ -310,7 +329,28 @@ pub(crate) fn transfer_sources_from_manifest(
                 file_rating: source.file_rating,
                 user_hash: source.user_hash.clone(),
                 user_name: endpoint.clone(),
-                client_software: "unknown".to_string(),
+                client_software: source_file_name_observations(manifest, source)
+                    .iter()
+                    .rev()
+                    .find(|observation| !observation.client_software.is_empty())
+                    .map_or_else(
+                        || "unknown".to_string(),
+                        |observation| observation.client_software.clone(),
+                    ),
+                reported_file_names: source_file_name_observations(manifest, source)
+                    .into_iter()
+                    .filter_map(|observation| {
+                        DateTime::from_timestamp_millis(observation.observed_at_ms).map(
+                            |observed_at| TransferFileNameObservation {
+                                raw_name: observation.raw_name.clone(),
+                                normalized_name: observation.normalized_name.clone(),
+                                origin: observation.origin.clone(),
+                                server_endpoint: observation.server_endpoint.clone(),
+                                observed_at,
+                            },
+                        )
+                    })
+                    .collect(),
                 download_state: if banned { "banned" } else { "remembered" }.to_string(),
                 download_speed_ki_bps: 0.0,
                 available_parts: 0,
@@ -325,6 +365,96 @@ pub(crate) fn transfer_sources_from_manifest(
                 banned,
                 status: "remembered".to_string(),
             }
+        })
+        .collect()
+}
+
+fn transfer_name_consensus(manifest: &Ed2kResumeManifest) -> TransferNameConsensus {
+    let mut latest_by_source = BTreeMap::new();
+    for observation in &manifest.file_name_observations {
+        let key = file_name_source_key(
+            observation.source_ip.as_deref(),
+            observation.source_tcp_port,
+            observation.user_hash.as_deref(),
+            &observation.origin,
+            observation.server_endpoint.as_deref(),
+        );
+        if latest_by_source.get(&key).is_none_or(
+            |existing: &&emulebb_ed2k::ed2k_transfer::Ed2kFileNameObservation| {
+                existing.observed_at_ms <= observation.observed_at_ms
+            },
+        ) {
+            latest_by_source.insert(key, observation);
+        }
+    }
+    let mut votes = BTreeMap::<String, usize>::new();
+    for observation in latest_by_source.into_values() {
+        *votes
+            .entry(observation.normalized_name.clone())
+            .or_default() += 1;
+    }
+    let candidates = votes
+        .into_iter()
+        .map(|(normalized_name, votes)| TransferNameCandidate {
+            raw_names: manifest
+                .file_name_observations
+                .iter()
+                .filter(|observation| observation.normalized_name == normalized_name)
+                .map(|observation| observation.raw_name.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            normalized_name,
+            votes,
+        })
+        .collect();
+    TransferNameConsensus {
+        selected_name: manifest.display_name.clone(),
+        pinned: manifest.display_name_pinned,
+        follow_majority: manifest.follow_majority_filename,
+        observation_count: manifest.file_name_observations.len(),
+        candidates,
+    }
+}
+
+fn file_name_source_key(
+    ip: Option<&str>,
+    tcp_port: Option<u16>,
+    user_hash: Option<&str>,
+    origin: &str,
+    server_endpoint: Option<&str>,
+) -> String {
+    user_hash
+        .map(|hash| format!("hash:{hash}"))
+        .or_else(|| {
+            ip.zip(tcp_port)
+                .map(|(ip, port)| format!("endpoint:{ip}:{port}"))
+        })
+        .unwrap_or_else(|| format!("origin:{origin}:{}", server_endpoint.unwrap_or_default()))
+}
+
+fn source_file_name_observations<'a>(
+    manifest: &'a Ed2kResumeManifest,
+    source: &emulebb_ed2k::ed2k_transfer::Ed2kSourceHint,
+) -> Vec<&'a emulebb_ed2k::ed2k_transfer::Ed2kFileNameObservation> {
+    let source_key = file_name_source_key(
+        Some(&source.ip),
+        Some(source.tcp_port),
+        source.user_hash.as_deref(),
+        "peer",
+        None,
+    );
+    manifest
+        .file_name_observations
+        .iter()
+        .filter(|observation| {
+            file_name_source_key(
+                observation.source_ip.as_deref(),
+                observation.source_tcp_port,
+                observation.user_hash.as_deref(),
+                &observation.origin,
+                observation.server_endpoint.as_deref(),
+            ) == source_key
         })
         .collect()
 }

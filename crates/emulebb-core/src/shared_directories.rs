@@ -32,6 +32,40 @@ pub struct SharedDirectories {
     pub reload_progress: SharedDirectoryReloadProgress,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedFileExclusions {
+    pub custom: Vec<SharedFileExclusion>,
+    pub defaults: Vec<SharedFileIgnoreRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedFileExclusion {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedFileIgnoreRule {
+    pub key: String,
+    pub match_kind: String,
+    pub pattern: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharedFileExclusionUpdate {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharedFileIgnoreRuleUpdate {
+    pub enabled: bool,
+}
+
 /// Live counters and file-level progress for the latest shared-directory reload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -225,12 +259,277 @@ const INITIAL_PUBLISH_CANDIDATE_LIMIT: usize = 2_048;
 const INITIAL_PUBLISH_COHORT_FILE_LIMIT: usize = 200;
 const INITIAL_PUBLISH_COHORT_BYTE_LIMIT: u64 = 256 * 1024 * 1024;
 
-fn should_ignore_shared_file_candidate(path: &Path, metadata: &Metadata) -> bool {
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    metadata.len() == 0
-        || metadata.len() > MAX_EMULE_FILE_SIZE
-        || has_windows_ignored_file_attributes(metadata)
-        || should_ignore_shared_file_name(&file_name)
+#[derive(Debug, Clone, Copy)]
+enum SharedFileIgnoreMatch {
+    Exact,
+    Prefix,
+    Suffix,
+    LockFile,
+}
+
+impl SharedFileIgnoreMatch {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Prefix => "prefix",
+            Self::Suffix => "suffix",
+            Self::LockFile => "lockFile",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SharedFileIgnoreRuleDefinition {
+    key: &'static str,
+    match_kind: SharedFileIgnoreMatch,
+    pattern: &'static str,
+}
+
+const DEFAULT_SHARED_FILE_IGNORE_RULES: &[SharedFileIgnoreRuleDefinition] = &[
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.known-met",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "known.met",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.known2-met",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "known2.met",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.known2-64-met",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "known2_64.met",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.preferences-dat",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "preferences.dat",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.preferences-ini",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "preferences.ini",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.clients-met",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "clients.met",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.server-met",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "server.met",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.cryptkey-dat",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "cryptkey.dat",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.cancelled-met",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "cancelled.met",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.statistics-ini",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "statistics.ini",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.thumbs-db",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "thumbs.db",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.ehthumbs-db",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "ehthumbs.db",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.desktop-ini",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "desktop.ini",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.ds-store",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: ".ds_store",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.localized",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: ".localized",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.icon-cr",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: "Icon\r",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.directory",
+        match_kind: SharedFileIgnoreMatch::Exact,
+        pattern: ".directory",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.apple-double",
+        match_kind: SharedFileIgnoreMatch::Prefix,
+        pattern: "._",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.office-temp",
+        match_kind: SharedFileIgnoreMatch::Prefix,
+        pattern: "~$",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.nfs-temp",
+        match_kind: SharedFileIgnoreMatch::Prefix,
+        pattern: ".nfs",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.sandbox-temp",
+        match_kind: SharedFileIgnoreMatch::Prefix,
+        pattern: ".sb-",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.syncthing-temp",
+        match_kind: SharedFileIgnoreMatch::Prefix,
+        pattern: ".syncthing.",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.windows-shortcut",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: ".lnk",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.part",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: ".part",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.part-met",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: ".part.met",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "emule.part-met-bak",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: ".part.met.bak",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.chrome-download",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: ".crdownload",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.download",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: ".download",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.tmp",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: ".tmp",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.temp",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: ".temp",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.backup-tilde",
+        match_kind: SharedFileIgnoreMatch::Suffix,
+        pattern: "~",
+    },
+    SharedFileIgnoreRuleDefinition {
+        key: "noise.libreoffice-lock",
+        match_kind: SharedFileIgnoreMatch::LockFile,
+        pattern: "~lock.*#",
+    },
+];
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SharedFileExclusionPolicy {
+    exact_paths: HashSet<NativePath>,
+    disabled_default_rules: HashSet<String>,
+}
+
+impl SharedFileExclusionPolicy {
+    pub(crate) fn new(exact_paths: Vec<NativePath>, disabled_default_rules: Vec<String>) -> Self {
+        Self {
+            exact_paths: exact_paths.into_iter().collect(),
+            disabled_default_rules: disabled_default_rules.into_iter().collect(),
+        }
+    }
+
+    pub(crate) fn should_ignore(&self, path: &Path, metadata: &Metadata) -> bool {
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+        metadata.len() == 0
+            || metadata.len() > MAX_EMULE_FILE_SIZE
+            || has_windows_ignored_file_attributes(metadata)
+            || self
+                .exact_paths
+                .contains(&NativePath::from(long_path(path)))
+            || self.should_ignore_file_name(&file_name)
+    }
+
+    fn should_ignore_file_name(&self, file_name: &str) -> bool {
+        DEFAULT_SHARED_FILE_IGNORE_RULES
+            .iter()
+            .any(|rule| !self.disabled_default_rules.contains(rule.key) && rule.matches(file_name))
+    }
+}
+
+impl SharedFileIgnoreRuleDefinition {
+    fn matches(self, file_name: &str) -> bool {
+        match self.match_kind {
+            SharedFileIgnoreMatch::Exact => file_name.eq_ignore_ascii_case(self.pattern),
+            SharedFileIgnoreMatch::Prefix => {
+                starts_with_ascii_case_insensitive(file_name, self.pattern)
+            }
+            SharedFileIgnoreMatch::Suffix => {
+                ends_with_ascii_case_insensitive(file_name, self.pattern)
+            }
+            SharedFileIgnoreMatch::LockFile => {
+                starts_with_ascii_case_insensitive(file_name, "~lock.")
+                    && ends_with_ascii_case_insensitive(file_name, "#")
+                    && file_name.len() >= "~lock.".len() + "#".len()
+            }
+        }
+    }
+}
+
+pub(crate) fn shared_file_ignore_rules(
+    disabled_default_rules: &HashSet<String>,
+) -> Vec<SharedFileIgnoreRule> {
+    DEFAULT_SHARED_FILE_IGNORE_RULES
+        .iter()
+        .map(|rule| SharedFileIgnoreRule {
+            key: rule.key.to_string(),
+            match_kind: rule.match_kind.as_str().to_string(),
+            pattern: rule.pattern.to_string(),
+            enabled: !disabled_default_rules.contains(rule.key),
+        })
+        .collect()
+}
+
+pub(crate) fn is_shared_file_ignore_rule(rule_key: &str) -> bool {
+    DEFAULT_SHARED_FILE_IGNORE_RULES
+        .iter()
+        .any(|rule| rule.key == rule_key)
+}
+
+fn should_ignore_shared_file_candidate_with_policy(
+    path: &Path,
+    metadata: &Metadata,
+    policy: &SharedFileExclusionPolicy,
+) -> bool {
+    policy.should_ignore(path, metadata)
+}
+
+#[cfg(test)]
+fn should_ignore_shared_file_name(file_name: &str) -> bool {
+    SharedFileExclusionPolicy::default().should_ignore_file_name(file_name)
 }
 
 #[cfg(windows)]
@@ -245,40 +544,6 @@ fn has_windows_ignored_file_attributes(metadata: &Metadata) -> bool {
 #[cfg(not(windows))]
 fn has_windows_ignored_file_attributes(_: &Metadata) -> bool {
     false
-}
-
-fn should_ignore_shared_file_name(file_name: &str) -> bool {
-    const EXACT: &[&str] = &[
-        "ehthumbs.db",
-        "desktop.ini",
-        ".ds_store",
-        ".localized",
-        "Icon\r",
-        ".directory",
-    ];
-    const PREFIXES: &[&str] = &["._", "~$", ".nfs", ".sb-", ".syncthing."];
-    const SUFFIXES: &[&str] = &[
-        ".lnk",
-        ".part",
-        ".crdownload",
-        ".download",
-        ".tmp",
-        ".temp",
-        "~",
-    ];
-
-    EXACT
-        .iter()
-        .any(|name| file_name.eq_ignore_ascii_case(name))
-        || PREFIXES
-            .iter()
-            .any(|prefix| starts_with_ascii_case_insensitive(file_name, prefix))
-        || SUFFIXES
-            .iter()
-            .any(|suffix| ends_with_ascii_case_insensitive(file_name, suffix))
-        || (starts_with_ascii_case_insensitive(file_name, "~lock.")
-            && ends_with_ascii_case_insensitive(file_name, "#")
-            && file_name.len() >= "~lock.".len() + "#".len())
 }
 
 fn should_ignore_shared_directory_name(directory_name: &str) -> bool {
@@ -325,9 +590,18 @@ fn ends_with_ascii_case_insensitive(value: &str, suffix: &str) -> bool {
 /// cycles. A single unreadable entry (permissions, vanished file, broken
 /// symlink) is logged and skipped instead of aborting the whole scan, so the
 /// readable files are still collected.
+#[cfg(test)]
 pub(crate) fn collect_shared_directory_files(
     root: &Path,
     output: &mut Vec<ScannedSharedFile>,
+) -> Result<usize> {
+    collect_shared_directory_files_with_policy(root, output, &SharedFileExclusionPolicy::default())
+}
+
+fn collect_shared_directory_files_with_policy(
+    root: &Path,
+    output: &mut Vec<ScannedSharedFile>,
+    policy: &SharedFileExclusionPolicy,
 ) -> Result<usize> {
     // Resolve the physical disk once per configured root. On a 100k-file
     // library this avoids 100k volume opens + disk-extent IOCTLs, while every
@@ -380,7 +654,7 @@ pub(crate) fn collect_shared_directory_files(
                     continue;
                 }
             };
-            if should_ignore_shared_file_candidate(entry.path(), &metadata) {
+            if should_ignore_shared_file_candidate_with_policy(entry.path(), &metadata, policy) {
                 skipped_intake_count.set(skipped_intake_count.get() + 1);
                 continue;
             }
@@ -405,6 +679,7 @@ pub(crate) fn collect_shared_directory_files(
 fn collect_initial_publish_candidates(
     root: &Path,
     output: &mut Vec<ScannedSharedFile>,
+    policy: &SharedFileExclusionPolicy,
 ) -> Result<usize> {
     let disk_key = physical_disk_key(root);
     let root = long_path(root);
@@ -453,7 +728,7 @@ fn collect_initial_publish_candidates(
                 continue;
             }
         };
-        if should_ignore_shared_file_candidate(entry.path(), &metadata) {
+        if should_ignore_shared_file_candidate_with_policy(entry.path(), &metadata, policy) {
             skipped_intake_count.set(skipped_intake_count.get() + 1);
             continue;
         }
@@ -504,10 +779,11 @@ fn select_initial_publish_cohort(mut candidates: Vec<ScannedSharedFile>) -> Vec<
 
 async fn scan_initial_publish_cohort(core: &EmulebbCore) -> Result<Vec<ScannedSharedFile>> {
     let roots = core.state.lock().await.shared_directories.clone();
+    let policy = load_shared_file_exclusion_policy(core)?;
     tokio::task::spawn_blocking(move || -> Result<Vec<ScannedSharedFile>> {
         let mut candidates = Vec::new();
         for root in roots {
-            collect_initial_publish_candidates(Path::new(&root.path), &mut candidates)
+            collect_initial_publish_candidates(Path::new(&root.path), &mut candidates, &policy)
                 .with_context(|| {
                     format!("failed to scan initial publish candidates in {}", root.path)
                 })?;
@@ -524,14 +800,18 @@ async fn scan_initial_publish_cohort(core: &EmulebbCore) -> Result<Vec<ScannedSh
 /// recursive filesystem walk on a runtime worker thread.
 pub(crate) async fn scan_shared_directory_roots(
     roots: Vec<SharedDirectoryRoot>,
+    policy: SharedFileExclusionPolicy,
 ) -> Result<SharedScanResult> {
     tokio::task::spawn_blocking(move || -> Result<SharedScanResult> {
         let mut files = Vec::new();
         let mut skipped_intake_count = 0;
         for root in roots {
-            skipped_intake_count +=
-                collect_shared_directory_files(Path::new(&root.path), &mut files)
-                    .with_context(|| format!("failed to scan shared directory {}", root.path))?;
+            skipped_intake_count += collect_shared_directory_files_with_policy(
+                Path::new(&root.path),
+                &mut files,
+                &policy,
+            )
+            .with_context(|| format!("failed to scan shared directory {}", root.path))?;
         }
         Ok(SharedScanResult {
             files,
@@ -597,10 +877,11 @@ pub(crate) fn hashing_count_snapshot(core: &EmulebbCore) -> i64 {
 /// Scan the configured shared roots and return the deduped, sorted file list.
 async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     let roots = core.state.lock().await.shared_directories.clone();
+    let policy = load_shared_file_exclusion_policy(core)?;
     // The recursive directory walk is synchronous and may be large, so the helper
     // runs it off the async executor via spawn_blocking to avoid stalling a tokio
     // worker thread.
-    let mut result = scan_shared_directory_roots(roots).await?;
+    let mut result = scan_shared_directory_roots(roots, policy).await?;
     result
         .files
         .sort_by(|left, right| left.path.cmp(&right.path));
@@ -615,6 +896,15 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
         }
     }
     Ok(result)
+}
+
+pub(crate) fn load_shared_file_exclusion_policy(
+    core: &EmulebbCore,
+) -> Result<SharedFileExclusionPolicy> {
+    Ok(SharedFileExclusionPolicy::new(
+        core.metadata_store.shared_file_exclusions()?,
+        core.metadata_store.disabled_shared_default_ignore_rules()?,
+    ))
 }
 
 /// Outcome of partitioning a freshly scanned shared-file list against the

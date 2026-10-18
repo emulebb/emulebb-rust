@@ -22,7 +22,7 @@ describe("SearchView", () => {
       total: 1,
       offset: 0,
       limit: 100,
-      items: [{ hash, name: "Sample.bin", sizeBytes: 1 }]
+      items: [{ hash, displayName: "Sample.bin", sizeBytes: 1 }]
     };
 
     render(
@@ -74,8 +74,8 @@ describe("SearchView", () => {
       offset: 100,
       limit: 100,
       items: [
-        { hash: "00112233445566778899aabbccddeeff", name: "Result 101.bin" },
-        { hash: "ffeeddccbbaa99887766554433221100", name: "Result 102.bin" }
+        { hash: "00112233445566778899aabbccddeeff", displayName: "Result 101.bin" },
+        { hash: "ffeeddccbbaa99887766554433221100", displayName: "Result 102.bin" }
       ]
     };
 
@@ -144,7 +144,7 @@ describe("SearchView", () => {
       },
       items: [{
         hash: "00112233445566778899aabbccddeeff",
-        name: "Primary.flac",
+        displayName: "Primary.flac",
         sizeBytes: 4096,
         sources: 12,
         completeSources: 5,
@@ -164,7 +164,8 @@ describe("SearchView", () => {
         observations: [
           {
             origin: "server",
-            name: "Primary.flac",
+            rawName: "Primary.flac",
+            normalizedName: "Primary.flac",
             sizeBytes: 4096,
             sources: 8,
             completeSources: 3,
@@ -181,7 +182,8 @@ describe("SearchView", () => {
           {
             origin: "global",
             serverEndpoint: "192.0.2.10:4661",
-            name: "Alternate.flac",
+            rawName: "Alternate.flac",
+            normalizedName: "Alternate.flac",
             sizeBytes: 4096,
             sources: 12,
             completeSources: 5,

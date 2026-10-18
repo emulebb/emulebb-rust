@@ -197,7 +197,7 @@ async fn transfer_patch_uses_canonical_update_families() {
                 .uri("/api/v1/transfers/00112233445566778899aabbccddeeff")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name":" Renamed.bin "}"#))
+                .body(Body::from(r#"{"displayName":" Renamed.bin "}"#))
                 .unwrap(),
         )
         .await
@@ -207,7 +207,8 @@ async fn transfer_patch_uses_canonical_update_families() {
         .await
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["name"], "Renamed.bin");
+    assert_eq!(value["data"]["displayName"], "Renamed.bin");
+    assert_eq!(value["data"]["nameConsensus"]["pinned"], true);
     assert_eq!(value["data"]["priority"], "veryhigh");
     assert_eq!(value["data"]["categoryId"], 1);
 
@@ -218,7 +219,9 @@ async fn transfer_patch_uses_canonical_update_families() {
                 .uri("/api/v1/transfers/00112233445566778899aabbccddeeff")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"priority":"high","name":"Nope.bin"}"#))
+                .body(Body::from(
+                    r#"{"priority":"high","displayName":"Nope.bin"}"#,
+                ))
                 .unwrap(),
         )
         .await

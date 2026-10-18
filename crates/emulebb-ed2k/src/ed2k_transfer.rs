@@ -106,8 +106,8 @@ pub use model::{
     ED2K_CALLBACK_TICKET_MAX_LIFETIME, Ed2kCallbackDispatchOutcome, Ed2kCallbackDispatchPermit,
     Ed2kCallbackDownload, Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError,
     Ed2kCallbackTicketId, Ed2kCallbackTicketRequest, Ed2kDeliveryOwnership, Ed2kDeliveryState,
-    Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest,
-    Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
+    Ed2kFileNameObservation, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry,
+    Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
 pub(crate) use model::{
     Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,
@@ -243,6 +243,7 @@ pub struct Ed2kTransferDeletionRecoveryReport {
 pub struct Ed2kTransferRuntime {
     root_dir: PathBuf,
     metadata: MetadataStore,
+    file_name_policy: Ed2kFileNamePolicy,
     shared_catalog: Ed2kSharedCatalog,
     shared_catalog_generation: AtomicU64,
     /// Keyset cursor for a persisted catalog intentionally loaded only through
@@ -391,6 +392,36 @@ pub struct Ed2kTransferRuntime {
     corruption_blackbox: Arc<StdMutex<HashMap<String, corruption_blackbox::CorruptionBlackBox>>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Ed2kFileNamePolicy {
+    follow_majority_for_new_downloads: bool,
+    minimum_votes: usize,
+    required_percent: u32,
+}
+
+impl Default for Ed2kFileNamePolicy {
+    fn default() -> Self {
+        Self {
+            follow_majority_for_new_downloads: false,
+            minimum_votes: 0,
+            required_percent: 51,
+        }
+    }
+}
+
+impl From<&Ed2kRuntimeConfig> for Ed2kFileNamePolicy {
+    fn from(config: &Ed2kRuntimeConfig) -> Self {
+        Self {
+            follow_majority_for_new_downloads: config.follow_majority_filename_for_new_downloads,
+            minimum_votes: usize::try_from(config.follow_majority_filename_minimum_votes)
+                .unwrap_or(usize::MAX),
+            required_percent: config
+                .follow_majority_filename_required_percent
+                .clamp(1, 100),
+        }
+    }
+}
+
 /// Lightweight notification handle for shared-file demand changes that can
 /// affect ED2K/Kad publish ranking.
 #[derive(Debug, Clone)]
@@ -466,6 +497,7 @@ impl Ed2kTransferRuntime {
             upload_queue_config_from_policy(&config.upload_queue),
             config.download_limit_bytes_per_sec,
             download_coordinator_config_from_policy(config),
+            Ed2kFileNamePolicy::from(config),
             defer_completed_catalog,
         )
     }
@@ -502,6 +534,7 @@ impl Ed2kTransferRuntime {
             upload_queue_config,
             download_limit_bytes_per_sec,
             coordinator_config,
+            Ed2kFileNamePolicy::default(),
             false,
         )
     }
@@ -512,6 +545,7 @@ impl Ed2kTransferRuntime {
         upload_queue_config: Ed2kUploadQueueConfig,
         download_limit_bytes_per_sec: u64,
         coordinator_config: Ed2kDownloadCoordinatorConfig,
+        file_name_policy: Ed2kFileNamePolicy,
         defer_completed_catalog: bool,
     ) -> Result<Self> {
         fs::create_dir_all(root_dir).with_context(|| {
@@ -539,6 +573,7 @@ impl Ed2kTransferRuntime {
         let runtime = Self {
             root_dir: root_dir.to_path_buf(),
             metadata,
+            file_name_policy,
             shared_catalog,
             shared_catalog_generation: AtomicU64::new(0),
             shared_catalog_hydration_cursor: StdMutex::new(None),

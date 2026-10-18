@@ -26,6 +26,9 @@ fn source_backed_manifest() -> MetadataTransferManifest {
     MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Concurrent.Sample.bin".to_string(),
+        display_name_pinned: false,
+        follow_majority_filename: false,
+        file_name_observations: Vec::new(),
         file_size: 16,
         piece_size: 16,
         completed: true,
@@ -152,6 +155,9 @@ fn transfer_manifest_roundtrips_sql_tables() {
     let mut manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Sample.Transfer.bin".to_string(),
+        display_name_pinned: false,
+        follow_majority_filename: false,
+        file_name_observations: Vec::new(),
         file_size: 1024,
         piece_size: 1024,
         completed: true,
@@ -494,6 +500,9 @@ fn upload_demand_counters_persist_on_known_files() {
     let manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Demand.Sample.bin".to_string(),
+        display_name_pinned: false,
+        follow_majority_filename: false,
+        file_name_observations: Vec::new(),
         file_size: 1024,
         piece_size: 1024,
         completed: true,
@@ -575,6 +584,9 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
     let mut manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Duplicate.Payload.bin".to_string(),
+        display_name_pinned: false,
+        follow_majority_filename: false,
+        file_name_observations: Vec::new(),
         file_size: 1024,
         piece_size: 1024,
         completed: true,
@@ -733,6 +745,9 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
     let manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Recovered.Source.bin".to_string(),
+        display_name_pinned: false,
+        follow_majority_filename: false,
+        file_name_observations: Vec::new(),
         file_size: 1024,
         piece_size: 1024,
         completed: true,
@@ -847,6 +862,9 @@ fn delete_transfer_manifest_removes_transfer_rows() {
     let manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Sample.Transfer.bin".to_string(),
+        display_name_pinned: false,
+        follow_majority_filename: false,
+        file_name_observations: Vec::new(),
         file_size: 1,
         piece_size: 1,
         completed: false,
@@ -1123,6 +1141,9 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     let mut manifest = MetadataTransferManifest {
         file_hash: hash.to_string(),
         display_name: "Delete.Intent.bin".to_string(),
+        display_name_pinned: false,
+        follow_majority_filename: false,
+        file_name_observations: Vec::new(),
         file_size: 1,
         piece_size: 1,
         completed: true,
@@ -1611,6 +1632,9 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
     let manifest = MetadataTransferManifest {
         file_hash: hash.to_string(),
         display_name: "Scenario.File.bin".to_string(),
+        display_name_pinned: false,
+        follow_majority_filename: false,
+        file_name_observations: Vec::new(),
         file_size: 1,
         piece_size: 1,
         completed: false,
@@ -1727,6 +1751,9 @@ fn completed_catalog_supports_hash_keyset_pages() {
             .upsert_transfer_manifest(&MetadataTransferManifest {
                 file_hash: file_hash.clone(),
                 display_name: format!("catalog-{sequence}.bin"),
+                display_name_pinned: false,
+                follow_majority_filename: false,
+                file_name_observations: Vec::new(),
                 file_size: sequence as u64,
                 piece_size: 1,
                 completed: true,

@@ -227,6 +227,18 @@ CREATE TABLE shared_directory_roots (
     UNIQUE(path_id)
 );
 
+CREATE TABLE shared_file_exclusions (
+    path_id INTEGER PRIMARY KEY REFERENCES local_paths(id) ON DELETE CASCADE,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)
+);
+
+CREATE TABLE shared_default_ignore_overrides (
+    rule_key TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    CHECK(length(trim(rule_key)) > 0)
+);
+
 CREATE TABLE shared_file_memberships (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
@@ -474,6 +486,34 @@ CREATE TABLE transfer_sources (
 
 CREATE UNIQUE INDEX transfer_sources_identity_idx
 ON transfer_sources(transfer_id, ip, tcp_port, coalesce(udp_port, 0));
+
+CREATE TABLE transfer_name_state (
+    transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
+    display_name_pinned INTEGER NOT NULL DEFAULT 0
+        CHECK(display_name_pinned IN (0, 1)),
+    follow_majority_filename INTEGER NOT NULL DEFAULT 0
+        CHECK(follow_majority_filename IN (0, 1))
+);
+
+CREATE TABLE transfer_file_name_observations (
+    id INTEGER PRIMARY KEY,
+    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+    source_ip TEXT,
+    source_tcp_port INTEGER CHECK(source_tcp_port IS NULL OR source_tcp_port BETWEEN 1 AND 65535),
+    user_hash BLOB CHECK(user_hash IS NULL OR length(user_hash) = 16),
+    client_software TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL,
+    server_endpoint TEXT,
+    raw_name TEXT NOT NULL,
+    normalized_name TEXT NOT NULL,
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    CHECK((source_ip IS NULL) = (source_tcp_port IS NULL)),
+    CHECK(length(trim(raw_name)) > 0),
+    CHECK(length(trim(normalized_name)) > 0)
+);
+
+CREATE INDEX transfer_file_name_observations_transfer_idx
+ON transfer_file_name_observations(transfer_id, observed_at_ms, id);
 
 CREATE TABLE kad_bootstrap_endpoints (
     position INTEGER PRIMARY KEY,

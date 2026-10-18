@@ -635,6 +635,11 @@ impl EmulebbCore {
             callback_sessions: callback_sessions.clone(),
             callback_session_inbox,
             callback_timeout: Duration::from_secs(network.ed2k.callback_timeout_secs.max(1)),
+            detect_tcp_error_flooder: network.ed2k.detect_tcp_error_flooder,
+            tcp_error_flooder_interval: Duration::from_secs(
+                u64::from(network.ed2k.tcp_error_flooder_interval_minutes).saturating_mul(60),
+            ),
+            tcp_error_flooder_threshold: network.ed2k.tcp_error_flooder_threshold,
         })));
         // Learned public-IP cell (eMule theApp public IP), shared by the server
         // loop (sets it from OP_IDCHANGE) and the UDP reask loop (obfuscation key).

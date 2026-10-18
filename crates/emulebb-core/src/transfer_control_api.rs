@@ -91,10 +91,7 @@ impl EmulebbCore {
         {
             anyhow::bail!("completed transfers cannot be renamed through this endpoint");
         }
-        let manifest = self
-            .ed2k_transfers
-            .reconcile_job_metadata(hash, Some(&name), None)
-            .await?;
+        let manifest = self.ed2k_transfers.pin_display_name(hash, &name).await?;
         let state_name = current
             .as_ref()
             .map(|transfer| transfer.state.as_str())
@@ -104,8 +101,12 @@ impl EmulebbCore {
             preserve_transfer_public_metadata(&mut transfer, existing);
         }
         transfer.name = name;
-        transfer.ed2k_link =
-            format_ed2k_file_link(&transfer.name, transfer.size_bytes, &transfer.hash);
+        transfer.ed2k_link = format_ed2k_file_link(
+            &transfer.name,
+            transfer.size_bytes,
+            &transfer.hash,
+            manifest.aich_root.as_deref(),
+        );
         self.state
             .lock()
             .await

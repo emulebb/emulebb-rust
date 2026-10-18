@@ -179,6 +179,24 @@ async fn download_search_result_creates_transfer() {
         .unwrap();
     // A non-paused download starts immediately (eMule/aMule parity).
     assert_eq!(transfer.state, "downloading");
+    assert_eq!(transfer.name, "Download.Me.bin");
+    assert_eq!(transfer.name_consensus.observation_count, 1);
+    let manifest = core
+        .ed2k_transfers
+        .manifest("00112233445566778899aabbccddeeff")
+        .await
+        .unwrap();
+    assert_eq!(manifest.file_name_observations.len(), 1);
+    assert_eq!(
+        manifest.file_name_observations[0].raw_name,
+        "Download.Me.bin"
+    );
+    assert_eq!(
+        manifest.file_name_observations[0].normalized_name,
+        "Download.Me.bin"
+    );
+    assert_eq!(manifest.file_name_observations[0].origin, "local_index");
+    assert_eq!(manifest.file_name_observations[0].source_ip, None);
 }
 
 #[tokio::test]
@@ -307,6 +325,40 @@ async fn create_transfer_uses_canonical_link_and_paused_state() {
             .unwrap()
             .state,
         "paused"
+    );
+}
+
+#[tokio::test]
+async fn create_transfer_persists_and_emits_link_aich_root() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let hash = "00112233445566778899aabbccddeeff";
+    let transfer = core
+        .create_transfer(TransferCreate {
+            known_file_policy: KnownFilePolicy::Redownload,
+            link: Some(format!(
+                "ed2k://|file|Aich.bin|4096|{hash}|h=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/"
+            )),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        core.ed2k_transfers
+            .manifest(hash)
+            .await
+            .unwrap()
+            .aich_root
+            .as_deref(),
+        Some("0000000000000000000000000000000000000000")
+    );
+    assert!(
+        transfer
+            .ed2k_link
+            .contains("|h=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/")
     );
 }
 

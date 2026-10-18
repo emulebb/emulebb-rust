@@ -403,6 +403,7 @@ mod tests {
         Transfer {
             hash: file_hash.to_string(),
             name: "Sample File.bin".to_string(),
+            name_consensus: Default::default(),
             path: String::new(),
             delivered_path: None,
             delivery_error: None,

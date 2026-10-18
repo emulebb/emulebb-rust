@@ -186,6 +186,22 @@ pub struct Ed2kSourceHint {
     pub file_rating: u8,
 }
 
+/// One immutable filename report retained with its peer and discovery provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ed2kFileNameObservation {
+    pub source_ip: Option<String>,
+    pub source_tcp_port: Option<u16>,
+    pub user_hash: Option<String>,
+    #[serde(default)]
+    pub client_software: String,
+    pub origin: String,
+    #[serde(default)]
+    pub server_endpoint: Option<String>,
+    pub raw_name: String,
+    pub normalized_name: String,
+    pub observed_at_ms: i64,
+}
+
 /// Canonical AICH master hash plus per-part hashes for one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ed2kAichHashset {
@@ -414,6 +430,17 @@ pub struct Ed2kResumeManifest {
     pub file_hash: String,
     /// Canonical file name.
     pub display_name: String,
+    /// Manual operator renames pin the canonical name and disable automatic
+    /// majority selection until a new transfer is created.
+    #[serde(default)]
+    pub display_name_pinned: bool,
+    /// Whether source filename observations may automatically update the
+    /// canonical display name for this incomplete transfer.
+    #[serde(default)]
+    pub follow_majority_filename: bool,
+    /// Immutable peer filename reports retained for consensus and diagnostics.
+    #[serde(default)]
+    pub file_name_observations: Vec<Ed2kFileNameObservation>,
     /// Target file size.
     pub file_size: u64,
     /// Piece size used in the piece store.
@@ -712,6 +739,9 @@ impl Ed2kResumeManifest {
         Self {
             file_hash: job.file_hash.clone(),
             display_name: job.display_name.clone(),
+            display_name_pinned: false,
+            follow_majority_filename: false,
+            file_name_observations: Vec::new(),
             file_size: job.file_size,
             piece_size: job.piece_size,
             completed: false,

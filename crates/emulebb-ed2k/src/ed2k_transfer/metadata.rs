@@ -1,8 +1,9 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
     MetadataStore, MetadataTransferCounts, MetadataTransferDirectoryDeletionAuthority,
@@ -11,7 +12,7 @@ use emulebb_metadata::{
 };
 use uuid::Uuid;
 
-use crate::long_path::long_path;
+use crate::{long_path::long_path, normalize_ed2k_file_name};
 
 use super::deliver::OwnedDeliveryOutput;
 use super::fs_durability::{NoReplaceMoveOutcome, move_path_no_replace, sync_parent_directory};
@@ -23,8 +24,9 @@ use super::manifest::{manifest_has_structural_progress, piece_count};
 use super::transfer_sql::manifest_from_metadata;
 use super::upload_queue::upload_priority_score;
 use super::{
-    Ed2kAichHashset, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint,
-    Ed2kTransferDeletionRecoveryReport, Ed2kTransferJob, Ed2kTransferRuntime, Ed2kTransferState,
+    Ed2kAichHashset, Ed2kFileNameObservation, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry,
+    Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport, Ed2kTransferJob, Ed2kTransferRuntime,
+    Ed2kTransferState,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,11 +285,13 @@ impl Ed2kTransferRuntime {
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let mut changed = false;
 
-        if let Some(display_name) = display_name.map(str::trim)
+        if let Some(display_name) = display_name.map(normalize_ed2k_file_name)
             && !display_name.is_empty()
+            && !manifest.display_name_pinned
+            && manifest.file_name_observations.is_empty()
             && manifest.display_name != display_name
         {
-            manifest.display_name = display_name.to_string();
+            manifest.display_name = display_name;
             changed = true;
         }
 
@@ -326,6 +330,122 @@ impl Ed2kTransferRuntime {
             self.upsert_verified_catalog_entry(&manifest).await;
         }
 
+        Ok(manifest)
+    }
+
+    /// Pin a manual operator-selected display name. Peer reports remain visible
+    /// as evidence but can no longer replace the selected name.
+    pub async fn pin_display_name(
+        &self,
+        file_hash: &str,
+        display_name: &str,
+    ) -> Result<Ed2kResumeManifest> {
+        let display_name = normalize_ed2k_file_name(display_name);
+        anyhow::ensure!(!display_name.is_empty(), "display name must not be empty");
+        let _guard = self.lock_manifest(file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        if manifest.display_name != display_name || !manifest.display_name_pinned {
+            manifest.display_name = display_name;
+            manifest.display_name_pinned = true;
+            manifest.follow_majority_filename = false;
+            self.store_manifest_unlocked(&manifest).await?;
+        }
+        Ok(manifest)
+    }
+
+    /// Retain a peer's raw filename report and refresh the unpinned majority.
+    pub async fn remember_source_file_name(
+        &self,
+        file_hash: &str,
+        source: Option<Ed2kSourceHint>,
+        raw_name: &str,
+        client_software: Option<&str>,
+        origin: &str,
+        server_endpoint: Option<&str>,
+    ) -> Result<Ed2kResumeManifest> {
+        let raw_name = raw_name.trim();
+        let normalized_name = normalize_ed2k_file_name(raw_name);
+        anyhow::ensure!(
+            !normalized_name.is_empty(),
+            "source filename must not be empty"
+        );
+        let _guard = self.lock_manifest(file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+
+        if let Some(source) = source.as_ref()
+            && !manifest
+                .sources
+                .iter()
+                .any(|existing| source_identity_matches(existing, source))
+        {
+            manifest.sources.push(source.clone());
+        }
+
+        let observed_at_ms = Utc::now().timestamp_millis();
+        let source_key = source_identity_key(
+            source.as_ref().map(|source| source.ip.as_str()),
+            source.as_ref().map(|source| source.tcp_port),
+            source
+                .as_ref()
+                .and_then(|source| source.user_hash.as_deref()),
+            origin,
+            server_endpoint,
+        );
+        if let Some(existing) = manifest.file_name_observations.iter_mut().find(|existing| {
+            source_identity_key(
+                existing.source_ip.as_deref(),
+                existing.source_tcp_port,
+                existing.user_hash.as_deref(),
+                &existing.origin,
+                existing.server_endpoint.as_deref(),
+            ) == source_key
+                && existing.raw_name == raw_name
+        }) {
+            existing.observed_at_ms = observed_at_ms;
+            if let Some(client_software) = client_software.filter(|value| !value.is_empty()) {
+                existing.client_software = client_software.to_string();
+            }
+        } else {
+            manifest
+                .file_name_observations
+                .push(Ed2kFileNameObservation {
+                    source_ip: source.as_ref().map(|source| source.ip.clone()),
+                    source_tcp_port: source.as_ref().map(|source| source.tcp_port),
+                    user_hash: source.and_then(|source| source.user_hash),
+                    client_software: client_software.unwrap_or_default().to_string(),
+                    origin: if origin.is_empty() { "peer" } else { origin }.to_string(),
+                    server_endpoint: server_endpoint.map(str::to_string),
+                    raw_name: raw_name.to_string(),
+                    normalized_name: normalized_name.clone(),
+                    observed_at_ms,
+                });
+        }
+        if manifest.file_name_observations.len() > 512 {
+            manifest
+                .file_name_observations
+                .sort_by_key(|observation| observation.observed_at_ms);
+            let remove_count = manifest.file_name_observations.len() - 512;
+            manifest.file_name_observations.drain(..remove_count);
+        }
+        if !manifest.display_name_pinned
+            && !manifest.completed
+            && !manifest.final_rehash_pending
+            && manifest.display_name == format!("ed2k-{}.bin", manifest.file_hash)
+        {
+            manifest.display_name = normalized_name;
+        } else if manifest.follow_majority_filename
+            && !manifest.display_name_pinned
+            && !manifest.completed
+            && !manifest.final_rehash_pending
+            && let Some(majority_name) = majority_file_name(
+                &manifest.file_name_observations,
+                self.file_name_policy.minimum_votes,
+                self.file_name_policy.required_percent,
+            )
+        {
+            manifest.display_name = majority_name;
+        }
+        self.store_manifest_unlocked(&manifest).await?;
         Ok(manifest)
     }
 
@@ -1096,6 +1216,75 @@ impl Ed2kTransferRuntime {
     }
 }
 
+fn source_identity_matches(left: &Ed2kSourceHint, right: &Ed2kSourceHint) -> bool {
+    (left.ip == right.ip && left.tcp_port == right.tcp_port)
+        || right.user_hash.is_some() && left.user_hash == right.user_hash
+}
+
+fn source_identity_key(
+    ip: Option<&str>,
+    tcp_port: Option<u16>,
+    user_hash: Option<&str>,
+    origin: &str,
+    server_endpoint: Option<&str>,
+) -> String {
+    user_hash
+        .map(|hash| format!("hash:{hash}"))
+        .or_else(|| {
+            ip.zip(tcp_port)
+                .map(|(ip, port)| format!("endpoint:{ip}:{port}"))
+        })
+        .unwrap_or_else(|| format!("origin:{origin}:{}", server_endpoint.unwrap_or_default()))
+}
+
+fn majority_file_name(
+    observations: &[Ed2kFileNameObservation],
+    minimum_votes: usize,
+    required_percent: u32,
+) -> Option<String> {
+    let mut latest_by_source = BTreeMap::<String, &Ed2kFileNameObservation>::new();
+    for observation in observations {
+        let key = source_identity_key(
+            observation.source_ip.as_deref(),
+            observation.source_tcp_port,
+            observation.user_hash.as_deref(),
+            &observation.origin,
+            observation.server_endpoint.as_deref(),
+        );
+        if latest_by_source
+            .get(&key)
+            .is_none_or(|existing| existing.observed_at_ms <= observation.observed_at_ms)
+        {
+            latest_by_source.insert(key, observation);
+        }
+    }
+    let total_votes = latest_by_source.len();
+    let mut votes = BTreeMap::<String, usize>::new();
+    for observation in latest_by_source.into_values() {
+        *votes
+            .entry(observation.normalized_name.clone())
+            .or_default() += 1;
+    }
+    let winning_votes = votes.values().copied().max()?;
+    if votes
+        .values()
+        .filter(|candidate_votes| **candidate_votes == winning_votes)
+        .count()
+        != 1
+    {
+        return None;
+    }
+    if winning_votes < minimum_votes
+        || winning_votes.saturating_mul(100)
+            < total_votes.saturating_mul(required_percent.clamp(1, 100) as usize)
+    {
+        return None;
+    }
+    votes
+        .into_iter()
+        .find_map(|(name, candidate_votes)| (candidate_votes == winning_votes).then_some(name))
+}
+
 pub(super) fn transfer_directory_tombstone_path(
     file_hash: &str,
     transfer_dir: &std::path::Path,
@@ -1264,4 +1453,33 @@ async fn validate_transfer_directory_authority(
         path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod file_name_majority_tests {
+    use super::*;
+
+    fn observation(source_ip: &str, normalized_name: &str) -> Ed2kFileNameObservation {
+        Ed2kFileNameObservation {
+            source_ip: Some(source_ip.to_string()),
+            source_tcp_port: Some(4662),
+            user_hash: None,
+            client_software: String::new(),
+            origin: "peer".to_string(),
+            server_endpoint: None,
+            raw_name: normalized_name.to_string(),
+            normalized_name: normalized_name.to_string(),
+            observed_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn tied_source_names_do_not_replace_the_existing_display_name() {
+        let observations = [
+            observation("198.51.100.1", "alpha.bin"),
+            observation("198.51.100.2", "beta.bin"),
+        ];
+
+        assert_eq!(majority_file_name(&observations, 0, 50), None);
+    }
 }
