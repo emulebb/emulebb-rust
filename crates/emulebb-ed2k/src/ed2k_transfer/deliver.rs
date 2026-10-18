@@ -431,7 +431,7 @@ impl Ed2kTransferRuntime {
             match install_staged_payload(&staging_path, &target_path).await? {
                 InstallOutcome::Installed => {
                     #[cfg(test)]
-                    run_after_publish_move_hook(file_hash, &target_path);
+                    run_after_publish_move_hook(&target_path);
                     let installed_fingerprint = capture_published_fingerprint(
                         verified_staging.file,
                         &target_path,
@@ -667,7 +667,7 @@ impl Ed2kTransferRuntime {
                 match install_staged_payload(&attempt.staging_path, &attempt.target_path).await? {
                     InstallOutcome::Installed => {
                         #[cfg(test)]
-                        run_after_publish_move_hook(file_hash, &attempt.target_path);
+                        run_after_publish_move_hook(&attempt.target_path);
                         let published_fingerprint = capture_published_fingerprint(
                             verified_staging.file,
                             &attempt.target_path,
@@ -1064,25 +1064,25 @@ async fn capture_published_fingerprint(
 type AfterPublishMoveHook = Box<dyn FnOnce(&Path) + Send>;
 
 #[cfg(test)]
-fn after_publish_move_hooks() -> &'static Mutex<HashMap<String, AfterPublishMoveHook>> {
-    static HOOKS: OnceLock<Mutex<HashMap<String, AfterPublishMoveHook>>> = OnceLock::new();
+fn after_publish_move_hooks() -> &'static Mutex<HashMap<PathBuf, AfterPublishMoveHook>> {
+    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, AfterPublishMoveHook>>> = OnceLock::new();
     HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(test)]
-pub(super) fn set_after_publish_move_hook(file_hash: &str, hook: AfterPublishMoveHook) {
+pub(super) fn set_after_publish_move_hook(target_path: &Path, hook: AfterPublishMoveHook) {
     after_publish_move_hooks()
         .lock()
         .expect("delivery after-publish-move hook mutex poisoned")
-        .insert(file_hash.to_owned(), hook);
+        .insert(long_path(target_path), hook);
 }
 
 #[cfg(test)]
-fn run_after_publish_move_hook(file_hash: &str, target_path: &Path) {
+fn run_after_publish_move_hook(target_path: &Path) {
     let hook = after_publish_move_hooks()
         .lock()
         .expect("delivery after-publish-move hook mutex poisoned")
-        .remove(file_hash);
+        .remove(&long_path(target_path));
     if let Some(hook) = hook {
         hook(target_path);
     }
