@@ -344,6 +344,45 @@ pub(crate) fn native_file_fingerprint(source_path: &Path) -> Option<NativeFileFi
     native_file_fingerprint_from_handle(&file, &opened_metadata)
 }
 
+pub(crate) fn native_directory_identity(path: &Path) -> Option<NativeFileIdentity> {
+    let directory = open_directory_without_follow(path).ok()?;
+    let metadata = directory.metadata().ok()?;
+    if !metadata.file_type().is_dir() {
+        return None;
+    }
+    native_file_identity_from_handle(&directory, &metadata)
+}
+
+#[cfg(unix)]
+fn open_directory_without_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_directory_without_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_directory_without_follow(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
 #[cfg(windows)]
 pub(crate) fn open_stable_read_file_without_follow(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -427,7 +466,7 @@ pub(crate) fn native_file_fingerprint_from_unix_metadata(
 }
 
 #[cfg(unix)]
-fn native_file_identity_from_handle(
+pub(crate) fn native_file_identity_from_handle(
     _file: &File,
     metadata: &Metadata,
 ) -> Option<NativeFileIdentity> {
@@ -440,7 +479,7 @@ fn native_file_identity_from_handle(
 }
 
 #[cfg(windows)]
-fn native_file_identity_from_handle(
+pub(crate) fn native_file_identity_from_handle(
     file: &File,
     _metadata: &Metadata,
 ) -> Option<NativeFileIdentity> {
@@ -493,7 +532,7 @@ fn native_file_identity_from_handle(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn native_file_identity_from_handle(
+pub(crate) fn native_file_identity_from_handle(
     _file: &File,
     _metadata: &Metadata,
 ) -> Option<NativeFileIdentity> {
