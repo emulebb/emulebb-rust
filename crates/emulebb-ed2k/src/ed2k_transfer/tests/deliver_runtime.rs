@@ -72,7 +72,10 @@ struct DeletionTombstoneFixture {
     tombstone_id: Uuid,
 }
 
-fn persist_deletion_intent(runtime: &Ed2kTransferRuntime, file_hash: &str) {
+fn persist_deletion_intent(
+    runtime: &Ed2kTransferRuntime,
+    file_hash: &str,
+) -> MetadataTransferDirectoryDeletionAuthority {
     let transfer_dir = runtime.transfer_dir(file_hash);
     let identity = super::super::ingest::native_directory_identity(&transfer_dir).unwrap();
     let marker_id = Uuid::new_v4();
@@ -81,18 +84,17 @@ fn persist_deletion_intent(runtime: &Ed2kTransferRuntime, file_hash: &str) {
         marker_id.as_bytes(),
     )
     .unwrap();
+    let authority = MetadataTransferDirectoryDeletionAuthority {
+        identity,
+        marker_id,
+    };
     assert!(
         runtime
             .metadata
-            .request_transfer_deletion(
-                file_hash,
-                Some(MetadataTransferDirectoryDeletionAuthority {
-                    identity,
-                    marker_id,
-                }),
-            )
+            .request_transfer_deletion(file_hash, Some(authority))
             .unwrap()
     );
+    authority
 }
 
 async fn prepare_deletion_tombstone(root: &Path, display_name: &str) -> DeletionTombstoneFixture {
@@ -1450,6 +1452,42 @@ async fn destructive_delete_recovers_transfer_directory_tombstone() {
     assert!(!transfer_dir.exists());
     assert!(!transfer_tombstone.exists());
     assert!(restarted.manifest(&hash).await.is_err());
+}
+
+#[tokio::test]
+async fn destructive_delete_preserves_tombstone_without_authority_marker() {
+    let root = unique_test_dir("ed2k-delete-transfer-dir-tombstone-marker-missing");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Missing.Authority.Marker.mkv").await;
+    runtime
+        .materialize_completed_payload(&hash, &root.join("incoming"))
+        .await
+        .unwrap();
+    let transfer_dir = runtime.transfer_dir(&hash);
+    let transfer_tombstone = transfer_directory_tombstone_path(&hash, &transfer_dir);
+    let authority = persist_deletion_intent(&runtime, &hash);
+    fs::rename(&transfer_dir, &transfer_tombstone).unwrap();
+    assert_eq!(
+        super::super::ingest::native_directory_identity(&transfer_tombstone),
+        Some(authority.identity)
+    );
+    fs::remove_file(transfer_directory_authority_marker_path(
+        &transfer_tombstone,
+        authority.marker_id,
+    ))
+    .unwrap();
+    let sentinel = transfer_tombstone.join("unrelated.txt");
+    fs::write(&sentinel, b"preserve me").unwrap();
+
+    let report = runtime.recover_pending_transfer_deletions().await.unwrap();
+    assert_eq!(report.recovered, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert!(report.failures[0].contains("authority marker changed"));
+    assert_eq!(fs::read(&sentinel).unwrap(), b"preserve me");
+    assert_eq!(
+        runtime.metadata.pending_transfer_deletion_hashes().unwrap(),
+        vec![hash]
+    );
 }
 
 #[tokio::test]
