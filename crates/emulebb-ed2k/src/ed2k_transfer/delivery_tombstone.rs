@@ -114,7 +114,9 @@ impl Ed2kTransferRuntime {
                         Ok(PreparedCleanupOutcome::Complete)
                     }
                     InspectedFile::Regular { file, fingerprint }
-                        if fingerprint.size_bytes == tombstone.source_fingerprint.size_bytes =>
+                        if fingerprint.identity == tombstone.source_fingerprint.identity
+                            && fingerprint.size_bytes
+                                == tombstone.source_fingerprint.size_bytes =>
                     {
                         let expected_hash = Ed2kHash::from_str(file_hash)
                             .with_context(|| format!("invalid ED2K file hash {file_hash}"))?

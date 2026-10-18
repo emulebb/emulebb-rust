@@ -861,7 +861,7 @@ async fn destructive_delete_recovers_rename_before_moved_checkpoint() {
 }
 
 #[tokio::test]
-async fn destructive_delete_recovers_uncheckpointed_rename_with_changed_identity() {
+async fn destructive_delete_preserves_uncheckpointed_tombstone_with_changed_identity() {
     let root = unique_test_dir("ed2k-delete-rename-unstable-identity");
     let fixture = prepare_deletion_tombstone(&root, "Unstable.Identity.Tombstone.mkv").await;
     let pre_rename_fingerprint = native_file_fingerprint(&fixture.delivered).unwrap();
@@ -878,16 +878,24 @@ async fn destructive_delete_recovers_uncheckpointed_rename_with_changed_identity
     drop(fixture.runtime);
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert_eq!(
-        restarted
-            .recover_pending_transfer_deletions()
-            .await
-            .unwrap(),
-        1
+    let error = restarted
+        .recover_pending_transfer_deletions()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("contains an unproven object"),
+        "unexpected error: {error:#}"
     );
     assert!(!fixture.delivered.exists());
-    assert!(!fixture.tombstone.exists());
-    assert!(!restarted.transfer_dir(&fixture.hash).exists());
+    assert!(fixture.tombstone.exists());
+    assert!(restarted.transfer_dir(&fixture.hash).exists());
+    assert_eq!(
+        restarted
+            .metadata
+            .pending_transfer_deletion_hashes()
+            .unwrap(),
+        vec![fixture.hash]
+    );
 }
 
 #[tokio::test]
