@@ -129,7 +129,9 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       body: request.postData()
     });
 
-    const data = dataFor(request.method(), path);
+    const data = request.method() === "PATCH" && path === "app/settings"
+      ? mergeFixture(dataFor("GET", path), request.postDataJSON())
+      : dataFor(request.method(), path);
     if (data === eventStream) {
       await route.fulfill({
         status: 200,
@@ -162,6 +164,21 @@ export function installMockApi(requests: RecordedApiRequest[]) {
 }
 
 const eventStream = Symbol("eventStream");
+
+function mergeFixture(base: unknown, update: unknown): unknown {
+  if (!isRecord(base) || !isRecord(update)) {
+    return update;
+  }
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(update)) {
+    merged[key] = mergeFixture(merged[key], value);
+  }
+  return merged;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function dataFor(method: string, path: string): unknown {
   if (method !== "GET") {
@@ -448,7 +465,6 @@ function dataFor(method: string, path: string): unknown {
           setting("ed2k.keywordServerAttemptBudget", "advancedControl", true),
           setting("ed2k.exactHashKeywordServerAttemptBudget", "advancedControl", true),
           setting("ed2k.sourceServerAttemptBudget", "advancedControl", true),
-          setting("ed2k.uploadQueue.baseSlots", "advancedControl", true),
           setting("ed2k.obfuscationEnabled", "normalControl", true),
           setting("ed2k.reconnectEnabled", "normalControl", true),
           setting("ed2k.useServerPriorities", "normalControl", true),
@@ -457,11 +473,7 @@ function dataFor(method: string, path: string): unknown {
           setting("ed2k.publishEmuleRustIdentity", "advancedControl", true),
           setting("ed2k.offerFilesCapabilityEnabled", "advancedControl", true),
           setting("ed2k.deadServerRetries", "advancedControl", true),
-          setting("ed2k.uploadQueue.elasticPercent", "advancedControl", true),
-          setting("ed2k.uploadQueue.uploadLimitBytesPerSec", "advancedControl", true),
-          setting("ed2k.uploadQueue.elasticUnderfillBytesPerSec", "advancedControl", true),
           setting("ed2k.uploadQueue.elasticUnderfillSecs", "advancedControl", true),
-          setting("ed2k.uploadQueue.waitingCapacity", "advancedControl", true),
           setting("ed2k.uploadQueue.waitingTimeoutSecs", "advancedControl", true),
           setting("ed2k.uploadQueue.grantedTimeoutSecs", "advancedControl", true),
           setting("ed2k.uploadQueue.uploadTimeoutSecs", "advancedControl", true),
@@ -585,12 +597,7 @@ function dataFor(method: string, path: string): unknown {
           offerFilesCapabilityEnabled: true,
           deadServerRetries: 1,
           uploadQueue: {
-            baseSlots: 3,
-            elasticPercent: 0,
-            uploadLimitBytesPerSec: 0,
-            elasticUnderfillBytesPerSec: 0,
             elasticUnderfillSecs: 10,
-            waitingCapacity: 512,
             waitingTimeoutSecs: 3600,
             grantedTimeoutSecs: 30,
             uploadTimeoutSecs: 90,
