@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::NativeFileFingerprint;
+use crate::{NativeFileFingerprint, NativeFileIdentity};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +54,12 @@ pub struct MetadataTransferDeletionTombstone {
     pub moved_fingerprint: Option<NativeFileFingerprint>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetadataTransferDirectoryDeletionAuthority {
+    pub identity: NativeFileIdentity,
+    pub marker_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

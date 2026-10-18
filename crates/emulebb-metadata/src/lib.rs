@@ -45,7 +45,8 @@ pub use transfer_model::{
     MetadataSharedSourceFailure, MetadataTransferCatalogEntry, MetadataTransferCounts,
     MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
     MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
-    MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState, MetadataTransferManifest,
+    MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
+    MetadataTransferDirectoryDeletionAuthority, MetadataTransferManifest,
     MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
     MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
 };

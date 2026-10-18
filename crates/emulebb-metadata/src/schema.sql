@@ -293,9 +293,19 @@ CREATE TABLE transfers (
     -- renamed to the deletion tombstone. Recovery must never recursively
     -- delete a path whose identity differs from this durable authority.
     transfer_directory_tombstone_identity BLOB,
+    -- Random marker created inside the owned directory before deletion intent
+    -- commits. Native identities can be reused after deletion, so recovery
+    -- requires both this marker and the native identity.
+    transfer_directory_tombstone_marker_id TEXT,
     CHECK(
-        transfer_directory_tombstone_identity IS NULL
-        OR (delete_requested_at_ms IS NOT NULL AND source_path_id IS NULL)
+        (transfer_directory_tombstone_identity IS NULL AND transfer_directory_tombstone_marker_id IS NULL)
+        OR (
+            transfer_directory_tombstone_identity IS NOT NULL
+            AND transfer_directory_tombstone_marker_id IS NOT NULL
+            AND length(trim(transfer_directory_tombstone_marker_id)) > 0
+            AND delete_requested_at_ms IS NOT NULL
+            AND source_path_id IS NULL
+        )
     ),
     CHECK(
         (delivery_state = 'not_applicable' AND delivery_ownership = 'none' AND source_path_id IS NOT NULL AND delivered_path_id IS NULL)
