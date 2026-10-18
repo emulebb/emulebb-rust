@@ -377,19 +377,14 @@ pub(in crate::ed2k_tcp) async fn reconcile_download_manifest_metadata(
     manifest: &mut Ed2kResumeManifest,
     request_file_identifier: &mut Ed2kFileIdentifier,
     peer_file_identifier: &Ed2kFileIdentifier,
-    peer_file_name: Option<&str>,
 ) -> Result<()> {
     let learned_size = peer_file_identifier.file_size;
-    let learned_name = peer_file_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty());
-    if learned_size.is_none() && learned_name.is_none() && peer_file_identifier.aich_root.is_none()
-    {
+    if learned_size.is_none() && peer_file_identifier.aich_root.is_none() {
         return Ok(());
     }
 
     *manifest = transfer_runtime
-        .reconcile_job_metadata(file_hash_hex, learned_name, learned_size)
+        .reconcile_job_metadata(file_hash_hex, None, learned_size)
         .await?;
     // The AICH root here is network-learned from a single peer, so it must be
     // corroborated before it can authorize salvage (mirrors the master's

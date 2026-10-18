@@ -11,6 +11,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
     NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter,
+    normalize_ed2k_file_name,
 };
 use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig};
 use serde::{Deserialize, Serialize};
@@ -593,7 +594,8 @@ impl SearchResult {
         }) else {
             return;
         };
-        self.name = display.name.clone();
+        self.name = majority_observation_name(&self.observations, &self.hash)
+            .unwrap_or_else(|| normalize_ed2k_file_name(&display.name));
         self.size_bytes = self
             .observations
             .iter()
@@ -689,6 +691,31 @@ impl SearchResult {
     }
 }
 
+fn majority_observation_name(
+    observations: &[SearchResultObservation],
+    hash: &str,
+) -> Option<String> {
+    let mut candidates = HashMap::<String, (usize, (bool, bool, u32, u32, bool, u8))>::new();
+    for observation in observations {
+        let normalized = normalize_ed2k_file_name(&observation.name);
+        if normalized.is_empty() {
+            continue;
+        }
+        let candidate = candidates.entry(normalized).or_default();
+        candidate.0 += 1;
+        candidate.1 = candidate.1.max(observation_quality(observation, hash));
+    }
+    candidates
+        .into_iter()
+        .max_by(|(left_name, left), (right_name, right)| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| right_name.cmp(left_name))
+        })
+        .map(|(name, _)| name)
+}
+
 /// Aggregate availability without conflating incompatible network estimates.
 ///
 /// Each eD2K server reports its own independent population, so its strongest
@@ -775,6 +802,55 @@ fn observations_are_equivalent(
         && left.directory == right.directory
 }
 
+#[cfg(test)]
+mod search_result_name_tests {
+    use super::{SearchResult, SearchResultMedia, SearchResultObservation};
+    use chrono::Utc;
+
+    fn observation(name: &str, origin: &str) -> SearchResultObservation {
+        SearchResultObservation {
+            origin: origin.to_string(),
+            server_endpoint: None,
+            name: name.to_string(),
+            size_bytes: 1024,
+            sources: 1,
+            complete_sources: 0,
+            source_client_id: None,
+            source_client_port: None,
+            file_type: "doc".to_string(),
+            media: SearchResultMedia::default(),
+            rating: 0,
+            aich_hash: String::new(),
+            complete: false,
+            directory: String::new(),
+            observed_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn search_display_name_uses_normalized_majority_and_retains_raw_observations() {
+        let result = SearchResult::from_observations(
+            "search".to_string(),
+            "doc".to_string(),
+            "00112233445566778899aabbccddeeff".to_string(),
+            observation("Wrong.bin", "server"),
+            [
+                observation("Caf%C3%A9.bin", "global"),
+                observation("Cafe\u{301}.bin", "kad"),
+            ],
+        );
+
+        assert_eq!(result.name, "Café.bin");
+        assert_eq!(result.observations.len(), 3);
+        assert!(
+            result
+                .observations
+                .iter()
+                .any(|observation| observation.name == "Caf%C3%A9.bin")
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransferCreate {
@@ -804,6 +880,7 @@ pub struct TransferCreate {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransferUpdate {
     #[serde(default)]
+    #[serde(rename = "displayName")]
     pub name: Option<String>,
     #[serde(default)]
     pub priority: Option<String>,
@@ -980,7 +1057,9 @@ pub struct SharedFileUpdate {
 #[serde(rename_all = "camelCase")]
 pub struct Transfer {
     pub hash: String,
+    #[serde(rename = "displayName")]
     pub name: String,
+    pub name_consensus: TransferNameConsensus,
     pub path: String,
     /// Absolute path the completed payload was delivered to by its canonical
     /// name (under a category path or the global incoming dir), or `None` until
@@ -1030,6 +1109,34 @@ pub struct Transfer {
     /// from the static shared library even when a shared dir doubles as the
     /// incoming dir. Incomplete (still downloading) transfers are always true.
     pub in_incoming: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferNameConsensus {
+    pub selected_name: String,
+    pub pinned: bool,
+    pub follow_majority: bool,
+    pub observation_count: usize,
+    pub candidates: Vec<TransferNameCandidate>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferNameCandidate {
+    pub normalized_name: String,
+    pub votes: usize,
+    pub raw_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferFileNameObservation {
+    pub raw_name: String,
+    pub normalized_name: String,
+    pub origin: String,
+    pub server_endpoint: Option<String>,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1185,6 +1292,7 @@ pub struct TransferSource {
     pub user_hash: Option<String>,
     pub user_name: String,
     pub client_software: String,
+    pub reported_file_names: Vec<TransferFileNameObservation>,
     pub download_state: String,
     pub download_speed_ki_bps: f64,
     pub available_parts: u32,

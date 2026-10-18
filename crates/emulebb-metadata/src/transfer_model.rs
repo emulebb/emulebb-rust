@@ -66,6 +66,9 @@ pub struct MetadataTransferDirectoryDeletionAuthority {
 pub struct MetadataTransferManifest {
     pub file_hash: String,
     pub display_name: String,
+    pub display_name_pinned: bool,
+    pub follow_majority_filename: bool,
+    pub file_name_observations: Vec<MetadataTransferFileNameObservation>,
     pub file_size: u64,
     pub piece_size: u64,
     pub completed: bool,
@@ -105,6 +108,19 @@ pub struct MetadataTransferManifest {
     /// Native identity baseline for the canonical internal payload after a
     /// successful whole-file ED2K verification. Share-in-place rows keep `None`.
     pub payload_fingerprint: Option<NativeFileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferFileNameObservation {
+    pub source_ip: Option<String>,
+    pub source_tcp_port: Option<u16>,
+    pub user_hash: Option<String>,
+    pub client_software: String,
+    pub origin: String,
+    pub server_endpoint: Option<String>,
+    pub raw_name: String,
+    pub normalized_name: String,
+    pub observed_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

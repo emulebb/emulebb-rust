@@ -47,7 +47,7 @@ use notify_debouncer_full::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::shared_directories::SharedDirectoryRoot;
+use crate::shared_directories::{SharedDirectoryRoot, load_shared_file_exclusion_policy};
 
 /// Settle window before a burst of raw FS events for one logical change is
 /// emitted as a settled event. Long enough that a file copied in is fully
@@ -504,6 +504,21 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
             return;
         }
     };
+    match load_shared_file_exclusion_policy(core) {
+        Ok(policy) if policy.should_ignore(&new_key, &metadata) => {
+            auto_unshare_monitored_path(core, from).await;
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                path = %to.display(),
+                error = %error,
+                "failed to load shared-file exclusions for monitored rename",
+            );
+            return;
+        }
+    }
     let (_, file_size, source_fingerprint) =
         emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity_from_metadata(
             &new_key, &metadata,
@@ -1051,6 +1066,37 @@ mod tests {
                 .monitor_shared_hashes
                 .contains_key(&monitor_shared_key(&source)),
             "the removed path must be dropped from the tracking map",
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn monitored_file_is_not_shared_when_exactly_excluded() {
+        let root = std::env::temp_dir().join(format!(
+            "emulebb-monitor-excluded-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("Excluded.At.Runtime.bin");
+        std::fs::write(&source, b"excluded monitored payload").unwrap();
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        core.metadata_store
+            .add_shared_file_exclusion(&monitor_shared_key(&source))
+            .unwrap();
+
+        auto_share_monitored_path(&core, &source).await;
+
+        assert!(core.shares().await.is_empty());
+        assert!(
+            !core
+                .state
+                .lock()
+                .await
+                .monitor_shared_hashes
+                .contains_key(&monitor_shared_key(&source))
         );
         std::fs::remove_dir_all(&root).ok();
     }

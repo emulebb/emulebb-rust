@@ -9,8 +9,21 @@ use emulebb_kad_proto::Ed2kHash;
 #[test]
 fn ed2k_link_escapes_stock_filename_bytes() {
     assert_eq!(
-        format_ed2k_file_link("Linux Guide é%.pdf", 123, "aabb"),
+        format_ed2k_file_link("Linux Guide é%.pdf", 123, "aabb", None),
         "ed2k://|file|Linux%20Guide%20%C3%A9%25.pdf|123|aabb|/",
+    );
+}
+
+#[test]
+fn ed2k_link_emits_valid_aich_root_section() {
+    assert_eq!(
+        format_ed2k_file_link(
+            "Aich.bin",
+            123,
+            "00112233445566778899aabbccddeeff",
+            Some("0000000000000000000000000000000000000000"),
+        ),
+        "ed2k://|file|Aich.bin|123|00112233445566778899aabbccddeeff|h=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/",
     );
 }
 

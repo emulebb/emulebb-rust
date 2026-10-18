@@ -190,6 +190,27 @@ async fn materialize_completed_payload_delivers_by_name() {
 }
 
 #[tokio::test]
+async fn materialize_completed_payload_uses_repaired_canonical_name() {
+    let root = unique_test_dir("ed2k-deliver-repaired-name");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Caf%C3%A9 &amp; FranÃ§ais.mkv").await;
+    let incoming = root.join("incoming");
+    let delivered = incoming.join("Café & Français.mkv");
+
+    let outcome = runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, Ed2kDeliveryOutcome::Delivered(delivered.clone()));
+    assert!(delivered.is_file());
+    assert_eq!(
+        runtime.manifest(&hash).await.unwrap().display_name,
+        "Café & Français.mkv"
+    );
+}
+
+#[tokio::test]
 async fn materialize_completed_payload_isolated_from_piece_store() {
     let root = unique_test_dir("ed2k-deliver-isolated-copy");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

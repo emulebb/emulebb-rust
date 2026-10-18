@@ -147,6 +147,40 @@ async fn remember_connected_peer_source(
         .await
 }
 
+fn connected_peer_source(
+    peer_addr: SocketAddr,
+    session_state: &DownloadSessionState,
+) -> Ed2kSourceHint {
+    Ed2kSourceHint {
+        ip: peer_addr.ip().to_string(),
+        tcp_port: peer_addr.port(),
+        user_hash: session_state.peer_user_hash.map(hex::encode),
+        connect_options: session_state.peer_connect_options,
+        file_comment: String::new(),
+        file_rating: 0,
+    }
+}
+
+async fn remember_peer_file_name(
+    transfer_runtime: &Ed2kTransferRuntime,
+    file_hash_hex: &str,
+    peer_addr: SocketAddr,
+    session_state: &DownloadSessionState,
+    raw_name: &str,
+) -> Result<Ed2kResumeManifest> {
+    transfer_runtime
+        .remember_source_file_name(
+            file_hash_hex,
+            Some(connected_peer_source(peer_addr, session_state)),
+            raw_name,
+            (!session_state.peer_client_software.is_empty())
+                .then_some(session_state.peer_client_software.as_str()),
+            "peer",
+            None,
+        )
+        .await
+}
+
 /// Outcome of one outbound ED2K peer download attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ed2kPeerDownloadOutcome {
@@ -430,6 +464,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             software.clone(),
                         );
+                        session_state.peer_client_software = software.clone();
                     }
                     for reply in build_hello_responses(&packet.payload, hello_identity)? {
                         dump_ed2k_tcp_download_send(peer_addr, transport.mode, "hello_reply", &reply);
@@ -722,7 +757,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         &mut manifest,
                         &mut request_file_identifier,
                         &hashset_answer.file_identifier,
-                        None,
                     )
                     .await?;
                     if let Some(hashset) = hashset_answer.md4_hashset {
@@ -747,13 +781,14 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             file_hash
                         );
                     }
-                    manifest = transfer_runtime
-                        .reconcile_job_metadata(
-                            file_hash_hex,
-                            Some(returned_file_name.as_str()),
-                            None,
-                        )
-                        .await?;
+                    manifest = remember_peer_file_name(
+                        transfer_runtime,
+                        file_hash_hex,
+                        peer_addr,
+                        &session_state,
+                        &returned_file_name,
+                    )
+                    .await?;
                     request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
                     session_state.startup_file_response_received = true;
                 }
@@ -880,13 +915,16 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         );
                         return Ok(Ed2kPeerDownloadOutcome::FileNotFound);
                     }
-                    manifest = transfer_runtime
-                        .reconcile_job_metadata(
+                    if let Some(returned_file_name) = returned_file_name.as_deref() {
+                        manifest = remember_peer_file_name(
+                            transfer_runtime,
                             file_hash_hex,
-                            returned_file_name.as_deref(),
-                            None,
+                            peer_addr,
+                            &session_state,
+                            returned_file_name,
                         )
                         .await?;
+                    }
                     request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
                     if let Some(bitmap) = session_state.peer_part_bitmap.as_deref()
                         && !peer_holds_needed_part(&manifest, bitmap)
@@ -954,6 +992,16 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     if returned_identifier.aich_root.is_some() {
                         session_state.peer_advertised_aich_root = true;
                     }
+                    if let Some(returned_file_name) = returned_file_name.as_deref() {
+                        manifest = remember_peer_file_name(
+                            transfer_runtime,
+                            file_hash_hex,
+                            peer_addr,
+                            &session_state,
+                            returned_file_name,
+                        )
+                        .await?;
+                    }
                     reconcile_download_manifest_metadata(
                         transfer_runtime,
                         file_hash_hex,
@@ -961,7 +1009,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         &mut manifest,
                         &mut request_file_identifier,
                         &returned_identifier,
-                        returned_file_name.as_deref(),
                     )
                     .await?;
                     if let Some(bitmap) = session_state.peer_part_bitmap.as_deref()

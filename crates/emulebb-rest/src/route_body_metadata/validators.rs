@@ -58,6 +58,9 @@ const ED2K_SETTINGS_FIELDS: &[&str] = &[
     "enableUdpReask",
     "publishEmuleRustIdentity",
     "offerFilesCapabilityEnabled",
+    "detectTcpErrorFlooder",
+    "tcpErrorFlooderIntervalMinutes",
+    "tcpErrorFlooderThreshold",
     "addServersFromServer",
     "deadServerRetries",
 ];
@@ -368,6 +371,21 @@ fn validate_ed2k_settings_patch_body_fields(object: &JsonObject) -> Result<(), B
         "settings.ed2k.deadServerRetries",
         1,
         10,
+    )?;
+    validate_optional_boolean_body_field(object, "detectTcpErrorFlooder")?;
+    validate_unsigned_number_range(
+        object,
+        "tcpErrorFlooderIntervalMinutes",
+        "settings.ed2k.tcpErrorFlooderIntervalMinutes",
+        1,
+        1_440,
+    )?;
+    validate_unsigned_number_range(
+        object,
+        "tcpErrorFlooderThreshold",
+        "settings.ed2k.tcpErrorFlooderThreshold",
+        1,
+        1_000,
     )
 }
 
@@ -957,12 +975,12 @@ pub(super) fn validate_transfer_patch_body_fields(
     if object.contains_key("categoryId") || object.contains_key("categoryName") {
         mutation_family_count += 1;
     }
-    if object.contains_key("name") {
+    if object.contains_key("displayName") {
         mutation_family_count += 1;
     }
     if mutation_family_count == 0 {
         return Err(invalid_body_error(
-            "transfer PATCH requires priority, categoryId, categoryName, or name",
+            "transfer PATCH requires priority, categoryId, categoryName, or displayName",
         ));
     }
     if mutation_family_count > 1 {
@@ -973,7 +991,7 @@ pub(super) fn validate_transfer_patch_body_fields(
     if let Some(priority) = object.get("priority") {
         validate_transfer_priority_body_field(priority)?;
     }
-    if let Some(name) = object.get("name") {
+    if let Some(name) = object.get("displayName") {
         validate_transfer_name_body_field(name)?;
     }
     Ok(())
@@ -1100,6 +1118,23 @@ pub(super) fn validate_shared_directory_root_body_fields(
         }
     }
     validate_path_text_body_field(object.get("path"), "path")
+}
+
+pub(super) fn validate_shared_file_ignore_rule_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    if object.keys().any(|name| name != "enabled") {
+        return Err(invalid_body_error(
+            "shared-file ignore rule only accepts enabled",
+        ));
+    }
+    let Some(enabled) = object.get("enabled") else {
+        return Err(invalid_body_error("enabled is required"));
+    };
+    if !enabled.is_boolean() {
+        return Err(invalid_body_error("enabled must be a boolean"));
+    }
+    Ok(())
 }
 
 fn validate_path_text_body_field(

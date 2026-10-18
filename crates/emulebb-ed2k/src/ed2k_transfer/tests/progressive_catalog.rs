@@ -15,6 +15,9 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
             .upsert_transfer_manifest(&MetadataTransferManifest {
                 file_hash: file_hash.clone(),
                 display_name: format!("catalog-{sequence}.bin"),
+                display_name_pinned: false,
+                follow_majority_filename: false,
+                file_name_observations: Vec::new(),
                 file_size: sequence as u64,
                 piece_size: 1,
                 completed: true,

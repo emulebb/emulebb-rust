@@ -21,6 +21,7 @@ egress-audit = ["emulebb-ed2k/egress-audit", "emulebb-kad-dht/egress-audit"]
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+data-encoding.workspace = true
 emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }

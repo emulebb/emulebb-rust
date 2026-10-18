@@ -88,7 +88,7 @@ async fn app_returns_evelope_with_capabilities() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("x-contract-version").unwrap(),
-        "1.2.0"
+        "2.0.0"
     );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
@@ -122,7 +122,7 @@ async fn capabilities_returns_contract_version_and_capability_list() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["contractVersion"], "1.2.0");
+    assert_eq!(value["data"]["contractVersion"], "2.0.0");
     assert_eq!(value["data"]["apiVersion"], "v1");
     assert!(
         value["data"]["capabilities"]
@@ -302,7 +302,7 @@ async fn events_endpoint_requires_auth_and_serves_sse() {
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         unauthorized.headers().get("x-contract-version").unwrap(),
-        "1.2.0"
+        "2.0.0"
     );
 
     let response = test_router()
@@ -322,7 +322,7 @@ async fn events_endpoint_requires_auth_and_serves_sse() {
     );
     assert_eq!(
         response.headers().get("x-contract-version").unwrap(),
-        "1.2.0"
+        "2.0.0"
     );
     assert_eq!(
         response.headers().get(header::CACHE_CONTROL).unwrap(),

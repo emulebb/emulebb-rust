@@ -213,7 +213,7 @@ fn is_transfer_state_name(value: &str) -> bool {
 fn is_search_result_sort(value: &str) -> bool {
     matches!(
         value,
-        "name"
+        "displayName"
             | "sizeBytes"
             | "sources"
             | "completeSources"
@@ -569,6 +569,8 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("GET", "/api/v1/shared-directories")
         | ("PATCH", "/api/v1/shared-directories")
         | ("POST", "/api/v1/shared-directories/roots")
+        | ("GET", "/api/v1/shared-directories/exclusions")
+        | ("POST", "/api/v1/shared-directories/exclusions")
         | ("POST", "/api/v1/shared-directories/operations/reload")
         | ("GET", "/api/v1/uploads")
         | ("GET", "/api/v1/upload-queue")
@@ -588,6 +590,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),
         ("DELETE", "/api/v1/searches") => Some(CONFIRM),
         ("DELETE", "/api/v1/shared-directories/roots") => Some(SHARED_DIRECTORY_ROOT),
+        ("DELETE", "/api/v1/shared-directories/exclusions") => Some(SHARED_DIRECTORY_ROOT),
         _ => route_query_fields_for_parameterized(method, path),
     }
 }
@@ -622,6 +625,7 @@ fn route_query_fields_for_parameterized(
         | ("DELETE", ["searches", _])
         | ("GET", ["shared-files", _])
         | ("PATCH", ["shared-files", _])
+        | ("PATCH", ["shared-directories", "exclusions", "rules", _])
         | ("GET", ["shared-files", _, "ed2k-link"])
         | ("GET", ["shared-files", _, "comments"])
         | ("GET", ["transfers", _])

@@ -192,6 +192,9 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
         .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
             file_hash: file_hash.clone(),
             display_name: "Imported.Source.bin".to_string(),
+            display_name_pinned: false,
+            follow_majority_filename: false,
+            file_name_observations: Vec::new(),
             file_size: size,
             piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
             completed: true,
@@ -249,6 +252,9 @@ async fn incremental_reload_never_reuses_same_size_coarse_timestamp() {
         .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
             file_hash: "00112233445566778899aabbccddeeff".to_string(),
             display_name: "Coarse.Timestamp.bin".to_string(),
+            display_name_pinned: false,
+            follow_majority_filename: false,
+            file_name_observations: Vec::new(),
             file_size,
             piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
             completed: true,
@@ -415,6 +421,9 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
         .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
             file_hash: file_hash.clone(),
             display_name: "Completed.Download.bin".to_string(),
+            display_name_pinned: false,
+            follow_majority_filename: false,
+            file_name_observations: Vec::new(),
             file_size: size,
             piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
             completed: true,
@@ -584,11 +593,62 @@ fn folder_tree_shared_scan_prunes_mfc_ignored_directories() {
 
 #[test]
 fn shared_file_name_policy_matches_mfc_affixes() {
+    assert!(should_ignore_shared_file_name("Thumbs.db"));
     assert!(should_ignore_shared_file_name(".DS_Store"));
     assert!(should_ignore_shared_file_name("._resource"));
     assert!(should_ignore_shared_file_name("download.crdownload"));
     assert!(should_ignore_shared_file_name("~lock.document#"));
     assert!(!should_ignore_shared_file_name("sample.data"));
+}
+
+#[test]
+fn shared_scan_applies_exact_exclusions_and_removable_defaults() {
+    let root = scratch_dir("exclusion-policy");
+    let excluded = root.join("private.bin");
+    fs::write(&excluded, b"private").unwrap();
+    fs::write(root.join("desktop.ini"), b"metadata").unwrap();
+    fs::write(root.join("known.met"), b"runtime").unwrap();
+    fs::write(root.join("public.bin"), b"public").unwrap();
+
+    let policy = SharedFileExclusionPolicy::new(
+        vec![NativePath::from(long_path(&excluded))],
+        vec!["noise.desktop-ini".to_string()],
+    );
+    let mut output = Vec::new();
+    let skipped = collect_shared_directory_files_with_policy(&root, &mut output, &policy).unwrap();
+
+    assert_eq!(skipped, 2);
+    assert_eq!(names(output), vec!["desktop.ini", "public.bin"]);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn shared_file_name_policy_ignores_emule_runtime_files() {
+    assert!(should_ignore_shared_file_name("known.met"));
+    assert!(should_ignore_shared_file_name("KNOWN2_64.MET"));
+    assert!(should_ignore_shared_file_name("001.part.met.bak"));
+    assert!(should_ignore_shared_file_name("preferences.dat"));
+}
+
+#[tokio::test]
+async fn direct_share_rejects_a_persisted_exact_exclusion() {
+    let root = scratch_dir("direct-exclusion");
+    let source = root.join("private.bin");
+    fs::write(&source, b"private payload").unwrap();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    core.metadata_store
+        .add_shared_file_exclusion(&long_path(&source))
+        .unwrap();
+
+    let error = core
+        .share_native_local_file_with_progress(&source, None, None)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("excluded from sharing"));
+    assert!(core.shares().await.is_empty());
+    fs::remove_dir_all(&root).ok();
 }
 
 #[test]

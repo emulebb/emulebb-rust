@@ -256,16 +256,20 @@ pub use shared_directories::{
     SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryHashActiveFile,
     SharedDirectoryHashDiskProgress, SharedDirectoryHashQueuedFile, SharedDirectoryHashRecentFile,
     SharedDirectoryReloadProgress, SharedDirectoryRoot, SharedDirectoryRootUpdate,
+    SharedFileExclusion, SharedFileExclusionUpdate, SharedFileExclusions, SharedFileIgnoreRule,
+    SharedFileIgnoreRuleUpdate,
 };
 use shared_directories::{
-    refresh_shared_directory_row, reload_progress_snapshot, shared_directory_from_index,
-    shared_directory_to_index,
+    is_shared_file_ignore_rule, load_shared_file_exclusion_policy, refresh_shared_directory_row,
+    reload_progress_snapshot, shared_directory_from_index, shared_directory_to_index,
+    shared_file_ignore_rules,
 };
 
 mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
 pub use emulebb_ed2k::NatStatusSnapshot;
+pub use emulebb_ed2k::normalize_ed2k_file_name;
 pub use emulebb_settings::{
     AppSettings, AppSettingsUpdate, CORE_SETTING_SPECS, CoreSettingFieldKind, CoreSettingSpec,
     CoreSettings, CoreSettingsUpdate, MAX_FREE_SPACE_BYTES, MIN_FREE_CONFIG_SPACE_BYTES,
@@ -282,7 +286,8 @@ pub use rest_model::{
     SearchResult, SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation,
     SearchSpec, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status, Transfer,
     TransferComment, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
-    TransferEventResetReason, TransferEventType, TransferPart, TransferSource, TransferStats,
+    TransferEventResetReason, TransferEventType, TransferFileNameObservation,
+    TransferNameCandidate, TransferNameConsensus, TransferPart, TransferSource, TransferStats,
     TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
     VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
@@ -782,6 +787,20 @@ impl EmulebbCore {
         hash: &str,
         state_name: &str,
     ) -> Result<Option<Transfer>> {
+        let transfer = self
+            .refresh_transfer_from_manifest_silent(hash, state_name)
+            .await?;
+        if let Some(transfer) = transfer.as_ref() {
+            self.publish_transfer_updated(transfer.clone());
+        }
+        Ok(transfer)
+    }
+
+    async fn refresh_transfer_from_manifest_silent(
+        &self,
+        hash: &str,
+        state_name: &str,
+    ) -> Result<Option<Transfer>> {
         let manifest = self.ed2k_transfers.manifest(hash).await?;
         let mut transfer = self.transfer_from_manifest(&manifest, state_name);
         let mut state = self.state.lock().await;
@@ -792,8 +811,6 @@ impl EmulebbCore {
         state
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
-        drop(state);
-        self.publish_transfer_updated(transfer.clone());
         Ok(Some(transfer))
     }
 
@@ -6944,6 +6961,7 @@ fn local_share_from_summary(
             &summary.display_name,
             summary.file_size,
             &summary.file_hash,
+            Some(&summary.aich_root),
         ),
         hash: summary.file_hash,
         name: summary.display_name,
@@ -7033,6 +7051,7 @@ struct ParsedEd2kLink {
     file_hash: String,
     name: String,
     size_bytes: u64,
+    aich_root: Option<[u8; 20]>,
     sources: Vec<Ed2kSourceHint>,
 }
 
@@ -7044,6 +7063,7 @@ fn parse_ed2k_link(link: &str) -> Result<ParsedEd2kLink> {
         .split('|')
         .collect::<Vec<_>>();
     anyhow::ensure!(parts.len() >= 3, "invalid ED2K file link");
+    let sections = &parts[3..];
     Ok(ParsedEd2kLink {
         file_hash: parts[2].to_ascii_lowercase(),
         name: percent_encoding::percent_decode_str(parts[0])
@@ -7051,8 +7071,31 @@ fn parse_ed2k_link(link: &str) -> Result<ParsedEd2kLink> {
             .context("ED2K file name is not valid UTF-8")?
             .into_owned(),
         size_bytes: parts[1].parse()?,
-        sources: parse_ed2k_link_sources(parts.iter().skip(3).copied()),
+        aich_root: parse_ed2k_link_aich_root(sections.iter().copied())?,
+        sources: parse_ed2k_link_sources(sections.iter().copied()),
     })
+}
+
+fn parse_ed2k_link_aich_root<'a>(
+    sections: impl Iterator<Item = &'a str>,
+) -> Result<Option<[u8; 20]>> {
+    let mut root = None;
+    for section in sections {
+        let Some(encoded) = section.strip_prefix("h=") else {
+            continue;
+        };
+        anyhow::ensure!(root.is_none(), "duplicate ED2K AICH root section");
+        let encoded = encoded.to_ascii_uppercase();
+        let decoded = data_encoding::BASE32_NOPAD
+            .decode(encoded.as_bytes())
+            .context("invalid ED2K AICH root")?;
+        root = Some(
+            decoded
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("ED2K AICH root must decode to 20 bytes"))?,
+        );
+    }
+    Ok(root)
 }
 
 fn parse_ed2k_link_sources<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<Ed2kSourceHint> {

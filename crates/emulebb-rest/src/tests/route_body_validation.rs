@@ -847,14 +847,14 @@ async fn transfer_patch_body_uses_canonical_mutation_family_validation() {
     let cases = [
         (
             r#"{}"#,
-            "transfer PATCH requires priority, categoryId, categoryName, or name",
+            "transfer PATCH requires priority, categoryId, categoryName, or displayName",
         ),
         (
-            r#"{"priority":"low","name":"Renamed.bin"}"#,
+            r#"{"priority":"low","displayName":"Renamed.bin"}"#,
             "transfer PATCH accepts only one mutation family",
         ),
         (
-            r#"{"categoryId":0,"name":"Renamed.bin"}"#,
+            r#"{"categoryId":0,"displayName":"Renamed.bin"}"#,
             "transfer PATCH accepts only one mutation family",
         ),
     ];
@@ -900,10 +900,10 @@ async fn transfer_patch_name_body_uses_canonical_validation() {
     let app = test_router();
     let uri = "/api/v1/transfers/00112233445566778899aabbccddeeff";
     let cases = [
-        (r#"{"name":1}"#, "name must be a string"),
-        (r#"{"name":"   "}"#, "name must not be empty"),
+        (r#"{"displayName":1}"#, "name must be a string"),
+        (r#"{"displayName":"   "}"#, "name must not be empty"),
         (
-            r#"{"name":"Bad<Name.bin"}"#,
+            r#"{"displayName":"Bad<Name.bin"}"#,
             "name must be a valid eD2K filename",
         ),
     ];
@@ -1047,6 +1047,51 @@ async fn shared_directory_root_operation_body_uses_canonical_validation() {
     for (body, expected_message) in cases {
         assert_invalid_json_response(app.clone(), "POST", uri, body.to_string(), expected_message)
             .await;
+    }
+}
+
+#[tokio::test]
+async fn shared_file_exclusion_body_uses_canonical_validation() {
+    let app = test_router();
+    let uri = "/api/v1/shared-directories/exclusions";
+    let cases = [
+        (r#"{}"#, "path must be a non-empty string path"),
+        (r#"{"path":1}"#, "path must be a non-empty string path"),
+        (r#"{"path":"   "}"#, "path must not be empty"),
+        (
+            r#"{"path":"C:/Shared/private.bin","recursive":true}"#,
+            "unknown JSON field: recursive",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(app.clone(), "POST", uri, body.to_string(), expected_message)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn shared_file_ignore_rule_body_uses_canonical_validation() {
+    let app = test_router();
+    let uri = "/api/v1/shared-directories/exclusions/rules/temporary-file";
+    let cases = [
+        (r#"{}"#, "enabled is required"),
+        (r#"{"enabled":"true"}"#, "enabled must be a boolean"),
+        (
+            r#"{"enabled":true,"pattern":"*.tmp"}"#,
+            "unknown JSON field: pattern",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
     }
 }
 

@@ -362,6 +362,94 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
+    pub fn add_shared_file_exclusion(&self, path: &Path) -> Result<()> {
+        let now = unix_ms();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let path_id = upsert_local_path(&tx, path)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO shared_file_exclusions(path_id, created_at_ms) VALUES (?1, ?2)",
+            params![path_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_shared_file_exclusion(&self, path: &Path) -> Result<bool> {
+        let native_path = NativePath::from(path);
+        let conn = self.connection()?;
+        let removed = conn.execute(
+            r#"
+            DELETE FROM shared_file_exclusions
+            WHERE path_id IN (
+                SELECT id FROM local_paths WHERE platform = ?1 AND native_path = ?2
+            )
+            "#,
+            params![current_platform(), native_path.storage_bytes()],
+        )?;
+        Ok(removed != 0)
+    }
+
+    pub fn shared_file_exclusions(&self) -> Result<Vec<NativePath>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT local_paths.platform, local_paths.native_path
+            FROM shared_file_exclusions
+            JOIN local_paths ON local_paths.id = shared_file_exclusions.path_id
+            ORDER BY local_paths.id
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let platform: String = row.get(0)?;
+            let native_path: Vec<u8> = row.get(1)?;
+            NativePath::from_storage(&platform, &native_path).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Blob,
+                    error.into(),
+                )
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn set_shared_default_ignore_rule_enabled(
+        &self,
+        rule_key: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        anyhow::ensure!(!rule_key.trim().is_empty(), "rule key must not be empty");
+        let conn = self.connection()?;
+        if enabled {
+            conn.execute(
+                "DELETE FROM shared_default_ignore_overrides WHERE rule_key = ?1",
+                params![rule_key],
+            )?;
+        } else {
+            conn.execute(
+                r#"
+                INSERT INTO shared_default_ignore_overrides(rule_key, enabled, updated_at_ms)
+                VALUES (?1, 0, ?2)
+                ON CONFLICT(rule_key) DO UPDATE SET enabled = 0, updated_at_ms = excluded.updated_at_ms
+                "#,
+                params![rule_key, unix_ms()],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn disabled_shared_default_ignore_rules(&self) -> Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT rule_key FROM shared_default_ignore_overrides WHERE enabled = 0 ORDER BY rule_key",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn table_count(&self, table_name: &str) -> Result<i64> {
         ensure!(
             table_name
@@ -684,5 +772,45 @@ mod tests {
         let roots = store.shared_directory_roots().unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].path, "/tmp/beta");
+    }
+
+    #[test]
+    fn shared_file_exclusions_and_default_overrides_survive_restart() {
+        let database_path = std::env::temp_dir().join(format!(
+            "emulebb-shared-exclusions-{}-{}.sqlite",
+            std::process::id(),
+            Uuid::new_v4(),
+        ));
+        let excluded_path = std::env::temp_dir().join("emulebb-excluded-file.bin");
+        {
+            let store = MetadataStore::open(&database_path).unwrap();
+            store.add_shared_file_exclusion(&excluded_path).unwrap();
+            store
+                .set_shared_default_ignore_rule_enabled("noise.desktop-ini", false)
+                .unwrap();
+        }
+        {
+            let store = MetadataStore::open(&database_path).unwrap();
+            assert_eq!(
+                store.shared_file_exclusions().unwrap(),
+                vec![NativePath::from(excluded_path.as_path())]
+            );
+            assert_eq!(
+                store.disabled_shared_default_ignore_rules().unwrap(),
+                vec!["noise.desktop-ini".to_string()]
+            );
+            assert!(store.remove_shared_file_exclusion(&excluded_path).unwrap());
+            store
+                .set_shared_default_ignore_rule_enabled("noise.desktop-ini", true)
+                .unwrap();
+            assert!(store.shared_file_exclusions().unwrap().is_empty());
+            assert!(
+                store
+                    .disabled_shared_default_ignore_rules()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        std::fs::remove_file(database_path).ok();
     }
 }

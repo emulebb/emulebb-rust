@@ -66,7 +66,8 @@ impl Ed2kTransferRuntime {
             return Ok(manifest);
         }
         self.prepare_new_download_directory(&job.file_hash).await?;
-        let manifest = Ed2kResumeManifest::new(job);
+        let mut manifest = Ed2kResumeManifest::new(job);
+        manifest.follow_majority_filename = self.file_name_policy.follow_majority_for_new_downloads;
         self.store_manifest_unlocked(&manifest).await?;
         Ok(manifest)
     }

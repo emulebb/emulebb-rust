@@ -46,7 +46,8 @@ pub use transfer_model::{
     MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
     MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
     MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
-    MetadataTransferDirectoryDeletionAuthority, MetadataTransferManifest,
-    MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
-    MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
+    MetadataTransferDirectoryDeletionAuthority, MetadataTransferFileNameObservation,
+    MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+    MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferShareEntry,
+    MetadataTransferSource,
 };

@@ -16,9 +16,9 @@ use crate::{
         MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
         MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
         MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
-        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
-        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferShareEntry,
-        MetadataTransferSource,
+        MetadataTransferFileNameObservation, MetadataTransferManifest,
+        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
+        MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
     },
 };
 
@@ -2546,6 +2546,19 @@ fn replace_transfer_children(
         .execute(params![known_file_id])?;
     tx.prepare_cached("DELETE FROM transfer_sources WHERE transfer_id = ?1")?
         .execute(params![transfer_id])?;
+    tx.prepare_cached("DELETE FROM transfer_file_name_observations WHERE transfer_id = ?1")?
+        .execute(params![transfer_id])?;
+    tx.prepare_cached("DELETE FROM transfer_name_state WHERE transfer_id = ?1")?
+        .execute(params![transfer_id])?;
+
+    tx.prepare_cached(
+        "INSERT INTO transfer_name_state(transfer_id, display_name_pinned, follow_majority_filename) VALUES (?1, ?2, ?3)",
+    )?
+    .execute(params![
+        transfer_id,
+        bool_to_i64(manifest.display_name_pinned),
+        bool_to_i64(manifest.follow_majority_filename),
+    ])?;
 
     let mut insert_piece = tx.prepare_cached(
         r#"
@@ -2629,6 +2642,30 @@ fn replace_transfer_children(
             now,
         ])?;
     }
+    drop(insert_source);
+    let mut insert_name_observation = tx.prepare_cached(
+        r#"
+        INSERT INTO transfer_file_name_observations(
+            transfer_id, source_ip, source_tcp_port, user_hash, client_software,
+            origin, server_endpoint, raw_name, normalized_name, observed_at_ms
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "#,
+    )?;
+    for observation in &manifest.file_name_observations {
+        insert_name_observation.execute(params![
+            transfer_id,
+            observation.source_ip,
+            observation.source_tcp_port.map(i64::from),
+            optional_fixed_hex(observation.user_hash.as_deref(), 16, "source user hash")?,
+            observation.client_software,
+            observation.origin,
+            observation.server_endpoint,
+            observation.raw_name,
+            observation.normalized_name,
+            observation.observed_at_ms,
+        ])?;
+    }
     Ok(())
 }
 
@@ -2636,9 +2673,14 @@ fn manifest_from_row(
     conn: &rusqlite::Connection,
     row: TransferRow,
 ) -> Result<MetadataTransferManifest> {
+    let (display_name_pinned, follow_majority_filename) =
+        read_transfer_name_state(conn, row.transfer_id)?;
     Ok(MetadataTransferManifest {
         file_hash: row.file_hash,
         display_name: row.display_name,
+        display_name_pinned,
+        follow_majority_filename,
+        file_name_observations: read_file_name_observations(conn, row.transfer_id)?,
         file_size: row.file_size,
         piece_size: row.piece_size,
         completed: row.completed,
@@ -2673,6 +2715,47 @@ fn manifest_from_row(
         source_fingerprint: row.source_fingerprint,
         payload_fingerprint: row.payload_fingerprint,
     })
+}
+
+fn read_transfer_name_state(conn: &rusqlite::Connection, transfer_id: i64) -> Result<(bool, bool)> {
+    conn.query_row(
+        "SELECT display_name_pinned, follow_majority_filename FROM transfer_name_state WHERE transfer_id = ?1",
+        params![transfer_id],
+        |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+    )
+    .map_err(Into::into)
+}
+
+fn read_file_name_observations(
+    conn: &rusqlite::Connection,
+    transfer_id: i64,
+) -> Result<Vec<MetadataTransferFileNameObservation>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT source_ip, source_tcp_port,
+               CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END,
+               client_software, origin, server_endpoint, raw_name, normalized_name,
+               observed_at_ms
+        FROM transfer_file_name_observations
+        WHERE transfer_id = ?1
+        ORDER BY observed_at_ms, id
+        "#,
+    )?;
+    let rows = stmt.query_map(params![transfer_id], |row| {
+        Ok(MetadataTransferFileNameObservation {
+            source_ip: row.get(0)?,
+            source_tcp_port: row.get::<_, Option<i64>>(1)?.map(|value| value as u16),
+            user_hash: row.get(2)?,
+            client_software: row.get(3)?,
+            origin: row.get(4)?,
+            server_endpoint: row.get(5)?,
+            raw_name: row.get(6)?,
+            normalized_name: row.get(7)?,
+            observed_at_ms: row.get(8)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<MetadataTransferCounts> {

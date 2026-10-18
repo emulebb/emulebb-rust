@@ -47,6 +47,7 @@ import {
   SearchResultMedia,
   ServerItem,
   SharedDirectories,
+  SharedFileExclusions,
   SharedFile,
   SettingsSectionResourceSpec,
   SettingSurfaceSpec,
@@ -307,14 +308,14 @@ export function TransfersView(props: {
     props.client.patch(`transfers/${transfer.hash}`, { categoryId: Number(categoryId) });
 
   const removeCompletedTransfer = (transfer: Transfer) => {
-    const name = transfer.name?.trim() || transfer.hash;
+    const name = transfer.displayName?.trim() || transfer.hash;
     if (window.confirm(`Remove "${name}" from the transfer list? The downloaded file will be preserved.`)) {
       void props.run(() => props.client.delete(`transfers/${transfer.hash}`), "Transfer removed from list");
     }
   };
 
   const deleteTransfer = (transfer: Transfer) => {
-    const name = transfer.name?.trim() || transfer.hash;
+    const name = transfer.displayName?.trim() || transfer.hash;
     const localData = transfer.state === "completed" ? "downloaded file" : "partial download data";
     if (window.confirm(`Delete "${name}" and its ${localData}? This cannot be undone.`)) {
       void props.run(
@@ -394,7 +395,7 @@ export function TransfersView(props: {
                 <tr key={transfer.hash} class={selectedId === transfer.hash ? "selected-row" : ""}>
                   <td>
                     <button type="button" class="link-button" onClick={() => setSelectedHash(transfer.hash)}>
-                      {transfer.name ?? transfer.hash}
+                      {transfer.displayName ?? transfer.hash}
                     </button>
                     {transfer.deliveryError && (
                       <small class="text-danger" title={transfer.deliveryError}>Delivery failed; retrying</small>
@@ -469,7 +470,7 @@ export function TransfersView(props: {
       <section class="panel card">
         <div class="section-title">
           <h2>Transfer Details</h2>
-          <span>{selected?.name ?? (selectedId || "No selection")}</span>
+          <span>{selected?.displayName ?? (selectedId || "No selection")}</span>
         </div>
         {detailError && <div class="notice alert alert-danger">{detailError}</div>}
         <div class="split">
@@ -481,6 +482,7 @@ export function TransfersView(props: {
                   <th>Source</th>
                   <th>State</th>
                   <th>Rate</th>
+                  <th>Reported names</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -493,6 +495,7 @@ export function TransfersView(props: {
                       <td>{source.userName ?? clientId}</td>
                       <td><StatusPill value={source.state ?? "unknown"} /></td>
                       <td>{formatKiBRate(source.downloadSpeedKiBps) || formatRate(source.downloadRateBytesPerSec)}</td>
+                      <td>{(source.reportedFileNames ?? []).map((name) => name.normalizedName).join(", ")}</td>
                       <td>
                         <div class="row-actions">
                           <Action title="Browse" icon={<Search size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${selectedId}/sources/${encodedClient}/operations/browse`), "Browse requested")} />
@@ -504,7 +507,7 @@ export function TransfersView(props: {
                     </tr>
                   );
                 })}
-                {sources.length === 0 && <EmptyRow colSpan={4} text="No sources for this transfer." />}
+                {sources.length === 0 && <EmptyRow colSpan={5} text="No sources for this transfer." />}
               </tbody>
             </table>
           </div>
@@ -776,8 +779,8 @@ export function SearchView(props: {
           <option value="rating:desc">Rating, highest first</option>
           <option value="sizeBytes:desc">Size, largest first</option>
           <option value="sizeBytes:asc">Size, smallest first</option>
-          <option value="name:asc">Name, A–Z</option>
-          <option value="name:desc">Name, Z–A</option>
+          <option value="displayName:asc">Name, A–Z</option>
+          <option value="displayName:desc">Name, Z–A</option>
           <option value="fileType:asc">Type, A–Z</option>
           <option value="title:asc">Media title, A–Z</option>
           <option value="artist:asc">Artist, A–Z</option>
@@ -809,8 +812,8 @@ export function SearchView(props: {
               const origins = [...new Set(observations.map((observation) => observation.origin))];
               const alternateNames = [...new Set(
                 observations
-                  .map((observation) => observation.name)
-                  .filter((name) => name && name !== result.name)
+                  .map((observation) => observation.normalizedName)
+                  .filter((name) => name && name !== result.displayName)
               )];
               const aichHashes = [...new Set(
                 observations
@@ -821,7 +824,7 @@ export function SearchView(props: {
               return (
               <tr key={result.hash}>
                 <td class="search-result-name-cell">
-                  <strong>{result.name ?? result.hash}</strong>
+                  <strong>{result.displayName ?? result.hash}</strong>
                   {alternateNames.length > 0 && (
                     <span class="search-result-alternates">Also seen as: {alternateNames.join(", ")}</span>
                   )}
@@ -840,8 +843,9 @@ export function SearchView(props: {
                         {observations.map((observation, index) => {
                           const observationMedia = searchResultMediaSummary(observation.media);
                           return (
-                            <li key={`${observation.origin}-${observation.name}-${index}`}>
-                              <strong>{observation.origin}</strong>: {observation.name} · {searchResultObservationEvidence(observation)}
+                            <li key={`${observation.origin}-${observation.rawName}-${index}`}>
+                              <strong>{observation.origin}</strong>: {observation.normalizedName}
+                              {observation.rawName !== observation.normalizedName ? ` (raw: ${observation.rawName})` : ""} · {searchResultObservationEvidence(observation)}
                               {observation.rating > 0 ? ` · rating ${observation.rating}/5` : ""}
                               {observation.aichHash ? ` · AICH ${observation.aichHash}` : ""}
                               {observationMedia ? ` · ${observationMedia}` : ""}
@@ -964,6 +968,7 @@ function formatMediaDuration(totalSeconds: number): string {
 
 export function SharingView(props: {
   directories: SharedDirectories | null;
+  exclusions: SharedFileExclusions | null;
   stats: Record<string, unknown>;
   sharedFiles: SharedFile[];
   uploads: Upload[];
@@ -972,7 +977,10 @@ export function SharingView(props: {
   run: RunFunction;
 }) {
   const [path, setPath] = useState("");
+  const [exclusionPath, setExclusionPath] = useState("");
   const roots = props.directories?.roots ?? [];
+  const customExclusions = props.exclusions?.custom ?? [];
+  const defaultExclusions = props.exclusions?.defaults ?? [];
   const reload = props.directories?.reloadProgress ?? {};
   const pathError = sharedRootPathError(path);
   const sharedFileCount = numberField(props.stats, "sharedFiles") ?? props.sharedFiles.length;
@@ -989,6 +997,18 @@ export function SharingView(props: {
 
   const removeRoot = (rootPath: string) =>
     props.client.delete(`shared-directories/roots?path=${encodeURIComponent(rootPath)}`);
+
+  const addExclusion = async () => {
+    const nextPath = exclusionPath.trim();
+    if (!nextPath) {
+      return;
+    }
+    await props.client.post("shared-directories/exclusions", { path: nextPath });
+    setExclusionPath("");
+  };
+
+  const removeExclusion = (filePath: string) =>
+    props.client.delete(`shared-directories/exclusions?path=${encodeURIComponent(filePath)}`);
 
   return (
     <section class="view-grid">
@@ -1051,6 +1071,54 @@ export function SharingView(props: {
                 </tr>
               ))}
               {roots.length === 0 && <EmptyRow colSpan={4} text="No shared folders." />}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel card wide sharing-panel">
+        <div class="section-title">
+          <h2>Share Exclusions</h2>
+          <StatusPill value={`${customExclusions.length} custom`} />
+        </div>
+        <p class="hint">Excluded files are removed from scans, live monitoring, and publication.</p>
+        <form class="form-row" onSubmit={(event) => {
+          event.preventDefault();
+          if (exclusionPath.trim()) {
+            void props.run(addExclusion, "File excluded");
+          }
+        }}>
+          <input class="form-control share-root-input" value={exclusionPath} placeholder="Exact server file path" aria-label="Exact excluded file path" onInput={(event) => setExclusionPath(event.currentTarget.value)} />
+          <button class="btn" type="submit" disabled={!exclusionPath.trim()}><FolderPlus size={16} />Exclude file</button>
+        </form>
+        <h3 class="panel-subhead">Exact Files</h3>
+        <div class="table-wrap">
+          <table class="table table-vcenter card-table root-table">
+            <thead><tr><th>File</th><th>Actions</th></tr></thead>
+            <tbody>
+              {customExclusions.map((exclusion) => (
+                <tr key={exclusion.path}>
+                  <td class="path-cell" title={displayPath(exclusion.path)}>{displayPath(exclusion.path)}</td>
+                  <td><Action title="Remove exclusion" icon={<Trash2 size={15} />} onClick={() => void props.run(() => removeExclusion(exclusion.path), "Exclusion removed")} /></td>
+                </tr>
+              ))}
+              {customExclusions.length === 0 && <EmptyRow colSpan={2} text="No exact file exclusions." />}
+            </tbody>
+          </table>
+        </div>
+        <h3 class="panel-subhead">Default Rules</h3>
+        <div class="table-wrap">
+          <table class="table table-vcenter card-table root-table">
+            <thead><tr><th>Pattern</th><th>Match</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>
+              {defaultExclusions.map((rule) => (
+                <tr key={rule.key}>
+                  <td><code>{rule.pattern}</code></td>
+                  <td>{rule.matchKind}</td>
+                  <td><StatusPill value={rule.enabled ? "enabled" : "disabled"} /></td>
+                  <td><button class="btn btn-sm" type="button" onClick={() => void props.run(() => props.client.patch(`shared-directories/exclusions/rules/${encodeURIComponent(rule.key)}`, { enabled: !rule.enabled }), rule.enabled ? "Default exclusion disabled" : "Default exclusion enabled")}>{rule.enabled ? "Disable" : "Enable"}</button></td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -1690,7 +1758,7 @@ export function NetworkHealthView(props: {
       .slice(0, 12)
       .map((transfer) => ({
         hash: transfer.hash,
-        name: transfer.name
+        name: transfer.displayName
       })),
     [props.transfers]
   );
@@ -4065,7 +4133,7 @@ function CompactTransferList(props: { transfers: Transfer[] }) {
     <div class="compact-list">
       {props.transfers.map((transfer) => (
         <div class="compact-row" key={transfer.hash}>
-          <span>{transfer.name ?? transfer.hash}</span>
+          <span>{transfer.displayName ?? transfer.hash}</span>
           <StatusPill value={transfer.state ?? "unknown"} />
           <strong>{formatProgress(transfer)}</strong>
         </div>

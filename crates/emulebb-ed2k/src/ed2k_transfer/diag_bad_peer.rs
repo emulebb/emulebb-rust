@@ -7,6 +7,7 @@
 //! diagnostics are enabled.
 
 use serde_json::json;
+use std::net::Ipv4Addr;
 
 use crate::diag_event::emit;
 
@@ -21,6 +22,22 @@ fn packet_keys(peer: &str, peer_hash: Option<[u8; 16]>) -> serde_json::Value {
         keys.insert("peerHash".to_string(), json!(hex::encode(user_hash)));
     }
     serde_json::Value::Object(keys)
+}
+
+pub(crate) fn tcp_error_flooder_banned(
+    ip: Ipv4Addr,
+    event_count: u32,
+    interval: std::time::Duration,
+) {
+    let keys = packet_keys(&ip.to_string(), None);
+    let body = json!({
+        "action": "ban",
+        "reason": "TCP error flood",
+        "eventCount": event_count,
+        "intervalSeconds": interval.as_secs(),
+        "banScope": "ip",
+    });
+    emit("bad_peer", "tcp_error_flooder_banned", "high", keys, body);
 }
 
 /// `packet_unknown_client_tcp_packet`: an inbound peer TCP packet whose

@@ -1,13 +1,15 @@
 use anyhow::Result;
 use emulebb_metadata::{
     MetadataStore, MetadataTransferCatalogEntry, MetadataTransferDeliveryOwnership,
-    MetadataTransferDeliveryState, MetadataTransferManifest, MetadataTransferMediaMetadata,
-    MetadataTransferPiece, MetadataTransferRange, MetadataTransferSource,
+    MetadataTransferDeliveryState, MetadataTransferFileNameObservation, MetadataTransferManifest,
+    MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferRange,
+    MetadataTransferSource,
 };
 
 use super::{
-    Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry,
-    Ed2kSharedRange, Ed2kSourceHint, Ed2kTransferState, catalog::Ed2kSharedPublishStats,
+    Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kFileNameObservation, Ed2kPieceState,
+    Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kSourceHint, Ed2kTransferState,
+    catalog::Ed2kSharedPublishStats,
 };
 
 pub(super) const MEDIA_METADATA_EXTRACTOR_VERSION: u32 = 1;
@@ -16,6 +18,23 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
     MetadataTransferManifest {
         file_hash: manifest.file_hash.clone(),
         display_name: manifest.display_name.clone(),
+        display_name_pinned: manifest.display_name_pinned,
+        follow_majority_filename: manifest.follow_majority_filename,
+        file_name_observations: manifest
+            .file_name_observations
+            .iter()
+            .map(|observation| MetadataTransferFileNameObservation {
+                source_ip: observation.source_ip.clone(),
+                source_tcp_port: observation.source_tcp_port,
+                user_hash: observation.user_hash.clone(),
+                client_software: observation.client_software.clone(),
+                origin: observation.origin.clone(),
+                server_endpoint: observation.server_endpoint.clone(),
+                raw_name: observation.raw_name.clone(),
+                normalized_name: observation.normalized_name.clone(),
+                observed_at_ms: observation.observed_at_ms,
+            })
+            .collect(),
         file_size: manifest.file_size,
         piece_size: manifest.piece_size,
         completed: manifest.completed,
@@ -99,6 +118,23 @@ pub(super) fn manifest_from_metadata(
     Ok(Ed2kResumeManifest {
         file_hash: manifest.file_hash,
         display_name: manifest.display_name,
+        display_name_pinned: manifest.display_name_pinned,
+        follow_majority_filename: manifest.follow_majority_filename,
+        file_name_observations: manifest
+            .file_name_observations
+            .into_iter()
+            .map(|observation| Ed2kFileNameObservation {
+                source_ip: observation.source_ip,
+                source_tcp_port: observation.source_tcp_port,
+                user_hash: observation.user_hash,
+                client_software: observation.client_software,
+                origin: observation.origin,
+                server_endpoint: observation.server_endpoint,
+                raw_name: observation.raw_name,
+                normalized_name: observation.normalized_name,
+                observed_at_ms: observation.observed_at_ms,
+            })
+            .collect(),
         file_size: manifest.file_size,
         piece_size: manifest.piece_size,
         completed: manifest.completed,
@@ -296,6 +332,9 @@ mod tests {
         MetadataTransferManifest {
             file_hash: "00000000000000000000000000000000".to_string(),
             display_name: "f.bin".to_string(),
+            display_name_pinned: false,
+            follow_majority_filename: false,
+            file_name_observations: Vec::new(),
             file_size,
             piece_size,
             completed: false,

@@ -419,6 +419,12 @@ pub struct Ed2kSettings {
     pub source_server_attempt_budget: usize,
     pub upload_queue: Ed2kUploadQueueSettings,
     pub download_limit_bytes_per_sec: u64,
+    pub follow_majority_filename_for_new_downloads: bool,
+    pub follow_majority_filename_minimum_votes: u32,
+    pub follow_majority_filename_required_percent: u32,
+    pub detect_tcp_error_flooder: bool,
+    pub tcp_error_flooder_interval_minutes: u32,
+    pub tcp_error_flooder_threshold: u32,
     /// Minimum free bytes retained on the profile/config volume.
     pub min_free_config_space_bytes: u64,
     /// Minimum free bytes retained on volumes holding incomplete part files.
@@ -693,6 +699,18 @@ pub struct Ed2kSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_limit_bytes_per_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_majority_filename_for_new_downloads: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_majority_filename_minimum_votes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_majority_filename_required_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detect_tcp_error_flooder: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_error_flooder_interval_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_error_flooder_threshold: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_free_config_space_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_free_transfer_space_bytes: Option<u64>,
@@ -950,6 +968,12 @@ impl Default for Ed2kSettings {
             source_server_attempt_budget: 3,
             upload_queue: Ed2kUploadQueueSettings::default(),
             download_limit_bytes_per_sec: 0,
+            follow_majority_filename_for_new_downloads: false,
+            follow_majority_filename_minimum_votes: 0,
+            follow_majority_filename_required_percent: 51,
+            detect_tcp_error_flooder: true,
+            tcp_error_flooder_interval_minutes: 60,
+            tcp_error_flooder_threshold: 10,
             min_free_config_space_bytes: MIN_FREE_CONFIG_SPACE_BYTES,
             min_free_transfer_space_bytes: MIN_FREE_TRANSFER_SPACE_BYTES,
             min_free_incoming_space_bytes: MIN_FREE_INCOMING_SPACE_BYTES,
@@ -1253,6 +1277,12 @@ impl Ed2kSettingsUpdate {
                 .as_ref()
                 .is_none_or(Ed2kUploadQueueSettingsUpdate::is_empty)
             && self.download_limit_bytes_per_sec.is_none()
+            && self.follow_majority_filename_for_new_downloads.is_none()
+            && self.follow_majority_filename_minimum_votes.is_none()
+            && self.follow_majority_filename_required_percent.is_none()
+            && self.detect_tcp_error_flooder.is_none()
+            && self.tcp_error_flooder_interval_minutes.is_none()
+            && self.tcp_error_flooder_threshold.is_none()
             && self.min_free_config_space_bytes.is_none()
             && self.min_free_transfer_space_bytes.is_none()
             && self.min_free_incoming_space_bytes.is_none()
@@ -1384,7 +1414,28 @@ pub fn validate_ed2k_settings(settings: &Ed2kSettings) -> Result<(), CoreSetting
         "minFreeIncomingSpaceBytes",
         settings.min_free_incoming_space_bytes,
         MIN_FREE_INCOMING_SPACE_BYTES,
-    )
+    )?;
+    if settings.follow_majority_filename_minimum_votes > 1000 {
+        return Err(CoreSettingValidationError::new(
+            "followMajorityFilenameMinimumVotes must be in the range 0..1000",
+        ));
+    }
+    if !(1..=100).contains(&settings.follow_majority_filename_required_percent) {
+        return Err(CoreSettingValidationError::new(
+            "followMajorityFilenameRequiredPercent must be in the range 1..100",
+        ));
+    }
+    if !(1..=1_440).contains(&settings.tcp_error_flooder_interval_minutes) {
+        return Err(CoreSettingValidationError::new(
+            "tcpErrorFlooderIntervalMinutes must be in the range 1..1440",
+        ));
+    }
+    if !(1..=1_000).contains(&settings.tcp_error_flooder_threshold) {
+        return Err(CoreSettingValidationError::new(
+            "tcpErrorFlooderThreshold must be in the range 1..1000",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_free_space_floor(
@@ -1479,6 +1530,24 @@ fn apply_ed2k_settings_update_unchecked(settings: &mut Ed2kSettings, update: Ed2
     }
     if let Some(value) = update.download_limit_bytes_per_sec {
         settings.download_limit_bytes_per_sec = value;
+    }
+    if let Some(value) = update.follow_majority_filename_for_new_downloads {
+        settings.follow_majority_filename_for_new_downloads = value;
+    }
+    if let Some(value) = update.follow_majority_filename_minimum_votes {
+        settings.follow_majority_filename_minimum_votes = value;
+    }
+    if let Some(value) = update.follow_majority_filename_required_percent {
+        settings.follow_majority_filename_required_percent = value;
+    }
+    if let Some(value) = update.detect_tcp_error_flooder {
+        settings.detect_tcp_error_flooder = value;
+    }
+    if let Some(value) = update.tcp_error_flooder_interval_minutes {
+        settings.tcp_error_flooder_interval_minutes = value;
+    }
+    if let Some(value) = update.tcp_error_flooder_threshold {
+        settings.tcp_error_flooder_threshold = value;
     }
     if let Some(value) = update.min_free_config_space_bytes {
         settings.min_free_config_space_bytes = value;
@@ -1733,6 +1802,18 @@ impl From<Ed2kSettings> for Ed2kSettingsUpdate {
             source_server_attempt_budget: Some(settings.source_server_attempt_budget),
             upload_queue: Some(settings.upload_queue.into()),
             download_limit_bytes_per_sec: Some(settings.download_limit_bytes_per_sec),
+            follow_majority_filename_for_new_downloads: Some(
+                settings.follow_majority_filename_for_new_downloads,
+            ),
+            follow_majority_filename_minimum_votes: Some(
+                settings.follow_majority_filename_minimum_votes,
+            ),
+            follow_majority_filename_required_percent: Some(
+                settings.follow_majority_filename_required_percent,
+            ),
+            detect_tcp_error_flooder: Some(settings.detect_tcp_error_flooder),
+            tcp_error_flooder_interval_minutes: Some(settings.tcp_error_flooder_interval_minutes),
+            tcp_error_flooder_threshold: Some(settings.tcp_error_flooder_threshold),
             min_free_config_space_bytes: Some(settings.min_free_config_space_bytes),
             min_free_transfer_space_bytes: Some(settings.min_free_transfer_space_bytes),
             min_free_incoming_space_bytes: Some(settings.min_free_incoming_space_bytes),
@@ -2062,6 +2143,56 @@ mod tests {
             MIN_FREE_INCOMING_SPACE_BYTES
         );
         validate_ed2k_settings(&settings).unwrap();
+    }
+
+    #[test]
+    fn follow_majority_filename_settings_use_mfc_defaults_and_bounds() {
+        let settings = Ed2kSettings::default();
+
+        assert!(!settings.follow_majority_filename_for_new_downloads);
+        assert_eq!(settings.follow_majority_filename_minimum_votes, 0);
+        assert_eq!(settings.follow_majority_filename_required_percent, 51);
+        validate_ed2k_settings(&settings).unwrap();
+
+        let mut candidate = settings.clone();
+        let error = apply_ed2k_settings_update(
+            &mut candidate,
+            Ed2kSettingsUpdate {
+                follow_majority_filename_required_percent: Some(0),
+                ..Ed2kSettingsUpdate::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "followMajorityFilenameRequiredPercent must be in the range 1..100"
+        );
+        assert_eq!(candidate, settings);
+    }
+
+    #[test]
+    fn tcp_error_flooder_settings_use_mfc_defaults_and_bounds() {
+        let settings = Ed2kSettings::default();
+
+        assert!(settings.detect_tcp_error_flooder);
+        assert_eq!(settings.tcp_error_flooder_interval_minutes, 60);
+        assert_eq!(settings.tcp_error_flooder_threshold, 10);
+        validate_ed2k_settings(&settings).unwrap();
+
+        let mut candidate = settings.clone();
+        let error = apply_ed2k_settings_update(
+            &mut candidate,
+            Ed2kSettingsUpdate {
+                tcp_error_flooder_threshold: Some(0),
+                ..Ed2kSettingsUpdate::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "tcpErrorFlooderThreshold must be in the range 1..1000"
+        );
+        assert_eq!(candidate, settings);
     }
 
     #[test]

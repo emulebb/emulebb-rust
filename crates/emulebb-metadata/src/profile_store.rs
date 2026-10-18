@@ -611,6 +611,9 @@ mod tests {
             .upsert_transfer_manifest(&crate::MetadataTransferManifest {
                 file_hash: "00112233445566778899aabbccddeeff".to_string(),
                 display_name: "Sample.bin".to_string(),
+                display_name_pinned: false,
+                follow_majority_filename: false,
+                file_name_observations: Vec::new(),
                 file_size: 10,
                 piece_size: 10,
                 completed: true,

@@ -268,6 +268,24 @@ function dataFor(method: string, path: string): unknown {
           ]
         }
       };
+    case "shared-directories/exclusions":
+      return {
+        custom: [{ path: "C:\\Sample\\Shared\\private.bin" }],
+        defaults: [
+          {
+            key: "mfc-runtime-database",
+            matchKind: "file-name",
+            pattern: "downloads.met",
+            enabled: true
+          },
+          {
+            key: "operating-system-noise",
+            matchKind: "file-name",
+            pattern: "Thumbs.db",
+            enabled: false
+          }
+        ]
+      };
     case "shared-files":
       return { items: snapshot.sharedFiles };
     case `shared-files/${sharedFileHash}/ed2k-link`:
@@ -623,7 +641,7 @@ function dataFor(method: string, path: string): unknown {
         capabilities: { transfers: true, "transfers.sse": true, "transfers.sse.status": true }
       };
     case "capabilities":
-      return { contractVersion: "1.2.0", apiVersion: "v1", capabilities: ["transfers", "transfers.sse", "transfers.sse.status"] };
+      return { contractVersion: "2.0.0", apiVersion: "v1", capabilities: ["transfers", "transfers.sse", "transfers.sse.status"] };
     case "diagnostics":
       return snapshot.status.runtimeDiagnostics;
     case `transfers/${transferHash}/details`:
