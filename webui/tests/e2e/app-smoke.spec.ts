@@ -987,7 +987,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByLabel("Concurrent downloads")).toBeVisible();
   await expect(settingsPanel.getByLabel("Keyword server attempts")).toBeVisible();
   await expect(settingsPanel.getByLabel("Server connect timeout seconds")).toBeVisible();
-  await expect(settingsPanel.getByLabel("Startup base upload slots")).toBeVisible();
+  await expect(settingsPanel.getByLabel("Base upload slots")).toHaveValue("12");
+  await expect(settingsPanel.getByLabel("Upload client KiB/s")).toHaveValue("32");
+  await expect(settingsPanel.getByLabel("Queue size")).toHaveValue("10000");
+  await expect(settingsPanel.getByLabel("Startup base upload slots")).toHaveCount(0);
+  await expect(settingsPanel.getByLabel("Waiting queue capacity")).toHaveCount(0);
   await expect(settingsPanel.getByLabel("Bootstrap contact floor")).toBeVisible();
   await expect(settingsPanel.getByLabel("DNS tick seconds")).toBeVisible();
   await expect(settingsPanel.getByLabel("Discovery timeout seconds")).toBeVisible();
@@ -1042,11 +1046,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("Dead server retries").fill("1");
   await expect(settingsPanel.getByText("Dead server retries must be between 1 and 10.")).toHaveCount(0);
-  await settingsPanel.getByLabel("Startup base upload slots").fill("0");
-  await expect(settingsPanel.getByText("Startup base upload slots must be between 1 and 64.")).toBeVisible();
+  await settingsPanel.getByLabel("Base upload slots").fill("0");
+  await expect(settingsPanel.getByText("Base upload slots must be between 1 and 64.")).toBeVisible();
   await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("Startup base upload slots").fill("3");
-  await expect(settingsPanel.getByText("Startup base upload slots must be between 1 and 64.")).toHaveCount(0);
+  await settingsPanel.getByLabel("Base upload slots").fill("12");
+  await expect(settingsPanel.getByText("Base upload slots must be between 1 and 64.")).toHaveCount(0);
   await settingsPanel.getByLabel("NAT bind IP").fill("not-an-ip");
   await expect(settingsPanel.getByText("NAT bind IP must be an IPv4 address.")).toBeVisible();
   await expect(save).toBeDisabled();
@@ -1062,7 +1066,6 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await settingsPanel.getByLabel("eD2K half-open connections").fill("0");
   await settingsPanel.getByLabel("eD2K source cap").fill("0");
   await settingsPanel.getByLabel("eD2K keepalive seconds").fill("0");
-  await settingsPanel.getByLabel("Waiting queue capacity").fill("0");
   await settingsPanel.getByLabel("Session transfer %").fill("0");
   await settingsPanel.getByLabel("Session time limit seconds").fill("0");
   await expect(save).toBeEnabled();
@@ -1071,7 +1074,6 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByText("eD2K half-open connections must be at least 1.")).toHaveCount(0);
   await expect(settingsPanel.getByText("eD2K source cap must be at least 1.")).toHaveCount(0);
   await expect(settingsPanel.getByText("eD2K keepalive seconds must be at least 1.")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Waiting queue capacity must be at least 1.")).toHaveCount(0);
   await expect(settingsPanel.getByText("Session transfer % must be between 1 and 100.")).toHaveCount(0);
   await expect(settingsPanel.getByText("Session time limit seconds must be at least 1.")).toHaveCount(0);
   await revert.click();
@@ -1104,6 +1106,9 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await settingsPanel.getByLabel("Auto-connect static servers only").check();
   await save.click();
   await expect(page.getByText("Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await expect(settingsPanel.getByLabel("Incoming directory")).toHaveValue("C:\\Changed\\Incoming");
+  await expect(settingsPanel.getByLabel("eD2K nickname")).toHaveValue("Phase B Mule");
   const settingsPatch = requests.find((request) => request.method === "PATCH" && request.path === "app/settings");
   expect(settingsPatch).toBeDefined();
   expect(JSON.parse(settingsPatch?.body ?? "{}")).toEqual({

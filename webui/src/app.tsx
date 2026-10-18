@@ -966,6 +966,7 @@ export function App() {
                 focusedSection={settingsSectionTarget}
                 client={client}
                 run={run}
+                onSettingsSaved={(nextSettings) => setSettings(nextSettings)}
                 openSection={(name) => {
                   setSettingsSectionTarget(name);
                   navigateToTab(settingsSectionTabs[name] ?? "settings");

@@ -2655,12 +2655,7 @@ type SettingsForm = {
   ed2kKeywordServerAttemptBudget: string;
   ed2kExactHashKeywordServerAttemptBudget: string;
   ed2kSourceServerAttemptBudget: string;
-  ed2kUploadQueueBaseSlots: string;
-  ed2kUploadQueueElasticPercent: string;
-  ed2kUploadQueueUploadLimitBytesPerSec: string;
-  ed2kUploadQueueElasticUnderfillBytesPerSec: string;
   ed2kUploadQueueElasticUnderfillSecs: string;
-  ed2kUploadQueueWaitingCapacity: string;
   ed2kUploadQueueWaitingTimeoutSecs: string;
   ed2kUploadQueueGrantedTimeoutSecs: string;
   ed2kUploadQueueUploadTimeoutSecs: string;
@@ -2769,12 +2764,7 @@ const emptySettingsForm: SettingsForm = {
   ed2kKeywordServerAttemptBudget: "",
   ed2kExactHashKeywordServerAttemptBudget: "",
   ed2kSourceServerAttemptBudget: "",
-  ed2kUploadQueueBaseSlots: "",
-  ed2kUploadQueueElasticPercent: "",
-  ed2kUploadQueueUploadLimitBytesPerSec: "",
-  ed2kUploadQueueElasticUnderfillBytesPerSec: "",
   ed2kUploadQueueElasticUnderfillSecs: "",
-  ed2kUploadQueueWaitingCapacity: "",
   ed2kUploadQueueWaitingTimeoutSecs: "",
   ed2kUploadQueueGrantedTimeoutSecs: "",
   ed2kUploadQueueUploadTimeoutSecs: "",
@@ -2829,6 +2819,7 @@ export function SettingsView(props: {
   focusedSection: string | null;
   client: RestClient;
   run: RunFunction;
+  onSettingsSaved: (settings: AppSettings) => void;
   openSection: (name: string) => void;
 }) {
   const [form, setForm] = useState<SettingsForm>(emptySettingsForm);
@@ -2871,6 +2862,9 @@ export function SettingsView(props: {
   const advancedCount = props.surface?.settings.filter((spec) => spec.class === "advancedControl").length ?? 0;
   const shouldRender = (path: string) => {
     const spec = surfaceByPath.get(path);
+    if (props.surface && !spec) {
+      return false;
+    }
     if (spec?.class === "notUserFacing") {
       return false;
     }
@@ -2884,7 +2878,10 @@ export function SettingsView(props: {
     ? <Toggle label={label} checked={form[key]} surface={surfaceByPath.get(path)} onInput={(value) => update(key, value)} />
     : null;
 
-  const save = () => props.client.patch<AppSettings>("app/settings", settingsUpdateFromForm(form, baseline));
+  const save = async () => {
+    const settings = await props.client.patch<AppSettings>("app/settings", settingsUpdateFromForm(form, baseline));
+    props.onSettingsSaved(settings);
+  };
 
   const revert = () => {
     setForm(baseline);
@@ -3069,12 +3066,7 @@ export function SettingsView(props: {
           </SettingsControlSection>
         )}
         {sectionVisible([
-          "ed2k.uploadQueue.baseSlots",
-          "ed2k.uploadQueue.elasticPercent",
-          "ed2k.uploadQueue.uploadLimitBytesPerSec",
-          "ed2k.uploadQueue.elasticUnderfillBytesPerSec",
           "ed2k.uploadQueue.elasticUnderfillSecs",
-          "ed2k.uploadQueue.waitingCapacity",
           "ed2k.uploadQueue.waitingTimeoutSecs",
           "ed2k.uploadQueue.grantedTimeoutSecs",
           "ed2k.uploadQueue.uploadTimeoutSecs",
@@ -3083,12 +3075,7 @@ export function SettingsView(props: {
         ]) && (
           <SettingsControlSection title="Uploads">
             <div class="settings-grid">
-              {renderField("ed2k.uploadQueue.baseSlots", "ed2kUploadQueueBaseSlots", "Startup base upload slots")}
-              {renderField("ed2k.uploadQueue.elasticPercent", "ed2kUploadQueueElasticPercent", "Startup upload elasticity %")}
-              {renderField("ed2k.uploadQueue.uploadLimitBytesPerSec", "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s")}
-              {renderField("ed2k.uploadQueue.elasticUnderfillBytesPerSec", "ed2kUploadQueueElasticUnderfillBytesPerSec", "Elastic underfill B/s")}
               {renderField("ed2k.uploadQueue.elasticUnderfillSecs", "ed2kUploadQueueElasticUnderfillSecs", "Elastic underfill seconds")}
-              {renderField("ed2k.uploadQueue.waitingCapacity", "ed2kUploadQueueWaitingCapacity", "Waiting queue capacity")}
               {renderField("ed2k.uploadQueue.waitingTimeoutSecs", "ed2kUploadQueueWaitingTimeoutSecs", "Waiting timeout seconds")}
               {renderField("ed2k.uploadQueue.grantedTimeoutSecs", "ed2kUploadQueueGrantedTimeoutSecs", "Granted idle timeout seconds")}
               {renderField("ed2k.uploadQueue.uploadTimeoutSecs", "ed2kUploadQueueUploadTimeoutSecs", "Upload timeout seconds")}
@@ -3387,12 +3374,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kKeywordServerAttemptBudget", "Keyword server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kExactHashKeywordServerAttemptBudget", "Exact-hash server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kSourceServerAttemptBudget", "Source server attempts", { min: 1 });
-  validateUnsigned(errors, form, "ed2kUploadQueueBaseSlots", "Startup base upload slots", { min: 1, max: 64 });
-  validateUnsigned(errors, form, "ed2kUploadQueueElasticPercent", "Startup upload elasticity %", { max: 100 });
-  validateUnsigned(errors, form, "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s", {});
-  validateUnsigned(errors, form, "ed2kUploadQueueElasticUnderfillBytesPerSec", "Elastic underfill B/s", {});
   validateUnsigned(errors, form, "ed2kUploadQueueElasticUnderfillSecs", "Elastic underfill seconds", { min: 1 });
-  validateUnsigned(errors, form, "ed2kUploadQueueWaitingCapacity", "Waiting queue capacity", {});
   validateUnsigned(errors, form, "ed2kUploadQueueWaitingTimeoutSecs", "Waiting timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kUploadQueueGrantedTimeoutSecs", "Granted idle timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kUploadQueueUploadTimeoutSecs", "Upload timeout seconds", { min: 1 });
@@ -3589,12 +3571,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   }
 
   const uploadQueue: Ed2kUploadQueueSettingsUpdate = {};
-  putChanged(uploadQueue, "baseSlots", parseNumber(form.ed2kUploadQueueBaseSlots), parseNumber(baseline.ed2kUploadQueueBaseSlots));
-  putChanged(uploadQueue, "elasticPercent", parseNumber(form.ed2kUploadQueueElasticPercent), parseNumber(baseline.ed2kUploadQueueElasticPercent));
-  putChanged(uploadQueue, "uploadLimitBytesPerSec", parseNumber(form.ed2kUploadQueueUploadLimitBytesPerSec), parseNumber(baseline.ed2kUploadQueueUploadLimitBytesPerSec));
-  putChanged(uploadQueue, "elasticUnderfillBytesPerSec", parseNumber(form.ed2kUploadQueueElasticUnderfillBytesPerSec), parseNumber(baseline.ed2kUploadQueueElasticUnderfillBytesPerSec));
   putChanged(uploadQueue, "elasticUnderfillSecs", parseNumber(form.ed2kUploadQueueElasticUnderfillSecs), parseNumber(baseline.ed2kUploadQueueElasticUnderfillSecs));
-  putChanged(uploadQueue, "waitingCapacity", parseNumber(form.ed2kUploadQueueWaitingCapacity), parseNumber(baseline.ed2kUploadQueueWaitingCapacity));
   putChanged(uploadQueue, "waitingTimeoutSecs", parseNumber(form.ed2kUploadQueueWaitingTimeoutSecs), parseNumber(baseline.ed2kUploadQueueWaitingTimeoutSecs));
   putChanged(uploadQueue, "grantedTimeoutSecs", parseNumber(form.ed2kUploadQueueGrantedTimeoutSecs), parseNumber(baseline.ed2kUploadQueueGrantedTimeoutSecs));
   putChanged(uploadQueue, "uploadTimeoutSecs", parseNumber(form.ed2kUploadQueueUploadTimeoutSecs), parseNumber(baseline.ed2kUploadQueueUploadTimeoutSecs));
@@ -3763,12 +3740,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kKeywordServerAttemptBudget: String(numberField(settings.ed2k, "keywordServerAttemptBudget") ?? ""),
     ed2kExactHashKeywordServerAttemptBudget: String(numberField(settings.ed2k, "exactHashKeywordServerAttemptBudget") ?? ""),
     ed2kSourceServerAttemptBudget: String(numberField(settings.ed2k, "sourceServerAttemptBudget") ?? ""),
-    ed2kUploadQueueBaseSlots: String(numberField(recordField(settings.ed2k, "uploadQueue"), "baseSlots") ?? ""),
-    ed2kUploadQueueElasticPercent: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticPercent") ?? ""),
-    ed2kUploadQueueUploadLimitBytesPerSec: String(numberField(recordField(settings.ed2k, "uploadQueue"), "uploadLimitBytesPerSec") ?? ""),
-    ed2kUploadQueueElasticUnderfillBytesPerSec: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticUnderfillBytesPerSec") ?? ""),
     ed2kUploadQueueElasticUnderfillSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticUnderfillSecs") ?? ""),
-    ed2kUploadQueueWaitingCapacity: String(numberField(recordField(settings.ed2k, "uploadQueue"), "waitingCapacity") ?? ""),
     ed2kUploadQueueWaitingTimeoutSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "waitingTimeoutSecs") ?? ""),
     ed2kUploadQueueGrantedTimeoutSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "grantedTimeoutSecs") ?? ""),
     ed2kUploadQueueUploadTimeoutSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "uploadTimeoutSecs") ?? ""),

@@ -5,9 +5,9 @@ use std::{
 };
 
 use emulebb_core::{
-    CategoryCreate, CategoryPriorityValue, CoreSettingsUpdate, EmulebbCore, FriendCreate,
-    LocalShareCreate, NullableStringField, NullableU32Field, ServerCreate, ServerUpdate,
-    TransferCreate, TransferUpdate,
+    AppSettingsUpdate, CategoryCreate, CategoryPriorityValue, CoreSettingsUpdate, EmulebbCore,
+    FriendCreate, LocalShareCreate, NullableStringField, NullableU32Field, ServerCreate,
+    ServerUpdate, TransferCreate, TransferUpdate,
 };
 use emulebb_index::FileIndex;
 
@@ -102,6 +102,59 @@ async fn profile_state_survives_core_restart() {
     let disabled_server = reloaded_again.server("192.0.2.10:4661").await.unwrap();
     assert!(!disabled_server.enabled);
     assert_eq!(disabled_server.name, "Server Renamed");
+}
+
+#[tokio::test]
+async fn network_and_upload_settings_survive_core_restart() {
+    let runtime_dir = unique_test_dir("network-upload-settings");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+
+    {
+        let core = open_core(&metadata_path, &transfer_root);
+        let update: AppSettingsUpdate = serde_json::from_value(serde_json::json!({
+            "core": {
+                "uploadLimitKiBps": 2048,
+                "uploadClientDataRate": 64,
+                "baseUploadSlots": 5,
+                "uploadSlotElasticPercent": 70,
+                "queueSize": 4000
+            },
+            "ed2k": {
+                "listenPort": 11719,
+                "uploadQueue": {
+                    "elasticUnderfillSecs": 12,
+                    "waitingTimeoutSecs": 1800,
+                    "grantedTimeoutSecs": 7,
+                    "uploadTimeoutSecs": 45,
+                    "sessionTransferPercent": 75,
+                    "sessionTimeLimitSecs": 3600
+                }
+            },
+            "kad": {
+                "listenPort": 11719
+            }
+        }))
+        .unwrap();
+
+        core.update_app_settings(update).await.unwrap();
+    }
+
+    let reloaded = open_core(&metadata_path, &transfer_root);
+    let settings = reloaded.app_settings().await.unwrap();
+    assert_eq!(settings.core.upload_limit_ki_bps, 2048);
+    assert_eq!(settings.core.upload_client_data_rate, 64);
+    assert_eq!(settings.core.base_upload_slots, 5);
+    assert_eq!(settings.core.upload_slot_elastic_percent, 70);
+    assert_eq!(settings.core.queue_size, 4000);
+    assert_eq!(settings.ed2k.listen_port, Some(11719));
+    assert_eq!(settings.ed2k.upload_queue.elastic_underfill_secs, 12);
+    assert_eq!(settings.ed2k.upload_queue.waiting_timeout_secs, 1800);
+    assert_eq!(settings.ed2k.upload_queue.granted_timeout_secs, 7);
+    assert_eq!(settings.ed2k.upload_queue.upload_timeout_secs, 45);
+    assert_eq!(settings.ed2k.upload_queue.session_transfer_percent, 75);
+    assert_eq!(settings.ed2k.upload_queue.session_time_limit_secs, 3600);
+    assert_eq!(settings.kad.listen_port, Some(11719));
 }
 
 #[tokio::test]

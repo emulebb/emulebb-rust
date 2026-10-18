@@ -652,12 +652,7 @@ export type DaemonSettings = {
 };
 
 export type Ed2kUploadQueueSettings = {
-  baseSlots?: number;
-  elasticPercent?: number;
-  uploadLimitBytesPerSec?: number;
-  elasticUnderfillBytesPerSec?: number;
   elasticUnderfillSecs?: number;
-  waitingCapacity?: number;
   waitingTimeoutSecs?: number;
   grantedTimeoutSecs?: number;
   uploadTimeoutSecs?: number;
