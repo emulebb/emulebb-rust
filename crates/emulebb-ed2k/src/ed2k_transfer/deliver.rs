@@ -1238,7 +1238,7 @@ pub(super) async fn remove_file_if_fingerprint_matches(
             return Ok(false);
         }
         #[cfg(test)]
-        run_before_fingerprint_remove_hook(&owned_path);
+        run_before_fingerprint_remove_hook(&owned_path)?;
         let metadata = match owned_path.symlink_metadata() {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
@@ -1265,7 +1265,7 @@ pub(super) async fn remove_file_if_fingerprint_matches(
 }
 
 #[cfg(test)]
-type BeforeFingerprintRemoveHook = Box<dyn FnOnce(&Path) + Send>;
+type BeforeFingerprintRemoveHook = Box<dyn FnOnce(&Path) -> std::io::Result<()> + Send>;
 
 #[cfg(test)]
 fn before_fingerprint_remove_hooks() -> &'static Mutex<HashMap<PathBuf, BeforeFingerprintRemoveHook>>
@@ -1283,14 +1283,15 @@ pub(super) fn set_before_fingerprint_remove_hook(path: &Path, hook: BeforeFinger
 }
 
 #[cfg(test)]
-fn run_before_fingerprint_remove_hook(path: &Path) {
+fn run_before_fingerprint_remove_hook(path: &Path) -> std::io::Result<()> {
     let hook = before_fingerprint_remove_hooks()
         .lock()
         .expect("delivery before-fingerprint-remove hook mutex poisoned")
         .remove(path);
     if let Some(hook) = hook {
-        hook(path);
+        hook(path)?;
     }
+    Ok(())
 }
 
 fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>> {
