@@ -25,22 +25,28 @@ pub(super) struct ConfiguredServerEntry {
     pub(super) static_server: bool,
 }
 
-/// eMule offer-batch cap from a server's soft file limit: use the soft limit,
-/// falling back to 200 when it is unknown (0) or exceeds 200.
-pub(super) fn server_offer_file_limit(soft_files: u32) -> usize {
-    if soft_files == 0 || soft_files > 200 {
+/// eMule offer-batch cap from a server's file limits: use the soft limit,
+/// falling back to 200 when it is unknown (0) or exceeds 200, and stay below a
+/// known hard limit.
+pub(super) fn server_offer_file_limit(soft_files: u32, hard_files: u32) -> usize {
+    let soft_limit = if soft_files == 0 || soft_files > 200 {
         200
     } else {
         soft_files as usize
+    };
+    if hard_files == 0 {
+        soft_limit
+    } else {
+        soft_limit.min(hard_files.saturating_sub(1) as usize)
     }
 }
 
 impl ConfiguredServerEntry {
     /// eMule offer-batch cap for this server: the server's soft file limit,
-    /// falling back to 200 when unknown (0) or above 200 (matches MFC's
-    /// `CServerConnect`/`CSharedFileList` offer clamp).
+    /// falling back to 200 when unknown (0) or above 200, and clamped below a
+    /// known hard limit (matches aMule's offer clamp).
     pub(super) fn offer_file_limit(&self) -> usize {
-        server_offer_file_limit(self.soft_files)
+        server_offer_file_limit(self.soft_files, self.hard_files)
     }
 
     pub(super) fn from_endpoint_text(endpoint_text: &str) -> Result<Self> {

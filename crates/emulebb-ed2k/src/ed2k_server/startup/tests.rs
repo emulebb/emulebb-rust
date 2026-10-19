@@ -303,11 +303,13 @@ fn offer_files_preserves_unicode_filename_tag() {
 fn server_offer_file_limit_clamps_like_mfc() {
     use super::super::server_entry::server_offer_file_limit;
     // Unknown (0) and above-200 soft limits fall back to 200; an in-range
-    // soft limit is used verbatim (eMule offer-batch clamp).
-    assert_eq!(server_offer_file_limit(0), 200);
-    assert_eq!(server_offer_file_limit(50), 50);
-    assert_eq!(server_offer_file_limit(200), 200);
-    assert_eq!(server_offer_file_limit(500), 200);
+    // soft limit is used verbatim, and a known hard limit remains exclusive.
+    assert_eq!(server_offer_file_limit(0, 0), 200);
+    assert_eq!(server_offer_file_limit(50, 0), 50);
+    assert_eq!(server_offer_file_limit(200, 0), 200);
+    assert_eq!(server_offer_file_limit(500, 0), 200);
+    assert_eq!(server_offer_file_limit(500, 3), 2);
+    assert_eq!(server_offer_file_limit(50, 1), 0);
 }
 
 #[test]
@@ -632,6 +634,71 @@ async fn session_catalog_refresh_sends_only_the_new_offer() {
     assert_eq!(second.published_entries, 2);
     assert_eq!(second.pending_entries, 0);
     assert_eq!(session.offer_files_published_hashes.len(), 2);
+}
+
+#[tokio::test]
+async fn negotiated_refresh_does_not_consume_another_distinct_candidate_slot() {
+    use std::sync::Arc;
+
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        sync::RwLock,
+    };
+
+    use crate::ed2k_transfer::IndexedSharedCatalog;
+
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer_task = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (server_stream, peer_addr) = listener.accept().await.unwrap();
+    let _peer = peer_task.await.unwrap();
+    let mut session = super::ServerSession::from_stream_for_test(server_stream, peer_addr);
+    session.offer_files_pacing = super::super::session::OfferFilesPacingMode::Negotiated(
+        super::super::offer_policy::OfferFilesPolicy::validate(1, 200, 1, 1, 201).unwrap(),
+    );
+    let original = shared_entry(0);
+    let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(vec![
+        original.clone(),
+    ])));
+
+    let first =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(first.entries_sent, 1);
+    assert_eq!(session.offer_files_distinct_published_hashes.len(), 1);
+    assert_eq!(session.offer_files_new_candidate_limit(), 0);
+    assert_eq!(session.offer_files_batch_limit(), 200);
+
+    let mut changed = original;
+    changed.display_name = "renamed-file.bin".to_string();
+    shared_catalog.write().await.replace_with(vec![changed]);
+    session.offer_files_refresh_catalog = true;
+
+    let second =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(second.entries_sent, 1);
+    assert_eq!(session.offer_files_distinct_published_hashes.len(), 1);
+    assert_eq!(session.offer_files_new_candidate_limit(), 0);
+
+    shared_catalog.write().await.push(shared_entry(1));
+    session.offer_files_refresh_catalog = true;
+
+    let third =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(third.entries_sent, 0);
+    assert_eq!(third.pending_entries, 1);
+    assert_eq!(session.offer_files_distinct_published_hashes.len(), 1);
+    session.finish_offer_files_batch(
+        third.entries_sent,
+        third.pending_entries,
+        third.skipped_duplicate_batch,
+    );
+    assert!(!session.offer_files_publish_requested);
 }
 
 #[test]

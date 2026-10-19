@@ -474,6 +474,24 @@ fn ranked_offer_files_at_cursor_skipping_published(
     already_published: &HashSet<[u8; 16]>,
     max_offer_files: usize,
 ) -> OfferedFilesCatalog {
+    ranked_offer_files_at_cursor_with_budget(
+        ranked,
+        cursor,
+        already_published,
+        &HashSet::new(),
+        max_offer_files,
+        max_offer_files,
+    )
+}
+
+fn ranked_offer_files_at_cursor_with_budget(
+    ranked: &[OfferedFileEntry],
+    cursor: usize,
+    already_published: &HashSet<[u8; 16]>,
+    distinct_published: &HashSet<[u8; 16]>,
+    max_offer_files: usize,
+    max_new_candidates: usize,
+) -> OfferedFilesCatalog {
     if ranked.is_empty() || max_offer_files == 0 {
         return OfferedFilesCatalog {
             entries: Vec::new(),
@@ -485,12 +503,17 @@ fn ranked_offer_files_at_cursor_skipping_published(
     let total_entries = ranked.len();
     let start = cursor % total_entries;
     let mut entries = Vec::with_capacity(max_offer_files);
+    let mut new_candidates = 0usize;
     let mut scanned = 0usize;
     while scanned < total_entries && entries.len() < max_offer_files {
         let index = (start + scanned) % total_entries;
         let entry = &ranked[index];
         if !already_published.contains(&entry.0) {
-            entries.push(entry.clone());
+            let is_new_candidate = !distinct_published.contains(&entry.0);
+            if !is_new_candidate || new_candidates < max_new_candidates {
+                entries.push(entry.clone());
+                new_candidates += usize::from(is_new_candidate);
+            }
         }
         scanned += 1;
     }
@@ -703,11 +726,13 @@ pub(super) async fn send_offer_files_advertisement(
         session.offer_files_refresh_catalog = false;
     }
     let current_cursor = session.offer_files_catalog_cursor;
-    let offered_files = ranked_offer_files_at_cursor_skipping_published(
+    let offered_files = ranked_offer_files_at_cursor_with_budget(
         &session.offer_files_ranked_catalog,
         current_cursor,
         &session.offer_files_published_hashes,
+        &session.offer_files_distinct_published_hashes,
         session.offer_files_batch_limit(),
+        session.offer_files_new_candidate_limit(),
     );
     let encoded = encode_offered_files_catalog(
         offered_files,
