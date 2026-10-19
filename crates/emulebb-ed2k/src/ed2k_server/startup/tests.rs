@@ -551,6 +551,90 @@ fn offered_files_catalog_stops_when_every_hash_was_published() {
 }
 
 #[test]
+fn catalog_refresh_only_republishes_new_or_changed_offers() {
+    let previous_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
+    let previous_ranked = ranked_offer_files(&previous_catalog, true);
+    let unchanged_hash = popular_hash_offer_file(&previous_catalog[0]).unwrap().0;
+    let changed_hash = popular_hash_offer_file(&previous_catalog[1]).unwrap().0;
+    let removed_hash = popular_hash_offer_file(&previous_catalog[2]).unwrap().0;
+    let mut published_hashes = previous_ranked
+        .iter()
+        .map(|entry| entry.0)
+        .collect::<HashSet<_>>();
+
+    let mut changed_entry = previous_catalog[1].clone();
+    changed_entry.display_name = "renamed-file.bin".to_string();
+    let new_entry = shared_entry(3);
+    let new_hash = popular_hash_offer_file(&new_entry).unwrap().0;
+    let refreshed_catalog = vec![previous_catalog[0].clone(), changed_entry, new_entry];
+    let refreshed_ranked = ranked_offer_files(&refreshed_catalog, true);
+
+    reconcile_offer_files_published_hashes(
+        &previous_ranked,
+        &refreshed_ranked,
+        &mut published_hashes,
+    );
+
+    assert_eq!(published_hashes, HashSet::from([unchanged_hash]));
+    assert!(!published_hashes.contains(&changed_hash));
+    assert!(!published_hashes.contains(&removed_hash));
+
+    let offered = ranked_offer_files_at_cursor_skipping_published(
+        &refreshed_ranked,
+        0,
+        &published_hashes,
+        MAX_OFFER_FILES_PER_ADVERTISEMENT,
+    );
+    let offered_hashes = offered
+        .entries
+        .iter()
+        .map(|entry| entry.0)
+        .collect::<HashSet<_>>();
+    assert_eq!(offered_hashes, HashSet::from([changed_hash, new_hash]));
+}
+
+#[tokio::test]
+async fn session_catalog_refresh_sends_only_the_new_offer() {
+    use std::sync::Arc;
+
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        sync::RwLock,
+    };
+
+    use crate::ed2k_transfer::IndexedSharedCatalog;
+
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer_task = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (server_stream, peer_addr) = listener.accept().await.unwrap();
+    let _peer = peer_task.await.unwrap();
+    let mut session = super::ServerSession::from_stream_for_test(server_stream, peer_addr);
+    session.server_soft_files = MAX_OFFER_FILES_PER_ADVERTISEMENT as u32;
+    let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(vec![
+        shared_entry(0),
+    ])));
+
+    let first =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(first.entries_sent, 1);
+
+    shared_catalog.write().await.push(shared_entry(1));
+    session.offer_files_refresh_catalog = true;
+
+    let second =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(second.entries_sent, 1);
+    assert_eq!(second.published_entries, 2);
+    assert_eq!(second.pending_entries, 0);
+    assert_eq!(session.offer_files_published_hashes.len(), 2);
+}
+
+#[test]
 fn cached_ranked_catalog_covers_one_hundred_thousand_distinct_files_once() {
     let shared_catalog = (0..100_000).map(shared_entry).collect::<Vec<_>>();
     let ranked = ranked_offer_files(&shared_catalog, true);
