@@ -311,11 +311,16 @@ impl ServerSession {
     pub(super) fn configure_offer_files_capability(&mut self, enabled: bool) {
         self.offer_files_capability_enabled = enabled;
         if !enabled {
-            self.offer_files_pacing = OfferFilesPacingMode::Legacy {
-                reason: "disabled by client setting".to_string(),
-            };
-            self.offer_files_negotiation_deadline = None;
+            self.configure_offer_files_legacy("disabled by client setting");
         }
+    }
+
+    pub(super) fn configure_offer_files_legacy(&mut self, reason: impl Into<String>) {
+        self.offer_files_capability_enabled = false;
+        self.offer_files_pacing = OfferFilesPacingMode::Legacy {
+            reason: reason.into(),
+        };
+        self.offer_files_negotiation_deadline = None;
     }
 
     fn reset_offer_files_publication_epoch(&mut self) {
@@ -338,6 +343,7 @@ impl ServerSession {
         self.offer_files_publish_requested = true;
         if !self.offer_files_capability_enabled {
             self.offer_files_next_publish_at = Some(Instant::now());
+            self.publish_offer_files_pacing_state().await;
             return;
         }
         if let Some(advertisement) = self.offer_files_capability_snapshot.clone() {
