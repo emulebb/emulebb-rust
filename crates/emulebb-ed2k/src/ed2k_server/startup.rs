@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     net::Ipv4Addr,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -501,6 +501,27 @@ fn ranked_offer_files_at_cursor_skipping_published(
     }
 }
 
+fn reconcile_offer_files_published_hashes(
+    previous_ranked: &[OfferedFileEntry],
+    refreshed_ranked: &[OfferedFileEntry],
+    published_hashes: &mut HashSet<[u8; 16]>,
+) {
+    let previous_by_hash = previous_ranked
+        .iter()
+        .map(|entry| (entry.0, entry))
+        .collect::<HashMap<_, _>>();
+    let refreshed_by_hash = refreshed_ranked
+        .iter()
+        .map(|entry| (entry.0, entry))
+        .collect::<HashMap<_, _>>();
+    published_hashes.retain(|file_hash| {
+        previous_by_hash
+            .get(file_hash)
+            .zip(refreshed_by_hash.get(file_hash))
+            .is_some_and(|(previous, refreshed)| previous == refreshed)
+    });
+}
+
 pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]) -> u64 {
     let mut hasher = DefaultHasher::new();
     // Change-detection hash over the full ranked share (server-independent): a
@@ -671,7 +692,11 @@ pub(super) async fn send_offer_files_advertisement(
         let fingerprint = hasher.finish();
         if session.offer_files_catalog_fingerprint != Some(fingerprint) {
             session.offer_files_catalog_cursor = 0;
-            session.offer_files_published_hashes.clear();
+            reconcile_offer_files_published_hashes(
+                &session.offer_files_ranked_catalog,
+                &ranked,
+                &mut session.offer_files_published_hashes,
+            );
         }
         session.offer_files_catalog_fingerprint = Some(fingerprint);
         session.offer_files_ranked_catalog = ranked;
