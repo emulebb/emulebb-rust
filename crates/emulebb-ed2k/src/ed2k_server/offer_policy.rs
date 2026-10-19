@@ -45,16 +45,20 @@ impl OfferFilesPolicy {
         })
     }
 
+    pub(super) fn packet_max(self) -> usize {
+        let hard_boundary =
+            usize::try_from(self.hard_files.saturating_sub(1)).unwrap_or(usize::MAX);
+        usize::try_from(self.batch_max)
+            .unwrap_or(usize::MAX)
+            .min(hard_boundary)
+            .min(OFFER_FILES_LOCAL_BATCH_MAX as usize)
+    }
+
     pub(super) fn effective_batch_max(self, distinct_published: usize) -> usize {
         let remaining_soft = usize::try_from(self.soft_files)
             .unwrap_or(usize::MAX)
             .saturating_sub(distinct_published);
-        let hard_boundary =
-            usize::try_from(self.hard_files.saturating_sub(1)).unwrap_or(usize::MAX);
-        remaining_soft
-            .min(usize::try_from(self.batch_max).unwrap_or(usize::MAX))
-            .min(hard_boundary)
-            .min(OFFER_FILES_LOCAL_BATCH_MAX as usize)
+        remaining_soft.min(self.packet_max())
     }
 
     pub(super) fn next_batch_delay(self, entries_sent: usize) -> Duration {
@@ -80,6 +84,7 @@ mod tests {
     #[test]
     fn negotiated_policy_clamps_to_every_safety_boundary() {
         let policy = OfferFilesPolicy::validate(1, 500, 1, 350, 501).unwrap();
+        assert_eq!(policy.packet_max(), 200);
         assert_eq!(policy.effective_batch_max(0), 200);
         assert_eq!(policy.effective_batch_max(200), 150);
         assert_eq!(policy.effective_batch_max(350), 0);

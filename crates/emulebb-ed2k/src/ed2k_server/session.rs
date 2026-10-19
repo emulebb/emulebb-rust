@@ -118,7 +118,8 @@ pub(super) struct ServerSession {
     pub(super) assigned_client_id: Option<u32>,
     pub(super) server_flags: Option<u32>,
     /// Soft file limit of the connected server (from the resolved entry); 0 when
-    /// unknown. Caps the OP_OFFERFILES batch size (see `server_offer_file_limit`).
+    /// unknown. Caps the OP_OFFERFILES batch size together with
+    /// `server_hard_files` (see `server_offer_file_limit`).
     pub(super) server_soft_files: u32,
     pub(super) server_hard_files: u32,
     pub(super) server_list_requested: bool,
@@ -500,11 +501,41 @@ impl ServerSession {
 
     pub(super) fn offer_files_batch_limit(&self) -> usize {
         match self.offer_files_pacing {
+            OfferFilesPacingMode::Negotiated(policy) => policy.packet_max(),
+            _ => super::server_entry::server_offer_file_limit(
+                self.server_soft_files,
+                self.server_hard_files,
+            ),
+        }
+    }
+
+    pub(super) fn offer_files_new_candidate_limit(&self) -> usize {
+        match self.offer_files_pacing {
             OfferFilesPacingMode::Negotiated(policy) => {
                 policy.effective_batch_max(self.offer_files_distinct_published_hashes.len())
             }
-            _ => super::server_entry::server_offer_file_limit(self.server_soft_files),
+            _ => self.offer_files_batch_limit(),
         }
+    }
+
+    fn has_publishable_offer_files(&self) -> bool {
+        let mut new_candidate_slots = self.offer_files_new_candidate_limit();
+        self.offer_files_ranked_catalog.iter().any(|entry| {
+            if self.offer_files_published_hashes.contains(&entry.0) {
+                return false;
+            }
+            if self
+                .offer_files_distinct_published_hashes
+                .contains(&entry.0)
+            {
+                return true;
+            }
+            if new_candidate_slots == 0 {
+                return false;
+            }
+            new_candidate_slots -= 1;
+            true
+        })
     }
 
     pub(super) fn finish_offer_files_batch(
@@ -516,7 +547,12 @@ impl ServerSession {
         if entries_sent > 0 {
             self.offer_files_last_batch_entries = entries_sent;
         }
+        let has_budgeted_pending = match self.offer_files_pacing {
+            OfferFilesPacingMode::Negotiated(_) => self.has_publishable_offer_files(),
+            _ => true,
+        };
         let continue_pump = pending_entries > 0
+            && has_budgeted_pending
             && self.offer_files_batch_limit() > 0
             && !skipped_duplicate_batch
             && entries_sent > 0;
@@ -545,16 +581,16 @@ impl ServerSession {
             OfferFilesPacingMode::AwaitingCapability => ("awaitingCapability", None, None, None),
             OfferFilesPacingMode::Legacy { reason } => (
                 "legacy",
-                Some(super::server_entry::server_offer_file_limit(self.server_soft_files) as u32),
+                Some(super::server_entry::server_offer_file_limit(
+                    self.server_soft_files,
+                    self.server_hard_files,
+                ) as u32),
                 Some(OFFER_FILES_LEGACY_MIN_INTERVAL.as_millis() as u32),
                 Some(reason.clone()),
             ),
             OfferFilesPacingMode::Negotiated(policy) => (
                 "negotiatedV1",
-                Some(
-                    policy.effective_batch_max(self.offer_files_distinct_published_hashes.len())
-                        as u32,
-                ),
+                Some(policy.packet_max() as u32),
                 Some(policy.min_interval_ms),
                 None,
             ),
