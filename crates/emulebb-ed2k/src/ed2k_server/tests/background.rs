@@ -1085,6 +1085,9 @@ async fn background_offer_files_v1_waits_for_server_ident_before_first_batch() {
 async fn background_offer_files_v1_timeout_reconnects_before_legacy_publish() {
     let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
     let endpoint = listener.local_addr().unwrap();
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let (fallback_offer_sent, fallback_offer_observed) = oneshot::channel();
+    let (fallback_state_asserted, fallback_state_release) = oneshot::channel();
     let server_task = tokio::spawn(async move {
         let (mut advertised_stream, _) = listener.accept().await.unwrap();
         let advertised_login = read_login_request_payload(&mut advertised_stream).await;
@@ -1145,9 +1148,10 @@ async fn background_offer_files_v1_timeout_reconnects_before_legacy_publish() {
         .expect("legacy offer should be sent only on the fallback connection");
         assert_eq!(opcode, OP_OFFERFILES);
         assert_eq!(u32::from_le_bytes(payload[..4].try_into().unwrap()), 1);
+        fallback_offer_sent.send(()).unwrap();
+        fallback_state_release.await.unwrap();
     });
 
-    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let context = background_test_context(Arc::clone(&state), Duration::from_secs(4));
     context
         .shared_catalog
@@ -1158,9 +1162,31 @@ async fn background_offer_files_v1_timeout_reconnects_before_legacy_publish() {
     let server = background_test_server(endpoint);
     let inbox = Arc::new(Mutex::new(inbox));
     let session = run_test_server_session(&server, &context, &inbox);
+    let observe_fallback_state = async {
+        fallback_offer_observed.await.unwrap();
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = state.read().await.clone();
+                if snapshot.offer_files_published_entries == 1 {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fallback publication diagnostics should become visible");
+        assert_eq!(snapshot.offer_files_mode.as_deref(), Some("legacy"));
+        assert_eq!(snapshot.offer_files_batch_max, Some(200));
+        assert_eq!(snapshot.offer_files_pending_entries, 0);
+        assert_eq!(
+            snapshot.offer_files_fallback_reason.as_deref(),
+            Some("automatic fallback after OP_SERVERIDENT capability timeout")
+        );
+        fallback_state_asserted.send(()).unwrap();
+    };
 
-    let (session_result, server_result) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(session, server_task)
+    let (session_result, server_result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(session, server_task, observe_fallback_state)
     })
     .await
     .expect("background fallback handshake should complete promptly");

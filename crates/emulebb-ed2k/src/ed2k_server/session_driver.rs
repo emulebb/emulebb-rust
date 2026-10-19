@@ -42,11 +42,23 @@ pub(super) enum ServerSessionExit {
     IntentionalShutdown,
 }
 
+#[derive(Clone, Debug)]
+enum OfferFilesHandshakeMode {
+    AdvertiseV1,
+    Legacy { reason: String },
+}
+
+impl OfferFilesHandshakeMode {
+    fn advertises_v1(&self) -> bool {
+        matches!(self, Self::AdvertiseV1)
+    }
+}
+
 async fn connect_server_transport(
     server: &ResolvedServerEntry,
     context: &ServerSessionContext,
     observed_external_ip: Option<&str>,
-    offer_files_v1_enabled: bool,
+    offer_files_mode: &OfferFilesHandshakeMode,
 ) -> Result<ServerSession> {
     let attempts = server_transport_attempts(context.hello_identity.connect_options, server);
     let base_endpoint = server.base_endpoint().to_string();
@@ -58,7 +70,7 @@ async fn connect_server_transport(
                 context,
                 observed_external_ip,
                 mode,
-                offer_files_v1_enabled,
+                offer_files_mode,
             )
         },
         |mode, error, will_retry| {
@@ -93,7 +105,7 @@ async fn connect_server_transport_attempt(
     context: &ServerSessionContext,
     observed_external_ip: Option<&str>,
     mode: ServerTransportMode,
-    offer_files_v1_enabled: bool,
+    offer_files_mode: &OfferFilesHandshakeMode,
 ) -> Result<ServerSession> {
     // Stock eMule's CONSERVTIMEOUT covers the whole pending connection attempt,
     // including connect, crypt negotiation, and CS_WAITFORLOGIN. A transport
@@ -122,10 +134,18 @@ async fn connect_server_transport_attempt(
     .await?;
     session.server_soft_files = server.entry.soft_files;
     session.server_hard_files = server.entry.hard_files;
+    let offer_files_v1_enabled = offer_files_mode.advertises_v1();
     let session_role = ServerSessionRole::Publishing {
         offer_files_v1_enabled,
     };
-    session.configure_offer_files_capability(session_role.advertises_offer_files_v1());
+    match offer_files_mode {
+        OfferFilesHandshakeMode::AdvertiseV1 => {
+            session.configure_offer_files_capability(true);
+        }
+        OfferFilesHandshakeMode::Legacy { reason } => {
+            session.configure_offer_files_legacy(reason.clone());
+        }
+    }
     let login_payload = encode_login_request(login_identity, &context.nickname, session_role);
     info!(
         "connected to ED2K server {} name={} trace_id={} role=background offer_files_v1={} bind_ip={} observed_external_ip={} transport={} connect_options={} supports_obf_tcp={} obf_port={} udp_flags=0x{:08X} udp_key_present={} chosen_port={}",
@@ -196,12 +216,19 @@ pub(super) async fn run_one_server_session(
 ) -> Result<ServerSessionExit> {
     let nat_status = context.nat.status().await;
     let observed_external_ip = nat_status.observed_external_addresses.first().cloned();
+    let offer_files_mode = if context.offer_files_capability_enabled {
+        OfferFilesHandshakeMode::AdvertiseV1
+    } else {
+        OfferFilesHandshakeMode::Legacy {
+            reason: "disabled by client setting".to_string(),
+        }
+    };
     let mut session = tokio::select! {
         result = connect_server_transport(
             server,
             context,
             observed_external_ip.as_deref(),
-            context.offer_files_capability_enabled,
+            &offer_files_mode,
         ) => result?,
         () = context.session_cancel.cancelled() => {
             clear_server_connection_state(&context.state).await;
@@ -411,12 +438,15 @@ pub(super) async fn run_one_server_session(
                     drop(session);
                     clear_server_connection_state(&context.state).await;
                     reachability_writer.clear_server_public_ip();
+                    let fallback_mode = OfferFilesHandshakeMode::Legacy {
+                        reason: format!("automatic fallback after {reason}"),
+                    };
                     session = tokio::select! {
                         result = connect_server_transport(
                             server,
                             context,
                             observed_external_ip.as_deref(),
-                            false,
+                            &fallback_mode,
                         ) => result?,
                         () = context.session_cancel.cancelled() => {
                             clear_server_connection_state(&context.state).await;
