@@ -612,6 +612,7 @@ async fn session_catalog_refresh_sends_only_the_new_offer() {
     let (server_stream, peer_addr) = listener.accept().await.unwrap();
     let _peer = peer_task.await.unwrap();
     let mut session = super::ServerSession::from_stream_for_test(server_stream, peer_addr);
+    session.configure_offer_files_capability(false);
     session.server_soft_files = MAX_OFFER_FILES_PER_ADVERTISEMENT as u32;
     let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(vec![
         shared_entry(0),

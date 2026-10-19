@@ -46,12 +46,21 @@ async fn connect_server_transport(
     server: &ResolvedServerEntry,
     context: &ServerSessionContext,
     observed_external_ip: Option<&str>,
+    offer_files_v1_enabled: bool,
 ) -> Result<ServerSession> {
     let attempts = server_transport_attempts(context.hello_identity.connect_options, server);
     let base_endpoint = server.base_endpoint().to_string();
     let (session, _) = run_server_transport_attempts(
         &attempts,
-        |mode| connect_server_transport_attempt(server, context, observed_external_ip, mode),
+        |mode| {
+            connect_server_transport_attempt(
+                server,
+                context,
+                observed_external_ip,
+                mode,
+                offer_files_v1_enabled,
+            )
+        },
         |mode, error, will_retry| {
             if will_retry {
                 // WHY: metadata-poor servers are probed with obfuscation first,
@@ -84,6 +93,7 @@ async fn connect_server_transport_attempt(
     context: &ServerSessionContext,
     observed_external_ip: Option<&str>,
     mode: ServerTransportMode,
+    offer_files_v1_enabled: bool,
 ) -> Result<ServerSession> {
     // Stock eMule's CONSERVTIMEOUT covers the whole pending connection attempt,
     // including connect, crypt negotiation, and CS_WAITFORLOGIN. A transport
@@ -113,15 +123,16 @@ async fn connect_server_transport_attempt(
     session.server_soft_files = server.entry.soft_files;
     session.server_hard_files = server.entry.hard_files;
     let session_role = ServerSessionRole::Publishing {
-        offer_files_v1_enabled: context.offer_files_capability_enabled,
+        offer_files_v1_enabled,
     };
     session.configure_offer_files_capability(session_role.advertises_offer_files_v1());
     let login_payload = encode_login_request(login_identity, &context.nickname, session_role);
     info!(
-        "connected to ED2K server {} name={} trace_id={} role=background bind_ip={} observed_external_ip={} transport={} connect_options={} supports_obf_tcp={} obf_port={} udp_flags=0x{:08X} udp_key_present={} chosen_port={}",
+        "connected to ED2K server {} name={} trace_id={} role=background offer_files_v1={} bind_ip={} observed_external_ip={} transport={} connect_options={} supports_obf_tcp={} obf_port={} udp_flags=0x{:08X} udp_key_present={} chosen_port={}",
         server.base_endpoint(),
         server.entry.display_name(),
         session.trace_id,
+        offer_files_v1_enabled,
         context.bind_ip,
         observed_external_ip.unwrap_or("unknown"),
         mode.label(),
@@ -186,7 +197,12 @@ pub(super) async fn run_one_server_session(
     let nat_status = context.nat.status().await;
     let observed_external_ip = nat_status.observed_external_addresses.first().cloned();
     let mut session = tokio::select! {
-        result = connect_server_transport(server, context, observed_external_ip.as_deref()) => result?,
+        result = connect_server_transport(
+            server,
+            context,
+            observed_external_ip.as_deref(),
+            context.offer_files_capability_enabled,
+        ) => result?,
         () = context.session_cancel.cancelled() => {
             clear_server_connection_state(&context.state).await;
             return Ok(ServerSessionExit::ContinueOrder);
@@ -375,7 +391,39 @@ pub(super) async fn run_one_server_session(
                 && queued_background_search.is_none()
                 && pending_background_search.is_none() => {
                 if session.offer_files_negotiation_timeout_due() {
-                    session.resolve_offer_files_negotiation_timeout().await;
+                    session.request_offer_files_negotiation_fallback().await;
+                }
+                if let Some(reason) = session.offer_files_fallback_reconnect_reason() {
+                    let reason = reason.to_string();
+                    info!(
+                        "reconnecting ED2K publishing session without offerfiles_v endpoint={} trace_id={} reason={}",
+                        session.endpoint,
+                        session.trace_id,
+                        reason,
+                    );
+                    dump_ed2k_server_loop_meta(
+                        &server.base_endpoint().to_string(),
+                        "offer_files_capability_fallback",
+                        format!(
+                            "reconnecting without offerfiles_v after ambiguous negotiation: {reason}"
+                        ),
+                    );
+                    drop(session);
+                    clear_server_connection_state(&context.state).await;
+                    reachability_writer.clear_server_public_ip();
+                    session = tokio::select! {
+                        result = connect_server_transport(
+                            server,
+                            context,
+                            observed_external_ip.as_deref(),
+                            false,
+                        ) => result?,
+                        () = context.session_cancel.cancelled() => {
+                            clear_server_connection_state(&context.state).await;
+                            return Ok(ServerSessionExit::ContinueOrder);
+                        }
+                    };
+                    continue;
                 }
                 if let Some(stats) = send_due_offer_files_advertisement(
                     &mut session,

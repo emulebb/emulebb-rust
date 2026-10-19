@@ -885,9 +885,10 @@ pub(super) async fn send_connected_server_startup(
     session.begin_offer_files_publishing().await;
     if session.trace_role != "background" {
         // Short-lived diagnostic/search sessions do not own the background
-        // pacing timer. Preserve their legacy startup advertisement while the
-        // long-lived background session performs the two-second negotiation.
-        session.resolve_offer_files_negotiation_timeout().await;
+        // pacing state machine. These roles disable the capability before
+        // login, so the fallback request is a no-op and publication remains
+        // legacy on the current connection.
+        session.request_offer_files_negotiation_fallback().await;
         let _ =
             send_due_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
     }

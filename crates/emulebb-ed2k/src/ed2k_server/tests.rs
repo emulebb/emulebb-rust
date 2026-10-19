@@ -193,6 +193,7 @@ async fn connected_id_change_fixture() -> (
     let peer = TcpStream::connect(addr).await.unwrap();
     let (stream, peer_addr) = listener.accept().await.unwrap();
     let mut session = ServerSession::from_stream_for_test(stream, peer_addr);
+    session.configure_offer_files_capability(false);
     session.server_soft_files = 1_000;
 
     let (server_list_events, events) = ed2k_server_list_event_channel();
