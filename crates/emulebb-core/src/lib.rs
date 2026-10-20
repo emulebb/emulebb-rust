@@ -50,7 +50,8 @@ use emulebb_ed2k::{
         Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kDownloadStorageReconciliation,
         Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedPublishDemandSignal,
         Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport, Ed2kTransferRootReconciliation,
-        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, is_unresolved_ed2k_display_name,
+        new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::{
@@ -1190,9 +1191,6 @@ impl EmulebbCore {
             return Ok(Some("queued"));
         };
         let config = self.effective_ed2k_config(&network.ed2k).await?;
-        if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
-            return Ok(Some("queued"));
-        }
         // Disk free-space floor: pause before engaging sources when the transfer
         // volume cannot hold the remaining payload, instead of failing late
         // mid-write and churn-retrying.
@@ -1234,7 +1232,10 @@ impl EmulebbCore {
                 transfer = updated;
             }
             if transfer.size_bytes == 0 {
-                return Ok(Some("queued"));
+                tracing::debug!(
+                    "ED2K hash-only metadata search returned no size for {}; probing known sources",
+                    transfer.hash
+                );
             }
         }
         let mut sources = self
@@ -1255,7 +1256,9 @@ impl EmulebbCore {
         let ban_store = self.ed2k_transfers.ban_store();
         sources.retain(|source| !ban_store.is_banned(Some(source.ip), source.user_hash.as_ref()));
         if sources.is_empty() {
-            return Ok(Some("downloading"));
+            return Ok(Some(ed2k_download_state_without_sources(
+                transfer.size_bytes,
+            )));
         }
         self.register_download_source_candidates(&transfer, &sources)
             .await;
@@ -6987,6 +6990,15 @@ const ED2K_DOWNLOAD_KAD_SOURCE_QUIET_DELAY_MS: u64 = 750;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS: usize = 2;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
 const ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS: u64 = 5;
+
+fn ed2k_download_state_without_sources(file_size: u64) -> &'static str {
+    if file_size == 0 {
+        "queued"
+    } else {
+        "downloading"
+    }
+}
+
 /// Startup download hydration pacing. Let the post-connect startup burst (large
 /// shared-library reload, publish) settle before adding download load, then stagger
 /// each resumed download so a big backlog does not thunder-herd the state lock /

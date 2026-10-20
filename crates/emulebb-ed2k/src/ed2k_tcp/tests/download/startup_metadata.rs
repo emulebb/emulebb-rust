@@ -7,7 +7,7 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
     let payload = vec![0x41; 180 * 1024];
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
     let file_hash_hex = file_hash.to_string();
-    let placeholder_name = format!("ed2k-{file_hash_hex}.bin");
+    let placeholder_name = file_hash_hex.clone();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
