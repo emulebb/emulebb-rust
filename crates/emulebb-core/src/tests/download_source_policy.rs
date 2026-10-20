@@ -460,6 +460,43 @@ async fn a4af_nnp_swap_skips_terminal_best_candidate_for_live_fallback() {
 }
 
 #[tokio::test]
+async fn completed_file_releases_peer_for_next_wanted_file() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let completed = Ed2kHash::from_bytes([0x79; 16]).to_string();
+    let wanted = Ed2kHash::from_bytes([0x7A; 16]).to_string();
+    let source = direct_test_source(
+        Ed2kHash::from_bytes([0x79; 16]),
+        Ipv4Addr::new(192, 0, 2, 36),
+        41015,
+    );
+    let now = Instant::now();
+    {
+        let mut state = core.state.lock().await;
+        for hash in [&completed, &wanted] {
+            state.download_source_registry.add_candidate(
+                now,
+                DownloadSourceCandidate {
+                    file_hash: hash.clone(),
+                    file_priority: 5,
+                    needed_parts: 1,
+                    rare_parts: 0,
+                    source: source.clone(),
+                    last_seen: now,
+                },
+            );
+        }
+    }
+
+    core.release_download_source_file(&completed).await;
+
+    let (acquired, deferred, _) = core
+        .acquire_direct_download_source_leases(&wanted, std::slice::from_ref(&source))
+        .await;
+    assert_eq!(acquired.len(), 1);
+    assert_eq!(deferred, 0);
+}
+
+#[tokio::test]
 async fn nnp_source_is_held_for_the_doubled_reask_cycle_not_dropped_or_dead_listed() {
     // RUST-PAR-017 DL-3: an NNP source stays in the download source registry
     // in an NNP-held state (oracle DS_NONEEDEDPARTS keeps the source in the

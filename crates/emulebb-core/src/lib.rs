@@ -2114,6 +2114,14 @@ impl EmulebbCore {
         }
     }
 
+    async fn release_download_source_file(&self, hash: &str) {
+        let mut state = self.state.lock().await;
+        let cleared = state.download_source_registry.release_file(hash);
+        for endpoint in cleared {
+            state.active_download_peer_endpoints.remove(&endpoint);
+        }
+    }
+
     /// Signal the in-flight background download attempt for `hash` to stop. Quick
     /// lock, no await held: clones nothing across `.await`. Idempotent and
     /// race-safe with a natural completion — if no attempt is running (or it just
@@ -2513,6 +2521,7 @@ impl EmulebbCore {
                 // BEFORE refreshing the in-memory transfer, so the refreshed view
                 // surfaces the deliveredPath in the same step.
                 if next_state == "completed" {
+                    core.release_download_source_file(&hash).await;
                     core.deliver_completed_transfer(&hash).await;
                 } else if let Err(error) =
                     core.refresh_transfer_from_manifest(&hash, next_state).await
