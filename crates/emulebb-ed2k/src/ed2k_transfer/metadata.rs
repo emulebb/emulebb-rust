@@ -430,7 +430,7 @@ impl Ed2kTransferRuntime {
         if !manifest.display_name_pinned
             && !manifest.completed
             && !manifest.final_rehash_pending
-            && manifest.display_name == format!("ed2k-{}.bin", manifest.file_hash)
+            && super::is_unresolved_ed2k_display_name(&manifest.file_hash, &manifest.display_name)
         {
             manifest.display_name = normalized_name;
         } else if manifest.follow_majority_filename

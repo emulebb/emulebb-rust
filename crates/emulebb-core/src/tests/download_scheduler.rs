@@ -628,6 +628,67 @@ fn queued_active_download_attempts_remain_retryable() {
     assert!(!should_retry_download_attempt_state("error"));
 }
 
+#[test]
+fn hash_only_transfer_without_sources_remains_queued() {
+    assert_eq!(ed2k_download_state_without_sources(0), "queued");
+    assert_eq!(ed2k_download_state_without_sources(1), "downloading");
+}
+
+#[tokio::test]
+async fn hash_only_transfer_with_explicit_source_dials_without_server_config() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-hash-only-explicit-source");
+    let mut network = test_network_config_with_store(
+        &runtime_dir,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.bind_ip = Ipv4Addr::LOCALHOST;
+    network.p2p_bind_ip = Some(Ipv4Addr::LOCALHOST);
+    network.ed2k.server_entries.clear();
+    network.ed2k.server_endpoints.clear();
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &runtime_dir,
+        Some(network),
+    )
+    .unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let source_port = listener.local_addr().unwrap().port();
+    let hash = Ed2kHash::from_bytes([0x81; 16]).to_string();
+    let transfer = core
+        .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
+            link: Some(format!(
+                "ed2k://|file|{hash}|0|{hash}|sources,127.0.0.1:{source_port}|/"
+            )),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let attempt_core = core.clone();
+    let attempt_cancel = cancel.clone();
+    let attempt = tokio::spawn(async move {
+        attempt_core
+            .run_ed2k_download_attempt(&transfer, &attempt_cancel)
+            .await
+    });
+
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("explicit source should be dialed")
+        .unwrap();
+    drop(stream);
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), attempt)
+        .await
+        .expect("cancelled hash-only attempt should stop");
+}
+
 #[tokio::test]
 async fn delete_transfer_files_cancels_attempt_and_releases_hash_leases() {
     // Delete must promptly free everything the running attempt holds for the

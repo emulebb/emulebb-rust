@@ -509,8 +509,7 @@ pub(crate) fn global_udp_source_search_excluded_endpoint(
 }
 
 pub(crate) fn should_adopt_hash_only_metadata_name(transfer: &Transfer) -> bool {
-    let name = transfer.name.trim();
-    name.is_empty() || name.eq_ignore_ascii_case(&transfer.hash)
+    crate::is_unresolved_ed2k_display_name(&transfer.hash, &transfer.name)
 }
 
 pub(crate) fn ed2k_server_callback_route(

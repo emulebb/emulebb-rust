@@ -1,7 +1,7 @@
 use super::piece_store::Ed2kIncompletePayloadFailure;
 use super::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState,
-    LocalIngestProgressStage, PAYLOAD_FILE_NAME, new_transfer_job,
+    LocalIngestProgressStage, PAYLOAD_FILE_NAME, is_unresolved_ed2k_display_name, new_transfer_job,
 };
 use crate::paths::unique_test_dir;
 use crate::{HashType, PopularHash};
@@ -49,6 +49,19 @@ mod upload_session_rotation;
 mod upload_slot_pacing;
 mod upload_slot_recycle_window;
 mod upload_unlimited_recycle;
+
+#[test]
+fn unresolved_ed2k_display_name_recognizes_hash_only_placeholders() {
+    let hash = "00112233445566778899aabbccddeeff";
+
+    assert!(is_unresolved_ed2k_display_name(hash, ""));
+    assert!(is_unresolved_ed2k_display_name(hash, hash));
+    assert!(is_unresolved_ed2k_display_name(
+        hash,
+        "ed2k-00112233445566778899AABBCCDDEEFF.bin"
+    ));
+    assert!(!is_unresolved_ed2k_display_name(hash, "captured.epub"));
+}
 
 fn write_repeating_pattern_file(path: &Path, size: usize, pattern: &[u8]) {
     assert!(!pattern.is_empty());

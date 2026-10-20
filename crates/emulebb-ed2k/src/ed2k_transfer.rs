@@ -163,6 +163,16 @@ impl Ed2kConnectionBudgetDenyReason {
 /// Canonical ED2K part size used by eMule-compatible file hashing.
 pub const ED2K_PART_SIZE: u64 = 9_728_000;
 
+/// Returns whether a display name is a synthetic placeholder for an unresolved
+/// hash-only ED2K link rather than peer- or index-provided metadata.
+#[must_use]
+pub fn is_unresolved_ed2k_display_name(file_hash: &str, display_name: &str) -> bool {
+    let display_name = display_name.trim();
+    display_name.is_empty()
+        || display_name.eq_ignore_ascii_case(file_hash)
+        || display_name.eq_ignore_ascii_case(&format!("ed2k-{file_hash}.bin"))
+}
+
 /// Part count used by OP_FILESTATUS / the OP_REQUESTFILENAME ext-info
 /// partstatus, i.e. eMule's `CKnownFile::m_iED2KPartCount`. This is
 /// `size / PARTSIZE + 1` for non-empty files (KnownFile.cpp:769), one MORE
