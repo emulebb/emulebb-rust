@@ -49,9 +49,9 @@ use emulebb_ed2k::{
         ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackDownload,
         Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kDownloadStorageReconciliation,
         Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedPublishDemandSignal,
-        Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport, Ed2kTransferRootReconciliation,
-        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, is_unresolved_ed2k_display_name,
-        new_transfer_job,
+        Ed2kSourceConnectionAdmission, Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport,
+        Ed2kTransferRootReconciliation, Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot,
+        is_unresolved_ed2k_display_name, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::{
@@ -352,10 +352,6 @@ struct Ed2kRuntime {
     /// the firewall check is disabled in config.
     kad_firewall_recheck: Option<Arc<tokio::sync::Notify>>,
     tasks: Vec<JoinHandle<()>>,
-    /// Detached per-transfer background download tasks for this session (FIX B3).
-    /// Aborted by `disconnect_ed2k`; a fresh handle is created per connect so a
-    /// later reconnect's tasks are never aborted by an earlier disconnect.
-    download_tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -460,8 +456,8 @@ pub struct EmulebbCore {
     /// Tracks the detached per-transfer background download tasks for the current
     /// connected session, so `disconnect_ed2k` can abort them (they are otherwise
     /// untracked detached tasks that survive disconnect and orphan on shutdown).
-    /// Reset to a fresh `JoinSet` on each connect; the same handle is stored in
-    /// the session `Ed2kRuntime` and aborted on disconnect (FIX B3).
+    /// Tracked per-transfer download tasks. Connect and disconnect abort and
+    /// drain this set before the next session may engage sources.
     ed2k_download_tasks: Arc<Mutex<JoinSet<()>>>,
     /// Live shared-directory auto-pickup monitor (eMule directory auto-monitor
     /// parity); rebuilt on reconfigure, torn down on `disconnect_ed2k`. See the

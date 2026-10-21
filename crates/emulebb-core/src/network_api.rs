@@ -317,14 +317,7 @@ impl EmulebbCore {
             return Ok(status);
         }
 
-        // Start this session's background-download task set from empty (FIX B3):
-        // any handles left from a previous session were aborted on disconnect, so
-        // a fresh JoinSet keeps the per-session abort scoped and reconnect-safe.
-        {
-            let mut download_tasks = self.ed2k_download_tasks.lock().await;
-            download_tasks.abort_all();
-            *download_tasks = JoinSet::new();
-        }
+        abort_and_drain_download_tasks(&self.ed2k_download_tasks).await;
 
         let (search_handle, search_inbox) = new_ed2k_server_search_channel(32);
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
@@ -810,7 +803,6 @@ impl EmulebbCore {
             server_task,
             kad_firewall_recheck,
             tasks,
-            download_tasks: Arc::clone(&self.ed2k_download_tasks),
         });
         drop(runtime_guard);
         self.queue_ed2k_shared_catalog_publish();
@@ -845,19 +837,6 @@ impl EmulebbCore {
         // Drop the reask detach handle so post-disconnect downloads stay on TCP
         // and the closed command channel lets the (aborted) loop wind down.
         *self.ed2k_reask_handle.lock().unwrap() = None;
-        // FIX (detached-reask lease leak): release every outstanding download
-        // source lease. Sources detached onto the reask loop free their lease only
-        // via a SourceReleased event, which is never emitted when the loop breaks
-        // on shutdown / command-channel close; without this reset those endpoints
-        // would stay leased across reconnect and acquire_*_leases would defer them
-        // forever. Safe (no race): disconnect fully tears the stack down before any
-        // reconnect rebuilds it.
-        {
-            let mut state = self.state.lock().await;
-            for endpoint in state.download_source_registry.reset_leases() {
-                state.active_download_peer_endpoints.remove(&endpoint);
-            }
-        }
         if let Some(mut runtime) = self.ed2k_runtime.lock().await.take() {
             let final_public_ip = self.ed2k_reachability.get();
             runtime.reachability.retire();
@@ -887,7 +866,6 @@ impl EmulebbCore {
             let Ed2kRuntime {
                 server_task,
                 tasks,
-                download_tasks,
                 nat,
                 ..
             } = runtime;
@@ -896,15 +874,28 @@ impl EmulebbCore {
                 task.abort();
                 let _ = task.await;
             }
-            // Abort this session's detached background-download tasks (FIX B3) so
-            // downloads do not survive disconnect or orphan on shutdown.
-            download_tasks.lock().await.abort_all();
             // WHY: REST disconnect must not hang behind network cleanup after a failed
             // server dial; the runtime has already been removed and tasks aborted.
             let _ = tokio::time::timeout(Duration::from_secs(2), nat.stop()).await;
         }
+        abort_and_drain_download_tasks(&self.ed2k_download_tasks).await;
+        // Release detached-reask and active-worker source leases only after every
+        // tracked download task has stopped, so no worker can reacquire a lease
+        // after the reset while disconnect is still completing.
+        {
+            let mut state = self.state.lock().await;
+            for endpoint in state.download_source_registry.reset_leases() {
+                state.active_download_peer_endpoints.remove(&endpoint);
+            }
+        }
         self.ed2k_status().await
     }
+}
+
+async fn abort_and_drain_download_tasks(download_tasks: &Arc<Mutex<JoinSet<()>>>) {
+    let mut tasks = download_tasks.lock().await;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
 }
 
 fn current_kad_nodes_dat(network: &Ed2kNetworkConfig) -> Option<Vec<u8>> {

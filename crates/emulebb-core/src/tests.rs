@@ -393,7 +393,6 @@ async fn ed2k_shared_catalog_publish_waits_for_connected_server() {
         server_task: test_server_task(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
 
     assert_eq!(

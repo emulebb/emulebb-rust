@@ -110,22 +110,13 @@ where
         );
 
         while let Some(joined) = active_downloads.join_next().await {
-            // Release the global connection budget slot this finished download
-            // held (acquired in spawn_pending_ed2k_direct_downloads) so the next
-            // source can claim it.
-            transfer_runtime.release_source_connection();
             let (peer_addr, source, result) = match joined {
                 Ok(joined) => joined,
                 Err(join_error) => {
-                    // The worker panicked. Returning here without draining the
-                    // remaining in-flight tasks would leak their connection-budget
-                    // slots permanently (their release_source_connection never
-                    // runs), eventually stalling the whole download subsystem.
-                    // Abort and drain the rest, releasing one slot per task.
+                    // Drain aborted workers before returning so their RAII budget
+                    // permits and connection futures are released promptly.
                     active_downloads.abort_all();
-                    while active_downloads.join_next().await.is_some() {
-                        transfer_runtime.release_source_connection();
-                    }
+                    while active_downloads.join_next().await.is_some() {}
                     return Err(anyhow::Error::new(join_error)
                         .context("ED2K direct download worker panicked"));
                 }
@@ -243,10 +234,7 @@ where
 
             if completed_primary_manifest {
                 active_downloads.abort_all();
-                // Release the budget slot held by each aborted download.
-                while active_downloads.join_next().await.is_some() {
-                    transfer_runtime.release_source_connection();
-                }
+                while active_downloads.join_next().await.is_some() {}
                 return Ok(DirectDownloadOutcome {
                     completed: true,
                     accepted_incomplete_peers,
@@ -335,19 +323,21 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
         // the new-connection per-5s rate across ALL transfers. When no slot is
         // available, leave the source pending (push it back) for the next cycle
         // rather than dropping it, and stop spawning this round.
-        let budget = context
-            .transfer_runtime
-            .try_acquire_source_connection_detailed();
+        let admission = context.transfer_runtime.try_admit_source_connection();
+        let budget = admission.decision();
         crate::diag_sched::source_conn_budget(budget, context.file_hash_hex, &source);
-        if !budget.admitted {
-            pending_sources.push_front(source);
-            tracing::debug!(
-                "ED2K direct download deferred by connection budget file_hash={} active={}",
-                context.file_hash_hex,
-                active_downloads.len()
-            );
-            break;
-        }
+        let budget_permit = match admission {
+            Ed2kSourceConnectionAdmission::Admitted { permit, .. } => permit,
+            Ed2kSourceConnectionAdmission::Denied { .. } => {
+                pending_sources.push_front(source);
+                tracing::debug!(
+                    "ED2K direct download deferred by connection budget file_hash={} active={}",
+                    context.file_hash_hex,
+                    active_downloads.len()
+                );
+                break;
+            }
+        };
         let transfer_runtime = Arc::clone(context.transfer_runtime);
         let secure_ident = Arc::clone(context.secure_ident);
         let download_peer = context.download_peer.clone();
@@ -368,6 +358,7 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
         let file_size = context.file_size;
         let connect_timeout = context.connect_timeout;
         active_downloads.spawn(async move {
+            let _budget_permit = budget_permit;
             let result = download_peer(
                 bind_ip,
                 source.clone(),

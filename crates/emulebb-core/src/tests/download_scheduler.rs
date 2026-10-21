@@ -45,15 +45,16 @@ async fn direct_download_scheduler_releases_all_slots_on_worker_panic() {
 
     // Every acquired connection-budget slot must have been released; if a
     // slot leaked, active_connections would be non-zero. Probe via a fresh
-    // acquire and inspect the reported occupancy before the probe.
-    let decision = transfer_runtime.try_acquire_source_connection_detailed();
+    // admission and inspect the reported occupancy before dropping its permit.
+    let admission = transfer_runtime.try_admit_source_connection();
+    let decision = admission.decision();
     // active_connections counts AFTER this probe acquired one slot, so it must
     // be exactly 1 (the probe itself) with no leaked predecessors.
     assert_eq!(
         decision.active_connections, 1,
         "all worker slots were released after the panic (no budget leak)"
     );
-    transfer_runtime.release_source_connection();
+    drop(admission);
 }
 
 #[tokio::test]
