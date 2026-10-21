@@ -58,6 +58,50 @@ async fn direct_download_scheduler_releases_all_slots_on_worker_panic() {
 }
 
 #[tokio::test]
+async fn disconnect_drains_download_tasks_and_releases_connection_budget() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    core.ed2k_transfers.apply_download_coordinator_config(
+        emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig {
+            max_connections: 1,
+            max_connections_per_window: 0,
+            ..emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig::default()
+        },
+    );
+
+    let admission = core.ed2k_transfers.try_admit_source_connection();
+    let permit = match admission {
+        Ed2kSourceConnectionAdmission::Admitted { decision, permit } => {
+            assert_eq!(decision.active_connections, 1);
+            permit
+        }
+        Ed2kSourceConnectionAdmission::Denied { decision } => {
+            panic!("initial source connection was denied: {decision:?}")
+        }
+    };
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    core.ed2k_download_tasks.lock().await.spawn(async move {
+        let _permit = permit;
+        let _ = started_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    started_rx.await.unwrap();
+
+    core.disconnect_ed2k().await;
+
+    assert!(core.ed2k_download_tasks.lock().await.is_empty());
+    let next_admission = core.ed2k_transfers.try_admit_source_connection();
+    match next_admission {
+        Ed2kSourceConnectionAdmission::Admitted { decision, .. } => {
+            assert_eq!(decision.active_connections, 1);
+            assert_eq!(decision.connection_cap, 1);
+        }
+        Ed2kSourceConnectionAdmission::Denied { decision } => {
+            panic!("disconnect leaked the prior connection budget: {decision:?}")
+        }
+    }
+}
+
+#[tokio::test]
 async fn direct_download_scheduler_retries_other_peer_after_failure() {
     let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
         completed_ed2k_transfer_runtime("emulebb-core-direct-download-retry").await;
