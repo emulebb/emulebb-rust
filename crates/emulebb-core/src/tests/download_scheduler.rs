@@ -79,7 +79,7 @@ async fn disconnect_drains_download_tasks_and_releases_connection_budget() {
         }
     };
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    core.ed2k_download_tasks.lock().await.spawn(async move {
+    core.ed2k_download_tasks.spawn(async move {
         let _permit = permit;
         let _ = started_tx.send(());
         std::future::pending::<()>().await;
@@ -88,7 +88,7 @@ async fn disconnect_drains_download_tasks_and_releases_connection_budget() {
 
     core.disconnect_ed2k().await;
 
-    assert!(core.ed2k_download_tasks.lock().await.is_empty());
+    assert!(core.ed2k_download_tasks.is_empty());
     let next_admission = core.ed2k_transfers.try_admit_source_connection();
     match next_admission {
         Ed2kSourceConnectionAdmission::Admitted { decision, .. } => {
