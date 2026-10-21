@@ -930,7 +930,6 @@ async fn install_test_server_plan_runtime(
         server_task: test_server_task(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
     (server_connect_plan, server_connect_plan_rx, shutdown)
 }
@@ -1234,7 +1233,6 @@ async fn explicit_server_connect_targets_running_server_loop() {
         server_task: test_server_task(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
 
     let result = core.connect_ed2k_server("203.0.113.20:4661").await.unwrap();
@@ -1325,7 +1323,6 @@ async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
         server_task: test_server_task(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
 
     let result = core.connect_ed2k_server("203.0.113.20:4661").await.unwrap();

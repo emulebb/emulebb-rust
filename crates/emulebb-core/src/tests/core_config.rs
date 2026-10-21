@@ -483,7 +483,6 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
         server_task,
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
     core.set_kad_running(true).await;
 
@@ -602,7 +601,6 @@ async fn server_disconnect_waits_for_supervisor_retirement_ack() {
         server_task,
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
 
     let core_for_disconnect = core.clone();
@@ -670,7 +668,6 @@ async fn full_disconnect_waits_for_server_supervisor_retirement() {
         server_task,
         kad_firewall_recheck: None,
         tasks: Vec::new(),
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
     let core_for_disconnect = core.clone();
     let disconnect = tokio::spawn(async move { core_for_disconnect.disconnect_ed2k().await });
@@ -755,7 +752,6 @@ async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() 
         server_task: test_server_task(),
         kad_firewall_recheck: None,
         tasks: vec![dht_task],
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
 
     let status = core.status().await;

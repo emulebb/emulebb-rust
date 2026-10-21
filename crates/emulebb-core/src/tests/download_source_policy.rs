@@ -46,7 +46,6 @@ async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
         server_task: test_server_task(),
         kad_firewall_recheck: None,
         tasks: Vec::new(),
-        download_tasks: Arc::clone(&core.ed2k_download_tasks),
     });
 
     let file_hash = Ed2kHash::from_bytes([0x52; 16]);

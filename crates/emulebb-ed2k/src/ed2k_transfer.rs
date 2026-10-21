@@ -57,6 +57,7 @@ mod manifest;
 mod media_metadata;
 mod metadata;
 mod model;
+mod outbound_admission;
 mod payload_reconcile;
 mod peer_connections;
 mod piece_store;
@@ -113,6 +114,7 @@ pub(crate) use model::{
     Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,
     Ed2kCallbackHelloIdentity, Ed2kCallbackPeer, PieceWriteOutcome,
 };
+pub use outbound_admission::{Ed2kSourceConnectionAdmission, Ed2kSourceConnectionPermit};
 pub(crate) use piece_store::Ed2kVerifiedRangeReader;
 use source_exchange::SourceExchangeState;
 use upload_queue::Ed2kUploadQueueState;
@@ -803,41 +805,6 @@ impl Ed2kTransferRuntime {
         self.download_throttle.lock().await.limit_bytes_per_sec()
     }
 
-    /// Try to claim a global connection budget slot for one new outgoing source
-    /// connection (eMule `CListenSocket::TooManySockets` inverted). Returns
-    /// `true` and reserves the slot when both the concurrent cap and the
-    /// per-window new-connection rate allow it. A `false` means the caller must
-    /// leave the source for the next cycle (never drop it).
-    pub fn try_acquire_source_connection(&self) -> bool {
-        self.try_acquire_source_connection_detailed().admitted
-    }
-
-    /// Like [`try_acquire_source_connection`] but also reports the connection
-    /// budget occupancy and (on a deny) the limiting cap, so the caller can emit
-    /// the `conn_budget` `diag_event_v1` event (schema §3.5) with real
-    /// `activeConnections` / `connectionCap` / `denyReason` values.
-    pub fn try_acquire_source_connection_detailed(&self) -> Ed2kConnectionBudgetDecision {
-        let mut coordinator = self.download_coordinator.lock();
-        let config = coordinator.config();
-        let active_before = coordinator.active_connections();
-        let admitted = coordinator.try_acquire_connection(Instant::now());
-        let deny_reason = if admitted {
-            None
-        } else if config.max_connections != 0 && active_before >= config.max_connections {
-            Some(Ed2kConnectionBudgetDenyReason::ConcurrentCap)
-        } else {
-            // The concurrent cap was not the binding limit, so the per-window
-            // new-connection rate (`m_OpenSocketsInterval`) denied it.
-            Some(Ed2kConnectionBudgetDenyReason::WindowCap)
-        };
-        Ed2kConnectionBudgetDecision {
-            admitted,
-            active_connections: coordinator.active_connections(),
-            connection_cap: config.max_connections,
-            deny_reason,
-        }
-    }
-
     /// Signal that a granted outgoing source connection has completed its TCP
     /// connect + hello handshake, transitioning it from half-open to established
     /// (eMule `m_nHalfOpen` decrement). Frees a half-open budget slot for a new
@@ -847,14 +814,6 @@ impl Ed2kTransferRuntime {
         self.download_coordinator
             .lock()
             .mark_connection_established();
-    }
-
-    /// Release a source connection budget slot when an outgoing peer connection
-    /// closes (the counterpart to [`try_acquire_source_connection`]). Decrements
-    /// the established bucket first, falling back to the half-open bucket for a
-    /// connection that closed before it ever handshaked; both saturate.
-    pub fn release_source_connection(&self) {
-        self.download_coordinator.lock().release_connection();
     }
 
     /// Whether one more source may be engaged over TCP for a file already
