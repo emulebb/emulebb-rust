@@ -114,6 +114,7 @@ mod direct_download_runtime;
 mod disk_guard;
 mod download_duplicate;
 mod download_source_registry;
+mod download_task_supervisor;
 mod ed2k_buddy_reask;
 mod ed2k_dead_source_list;
 mod ed2k_direct_download_types;
@@ -269,6 +270,7 @@ use shared_directories::{
 mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
+use download_task_supervisor::DownloadTaskSupervisor;
 pub use emulebb_ed2k::NatStatusSnapshot;
 pub use emulebb_ed2k::normalize_ed2k_file_name;
 pub use emulebb_settings::{
@@ -458,7 +460,7 @@ pub struct EmulebbCore {
     /// untracked detached tasks that survive disconnect and orphan on shutdown).
     /// Tracked per-transfer download tasks. Connect and disconnect abort and
     /// drain this set before the next session may engage sources.
-    ed2k_download_tasks: Arc<Mutex<JoinSet<()>>>,
+    ed2k_download_tasks: Arc<DownloadTaskSupervisor>,
     /// Live shared-directory auto-pickup monitor (eMule directory auto-monitor
     /// parity); rebuilt on reconfigure, torn down on `disconnect_ed2k`. See the
     /// `shared_dir_monitor` module. `std::sync::Mutex` so start/stop is await-free.
@@ -640,7 +642,7 @@ impl EmulebbCore {
             vpn_guard_egress: Arc::new(std::sync::Mutex::new(
                 vpn_guard::EgressProbeReport::default(),
             )),
-            ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
+            ed2k_download_tasks: Arc::new(DownloadTaskSupervisor::new()),
             shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             shared_directory_reload_progress: Arc::new(std::sync::Mutex::new(
@@ -2428,44 +2430,14 @@ impl EmulebbCore {
     /// runtime. The dedup guard runs inside the spawned task.
     fn queue_ed2k_download_attempt(&self, transfer: Transfer) {
         let core = self.clone();
-        let task_core = self.clone();
-        let mut tasks = match self.ed2k_download_tasks.try_lock() {
-            Ok(tasks) => tasks,
-            Err(_) => {
-                // Contended only momentarily (connect reset / disconnect abort);
-                // block briefly on the async lock from a fresh spawn instead.
-                let spawn_core = self.clone();
-                tokio::spawn(async move {
-                    spawn_core
-                        .ed2k_download_tasks
-                        .lock()
-                        .await
-                        .spawn(Self::run_queued_ed2k_download_attempt(task_core, transfer));
-                });
-                return;
-            }
-        };
-        tasks.spawn(Self::run_queued_ed2k_download_attempt(core, transfer));
+        self.ed2k_download_tasks
+            .spawn(Self::run_queued_ed2k_download_attempt(core, transfer));
     }
 
     fn queue_ed2k_download_retry(&self, hash: String) {
         let core = self.clone();
-        let task_core = self.clone();
-        let mut tasks = match self.ed2k_download_tasks.try_lock() {
-            Ok(tasks) => tasks,
-            Err(_) => {
-                let spawn_core = self.clone();
-                tokio::spawn(async move {
-                    spawn_core
-                        .ed2k_download_tasks
-                        .lock()
-                        .await
-                        .spawn(Self::run_queued_ed2k_download_retry(task_core, hash));
-                });
-                return;
-            }
-        };
-        tasks.spawn(Self::run_queued_ed2k_download_retry(core, hash));
+        self.ed2k_download_tasks
+            .spawn(Self::run_queued_ed2k_download_retry(core, hash));
     }
 
     /// Body of one background download attempt, run as a tracked task.

@@ -317,7 +317,7 @@ impl EmulebbCore {
             return Ok(status);
         }
 
-        abort_and_drain_download_tasks(&self.ed2k_download_tasks).await;
+        self.ed2k_download_tasks.stop_and_drain().await;
 
         let (search_handle, search_inbox) = new_ed2k_server_search_channel(32);
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
@@ -804,6 +804,7 @@ impl EmulebbCore {
             kad_firewall_recheck,
             tasks,
         });
+        self.ed2k_download_tasks.start();
         drop(runtime_guard);
         self.queue_ed2k_shared_catalog_publish();
         let status = self.ed2k_status().await;
@@ -878,7 +879,7 @@ impl EmulebbCore {
             // server dial; the runtime has already been removed and tasks aborted.
             let _ = tokio::time::timeout(Duration::from_secs(2), nat.stop()).await;
         }
-        abort_and_drain_download_tasks(&self.ed2k_download_tasks).await;
+        self.ed2k_download_tasks.stop_and_drain().await;
         // Release detached-reask and active-worker source leases only after every
         // tracked download task has stopped, so no worker can reacquire a lease
         // after the reset while disconnect is still completing.
@@ -890,12 +891,6 @@ impl EmulebbCore {
         }
         self.ed2k_status().await
     }
-}
-
-async fn abort_and_drain_download_tasks(download_tasks: &Arc<Mutex<JoinSet<()>>>) {
-    let mut tasks = download_tasks.lock().await;
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
 }
 
 fn current_kad_nodes_dat(network: &Ed2kNetworkConfig) -> Option<Vec<u8>> {
