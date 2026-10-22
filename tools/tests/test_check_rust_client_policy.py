@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import unittest
 from pathlib import Path
 
@@ -389,13 +390,41 @@ class TestReleaseCiGate(unittest.TestCase):
 
     def test_rejects_release_packaging_without_exact_source_gate(self) -> None:
         errors = CHECKER.check_release_ci_gate(
-            "native-package:\n  runs-on: ubuntu-latest\n",
+            f"""
+env:
+  EMULEBB_BUILD_REF: {'a' * 40}
+  EMULEBB_BUILD_TESTS_REF: {'b' * 40}
+  EMULEBB_TOOLING_REF: {'c' * 40}
+native-package:
+  runs-on: ubuntu-latest
+  repository: emulebb/emulebb-build
+  ref: ${{{{ env.EMULEBB_BUILD_REF }}}}
+  repository: emulebb/emulebb-build-tests
+  ref: ${{{{ env.EMULEBB_BUILD_TESTS_REF }}}}
+  repository: emulebb/emulebb-tooling
+  ref: ${{{{ env.EMULEBB_TOOLING_REF }}}}
+""",
             "  package:\n    permissions:\n      checks: read\n",
         )
 
         self.assertEqual(len(errors), 6)
         self.assertTrue(any("source-check verification job" in error for error in errors))
         self.assertTrue(any("packaging dependency" in error for error in errors))
+
+    def test_rejects_mutable_release_support_ref(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow, replacements = re.subn(
+            r"(?m)^  EMULEBB_BUILD_REF: [0-9a-f]{40}$",
+            "  EMULEBB_BUILD_REF: main",
+            workflow,
+        )
+        self.assertEqual(replacements, 1)
+
+        errors = CHECKER.check_release_ci_gate(workflow)
+
+        self.assertTrue(any("must pin EMULEBB_BUILD_REF" in error for error in errors))
 
     def test_rejects_nightly_caller_without_check_permission(self) -> None:
         errors = CHECKER.check_release_ci_gate(
@@ -542,10 +571,14 @@ class TestReleaseImageSecurity(unittest.TestCase):
             --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
       - with:
           name: emulebb-rust-image-security
-  publish-native:
+  assemble-candidate:
     steps:
       - with:
           name: emulebb-rust-image-security
+  publish-native:
+    steps:
+      - with:
+          name: emulebb-rust-release-candidate
 """
 
         errors = CHECKER.check_release_image_security(
@@ -692,6 +725,10 @@ smoke-rust-release-package.py
 smoke-rust-container.py
 path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
+assemble-candidate:
+candidate-manifest
+name: emulebb-rust-release-candidate
+needs: [prepare, assemble-candidate, publish-image]
 RELEASE-${RELEASE_VERSION}-NOTES.md
 RELEASE-${RELEASE_VERSION}-CHANGELOG.md
 body_path: ${{ inputs.channel == 'nightly' && 'nightly-release-notes.md' || 'release-notes.md' }}
@@ -702,7 +739,7 @@ body_path: ${{ inputs.channel == 'nightly' && 'nightly-release-notes.md' || 'rel
         errors = CHECKER.check_release_output_paths(
             "python tools/package_release_zip.py --target-dir target/release --out dist"
         )
-        self.assertEqual(len(errors), 14)
+        self.assertEqual(len(errors), 18)
 
 
 if __name__ == "__main__":
