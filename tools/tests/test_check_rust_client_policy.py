@@ -720,13 +720,20 @@ EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
 CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 path: .ci/emulebb-tooling
 working-directory: .ci/emulebb-build
+  native-package:
+    steps: []
+  native-package-smoke:
+    needs: [prepare, native-package]
+    steps:
+      - ref: ${{ github.workflow_sha }}
+      - run: smoke-rust-release-package.py --rust-repo . --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --render-webui
+      - name: emulebb-rust-package-smoke-${{ matrix.slug }}
+      - pattern: emulebb-rust-package-smoke-*
 package-emulebb-rust-ci --release-version 0.1.0-beta.2 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
-smoke-rust-release-package.py --rust-repo . --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --render-webui
-name: emulebb-rust-package-smoke-${{ matrix.slug }}
-pattern: emulebb-rust-package-smoke-*
 smoke-rust-container.py
 path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
+needs: [prepare, native-package-smoke, image-candidate]
 assemble-candidate:
 ref: ${{ github.workflow_sha }}
 candidate-manifest
@@ -770,6 +777,21 @@ body_path: ${{ inputs.channel == 'nightly' && 'nightly-release-notes.md' || 'rel
         )
 
         self.assertTrue(any("lifecycle report output" in error for error in errors))
+
+    def test_requires_isolated_trusted_package_smoke(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        errors = CHECKER.check_release_output_paths(
+            workflow.replace(
+                "  native-package-smoke:\n",
+                "  native-package-smoke-renamed:\n",
+                1,
+            )
+        )
+
+        self.assertTrue(any("isolate packaged lifecycle execution" in error for error in errors))
 
     def test_reports_in_checkout_release_paths(self) -> None:
         errors = CHECKER.check_release_output_paths(
