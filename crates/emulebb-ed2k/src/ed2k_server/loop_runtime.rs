@@ -201,6 +201,11 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                 | ParallelServerCycleOutcome::SessionEnded
                 | ParallelServerCycleOutcome::ReconnectRequested => {}
             }
+            if matches!(outcome, ParallelServerCycleOutcome::ReconnectRequested)
+                && !server_enabled.load(Ordering::SeqCst)
+            {
+                continue;
+            }
             if !reconnect_enabled {
                 if matches!(outcome, ParallelServerCycleOutcome::ReconnectRequested) {
                     continue;
@@ -286,6 +291,9 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                         }
                         ControlledServerSessionOutcome::ReconnectRequested => {
                             clear_server_connection_state(&state).await;
+                            if !server_enabled.load(Ordering::SeqCst) {
+                                continue 'server_loop;
+                            }
                             if reconnect_enabled && !shutdown.load(Ordering::Relaxed) {
                                 let endpoint = server.base_endpoint().to_string();
                                 dump_ed2k_server_loop_meta(
@@ -1194,6 +1202,40 @@ mod tests {
                 .expect("retired activation waiter should complete")
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn disabling_server_lane_skips_reconnect_delay() {
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut stream = accept_login(listener).await;
+            establish_login(&mut stream).await;
+            drain_until_closed(stream).await;
+        });
+        let runtime = spawn_test_server_loop(Ed2kServerConnectPlan::new(
+            test_config(vec![endpoint.to_string()], true),
+            Ed2kServerConnectMode::Manual,
+        ));
+        wait_for_connected_endpoint(&runtime.state, endpoint).await;
+
+        timeout(
+            Duration::from_secs(1),
+            runtime.server_control.disable_and_wait(),
+        )
+        .await
+        .expect("server lane should retire without reconnect delay")
+        .unwrap();
+
+        let state = runtime.state.read().await.clone();
+        assert!(!state.connecting);
+        assert!(!state.connected);
+        assert_eq!(state.endpoint, None);
+        stop_test_server_loop(runtime).await;
+        timeout(Duration::from_secs(2), server)
+            .await
+            .expect("test server should observe disabled session closure")
+            .unwrap();
     }
 
     #[tokio::test]
