@@ -41,6 +41,9 @@ permissions:
 
 env:
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
+  EMULEBB_BUILD_REF: bd96006a94b92ab9a8499f563c86011f36dfbfd9
+  EMULEBB_BUILD_TESTS_REF: 160da394fc74343bffd2846db4058eb3a11ed050
+  EMULEBB_TOOLING_REF: 9af34723a508b46be839502138b64a0be7e39dde
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
@@ -136,19 +139,19 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build
-          ref: 1a9ad5b19b29b24470547c0514844d192b83079c
+          ref: ${{ env.EMULEBB_BUILD_REF }}
           path: .ci/emulebb-build
       - name: Checkout pinned release documentation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-tooling
-          ref: adb49ac93ac1c0b59319c7fd6c004faeb876720c
+          ref: ${{ env.EMULEBB_TOOLING_REF }}
           path: .ci/emulebb-tooling
       - name: Checkout pinned package smoke harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build-tests
-          ref: ef2581da9f0c4cb4a305fb2e9ec8ba26b87f8e84
+          ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
           path: .ci/emulebb-build-tests
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -251,13 +254,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build
-          ref: 1a9ad5b19b29b24470547c0514844d192b83079c
+          ref: ${{ env.EMULEBB_BUILD_REF }}
           path: .ci/emulebb-build
       - name: Checkout pinned image smoke harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build-tests
-          ref: ef2581da9f0c4cb4a305fb2e9ec8ba26b87f8e84
+          ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
           path: .ci/emulebb-build-tests
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -355,6 +358,81 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  assemble-candidate:
+    name: Assemble non-publishing release candidate
+    needs: [prepare, native-package, image-candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+    steps:
+      - name: Checkout candidate manifest helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          path: emulebb-rust
+      - name: Checkout pinned workspace packaging
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_BUILD_REF }}
+          path: emulebb-build
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned workspace CLI dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.13.4
+      - name: Download all native assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-package-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Verify complete native set and write SHA256SUMS
+        working-directory: emulebb-build
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+        run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
+      - name: Download image security evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: emulebb-rust-image-security
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Download smoke-tested image identity
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: emulebb-rust-image-candidate
+          path: ${{ runner.temp }}/emulebb-rust-out/artifacts
+      - name: Add verified OCI digest to candidate evidence
+        shell: bash
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+        run: cp "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${RELEASE_VERSION}-multiarch.oci.digest" "$RELEASE_DIR/"
+      - name: Write exact candidate revision and evidence manifest
+        run: >-
+          python emulebb-rust/tools/release_publish.py candidate-manifest
+          --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
+          --output "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/emulebb-rust-v${{ env.RELEASE_VERSION }}-candidate-manifest.json"
+          --release-version "${{ env.RELEASE_VERSION }}"
+          --channel "${{ env.RELEASE_CHANNEL }}"
+          --source-sha "${{ needs.prepare.outputs.source_sha }}"
+          --emulebb-build-ref "${{ env.EMULEBB_BUILD_REF }}"
+          --emulebb-build-tests-ref "${{ env.EMULEBB_BUILD_TESTS_REF }}"
+          --emulebb-tooling-ref "${{ env.EMULEBB_TOOLING_REF }}"
+          --emulebb-miniupnp-ref "${{ env.MINIUPNP_REF }}"
+          --emulebb-libpcpnatpmp-ref "${{ env.PCPNATPMP_REF }}"
+          --repository "${{ github.repository }}"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+      - name: Retain assembled release candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-release-candidate
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
+          if-no-files-found: error
+          retention-days: 30
+
   publish-image:
     name: Publish verified GHCR image
     if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
@@ -412,7 +490,7 @@ jobs:
   publish-native:
     name: Publish verified native assets
     if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
-    needs: [prepare, publish-image]
+    needs: [prepare, assemble-candidate, publish-image]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -422,45 +500,26 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - name: Checkout candidate
+      - name: Checkout candidate for nightly notes
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
           fetch-depth: 0
           path: emulebb-rust
-      - name: Checkout pinned workspace packaging
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: emulebb/emulebb-build
-          ref: 1a9ad5b19b29b24470547c0514844d192b83079c
-          path: emulebb-build
       - name: Checkout pinned release documentation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-tooling
-          ref: adb49ac93ac1c0b59319c7fd6c004faeb876720c
+          ref: ${{ env.EMULEBB_TOOLING_REF }}
           path: emulebb-tooling
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Install pinned workspace CLI dependencies
-        run: python -m pip install click==8.4.1 pydantic==2.13.4
-      - name: Download all native assets
+      - name: Download assembled release candidate
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: emulebb-rust-package-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-      - name: Verify complete set and write SHA256SUMS
-        working-directory: emulebb-build
-        env:
-          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
-        run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
-      - name: Download image security evidence
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: emulebb-rust-image-security
+          name: emulebb-rust-release-candidate
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Add versioned release documentation
         if: ${{ inputs.channel != 'nightly' }}

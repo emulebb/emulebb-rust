@@ -33,6 +33,27 @@ def write_oci_archive(path: Path, blob: bytes, *, digest: str, manifests: int = 
         add_bytes(archive, f"blobs/sha256/{digest.removeprefix('sha256:')}", blob)
 
 
+def write_candidate_evidence(release_dir: Path, version: str) -> str:
+    stem = f"emulebb-rust-v{version}"
+    names = (
+        "SHA256SUMS",
+        f"{stem}-image-security-SHA256SUMS",
+        f"{stem}-windows-x64.zip",
+        f"{stem}-windows-arm64.zip",
+        f"{stem}-linux-amd64.deb",
+        f"{stem}-linux-x86_64.AppImage",
+        f"{stem}-linux-arm64.deb",
+        f"{stem}-linux-aarch64.AppImage",
+        f"{stem}-macos-x64.dmg",
+        f"{stem}-macos-arm64.dmg",
+    )
+    for name in names:
+        (release_dir / name).write_bytes(f"payload:{name}".encode("ascii"))
+    digest = f"sha256:{'a' * 64}"
+    (release_dir / f"{stem}-multiarch.oci.digest").write_text(f"{digest}\n", encoding="utf-8")
+    return digest
+
+
 class TestReleaseIdentity(unittest.TestCase):
     def test_formal_release_is_derived_from_tag_and_matches_cargo(self) -> None:
         self.assertEqual(
@@ -165,6 +186,104 @@ class TestOciArchiveDigest(unittest.TestCase):
                 0,
             )
             self.assertEqual(output.read_text(encoding="utf-8"), f"{digest}\n")
+
+
+class TestCandidateManifest(unittest.TestCase):
+    def test_records_exact_revisions_and_release_evidence(self) -> None:
+        version = "0.1.0-beta.2"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            expected_digest = write_candidate_evidence(release_dir, version)
+            output = release_dir / f"emulebb-rust-v{version}-candidate-manifest.json"
+            manifest = PUBLISH.write_candidate_manifest(
+                release_dir=release_dir,
+                output=output,
+                release_version=version,
+                channel="candidate",
+                source_sha="1" * 40,
+                support_refs={
+                    "emulebbBuild": "2" * 40,
+                    "emulebbBuildTests": "3" * 40,
+                    "emulebbTooling": "4" * 40,
+                    "emulebbMiniupnp": "5" * 40,
+                    "emulebbLibpcpnatpmp": "6" * 40,
+                },
+                repository="emulebb/emulebb-rust",
+                run_id="123",
+                run_attempt="2",
+            )
+
+            self.assertEqual(manifest["source"]["emulebbRust"], "1" * 40)
+            self.assertEqual(manifest["ociManifestDigest"], expected_digest)
+            artifact_names = {artifact["name"] for artifact in manifest["artifacts"]}
+            self.assertIn(f"emulebb-rust-v{version}-windows-x64.zip", artifact_names)
+            self.assertNotIn(output.name, artifact_names)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), manifest)
+
+    def test_rejects_mutable_support_ref(self) -> None:
+        version = "0.1.0-beta.2"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            write_candidate_evidence(release_dir, version)
+
+            with self.assertRaisesRegex(RuntimeError, "full lowercase commit SHAs"):
+                PUBLISH.write_candidate_manifest(
+                    release_dir=release_dir,
+                    output=release_dir / "candidate.json",
+                    release_version=version,
+                    channel="candidate",
+                    source_sha="1" * 40,
+                    support_refs={"emulebbBuild": "main"},
+                    repository="emulebb/emulebb-rust",
+                    run_id="123",
+                    run_attempt="1",
+                )
+
+    def test_command_writes_candidate_manifest(self) -> None:
+        version = "0.1.0-beta.2"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            write_candidate_evidence(release_dir, version)
+            output = release_dir / "candidate.json"
+
+            self.assertEqual(
+                PUBLISH.main(
+                    [
+                        "candidate-manifest",
+                        "--release-dir",
+                        str(release_dir),
+                        "--output",
+                        str(output),
+                        "--release-version",
+                        version,
+                        "--channel",
+                        "candidate",
+                        "--source-sha",
+                        "1" * 40,
+                        "--emulebb-build-ref",
+                        "2" * 40,
+                        "--emulebb-build-tests-ref",
+                        "3" * 40,
+                        "--emulebb-tooling-ref",
+                        "4" * 40,
+                        "--emulebb-miniupnp-ref",
+                        "5" * 40,
+                        "--emulebb-libpcpnatpmp-ref",
+                        "6" * 40,
+                        "--repository",
+                        "emulebb/emulebb-rust",
+                        "--run-id",
+                        "123",
+                        "--run-attempt",
+                        "1",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8"))["formatVersion"],
+                1,
+            )
 
 
 if __name__ == "__main__":

@@ -979,6 +979,27 @@ def check_release_ci_gate(
         for fragment, description in required.items()
         if fragment not in text
     ]
+    support_repositories = {
+        "emulebb/emulebb-build": "EMULEBB_BUILD_REF",
+        "emulebb/emulebb-build-tests": "EMULEBB_BUILD_TESTS_REF",
+        "emulebb/emulebb-tooling": "EMULEBB_TOOLING_REF",
+    }
+    for repository, variable in support_repositories.items():
+        checkout = re.compile(
+            rf"repository:\s*{re.escape(repository)}\s+ref:\s*"
+            rf"\$\{{\{{\s*env\.{variable}\s*\}}\}}",
+            re.MULTILINE,
+        ).search(text)
+        if checkout is None:
+            errors.append(
+                ".github/workflows/release.yml must use "
+                f"{variable} for {repository} checkouts"
+            )
+        value = re.search(rf"(?m)^\s+{variable}:\s*([^\s]+)\s*$", text)
+        if value is None or not action_ref_is_immutable(value.group(1)):
+            errors.append(
+                f".github/workflows/release.yml must pin {variable} by full commit SHA"
+            )
     nightly = ROOT / ".github" / "workflows" / "nightly.yml"
     nightly_source = (
         nightly.read_text(encoding="utf-8") if nightly_text is None else nightly_text
@@ -1128,7 +1149,9 @@ def check_release_image_promotion(workflow_text: str | None = None) -> list[str]
         errors.append(".github/workflows/release.yml is missing the native publishing job")
     else:
         native_required = {
-            "needs: [prepare, publish-image]": "image-before-release ordering",
+            "needs: [prepare, assemble-candidate, publish-image]": (
+                "candidate-and-image-before-release ordering"
+            ),
             "id: draft-release": "draft release output",
             "draft: true": "draft-first release creation",
             "overwrite_files: false": "write-once release assets",
@@ -1232,15 +1255,22 @@ def check_release_image_security(
                 ".github/workflows/release.yml must pin the Trivy installer by full commit SHA"
             )
 
+    assemble_job = re.search(
+        r"(?ms)^  assemble-candidate:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+        text,
+    )
     publish_job = re.search(
         r"(?ms)^  publish-native:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
         text,
     )
-    if publish_job is None or "name: emulebb-rust-image-security" not in publish_job.group(
-        "body"
+    if (
+        assemble_job is None
+        or "name: emulebb-rust-image-security" not in assemble_job.group("body")
+        or publish_job is None
+        or "name: emulebb-rust-release-candidate" not in publish_job.group("body")
     ):
         errors.append(
-            ".github/workflows/release.yml must attach image security evidence to the release"
+            ".github/workflows/release.yml must carry image security evidence through the assembled release candidate"
         )
 
     dockerfile = ROOT / "packaging" / "docker" / "Dockerfile"
@@ -1393,6 +1423,10 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "smoke-rust-container.py": "first-run LinuxServer image smoke",
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
         "assemble-emulebb-rust-release-ci": "verified release assembly",
+        "assemble-candidate:": "non-publishing candidate assembly job",
+        "candidate-manifest": "candidate revision and evidence manifest",
+        "name: emulebb-rust-release-candidate": "retained assembled candidate artifact",
+        "needs: [prepare, assemble-candidate, publish-image]": "publication dependency on candidate assembly",
         "RELEASE-${RELEASE_VERSION}-NOTES.md": "versioned release notes asset",
         "RELEASE-${RELEASE_VERSION}-CHANGELOG.md": "versioned changelog asset",
         "nightly-release-notes.md": "generated nightly release notes body",
