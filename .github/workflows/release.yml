@@ -42,7 +42,7 @@ permissions:
 env:
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
   EMULEBB_BUILD_REF: bd96006a94b92ab9a8499f563c86011f36dfbfd9
-  EMULEBB_BUILD_TESTS_REF: b54b1fca7527cde75d4d1444513298af1bdcc9f5
+  EMULEBB_BUILD_TESTS_REF: fdabef50aaacbb4818dfa8b8561a9441e76afc70
   EMULEBB_TOOLING_REF: 9af34723a508b46be839502138b64a0be7e39dde
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
