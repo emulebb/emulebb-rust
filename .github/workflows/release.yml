@@ -42,7 +42,7 @@ permissions:
 env:
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
   EMULEBB_BUILD_REF: bd96006a94b92ab9a8499f563c86011f36dfbfd9
-  EMULEBB_BUILD_TESTS_REF: 160da394fc74343bffd2846db4058eb3a11ed050
+  EMULEBB_BUILD_TESTS_REF: b54b1fca7527cde75d4d1444513298af1bdcc9f5
   EMULEBB_TOOLING_REF: 9af34723a508b46be839502138b64a0be7e39dde
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
@@ -105,12 +105,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: windows, arch: x64, runner: windows-latest}
-          - {os: windows, arch: ARM64, runner: windows-11-arm}
-          - {os: linux, arch: x64, runner: ubuntu-24.04}
-          - {os: linux, arch: ARM64, runner: ubuntu-24.04-arm}
-          - {os: macos, arch: x64, runner: macos-15-intel}
-          - {os: macos, arch: ARM64, runner: macos-15}
+          - {os: windows, arch: x64, slug: windows-x64, runner: windows-latest}
+          - {os: windows, arch: ARM64, slug: windows-arm64, runner: windows-11-arm}
+          - {os: linux, arch: x64, slug: linux-x64, runner: ubuntu-24.04}
+          - {os: linux, arch: ARM64, slug: linux-arm64, runner: ubuntu-24.04-arm}
+          - {os: macos, arch: x64, slug: macos-x64, runner: macos-15-intel}
+          - {os: macos, arch: ARM64, slug: macos-arm64, runner: macos-15}
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
@@ -210,11 +210,15 @@ jobs:
           EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
           RUSTUP_TOOLCHAIN: "1.98.1"
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
-      - name: Smoke native package and embedded WebUI
-        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
-      - name: Render native package WebUI and prove stale-key recovery
-        if: matrix.os == 'windows' && matrix.arch == 'x64'
-        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} --render-webui
+      - name: Prove packaged lifecycle, local transfer, and embedded WebUI
+        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --rust-repo . --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} ${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}
+      - name: Retain package lifecycle evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-package-smoke-${{ matrix.slug }}
+          path: ${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Retain build diagnostics
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -394,6 +398,12 @@ jobs:
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
         run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
+      - name: Download package lifecycle evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-package-smoke-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Download image security evidence
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
