@@ -726,6 +726,7 @@ smoke-rust-container.py
 path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
 assemble-candidate:
+ref: ${{ github.workflow_sha }}
 candidate-manifest
 name: emulebb-rust-release-candidate
 needs: [prepare, assemble-candidate, publish-image]
@@ -739,7 +740,7 @@ body_path: ${{ inputs.channel == 'nightly' && 'nightly-release-notes.md' || 'rel
         errors = CHECKER.check_release_output_paths(
             "python tools/package_release_zip.py --target-dir target/release --out dist"
         )
-        self.assertEqual(len(errors), 18)
+        self.assertEqual(len(errors), 19)
 
 
 if __name__ == "__main__":

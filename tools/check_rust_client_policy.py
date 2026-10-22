@@ -1424,6 +1424,7 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
         "assemble-emulebb-rust-release-ci": "verified release assembly",
         "assemble-candidate:": "non-publishing candidate assembly job",
+        "ref: ${{ github.workflow_sha }}": "trusted release-control checkout",
         "candidate-manifest": "candidate revision and evidence manifest",
         "name: emulebb-rust-release-candidate": "retained assembled candidate artifact",
         "needs: [prepare, assemble-candidate, publish-image]": "publication dependency on candidate assembly",

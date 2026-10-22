@@ -366,10 +366,10 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
     steps:
-      - name: Checkout candidate manifest helper
+      - name: Checkout trusted release-control helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          ref: ${{ github.workflow_sha }}
           path: emulebb-rust
       - name: Checkout pinned workspace packaging
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
