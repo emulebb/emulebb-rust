@@ -1420,6 +1420,10 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "package-emulebb-rust-ci --release-version": "orchestrated native packaging",
         "--target-os ${{ matrix.os }} --platform ${{ matrix.arch }}": "six-target package selection",
         "smoke-rust-release-package.py": "native package and WebUI smoke",
+        "--rust-repo .": "package smoke source schema",
+        "--report-path \"${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json\"": "package lifecycle report output",
+        "name: emulebb-rust-package-smoke-${{ matrix.slug }}": "package lifecycle report retention",
+        "pattern: emulebb-rust-package-smoke-*": "package lifecycle report assembly",
         "smoke-rust-container.py": "first-run LinuxServer image smoke",
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
         "assemble-emulebb-rust-release-ci": "verified release assembly",
@@ -1432,11 +1436,19 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "RELEASE-${RELEASE_VERSION}-CHANGELOG.md": "versioned changelog asset",
         "nightly-release-notes.md": "generated nightly release notes body",
     }
-    return [
+    errors = [
         f".github/workflows/release.yml is missing {description} configuration"
         for fragment, description in required.items()
         if fragment not in text
     ]
+    if text.count("smoke-rust-release-package.py") != 1:
+        errors.append(
+            ".github/workflows/release.yml must run smoke-rust-release-package.py "
+            "exactly once per native matrix target"
+        )
+    if "ed2k-server" in text.lower():
+        errors.append(".github/workflows/release.yml must not reference ed2k-server")
+    return errors
 
 
 def maintainability_advisories(

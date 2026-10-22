@@ -49,9 +49,73 @@ def write_candidate_evidence(release_dir: Path, version: str) -> str:
     )
     for name in names:
         (release_dir / name).write_bytes(f"payload:{name}".encode("ascii"))
+    package_smoke_assets = {
+        "windows-x64": [f"{stem}-windows-x64.zip"],
+        "windows-arm64": [f"{stem}-windows-arm64.zip"],
+        "linux-x64": [
+            f"{stem}-linux-amd64.deb",
+            f"{stem}-linux-x86_64.AppImage",
+        ],
+        "linux-arm64": [
+            f"{stem}-linux-arm64.deb",
+            f"{stem}-linux-aarch64.AppImage",
+        ],
+        "macos-x64": [f"{stem}-macos-x64.dmg"],
+        "macos-arm64": [f"{stem}-macos-arm64.dmg"],
+    }
+    for platform, assets in package_smoke_assets.items():
+        write_package_smoke_report(release_dir, version, platform, assets)
     digest = f"sha256:{'a' * 64}"
     (release_dir / f"{stem}-multiarch.oci.digest").write_text(f"{digest}\n", encoding="utf-8")
     return digest
+
+
+def write_package_smoke_report(
+    release_dir: Path,
+    version: str,
+    platform: str,
+    assets: list[str],
+) -> Path:
+    payload_sha256 = "b" * 64
+    payload_size = 262_144
+    report = {
+        "schema": "emulebb.rust.package-smoke/2",
+        "platform": platform,
+        "results": [
+            {
+                "asset": asset,
+                "status": "passed",
+                "localTransfer": {
+                    "payload": {
+                        "name": "emulebb-package-smoke.bin",
+                        "sizeBytes": payload_size,
+                        "sha256": payload_sha256,
+                    },
+                    "sharedFile": {
+                        "hash": "c" * 32,
+                        "name": "emulebb-package-smoke.bin",
+                        "sizeBytes": payload_size,
+                    },
+                    "transferAccepted": True,
+                    "delivery": {
+                        "hash": "c" * 32,
+                        "state": "completed",
+                        "completedBytes": payload_size,
+                        "deliveredPathWithinIncoming": True,
+                        "deliveredSha256": payload_sha256,
+                        "observations": [],
+                    },
+                    "sourceDiscovery": "ed2k-link-direct-source",
+                    "publicDiscoveryDisabled": True,
+                    "gracefulShutdowns": 2,
+                },
+            }
+            for asset in assets
+        ],
+    }
+    path = release_dir / f"emulebb-rust-v{version}-package-smoke-{platform}.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
 
 
 class TestReleaseIdentity(unittest.TestCase):
@@ -215,10 +279,113 @@ class TestCandidateManifest(unittest.TestCase):
 
             self.assertEqual(manifest["source"]["emulebbRust"], "1" * 40)
             self.assertEqual(manifest["ociManifestDigest"], expected_digest)
+            self.assertEqual(manifest["formatVersion"], 2)
+            self.assertEqual(
+                {evidence["platform"] for evidence in manifest["packageSmoke"]},
+                {
+                    "windows-x64",
+                    "windows-arm64",
+                    "linux-x64",
+                    "linux-arm64",
+                    "macos-x64",
+                    "macos-arm64",
+                },
+            )
             artifact_names = {artifact["name"] for artifact in manifest["artifacts"]}
             self.assertIn(f"emulebb-rust-v{version}-windows-x64.zip", artifact_names)
+            self.assertIn(
+                f"emulebb-rust-v{version}-package-smoke-windows-x64.json",
+                artifact_names,
+            )
             self.assertNotIn(output.name, artifact_names)
             self.assertEqual(json.loads(output.read_text(encoding="utf-8")), manifest)
+
+    def test_rejects_missing_package_smoke_report(self) -> None:
+        version = "0.1.0-beta.2"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            write_candidate_evidence(release_dir, version)
+            (release_dir / f"emulebb-rust-v{version}-package-smoke-macos-arm64.json").unlink()
+
+            with self.assertRaisesRegex(RuntimeError, "candidate release evidence is missing"):
+                PUBLISH.write_candidate_manifest(
+                    release_dir=release_dir,
+                    output=release_dir / "candidate.json",
+                    release_version=version,
+                    channel="candidate",
+                    source_sha="1" * 40,
+                    support_refs={"emulebbBuild": "2" * 40},
+                    repository="emulebb/emulebb-rust",
+                    run_id="123",
+                    run_attempt="1",
+                )
+
+    def test_rejects_failed_package_transfer(self) -> None:
+        version = "0.1.0-beta.2"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            write_candidate_evidence(release_dir, version)
+            report_path = release_dir / f"emulebb-rust-v{version}-package-smoke-windows-x64.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["results"][0]["status"] = "failed"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "result 0 did not pass"):
+                PUBLISH.write_candidate_manifest(
+                    release_dir=release_dir,
+                    output=release_dir / "candidate.json",
+                    release_version=version,
+                    channel="candidate",
+                    source_sha="1" * 40,
+                    support_refs={"emulebbBuild": "2" * 40},
+                    repository="emulebb/emulebb-rust",
+                    run_id="123",
+                    run_attempt="1",
+                )
+
+    def test_rejects_malformed_package_smoke_report(self) -> None:
+        version = "0.1.0-beta.2"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            write_candidate_evidence(release_dir, version)
+            report_path = release_dir / f"emulebb-rust-v{version}-package-smoke-macos-x64.json"
+            report_path.write_text("{not-json", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "could not read package smoke report"):
+                PUBLISH.write_candidate_manifest(
+                    release_dir=release_dir,
+                    output=release_dir / "candidate.json",
+                    release_version=version,
+                    channel="candidate",
+                    source_sha="1" * 40,
+                    support_refs={"emulebbBuild": "2" * 40},
+                    repository="emulebb/emulebb-rust",
+                    run_id="123",
+                    run_attempt="1",
+                )
+
+    def test_rejects_package_transfer_digest_mismatch(self) -> None:
+        version = "0.1.0-beta.2"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            write_candidate_evidence(release_dir, version)
+            report_path = release_dir / f"emulebb-rust-v{version}-package-smoke-linux-x64.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["results"][0]["localTransfer"]["delivery"]["deliveredSha256"] = "d" * 64
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "delivered SHA-256 does not match"):
+                PUBLISH.write_candidate_manifest(
+                    release_dir=release_dir,
+                    output=release_dir / "candidate.json",
+                    release_version=version,
+                    channel="candidate",
+                    source_sha="1" * 40,
+                    support_refs={"emulebbBuild": "2" * 40},
+                    repository="emulebb/emulebb-rust",
+                    run_id="123",
+                    run_attempt="1",
+                )
 
     def test_rejects_mutable_support_ref(self) -> None:
         version = "0.1.0-beta.2"
@@ -282,7 +449,7 @@ class TestCandidateManifest(unittest.TestCase):
             )
             self.assertEqual(
                 json.loads(output.read_text(encoding="utf-8"))["formatVersion"],
-                1,
+                2,
             )
 
 

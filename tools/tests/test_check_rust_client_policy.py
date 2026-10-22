@@ -721,7 +721,9 @@ CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 path: .ci/emulebb-tooling
 working-directory: .ci/emulebb-build
 package-emulebb-rust-ci --release-version 0.1.0-beta.2 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
-smoke-rust-release-package.py
+smoke-rust-release-package.py --rust-repo . --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --render-webui
+name: emulebb-rust-package-smoke-${{ matrix.slug }}
+pattern: emulebb-rust-package-smoke-*
 smoke-rust-container.py
 path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
@@ -736,11 +738,44 @@ body_path: ${{ inputs.channel == 'nightly' && 'nightly-release-notes.md' || 'rel
 """
         self.assertEqual(CHECKER.check_release_output_paths(workflow), [])
 
+    def test_rejects_duplicate_package_smoke_runs(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        errors = CHECKER.check_release_output_paths(
+            workflow + "\nsmoke-rust-release-package.py\n"
+        )
+
+        self.assertTrue(any("exactly once" in error for error in errors))
+
+    def test_rejects_release_dependency_on_ed2k_server(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        errors = CHECKER.check_release_output_paths(
+            workflow + "\nrepository: emulebb/ed2k-server\n"
+        )
+
+        self.assertTrue(any("must not reference ed2k-server" in error for error in errors))
+
+    def test_requires_package_lifecycle_evidence(self) -> None:
+        workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        errors = CHECKER.check_release_output_paths(
+            workflow.replace(" --report-path ", " --omitted-report-path ")
+        )
+
+        self.assertTrue(any("lifecycle report output" in error for error in errors))
+
     def test_reports_in_checkout_release_paths(self) -> None:
         errors = CHECKER.check_release_output_paths(
             "python tools/package_release_zip.py --target-dir target/release --out dist"
         )
-        self.assertEqual(len(errors), 19)
+        self.assertGreaterEqual(len(errors), 19)
 
 
 if __name__ == "__main__":

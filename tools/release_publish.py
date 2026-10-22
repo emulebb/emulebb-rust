@@ -16,6 +16,8 @@ from typing import Sequence
 ROOT = Path(__file__).resolve().parents[1]
 OCI_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+ED2K_HASH_RE = re.compile(r"[0-9a-f]{32}")
 SEMVER_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\."
     r"(?:0|[1-9][0-9]*)\."
@@ -35,6 +37,16 @@ BETA_VERSION_RE = re.compile(
 )
 NIGHTLY_SUFFIX_RE = re.compile(r"nightly\.[0-9]{8}\.g[0-9a-f]{7,40}")
 MAX_INDEX_BYTES = 1024 * 1024
+MAX_PACKAGE_SMOKE_REPORT_BYTES = 1024 * 1024
+PACKAGE_SMOKE_SCHEMA = "emulebb.rust.package-smoke/2"
+PACKAGE_SMOKE_ASSET_SUFFIXES = {
+    "windows-x64": ("windows-x64.zip",),
+    "windows-arm64": ("windows-arm64.zip",),
+    "linux-x64": ("linux-amd64.deb", "linux-x86_64.AppImage"),
+    "linux-arm64": ("linux-arm64.deb", "linux-aarch64.AppImage"),
+    "macos-x64": ("macos-x64.dmg",),
+    "macos-arm64": ("macos-arm64.dmg",),
+}
 
 
 def _sha256(path: Path) -> str:
@@ -182,6 +194,128 @@ def oci_archive_digest(path: Path) -> str:
     return digest
 
 
+def _package_smoke_requirements(stem: str) -> dict[str, tuple[str, tuple[str, ...]]]:
+    return {
+        platform: (
+            f"{stem}-package-smoke-{platform}.json",
+            tuple(f"{stem}-{suffix}" for suffix in suffixes),
+        )
+        for platform, suffixes in PACKAGE_SMOKE_ASSET_SUFFIXES.items()
+    }
+
+
+def _object(value: object, *, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} must be an object")
+    return value
+
+
+def _positive_int(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise RuntimeError(f"{label} must be a positive integer")
+    return value
+
+
+def _validate_package_smoke_result(
+    result: object,
+    *,
+    report_name: str,
+    index: int,
+) -> str:
+    label = f"package smoke report {report_name} result {index}"
+    result_object = _object(result, label=label)
+    asset = result_object.get("asset")
+    if not isinstance(asset, str) or not asset:
+        raise RuntimeError(f"{label} has an invalid asset name")
+    if result_object.get("status") != "passed":
+        raise RuntimeError(f"{label} did not pass")
+
+    transfer = _object(result_object.get("localTransfer"), label=f"{label} localTransfer")
+    payload = _object(transfer.get("payload"), label=f"{label} payload")
+    payload_name = payload.get("name")
+    if not isinstance(payload_name, str) or not payload_name:
+        raise RuntimeError(f"{label} payload name is invalid")
+    payload_size = _positive_int(payload.get("sizeBytes"), label=f"{label} payload size")
+    payload_sha256 = payload.get("sha256")
+    if not isinstance(payload_sha256, str) or SHA256_RE.fullmatch(payload_sha256) is None:
+        raise RuntimeError(f"{label} payload SHA-256 is invalid")
+
+    shared_file = _object(transfer.get("sharedFile"), label=f"{label} sharedFile")
+    shared_hash = shared_file.get("hash")
+    if not isinstance(shared_hash, str) or ED2K_HASH_RE.fullmatch(shared_hash) is None:
+        raise RuntimeError(f"{label} shared eD2k hash is invalid")
+    if shared_file.get("name") != payload_name or shared_file.get("sizeBytes") != payload_size:
+        raise RuntimeError(f"{label} shared file does not match the payload")
+
+    if transfer.get("transferAccepted") is not True:
+        raise RuntimeError(f"{label} transfer was not accepted")
+    if transfer.get("sourceDiscovery") != "ed2k-link-direct-source":
+        raise RuntimeError(f"{label} did not use direct eD2k source discovery")
+    if transfer.get("publicDiscoveryDisabled") is not True:
+        raise RuntimeError(f"{label} did not disable public discovery")
+    if transfer.get("gracefulShutdowns") != 2:
+        raise RuntimeError(f"{label} did not record two graceful shutdowns")
+
+    delivery = _object(transfer.get("delivery"), label=f"{label} delivery")
+    if delivery.get("hash") != shared_hash:
+        raise RuntimeError(f"{label} delivered transfer hash does not match")
+    if delivery.get("state") != "completed":
+        raise RuntimeError(f"{label} transfer did not complete")
+    if delivery.get("completedBytes") != payload_size:
+        raise RuntimeError(f"{label} completed byte count does not match the payload")
+    if delivery.get("deliveredPathWithinIncoming") is not True:
+        raise RuntimeError(f"{label} was not delivered inside the incoming directory")
+    if delivery.get("deliveredSha256") != payload_sha256:
+        raise RuntimeError(f"{label} delivered SHA-256 does not match the payload")
+    return asset
+
+
+def _validate_package_smoke_reports(
+    release_dir: Path,
+    stem: str,
+) -> list[dict[str, object]]:
+    evidence = []
+    for platform, (report_name, expected_assets) in _package_smoke_requirements(stem).items():
+        report_path = release_dir / report_name
+        if report_path.stat().st_size > MAX_PACKAGE_SMOKE_REPORT_BYTES:
+            raise RuntimeError(
+                f"package smoke report {report_name} exceeds "
+                f"{MAX_PACKAGE_SMOKE_REPORT_BYTES} bytes"
+            )
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"could not read package smoke report {report_name}: {error}") from error
+        report_object = _object(report, label=f"package smoke report {report_name}")
+        if report_object.get("schema") != PACKAGE_SMOKE_SCHEMA:
+            raise RuntimeError(f"package smoke report {report_name} has an invalid schema")
+        if report_object.get("platform") != platform:
+            raise RuntimeError(f"package smoke report {report_name} has the wrong platform")
+        results = report_object.get("results")
+        if not isinstance(results, list) or not results:
+            raise RuntimeError(f"package smoke report {report_name} has no results")
+        actual_assets = [
+            _validate_package_smoke_result(result, report_name=report_name, index=index)
+            for index, result in enumerate(results)
+        ]
+        if len(actual_assets) != len(set(actual_assets)):
+            raise RuntimeError(f"package smoke report {report_name} repeats an asset")
+        if set(actual_assets) != set(expected_assets):
+            raise RuntimeError(
+                f"package smoke report {report_name} covers the wrong assets: "
+                + ", ".join(sorted(actual_assets))
+            )
+        evidence.append(
+            {
+                "platform": platform,
+                "report": report_name,
+                "sha256": _sha256(report_path),
+                "assets": sorted(expected_assets),
+            }
+        )
+    return evidence
+
+
 def write_candidate_manifest(
     *,
     release_dir: Path,
@@ -230,6 +364,10 @@ def write_candidate_manifest(
         f"{stem}-macos-x64.dmg",
         f"{stem}-macos-arm64.dmg",
     }
+    required_files.update(
+        report_name
+        for report_name, _expected_assets in _package_smoke_requirements(stem).values()
+    )
     available = {
         path.name
         for path in release_dir.iterdir()
@@ -243,6 +381,7 @@ def write_candidate_manifest(
     oci_digest = oci_digest_path.read_text(encoding="utf-8").strip()
     if OCI_DIGEST_RE.fullmatch(oci_digest) is None:
         raise RuntimeError("candidate OCI digest file is invalid")
+    package_smoke = _validate_package_smoke_reports(release_dir, stem)
 
     artifacts = []
     for path in sorted(release_dir.iterdir(), key=lambda candidate: candidate.name):
@@ -261,7 +400,7 @@ def write_candidate_manifest(
         )
 
     manifest: dict[str, object] = {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "releaseVersion": release_version,
         "channel": channel,
         "source": revisions,
@@ -271,6 +410,7 @@ def write_candidate_manifest(
             "runAttempt": run_attempt,
         },
         "ociManifestDigest": oci_digest,
+        "packageSmoke": package_smoke,
         "artifacts": artifacts,
     }
     output.write_text(
