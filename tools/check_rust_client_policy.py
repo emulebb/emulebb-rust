@@ -1427,6 +1427,8 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "smoke-rust-container.py": "first-run LinuxServer image smoke",
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
         "assemble-emulebb-rust-release-ci": "verified release assembly",
+        "native-package-smoke:": "isolated package lifecycle job",
+        "needs: [prepare, native-package-smoke, image-candidate]": "candidate dependency on package lifecycle evidence",
         "assemble-candidate:": "non-publishing candidate assembly job",
         "ref: ${{ github.workflow_sha }}": "trusted release-control checkout",
         "candidate-manifest": "candidate revision and evidence manifest",
@@ -1448,6 +1450,35 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         )
     if "ed2k-server" in text.lower():
         errors.append(".github/workflows/release.yml must not reference ed2k-server")
+    smoke_job = re.search(
+        r"(?ms)^  native-package-smoke:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+        text,
+    )
+    if smoke_job is None:
+        errors.append(
+            ".github/workflows/release.yml must isolate packaged lifecycle execution"
+        )
+    else:
+        smoke_body = smoke_job.group("body")
+        smoke_requirements = {
+            "needs: [prepare, native-package]": "depend only on completed native packages",
+            "ref: ${{ github.workflow_sha }}": "use trusted release-control source",
+            "smoke-rust-release-package.py": "run the pinned package smoke harness",
+        }
+        errors.extend(
+            ".github/workflows/release.yml native-package-smoke must " + description
+            for fragment, description in smoke_requirements.items()
+            if fragment not in smoke_body
+        )
+    native_job = re.search(
+        r"(?ms)^  native-package:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+        text,
+    )
+    if native_job is not None and "smoke-rust-release-package.py" in native_job.group("body"):
+        errors.append(
+            ".github/workflows/release.yml must not execute packaged lifecycle smoke "
+            "after the selectable candidate checkout"
+        )
     return errors
 
 
