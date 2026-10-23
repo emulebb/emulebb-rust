@@ -12,9 +12,8 @@ use std::{
 use emulebb_core::{
     AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
     Search, SearchResult, SearchSpec, ServerInfo, SharedFileListItem, SharedFilePublishState,
-    Status, Transfer,
-    TransferEventDiagnostics, TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus,
-    VpnGuardStatus, normal_path_display, normalize_ed2k_file_name,
+    Status, Transfer, TransferEventDiagnostics, TransferThroughputStats, UploadPolicyMetrics,
+    VpnGuardProbeStatus, VpnGuardStatus, normal_path_display, normalize_ed2k_file_name,
 };
 use serde_json::{Value, json};
 
@@ -702,9 +701,7 @@ fn shared_file_response_with_publication(
     let path = managed_shared_file_path(share);
     let published_ed2k = publication
         .as_ref()
-        .map_or(true, |status| {
-            status.ed2k.state == SharedFilePublishState::Published
-        });
+        .is_none_or(|status| status.ed2k.state == SharedFilePublishState::Published);
     SharedFileResponse {
         hash: share.hash.clone(),
         name: share.name.clone(),

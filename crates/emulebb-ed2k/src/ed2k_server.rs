@@ -131,9 +131,9 @@ use tag_codec::decode_ed2k_string;
 use tag_codec::decode_tag;
 use types::ServerUdpPacket;
 pub use types::{
-    Ed2kFoundSource, Ed2kFoundSourceKey, Ed2kSearchFile, Ed2kServerConnectMode,
-    Ed2kOfferFilePublishPhase, Ed2kOfferFilesPublication, Ed2kServerConnectPlan,
-    Ed2kServerLoopOptions, Ed2kServerSearchObservation, Ed2kServerState,
+    Ed2kFoundSource, Ed2kFoundSourceKey, Ed2kOfferFilePublishPhase, Ed2kOfferFilesPublication,
+    Ed2kSearchFile, Ed2kServerConnectMode, Ed2kServerConnectPlan, Ed2kServerLoopOptions,
+    Ed2kServerSearchObservation, Ed2kServerState,
 };
 #[cfg(test)]
 use udp::derive_server_udp_cipher;

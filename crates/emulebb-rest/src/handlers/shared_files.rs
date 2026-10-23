@@ -34,7 +34,12 @@ pub(crate) async fn shared_files(
     if let Err(message) = validate_shared_file_query(&query) {
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message).into_response();
     }
-    let cursor = match query.cursor.as_deref().map(decode_shared_file_cursor).transpose() {
+    let cursor = match query
+        .cursor
+        .as_deref()
+        .map(decode_shared_file_cursor)
+        .transpose()
+    {
         Ok(cursor) => cursor,
         Err(message) => {
             return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message).into_response();
@@ -86,7 +91,15 @@ fn validate_shared_file_query(query: &SharedFilesQuery) -> Result<(), String> {
     validate_optional_token(
         "priority",
         query.priority.as_deref(),
-        &["auto", "verylow", "low", "normal", "high", "release", "not-published"],
+        &[
+            "auto",
+            "verylow",
+            "low",
+            "normal",
+            "high",
+            "release",
+            "not-published",
+        ],
     )?;
     Ok(())
 }
@@ -99,7 +112,10 @@ fn validate_optional_token(
     let Some(value) = value else {
         return Ok(());
     };
-    if allowed.iter().any(|allowed| value.eq_ignore_ascii_case(allowed)) {
+    if allowed
+        .iter()
+        .any(|allowed| value.eq_ignore_ascii_case(allowed))
+    {
         return Ok(());
     }
     Err(format!("{field} has an unsupported value"))

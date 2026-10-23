@@ -292,12 +292,11 @@ pub use rest_model::{
     SearchSpec, ServerCreate, ServerInfo, ServerUpdate, SharedFileKadKeywordPublish,
     SharedFileListCursor, SharedFileListItem, SharedFileListPage, SharedFileListQuery,
     SharedFilePublicationStatus, SharedFilePublishLane, SharedFilePublishState, SharedFileUpdate,
-    Status, Transfer,
-    TransferComment, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
-    TransferEventResetReason, TransferEventType, TransferFileNameObservation,
-    TransferNameCandidate, TransferNameConsensus, TransferPart, TransferSource, TransferStats,
-    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
-    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    Status, Transfer, TransferComment, TransferCreate, TransferDetails, TransferEvent,
+    TransferEventDiagnostics, TransferEventResetReason, TransferEventType,
+    TransferFileNameObservation, TransferNameCandidate, TransferNameConsensus, TransferPart,
+    TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
+    UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,

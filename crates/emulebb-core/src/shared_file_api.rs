@@ -1,8 +1,6 @@
 use super::*;
 use crate::shared_file_publication::TrackedPublishPhase;
-use emulebb_ed2k::ed2k_server::{
-    Ed2kOfferFilePublishPhase, Ed2kOfferFilesPublication,
-};
+use emulebb_ed2k::ed2k_server::{Ed2kOfferFilePublishPhase, Ed2kOfferFilesPublication};
 
 struct SharedFilePublicationContext {
     ed2k_connected: bool,
@@ -237,12 +235,8 @@ impl EmulebbCore {
                 |tracked| SharedFilePublishLane {
                     state: match tracked.phase {
                         Ed2kOfferFilePublishPhase::Queued => SharedFilePublishState::Queued,
-                        Ed2kOfferFilePublishPhase::Publishing => {
-                            SharedFilePublishState::Publishing
-                        }
-                        Ed2kOfferFilePublishPhase::Published => {
-                            SharedFilePublishState::Published
-                        }
+                        Ed2kOfferFilePublishPhase::Publishing => SharedFilePublishState::Publishing,
+                        Ed2kOfferFilePublishPhase::Published => SharedFilePublishState::Published,
                         Ed2kOfferFilePublishPhase::Failed => SharedFilePublishState::Failed,
                     },
                     last_success_at_ms: tracked.last_success_at_ms,
@@ -258,11 +252,8 @@ impl EmulebbCore {
             context.kad_enabled,
             &context.kad_diagnostics,
         );
-        let kad_source = kad_source_publication_status(
-            &tracked,
-            context.kad_enabled,
-            &context.kad_diagnostics,
-        );
+        let kad_source =
+            kad_source_publication_status(&tracked, context.kad_enabled, &context.kad_diagnostics);
         SharedFilePublicationStatus {
             ed2k,
             kad_keyword,

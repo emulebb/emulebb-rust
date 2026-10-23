@@ -38,17 +38,13 @@ impl SharedKadFilePublication {
                 .get(file_hash)
                 .and_then(|state| state.keywords.get(keyword))
                 .and_then(|attempt| attempt.last_success_at_ms);
-            files
-                .entry(file_hash.clone())
-                .or_default()
-                .keywords
-                .insert(
-                    keyword.to_string(),
-                    TrackedPublishAttempt {
-                        phase: TrackedPublishPhase::Publishing,
-                        last_success_at_ms: previous_success,
-                    },
-                );
+            files.entry(file_hash.clone()).or_default().keywords.insert(
+                keyword.to_string(),
+                TrackedPublishAttempt {
+                    phase: TrackedPublishPhase::Publishing,
+                    last_success_at_ms: previous_success,
+                },
+            );
         }
     }
 
@@ -58,9 +54,7 @@ impl SharedKadFilePublication {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let state = files.entry(file_hash.to_string()).or_default();
-        let previous_success = state
-            .source
-            .and_then(|attempt| attempt.last_success_at_ms);
+        let previous_success = state.source.and_then(|attempt| attempt.last_success_at_ms);
         state.source = Some(TrackedPublishAttempt {
             phase: TrackedPublishPhase::Publishing,
             last_success_at_ms: previous_success,
@@ -103,9 +97,7 @@ impl SharedKadFilePublication {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let state = files.entry(file_hash.to_string()).or_default();
-        let previous_success = state
-            .source
-            .and_then(|attempt| attempt.last_success_at_ms);
+        let previous_success = state.source.and_then(|attempt| attempt.last_success_at_ms);
         state.source = Some(TrackedPublishAttempt {
             phase: if succeeded_at_ms.is_some() {
                 TrackedPublishPhase::Published
@@ -190,10 +182,7 @@ mod tests {
         publication.keyword_finished(&hashes, "shared", None);
 
         let failed = publication.snapshot(&hashes[0]);
-        assert_eq!(
-            failed.keywords["shared"].phase,
-            TrackedPublishPhase::Failed
-        );
+        assert_eq!(failed.keywords["shared"].phase, TrackedPublishPhase::Failed);
         assert_eq!(failed.keywords["shared"].last_success_at_ms, Some(42));
 
         publication.keyword_started(&hashes, "shared");
