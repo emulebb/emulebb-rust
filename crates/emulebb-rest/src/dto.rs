@@ -5,7 +5,7 @@
 //! `page()` projections onto the shared `PageQuery`. Extracted verbatim from
 //! `lib.rs` during the maintainability restructuring; behavior is unchanged.
 
-use emulebb_core::{SearchProgress, SearchResult, SearchSpec};
+use emulebb_core::{SearchProgress, SearchResult, SearchSpec, SharedFilePublicationStatus};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +54,7 @@ pub(crate) struct SharedFileResponse {
     pub(crate) has_comment: bool,
     pub(crate) user_rating: u8,
     pub(crate) published_ed2k: bool,
+    pub(crate) publication: Option<SharedFilePublicationStatus>,
     pub(crate) shared_by_rule: bool,
     pub(crate) ed2k_link: String,
 }
@@ -93,9 +94,10 @@ pub(crate) struct PageQuery {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SharedFilesQuery {
-    pub(crate) offset: Option<usize>,
     pub(crate) limit: Option<usize>,
-    pub(crate) after_hash: Option<String>,
+    pub(crate) cursor: Option<String>,
+    pub(crate) q: Option<String>,
+    pub(crate) priority: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -1,4 +1,15 @@
 use super::*;
+use crate::shared_file_publication::TrackedPublishPhase;
+use emulebb_ed2k::ed2k_server::{
+    Ed2kOfferFilePublishPhase, Ed2kOfferFilesPublication,
+};
+
+struct SharedFilePublicationContext {
+    ed2k_connected: bool,
+    ed2k_publication: Option<Ed2kOfferFilesPublication>,
+    kad_enabled: bool,
+    kad_diagnostics: KadPublishDiagnostics,
+}
 
 impl EmulebbCore {
     /// Hydrate the first persisted shared-catalog cohort after startup storage
@@ -138,6 +149,127 @@ impl EmulebbCore {
         ))
     }
 
+    pub async fn query_shared_files(
+        &self,
+        query: SharedFileListQuery,
+    ) -> Result<SharedFileListPage> {
+        let context = self.shared_file_publication_context().await;
+        let page = self
+            .ed2k_transfers
+            .query_share_entries(MetadataSharedFileQuery {
+                search: query.search,
+                priority: query.priority,
+                after: query.after.map(metadata_shared_file_cursor),
+                limit: query.limit,
+                count_total: true,
+            })
+            .await?;
+        Ok(SharedFileListPage {
+            items: page
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    let share = self.local_share_from_entry(entry);
+                    let publication = self.shared_file_publication_status(&share, &context);
+                    SharedFileListItem { share, publication }
+                })
+                .collect(),
+            total: page.total,
+            next_cursor: page.next_cursor.map(shared_file_list_cursor),
+        })
+    }
+
+    async fn shared_file_publication_context(&self) -> SharedFilePublicationContext {
+        let server_state = {
+            let runtime = self.ed2k_runtime.lock().await;
+            runtime
+                .as_ref()
+                .map(|runtime| Arc::clone(&runtime.server_state))
+        };
+        let (ed2k_connected, ed2k_publication) = match server_state {
+            Some(server_state) => {
+                let server_state = server_state.read().await;
+                (
+                    server_state.connected,
+                    Some(server_state.offer_files_publication.clone()),
+                )
+            }
+            None => (false, None),
+        };
+        SharedFilePublicationContext {
+            ed2k_connected,
+            ed2k_publication,
+            kad_enabled: self
+                .ed2k_network
+                .as_ref()
+                .is_some_and(|network| network.kad_publish_shared_files),
+            kad_diagnostics: self.kad_publish_diagnostics(),
+        }
+    }
+
+    fn shared_file_publication_status(
+        &self,
+        share: &LocalShare,
+        context: &SharedFilePublicationContext,
+    ) -> SharedFilePublicationStatus {
+        let ed2k = if !shared_file_publish_enabled(&share.priority) {
+            SharedFilePublishLane {
+                state: SharedFilePublishState::Unavailable,
+                last_success_at_ms: None,
+            }
+        } else if !context.ed2k_connected {
+            SharedFilePublishLane {
+                state: SharedFilePublishState::Waiting,
+                last_success_at_ms: None,
+            }
+        } else {
+            let tracked = share.hash.parse::<Ed2kHash>().ok().and_then(|hash| {
+                context
+                    .ed2k_publication
+                    .as_ref()
+                    .and_then(|publication| publication.status(&hash))
+            });
+            tracked.map_or_else(
+                || SharedFilePublishLane {
+                    state: SharedFilePublishState::Queued,
+                    last_success_at_ms: None,
+                },
+                |tracked| SharedFilePublishLane {
+                    state: match tracked.phase {
+                        Ed2kOfferFilePublishPhase::Queued => SharedFilePublishState::Queued,
+                        Ed2kOfferFilePublishPhase::Publishing => {
+                            SharedFilePublishState::Publishing
+                        }
+                        Ed2kOfferFilePublishPhase::Published => {
+                            SharedFilePublishState::Published
+                        }
+                        Ed2kOfferFilePublishPhase::Failed => SharedFilePublishState::Failed,
+                    },
+                    last_success_at_ms: tracked.last_success_at_ms,
+                },
+            )
+        };
+
+        let keyword_terms = significant_keyword_words_unique(&share.name);
+        let tracked = self.kad_file_publication.snapshot(&share.hash);
+        let kad_keyword = kad_keyword_publication_status(
+            &keyword_terms,
+            &tracked,
+            context.kad_enabled,
+            &context.kad_diagnostics,
+        );
+        let kad_source = kad_source_publication_status(
+            &tracked,
+            context.kad_enabled,
+            &context.kad_diagnostics,
+        );
+        SharedFilePublicationStatus {
+            ed2k,
+            kad_keyword,
+            kad_source,
+        }
+    }
+
     fn local_share_from_entry(&self, entry: MetadataTransferShareEntry) -> LocalShare {
         LocalShare {
             hash: entry.file_hash.clone(),
@@ -266,6 +398,21 @@ impl EmulebbCore {
             publish_status_changed,
             rating_changed,
         ) {
+            if let Ok(file_hash) = share.hash.parse::<Ed2kHash>() {
+                let server_state = {
+                    let runtime = self.ed2k_runtime.lock().await;
+                    runtime
+                        .as_ref()
+                        .map(|runtime| Arc::clone(&runtime.server_state))
+                };
+                if let Some(server_state) = server_state {
+                    server_state
+                        .read()
+                        .await
+                        .offer_files_publication
+                        .mark_queued(file_hash);
+                }
+            }
             self.queue_ed2k_shared_catalog_publish();
         }
         Ok(self.share(hash).await)
@@ -465,6 +612,106 @@ impl EmulebbCore {
     /// Stop the live shared-directory monitor (if running). Idempotent.
     pub fn stop_shared_directory_monitor(&self) {
         shared_dir_monitor::stop_shared_directory_monitor(self);
+    }
+}
+
+fn metadata_shared_file_cursor(cursor: SharedFileListCursor) -> MetadataSharedFileCursor {
+    MetadataSharedFileCursor {
+        sort_path: cursor.sort_path,
+        file_hash: cursor.hash,
+    }
+}
+
+fn shared_file_list_cursor(cursor: MetadataSharedFileCursor) -> SharedFileListCursor {
+    SharedFileListCursor {
+        sort_path: cursor.sort_path,
+        hash: cursor.file_hash,
+    }
+}
+
+fn kad_keyword_publication_status(
+    keyword_terms: &[String],
+    tracked: &shared_file_publication::KadFilePublishState,
+    kad_enabled: bool,
+    diagnostics: &KadPublishDiagnostics,
+) -> SharedFileKadKeywordPublish {
+    if !kad_enabled || keyword_terms.is_empty() {
+        return SharedFileKadKeywordPublish {
+            state: SharedFilePublishState::Unavailable,
+            published_keywords: 0,
+            total_keywords: keyword_terms.len(),
+            last_success_at_ms: None,
+        };
+    }
+    let attempts = keyword_terms
+        .iter()
+        .filter_map(|keyword| tracked.keywords.get(keyword))
+        .collect::<Vec<_>>();
+    let published_keywords = attempts
+        .iter()
+        .filter(|attempt| attempt.last_success_at_ms.is_some())
+        .count();
+    let last_success_at_ms = attempts
+        .iter()
+        .filter_map(|attempt| attempt.last_success_at_ms)
+        .max();
+    let state = if attempts
+        .iter()
+        .any(|attempt| attempt.phase == TrackedPublishPhase::Publishing)
+    {
+        SharedFilePublishState::Publishing
+    } else if attempts
+        .iter()
+        .any(|attempt| attempt.phase == TrackedPublishPhase::Failed)
+    {
+        SharedFilePublishState::Failed
+    } else if published_keywords == keyword_terms.len() {
+        SharedFilePublishState::Published
+    } else if published_keywords > 0 {
+        SharedFilePublishState::Partial
+    } else if !diagnostics.running || !diagnostics.bootstrapped || !diagnostics.gate_allowed {
+        SharedFilePublishState::Waiting
+    } else {
+        SharedFilePublishState::Queued
+    };
+    SharedFileKadKeywordPublish {
+        state,
+        published_keywords,
+        total_keywords: keyword_terms.len(),
+        last_success_at_ms,
+    }
+}
+
+fn kad_source_publication_status(
+    tracked: &shared_file_publication::KadFilePublishState,
+    kad_enabled: bool,
+    diagnostics: &KadPublishDiagnostics,
+) -> SharedFilePublishLane {
+    if !kad_enabled {
+        return SharedFilePublishLane {
+            state: SharedFilePublishState::Unavailable,
+            last_success_at_ms: None,
+        };
+    }
+    match tracked.source {
+        Some(attempt) => SharedFilePublishLane {
+            state: match attempt.phase {
+                TrackedPublishPhase::Publishing => SharedFilePublishState::Publishing,
+                TrackedPublishPhase::Published => SharedFilePublishState::Published,
+                TrackedPublishPhase::Failed => SharedFilePublishState::Failed,
+            },
+            last_success_at_ms: attempt.last_success_at_ms,
+        },
+        None if !diagnostics.running || !diagnostics.bootstrapped || !diagnostics.gate_allowed => {
+            SharedFilePublishLane {
+                state: SharedFilePublishState::Waiting,
+                last_success_at_ms: None,
+            }
+        }
+        None => SharedFilePublishLane {
+            state: SharedFilePublishState::Queued,
+            last_success_at_ms: None,
+        },
     }
 }
 

@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    MetadataStore, MetadataTransferCounts, MetadataTransferDirectoryDeletionAuthority,
-    MetadataTransferPublishEntry, MetadataTransferShareEntry, NativeFileFingerprint,
-    NativeFileIdentity,
+    MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore, MetadataTransferCounts,
+    MetadataTransferDirectoryDeletionAuthority, MetadataTransferPublishEntry,
+    MetadataTransferShareEntry, NativeFileFingerprint, NativeFileIdentity,
 };
 use uuid::Uuid;
 
@@ -93,6 +93,19 @@ impl Ed2kTransferRuntime {
         .map_err(anyhow::Error::from)??;
         let total = self.shared_catalog.read().await.completed_verified_len();
         Ok((entries, total))
+    }
+
+    /// Return one filtered, path-ordered REST shared-file page.
+    pub async fn query_share_entries(
+        &self,
+        query: MetadataSharedFileQuery,
+    ) -> Result<MetadataSharedFilePage> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            metadata.query_completed_transfer_share_entries(&query)
+        })
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     /// Return completed download hashes that still need incoming delivery.
