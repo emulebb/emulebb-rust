@@ -203,6 +203,28 @@ pub struct MetadataTransferShareEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSharedFileCursor {
+    pub sort_path: String,
+    pub file_hash: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetadataSharedFileQuery {
+    pub search: Option<String>,
+    pub priority: Option<String>,
+    pub after: Option<MetadataSharedFileCursor>,
+    pub limit: usize,
+    pub count_total: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSharedFilePage {
+    pub entries: Vec<MetadataTransferShareEntry>,
+    pub total: usize,
+    pub next_cursor: Option<MetadataSharedFileCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataShareInPlaceReloadEntry {
     pub file_hash: String,
     pub file_size: u64,

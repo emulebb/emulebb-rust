@@ -67,6 +67,82 @@ fn completed_pending_download_manifest() -> MetadataTransferManifest {
     manifest
 }
 
+#[test]
+fn shared_file_query_searches_filters_and_pages_by_path() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut alpha = source_backed_manifest();
+    alpha.file_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    alpha.display_name = "Alpha Sample.bin".to_string();
+    alpha.source_path = Some("/library/Alpha Sample.bin".into());
+    alpha.source_fingerprint = Some(fingerprint(alpha.file_size, 101));
+
+    let mut zeta = source_backed_manifest();
+    zeta.file_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+    zeta.display_name = "Zeta Sample.bin".to_string();
+    zeta.source_path = Some("/library/Zeta Sample.bin".into());
+    zeta.source_fingerprint = Some(fingerprint(zeta.file_size, 102));
+
+    let mut release = source_backed_manifest();
+    release.file_hash = "cccccccccccccccccccccccccccccccc".to_string();
+    release.display_name = "Release Archive.bin".to_string();
+    release.source_path = Some("/release/Archive.bin".into());
+    release.source_fingerprint = Some(fingerprint(release.file_size, 103));
+    release.upload_priority = "release".to_string();
+
+    for manifest in [&alpha, &zeta, &release] {
+        store.upsert_transfer_manifest(manifest).unwrap();
+    }
+
+    let first = store
+        .query_completed_transfer_share_entries(&MetadataSharedFileQuery {
+            search: Some("sample".to_string()),
+            priority: Some("normal".to_string()),
+            after: None,
+            limit: 1,
+            count_total: true,
+        })
+        .unwrap();
+    assert_eq!(first.total, 2);
+    assert_eq!(first.entries[0].file_hash, alpha.file_hash);
+    let cursor = first.next_cursor.expect("next cursor");
+
+    let second = store
+        .query_completed_transfer_share_entries(&MetadataSharedFileQuery {
+            search: Some("sample".to_string()),
+            priority: Some("normal".to_string()),
+            after: Some(cursor),
+            limit: 1,
+            count_total: true,
+        })
+        .unwrap();
+    assert_eq!(second.total, 2);
+    assert_eq!(second.entries[0].file_hash, zeta.file_hash);
+    assert!(second.next_cursor.is_none());
+
+    let by_path = store
+        .query_completed_transfer_share_entries(&MetadataSharedFileQuery {
+            search: Some("release/archive".to_string()),
+            priority: None,
+            after: None,
+            limit: 10,
+            count_total: true,
+        })
+        .unwrap();
+    assert_eq!(by_path.total, 1);
+    assert_eq!(by_path.entries[0].file_hash, release.file_hash);
+
+    let by_hash = store
+        .query_completed_transfer_share_entries(&MetadataSharedFileQuery {
+            search: Some("cccccccccccc".to_string()),
+            priority: Some("release".to_string()),
+            after: None,
+            limit: 10,
+            count_total: true,
+        })
+        .unwrap();
+    assert_eq!(by_hash.entries[0].file_hash, release.file_hash);
+}
+
 fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
     NativeFileFingerprint {
         identity: crate::NativeFileIdentity::Unix {

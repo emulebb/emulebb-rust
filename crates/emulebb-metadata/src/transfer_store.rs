@@ -17,6 +17,7 @@ use crate::{
         MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
         MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
         MetadataTransferFileNameObservation, MetadataTransferManifest,
+        MetadataSharedFileCursor, MetadataSharedFilePage, MetadataSharedFileQuery,
         MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
         MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
     },
@@ -1565,6 +1566,161 @@ impl super::MetadataStore {
         let has_more = entries.len() > limit;
         entries.truncate(limit);
         Ok((entries, has_more))
+    }
+
+    /// Read one path-ordered shared-file page with an exact-phrase search and
+    /// optional upload-priority filter.
+    pub fn query_completed_transfer_share_entries(
+        &self,
+        query: &MetadataSharedFileQuery,
+    ) -> Result<MetadataSharedFilePage> {
+        let search = query
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_lowercase);
+        let priority = query
+            .priority
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_lowercase);
+        let cursor_path = query.after.as_ref().map(|cursor| cursor.sort_path.clone());
+        let cursor_hash = query
+            .after
+            .as_ref()
+            .map(|cursor| {
+                decode_fixed_hex(&cursor.file_hash, 16, "ED2K shared-file cursor hash")?;
+                Ok::<String, anyhow::Error>(cursor.file_hash.to_lowercase())
+            })
+            .transpose()?;
+        let conn = self.connection()?;
+        let shared_cte = r#"
+            WITH shared AS (
+                SELECT lower(hex(known_files.ed2k_hash)) AS file_hash,
+                       known_files.display_name,
+                       known_files.size_bytes,
+                       coalesce(known_files.part_count, 0) AS part_count,
+                       effective_paths.platform,
+                       effective_paths.native_path,
+                       CASE
+                           WHEN known_files.aich_root IS NULL THEN NULL
+                           ELSE lower(hex(known_files.aich_root))
+                       END AS aich_root,
+                       known_files.upload_priority,
+                       known_files.auto_upload_priority,
+                       known_files.all_time_uploaded_bytes,
+                       known_files.all_time_upload_requests,
+                       known_files.all_time_upload_accepts,
+                       known_files.comment,
+                       known_files.rating,
+                       lower(coalesce(effective_paths.display_path, known_files.display_name)) AS sort_path,
+                       lower(coalesce(effective_paths.display_path, '')) AS searchable_path
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                LEFT JOIN local_paths effective_paths ON effective_paths.id = COALESCE(
+                    transfers.source_path_id,
+                    (
+                        SELECT shared_file_sources.path_id
+                        FROM shared_file_sources
+                        JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                        WHERE shared_file_sources.known_file_id = known_files.id
+                        ORDER BY local_paths.display_path, local_paths.native_path
+                        LIMIT 1
+                    )
+                )
+                WHERE (
+                        known_files.completed != 0
+                        OR EXISTS (
+                            SELECT 1 FROM shared_file_sources
+                            WHERE shared_file_sources.known_file_id = known_files.id
+                        )
+                      )
+                  AND transfers.delete_requested_at_ms IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM unshared_files
+                      WHERE unshared_files.known_file_id = known_files.id
+                  )
+            )
+        "#;
+        let filtered_where = r#"
+            WHERE (?1 IS NULL
+                    OR instr(lower(display_name), ?1) > 0
+                    OR instr(searchable_path, ?1) > 0
+                    OR instr(file_hash, ?1) > 0)
+              AND (?2 IS NULL OR lower(upload_priority) = ?2)
+        "#;
+        let total = if query.count_total {
+            let count_sql = format!("{shared_cte} SELECT count(*) FROM shared {filtered_where}");
+            conn.query_row(&count_sql, params![search, priority], |row| {
+                row.get::<_, i64>(0)
+            })? as usize
+        } else {
+            0
+        };
+        let page_sql = format!(
+            "{shared_cte}
+             SELECT file_hash, display_name, size_bytes, part_count, platform, native_path,
+                    aich_root, upload_priority, auto_upload_priority,
+                    all_time_uploaded_bytes, all_time_upload_requests,
+                    all_time_upload_accepts, comment, rating, sort_path
+             FROM shared
+             {filtered_where}
+               AND (?3 IS NULL
+                    OR sort_path > ?3
+                    OR (sort_path = ?3 AND file_hash > ?4))
+             ORDER BY sort_path, file_hash
+             LIMIT ?5"
+        );
+        let fetch_limit = query.limit.saturating_add(1);
+        let mut stmt = conn.prepare(&page_sql)?;
+        let rows = stmt.query_map(
+            params![
+                search,
+                priority,
+                cursor_path,
+                cursor_hash,
+                fetch_limit as i64
+            ],
+            |row| {
+                Ok((
+                    MetadataTransferShareEntry {
+                        file_hash: row.get(0)?,
+                        display_name: row.get(1)?,
+                        file_size: row.get::<_, i64>(2)? as u64,
+                        part_count: row.get::<_, i64>(3)? as u32,
+                        source_path: optional_path_from_row(row, 4, 5)?,
+                        aich_root: row.get(6)?,
+                        upload_priority: row.get(7)?,
+                        auto_upload_priority: row.get::<_, i64>(8)? != 0,
+                        all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
+                        all_time_upload_requests: row.get::<_, i64>(10)? as u64,
+                        all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
+                        comment: row.get(12)?,
+                        rating: row.get::<_, i64>(13)? as u8,
+                    },
+                    row.get::<_, String>(14)?,
+                ))
+            },
+        )?;
+        let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > query.limit;
+        rows.truncate(query.limit);
+        let next_cursor = has_more.then(|| {
+            let (entry, sort_path) = rows
+                .last()
+                .expect("a page with a following row must contain a cursor row");
+            MetadataSharedFileCursor {
+                sort_path: sort_path.clone(),
+                file_hash: entry.file_hash.clone(),
+            }
+        });
+        Ok(MetadataSharedFilePage {
+            entries: rows.into_iter().map(|(entry, _)| entry).collect(),
+            total,
+            next_cursor,
+        })
     }
 
     fn completed_transfer_share_count(&self) -> Result<usize> {
