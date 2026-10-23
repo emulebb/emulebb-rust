@@ -2,8 +2,7 @@ use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     sync::{
-        Arc,
-        Mutex as StdMutex,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU32},
     },
     time::Duration,

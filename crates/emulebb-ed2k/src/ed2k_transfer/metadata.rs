@@ -101,11 +101,9 @@ impl Ed2kTransferRuntime {
         query: MetadataSharedFileQuery,
     ) -> Result<MetadataSharedFilePage> {
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            metadata.query_completed_transfer_share_entries(&query)
-        })
-        .await
-        .map_err(anyhow::Error::from)?
+        tokio::task::spawn_blocking(move || metadata.query_completed_transfer_share_entries(&query))
+            .await
+            .map_err(anyhow::Error::from)?
     }
 
     /// Return completed download hashes that still need incoming delivery.

@@ -235,7 +235,10 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     assert!(first["data"].get("offset").is_none());
     assert!(first["data"].get("nextAfterHash").is_none());
     assert_eq!(first["data"]["items"][0]["hash"], alpha.hash);
-    assert_eq!(first["data"]["items"][0]["publication"]["ed2k"]["state"], "waiting");
+    assert_eq!(
+        first["data"]["items"][0]["publication"]["ed2k"]["state"],
+        "waiting"
+    );
     let cursor = first["data"]["nextCursor"].as_str().unwrap();
     let encoded_cursor = utf8_percent_encode(cursor, NON_ALPHANUMERIC).to_string();
     let second = get_json(
