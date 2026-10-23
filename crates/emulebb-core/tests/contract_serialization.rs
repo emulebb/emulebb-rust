@@ -6,7 +6,10 @@
 
 use std::collections::BTreeSet;
 
-use emulebb_core::{Transfer, TransferEvent, TransferSource, Upload, UploadScoreBreakdown};
+use emulebb_core::{
+    SharedFileKadKeywordPublish, SharedFilePublicationStatus, SharedFilePublishLane,
+    SharedFilePublishState, Transfer, TransferEvent, TransferSource, Upload, UploadScoreBreakdown,
+};
 use serde_json::{Value, json};
 
 /// Collect the top-level object keys of a serialized value.
@@ -270,4 +273,29 @@ fn upload_score_breakdown_is_gated_on_the_flag() {
         without.get("scoreBreakdown").is_none(),
         "scoreBreakdown must be omitted when not requested"
     );
+}
+
+#[test]
+fn shared_file_publication_states_use_stable_contract_tokens() {
+    let value = serde_json::to_value(SharedFilePublicationStatus {
+        ed2k: SharedFilePublishLane {
+            state: SharedFilePublishState::Queued,
+            last_success_at_ms: None,
+        },
+        kad_keyword: SharedFileKadKeywordPublish {
+            state: SharedFilePublishState::Partial,
+            published_keywords: 1,
+            total_keywords: 2,
+            last_success_at_ms: Some(42),
+        },
+        kad_source: SharedFilePublishLane {
+            state: SharedFilePublishState::Unavailable,
+            last_success_at_ms: None,
+        },
+    })
+    .unwrap();
+
+    assert_eq!(value["ed2k"]["state"], "queued");
+    assert_eq!(value["kadKeyword"]["state"], "partial");
+    assert_eq!(value["kadSource"]["state"], "unavailable");
 }

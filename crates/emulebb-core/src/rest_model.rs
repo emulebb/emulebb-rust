@@ -1042,6 +1042,71 @@ pub struct LocalShare {
     pub rating: u8,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SharedFilePublishState {
+    #[default]
+    Unavailable,
+    Waiting,
+    Queued,
+    Publishing,
+    Partial,
+    Published,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedFilePublishLane {
+    pub state: SharedFilePublishState,
+    pub last_success_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedFileKadKeywordPublish {
+    pub state: SharedFilePublishState,
+    pub published_keywords: usize,
+    pub total_keywords: usize,
+    pub last_success_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedFilePublicationStatus {
+    pub ed2k: SharedFilePublishLane,
+    pub kad_keyword: SharedFileKadKeywordPublish,
+    pub kad_source: SharedFilePublishLane,
+}
+
+#[derive(Debug, Clone)]
+pub struct SharedFileListItem {
+    pub share: LocalShare,
+    pub publication: SharedFilePublicationStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharedFileListCursor {
+    pub sort_path: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SharedFileListQuery {
+    pub search: Option<String>,
+    pub priority: Option<String>,
+    pub after: Option<SharedFileListCursor>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SharedFileListPage {
+    pub items: Vec<SharedFileListItem>,
+    pub total: usize,
+    pub next_cursor: Option<SharedFileListCursor>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SharedFileUpdate {

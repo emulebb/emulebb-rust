@@ -1046,4 +1046,5 @@ pub(super) async fn clear_server_connection_state(state: &Arc<RwLock<Ed2kServerS
     guard.offer_files_fallback_reason = None;
     guard.offer_files_published_entries = 0;
     guard.offer_files_pending_entries = 0;
+    guard.offer_files_publication.reset();
 }

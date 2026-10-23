@@ -527,6 +527,7 @@ impl EmulebbCore {
                     kad_buddy: Arc::clone(&kad_buddy),
                     network: network.clone(),
                     kad_notes_dirty: Arc::clone(&self.kad_notes_dirty),
+                    file_publication: self.kad_file_publication.clone(),
                 },
                 Arc::clone(&shutdown),
             )));

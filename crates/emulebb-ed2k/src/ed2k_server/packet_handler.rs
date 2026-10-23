@@ -85,6 +85,7 @@ pub(super) async fn handle_server_packet(
                     // parallel transports and reconnects begin from independent
                     // snapshots and could otherwise reuse generation 1.
                     guard.session_generation = session.trace_id;
+                    guard.offer_files_publication.reset();
                 }
                 guard.client_id = Some(id_change.client_id);
                 guard.server_flags = id_change.server_flags;
