@@ -305,6 +305,20 @@ fn load_requires_existing_profile_settings_path() {
 }
 
 #[test]
+fn load_for_import_creates_an_explicit_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("fresh-import-profile");
+
+    let profile = DaemonProfile::load_for_import(profile_dir.clone()).unwrap();
+
+    assert_eq!(profile.profile_dir, profile_dir);
+    assert!(profile.profile_dir.join(PROFILE_SETTINGS_FILE).is_file());
+    assert!(profile.profile_dir.join(PROFILE_METADATA_FILE).is_file());
+    assert_eq!(profile.ed2k.listen_port, Some(4662));
+    assert_eq!(profile.kad.listen_port, Some(4672));
+}
+
+#[test]
 #[expect(
     clippy::cognitive_complexity,
     reason = "linear protocol orchestration flow"
