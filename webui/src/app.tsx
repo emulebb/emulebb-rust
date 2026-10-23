@@ -169,6 +169,7 @@ export function App() {
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [manualRefreshGeneration, setManualRefreshGeneration] = useState(0);
   const [eventStreamStatus, setEventStreamStatus] = useState<EventStreamStatus>(pollingEventStreamStatus);
 
   const resetProtectedState = useCallback(() => {
@@ -261,7 +262,7 @@ export function App() {
     };
   }, [apiKey, authAttempt, resetProtectedState]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (manual = false) => {
     if (authState !== "authenticated") {
       return;
     }
@@ -276,6 +277,9 @@ export function App() {
       setUploads(nextSnapshot.uploads ?? []);
       setUploadQueue(nextSnapshot.uploadQueue ?? []);
       setRefreshGeneration((value) => value + 1);
+      if (manual) {
+        setManualRefreshGeneration((value) => value + 1);
+      }
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -360,29 +364,6 @@ export function App() {
       }
     };
     void loadSharing();
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, refreshGeneration, authState]);
-
-  useEffect(() => {
-    if (authState !== "authenticated" || tab !== "shared-files") {
-      return;
-    }
-    let cancelled = false;
-    const loadSharedFiles = async () => {
-      try {
-        const nextSharedFiles = await client.get<Page<SharedFile>>(`shared-files?limit=${SNAPSHOT_LIMIT}`);
-        if (!cancelled) {
-          setSharedFiles(nextSharedFiles.items ?? []);
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(errorMessage(caught));
-        }
-      }
-    };
-    void loadSharedFiles();
     return () => {
       cancelled = true;
     };
@@ -788,7 +769,7 @@ export function App() {
                     <KeyRound size={16} />
                     Change key
                   </button>
-                  <button type="button" class="btn btn-outline-secondary" title="Refresh" onClick={() => void refresh()}>
+                  <button type="button" class="btn btn-outline-secondary" title="Refresh" onClick={() => void refresh(true)}>
                     <RefreshCw size={16} class={refreshing ? "spin" : ""} />
                     Refresh
                   </button>
@@ -938,7 +919,13 @@ export function App() {
                 run={run}
               />
             )}
-            {tab === "shared-files" && <SharedFilesView files={sharedFiles} client={client} run={run} />}
+            {tab === "shared-files" && (
+              <SharedFilesView
+                client={client}
+                run={run}
+                refreshGeneration={manualRefreshGeneration}
+              />
+            )}
             {tab === "uploads" && <UploadsView uploads={uploads} uploadQueue={uploadQueue} client={client} run={run} />}
             {tab === "network" && (
               <NetworkHealthView

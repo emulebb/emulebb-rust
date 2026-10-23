@@ -55,6 +55,8 @@ export type Page<T> = {
   total?: number;
   offset?: number;
   limit?: number;
+  nextCursor?: string | null;
+  nextAfterHash?: string | null;
 };
 
 export type AppInfo = {
@@ -480,7 +482,33 @@ export type SharedFile = {
   comment?: string;
   rating?: number;
   ed2kLink?: string;
+  publication?: SharedFilePublication | null;
   [key: string]: unknown;
+};
+
+export type SharedFilePublishState =
+  | "unavailable"
+  | "waiting"
+  | "queued"
+  | "publishing"
+  | "partial"
+  | "published"
+  | "failed";
+
+export type SharedFilePublishLane = {
+  state: SharedFilePublishState;
+  lastSuccessAtMs?: number | null;
+};
+
+export type SharedFileKadKeywordPublish = SharedFilePublishLane & {
+  publishedKeywords: number;
+  totalKeywords: number;
+};
+
+export type SharedFilePublication = {
+  ed2k: SharedFilePublishLane;
+  kadKeyword: SharedFileKadKeywordPublish;
+  kadSource: SharedFilePublishLane;
 };
 
 export type SharedDirectoryRoot = {
