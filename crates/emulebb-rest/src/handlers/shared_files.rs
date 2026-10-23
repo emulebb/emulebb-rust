@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use emulebb_core::{
     SharedDirectoriesUpdate, SharedDirectoryRootUpdate, SharedFileExclusionUpdate,
-    SharedFileIgnoreRuleUpdate, SharedFileUpdate,
+    SharedFileIgnoreRuleUpdate, SharedFileListCursor, SharedFileListQuery, SharedFileUpdate,
 };
 
 use crate::handlers::prelude::*;
@@ -27,55 +27,82 @@ pub(crate) async fn shared_files(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    let (offset, limit) = match resolve_page_bounds(query.offset, query.limit) {
+    let (_, limit) = match resolve_page_bounds(None, query.limit) {
         Ok(bounds) => bounds,
         Err(response) => return *response,
     };
-    if query.after_hash.is_some() && offset != 0 {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "afterHash cannot be combined with a non-zero offset",
-        )
-        .into_response();
+    if let Err(message) = validate_shared_file_query(&query) {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message).into_response();
     }
-    let (shares, total, has_more) = if let Some(after_hash) = query.after_hash.as_deref() {
-        match state.core.shares_after(Some(after_hash), limit).await {
-            Ok(page) => page,
-            Err(error) => {
-                return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string())
-                    .into_response();
-            }
+    let cursor = match query.cursor.as_deref().map(decode_shared_file_cursor).transpose() {
+        Ok(cursor) => cursor,
+        Err(message) => {
+            return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message).into_response();
         }
-    } else if query.after_hash.is_none() && query.offset.is_none() {
-        match state.core.shares_after(None, limit).await {
-            Ok(page) => page,
-            Err(error) => {
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "INTERNAL_ERROR",
-                    error.to_string(),
-                )
-                .into_response();
-            }
-        }
-    } else {
-        let (shares, total) = state.core.shares_page(offset, limit).await;
-        let has_more = offset.saturating_add(shares.len()) < total;
-        (shares, total, has_more)
     };
-    let next_after_hash = has_more
-        .then(|| shares.last().map(|share| share.hash.clone()))
-        .flatten();
-    let items = shares.iter().map(shared_file_response).collect::<Vec<_>>();
-    api_ok(json!({
-        "items": items,
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "nextAfterHash": next_after_hash
-    }))
-    .into_response()
+    match state
+        .core
+        .query_shared_files(SharedFileListQuery {
+            search: query.q,
+            priority: query.priority.map(|value| value.to_lowercase()),
+            after: cursor,
+            limit,
+        })
+        .await
+    {
+        Ok(page) => api_ok(json!({
+            "items": page.items.iter().map(shared_file_list_response).collect::<Vec<_>>(),
+            "total": page.total,
+            "limit": limit,
+            "nextCursor": page.next_cursor.as_ref().map(encode_shared_file_cursor),
+        }))
+        .into_response(),
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            error.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+fn encode_shared_file_cursor(cursor: &SharedFileListCursor) -> String {
+    serde_json::to_string(cursor).expect("shared-file cursor serialization is infallible")
+}
+
+fn decode_shared_file_cursor(cursor: &str) -> Result<SharedFileListCursor, String> {
+    let cursor = serde_json::from_str::<SharedFileListCursor>(cursor)
+        .map_err(|_| "cursor is invalid".to_string())?;
+    if cursor.sort_path.is_empty()
+        || cursor.hash.len() != 32
+        || !cursor.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("cursor is invalid".to_string());
+    }
+    Ok(cursor)
+}
+
+fn validate_shared_file_query(query: &SharedFilesQuery) -> Result<(), String> {
+    validate_optional_token(
+        "priority",
+        query.priority.as_deref(),
+        &["auto", "verylow", "low", "normal", "high", "release", "not-published"],
+    )?;
+    Ok(())
+}
+
+fn validate_optional_token(
+    field: &str,
+    value: Option<&str>,
+    allowed: &[&str],
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if allowed.iter().any(|allowed| value.eq_ignore_ascii_case(allowed)) {
+        return Ok(());
+    }
+    Err(format!("{field} has an unsupported value"))
 }
 
 pub(crate) async fn shared_directories(State(state): State<RestState>) -> impl IntoResponse {

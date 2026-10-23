@@ -525,7 +525,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const NONE: &[&str] = &[];
     const SNAPSHOT: &[&str] = &["limit"];
     const PAGE: &[&str] = &["offset", "limit"];
-    const SHARED_FILES: &[&str] = &["offset", "limit", "afterHash"];
+    const SHARED_FILES: &[&str] = &["limit", "cursor", "q", "priority"];
     const TRANSFERS: &[&str] = &["state", "categoryId", "offset", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];

@@ -1,4 +1,5 @@
 use crate::rest_test_support::*;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
 async fn query_error_value(uri: &str) -> (StatusCode, Value) {
     let response = test_router()
@@ -123,32 +124,32 @@ async fn all_limited_routes_reject_out_of_range_limit_with_canonical_bounds() {
 }
 
 #[tokio::test]
-async fn shared_files_keyset_cursor_is_validated_and_exclusive_with_offset() {
-    let (status, value) = query_error_value("/api/v1/shared-files?afterHash=abc&limit=10").await;
+async fn shared_files_keyset_cursor_and_priority_are_validated() {
+    let (status, value) = query_error_value("/api/v1/shared-files?cursor=not-json").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        value["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("ED2K after hash")
-    );
+    assert_eq!(value["error"]["message"], "cursor is invalid");
 
-    let (status, value) = query_error_value(
-        "/api/v1/shared-files?afterHash=00112233445566778899aabbccddeeff&offset=1",
-    )
+    let invalid_semantic_cursor = utf8_percent_encode(
+        r#"{"sortPath":"sample","hash":"not-a-hash"}"#,
+        NON_ALPHANUMERIC,
+    );
+    let (status, value) = query_error_value(&format!(
+        "/api/v1/shared-files?cursor={invalid_semantic_cursor}"
+    ))
     .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["error"]["message"], "cursor is invalid");
+
+    let (status, value) = query_error_value("/api/v1/shared-files?priority=urgent").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         value["error"]["message"],
-        "afterHash cannot be combined with a non-zero offset"
+        "priority has an unsupported value"
     );
 
-    let (status, value) = query_error_value(
-        "/api/v1/shared-files?afterHash=00112233445566778899aabbccddeeff&limit=10",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(value["data"]["nextAfterHash"], Value::Null);
+    let (status, value) = query_error_value("/api/v1/shared-files?offset=1").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["error"]["message"], "unknown query parameter: offset");
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ use axum::{
 use emulebb_core::{EmulebbCore, LocalShareCreate, long_path, normal_path_display};
 use emulebb_index::FileIndex;
 use emulebb_rest::{RestServerSettings, router};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -74,15 +75,16 @@ async fn shared_files_use_canonical_route_and_envelope() {
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["total"], 1);
-    assert_eq!(value["data"]["offset"], 0);
+    assert!(value["data"].get("offset").is_none());
     assert_eq!(value["data"]["limit"], 100);
     assert_eq!(value["data"]["items"][0]["hash"], hash);
+    assert!(value["data"]["nextCursor"].is_null());
 
     let paged_response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/shared-files?offset=1&limit=1")
+                .uri("/api/v1/shared-files?limit=1")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -95,9 +97,8 @@ async fn shared_files_use_canonical_route_and_envelope() {
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["total"], 1);
-    assert_eq!(value["data"]["offset"], 1);
     assert_eq!(value["data"]["limit"], 1);
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
 
     let read_response = app
         .clone()
@@ -193,6 +194,91 @@ async fn shared_files_use_canonical_route_and_envelope() {
         .await
         .unwrap();
     assert_eq!(retired_route.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn shared_files_support_path_cursor_search_and_publication_status() {
+    let runtime_dir = unique_test_dir("shared-files-query");
+    let transfer_root = runtime_dir.join("transfers");
+    let alpha_path = runtime_dir.join("Alpha Sample.bin");
+    let zeta_path = runtime_dir.join("Zeta Sample.bin");
+    std::fs::write(&alpha_path, b"alpha shared payload").unwrap();
+    std::fs::write(&zeta_path, b"zeta shared payload").unwrap();
+    let core = Arc::new(
+        EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
+    );
+    let alpha = core
+        .share_local_file(LocalShareCreate {
+            path: alpha_path.display().to_string(),
+            name: Some("Catalog Alpha.bin".to_string()),
+        })
+        .await
+        .unwrap();
+    let zeta = core
+        .share_local_file(LocalShareCreate {
+            path: zeta_path.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".to_string(),
+            web_root_dir: None,
+        },
+    );
+
+    let first = get_json(&app, "/api/v1/shared-files?limit=1").await;
+    assert_eq!(first["data"]["total"], 2);
+    assert_eq!(first["data"]["limit"], 1);
+    assert!(first["data"].get("offset").is_none());
+    assert!(first["data"].get("nextAfterHash").is_none());
+    assert_eq!(first["data"]["items"][0]["hash"], alpha.hash);
+    assert_eq!(first["data"]["items"][0]["publication"]["ed2k"]["state"], "waiting");
+    let cursor = first["data"]["nextCursor"].as_str().unwrap();
+    let encoded_cursor = utf8_percent_encode(cursor, NON_ALPHANUMERIC).to_string();
+    let second = get_json(
+        &app,
+        &format!("/api/v1/shared-files?limit=1&cursor={encoded_cursor}"),
+    )
+    .await;
+    assert_eq!(second["data"]["items"][0]["hash"], zeta.hash);
+    assert!(second["data"]["nextCursor"].is_null());
+
+    for query in [
+        "q=catalog%20alpha".to_string(),
+        "q=alpha%20sample".to_string(),
+        format!("q={}", &alpha.hash[..12]),
+    ] {
+        let searched = get_json(&app, &format!("/api/v1/shared-files?{query}")).await;
+        assert_eq!(searched["data"]["total"], 1);
+        assert_eq!(searched["data"]["items"][0]["hash"], alpha.hash);
+    }
+
+    let filtered = get_json(&app, "/api/v1/shared-files?priority=normal").await;
+    assert_eq!(filtered["data"]["total"], 2);
+    assert_eq!(
+        filtered["data"]["items"][0]["publication"]["kadSource"]["state"],
+        "unavailable"
+    );
+}
+
+async fn get_json(app: &axum::Router, uri: &str) -> Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
 }
 
 #[tokio::test]

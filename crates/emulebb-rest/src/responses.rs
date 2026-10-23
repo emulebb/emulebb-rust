@@ -11,9 +11,10 @@ use std::{
 
 use emulebb_core::{
     AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
-    Search, SearchResult, SearchSpec, ServerInfo, Status, Transfer, TransferEventDiagnostics,
-    TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
-    normal_path_display, normalize_ed2k_file_name,
+    Search, SearchResult, SearchSpec, ServerInfo, SharedFileListItem, SharedFilePublishState,
+    Status, Transfer,
+    TransferEventDiagnostics, TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus,
+    VpnGuardStatus, normal_path_display, normalize_ed2k_file_name,
 };
 use serde_json::{Value, json};
 
@@ -687,7 +688,23 @@ fn search_criteria_response(spec: &SearchSpec) -> Value {
 }
 
 pub(crate) fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
+    shared_file_response_with_publication(share, None)
+}
+
+pub(crate) fn shared_file_list_response(item: &SharedFileListItem) -> SharedFileResponse {
+    shared_file_response_with_publication(&item.share, Some(item.publication.clone()))
+}
+
+fn shared_file_response_with_publication(
+    share: &LocalShare,
+    publication: Option<emulebb_core::SharedFilePublicationStatus>,
+) -> SharedFileResponse {
     let path = managed_shared_file_path(share);
+    let published_ed2k = publication
+        .as_ref()
+        .map_or(true, |status| {
+            status.ed2k.state == SharedFilePublishState::Published
+        });
     SharedFileResponse {
         hash: share.hash.clone(),
         name: share.name.clone(),
@@ -709,7 +726,8 @@ pub(crate) fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
         rating: share.rating,
         has_comment: !share.comment.is_empty(),
         user_rating: share.rating,
-        published_ed2k: true,
+        published_ed2k,
+        publication,
         shared_by_rule: false,
         ed2k_link: share.ed2k_link.clone(),
     }
