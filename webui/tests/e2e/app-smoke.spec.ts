@@ -930,6 +930,10 @@ test("shared file metadata form validates rating and priority contract", async (
 
   await page.goto("/");
   await page.getByRole("link", { name: "Shared Files" }).click();
+  const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
+  await expect(sharedFilesPanel.getByText("Published", { exact: true })).toBeVisible();
+  await expect(sharedFilesPanel.getByText("1/2 Partial", { exact: true })).toBeVisible();
+  await expect(sharedFilesPanel.getByText("Publishing", { exact: true })).toBeVisible();
   const metadataPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) });
   await expect(metadataPanel.getByText("Shared Sample.bin")).toBeVisible();
   await expect(metadataPanel.getByRole("option", { name: "Very high" })).toHaveCount(0);
@@ -950,6 +954,32 @@ test("shared file metadata form validates rating and priority contract", async (
   const sharedFilePatch = requests.find((request) => request.method === "PATCH" && request.path.startsWith("shared-files/"));
   expect(sharedFilePatch).toBeDefined();
   expect(JSON.parse(sharedFilePatch?.body ?? "{}")).toEqual({ priority: "release", comment: "Verified release", rating: 5 });
+});
+
+test("top refresh preserves the shared-files query, page, and selection", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+  await page.getByRole("link", { name: "Shared Files" }).click();
+  const panel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
+  await panel.getByLabel("Search name, path, or hash").fill("Shared Sample");
+  await panel.getByRole("button", { name: "Search" }).click();
+  await panel.getByLabel("Priority").selectOption("normal");
+  await panel.getByRole("button", { name: "Next" }).click();
+  await expect(panel.getByText("Second Shared Sample.bin", { exact: true })).toBeVisible();
+
+  const requestCount = requests.filter((request) => request.path === "shared-files").length;
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => requests.filter((request) => request.path === "shared-files").length).toBeGreaterThan(requestCount);
+
+  const latest = requests.filter((request) => request.path === "shared-files").at(-1);
+  const params = new URLSearchParams(latest?.query ?? "");
+  expect(params.get("cursor")).toBe("second-page");
+  expect(params.get("q")).toBe("Shared Sample");
+  expect(params.get("priority")).toBe("normal");
+  await expect(panel.getByText("Second Shared Sample.bin", { exact: true })).toBeVisible();
+  await expect(page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) }).getByText("Second Shared Sample.bin")).toBeVisible();
 });
 
 test("settings use dirty state and advanced surface metadata", async ({ page }) => {

@@ -1319,15 +1319,69 @@ function QueuedHashTable(props: { files: NonNullable<SharedDirectories["reloadPr
   );
 }
 
-export function SharedFilesView(props: { files: SharedFile[]; client: RestClient; run: RunFunction }) {
+const sharedFilePriorityFilters = ["", "auto", "verylow", "low", "normal", "high", "release", "not-published"];
+
+export function SharedFilesView(props: { client: RestClient; run: RunFunction; refreshGeneration: number }) {
+  const [files, setFiles] = useState<SharedFile[]>([]);
+  const [total, setTotal] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([]);
+  const [searchDraft, setSearchDraft] = useState("");
+  const [search, setSearch] = useState("");
+  const [priorityFilter, setPriorityFilter] = useState("");
+  const [pageSize, setPageSize] = useState(100);
+  const [loadGeneration, setLoadGeneration] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [selectedHash, setSelectedHash] = useState("");
   const [priority, setPriority] = useState("normal");
   const [comment, setComment] = useState("");
   const [rating, setRating] = useState("0");
   const [linkValue, setLinkValue] = useState("");
   const [comments, setComments] = useState<unknown[]>([]);
-  const selected = props.files.find((file) => file.hash === selectedHash) ?? props.files[0];
+  const selected = files.find((file) => file.hash === selectedHash) ?? files[0];
   const ratingError = sharedFileRatingError(rating);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setLoading(true);
+      setLoadError("");
+      const params = new URLSearchParams({ limit: String(pageSize) });
+      if (cursor) params.set("cursor", cursor);
+      if (search) params.set("q", search);
+      if (priorityFilter) params.set("priority", priorityFilter);
+      try {
+        const page = await props.client.get<Page<SharedFile>>(`shared-files?${params.toString()}`);
+        if (!cancelled) {
+          setFiles(page.items ?? []);
+          setTotal(page.total ?? 0);
+          setNextCursor(page.nextCursor ?? null);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setLoadError(caught instanceof Error ? caught.message : String(caught));
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.client, props.refreshGeneration, cursor, search, priorityFilter, pageSize, loadGeneration]);
+
+  const resetPaging = () => {
+    setCursor(null);
+    setCursorHistory([]);
+  };
+
+  const applyFilter = (setter: (value: string) => void, value: string) => {
+    setter(value);
+    resetPaging();
+  };
 
   useEffect(() => {
     if (!selected) {
@@ -1363,7 +1417,7 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
       priority,
       comment,
       rating: parsedRating
-    });
+    }).then(() => setLoadGeneration((value) => value + 1));
   };
 
   return (
@@ -1371,8 +1425,37 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
       <section class="panel card">
         <div class="section-title">
           <h2>Shared Files</h2>
-          <span>{props.files.length} visible</span>
+          <span>{loading ? "Loading…" : `${files.length.toLocaleString()} of ${total.toLocaleString()}`} · Page {cursorHistory.length + 1}</span>
         </div>
+        <form class="shared-files-toolbar" onSubmit={(event) => {
+          event.preventDefault();
+          setSearch(searchDraft.trim());
+          resetPaging();
+        }}>
+          <label class="shared-files-search">
+            Search name, path, or hash
+            <div class="copy-row">
+              <input class="form-control" value={searchDraft} onInput={(event) => setSearchDraft(event.currentTarget.value)} />
+              <button class="btn" type="submit"><Search size={15} />Search</button>
+            </div>
+          </label>
+          <label>
+            Priority
+            <select class="form-select" value={priorityFilter} onInput={(event) => applyFilter(setPriorityFilter, event.currentTarget.value)}>
+              {sharedFilePriorityFilters.map((value) => <option value={value}>{value || "All"}</option>)}
+            </select>
+          </label>
+          <label>
+            Page size
+            <select class="form-select" value={String(pageSize)} onInput={(event) => {
+              setPageSize(Number(event.currentTarget.value));
+              resetPaging();
+            }}>
+              {[50, 100, 200].map((value) => <option value={value}>{value}</option>)}
+            </select>
+          </label>
+        </form>
+        {loadError && <p class="field-error">{loadError}</p>}
         <div class="table-wrap">
           <table class="table table-vcenter card-table">
             <thead>
@@ -1380,23 +1463,50 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
                 <th>Name</th>
                 <th>Size</th>
                 <th>Priority</th>
+                <th>eD2K Publish</th>
+                <th>Kad Keywords</th>
+                <th>Kad Source</th>
                 <th>Requests</th>
                 <th>Uploaded</th>
               </tr>
             </thead>
             <tbody>
-              {props.files.map((file) => (
+              {files.map((file) => (
                 <tr key={file.hash} class={selected?.hash === file.hash ? "selected-row" : ""}>
-                  <td><button type="button" class="link-button" onClick={() => setSelectedHash(file.hash)}>{file.name ?? file.hash}</button></td>
+                  <td>
+                    <button type="button" class="link-button" onClick={() => setSelectedHash(file.hash)}>{file.name ?? file.hash}</button>
+                    <small class="shared-file-path">{file.path ?? file.sourcePath ?? ""}</small>
+                  </td>
                   <td>{formatBytes(file.sizeBytes)}</td>
                   <td>{file.priority ?? "normal"}</td>
+                  <td title={publicationTitle(file.publication?.ed2k, "Sent to the connected server; eD2K servers do not acknowledge individual files.")}>
+                    <StatusPill value={publishStateLabel(file.publication?.ed2k?.state)} />
+                  </td>
+                  <td title={publicationTitle(file.publication?.kadKeyword)}>
+                    <StatusPill value={kadKeywordLabel(file)} />
+                  </td>
+                  <td title={publicationTitle(file.publication?.kadSource)}>
+                    <StatusPill value={publishStateLabel(file.publication?.kadSource?.state)} />
+                  </td>
                   <td>{file.allTimeUploadRequests ?? file.requests ?? 0}</td>
                   <td>{formatBytes(file.allTimeUploadedBytes ?? file.transferredBytes)}</td>
                 </tr>
               ))}
-              {props.files.length === 0 && <EmptyRow colSpan={5} text="No shared files." />}
+              {files.length === 0 && <EmptyRow colSpan={8} text={loading ? "Loading shared files…" : "No shared files match the current filters."} />}
             </tbody>
           </table>
+        </div>
+        <div class="shared-files-pagination">
+          <button class="btn" type="button" disabled={cursorHistory.length === 0 || loading} onClick={() => {
+            const history = [...cursorHistory];
+            const previous = history.pop() ?? null;
+            setCursorHistory(history);
+            setCursor(previous);
+          }}>Previous</button>
+          <button class="btn" type="button" disabled={!nextCursor || loading} onClick={() => {
+            setCursorHistory((history) => [...history, cursor]);
+            setCursor(nextCursor);
+          }}>Next</button>
         </div>
       </section>
 
@@ -1448,6 +1558,29 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
       </section>
     </section>
   );
+}
+
+function publishStateLabel(state?: string): string {
+  if (!state) return "Waiting";
+  return `${state.charAt(0).toUpperCase()}${state.slice(1)}`;
+}
+
+function kadKeywordLabel(file: SharedFile): string {
+  const publication = file.publication?.kadKeyword;
+  if (!publication) return "Waiting";
+  const state = publishStateLabel(publication.state);
+  if (publication.totalKeywords === 0) return state;
+  return `${publication.publishedKeywords}/${publication.totalKeywords} ${state}`;
+}
+
+function publicationTitle(
+  publication?: { lastSuccessAtMs?: number | null },
+  prefix = ""
+): string {
+  const lastSuccess = publication?.lastSuccessAtMs
+    ? `Last confirmed success: ${new Date(publication.lastSuccessAtMs).toLocaleString()}`
+    : "No confirmed success in this runtime";
+  return prefix ? `${prefix} ${lastSuccess}` : lastSuccess;
 }
 
 type UploadLane = "active" | "queue";

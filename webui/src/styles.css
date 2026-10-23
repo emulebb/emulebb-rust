@@ -1239,6 +1239,46 @@ td {
   }
 }
 
+.shared-files-toolbar {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(280px, 2fr) repeat(2, minmax(130px, 1fr));
+  margin-bottom: 16px;
+}
+
+.shared-files-toolbar label {
+  display: grid;
+  gap: 6px;
+}
+
+.shared-file-path {
+  color: var(--tblr-secondary);
+  display: block;
+  margin-top: 4px;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shared-files-pagination {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+@media (max-width: 1200px) {
+  .shared-files-toolbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .shared-files-search {
+    grid-column: span 3;
+  }
+}
+
 @media (max-width: 640px) {
   .shell {
     padding: 10px;
@@ -1305,5 +1345,13 @@ td {
 
   .copy-row {
     flex-direction: column;
+  }
+
+  .shared-files-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .shared-files-search {
+    grid-column: span 1;
   }
 }

@@ -10,6 +10,7 @@ export type RecordedApiRequest = {
 
 const transferHash = "00112233445566778899AABBCCDDEEFF";
 const sharedFileHash = "FFEEDDCCBBAA99887766554433221100";
+const secondSharedFileHash = "0123456789ABCDEFFEDCBA9876543210";
 const longSharedRoot =
   "\\\\?\\F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
 
@@ -108,7 +109,25 @@ const snapshot = {
       requestedFileName: "Shared Sample.bin"
     }
   ],
-  sharedFiles: [{ hash: sharedFileHash, name: "Shared Sample.bin", sizeBytes: 4096 }]
+  sharedFiles: [{
+    hash: sharedFileHash,
+    name: "Shared Sample.bin",
+    path: "F:\\Sample\\Shared Sample.bin",
+    sizeBytes: 4096,
+    priority: "normal",
+    publication: {
+      ed2k: { state: "published", lastSuccessAtMs: 1_700_000_000_000 },
+      kadKeyword: { state: "partial", publishedKeywords: 1, totalKeywords: 2, lastSuccessAtMs: 1_700_000_000_000 },
+      kadSource: { state: "publishing", lastSuccessAtMs: null }
+    }
+  }]
+};
+
+const secondSharedFile = {
+  ...snapshot.sharedFiles[0],
+  hash: secondSharedFileHash,
+  name: "Second Shared Sample.bin",
+  path: "F:\\Sample\\Second Shared Sample.bin"
 };
 
 /** Fresh mutable dashboard state for stateful browser workflow tests. */
@@ -129,9 +148,13 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       body: request.postData()
     });
 
-    const data = request.method() === "PATCH" && path === "app/settings"
-      ? mergeFixture(dataFor("GET", path), request.postDataJSON())
-      : dataFor(request.method(), path);
+    const data = request.method() === "GET" && path === "shared-files"
+      ? url.searchParams.has("cursor")
+        ? { items: [secondSharedFile], total: 2, nextCursor: null }
+        : { items: snapshot.sharedFiles, total: 2, nextCursor: "second-page" }
+      : request.method() === "PATCH" && path === "app/settings"
+        ? mergeFixture(dataFor("GET", path), request.postDataJSON())
+        : dataFor(request.method(), path);
     if (data === eventStream) {
       await route.fulfill({
         status: 200,
@@ -304,10 +327,14 @@ function dataFor(method: string, path: string): unknown {
         ]
       };
     case "shared-files":
-      return { items: snapshot.sharedFiles };
+      return { items: snapshot.sharedFiles, total: snapshot.sharedFiles.length, nextCursor: null };
     case `shared-files/${sharedFileHash}/ed2k-link`:
       return { hash: sharedFileHash, link: "ed2k://|file|Shared%20Sample.bin|4096|ffeeddccbbaa99887766554433221100|/" };
     case `shared-files/${sharedFileHash}/comments`:
+      return { items: [] };
+    case `shared-files/${secondSharedFileHash}/ed2k-link`:
+      return { hash: secondSharedFileHash, link: "ed2k://|file|Second%20Shared%20Sample.bin|4096|0123456789abcdeffedcba9876543210|/" };
+    case `shared-files/${secondSharedFileHash}/comments`:
       return { items: [] };
     case "categories":
       return { items: [{ id: 1, name: "Sample Category", priority: 0 }] };
