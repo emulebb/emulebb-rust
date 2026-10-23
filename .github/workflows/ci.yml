@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Enforce one human pull request per author
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const pullRequest = context.payload.pull_request;
@@ -151,7 +151,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libfontconfig1-dev
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 
