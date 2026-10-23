@@ -1,7 +1,9 @@
 use std::{
+    collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     sync::{
         Arc,
+        Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU32},
     },
     time::Duration,
@@ -20,6 +22,148 @@ use crate::{
 
 use super::server_events::Ed2kServerListEventSender;
 use super::{Ed2kServerSearchInbox, is_low_id};
+
+#[derive(Clone, Debug, Default)]
+pub struct Ed2kOfferFilesPublication {
+    entries: Arc<StdMutex<HashMap<Ed2kHash, Ed2kOfferFilePublishStatus>>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Ed2kOfferFilePublishPhase {
+    #[default]
+    Queued,
+    Publishing,
+    Published,
+    Failed,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Ed2kOfferFilePublishStatus {
+    pub phase: Ed2kOfferFilePublishPhase,
+    pub last_success_at_ms: Option<i64>,
+}
+
+impl Ed2kOfferFilesPublication {
+    #[must_use]
+    pub fn status(&self, file_hash: &Ed2kHash) -> Option<Ed2kOfferFilePublishStatus> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(file_hash)
+            .cloned()
+    }
+
+    pub(super) fn reset(&self) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    pub fn mark_queued(&self, file_hash: Ed2kHash) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_success = entries
+            .get(&file_hash)
+            .and_then(|status| status.last_success_at_ms);
+        entries.insert(
+            file_hash,
+            Ed2kOfferFilePublishStatus {
+                phase: Ed2kOfferFilePublishPhase::Queued,
+                last_success_at_ms: previous_success,
+            },
+        );
+    }
+
+    pub(super) fn mark_publishing(&self, file_hashes: &[Ed2kHash]) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for file_hash in file_hashes {
+            let previous_success = entries
+                .get(file_hash)
+                .and_then(|status| status.last_success_at_ms);
+            entries.insert(
+                *file_hash,
+                Ed2kOfferFilePublishStatus {
+                    phase: Ed2kOfferFilePublishPhase::Publishing,
+                    last_success_at_ms: previous_success,
+                },
+            );
+        }
+    }
+
+    pub(super) fn mark_published(&self, file_hashes: &[Ed2kHash], published_at_ms: i64) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for file_hash in file_hashes {
+            entries.insert(
+                *file_hash,
+                Ed2kOfferFilePublishStatus {
+                    phase: Ed2kOfferFilePublishPhase::Published,
+                    last_success_at_ms: Some(published_at_ms),
+                },
+            );
+        }
+    }
+
+    pub(super) fn mark_failed(&self, file_hashes: &[Ed2kHash]) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for file_hash in file_hashes {
+            let previous_success = entries
+                .get(file_hash)
+                .and_then(|status| status.last_success_at_ms);
+            entries.insert(
+                *file_hash,
+                Ed2kOfferFilePublishStatus {
+                    phase: Ed2kOfferFilePublishPhase::Failed,
+                    last_success_at_ms: previous_success,
+                },
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod offer_files_publication_tests {
+    use emulebb_kad_proto::Ed2kHash;
+
+    use super::{Ed2kOfferFilePublishPhase, Ed2kOfferFilesPublication};
+
+    #[test]
+    fn failed_retry_preserves_last_success_until_session_reset() {
+        let publication = Ed2kOfferFilesPublication::default();
+        let hash = Ed2kHash([0x11; 16]);
+
+        publication.mark_publishing(&[hash]);
+        assert_eq!(
+            publication.status(&hash).expect("status").phase,
+            Ed2kOfferFilePublishPhase::Publishing
+        );
+
+        publication.mark_published(&[hash], 42);
+        publication.mark_queued(hash);
+        let queued = publication.status(&hash).expect("status");
+        assert_eq!(queued.phase, Ed2kOfferFilePublishPhase::Queued);
+        assert_eq!(queued.last_success_at_ms, Some(42));
+        publication.mark_publishing(&[hash]);
+        publication.mark_failed(&[hash]);
+        let failed = publication.status(&hash).expect("status");
+        assert_eq!(failed.phase, Ed2kOfferFilePublishPhase::Failed);
+        assert_eq!(failed.last_success_at_ms, Some(42));
+
+        publication.reset();
+        assert!(publication.status(&hash).is_none());
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct ServerSessionActivation {
@@ -113,6 +257,8 @@ pub struct Ed2kServerState {
     pub offer_files_fallback_reason: Option<String>,
     pub offer_files_published_entries: usize,
     pub offer_files_pending_entries: usize,
+    /// Per-file status for the current accepted server session only.
+    pub offer_files_publication: Ed2kOfferFilesPublication,
     /// Server UDP obfuscation metadata learned from a challenge-validated
     /// status reply. The key is usable only while `server_udp_key_ip` matches
     /// the current public IPv4 identity.

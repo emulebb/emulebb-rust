@@ -769,7 +769,18 @@ pub(super) async fn send_offer_files_advertisement(
         });
     }
     let was_sent = session.offer_files_sent;
-    session.send_packet(OP_OFFERFILES, &encoded.payload).await?;
+    let published_hashes = encoded
+        .entries
+        .iter()
+        .map(|(file_hash, _, _, _, _, _, _)| Ed2kHash(*file_hash))
+        .collect::<Vec<_>>();
+    let publication = session.state.read().await.offer_files_publication.clone();
+    publication.mark_publishing(&published_hashes);
+    if let Err(error) = session.send_packet(OP_OFFERFILES, &encoded.payload).await {
+        publication.mark_failed(&published_hashes);
+        return Err(error);
+    }
+    publication.mark_published(&published_hashes, unix_timestamp_ms());
     session.offer_files_sent = true;
     session.offer_files_sent_at = Some(Instant::now());
     session.offer_files_catalog_cursor = encoded.next_cursor;
@@ -806,6 +817,15 @@ pub(super) async fn send_offer_files_advertisement(
         skipped_duplicate_batch: false,
         session_pump_active: false,
     })
+}
+
+fn unix_timestamp_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
 }
 
 pub(super) async fn send_due_offer_files_advertisement(

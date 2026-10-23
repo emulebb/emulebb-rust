@@ -88,8 +88,9 @@ use emulebb_kad_proto::{
     SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq,
 };
 use emulebb_metadata::{
-    MetadataKadOutboundPublish, MetadataKadOutboundPublishKind, MetadataStore,
-    MetadataTransferCounts, MetadataTransferPublishEntry, MetadataTransferShareEntry,
+    MetadataKadOutboundPublish, MetadataKadOutboundPublishKind, MetadataSharedFileCursor,
+    MetadataSharedFileQuery, MetadataStore, MetadataTransferCounts, MetadataTransferPublishEntry,
+    MetadataTransferShareEntry,
 };
 use serde_json::json;
 use tokio::{
@@ -154,6 +155,7 @@ mod server_list;
 mod shared_dir_monitor;
 mod shared_directories;
 mod shared_file_api;
+mod shared_file_publication;
 mod source_publish;
 mod transfer_control_api;
 mod transfer_create_api;
@@ -287,7 +289,10 @@ pub use rest_model::{
     HostNameResolution, IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate,
     NetworkStatus, NullableStringField, NullableU32Field, Search, SearchCreate, SearchProgress,
     SearchResult, SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation,
-    SearchSpec, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status, Transfer,
+    SearchSpec, ServerCreate, ServerInfo, ServerUpdate, SharedFileKadKeywordPublish,
+    SharedFileListCursor, SharedFileListItem, SharedFileListPage, SharedFileListQuery,
+    SharedFilePublicationStatus, SharedFilePublishLane, SharedFilePublishState, SharedFileUpdate,
+    Status, Transfer,
     TransferComment, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
     TransferEventResetReason, TransferEventType, TransferFileNameObservation,
     TransferNameCandidate, TransferNameConsensus, TransferPart, TransferSource, TransferStats,
@@ -490,6 +495,7 @@ pub struct EmulebbCore {
     /// Drained by the loop-local `KadPublishSchedule`; `std::sync::Mutex` since it
     /// is only ever held for a brief insert/drain, never across an `.await`.
     kad_notes_dirty: Arc<std::sync::Mutex<HashSet<String>>>,
+    kad_file_publication: shared_file_publication::SharedKadFilePublication,
     ed2k_publish_diagnostics: ed2k_publish_diagnostics::SharedEd2kPublishDiagnostics,
     kad_publish_diagnostics: kad_publish_diagnostics::SharedKadPublishDiagnostics,
     hostname_lookup_cache: Arc<hostname_lookup::HostNameLookupCache>,
@@ -655,6 +661,7 @@ impl EmulebbCore {
             shared_catalog_publish_worker: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_last: Arc::new(Mutex::new(None)),
             kad_notes_dirty: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            kad_file_publication: shared_file_publication::SharedKadFilePublication::default(),
             ed2k_publish_diagnostics: ed2k_publish_diagnostics::new_shared(),
             kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
             hostname_lookup_cache: Arc::new(hostname_lookup::HostNameLookupCache::default()),
@@ -3243,7 +3250,9 @@ impl EmulebbCore {
         self.shared_catalog_publish_dirty
             .store(true, Ordering::Release);
         ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
-            diagnostics.phase = "queued".to_string();
+            if !diagnostics.running {
+                diagnostics.phase = "queued".to_string();
+            }
             diagnostics.running = true;
             diagnostics.dirty = true;
             diagnostics.queued_count = diagnostics.queued_count.saturating_add(1);
@@ -3677,6 +3686,7 @@ struct KadPublishLoopRuntime {
     /// Shared queue of files whose NOTES clock must be reset (comment/rating
     /// edited); drained each tick into the loop-local schedule.
     kad_notes_dirty: Arc<std::sync::Mutex<HashSet<String>>>,
+    file_publication: shared_file_publication::SharedKadFilePublication,
 }
 
 /// Re-scan cadence for the shared-file publish loop. The master `Publish()` runs
@@ -4185,6 +4195,7 @@ async fn publish_kad_due_shared_files(
     // Keep the per-file schedule from growing without bound: forget files that
     // are no longer publishable (removed / no longer complete).
     schedule.retain_only_set(&publishable_hashes);
+    runtime.file_publication.retain_only(&publishable_hashes);
     if item_count == 0 {
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
             diagnostics.phase = "idle".to_string();
@@ -4507,6 +4518,7 @@ async fn publish_kad_due_shared_files(
                     Utc::now().timestamp_millis(),
                     source_publish_buddy_ip,
                 );
+                runtime.file_publication.source_started(&file_hash_text);
                 available_publish_starts = available_publish_starts.saturating_sub(1);
                 active_counts.started(KadSharedPublishKind::Source);
                 publish_tasks.spawn(async move {
@@ -4581,6 +4593,9 @@ async fn publish_kad_due_shared_files(
                         started_at,
                         Utc::now().timestamp_millis(),
                     );
+                    runtime
+                        .file_publication
+                        .keyword_started(&keyword_file_hashes, &keyword);
                     available_publish_starts = available_publish_starts.saturating_sub(1);
                     active_counts.started(KadSharedPublishKind::Keyword);
                     publish_tasks.spawn(async move {
@@ -4828,6 +4843,13 @@ async fn drain_completed_kad_publish_tasks(
         match outcome.result {
             Ok(stats) => match outcome.kind {
                 KadSharedPublishKind::Keyword => {
+                    if let Some(keyword) = outcome.keyword.as_deref() {
+                        runtime.file_publication.keyword_finished(
+                            &outcome.file_hashes,
+                            keyword,
+                            (stats.acked_contacts > 0).then(|| Utc::now().timestamp_millis()),
+                        );
+                    }
                     record_kad_publish_completion(
                         runtime,
                         outcome.kind,
@@ -4858,6 +4880,10 @@ async fn drain_completed_kad_publish_tasks(
                     *keyword_published += outcome.file_hashes.len();
                 }
                 KadSharedPublishKind::Source => {
+                    runtime.file_publication.source_finished(
+                        &primary_file_hash,
+                        (stats.acked_contacts > 0).then(|| Utc::now().timestamp_millis()),
+                    );
                     record_kad_publish_completion(runtime, outcome.kind, 1, stats);
                     accumulate_publish_stats(source_totals, stats);
                     diag_kad_event::publish(
@@ -4881,6 +4907,19 @@ async fn drain_completed_kad_publish_tasks(
                 }
             },
             Err(KadSharedPublishError::Busy) => {
+                match outcome.kind {
+                    KadSharedPublishKind::Keyword => {
+                        if let Some(keyword) = outcome.keyword.as_deref() {
+                            runtime
+                                .file_publication
+                                .keyword_busy(&outcome.file_hashes, keyword);
+                        }
+                    }
+                    KadSharedPublishKind::Source => {
+                        runtime.file_publication.source_busy(&primary_file_hash);
+                    }
+                    KadSharedPublishKind::Notes => {}
+                }
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Busy);
                 // A `Busy` outcome means the store search could not be created (no
                 // permit acquired, no packet sent) — the oracle `PrepareLookup ==
@@ -4909,6 +4948,13 @@ async fn drain_completed_kad_publish_tasks(
                 );
             }
             Err(KadSharedPublishError::TimedOut) => {
+                record_kad_file_publication_failure(
+                    runtime,
+                    outcome.kind,
+                    &outcome.file_hashes,
+                    outcome.keyword.as_deref(),
+                    &primary_file_hash,
+                );
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::TimedOut);
                 diag_kad_event::publish_failure(
                     diag_publish_kind(outcome.kind),
@@ -4926,6 +4972,13 @@ async fn drain_completed_kad_publish_tasks(
                 );
             }
             Err(KadSharedPublishError::Failed(error)) => {
+                record_kad_file_publication_failure(
+                    runtime,
+                    outcome.kind,
+                    &outcome.file_hashes,
+                    outcome.keyword.as_deref(),
+                    &primary_file_hash,
+                );
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Other);
                 diag_kad_event::publish_failure(
                     diag_publish_kind(outcome.kind),
@@ -4943,6 +4996,30 @@ async fn drain_completed_kad_publish_tasks(
                 );
             }
         }
+    }
+}
+
+fn record_kad_file_publication_failure(
+    runtime: &KadPublishLoopRuntime,
+    kind: KadSharedPublishKind,
+    file_hashes: &[String],
+    keyword: Option<&str>,
+    primary_file_hash: &str,
+) {
+    match kind {
+        KadSharedPublishKind::Keyword => {
+            if let Some(keyword) = keyword {
+                runtime
+                    .file_publication
+                    .keyword_finished(file_hashes, keyword, None);
+            }
+        }
+        KadSharedPublishKind::Source => {
+            runtime
+                .file_publication
+                .source_finished(primary_file_hash, None);
+        }
+        KadSharedPublishKind::Notes => {}
     }
 }
 
