@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Result, ensure};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::{
@@ -924,79 +924,10 @@ impl super::MetadataStore {
     }
 
     pub fn upsert_imported_known_file(&self, entry: &MetadataImportedKnownFileEntry) -> Result<()> {
-        let hash = decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?;
-        let aich_root = optional_fixed_hex(entry.aich_root.as_deref(), 20, "AICH root")?;
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        tx.execute(
-            r#"
-            DELETE FROM imported_known_files
-            WHERE ed2k_hash = ?1 AND display_name = ?2 AND size_bytes = ?3 AND modified_s = ?4
-            "#,
-            params![
-                hash,
-                entry.display_name,
-                entry.file_size as i64,
-                entry.modified_s
-            ],
-        )?;
-        tx.execute(
-            r#"
-            INSERT INTO imported_known_files(
-                ed2k_hash, display_name, size_bytes, modified_s, aich_root,
-                upload_priority, auto_upload_priority, all_time_uploaded_bytes,
-                all_time_upload_requests, all_time_upload_accepts,
-                last_upload_request_ms, imported_at_ms
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-            "#,
-            params![
-                decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?,
-                entry.display_name,
-                entry.file_size as i64,
-                entry.modified_s,
-                aich_root,
-                entry.upload_priority,
-                bool_to_i64(entry.auto_upload_priority),
-                entry.all_time_uploaded_bytes as i64,
-                entry.all_time_upload_requests as i64,
-                entry.all_time_upload_accepts as i64,
-                entry.last_upload_request_ms,
-                now,
-            ],
-        )?;
-        let imported_known_file_id = tx.last_insert_rowid();
-        for (index, hash) in entry.md4_hashset.iter().enumerate() {
-            tx.execute(
-                r#"
-                INSERT INTO imported_known_file_md4_hashes(
-                    imported_known_file_id, part_index, md4_hash
-                )
-                VALUES (?1, ?2, ?3)
-                "#,
-                params![
-                    imported_known_file_id,
-                    index as i64,
-                    decode_fixed_hex(hash, 16, "MD4 part hash")?,
-                ],
-            )?;
-        }
-        for (index, hash) in entry.aich_hashset.iter().enumerate() {
-            tx.execute(
-                r#"
-                INSERT INTO imported_known_file_aich_hashes(
-                    imported_known_file_id, part_index, aich_hash
-                )
-                VALUES (?1, ?2, ?3)
-                "#,
-                params![
-                    imported_known_file_id,
-                    index as i64,
-                    decode_fixed_hex(hash, 20, "AICH part hash")?,
-                ],
-            )?;
-        }
+        upsert_imported_known_file_tx(&tx, entry, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -2347,6 +2278,91 @@ impl super::MetadataStore {
         tx.commit()?;
         Ok(true)
     }
+}
+
+pub(crate) fn upsert_imported_known_file_tx(
+    tx: &Transaction<'_>,
+    entry: &MetadataImportedKnownFileEntry,
+    now: i64,
+) -> Result<()> {
+    let hash = decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?;
+    let aich_root = optional_fixed_hex(entry.aich_root.as_deref(), 20, "AICH root")?;
+    let file_size = i64::try_from(entry.file_size)?;
+    let all_time_uploaded_bytes = i64::try_from(entry.all_time_uploaded_bytes)?;
+    let all_time_upload_requests = i64::try_from(entry.all_time_upload_requests)?;
+    let all_time_upload_accepts = i64::try_from(entry.all_time_upload_accepts)?;
+    ensure!(
+        entry.modified_s > 0,
+        "imported known file mtime must be positive"
+    );
+    ensure!(
+        entry.last_upload_request_ms >= 0,
+        "last upload request timestamp must not be negative"
+    );
+    tx.execute(
+        r#"
+        DELETE FROM imported_known_files
+        WHERE ed2k_hash = ?1 AND display_name = ?2 AND size_bytes = ?3 AND modified_s = ?4
+        "#,
+        params![hash, entry.display_name, file_size, entry.modified_s],
+    )?;
+    tx.execute(
+        r#"
+        INSERT INTO imported_known_files(
+            ed2k_hash, display_name, size_bytes, modified_s, aich_root,
+            upload_priority, auto_upload_priority, all_time_uploaded_bytes,
+            all_time_upload_requests, all_time_upload_accepts,
+            last_upload_request_ms, imported_at_ms
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        "#,
+        params![
+            decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?,
+            entry.display_name,
+            file_size,
+            entry.modified_s,
+            aich_root,
+            entry.upload_priority,
+            bool_to_i64(entry.auto_upload_priority),
+            all_time_uploaded_bytes,
+            all_time_upload_requests,
+            all_time_upload_accepts,
+            entry.last_upload_request_ms,
+            now,
+        ],
+    )?;
+    let imported_known_file_id = tx.last_insert_rowid();
+    for (index, hash) in entry.md4_hashset.iter().enumerate() {
+        tx.execute(
+            r#"
+            INSERT INTO imported_known_file_md4_hashes(
+                imported_known_file_id, part_index, md4_hash
+            )
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                imported_known_file_id,
+                index as i64,
+                decode_fixed_hex(hash, 16, "MD4 part hash")?,
+            ],
+        )?;
+    }
+    for (index, hash) in entry.aich_hashset.iter().enumerate() {
+        tx.execute(
+            r#"
+            INSERT INTO imported_known_file_aich_hashes(
+                imported_known_file_id, part_index, aich_hash
+            )
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                imported_known_file_id,
+                index as i64,
+                decode_fixed_hex(hash, 20, "AICH part hash")?,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn delivery_attempt_by_hash(

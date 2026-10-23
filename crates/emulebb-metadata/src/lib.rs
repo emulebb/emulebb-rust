@@ -11,6 +11,7 @@ mod native_file;
 mod native_path;
 mod peer_model;
 mod peer_store;
+mod profile_import;
 mod profile_model;
 mod profile_store;
 mod schema;
@@ -32,6 +33,7 @@ pub use model::{MetadataIndexedFile, MetadataSharedDirectoryRoot};
 pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp};
 pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
+pub use profile_import::{MetadataProfileImport, MetadataProfileImportSummary};
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{
