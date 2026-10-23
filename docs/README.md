@@ -1,7 +1,10 @@
 # emulebb-rust Docs
 
 The canonical emulebb-rust product, backlog, design, release, history, and API
-docs live in:
+docs are public in the
+[emulebb-tooling repository](https://github.com/emulebb/emulebb-tooling/tree/main/docs/products/emulebb-rust).
+
+Maintainer workspaces materialize the same docs at:
 
 `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust`
 
