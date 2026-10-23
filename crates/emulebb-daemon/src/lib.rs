@@ -33,7 +33,10 @@ use tracing::{info, warn};
 mod bind_config;
 mod discovery_bootstrap;
 pub mod logging;
+mod profile_import;
 mod vpn_guard_monitor;
+
+pub use profile_import::{ProfileImportApplySummary, apply_profile_import};
 
 pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
 pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
@@ -126,8 +129,16 @@ impl DaemonProfile {
             Some(profile_dir) => profile_dir,
             None => default_profile_dir()?,
         };
+        Self::load_from_dir(profile_dir, implicit_profile)
+    }
+
+    pub fn load_for_import(profile_dir: PathBuf) -> Result<Self> {
+        Self::load_from_dir(profile_dir, true)
+    }
+
+    fn load_from_dir(profile_dir: PathBuf, create_if_missing: bool) -> Result<Self> {
         let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
-        let created_default_profile = if implicit_profile && !settings_path.exists() {
+        let created_default_profile = if create_if_missing && !settings_path.exists() {
             create_default_profile_bootstrap(&profile_dir, &settings_path)?;
             true
         } else {
