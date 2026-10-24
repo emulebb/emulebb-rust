@@ -504,6 +504,55 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
     dump_ed2k_tcp_record(&record);
 }
 
+#[cfg(feature = "packet-diagnostics")]
+pub(super) fn dump_ed2k_tcp_recv_failure(
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    raw: &[u8],
+    clear_frame: &[u8],
+    detail: String,
+) {
+    let protocol = clear_frame.first().copied();
+    let opcode = clear_frame.get(TCP_PACKET_HEADER_LEN - 1).copied();
+    let canonical_phase = protocol.zip(opcode).map_or_else(
+        || Cow::Borrowed(phase),
+        |(protocol, opcode)| canonical_ed2k_recv_phase(flow, phase, protocol, opcode),
+    );
+    let record = Ed2kTcpDumpRecord {
+        schema: "ed2k_packet_v1",
+        source: "emulebb-rust",
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        event_seq: ed2k_tcp_dump_event_seq(),
+        trace_key: ed2k_tcp_trace_key(flow, remote_addr),
+        state_id: ed2k_tcp_state_id(flow, canonical_phase.as_ref()),
+        state_label: canonical_phase.as_ref(),
+        flow,
+        phase: canonical_phase.as_ref(),
+        direction: "recv",
+        outcome: "dropped",
+        remote_addr: remote_addr.to_string(),
+        transport_mode: transport_mode.as_str(),
+        obfuscated: Some(transport_mode.is_obfuscated()),
+        protocol: protocol.map(ed2k_protocol_name),
+        protocol_marker: protocol,
+        opcode,
+        opcode_name: protocol
+            .zip(opcode)
+            .map(|(protocol, opcode)| ed2k_opcode_name(protocol, opcode)),
+        raw_len: Some(raw.len()),
+        raw_hex: Some(exact_packet_hex(raw)),
+        clear_frame_len: (!clear_frame.is_empty()).then_some(clear_frame.len()),
+        clear_frame_hex: (!clear_frame.is_empty()).then(|| exact_packet_hex(clear_frame)),
+        payload_len: None,
+        payload_hex: None,
+        payload_hex_truncated: None,
+        note: Some(detail),
+    };
+    dump_ed2k_tcp_record(&record);
+}
+
 // No-op variants compiled when the `packet-diagnostics` feature is off, so the
 // public wrappers (called from the hot eD2k paths) cost nothing in release builds.
 #[cfg(not(feature = "packet-diagnostics"))]

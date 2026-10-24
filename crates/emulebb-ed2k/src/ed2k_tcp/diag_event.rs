@@ -80,10 +80,15 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
         body.insert("note".to_string(), json!(note));
     }
 
+    let severity = if record.outcome == "dropped" {
+        "warning"
+    } else {
+        "info"
+    };
     crate::diag_event::emit(
         "ed2k_tcp",
         "packet",
-        "info",
+        severity,
         Value::Object(keys),
         Value::Object(body),
     );

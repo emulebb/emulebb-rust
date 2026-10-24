@@ -280,6 +280,16 @@ impl Ed2kTransport {
                 &capture.raw,
                 &capture.clear_frame,
             );
+        } else if let Err(error) = result.as_ref() {
+            super::dump::dump_ed2k_tcp_recv_failure(
+                flow,
+                remote_addr,
+                self.mode,
+                phase,
+                &capture.raw,
+                &capture.clear_frame,
+                format!("{error:#}"),
+            );
         }
         result
     }
@@ -381,16 +391,31 @@ impl Ed2kTransport {
                 // A large remainder (payload body) skips the copy through the
                 // buffer: read it directly and decrypt in place.
                 if bytes.len() - offset >= READ_BUFFER_CHUNK {
-                    self.stream.read_exact(&mut bytes[offset..]).await?;
-                    #[cfg(feature = "packet-diagnostics")]
-                    let raw = self.read_capture.as_ref().map(|_| bytes[offset..].to_vec());
-                    if let Some(cipher) = self.receive_cipher.as_mut() {
-                        cipher.apply(&mut bytes[offset..]);
-                    }
-                    #[cfg(feature = "packet-diagnostics")]
-                    if let (Some(capture), Some(raw)) = (self.read_capture.as_mut(), raw) {
-                        capture.raw.extend_from_slice(&raw);
-                        capture.clear_frame.extend_from_slice(&bytes[offset..]);
+                    while offset < bytes.len() {
+                        let received = self.stream.read(&mut bytes[offset..]).await?;
+                        if received == 0 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "eD2k stream closed mid-frame",
+                            )
+                            .into());
+                        }
+                        #[cfg(feature = "packet-diagnostics")]
+                        let raw = self
+                            .read_capture
+                            .as_ref()
+                            .map(|_| bytes[offset..offset + received].to_vec());
+                        if let Some(cipher) = self.receive_cipher.as_mut() {
+                            cipher.apply(&mut bytes[offset..offset + received]);
+                        }
+                        #[cfg(feature = "packet-diagnostics")]
+                        if let (Some(capture), Some(raw)) = (self.read_capture.as_mut(), raw) {
+                            capture.raw.extend_from_slice(&raw);
+                            capture
+                                .clear_frame
+                                .extend_from_slice(&bytes[offset..offset + received]);
+                        }
+                        offset += received;
                     }
                     return Ok(());
                 }
@@ -513,6 +538,61 @@ mod tests {
         assert_eq!(capture.raw, raw);
         assert_eq!(capture.clear_frame, clear_frame);
         assert_ne!(capture.raw, capture.clear_frame);
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    #[tokio::test]
+    async fn diagnostic_capture_preserves_rejected_packed_frame() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut transport, mut server) = transport_with_prefetched(Vec::new()).await;
+        let mut frame = header(OP_PACKEDPROT, 4, OP_HELLO);
+        frame.extend_from_slice(&[0x01, 0x02, 0x03]);
+        server.write_all(&frame).await.unwrap();
+
+        transport.read_capture = Some(Ed2kTcpReadCapture::default());
+        let error = transport
+            .read_packet()
+            .await
+            .expect_err("invalid packed payload must be rejected");
+        let capture = transport.read_capture.take().unwrap();
+
+        assert!(
+            error.to_string().contains("zlib"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(capture.raw, frame);
+        assert_eq!(capture.clear_frame, frame);
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    #[tokio::test]
+    async fn diagnostic_capture_preserves_partial_large_payload_before_eof() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let payload_len = READ_BUFFER_CHUNK;
+        let packet_length = u32::try_from(payload_len + 1).unwrap();
+        let header = header(OP_EDONKEYPROT, packet_length, OP_HELLO);
+        let partial_payload = vec![0x5A; 1024];
+        let (mut transport, mut server) = transport_with_prefetched(header.clone()).await;
+        server.write_all(&partial_payload).await.unwrap();
+        drop(server);
+
+        transport.read_capture = Some(Ed2kTcpReadCapture::default());
+        let error = transport
+            .read_packet()
+            .await
+            .expect_err("partial large payload must end with EOF");
+        let capture = transport.read_capture.take().unwrap();
+        let mut expected = header;
+        expected.extend_from_slice(&partial_payload);
+
+        assert!(
+            error.to_string().contains("closed mid-frame"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(capture.raw, expected);
+        assert_eq!(capture.clear_frame, expected);
     }
 
     #[tokio::test]
