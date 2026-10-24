@@ -1,4 +1,4 @@
-//! `family:"kad_event"` `diag_event_v1` emitters (uniform-diagnostics-v2, lane E).
+//! `family:"kad_event"` `diag_event_v2` emitters (uniform-diagnostics-v2, lane E).
 //!
 //! These build the `keys` + `body` for the Kad milestone events (schema §3.3)
 //! from real call-site data and forward them to the shared writer
@@ -349,7 +349,7 @@ pub(crate) fn lookup_complete(search_type: u32, result_count: u32) {
 
 /// `routing_summary` (schema §3.3, periodic): the routing-table + connection
 /// gauge emitted from the periodic Kad buddy/maintenance tick. Field names match
-/// the master's `LogRoutingSummary` diag_event_v1 body byte-for-byte.
+/// the master's `LogRoutingSummary` diag_event_v2 body byte-for-byte.
 pub(crate) fn routing_summary(
     connected: bool,
     bootstrapping: bool,
