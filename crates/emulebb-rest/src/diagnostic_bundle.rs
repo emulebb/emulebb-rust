@@ -3,7 +3,7 @@ use std::{
     fmt::Write as _,
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::SystemTime,
 };
 
@@ -89,12 +89,36 @@ struct ArtifactCollection {
     directory_scan_truncated: bool,
 }
 
+struct ArtifactCandidate {
+    file_name: String,
+    path: PathBuf,
+    modified: SystemTime,
+}
+
+#[derive(Debug)]
+struct UnifiedRunSelection {
+    run_id: String,
+    process_id: u64,
+    active_file_name: String,
+}
+
+struct TailRead {
+    file_name: String,
+    file_size: u64,
+    tail_start_offset: u64,
+    bytes_read: usize,
+    incomplete_final_line_ignored: bool,
+    lines: Vec<Vec<u8>>,
+}
+
 pub(crate) async fn capture(
     state: &RestState,
     full_memory_requested: bool,
 ) -> Result<DiagnosticBundleCapture> {
     let status = redact_value(status_response(state).await);
-    let runtime_diagnostics = redact_value(runtime_diagnostics_response(state).await);
+    let runtime_diagnostics = runtime_diagnostics_response(state).await;
+    let unified_run = unified_run_selection(&runtime_diagnostics);
+    let runtime_diagnostics = redact_value(runtime_diagnostics);
     let settings = match state.core.app_settings().await {
         Ok(settings) => redact_value(serde_json::to_value(settings)?),
         Err(error) => json!({
@@ -102,7 +126,10 @@ pub(crate) async fn capture(
             "error": fingerprint_text(&error.to_string()),
         }),
     };
-    let artifacts = collect_artifacts(std::env::var_os("EMULEBB_RUST_LOG_DIR").map(PathBuf::from));
+    let artifacts = collect_artifacts(
+        std::env::var_os("EMULEBB_RUST_LOG_DIR").map(PathBuf::from),
+        unified_run.as_ref(),
+    );
     let logs = recent_log_values(MAX_LOG_RECORDS)
         .into_iter()
         .map(redact_log_record)
@@ -148,7 +175,22 @@ pub(crate) async fn capture(
     })
 }
 
-fn collect_artifacts(log_dir: Option<PathBuf>) -> ArtifactCollection {
+fn unified_run_selection(runtime_diagnostics: &Value) -> Option<UnifiedRunSelection> {
+    let writer = runtime_diagnostics.get("diagnosticWriter")?;
+    if writer.get("initialized").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    Some(UnifiedRunSelection {
+        run_id: writer.get("runId")?.as_str()?.to_string(),
+        process_id: writer.get("processId")?.as_u64()?,
+        active_file_name: writer.get("activeFileName")?.as_str()?.to_string(),
+    })
+}
+
+fn collect_artifacts(
+    log_dir: Option<PathBuf>,
+    unified_run: Option<&UnifiedRunSelection>,
+) -> ArtifactCollection {
     let Some(log_dir) = log_dir else {
         return ArtifactCollection {
             log_directory: json!({"configured": false}),
@@ -212,7 +254,11 @@ fn collect_artifacts(log_dir: Option<PathBuf>) -> ArtifactCollection {
             .metadata()
             .and_then(|metadata| metadata.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        candidates.push((file_name, entry.path(), modified));
+        candidates.push(ArtifactCandidate {
+            file_name,
+            path: entry.path(),
+            modified,
+        });
     }
 
     let mut families = Vec::with_capacity(ARTIFACT_FAMILIES.len());
@@ -220,17 +266,79 @@ fn collect_artifacts(log_dir: Option<PathBuf>) -> ArtifactCollection {
     let mut file_count = 0_u64;
     let mut issue_count = u64::from(directory_scan_truncated);
     for spec in ARTIFACT_FAMILIES {
+        if spec.family == "unifiedEvents" {
+            let Some(selection) = unified_run else {
+                missing_families.push(spec.family.to_string());
+                issue_count += 1;
+                families.push(missing_artifact(spec, "activeRunNotInitialized"));
+                continue;
+            };
+            let run_prefix = format!(
+                "{}{}-{}-",
+                spec.file_prefix, selection.process_id, selection.run_id
+            );
+            let mut run_candidates = candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.file_name.starts_with(&run_prefix)
+                        && candidate.file_name.ends_with(".jsonl")
+                })
+                .collect::<Vec<_>>();
+            run_candidates.sort_by_key(|candidate| {
+                candidate
+                    .file_name
+                    .strip_prefix(&run_prefix)
+                    .and_then(|tail| tail.strip_suffix(".jsonl"))
+                    .and_then(|tail| tail.parse::<u64>().ok())
+                    .unwrap_or(u64::MAX)
+            });
+            if !run_candidates
+                .iter()
+                .any(|candidate| candidate.file_name == selection.active_file_name)
+            {
+                missing_families.push(spec.family.to_string());
+                issue_count += 1;
+                families.push(missing_artifact(spec, "activeSegmentNotFound"));
+                continue;
+            }
+            match summarize_artifacts(spec, &run_candidates, Some(selection)) {
+                Ok((summary, issues)) => {
+                    file_count += run_candidates.len() as u64;
+                    issue_count += issues;
+                    families.push(summary);
+                }
+                Err(error) => {
+                    missing_families.push(spec.family.to_string());
+                    issue_count += 1;
+                    families.push(json!({
+                        "family": spec.family,
+                        "expectedSchema": spec.expected_schema,
+                        "present": false,
+                        "activeFileName": selection.active_file_name,
+                        "missingReason": format!("artifactReadFailed:{}", error.kind()),
+                    }));
+                }
+            }
+            continue;
+        }
         let candidate = candidates
             .iter()
-            .filter(|(name, _, _)| name.starts_with(spec.file_prefix) && name.ends_with(".jsonl"))
-            .max_by(|left, right| left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)));
-        let Some((file_name, path, _)) = candidate else {
+            .filter(|candidate| {
+                candidate.file_name.starts_with(spec.file_prefix)
+                    && candidate.file_name.ends_with(".jsonl")
+            })
+            .max_by(|left, right| {
+                left.modified
+                    .cmp(&right.modified)
+                    .then_with(|| left.file_name.cmp(&right.file_name))
+            });
+        let Some(candidate) = candidate else {
             missing_families.push(spec.family.to_string());
             issue_count += 1;
             families.push(missing_artifact(spec, "matchingArtifactNotFound"));
             continue;
         };
-        match summarize_artifact(spec, file_name, path) {
+        match summarize_artifacts(spec, &[candidate], None) {
             Ok((summary, issues)) => {
                 file_count += 1;
                 issue_count += issues;
@@ -243,7 +351,7 @@ fn collect_artifacts(log_dir: Option<PathBuf>) -> ArtifactCollection {
                     "family": spec.family,
                     "expectedSchema": spec.expected_schema,
                     "present": false,
-                    "fileName": file_name,
+                    "fileName": candidate.file_name,
                     "missingReason": format!("artifactReadFailed:{}", error.kind()),
                 }));
             }
@@ -269,28 +377,29 @@ fn missing_artifact(spec: &ArtifactFamilySpec, reason: &str) -> Value {
     })
 }
 
-fn summarize_artifact(
+fn summarize_artifacts(
     spec: &ArtifactFamilySpec,
-    file_name: &str,
-    path: &Path,
+    candidates: &[&ArtifactCandidate],
+    unified_run: Option<&UnifiedRunSelection>,
 ) -> std::io::Result<(Value, u64)> {
-    let mut file = File::open(path)?;
-    let file_size = file.metadata()?.len();
-    let tail_start_offset = file_size.saturating_sub(MAX_TAIL_BYTES);
-    file.seek(SeekFrom::Start(tail_start_offset))?;
-    let mut bytes = Vec::with_capacity((file_size - tail_start_offset) as usize);
-    file.take(MAX_TAIL_BYTES).read_to_end(&mut bytes)?;
-    if tail_start_offset > 0 {
-        if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
-            bytes.drain(..=newline);
-        } else {
-            bytes.clear();
+    let mut remaining_bytes = MAX_TAIL_BYTES;
+    let mut tails = Vec::new();
+    for candidate in candidates.iter().rev() {
+        if remaining_bytes == 0 {
+            break;
         }
+        let ignore_incomplete_final_line = unified_run
+            .is_some_and(|selection| selection.active_file_name == candidate.file_name)
+            || (unified_run.is_none() && candidates.len() == 1);
+        let tail = read_artifact_tail(candidate, remaining_bytes, ignore_incomplete_final_line)?;
+        remaining_bytes = remaining_bytes.saturating_sub(tail.bytes_read as u64);
+        tails.push(tail);
     }
+    tails.reverse();
 
-    let lines = bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
+    let lines = tails
+        .iter()
+        .flat_map(|tail| tail.lines.iter())
         .collect::<Vec<_>>();
     let records_omitted_before_limit = lines.len().saturating_sub(MAX_TAIL_RECORDS);
     let selected = &lines[records_omitted_before_limit..];
@@ -323,27 +432,89 @@ fn summarize_artifact(
         + sequence["decreaseCount"].as_u64().unwrap_or(0)
         + sequence["gapCount"].as_u64().unwrap_or(0);
     let issue_count = parse_error_count + unknown_schema_count + sequence_issue_count;
+    let active_file_name = unified_run
+        .map(|selection| selection.active_file_name.as_str())
+        .or_else(|| {
+            candidates
+                .last()
+                .map(|candidate| candidate.file_name.as_str())
+        });
+    let mut summary = json!({
+        "family": spec.family,
+        "expectedSchema": spec.expected_schema,
+        "present": true,
+        "fileName": active_file_name,
+        "fileNames": tails.iter().map(|tail| tail.file_name.as_str()).collect::<Vec<_>>(),
+        "fileSizeBytes": tails.iter().map(|tail| tail.file_size).sum::<u64>(),
+        "segmentFilesAvailable": candidates.len(),
+        "segmentFilesIncluded": tails.len(),
+        "segmentsOmittedBeforeTail": candidates.len().saturating_sub(tails.len()),
+        "truncatedBeforeTail": tails.len() < candidates.len()
+            || tails.iter().any(|tail| tail.tail_start_offset > 0),
+        "bytesRead": tails.iter().map(|tail| tail.bytes_read).sum::<usize>(),
+        "tailLineCount": lines.len(),
+        "incompleteFinalLineIgnoredCount": tails
+            .iter()
+            .filter(|tail| tail.incomplete_final_line_ignored)
+            .count(),
+        "recordsIncluded": records.len(),
+        "recordsOmittedBeforeLimit": records_omitted_before_limit,
+        "parseErrorCount": parse_error_count,
+        "unknownSchemaCount": unknown_schema_count,
+        "sequence": sequence,
+        "records": records,
+    });
+    if let Some(selection) = unified_run {
+        summary["runId"] = Value::String(selection.run_id.clone());
+        summary["processId"] = Value::from(selection.process_id);
+        summary["activeFileName"] = Value::String(selection.active_file_name.clone());
+    }
 
-    Ok((
-        json!({
-            "family": spec.family,
-            "expectedSchema": spec.expected_schema,
-            "present": true,
-            "fileName": file_name,
-            "fileSizeBytes": file_size,
-            "tailStartOffset": tail_start_offset,
-            "truncatedBeforeTail": tail_start_offset > 0,
-            "bytesRead": bytes.len(),
-            "tailLineCount": lines.len(),
-            "recordsIncluded": records.len(),
-            "recordsOmittedBeforeLimit": records_omitted_before_limit,
-            "parseErrorCount": parse_error_count,
-            "unknownSchemaCount": unknown_schema_count,
-            "sequence": sequence,
-            "records": records,
-        }),
-        issue_count,
-    ))
+    Ok((summary, issue_count))
+}
+
+fn read_artifact_tail(
+    candidate: &ArtifactCandidate,
+    max_bytes: u64,
+    ignore_incomplete_final_line: bool,
+) -> std::io::Result<TailRead> {
+    let mut file = File::open(&candidate.path)?;
+    let file_size = file.metadata()?.len();
+    let bytes_to_read = file_size.min(max_bytes);
+    let tail_start_offset = file_size.saturating_sub(bytes_to_read);
+    file.seek(SeekFrom::Start(tail_start_offset))?;
+    let mut bytes = Vec::with_capacity(bytes_to_read as usize);
+    file.take(bytes_to_read).read_to_end(&mut bytes)?;
+    let bytes_read = bytes.len();
+    if tail_start_offset > 0 {
+        if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=newline);
+        } else {
+            bytes.clear();
+        }
+    }
+    let incomplete_final_line_ignored =
+        ignore_incomplete_final_line && bytes.last().is_some_and(|last| *last != b'\n');
+    if incomplete_final_line_ignored {
+        if let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
+            bytes.truncate(newline + 1);
+        } else {
+            bytes.clear();
+        }
+    }
+    let lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+    Ok(TailRead {
+        file_name: candidate.file_name.clone(),
+        file_size,
+        tail_start_offset,
+        bytes_read,
+        incomplete_final_line_ignored,
+        lines,
+    })
 }
 
 fn sequence_summary(sequences: &[u64], field: &str, assessment: &str) -> Value {
@@ -536,7 +707,8 @@ mod tests {
     #[test]
     fn artifact_summary_is_bounded_and_reports_schema_and_sequence_issues() {
         let root = test_dir("artifact-summary");
-        let path = root.join("emulebb-rust-diag-test.jsonl");
+        let file_name = "emulebb-rust-diag-42-test-run-000003.jsonl";
+        let path = root.join(file_name);
         let mut content = String::new();
         for sequence in 1..=70 {
             let schema = if sequence == 69 {
@@ -566,7 +738,12 @@ mod tests {
         }
         fs::write(&path, content).unwrap();
 
-        let artifacts = collect_artifacts(Some(root));
+        let selection = UnifiedRunSelection {
+            run_id: "test-run".to_string(),
+            process_id: 42,
+            active_file_name: file_name.to_string(),
+        };
+        let artifacts = collect_artifacts(Some(root), Some(&selection));
         let unified = artifacts
             .families
             .iter()
@@ -584,8 +761,76 @@ mod tests {
     }
 
     #[test]
+    fn unified_summary_uses_only_the_active_run_and_ignores_a_partial_live_line() {
+        let root = test_dir("active-run-summary");
+        fs::write(
+            root.join("emulebb-rust-diag-7-stale-run-000000.jsonl"),
+            json!({
+                "schema": "diag_event_v2",
+                "runId": "stale-run",
+                "processId": 7,
+                "segmentId": 0,
+                "seq": 99,
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("emulebb-rust-diag-42-active-run-000000.jsonl"),
+            json!({
+                "schema": "diag_event_v2",
+                "runId": "active-run",
+                "processId": 42,
+                "segmentId": 0,
+                "seq": 1,
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+        let active_file_name = "emulebb-rust-diag-42-active-run-000001.jsonl";
+        fs::write(
+            root.join(active_file_name),
+            format!(
+                "{}\n{{\"schema\":\"diag_event_v2\"",
+                json!({
+                    "schema": "diag_event_v2",
+                    "runId": "active-run",
+                    "processId": 42,
+                    "segmentId": 1,
+                    "seq": 2,
+                })
+            ),
+        )
+        .unwrap();
+        let selection = UnifiedRunSelection {
+            run_id: "active-run".to_string(),
+            process_id: 42,
+            active_file_name: active_file_name.to_string(),
+        };
+
+        let artifacts = collect_artifacts(Some(root), Some(&selection));
+        let unified = artifacts
+            .families
+            .iter()
+            .find(|family| family["family"] == "unifiedEvents")
+            .unwrap();
+        assert_eq!(artifacts.file_count, 2);
+        assert_eq!(unified["runId"], "active-run");
+        assert_eq!(unified["segmentFilesAvailable"], 2);
+        assert_eq!(unified["segmentFilesIncluded"], 2);
+        assert_eq!(unified["recordsIncluded"], 2);
+        assert_eq!(unified["sequence"]["first"], 1);
+        assert_eq!(unified["sequence"]["last"], 2);
+        assert_eq!(unified["parseErrorCount"], 0);
+        assert_eq!(unified["incompleteFinalLineIgnoredCount"], 1);
+        assert!(!unified.to_string().contains("stale-run"));
+    }
+
+    #[test]
     fn missing_artifact_families_are_explicit_when_log_directory_is_unset() {
-        let artifacts = collect_artifacts(None);
+        let artifacts = collect_artifacts(None, None);
         assert_eq!(artifacts.file_count, 0);
         assert_eq!(artifacts.missing_families.len(), ARTIFACT_FAMILIES.len());
         assert!(
