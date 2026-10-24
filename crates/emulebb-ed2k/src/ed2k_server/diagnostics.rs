@@ -25,9 +25,10 @@ use super::{ResolvedServerEntry, ServerSession};
 /// protocol byte unless the server advertised packed payload support.
 #[cfg(any(feature = "packet-diagnostics", test))]
 const OP_EDONKEYPROT_MARKER: u8 = 0xE3;
-/// One server-flow packet in the converged `ed2k_packet_v1` shape (flow="server"),
-/// so client<->server traces diff 1:1 against eMuleBB's server-packet emitter.
-/// Carries server-session extras (role/trace_id) the diff harness ignores.
+/// One server-flow diagnostic record, normalized into the converged
+/// `diag_event_v2` envelope so client<->server traces diff 1:1 against eMuleBB's
+/// server-packet emitter. Carries server-session extras (role/trace_id) the diff
+/// harness ignores.
 #[cfg(any(feature = "packet-diagnostics", test))]
 #[derive(Debug)]
 struct Ed2kServerDumpRecord<'a> {

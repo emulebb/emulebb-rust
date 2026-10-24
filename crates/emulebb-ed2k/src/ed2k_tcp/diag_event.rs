@@ -1,12 +1,9 @@
 //! `family:"ed2k_tcp"` `diag_event_v2` mapping.
 //!
-//! Re-shapes an [`Ed2kTcpDumpRecord`] (the legacy `ed2k_packet_v1` record) into
-//! the converged `ed2k_tcp` `diag_event_v2` envelope and forwards
-//! it to the shared writer. Kept in its own module because diagnostics-envelope
-//! mapping is a separate responsibility from packet capture. Both writes are
-//! behind the `packet-diagnostics` feature: the only caller
-//! (`dump.rs::dump_ed2k_tcp_record`) is invoked solely from the feature-gated
-//! send/recv/meta builders.
+//! Maps an [`Ed2kTcpDiagnosticRecord`] into the converged `ed2k_tcp`
+//! `diag_event_v2` envelope and forwards it to the shared writer. Kept in its
+//! own module because diagnostics-envelope mapping is a separate responsibility
+//! from packet capture.
 
 #![cfg_attr(
     not(feature = "packet-diagnostics"),
@@ -18,19 +15,18 @@
 
 use serde_json::{Map, Value, json};
 
-use super::dump::Ed2kTcpDumpRecord;
+use super::dump::Ed2kTcpDiagnosticRecord;
 
-/// Emit the converged `ed2k_tcp` `diag_event_v2` record from the same data that
-/// built the legacy `ed2k_packet_v1` record. Optional `keys`/`body` fields are
-/// omitted when absent rather than faked (`peerHash`/`fileHash` are not known at
-/// this layer, so they are not emitted).
-pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
+/// Emit one converged `ed2k_tcp` `diag_event_v2` record. Optional `keys`/`body`
+/// fields are omitted when absent rather than faked (`peerHash`/`fileHash` are
+/// not known at this layer, so they are not emitted).
+pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDiagnosticRecord<'_>) {
     let (event, severity, keys, body) = ed2k_tcp_diag_event_parts(record);
     crate::diag_event::emit("ed2k_tcp", event, severity, keys, body);
 }
 
 fn ed2k_tcp_diag_event_parts(
-    record: &Ed2kTcpDumpRecord<'_>,
+    record: &Ed2kTcpDiagnosticRecord<'_>,
 ) -> (&'static str, &'static str, Value, Value) {
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(record.remote_addr));
@@ -104,12 +100,12 @@ fn ed2k_tcp_diag_event_parts(
     } else {
         "info"
     };
-    let event = match (record.schema, record.direction) {
-        ("ed2k_handshake_v1", _) => "obfuscation_handshake",
-        (_, "meta") => "state",
-        _ => "packet",
-    };
-    (event, severity, Value::Object(keys), Value::Object(body))
+    (
+        record.event,
+        severity,
+        Value::Object(keys),
+        Value::Object(body),
+    )
 }
 
 #[cfg(test)]
@@ -117,15 +113,12 @@ mod tests {
     use super::*;
 
     fn record<'a>(
-        schema: &'static str,
+        event: &'static str,
         direction: &'a str,
         outcome: &'a str,
-    ) -> Ed2kTcpDumpRecord<'a> {
-        Ed2kTcpDumpRecord {
-            schema,
-            source: "emulebb-rust",
-            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
-            event_seq: 1,
+    ) -> Ed2kTcpDiagnosticRecord<'a> {
+        Ed2kTcpDiagnosticRecord {
+            event,
             trace_key: "native_download:198.51.100.2:4662".to_string(),
             state_id: "native_download.session".to_string(),
             state_label: "session",
@@ -155,7 +148,7 @@ mod tests {
 
     #[test]
     fn peer_tcp_state_event_preserves_trace_context() {
-        let record = record("ed2k_packet_v1", "meta", "meta");
+        let record = record("state", "meta", "meta");
         let (event, severity, keys, body) = ed2k_tcp_diag_event_parts(&record);
 
         assert_eq!(event, "state");
@@ -168,7 +161,7 @@ mod tests {
 
     #[test]
     fn peer_tcp_handshake_keeps_distinct_event_classification() {
-        let record = record("ed2k_handshake_v1", "send", "send_succeeded");
+        let record = record("obfuscation_handshake", "send", "send_succeeded");
         let (event, _, _, body) = ed2k_tcp_diag_event_parts(&record);
 
         assert_eq!(event, "obfuscation_handshake");

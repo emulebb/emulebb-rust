@@ -1,7 +1,6 @@
-// The packet dump is gated by the `packet-diagnostics` Cargo feature (the
-// equivalent of eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS #ifdef). When the
-// feature is off the public dump wrappers below become no-ops and the record
-// machinery is dead-code-eliminated, so release builds carry zero dump cost.
+// Exact peer diagnostics are gated by the `packet-diagnostics` Cargo feature.
+// When the feature is off the public wrappers below become no-ops and the
+// record machinery is dead-code-eliminated, so release builds carry zero cost.
 #![cfg_attr(
     not(feature = "packet-diagnostics"),
     expect(
@@ -13,17 +12,9 @@
 
 use std::{
     borrow::Cow,
-    fs,
-    io::Write,
     net::SocketAddr,
-    sync::{
-        Mutex as StdMutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
-
-use chrono::SecondsFormat;
-use serde::Serialize;
 
 use super::{
     Ed2kTransportMode, EmuleTcpPacket, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS,
@@ -44,15 +35,9 @@ use super::{
     OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN,
 };
 
-const ED2K_TCP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-tcp-dump-";
-const ED2K_TCP_LIVE_SYNC_EVERY: u64 = 128;
-
-#[derive(Debug, Serialize)]
-pub(super) struct Ed2kTcpDumpRecord<'a> {
-    pub(super) schema: &'static str,
-    pub(super) source: &'static str,
-    pub(super) ts_utc: String,
-    pub(super) event_seq: u64,
+#[derive(Debug)]
+pub(super) struct Ed2kTcpDiagnosticRecord<'a> {
+    pub(super) event: &'static str,
     pub(super) trace_key: String,
     pub(super) state_id: String,
     pub(super) state_label: &'a str,
@@ -83,47 +68,12 @@ fn exact_packet_hex(bytes: &[u8]) -> String {
     hex::encode(bytes)
 }
 
-fn ed2k_tcp_dump_event_seq() -> u64 {
-    static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
-    NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
 fn ed2k_tcp_trace_key(flow: &'static str, remote_addr: SocketAddr) -> String {
     format!("{flow}:{remote_addr}")
 }
 
 fn ed2k_tcp_state_id(flow: &'static str, phase: &str) -> String {
     format!("{flow}.{phase}")
-}
-
-/// Open (create/append) the ed2k TCP dump file under `EMULEBB_RUST_LOG_DIR`.
-/// Returns `None` when the env var is unset or the file cannot be created.
-///
-/// Kept separate from the `OnceLock` cell so callers can RE-ATTEMPT the open
-/// while the handle is still `None`: the previous design opened inside
-/// `get_or_init`, so a single early first-access (before the daemon made
-/// `EMULEBB_RUST_LOG_DIR` visible) permanently cached `None` and silently
-/// disabled the dump for the whole run.
-fn open_ed2k_tcp_dump_file() -> Option<fs::File> {
-    let dir = std::env::var("EMULEBB_RUST_LOG_DIR")
-        .ok()
-        .map(std::path::PathBuf::from)?;
-    fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!(
-        "{}{}.jsonl",
-        ED2K_TCP_DUMP_FILE_PREFIX,
-        chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
-    ));
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()
-}
-
-fn ed2k_tcp_dump_file() -> &'static StdMutex<Option<fs::File>> {
-    static DUMP_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
-    DUMP_FILE.get_or_init(|| StdMutex::new(None))
 }
 
 fn ed2k_protocol_name(protocol: u8) -> &'static str {
@@ -331,40 +281,8 @@ fn should_skip_bulk_packet(protocol: u8, opcode: u8, from_recv: bool) -> bool {
     !(n < HEAD || n % EVERY == 0)
 }
 
-fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
-    if let Ok(line) = serde_json::to_string(record)
-        && let Ok(mut guard) = ed2k_tcp_dump_file().lock()
-    {
-        // Open on the first record and re-attempt whenever the handle is still
-        // None, so an early first-access (before EMULEBB_RUST_LOG_DIR is visible)
-        // does not permanently disable the dump for the run.
-        if guard.is_none() {
-            *guard = open_ed2k_tcp_dump_file();
-        }
-        if let Some(file) = guard.as_mut() {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-            maybe_sync_ed2k_tcp_dump(file);
-        }
-    }
-
-    // uniform-diagnostics-v2 (lane D2): also emit the converged `ed2k_tcp`
-    // `diag_event_v2` record from the SAME data. The legacy
-    // `ed2k_packet_v1` line above is kept during migration. Both writes are
-    // already behind the `packet-diagnostics` feature (the only callers of this
-    // fn are the feature-gated send/recv/meta builders). The mapping itself lives
-    // in the sibling `diag_event` module to keep this file within budget.
+fn emit_ed2k_tcp_record(record: &Ed2kTcpDiagnosticRecord<'_>) {
     super::diag_event::emit_ed2k_tcp_diag_event(record);
-}
-
-fn maybe_sync_ed2k_tcp_dump(file: &fs::File) {
-    static ED2K_TCP_LIVE_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
-    if ED2K_TCP_LIVE_SYNC_COUNTER
-        .fetch_add(1, Ordering::Relaxed)
-        .is_multiple_of(ED2K_TCP_LIVE_SYNC_EVERY)
-    {
-        let _ = file.sync_data();
-    }
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -375,11 +293,8 @@ fn dump_ed2k_tcp_meta(
     phase: &str,
     note: impl FnOnce() -> String,
 ) {
-    let record = Ed2kTcpDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: ed2k_tcp_dump_event_seq(),
+    let record = Ed2kTcpDiagnosticRecord {
+        event: "state",
         trace_key: ed2k_tcp_trace_key(flow, remote_addr),
         state_id: ed2k_tcp_state_id(flow, phase),
         state_label: phase,
@@ -405,7 +320,7 @@ fn dump_ed2k_tcp_meta(
         payload_hex_truncated: None,
         note: Some(note()),
     };
-    dump_ed2k_tcp_record(&record);
+    emit_ed2k_tcp_record(&record);
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -423,11 +338,8 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
     }
     let canonical_phase = canonical_ed2k_recv_phase(flow, phase, packet.protocol, packet.opcode);
     let payload_hex = exact_packet_hex(&packet.payload);
-    let record = Ed2kTcpDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: ed2k_tcp_dump_event_seq(),
+    let record = Ed2kTcpDiagnosticRecord {
+        event: "packet",
         trace_key: ed2k_tcp_trace_key(flow, remote_addr),
         state_id: ed2k_tcp_state_id(flow, canonical_phase.as_ref()),
         state_label: canonical_phase.as_ref(),
@@ -453,7 +365,7 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
         payload_hex_truncated: Some(false),
         note: None,
     };
-    dump_ed2k_tcp_record(&record);
+    emit_ed2k_tcp_record(&record);
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -470,11 +382,8 @@ pub(super) fn dump_ed2k_tcp_handshake_step(
     raw: &[u8],
     clear: &[u8],
 ) {
-    let record = Ed2kTcpDumpRecord {
-        schema: "ed2k_handshake_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: ed2k_tcp_dump_event_seq(),
+    let record = Ed2kTcpDiagnosticRecord {
+        event: "obfuscation_handshake",
         trace_key: ed2k_tcp_trace_key(flow, remote_addr),
         state_id: ed2k_tcp_state_id(flow, phase),
         state_label: phase,
@@ -500,7 +409,7 @@ pub(super) fn dump_ed2k_tcp_handshake_step(
         payload_hex_truncated: None,
         note: Some("eD2K TCP obfuscation handshake".to_string()),
     };
-    dump_ed2k_tcp_record(&record);
+    emit_ed2k_tcp_record(&record);
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -521,11 +430,8 @@ pub(super) fn dump_ed2k_tcp_recv_terminal(
         || Cow::Borrowed(phase),
         |(protocol, opcode)| canonical_ed2k_recv_phase(flow, phase, protocol, opcode),
     );
-    let record = Ed2kTcpDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: ed2k_tcp_dump_event_seq(),
+    let record = Ed2kTcpDiagnosticRecord {
+        event: "packet",
         trace_key: ed2k_tcp_trace_key(flow, remote_addr),
         state_id: ed2k_tcp_state_id(flow, canonical_phase.as_ref()),
         state_label: canonical_phase.as_ref(),
@@ -553,7 +459,7 @@ pub(super) fn dump_ed2k_tcp_recv_terminal(
         payload_hex_truncated: None,
         note: Some(detail),
     };
-    dump_ed2k_tcp_record(&record);
+    emit_ed2k_tcp_record(&record);
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -580,11 +486,8 @@ pub(super) fn dump_ed2k_tcp_send_capture(
     let payload =
         (clear_frame.len() > TCP_PACKET_HEADER_LEN).then(|| &clear_frame[TCP_PACKET_HEADER_LEN..]);
     let canonical_phase = canonical_ed2k_send_phase(flow, phase, protocol, opcode);
-    let record = Ed2kTcpDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: ed2k_tcp_dump_event_seq(),
+    let record = Ed2kTcpDiagnosticRecord {
+        event: "packet",
         trace_key: ed2k_tcp_trace_key(flow, remote_addr),
         state_id: ed2k_tcp_state_id(flow, canonical_phase.as_ref()),
         state_label: canonical_phase.as_ref(),
@@ -612,7 +515,7 @@ pub(super) fn dump_ed2k_tcp_send_capture(
         payload_hex_truncated: payload.map(|_| false),
         note: detail,
     };
-    dump_ed2k_tcp_record(&record);
+    emit_ed2k_tcp_record(&record);
 }
 
 // No-op variants compiled when the `packet-diagnostics` feature is off, so the
@@ -674,15 +577,7 @@ pub(crate) fn dump_ed2k_tcp_download_meta(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ED2K_TCP_DUMP_FILE_PREFIX, OP_EMULEPROT, OP_SIGNATURE, canonical_ed2k_send_phase,
-        exact_packet_hex,
-    };
-
-    #[test]
-    fn tcp_dump_prefix_uses_emulebb_rust_name() {
-        assert_eq!(ED2K_TCP_DUMP_FILE_PREFIX, "emulebb-rust-ed2k-tcp-dump-");
-    }
+    use super::{OP_EMULEPROT, OP_SIGNATURE, canonical_ed2k_send_phase, exact_packet_hex};
 
     #[test]
     fn packet_hex_preserves_payloads_larger_than_the_former_cap() {
@@ -690,45 +585,6 @@ mod tests {
         let encoded = exact_packet_hex(&payload);
         assert_eq!(encoded.len(), payload.len() * 2);
         assert!(encoded.ends_with("ab"));
-    }
-
-    // Regression guard: an early dump access before EMULEBB_RUST_LOG_DIR is
-    // visible must NOT permanently disable the dump (the OnceLock previously
-    // opened the file inside get_or_init and cached the resulting None forever,
-    // silently killing the whole run's ed2k dump). The writer must re-attempt.
-    #[cfg(feature = "packet-diagnostics")]
-    #[test]
-    fn dump_recovers_when_log_dir_appears_after_first_access() {
-        use std::net::SocketAddr;
-        let addr: SocketAddr = "127.0.0.1:4662".parse().unwrap();
-        // First access with the log dir NOT visible: must be a recoverable no-op.
-        // SAFETY: this test owns the dump OnceLock's first access in its run.
-        unsafe {
-            std::env::remove_var("EMULEBB_RUST_LOG_DIR");
-        }
-        super::dump_ed2k_tcp_download_meta(addr, None, "session", || ("pre-env").into());
-        // The log dir now becomes available (mirrors the daemon making it visible
-        // after an early first-access): the next record must create + write.
-        let dir = std::env::temp_dir().join(format!("ed2k-dump-probe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        unsafe {
-            std::env::set_var("EMULEBB_RUST_LOG_DIR", &dir);
-        }
-        super::dump_ed2k_tcp_download_meta(addr, None, "session", || ("post-env").into());
-        let created = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(ED2K_TCP_DUMP_FILE_PREFIX)
-            });
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            created,
-            "dump must recover once EMULEBB_RUST_LOG_DIR appears after an early access"
-        );
     }
 
     #[test]
