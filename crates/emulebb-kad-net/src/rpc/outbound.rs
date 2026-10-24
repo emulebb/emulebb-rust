@@ -260,6 +260,7 @@ impl RpcManager {
                 receiver_verify_key_valid: None,
                 tracked_request_opcode: None,
                 drop_reason: None,
+                detail: None,
                 tracker_bucket: None,
                 tracker_action: None,
                 tracker_observed_packets: None,
