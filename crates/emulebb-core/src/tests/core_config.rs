@@ -166,6 +166,10 @@ fn ip_filter_reload_status_reflects_live_reparsed_ranges() {
     assert_eq!(status.path.as_deref(), Some(expected_path.as_str()));
     assert_eq!(status.level, emulebb_ed2k::ipfilter::DEFAULT_FILTER_LEVEL);
     assert_eq!(status.range_count, 2);
+    assert_eq!(
+        status.loaded_sha256.as_deref(),
+        Some("ce977fed02d185f1bc1f880bcea0ded2e11ff02633741cf580da9376ffbaaf99")
+    );
 }
 
 #[tokio::test]

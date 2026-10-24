@@ -886,6 +886,7 @@ async fn ip_filter_reports_default_status_and_reload_shape() {
     assert_eq!(value["data"]["level"], 127);
     assert_eq!(value["data"]["rangeCount"], 0);
     assert!(value["data"].get("path").is_none());
+    assert!(value["data"].get("loadedSha256").is_none());
 
     let response = router
         .oneshot(
