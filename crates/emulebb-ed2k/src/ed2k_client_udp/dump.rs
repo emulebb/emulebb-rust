@@ -30,7 +30,6 @@ use crate::ed2k_client_udp_obfuscation::deobfuscate_client_udp;
 
 const CLIENT_UDP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-client-udp-dump-";
 const OP_EMULEPROT_MARKER: u8 = 0xC5;
-const MAX_CLIENT_UDP_DUMP_HEX_BYTES: usize = 4 * 1024;
 const CLIENT_UDP_LIVE_SYNC_EVERY: u64 = 128;
 
 #[derive(Debug, Serialize)]
@@ -64,8 +63,8 @@ pub(super) fn dump_client_udp_send(_remote_addr: SocketAddr, _datagram: &ClientU
 
 #[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_client_udp_send(remote_addr: SocketAddr, datagram: &ClientUdpDatagram) {
-    let (raw_hex, _) = capped_packet_hex(&datagram.bytes);
-    let (payload_hex, payload_hex_truncated) = capped_packet_hex(&datagram.payload);
+    let raw_hex = exact_packet_hex(&datagram.bytes);
+    let payload_hex = exact_packet_hex(&datagram.payload);
     dump_client_udp_record(&ClientUdpDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -91,7 +90,7 @@ pub(super) fn dump_client_udp_send(remote_addr: SocketAddr, datagram: &ClientUdp
         raw_hex,
         payload_len: Some(datagram.payload.len()),
         payload_hex: Some(payload_hex),
-        payload_hex_truncated: Some(payload_hex_truncated),
+        payload_hex_truncated: Some(false),
         note: None,
     });
 }
@@ -115,8 +114,8 @@ pub(super) fn dump_client_udp_recv(
     let Some(decoded) = decode_client_udp_for_dump(our_user_hash, sender_ip, datagram) else {
         return;
     };
-    let (raw_hex, _) = capped_packet_hex(datagram);
-    let (payload_hex, payload_hex_truncated) = capped_packet_hex(&decoded.payload);
+    let raw_hex = exact_packet_hex(datagram);
+    let payload_hex = exact_packet_hex(&decoded.payload);
     dump_client_udp_record(&ClientUdpDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -138,7 +137,7 @@ pub(super) fn dump_client_udp_recv(
         raw_hex,
         payload_len: Some(decoded.payload.len()),
         payload_hex: Some(payload_hex),
-        payload_hex_truncated: Some(payload_hex_truncated),
+        payload_hex_truncated: Some(false),
         note: None,
     });
 }
@@ -231,12 +230,8 @@ fn client_udp_dump_file() -> &'static StdMutex<Option<fs::File>> {
     DUMP_FILE.get_or_init(|| StdMutex::new(None))
 }
 
-fn capped_packet_hex(bytes: &[u8]) -> (String, bool) {
-    if bytes.len() > MAX_CLIENT_UDP_DUMP_HEX_BYTES {
-        (hex::encode(&bytes[..MAX_CLIENT_UDP_DUMP_HEX_BYTES]), true)
-    } else {
-        (hex::encode(bytes), false)
-    }
+fn exact_packet_hex(bytes: &[u8]) -> String {
+    hex::encode(bytes)
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -274,7 +269,7 @@ fn maybe_sync_client_udp_dump(file: &fs::File) {
 mod tests {
     use super::{
         CLIENT_UDP_DUMP_FILE_PREFIX, OP_DIRECTCALLBACKREQ, OP_REASKACK, OP_REASKCALLBACKUDP,
-        OP_REASKFILEPING, client_udp_opcode_name,
+        OP_REASKFILEPING, client_udp_opcode_name, exact_packet_hex,
     };
     use crate::ed2k_client_udp::outbound::{OutboundReaskTarget, build_reask_file_ping_datagram};
     use emulebb_kad_proto::Ed2kHash;
@@ -285,6 +280,14 @@ mod tests {
             CLIENT_UDP_DUMP_FILE_PREFIX,
             "emulebb-rust-ed2k-client-udp-dump-"
         );
+    }
+
+    #[test]
+    fn client_udp_packet_hex_preserves_payloads_larger_than_the_former_cap() {
+        let payload = vec![0xEF; 4 * 1024 + 1];
+        let encoded = exact_packet_hex(&payload);
+        assert_eq!(encoded.len(), payload.len() * 2);
+        assert!(encoded.ends_with("ef"));
     }
 
     #[test]

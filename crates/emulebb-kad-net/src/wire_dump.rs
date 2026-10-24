@@ -341,7 +341,7 @@ fn emit_kad_udp_diag_event(
     body.insert("wireLen".to_string(), serde_json::json!(wire_payload.len()));
     body.insert(
         "wireHex".to_string(),
-        serde_json::json!(capped_hex_upper(wire_payload)),
+        serde_json::json!(encode_hex_upper(wire_payload)),
     );
     body.insert(
         "decodedLen".to_string(),
@@ -349,7 +349,7 @@ fn emit_kad_udp_diag_event(
     );
     body.insert(
         "decodedHex".to_string(),
-        serde_json::json!(capped_hex_upper(decoded_payload)),
+        serde_json::json!(encode_hex_upper(decoded_payload)),
     );
     body.insert(
         "rawObfuscated".to_string(),
@@ -402,19 +402,6 @@ fn emit_kad_udp_diag_event(
         serde_json::Value::Object(keys),
         serde_json::Value::Object(body),
     );
-}
-
-/// Cap on hex-encoded bytes emitted per packet (schema §3.2: 4 KiB), matching the
-/// eD2k TCP dump cap so the converged dumps stay byte-comparable.
-const MAX_DIAG_HEX_BYTES: usize = 4 * 1024;
-
-fn capped_hex_upper(bytes: &[u8]) -> String {
-    let slice = if bytes.len() > MAX_DIAG_HEX_BYTES {
-        &bytes[..MAX_DIAG_HEX_BYTES]
-    } else {
-        bytes
-    };
-    encode_hex_upper(slice)
 }
 
 fn udp_dump_writer() -> Option<&'static UdpDumpWriter> {
@@ -525,6 +512,14 @@ mod tests {
     #[test]
     fn encode_hex_upper_matches_oracle_style() {
         assert_eq!(encode_hex_upper(&[0xE4, 0x21, 0xAB, 0x00]), "E421AB00");
+    }
+
+    #[test]
+    fn encode_hex_upper_preserves_payloads_larger_than_the_former_cap() {
+        let payload = vec![0xAB; 4 * 1024 + 1];
+        let encoded = encode_hex_upper(&payload);
+        assert_eq!(encoded.len(), payload.len() * 2);
+        assert!(encoded.ends_with("AB"));
     }
 
     #[test]
