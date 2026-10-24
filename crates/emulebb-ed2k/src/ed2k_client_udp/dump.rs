@@ -465,10 +465,6 @@ fn client_udp_diag_event_parts(
 }
 
 #[cfg(feature = "packet-diagnostics")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "flat diagnostic send-outcome boundary"
-)]
 pub(super) fn emit_client_udp_send_outcome(
     remote_addr: SocketAddr,
     role: ClientUdpSendRole,
@@ -491,10 +487,6 @@ pub(super) fn emit_client_udp_send_outcome(
 }
 
 #[cfg(any(feature = "packet-diagnostics", test))]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "flat diagnostic send-outcome mapping"
-)]
 fn client_udp_send_outcome_parts(
     remote_addr: SocketAddr,
     role: ClientUdpSendRole,
