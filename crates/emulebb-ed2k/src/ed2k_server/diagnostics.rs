@@ -57,6 +57,7 @@ struct Ed2kServerDumpRecord<'a> {
     phase: &'a str,
     direction: &'a str,
     outcome: &'a str,
+    send_attempt_id: Option<u64>,
     remote_addr: String,
     transport_mode: &'a str,
     obfuscated: Option<bool>,
@@ -88,6 +89,113 @@ pub(super) struct Ed2kServerPacketCapture<'a> {
     pub(super) note: Option<String>,
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
+struct Ed2kServerSendContext {
+    attempt_id: u64,
+    trace_id: u64,
+    trace_key: String,
+    state_id: String,
+    state_label: &'static str,
+    role: &'static str,
+    phase: &'static str,
+    remote_addr: String,
+    transport_mode: &'static str,
+    obfuscated: Option<bool>,
+    protocol_marker: Option<u8>,
+    opcode: Option<u8>,
+    attempted_len: usize,
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ed2kServerSendOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+impl Ed2kServerSendOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "send_succeeded",
+            Self::Failed => "send_failed",
+            Self::Cancelled => "send_cancelled",
+        }
+    }
+
+    const fn severity(self) -> &'static str {
+        match self {
+            Self::Succeeded => "info",
+            Self::Failed | Self::Cancelled => "warning",
+        }
+    }
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) struct Ed2kServerTcpSendAttempt {
+    context: Ed2kServerSendContext,
+    completed: bool,
+}
+
+#[cfg(feature = "packet-diagnostics")]
+impl Ed2kServerTcpSendAttempt {
+    pub(super) fn new(session: &ServerSession, capture: Ed2kServerPacketCapture<'_>) -> Self {
+        let attempt_id = next_ed2k_server_send_attempt_id();
+        let context = Ed2kServerSendContext {
+            attempt_id,
+            trace_id: session.trace_id,
+            trace_key: ed2k_server_trace_key(session),
+            state_id: ed2k_server_state_id(session),
+            state_label: session.phase.as_str(),
+            role: session.trace_role,
+            phase: session.phase.as_str(),
+            remote_addr: session.endpoint.to_string(),
+            transport_mode: capture.transport_mode,
+            obfuscated: capture.obfuscated,
+            protocol_marker: capture.protocol_marker,
+            opcode: capture.opcode,
+            attempted_len: capture.raw.len(),
+        };
+        dump_ed2k_server_packet_with_attempt(session, capture, Some(attempt_id));
+        Self {
+            context,
+            completed: false,
+        }
+    }
+
+    fn settle(
+        &mut self,
+        outcome: Ed2kServerSendOutcome,
+        delivery_known: bool,
+        note: Option<String>,
+    ) {
+        self.completed = true;
+        emit_ed2k_server_send_outcome(&self.context, outcome, delivery_known, note.as_deref());
+    }
+
+    pub(super) fn succeeded(mut self) {
+        self.settle(Ed2kServerSendOutcome::Succeeded, true, None);
+    }
+
+    pub(super) fn failed(mut self, error: String) {
+        self.settle(Ed2kServerSendOutcome::Failed, true, Some(error));
+    }
+}
+
+#[cfg(feature = "packet-diagnostics")]
+impl Drop for Ed2kServerTcpSendAttempt {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.settle(
+                Ed2kServerSendOutcome::Cancelled,
+                false,
+                Some("server TCP send future cancelled before completion".to_string()),
+            );
+        }
+    }
+}
+
 #[cfg(not(feature = "packet-diagnostics"))]
 pub(super) fn dump_ed2k_server_meta(_session: &ServerSession, _note: impl Into<String>) {}
 
@@ -115,6 +223,7 @@ pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<Str
         phase: session.phase.as_str(),
         direction: "meta",
         outcome: "meta",
+        send_attempt_id: None,
         remote_addr: session.endpoint.to_string(),
         transport_mode: if session.send_cipher.is_some() {
             "obfuscated"
@@ -158,6 +267,7 @@ pub(super) fn dump_ed2k_server_loop_meta(
         phase,
         direction: "meta",
         outcome: "meta",
+        send_attempt_id: None,
         remote_addr: endpoint.to_string(),
         transport_mode: "unknown",
         obfuscated: None,
@@ -226,6 +336,7 @@ pub(super) fn dump_ed2k_server_udp_packet(
         phase: "udp",
         direction,
         outcome: capture.outcome,
+        send_attempt_id: None,
         remote_addr: remote_addr.to_string(),
         transport_mode: capture.transport_mode,
         obfuscated: capture.obfuscated,
@@ -250,6 +361,15 @@ pub(super) fn dump_ed2k_server_packet(
     session: &ServerSession,
     capture: Ed2kServerPacketCapture<'_>,
 ) {
+    dump_ed2k_server_packet_with_attempt(session, capture, None);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+fn dump_ed2k_server_packet_with_attempt(
+    session: &ServerSession,
+    capture: Ed2kServerPacketCapture<'_>,
+    send_attempt_id: Option<u64>,
+) {
     // Normalize the wire direction to the shared send/recv vocabulary so the
     // packet-trace diff harness aligns these with eMuleBB's server packets.
     let direction = match capture.direction {
@@ -271,6 +391,7 @@ pub(super) fn dump_ed2k_server_packet(
         phase: session.phase.as_str(),
         direction,
         outcome: capture.outcome,
+        send_attempt_id,
         remote_addr: session.endpoint.to_string(),
         transport_mode: capture.transport_mode,
         obfuscated: capture.obfuscated,
@@ -305,6 +426,12 @@ fn exact_packet_hex(bytes: &[u8]) -> String {
 fn next_ed2k_server_dump_event_seq() -> u64 {
     static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
     NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(feature = "packet-diagnostics")]
+fn next_ed2k_server_send_attempt_id() -> u64 {
+    static NEXT_SEND_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_SEND_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 fn ed2k_server_trace_key(session: &ServerSession) -> String {
@@ -396,6 +523,9 @@ fn ed2k_server_diag_event_parts(
 
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(record.remote_addr));
+    if let Some(send_attempt_id) = record.send_attempt_id {
+        keys.insert("sendAttemptId".to_string(), json!(send_attempt_id));
+    }
     if let Some(protocol_marker) = record.protocol_marker {
         keys.insert("protocolMarker".to_string(), json!(protocol_marker));
     }
@@ -406,6 +536,9 @@ fn ed2k_server_diag_event_parts(
     let mut body = Map::new();
     body.insert("direction".to_string(), json!(record.direction));
     body.insert("outcome".to_string(), json!(record.outcome));
+    if let Some(send_attempt_id) = record.send_attempt_id {
+        body.insert("sendAttemptId".to_string(), json!(send_attempt_id));
+    }
     if let Some(protocol_marker) = record.protocol_marker {
         body.insert("protocolMarker".to_string(), json!(protocol_marker));
     }
@@ -464,6 +597,70 @@ fn ed2k_server_diag_event_parts(
 }
 
 #[cfg(feature = "packet-diagnostics")]
+fn emit_ed2k_server_send_outcome(
+    context: &Ed2kServerSendContext,
+    outcome: Ed2kServerSendOutcome,
+    delivery_known: bool,
+    note: Option<&str>,
+) {
+    let (severity, keys, body) =
+        ed2k_server_send_outcome_parts(context, outcome, delivery_known, note);
+    crate::diag_event::emit("ed2k_tcp", "send_outcome", severity, keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn ed2k_server_send_outcome_parts(
+    context: &Ed2kServerSendContext,
+    outcome: Ed2kServerSendOutcome,
+    delivery_known: bool,
+    note: Option<&str>,
+) -> (&'static str, Value, Value) {
+    let mut keys = Map::new();
+    keys.insert("peer".to_string(), json!(context.remote_addr));
+    keys.insert("sendAttemptId".to_string(), json!(context.attempt_id));
+    if let Some(protocol_marker) = context.protocol_marker {
+        keys.insert("protocolMarker".to_string(), json!(protocol_marker));
+    }
+    if let Some(opcode) = context.opcode {
+        keys.insert("opcode".to_string(), json!(opcode));
+    }
+
+    let mut body = Map::new();
+    body.insert("direction".to_string(), json!("send"));
+    body.insert("outcome".to_string(), json!(outcome.as_str()));
+    body.insert("deliveryKnown".to_string(), json!(delivery_known));
+    body.insert("sendAttemptId".to_string(), json!(context.attempt_id));
+    body.insert("traceId".to_string(), json!(context.trace_id));
+    body.insert("traceKey".to_string(), json!(context.trace_key));
+    body.insert("stateId".to_string(), json!(context.state_id));
+    body.insert("stateLabel".to_string(), json!(context.state_label));
+    body.insert("role".to_string(), json!(context.role));
+    body.insert("flow".to_string(), json!("server"));
+    body.insert("phase".to_string(), json!(context.phase));
+    body.insert("transportMode".to_string(), json!(context.transport_mode));
+    body.insert("attemptedLen".to_string(), json!(context.attempted_len));
+    if let Some(obfuscated) = context.obfuscated {
+        body.insert("obfuscated".to_string(), json!(obfuscated));
+    }
+    if let Some(protocol_marker) = context.protocol_marker {
+        body.insert("protocolMarker".to_string(), json!(protocol_marker));
+        body.insert(
+            "protocolName".to_string(),
+            json!(server_protocol_name(protocol_marker)),
+        );
+    }
+    if let Some(opcode) = context.opcode {
+        body.insert("opcode".to_string(), json!(opcode));
+        body.insert("opcodeName".to_string(), json!(server_opcode_name(opcode)));
+    }
+    if let Some(note) = note {
+        body.insert("note".to_string(), json!(note));
+    }
+
+    (outcome.severity(), Value::Object(keys), Value::Object(body))
+}
+
+#[cfg(feature = "packet-diagnostics")]
 fn maybe_sync_ed2k_server_dump(file: &fs::File) {
     static SINCE_SYNC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if SINCE_SYNC
@@ -517,11 +714,12 @@ fn server_opcode_name(opcode: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ED2K_SERVER_DUMP_FILE_PREFIX, Ed2kServerDumpRecord, OP_CALLBACKREQUEST,
-        OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ,
-        OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_PACKEDPROT, OP_SERVER_LIST_REQ,
-        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, ed2k_server_diag_event_parts, exact_packet_hex,
-        server_opcode_name, server_protocol_name,
+        ED2K_SERVER_DUMP_FILE_PREFIX, Ed2kServerDumpRecord, Ed2kServerSendContext,
+        Ed2kServerSendOutcome, OP_CALLBACKREQUEST, OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ,
+        OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
+        OP_GLOBSEARCHRES, OP_PACKEDPROT, OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2,
+        OP_SERVER_LIST_RES, ed2k_server_diag_event_parts, ed2k_server_send_outcome_parts,
+        exact_packet_hex, server_opcode_name, server_protocol_name,
     };
 
     #[test]
@@ -530,6 +728,46 @@ mod tests {
             ED2K_SERVER_DUMP_FILE_PREFIX,
             "emulebb-rust-ed2k-server-dump-"
         );
+    }
+
+    #[test]
+    fn server_tcp_send_outcome_preserves_attempt_correlation_and_terminal_state() {
+        let context = Ed2kServerSendContext {
+            attempt_id: 42,
+            trace_id: 7,
+            trace_key: "server:background:7:198.51.100.1:4661".to_string(),
+            state_id: "server.background.connected".to_string(),
+            state_label: "connected",
+            role: "background",
+            phase: "connected",
+            remote_addr: "198.51.100.1:4661".to_string(),
+            transport_mode: "plaintext",
+            obfuscated: Some(false),
+            protocol_marker: Some(OP_EDONKEYPROT_MARKER),
+            opcode: Some(OP_CALLBACKREQUEST),
+            attempted_len: 73,
+        };
+
+        let (severity, keys, body) =
+            ed2k_server_send_outcome_parts(&context, Ed2kServerSendOutcome::Succeeded, true, None);
+        assert_eq!(severity, "info");
+        assert_eq!(keys["sendAttemptId"], 42);
+        assert_eq!(body["outcome"], "send_succeeded");
+        assert_eq!(body["deliveryKnown"], true);
+        assert_eq!(body["attemptedLen"], 73);
+        assert_eq!(body["traceKey"], context.trace_key);
+        assert_eq!(body["stateId"], context.state_id);
+
+        let (severity, _, body) = ed2k_server_send_outcome_parts(
+            &context,
+            Ed2kServerSendOutcome::Cancelled,
+            false,
+            Some("cancelled"),
+        );
+        assert_eq!(severity, "warning");
+        assert_eq!(body["outcome"], "send_cancelled");
+        assert_eq!(body["deliveryKnown"], false);
+        assert_eq!(body["note"], "cancelled");
     }
 
     #[test]
@@ -549,8 +787,9 @@ mod tests {
             role: "background",
             flow: "server",
             phase: "connected",
-            direction: "recv",
-            outcome: "accepted",
+            direction: "send",
+            outcome: "attempted",
+            send_attempt_id: Some(17),
             remote_addr: "198.51.100.1:4661".to_string(),
             transport_mode: "plaintext",
             obfuscated: Some(false),
@@ -573,7 +812,9 @@ mod tests {
         assert_eq!(event, "packet");
         assert_eq!(severity, "info");
         assert_eq!(keys["peer"], "198.51.100.1:4661");
-        assert_eq!(body["outcome"], "accepted");
+        assert_eq!(keys["sendAttemptId"], 17);
+        assert_eq!(body["outcome"], "attempted");
+        assert_eq!(body["sendAttemptId"], 17);
         assert_eq!(body["traceKey"], "server:background:7:198.51.100.1:4661");
         assert_eq!(body["stateId"], "server.background.connected");
         assert_eq!(body["stateLabel"], "connected");
@@ -609,6 +850,7 @@ mod tests {
             phase: "udp",
             direction: "send",
             outcome: "accepted",
+            send_attempt_id: None,
             remote_addr: "198.51.100.2:4665".to_string(),
             transport_mode: "obfuscated",
             obfuscated: Some(true),
@@ -649,6 +891,7 @@ mod tests {
             phase: "udp",
             direction: "recv",
             outcome: "dropped",
+            send_attempt_id: None,
             remote_addr: "198.51.100.2:4665".to_string(),
             transport_mode: "obfuscated",
             obfuscated: Some(true),
@@ -692,6 +935,7 @@ mod tests {
             phase: "connected",
             direction: "meta",
             outcome: "meta",
+            send_attempt_id: None,
             remote_addr: "198.51.100.3:4661".to_string(),
             transport_mode: "plaintext",
             obfuscated: Some(false),

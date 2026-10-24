@@ -23,7 +23,7 @@ use crate::ed2k_tcp::MAX_ED2K_PACKET_LEN;
 
 use super::Ed2kServerFailure;
 #[cfg(feature = "packet-diagnostics")]
-use super::diagnostics::Ed2kServerPacketCapture;
+use super::diagnostics::{Ed2kServerPacketCapture, Ed2kServerTcpSendAttempt};
 use super::offer_policy::{
     OFFER_FILES_LEGACY_MIN_INTERVAL, OFFER_FILES_NEGOTIATION_WAIT,
     OfferFilesCapabilityAdvertisement, OfferFilesPolicy,
@@ -684,7 +684,7 @@ impl ServerSession {
             cipher.apply(&mut packet);
         }
         #[cfg(feature = "packet-diagnostics")]
-        dump_ed2k_server_packet(
+        let send_attempt = Ed2kServerTcpSendAttempt::new(
             self,
             Ed2kServerPacketCapture {
                 direction: "tx",
@@ -695,17 +695,29 @@ impl ServerSession {
                 raw: &packet,
                 clear_frame: Some(&clear_frame),
                 payload: Some(payload),
-                outcome: "accepted",
+                outcome: "attempted",
                 note: None,
             },
         );
         #[cfg(not(feature = "packet-diagnostics"))]
         dump_ed2k_server_packet(self, "tx", protocol_marker, opcode, payload);
-        self.stream.write_all(&packet).await.with_context(|| {
-            format!("failed to send opcode=0x{opcode:02X} to {}", self.endpoint)
-        })?;
-        self.last_tx = Instant::now();
-        Ok(())
+        let send_result =
+            self.stream.write_all(&packet).await.with_context(|| {
+                format!("failed to send opcode=0x{opcode:02X} to {}", self.endpoint)
+            });
+        match send_result {
+            Ok(()) => {
+                #[cfg(feature = "packet-diagnostics")]
+                send_attempt.succeeded();
+                self.last_tx = Instant::now();
+                Ok(())
+            }
+            Err(error) => {
+                #[cfg(feature = "packet-diagnostics")]
+                send_attempt.failed(format!("{error:#}"));
+                Err(error)
+            }
+        }
     }
 
     pub(super) async fn send_encoded_packet(
