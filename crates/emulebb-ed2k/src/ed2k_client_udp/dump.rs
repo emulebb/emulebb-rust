@@ -27,6 +27,7 @@ use super::codec::{
     OP_REASKCALLBACKUDP, OP_REASKFILEPING,
 };
 use super::outbound::ClientUdpDatagram;
+use super::transport::ClientUdpSendRole;
 use crate::ed2k_client_udp_obfuscation::deobfuscate_client_udp;
 
 const CLIENT_UDP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-client-udp-dump-";
@@ -46,6 +47,8 @@ struct ClientUdpDumpRecord<'a> {
     phase: &'static str,
     direction: &'a str,
     outcome: &'static str,
+    send_attempt_id: Option<u64>,
+    role: Option<&'static str>,
     remote_addr: String,
     transport_mode: &'a str,
     obfuscated: Option<bool>,
@@ -55,6 +58,7 @@ struct ClientUdpDumpRecord<'a> {
     opcode_name: Option<&'static str>,
     raw_len: usize,
     raw_hex: String,
+    attempted_len: Option<usize>,
     payload_len: Option<usize>,
     payload_hex: Option<String>,
     payload_hex_truncated: Option<bool>,
@@ -63,6 +67,7 @@ struct ClientUdpDumpRecord<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClientUdpDumpOutcome {
+    Attempted,
     Accepted,
     Ignored,
     Dropped,
@@ -74,6 +79,7 @@ pub(super) enum ClientUdpDumpOutcome {
 impl ClientUdpDumpOutcome {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Attempted => "attempted",
             Self::Accepted => "accepted",
             Self::Ignored => "ignored",
             Self::Dropped => "dropped",
@@ -86,16 +92,18 @@ impl ClientUdpDumpOutcome {
     const fn severity(self) -> &'static str {
         match self {
             Self::Dropped | Self::SendFailed | Self::SendCancelled => "warning",
-            Self::Accepted | Self::Ignored | Self::SendSucceeded => "info",
+            Self::Attempted | Self::Accepted | Self::Ignored | Self::SendSucceeded => "info",
         }
     }
 }
 
-#[cfg(not(feature = "packet-diagnostics"))]
-pub(super) fn dump_client_udp_send(_remote_addr: SocketAddr, _datagram: &ClientUdpDatagram) {}
-
 #[cfg(feature = "packet-diagnostics")]
-pub(super) fn dump_client_udp_send(remote_addr: SocketAddr, datagram: &ClientUdpDatagram) {
+pub(super) fn dump_client_udp_send_attempt(
+    remote_addr: SocketAddr,
+    role: ClientUdpSendRole,
+    datagram: &ClientUdpDatagram,
+    attempt_id: u64,
+) {
     let raw_hex = exact_packet_hex(&datagram.bytes);
     let payload_hex = exact_packet_hex(&datagram.payload);
     dump_client_udp_record(&ClientUdpDumpRecord {
@@ -104,12 +112,14 @@ pub(super) fn dump_client_udp_send(remote_addr: SocketAddr, datagram: &ClientUdp
         ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         event_seq: next_client_udp_dump_event_seq(),
         trace_key: client_udp_trace_key(remote_addr),
-        state_id: "client_udp.reask",
-        state_label: "reask",
+        state_id: role.state_id(),
+        state_label: role.state_label(),
         flow: "client_udp",
-        phase: "reask",
+        phase: role.phase(),
         direction: "send",
-        outcome: ClientUdpDumpOutcome::SendSucceeded.as_str(),
+        outcome: ClientUdpDumpOutcome::Attempted.as_str(),
+        send_attempt_id: Some(attempt_id),
+        role: Some(role.as_str()),
         remote_addr: remote_addr.to_string(),
         transport_mode: if datagram.obfuscated {
             "obfuscated"
@@ -123,6 +133,7 @@ pub(super) fn dump_client_udp_send(remote_addr: SocketAddr, datagram: &ClientUdp
         opcode_name: Some(client_udp_opcode_name(datagram.opcode)),
         raw_len: datagram.bytes.len(),
         raw_hex,
+        attempted_len: Some(datagram.bytes.len()),
         payload_len: Some(datagram.payload.len()),
         payload_hex: Some(payload_hex),
         payload_hex_truncated: Some(false),
@@ -176,6 +187,8 @@ pub(super) fn dump_client_udp_recv(
         phase: "reask",
         direction: "recv",
         outcome: outcome.as_str(),
+        send_attempt_id: None,
+        role: None,
         remote_addr: remote_addr.to_string(),
         transport_mode,
         obfuscated: match transport_mode {
@@ -193,6 +206,7 @@ pub(super) fn dump_client_udp_recv(
             .map(|decoded| client_udp_opcode_name(decoded.opcode)),
         raw_len: datagram.len(),
         raw_hex,
+        attempted_len: None,
         payload_len,
         payload_hex,
         payload_hex_truncated: payload_len.map(|_| false),
@@ -264,6 +278,12 @@ fn client_udp_trace_key(remote_addr: SocketAddr) -> String {
 fn next_client_udp_dump_event_seq() -> u64 {
     static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
     NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) fn next_client_udp_send_attempt_id() -> u64 {
+    static NEXT_SEND_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_SEND_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Open (create/append) the ed2k client-UDP dump file under `EMULEBB_RUST_LOG_DIR`.
@@ -339,6 +359,13 @@ fn client_udp_diag_event_parts(
     let mut body = Map::new();
     body.insert("direction".to_string(), json!(record.direction));
     body.insert("outcome".to_string(), json!(record.outcome));
+    if let Some(send_attempt_id) = record.send_attempt_id {
+        keys.insert("sendAttemptId".to_string(), json!(send_attempt_id));
+        body.insert("sendAttemptId".to_string(), json!(send_attempt_id));
+    }
+    if let Some(role) = record.role {
+        body.insert("role".to_string(), json!(role));
+    }
     body.insert("stateId".to_string(), json!(record.state_id));
     body.insert("stateLabel".to_string(), json!(record.state_label));
     body.insert("traceKey".to_string(), json!(record.trace_key));
@@ -362,6 +389,9 @@ fn client_udp_diag_event_parts(
     }
     body.insert("rawLen".to_string(), json!(record.raw_len));
     body.insert("rawHex".to_string(), json!(record.raw_hex));
+    if let Some(attempted_len) = record.attempted_len {
+        body.insert("attemptedLen".to_string(), json!(attempted_len));
+    }
     if let Some(payload_len) = record.payload_len {
         body.insert("payloadLen".to_string(), json!(payload_len));
     }
@@ -391,6 +421,83 @@ fn client_udp_diag_event_parts(
 }
 
 #[cfg(feature = "packet-diagnostics")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic send-outcome boundary"
+)]
+pub(super) fn emit_client_udp_send_outcome(
+    remote_addr: SocketAddr,
+    role: ClientUdpSendRole,
+    datagram: &ClientUdpDatagram,
+    attempt_id: u64,
+    outcome: ClientUdpDumpOutcome,
+    delivery_known: bool,
+    note: Option<String>,
+) {
+    let (severity, keys, body) = client_udp_send_outcome_parts(
+        remote_addr,
+        role,
+        datagram,
+        attempt_id,
+        outcome,
+        delivery_known,
+        note.as_deref(),
+    );
+    crate::diag_event::emit("ed2k_client_udp", "send_outcome", severity, keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic send-outcome mapping"
+)]
+fn client_udp_send_outcome_parts(
+    remote_addr: SocketAddr,
+    role: ClientUdpSendRole,
+    datagram: &ClientUdpDatagram,
+    attempt_id: u64,
+    outcome: ClientUdpDumpOutcome,
+    delivery_known: bool,
+    note: Option<&str>,
+) -> (&'static str, Value, Value) {
+    let keys = json!({
+        "peer": remote_addr.to_string(),
+        "protocolMarker": datagram.protocol_marker,
+        "opcode": datagram.opcode,
+        "sendAttemptId": attempt_id,
+    });
+    let mut body = Map::new();
+    body.insert("direction".to_string(), json!("send"));
+    body.insert("outcome".to_string(), json!(outcome.as_str()));
+    body.insert("deliveryKnown".to_string(), json!(delivery_known));
+    body.insert("sendAttemptId".to_string(), json!(attempt_id));
+    body.insert("role".to_string(), json!(role.as_str()));
+    body.insert("stateId".to_string(), json!(role.state_id()));
+    body.insert("stateLabel".to_string(), json!(role.state_label()));
+    body.insert(
+        "traceKey".to_string(),
+        json!(client_udp_trace_key(remote_addr)),
+    );
+    body.insert("flow".to_string(), json!("client_udp"));
+    body.insert("phase".to_string(), json!(role.phase()));
+    body.insert(
+        "protocolMarker".to_string(),
+        json!(datagram.protocol_marker),
+    );
+    body.insert("protocolName".to_string(), json!("emule"));
+    body.insert("opcode".to_string(), json!(datagram.opcode));
+    body.insert(
+        "opcodeName".to_string(),
+        json!(client_udp_opcode_name(datagram.opcode)),
+    );
+    body.insert("attemptedLen".to_string(), json!(datagram.bytes.len()));
+    if let Some(note) = note {
+        body.insert("note".to_string(), json!(note));
+    }
+    (outcome.severity(), keys, Value::Object(body))
+}
+
+#[cfg(feature = "packet-diagnostics")]
 fn maybe_sync_client_udp_dump(file: &fs::File) {
     static CLIENT_UDP_LIVE_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
     if CLIENT_UDP_LIVE_SYNC_COUNTER
@@ -406,9 +513,13 @@ mod tests {
     use super::{
         CLIENT_UDP_DUMP_FILE_PREFIX, ClientUdpDumpOutcome, ClientUdpDumpRecord,
         OP_DIRECTCALLBACKREQ, OP_PORTTEST, OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING,
-        client_udp_diag_event_parts, client_udp_opcode_name, exact_packet_hex,
+        client_udp_diag_event_parts, client_udp_opcode_name, client_udp_send_outcome_parts,
+        exact_packet_hex,
     };
-    use crate::ed2k_client_udp::outbound::{OutboundReaskTarget, build_reask_file_ping_datagram};
+    use crate::ed2k_client_udp::outbound::{
+        ClientUdpDatagram, OutboundReaskTarget, build_reask_file_ping_datagram,
+    };
+    use crate::ed2k_client_udp::transport::ClientUdpSendRole;
     use emulebb_kad_proto::Ed2kHash;
 
     #[test]
@@ -458,7 +569,9 @@ mod tests {
             flow: "client_udp",
             phase: "reask",
             direction: "send",
-            outcome: ClientUdpDumpOutcome::SendSucceeded.as_str(),
+            outcome: ClientUdpDumpOutcome::Attempted.as_str(),
+            send_attempt_id: Some(7),
+            role: Some("reask_request"),
             remote_addr: "198.51.100.2:4672".to_string(),
             transport_mode: "obfuscated",
             obfuscated: Some(true),
@@ -468,6 +581,7 @@ mod tests {
             opcode_name: Some(client_udp_opcode_name(OP_REASKFILEPING)),
             raw_len: raw.len(),
             raw_hex: exact_packet_hex(&raw),
+            attempted_len: Some(raw.len()),
             payload_len: Some(payload.len()),
             payload_hex: Some(exact_packet_hex(&payload)),
             payload_hex_truncated: Some(false),
@@ -481,12 +595,16 @@ mod tests {
         assert_eq!(keys["protocolMarker"], 0xC5);
         assert_eq!(keys["opcode"], OP_REASKFILEPING);
         assert_eq!(body["direction"], "send");
-        assert_eq!(body["outcome"], "send_succeeded");
+        assert_eq!(keys["sendAttemptId"], 7);
+        assert_eq!(body["outcome"], "attempted");
+        assert_eq!(body["sendAttemptId"], 7);
+        assert_eq!(body["role"], "reask_request");
         assert_eq!(body["transportMode"], "obfuscated");
         assert_eq!(body["obfuscated"], true);
         assert_eq!(body["stateId"], "client_udp.reask");
         assert_eq!(body["traceKey"], "client_udp:198.51.100.2:4672");
         assert_eq!(body["rawLen"], raw.len());
+        assert_eq!(body["attemptedLen"], raw.len());
         assert_eq!(body["rawHex"].as_str().unwrap().len(), raw.len() * 2);
         assert_eq!(body["payloadLen"], payload.len());
         assert_eq!(
@@ -511,6 +629,8 @@ mod tests {
             phase: "reask",
             direction: "recv",
             outcome: ClientUdpDumpOutcome::Dropped.as_str(),
+            send_attempt_id: None,
+            role: None,
             remote_addr: "198.51.100.2:4672".to_string(),
             transport_mode: "unknown",
             obfuscated: None,
@@ -520,6 +640,7 @@ mod tests {
             opcode_name: None,
             raw_len: raw.len(),
             raw_hex: exact_packet_hex(&raw),
+            attempted_len: None,
             payload_len: None,
             payload_hex: None,
             payload_hex_truncated: None,
@@ -536,6 +657,38 @@ mod tests {
         assert!(body.get("payloadHex").is_none());
         assert_eq!(body["rawHex"].as_str().unwrap().len(), raw.len() * 2);
         assert_eq!(body["note"], "undecodable");
+    }
+
+    #[test]
+    fn client_udp_send_terminal_event_correlates_without_repeating_payload() {
+        let datagram = ClientUdpDatagram {
+            bytes: vec![0xC5, OP_DIRECTCALLBACKREQ, 0x01, 0x02],
+            protocol_marker: 0xC5,
+            opcode: OP_DIRECTCALLBACKREQ,
+            payload: vec![0x01, 0x02],
+            obfuscated: false,
+        };
+        let (severity, keys, body) = client_udp_send_outcome_parts(
+            "198.51.100.2:4672".parse().unwrap(),
+            ClientUdpSendRole::DirectCallbackRequest,
+            &datagram,
+            9,
+            ClientUdpDumpOutcome::SendCancelled,
+            false,
+            Some("cancelled in test"),
+        );
+
+        assert_eq!(severity, "warning");
+        assert_eq!(keys["sendAttemptId"], 9);
+        assert_eq!(body["outcome"], "send_cancelled");
+        assert_eq!(body["deliveryKnown"], false);
+        assert_eq!(body["role"], "direct_callback_request");
+        assert_eq!(body["stateId"], "client_udp.direct_callback");
+        assert_eq!(body["phase"], "direct_callback_request");
+        assert_eq!(body["attemptedLen"], datagram.bytes.len());
+        assert!(body.get("rawHex").is_none());
+        assert!(body.get("payloadHex").is_none());
+        assert_eq!(body["note"], "cancelled in test");
     }
 
     #[test]

@@ -129,7 +129,6 @@ pub(super) async fn send_direct_callback_req(
     .await
     {
         Ok(()) => {
-            super::dump::dump_client_udp_send(args.dest, &datagram);
             trace!("ed2k udp: sent OP_DIRECTCALLBACKREQ to {}", args.dest);
             DirectCallbackDispatchOutcome::Sent
         }

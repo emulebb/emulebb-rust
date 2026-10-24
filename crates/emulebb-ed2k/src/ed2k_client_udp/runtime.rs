@@ -509,8 +509,6 @@ async fn handle_inbound_datagram(
                         .await
                         {
                             trace!("ed2k udp reask: reciprocity reply to {from} failed: {err}");
-                        } else {
-                            super::dump::dump_client_udp_send(from, &reply);
                         }
                     }
                     // Deliberate silence (force TCP / file mismatch); nothing to send.
@@ -805,7 +803,6 @@ async fn drive_reask_tick(
         };
         match send_client_udp_datagram(dht, addr, role, &datagram).await {
             Ok(()) => {
-                super::dump::dump_client_udp_send(addr, &datagram);
                 trace!(
                     "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
                     datagram.bytes.len(),
