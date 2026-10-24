@@ -66,6 +66,8 @@ impl EmulebbCore {
             let tick = self.search_queue.lock().tick(Instant::now(), readiness);
             for entry in tick.expired {
                 crate::diag_sched::keyword_search_queue(
+                    &entry.search_id,
+                    &entry.request.query,
                     "expired",
                     &entry.request.method,
                     Some(entry.lane.waiting_reason()),
@@ -81,6 +83,8 @@ impl EmulebbCore {
             }
             for dispatch in tick.dispatches {
                 crate::diag_sched::keyword_search_queue(
+                    &dispatch.entry.search_id,
+                    &dispatch.entry.request.query,
                     "drained",
                     &dispatch.entry.request.method,
                     None,
@@ -430,6 +434,8 @@ impl EmulebbCore {
         }
         if requeued {
             crate::diag_sched::keyword_search_queue(
+                &search_id,
+                &request.query,
                 "retry",
                 &request.method,
                 Some(retry_reason),
@@ -439,6 +445,8 @@ impl EmulebbCore {
                 .await;
         } else {
             crate::diag_sched::keyword_search_queue(
+                &search_id,
+                &request.query,
                 "retry-exhausted",
                 &request.method,
                 Some(retry_reason),
@@ -546,9 +554,10 @@ impl EmulebbCore {
             snapshot
         };
         crate::diag_sched::keyword_search(
+            search_id,
+            &request.query,
             method_token,
             snapshot.results.len(),
-            request.query.chars().count(),
             &snapshot.status,
         );
         if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
@@ -581,9 +590,10 @@ impl EmulebbCore {
             search.clone()
         };
         crate::diag_sched::keyword_search(
+            search_id,
+            &request.query,
             method_token,
             snapshot.results.len(),
-            request.query.chars().count(),
             &snapshot.status,
         );
         if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {

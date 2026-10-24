@@ -1,4 +1,4 @@
-//! `family:"sched"` `diag_event_v1` emitters (uniform-diagnostics-v2, lane D2).
+//! `family:"sched"` `diag_event_v2` emitters (uniform-diagnostics-v2, lane D2).
 //!
 //! These build the `keys` + `body` for the internal-scheduling events (schema
 //! §3.5) from real call-site data and forward them to the shared writer
@@ -241,25 +241,37 @@ pub(crate) fn source_swapped(
     emit(FAMILY, "source_swapped", "info", Value::Object(keys), body);
 }
 
-/// `keyword_search`: a user-facing keyword search completed. Converged parity of the
-/// MFC oracle search path — captures the network method used and how many results
-/// came back, so rust-vs-oracle search behaviour is diffable from the diag stream.
-/// Privacy: the query text is NOT logged (only its length + result count + method),
-/// so search terms never reach the diagnostics. `keys` empty (whole-search event).
-pub(crate) fn keyword_search(method: &str, result_count: usize, query_len: usize, status: &str) {
-    let body = json!({
+/// `keyword_search`: a user-facing keyword search completed. The stable search ID
+/// correlates queue transitions with the terminal event, while the exact query and
+/// its derived character count make the resulting wire behaviour reproducible.
+pub(crate) fn keyword_search(
+    search_id: &str,
+    query: &str,
+    method: &str,
+    result_count: usize,
+    status: &str,
+) {
+    let (keys, body) = keyword_search_parts(search_id, query, method, result_count, status);
+    emit(FAMILY, "keyword_search", "info", keys, body);
+}
+
+fn keyword_search_parts(
+    search_id: &str,
+    query: &str,
+    method: &str,
+    result_count: usize,
+    status: &str,
+) -> (Value, Value) {
+    (
+        json!({ "searchId": search_id }),
+        json!({
+        "query": query,
+        "queryLen": query.chars().count(),
         "method": method,
         "resultCount": result_count,
-        "queryLen": query_len,
         "status": status,
-    });
-    emit(
-        FAMILY,
-        "keyword_search",
-        "info",
-        Value::Object(Map::new()),
-        body,
-    );
+        }),
+    )
 }
 
 /// `keyword_search_queue`: rust-only superset event tracing the connection-aware
@@ -267,32 +279,42 @@ pub(crate) fn keyword_search(method: &str, result_count: usize, query_len: usize
 /// was not ready), `rejected` (duplicate/cap at enqueue), `drained` (dispatched
 /// once the backend became ready), `retry` (send interrupted mid-flight,
 /// re-queued), `retry-exhausted`, or `expired` (max queue wait exceeded).
-/// Privacy: like `keyword_search`, the query text is never logged — only the
-/// requested method, the machine reason token, and the attempt count.
 pub(crate) fn keyword_search_queue(
+    search_id: &str,
+    query: &str,
     outcome: &str,
     method: &str,
     reason: Option<&str>,
     attempts: u32,
 ) {
+    let (keys, body) =
+        keyword_search_queue_parts(search_id, query, outcome, method, reason, attempts);
+    let severity = match outcome {
+        "drained" => "info",
+        _ => "low",
+    };
+    emit(FAMILY, "keyword_search_queue", severity, keys, body);
+}
+
+fn keyword_search_queue_parts(
+    search_id: &str,
+    query: &str,
+    outcome: &str,
+    method: &str,
+    reason: Option<&str>,
+    attempts: u32,
+) -> (Value, Value) {
+    let keys = json!({ "searchId": search_id });
     let mut body = Map::new();
+    body.insert("query".to_string(), json!(query));
+    body.insert("queryLen".to_string(), json!(query.chars().count()));
     body.insert("outcome".to_string(), json!(outcome));
     body.insert("method".to_string(), json!(method));
     if let Some(reason) = reason {
         body.insert("reason".to_string(), json!(reason));
     }
     body.insert("attempts".to_string(), json!(attempts));
-    let severity = match outcome {
-        "drained" => "info",
-        _ => "low",
-    };
-    emit(
-        FAMILY,
-        "keyword_search_queue",
-        severity,
-        Value::Object(Map::new()),
-        Value::Object(body),
-    );
+    (keys, Value::Object(body))
 }
 
 /// `source_count` (schema §3.5): periodic download-source picture snapshot, for
@@ -328,4 +350,42 @@ pub(crate) fn source_count(
         Value::Object(Map::new()),
         body,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyword_search_preserves_exact_query_and_search_identity() {
+        let (keys, body) =
+            keyword_search_parts("search-42", "βeta release", "kad", 17, "completed");
+
+        assert_eq!(keys, json!({ "searchId": "search-42" }));
+        assert_eq!(body["query"], "βeta release");
+        assert_eq!(body["queryLen"], 12);
+        assert_eq!(body["method"], "kad");
+        assert_eq!(body["resultCount"], 17);
+        assert_eq!(body["status"], "completed");
+    }
+
+    #[test]
+    fn keyword_search_queue_preserves_exact_query_and_search_identity() {
+        let (keys, body) = keyword_search_queue_parts(
+            "search-43",
+            "exact queued query",
+            "retry",
+            "server",
+            Some("session-interrupted"),
+            2,
+        );
+
+        assert_eq!(keys, json!({ "searchId": "search-43" }));
+        assert_eq!(body["query"], "exact queued query");
+        assert_eq!(body["queryLen"], 18);
+        assert_eq!(body["outcome"], "retry");
+        assert_eq!(body["method"], "server");
+        assert_eq!(body["reason"], "session-interrupted");
+        assert_eq!(body["attempts"], 2);
+    }
 }
