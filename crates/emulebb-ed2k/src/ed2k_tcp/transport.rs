@@ -36,6 +36,52 @@ struct Ed2kTcpReadCapture {
     clear_frame: Vec<u8>,
 }
 
+#[cfg(feature = "packet-diagnostics")]
+struct Ed2kTcpSendCapture<'a> {
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &'a str,
+    clear_frame: &'a [u8],
+    raw: Vec<u8>,
+    attempted_len: usize,
+    completed: bool,
+}
+
+#[cfg(feature = "packet-diagnostics")]
+impl Ed2kTcpSendCapture<'_> {
+    fn record_written(&mut self, bytes: &[u8]) {
+        self.raw.extend_from_slice(bytes);
+    }
+
+    fn emit(&mut self, outcome: &'static str, detail: Option<String>) {
+        self.completed = true;
+        super::dump::dump_ed2k_tcp_send_capture(
+            self.flow,
+            self.remote_addr,
+            self.transport_mode,
+            self.phase,
+            self.clear_frame,
+            &self.raw,
+            self.attempted_len,
+            outcome,
+            detail,
+        );
+    }
+}
+
+#[cfg(feature = "packet-diagnostics")]
+impl Drop for Ed2kTcpSendCapture<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.emit(
+                "send_cancelled",
+                Some("peer send future cancelled before completion".to_string()),
+            );
+        }
+    }
+}
+
 /// One socket-read granularity for the buffered receive path. Headers are 6
 /// bytes and control packets tens of bytes, so one recv typically batches many
 /// packets (plus a data packet's tail); the old unbuffered path paid two
@@ -335,25 +381,39 @@ impl Ed2kTransport {
         } else {
             bytes
         };
-        let (written_len, result) = write_with_progress(&mut self.stream, wire_bytes).await;
-        let outcome = if result.is_ok() {
-            "send_succeeded"
-        } else {
-            "send_failed"
-        };
-        let detail = result.as_ref().err().map(ToString::to_string);
-        super::dump::dump_ed2k_tcp_send_capture(
+        let mut capture = Ed2kTcpSendCapture {
             flow,
             remote_addr,
-            self.mode,
+            transport_mode: self.mode,
             phase,
-            bytes,
-            &wire_bytes[..written_len],
-            wire_bytes.len(),
-            outcome,
-            detail,
-        );
-        result.map_err(Into::into)
+            clear_frame: bytes,
+            raw: Vec::with_capacity(wire_bytes.len()),
+            attempted_len: wire_bytes.len(),
+            completed: false,
+        };
+        let mut written = 0usize;
+        while written < wire_bytes.len() {
+            match self.stream.write(&wire_bytes[written..]).await {
+                Ok(0) => {
+                    let error = io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write complete eD2k frame",
+                    );
+                    capture.emit("send_failed", Some(error.to_string()));
+                    return Err(error.into());
+                }
+                Ok(count) => {
+                    capture.record_written(&wire_bytes[written..written + count]);
+                    written += count;
+                }
+                Err(error) => {
+                    capture.emit("send_failed", Some(error.to_string()));
+                    return Err(error.into());
+                }
+            }
+        }
+        capture.emit("send_succeeded", None);
+        Ok(())
     }
 
     #[cfg(not(feature = "packet-diagnostics"))]
@@ -498,27 +558,6 @@ impl Ed2kTransport {
         }
         Ok(())
     }
-}
-
-#[cfg(feature = "packet-diagnostics")]
-async fn write_with_progress(stream: &mut TcpStream, bytes: &[u8]) -> (usize, io::Result<()>) {
-    let mut written = 0usize;
-    while written < bytes.len() {
-        match stream.write(&bytes[written..]).await {
-            Ok(0) => {
-                return (
-                    written,
-                    Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write complete eD2k frame",
-                    )),
-                );
-            }
-            Ok(count) => written += count,
-            Err(error) => return (written, Err(error)),
-        }
-    }
-    (written, Ok(()))
 }
 
 #[cfg(test)]
