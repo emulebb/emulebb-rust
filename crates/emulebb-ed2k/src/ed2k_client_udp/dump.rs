@@ -100,7 +100,6 @@ pub(super) fn dump_client_udp_send(remote_addr: SocketAddr, datagram: &ClientUdp
 pub(super) fn dump_client_udp_recv(
     _remote_addr: SocketAddr,
     _our_user_hash: &[u8; 16],
-    _sender_ip: [u8; 4],
     _datagram: &[u8],
 ) {
 }
@@ -109,10 +108,9 @@ pub(super) fn dump_client_udp_recv(
 pub(super) fn dump_client_udp_recv(
     remote_addr: SocketAddr,
     our_user_hash: &[u8; 16],
-    sender_ip: [u8; 4],
     datagram: &[u8],
 ) {
-    let Some(decoded) = decode_client_udp_for_dump(our_user_hash, sender_ip, datagram) else {
+    let Some(decoded) = decode_client_udp_for_dump(our_user_hash, remote_addr, datagram) else {
         return;
     };
     let raw_hex = exact_packet_hex(datagram);
@@ -154,7 +152,7 @@ struct DecodedClientUdpDatagram {
 #[cfg(feature = "packet-diagnostics")]
 fn decode_client_udp_for_dump(
     our_user_hash: &[u8; 16],
-    sender_ip: [u8; 4],
+    remote_addr: SocketAddr,
     datagram: &[u8],
 ) -> Option<DecodedClientUdpDatagram> {
     if datagram.len() >= 2 && datagram[0] == OP_EMULEPROT_MARKER {
@@ -165,7 +163,10 @@ fn decode_client_udp_for_dump(
             transport_mode: "plaintext",
         });
     }
-    let plain = deobfuscate_client_udp(our_user_hash, sender_ip, datagram)?;
+    let SocketAddr::V4(remote_addr) = remote_addr else {
+        return None;
+    };
+    let plain = deobfuscate_client_udp(our_user_hash, remote_addr.ip().octets(), datagram)?;
     if plain.len() < 2 {
         return None;
     }
@@ -433,8 +434,9 @@ mod tests {
             obfuscate: true,
         };
         let datagram = build_reask_file_ping_datagram(&file_hash, None, 1, 4, &target);
-        let decoded = super::decode_client_udp_for_dump(&dest_hash, sender_ip, &datagram)
-            .expect("obfuscated datagram decoded");
+        let remote_addr = std::net::SocketAddr::from((sender_ip, 4672));
+        let decoded = super::decode_client_udp_for_dump(&dest_hash, remote_addr, &datagram)
+            .expect("obfuscated datagram decoded from sender endpoint");
         assert_eq!(decoded.protocol_marker, 0xC5);
         assert_eq!(decoded.opcode, OP_REASKFILEPING);
         assert_eq!(decoded.transport_mode, "obfuscated");
@@ -443,6 +445,7 @@ mod tests {
     #[test]
     #[cfg(feature = "packet-diagnostics")]
     fn client_udp_dump_rejects_non_client_foreign_datagrams() {
-        assert!(super::decode_client_udp_for_dump(&[0x21; 16], [203, 0, 113, 9], &[1]).is_none());
+        let remote_addr = std::net::SocketAddr::from(([203, 0, 113, 9], 4672));
+        assert!(super::decode_client_udp_for_dump(&[0x21; 16], remote_addr, &[1]).is_none());
     }
 }
