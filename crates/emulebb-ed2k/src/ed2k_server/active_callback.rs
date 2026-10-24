@@ -18,7 +18,7 @@ use crate::{
 use super::packet_handler::{decode_id_change_payload, log_uncorrelated_server_reject};
 use super::{
     Ed2kServerState, OP_CALLBACK_FAIL, OP_CALLBACKREQUEST, OP_IDCHANGE, OP_LOGINREQUEST, OP_REJECT,
-    ServerSession, ServerSessionPhase, ServerSessionRole, encode_login_request, encode_packet,
+    ServerSession, ServerSessionPhase, ServerSessionRole, encode_login_request,
     login_identity_for_server_transport, resolve_callback_server_entry,
     send_connected_server_startup, should_use_server_obfuscation, wait_for_offer_files_settle,
 };
@@ -68,9 +68,8 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
     let login_payload =
         encode_login_request(login_identity, &nickname, ServerSessionRole::Callback);
     if use_server_obfuscation {
-        let login_request = encode_packet(OP_LOGINREQUEST, &login_payload, false)?;
         session
-            .negotiate_obfuscation_and_send(&login_request)
+            .negotiate_obfuscation_and_send(OP_LOGINREQUEST, &login_payload)
             .await?;
     } else {
         session.send_packet(OP_LOGINREQUEST, &login_payload).await?;

@@ -20,7 +20,7 @@ use super::{
     OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT,
     PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession, ServerSessionPhase,
     ServerSessionRole, ServerTransportMode, annotate_found_sources_server, decode_found_sources,
-    decode_search_result_page, dump_ed2k_server_loop_meta, encode_login_request, encode_packet,
+    decode_search_result_page, dump_ed2k_server_loop_meta, encode_login_request,
     fail_background_search_request, fail_pending_background_search, format_connect_options,
     handle_background_udp_packet, handle_server_packet, log_search_result_page,
     login_identity_for_server_transport, run_server_transport_attempts,
@@ -164,10 +164,9 @@ async fn connect_server_transport_attempt(
         transport_endpoint.port(),
     );
     if use_server_obfuscation {
-        let login_request = encode_packet(OP_LOGINREQUEST, &login_payload, false)?;
         match tokio::time::timeout_at(
             TokioInstant::from_std(pending_login_deadline),
-            session.negotiate_obfuscation_and_send(&login_request),
+            session.negotiate_obfuscation_and_send(OP_LOGINREQUEST, &login_payload),
         )
         .await
         {

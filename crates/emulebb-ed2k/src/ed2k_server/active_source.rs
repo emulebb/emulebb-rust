@@ -21,7 +21,7 @@ use super::{
     Ed2kFoundSource, Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_IDCHANGE,
     OP_LOGINREQUEST, OP_REJECT, ResolvedServerEntry, ServerSession, ServerSessionPhase,
     ServerSessionRole, annotate_found_sources_server, configured_server_entries,
-    decode_found_sources, encode_login_request, encode_packet, encode_source_request,
+    decode_found_sources, encode_login_request, encode_source_request,
     login_identity_for_server_transport, merge_found_sources, resolve_server_entry,
     send_connected_server_startup, should_use_server_obfuscation, source_request_opcode,
     validate_found_sources,
@@ -210,10 +210,9 @@ async fn search_sources_on_server(
     .await?;
     let login_payload =
         encode_login_request(login_identity, nickname, ServerSessionRole::SourceSearch);
-    let login_request = encode_packet(OP_LOGINREQUEST, &login_payload, false)?;
     if use_server_obfuscation {
         session
-            .negotiate_obfuscation_and_send(&login_request)
+            .negotiate_obfuscation_and_send(OP_LOGINREQUEST, &login_payload)
             .await
             .with_context(|| {
                 format!(
