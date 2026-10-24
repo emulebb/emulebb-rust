@@ -92,7 +92,6 @@ use emulebb_metadata::{
     MetadataSharedFileQuery, MetadataStore, MetadataTransferCounts, MetadataTransferPublishEntry,
     MetadataTransferShareEntry,
 };
-use serde_json::json;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, RwLock, broadcast},

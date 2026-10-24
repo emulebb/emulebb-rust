@@ -37,28 +37,6 @@ impl EmulebbCore {
         }
     }
 
-    pub async fn capture_diagnostic_dump(&self, full_memory: bool) -> Result<DiagnosticDumpResult> {
-        let payload = json!({
-            "app": self.app_info(),
-            "status": self.status().await,
-            "fullMemory": full_memory,
-            "kind": "json",
-            "capturedAt": Utc::now(),
-        });
-        let dump = self.write_diagnostic_dump(&payload)?;
-        Ok(DiagnosticDumpResult {
-            ok: true,
-            path: dump.path.display().to_string(),
-            full_memory,
-            full_memory_included: false,
-            schema: "emulebb.legacy-diagnostic-dump.v1".to_string(),
-            byte_count: dump.byte_count,
-            artifact_file_count: 0,
-            missing_artifact_families: Vec::new(),
-            issue_count: 0,
-        })
-    }
-
     pub fn write_diagnostic_dump(&self, payload: &serde_json::Value) -> Result<DiagnosticDumpFile> {
         let dump_dir = self
             .transfer_root
