@@ -457,13 +457,15 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
 }
 
 #[cfg(feature = "packet-diagnostics")]
-pub(super) fn dump_ed2k_tcp_recv_failure(
+#[expect(clippy::too_many_arguments, reason = "flat diagnostic packet boundary")]
+pub(super) fn dump_ed2k_tcp_recv_terminal(
     flow: &'static str,
     remote_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     phase: &str,
     raw: &[u8],
     clear_frame: &[u8],
+    outcome: &'static str,
     detail: String,
 ) {
     let protocol = clear_frame.first().copied();
@@ -483,7 +485,7 @@ pub(super) fn dump_ed2k_tcp_recv_failure(
         flow,
         phase: canonical_phase.as_ref(),
         direction: "recv",
-        outcome: "dropped",
+        outcome,
         remote_addr: remote_addr.to_string(),
         transport_mode: transport_mode.as_str(),
         obfuscated: Some(transport_mode.is_obfuscated()),
