@@ -25,6 +25,13 @@ use super::dump::Ed2kTcpDumpRecord;
 /// omitted when absent rather than faked (`peerHash`/`fileHash` are not known at
 /// this layer, so they are not emitted).
 pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
+    let (event, severity, keys, body) = ed2k_tcp_diag_event_parts(record);
+    crate::diag_event::emit("ed2k_tcp", event, severity, keys, body);
+}
+
+fn ed2k_tcp_diag_event_parts(
+    record: &Ed2kTcpDumpRecord<'_>,
+) -> (&'static str, &'static str, Value, Value) {
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(record.remote_addr));
     if let Some(protocol_marker) = record.protocol_marker {
@@ -82,6 +89,9 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
     body.insert("transportMode".to_string(), json!(record.transport_mode));
     body.insert("flow".to_string(), json!(record.flow));
     body.insert("phase".to_string(), json!(record.phase));
+    body.insert("traceKey".to_string(), json!(record.trace_key));
+    body.insert("stateId".to_string(), json!(record.state_id));
+    body.insert("stateLabel".to_string(), json!(record.state_label));
     if let Some(note) = record.note.as_deref() {
         body.insert("note".to_string(), json!(note));
     }
@@ -94,16 +104,74 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
     } else {
         "info"
     };
-    let event = if record.schema == "ed2k_handshake_v1" {
-        "obfuscation_handshake"
-    } else {
-        "packet"
+    let event = match (record.schema, record.direction) {
+        ("ed2k_handshake_v1", _) => "obfuscation_handshake",
+        (_, "meta") => "state",
+        _ => "packet",
     };
-    crate::diag_event::emit(
-        "ed2k_tcp",
-        event,
-        severity,
-        Value::Object(keys),
-        Value::Object(body),
-    );
+    (event, severity, Value::Object(keys), Value::Object(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record<'a>(
+        schema: &'static str,
+        direction: &'a str,
+        outcome: &'a str,
+    ) -> Ed2kTcpDumpRecord<'a> {
+        Ed2kTcpDumpRecord {
+            schema,
+            source: "emulebb-rust",
+            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
+            event_seq: 1,
+            trace_key: "native_download:198.51.100.2:4662".to_string(),
+            state_id: "native_download.session".to_string(),
+            state_label: "session",
+            flow: "native_download",
+            phase: "session",
+            direction,
+            outcome,
+            remote_addr: "198.51.100.2:4662".to_string(),
+            transport_mode: "obfuscated",
+            obfuscated: Some(true),
+            protocol: None,
+            protocol_marker: None,
+            opcode: None,
+            opcode_name: None,
+            raw_len: None,
+            raw_hex: None,
+            clear_frame_len: None,
+            clear_frame_hex: None,
+            attempted_len: None,
+            written_len: None,
+            payload_len: None,
+            payload_hex: None,
+            payload_hex_truncated: None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn peer_tcp_state_event_preserves_trace_context() {
+        let record = record("ed2k_packet_v1", "meta", "meta");
+        let (event, severity, keys, body) = ed2k_tcp_diag_event_parts(&record);
+
+        assert_eq!(event, "state");
+        assert_eq!(severity, "info");
+        assert_eq!(keys["peer"], "198.51.100.2:4662");
+        assert_eq!(body["traceKey"], "native_download:198.51.100.2:4662");
+        assert_eq!(body["stateId"], "native_download.session");
+        assert_eq!(body["stateLabel"], "session");
+    }
+
+    #[test]
+    fn peer_tcp_handshake_keeps_distinct_event_classification() {
+        let record = record("ed2k_handshake_v1", "send", "send_succeeded");
+        let (event, _, _, body) = ed2k_tcp_diag_event_parts(&record);
+
+        assert_eq!(event, "obfuscation_handshake");
+        assert_eq!(body["traceKey"], "native_download:198.51.100.2:4662");
+    }
 }

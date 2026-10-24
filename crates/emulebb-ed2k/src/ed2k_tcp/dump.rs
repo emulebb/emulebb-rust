@@ -50,12 +50,12 @@ const ED2K_TCP_LIVE_SYNC_EVERY: u64 = 128;
 #[derive(Debug, Serialize)]
 pub(super) struct Ed2kTcpDumpRecord<'a> {
     pub(super) schema: &'static str,
-    source: &'static str,
-    ts_utc: String,
-    event_seq: u64,
-    trace_key: String,
-    state_id: String,
-    state_label: &'a str,
+    pub(super) source: &'static str,
+    pub(super) ts_utc: String,
+    pub(super) event_seq: u64,
+    pub(super) trace_key: String,
+    pub(super) state_id: String,
+    pub(super) state_label: &'a str,
     pub(super) flow: &'static str,
     pub(super) phase: &'a str,
     pub(super) direction: &'a str,
