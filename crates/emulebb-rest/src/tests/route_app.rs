@@ -98,7 +98,7 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
     assert_eq!(value["data"]["ok"], true);
     assert!(value["data"].get("fullMemory").is_none());
     assert!(value["data"].get("fullMemoryIncluded").is_none());
-    assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v2");
+    assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v3");
     let path = value["data"]["path"].as_str().unwrap();
     assert!(std::path::Path::new(path).is_file());
     assert!(value["data"]["byteCount"].as_u64().unwrap() > 0);
@@ -108,11 +108,11 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
             .as_array()
             .unwrap()
             .len(),
-        5
+        1
     );
 
     let bundle: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v2");
+    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v3");
     assert!(bundle.get("memory").is_none());
     assert_eq!(bundle["settingsProvenance"]["apiKeyIncluded"], true);
     assert_eq!(bundle["settingsProvenance"]["sensitiveValues"], "exact");
@@ -122,6 +122,7 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
     assert!(bundle["settings"].is_object());
     assert!(bundle["recentLogs"].is_array());
     assert!(bundle["diagnosticArtifacts"]["families"].is_array());
+    assert_eq!(bundle["limits"]["artifactFamilies"], 1);
     assert!(serde_json::to_string(&bundle).unwrap().contains("secret"));
 }
 
