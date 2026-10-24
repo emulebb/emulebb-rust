@@ -213,6 +213,11 @@ pub fn dump_kad_udp_packet(
     decoded_payload: &[u8],
     summary: KadUdpDumpSummary,
 ) {
+    // The converged stream is the primary diagnostic contract. Emit it before
+    // touching the optional legacy side file so directory, lock, serialization,
+    // or write failures cannot erase packet evidence from `diag_event_v2`.
+    emit_kad_udp_diag_event(direction, peer, wire_payload, decoded_payload, &summary);
+
     let Some(writer) = udp_dump_writer() else {
         return;
     };
@@ -270,14 +275,6 @@ pub fn dump_kad_udp_packet(
     // DUMP_FLUSH_EVERY records so a tailing reader sees data and crash loss is
     // bounded. Full coverage (including dropped/flood packets) is preserved.
     maybe_periodic_flush(&mut guard, &writer.path);
-    drop(guard);
-
-    // uniform-diagnostics-v2 (lane D2): also emit the converged `kad_udp`
-    // `diag_event_v2` record from the same data. The `ts` is UTC
-    // millis with a trailing `Z` (normalised; the v1 `udp_packet_v1` line above
-    // keeps its legacy local-time `ts` during migration). Hex stays UPPER for
-    // Kad parity. Optional fields are omitted when not known rather than faked.
-    emit_kad_udp_diag_event(direction, peer, wire_payload, decoded_payload, &summary);
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
