@@ -52,7 +52,7 @@ impl ReaskSourceSet {
     }
 
     /// Build the outbound reask datagrams for every source that is due (and not
-    /// already awaiting a reply), marking each pending. Each [`ReaskSend`]
+    /// already awaiting a reply). Each [`ReaskSend`]
     /// retains both the source endpoint and actual destination: a HighID source
     /// gets a direct `OP_REASKFILEPING` to its own endpoint; a firewalled LowID
     /// source whose Kad buddy is known gets an `OP_REASKCALLBACKUDP` targeted at
@@ -64,7 +64,7 @@ impl ReaskSourceSet {
     /// UDP-disqualified sources (`fallback_tcp_only`) are skipped — the caller
     /// reasks those over TCP.
     pub(crate) fn due_datagrams(
-        &mut self,
+        &self,
         now: Instant,
         our_part_status: Option<&[bool]>,
         complete_source_count: u16,
@@ -113,7 +113,6 @@ impl ReaskSourceSet {
                 );
                 (SocketAddr::new(ip.into(), udp_port), datagram)
             };
-            self.mark_reasked(ip, udp_port, now);
             out.push(ReaskSend {
                 source_endpoint: (ip, udp_port),
                 destination,
@@ -124,12 +123,18 @@ impl ReaskSourceSet {
     }
 
     /// Mark that a reask was just sent to `endpoint` (opens the pending-reply
-    /// gate). The source reschedules when the reply or timeout lands.
-    pub(crate) fn mark_reasked(&mut self, ip: Ipv4Addr, udp_port: u16, now: Instant) {
-        if let Some(source) = self.sources.get(&(ip, udp_port)) {
-            let file_hash = source.file_hash;
-            self.pending.mark_sent(ip, udp_port, file_hash, now);
+    /// gate). The source reschedules when the reply or timeout lands. Returns
+    /// false for an unknown endpoint or an already-pending source.
+    pub(crate) fn mark_reasked(&mut self, ip: Ipv4Addr, udp_port: u16, now: Instant) -> bool {
+        if self.pending.is_pending(ip, udp_port) {
+            return false;
         }
+        let Some(source) = self.sources.get(&(ip, udp_port)) else {
+            return false;
+        };
+        let file_hash = source.file_hash;
+        self.pending.mark_sent(ip, udp_port, file_hash, now);
+        true
     }
 
     /// Apply a *received* reply (`Ack`/`QueueFull`/`FileNotFound`) to the source,
@@ -352,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn due_datagrams_builds_pings_marks_pending_and_skips_tcp_fallback() {
+    fn due_datagrams_builds_pings_without_marking_pending_and_skips_tcp_fallback() {
         use super::super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 
         let now = Instant::now();
@@ -385,7 +390,10 @@ mod tests {
             other => panic!("expected FilePing, got {other:?}"),
         }
 
-        // The source is now pending, so it is no longer due.
+        // Merely building work does not claim delivery or open the reply gate.
+        assert_eq!(set.due(now), vec![endpoint]);
+        assert!(set.mark_reasked(endpoint.0, endpoint.1, now));
+        assert!(!set.mark_reasked(endpoint.0, endpoint.1, now));
         assert!(set.due(now).is_empty());
 
         // A TCP-fallback source produces no datagram.
@@ -452,8 +460,10 @@ mod tests {
             3
         );
 
-        // The pending gate is keyed on the SOURCE endpoint (the source answers), so
-        // the source is no longer due after origination.
+        // The pending gate is keyed on the SOURCE endpoint (the source answers),
+        // but building the buddy-targeted work alone does not open it.
+        assert_eq!(set.due(now), vec![source_endpoint]);
+        assert!(set.mark_reasked(source_endpoint.0, source_endpoint.1, now));
         assert!(set.due(now).is_empty());
 
         // A LowID source missing the buddy id (hello-only buddy) cannot originate

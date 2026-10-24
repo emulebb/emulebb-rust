@@ -745,6 +745,15 @@ fn apply_reask_command(
     }
 }
 
+fn settle_reask_send<E>(
+    service: &mut ReaskService,
+    source_endpoint: (Ipv4Addr, u16),
+    result: Result<(), E>,
+    sent_at: Instant,
+) -> Result<bool, E> {
+    result.map(|()| service.mark_reask_sent(source_endpoint, sent_at))
+}
+
 /// Drive one reask tick: send due reask pings and account timed-out reasks.
 /// Per-file transfer info (our part availability) is pulled from the transfer
 /// runtime before the sync `tick`, since the source state lives in the service.
@@ -796,6 +805,7 @@ async fn drive_reask_tick(
         },
     );
     for send in out.send {
+        let source_endpoint = send.source_endpoint;
         let addr = send.destination;
         let datagram = send.datagram;
         let role = if datagram.opcode == super::codec::OP_REASKCALLBACKUDP {
@@ -803,8 +813,17 @@ async fn drive_reask_tick(
         } else {
             ClientUdpSendRole::ReaskRequest
         };
-        match send_client_udp_datagram(dht, addr, role, &datagram).await {
-            Ok(()) => {
+        let result = send_client_udp_datagram(dht, addr, role, &datagram).await;
+        match settle_reask_send(service, source_endpoint, result, Instant::now()) {
+            Ok(marked) => {
+                debug_assert!(marked, "scheduled reask source disappeared during send");
+                if !marked {
+                    debug!(
+                        ?source_endpoint,
+                        destination = %addr,
+                        "ed2k udp reask: successful send could not open source reply gate"
+                    );
+                }
                 trace!(
                     "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
                     datagram.bytes.len(),
@@ -820,7 +839,10 @@ async fn drive_reask_tick(
                     udp_reask_sent_body(),
                 );
             }
-            Err(err) => trace!("ed2k udp reask: send to {addr} failed: {err}"),
+            Err(err) => trace!(
+                "ed2k udp reask: send to {addr} for source {:?} failed: {err}",
+                source_endpoint
+            ),
         }
     }
     for (addr, action) in out.timed_out {
