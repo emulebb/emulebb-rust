@@ -720,27 +720,16 @@ impl ServerSession {
         }
     }
 
-    pub(super) async fn send_encoded_packet(
-        &mut self,
-        packet: &[u8],
-        context: impl Into<String>,
-    ) -> Result<()> {
-        self.stream
-            .write_all(packet)
-            .await
-            .with_context(|| context.into())?;
-        self.last_tx = Instant::now();
-        Ok(())
-    }
-
     fn server_supports_compression(&self) -> bool {
         self.server_flags.unwrap_or_default() & SERVER_TCP_FLAG_COMPRESSION != 0
     }
 
     pub(super) async fn negotiate_obfuscation_and_send(
         &mut self,
-        first_packet: &[u8],
+        opcode: u8,
+        payload: &[u8],
     ) -> Result<()> {
+        let first_packet = encode_packet(opcode, payload, false)?;
         let prime = BigUint::from_bytes_be(&SERVER_OBFUSCATION_PRIME_BYTES);
         let generator = BigUint::from(2u8);
         let secret = random_nonzero_biguint(SERVER_OBFUSCATION_RANDOM_EXPONENT_LEN);
@@ -837,40 +826,39 @@ impl ServerSession {
         response.extend_from_slice(&response_padding);
         #[cfg(feature = "packet-diagnostics")]
         let first_packet_offset = response.len();
-        response.extend_from_slice(first_packet);
+        response.extend_from_slice(&first_packet);
         send_cipher.apply(&mut response);
-        if first_packet.len() >= TCP_PACKET_HEADER_LEN {
-            #[cfg(feature = "packet-diagnostics")]
-            dump_ed2k_server_packet(
-                self,
-                Ed2kServerPacketCapture {
-                    direction: "tx",
-                    transport_mode: "obfuscated",
-                    obfuscated: Some(true),
-                    protocol_marker: Some(first_packet[0]),
-                    opcode: Some(first_packet[5]),
-                    raw: &response[first_packet_offset..],
-                    clear_frame: Some(first_packet),
-                    payload: Some(&first_packet[TCP_PACKET_HEADER_LEN..]),
-                    outcome: "accepted",
-                    note: None,
-                },
-            );
-            #[cfg(not(feature = "packet-diagnostics"))]
-            dump_ed2k_server_packet(
-                self,
-                "tx",
-                first_packet[0],
-                first_packet[5],
-                &first_packet[TCP_PACKET_HEADER_LEN..],
-            );
-        }
-        self.stream.write_all(&response).await.with_context(|| {
+        #[cfg(feature = "packet-diagnostics")]
+        let send_attempt = Ed2kServerSendAttempt::tcp(
+            self,
+            Ed2kServerPacketCapture {
+                direction: "tx",
+                transport_mode: "obfuscated",
+                obfuscated: Some(true),
+                protocol_marker: Some(first_packet[0]),
+                opcode: Some(opcode),
+                raw: &response[first_packet_offset..],
+                clear_frame: Some(&first_packet),
+                payload: Some(payload),
+                outcome: "attempted",
+                note: None,
+            },
+        );
+        #[cfg(not(feature = "packet-diagnostics"))]
+        dump_ed2k_server_packet(self, "tx", first_packet[0], opcode, payload);
+        let send_result = self.stream.write_all(&response).await.with_context(|| {
             format!(
                 "failed to send ED2K server obfuscation response to {}",
                 self.endpoint
             )
-        })?;
+        });
+        if let Err(error) = send_result {
+            #[cfg(feature = "packet-diagnostics")]
+            send_attempt.failed(format!("{error:#}"));
+            return Err(error);
+        }
+        #[cfg(feature = "packet-diagnostics")]
+        send_attempt.succeeded();
 
         self.receive_cipher = Some(receive_cipher);
         self.send_cipher = Some(send_cipher);

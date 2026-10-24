@@ -22,7 +22,7 @@ use super::{
     OP_LOGINREQUEST, OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT,
     ResolvedServerEntry, SERVER_UDP_FLAG_LARGEFILES, SearchCriteria, ServerSession,
     ServerSessionPhase, ServerSessionRole, bind_server_udp_socket, configured_server_entries,
-    decode_search_result_page, decode_udp_search_result_pages, encode_login_request, encode_packet,
+    decode_search_result_page, decode_udp_search_result_pages, encode_login_request,
     encode_search_request, encode_search_request_with_criteria,
     login_identity_for_server_transport, read_server_udp_packet_from_any, resolve_server_entry,
     retain_live_servers, send_connected_server_startup, send_udp_keyword_search,
@@ -454,14 +454,11 @@ async fn search_keyword_on_server(
         },
         search_payload.len()
     );
-    let login_request = encode_packet(
-        OP_LOGINREQUEST,
-        &encode_login_request(login_identity, nickname, ServerSessionRole::KeywordSearch),
-        false,
-    )?;
+    let login_payload =
+        encode_login_request(login_identity, nickname, ServerSessionRole::KeywordSearch);
     if use_server_obfuscation {
         session
-            .negotiate_obfuscation_and_send(&login_request)
+            .negotiate_obfuscation_and_send(OP_LOGINREQUEST, &login_payload)
             .await
             .with_context(|| {
                 format!(
@@ -470,12 +467,7 @@ async fn search_keyword_on_server(
                 )
             })?;
     } else {
-        session
-            .send_encoded_packet(
-                &login_request,
-                format!("failed to send ED2K server login request to {transport_endpoint}"),
-            )
-            .await?;
+        session.send_packet(OP_LOGINREQUEST, &login_payload).await?;
     }
     session.set_phase(
         ServerSessionPhase::AwaitingIdChange,

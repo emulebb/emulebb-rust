@@ -769,16 +769,12 @@ async fn server_obfuscation_handshake_encrypts_login_request() {
         connect_options: emule_connect_options(true),
         direct_udp_callback: false,
     };
-    let expected_login = encode_packet(
-        OP_LOGINREQUEST,
-        &encode_login_request(
-            hello_identity,
-            HELLO_NICKNAME,
-            ServerSessionRole::KeywordSearch,
-        ),
-        false,
-    )
-    .unwrap();
+    let login_payload = encode_login_request(
+        hello_identity,
+        HELLO_NICKNAME,
+        ServerSessionRole::KeywordSearch,
+    );
+    let expected_login = encode_packet(OP_LOGINREQUEST, &login_payload, false).unwrap();
     let expected_login_for_server = expected_login.clone();
 
     let server = tokio::spawn(async move {
@@ -860,7 +856,7 @@ async fn server_obfuscation_handshake_encrypts_login_request() {
     .await
     .unwrap();
     session
-        .negotiate_obfuscation_and_send(&expected_login)
+        .negotiate_obfuscation_and_send(OP_LOGINREQUEST, &login_payload)
         .await
         .unwrap();
 
