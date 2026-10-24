@@ -5,7 +5,12 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "packet-diagnostics")]
+use std::sync::{Arc, Weak};
+
 use anyhow::{Context, Result};
+#[cfg(feature = "packet-diagnostics")]
+use parking_lot::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpSocket, TcpStream},
@@ -34,6 +39,60 @@ pub struct EmuleTcpPacket {
 struct Ed2kTcpReadCapture {
     raw: Vec<u8>,
     clear_frame: Vec<u8>,
+}
+
+#[cfg(feature = "packet-diagnostics")]
+struct Ed2kTcpReadCaptureGuard<'a> {
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &'a str,
+    capture: Arc<Mutex<Ed2kTcpReadCapture>>,
+    completed: bool,
+}
+
+#[cfg(feature = "packet-diagnostics")]
+impl Ed2kTcpReadCaptureGuard<'_> {
+    fn emit_packet(&mut self, packet: &EmuleTcpPacket) {
+        self.completed = true;
+        let capture = self.capture.lock();
+        super::dump::dump_ed2k_tcp_recv_capture(
+            self.flow,
+            self.remote_addr,
+            self.transport_mode,
+            self.phase,
+            packet,
+            &capture.raw,
+            &capture.clear_frame,
+        );
+    }
+
+    fn emit_terminal(&mut self, outcome: &'static str, detail: String) {
+        self.completed = true;
+        let capture = self.capture.lock();
+        super::dump::dump_ed2k_tcp_recv_terminal(
+            self.flow,
+            self.remote_addr,
+            self.transport_mode,
+            self.phase,
+            &capture.raw,
+            &capture.clear_frame,
+            outcome,
+            detail,
+        );
+    }
+}
+
+#[cfg(feature = "packet-diagnostics")]
+impl Drop for Ed2kTcpReadCaptureGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.emit_terminal(
+                "recv_cancelled",
+                "peer receive future cancelled before completion".to_string(),
+            );
+        }
+    }
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -212,7 +271,7 @@ pub(super) struct Ed2kTransport {
     #[cfg(feature = "packet-diagnostics")]
     read_wire_buf: Vec<u8>,
     #[cfg(feature = "packet-diagnostics")]
-    read_capture: Option<Ed2kTcpReadCapture>,
+    read_capture: Option<Weak<Mutex<Ed2kTcpReadCapture>>>,
     /// Reusable ciphertext scratch for obfuscated sends, so every write does
     /// not allocate a fresh copy of the packet.
     write_buf: Vec<u8>,
@@ -416,32 +475,27 @@ impl Ed2kTransport {
         remote_addr: SocketAddr,
         phase: &str,
     ) -> Result<Option<EmuleTcpPacket>> {
-        self.read_capture = Some(Ed2kTcpReadCapture::default());
+        let capture = Arc::new(Mutex::new(Ed2kTcpReadCapture::default()));
+        self.read_capture = Some(Arc::downgrade(&capture));
+        let mut guard = Ed2kTcpReadCaptureGuard {
+            flow,
+            remote_addr,
+            transport_mode: self.mode,
+            phase,
+            capture,
+            completed: false,
+        };
         let result = self.read_packet().await;
-        let capture = self
-            .read_capture
-            .take()
-            .expect("diagnostic read capture must remain active");
+        self.read_capture = None;
         if let Ok(Some(packet)) = result.as_ref() {
-            super::dump::dump_ed2k_tcp_recv_capture(
-                flow,
-                remote_addr,
-                self.mode,
-                phase,
-                packet,
-                &capture.raw,
-                &capture.clear_frame,
+            guard.emit_packet(packet);
+        } else if let Ok(None) = result.as_ref() {
+            guard.emit_terminal(
+                "recv_closed",
+                "peer closed stream on a packet boundary".to_string(),
             );
         } else if let Err(error) = result.as_ref() {
-            super::dump::dump_ed2k_tcp_recv_failure(
-                flow,
-                remote_addr,
-                self.mode,
-                phase,
-                &capture.raw,
-                &capture.clear_frame,
-                format!("{error:#}"),
-            );
+            guard.emit_terminal("dropped", format!("{error:#}"));
         }
         result
     }
@@ -548,10 +602,16 @@ impl Ed2kTransport {
         Ok(received)
     }
 
+    #[cfg(feature = "packet-diagnostics")]
+    fn active_read_capture(&self) -> Option<Arc<Mutex<Ed2kTcpReadCapture>>> {
+        self.read_capture.as_ref()?.upgrade()
+    }
+
     async fn read_u8(&mut self) -> Result<Option<u8>> {
         if let Some(byte) = self.prefetched.pop_front() {
             #[cfg(feature = "packet-diagnostics")]
-            if let Some(capture) = self.read_capture.as_mut() {
+            if let Some(capture) = self.active_read_capture() {
+                let mut capture = capture.lock();
                 capture.raw.push(byte);
                 capture.clear_frame.push(byte);
             }
@@ -567,7 +627,8 @@ impl Ed2kTransport {
         }
         let byte = self.read_buf[self.read_pos];
         #[cfg(feature = "packet-diagnostics")]
-        if let Some(capture) = self.read_capture.as_mut() {
+        if let Some(capture) = self.active_read_capture() {
+            let mut capture = capture.lock();
             capture.raw.push(self.read_wire_buf[self.read_pos]);
             capture.clear_frame.push(byte);
         }
@@ -581,7 +642,8 @@ impl Ed2kTransport {
             if let Some(byte) = self.prefetched.pop_front() {
                 bytes[offset] = byte;
                 #[cfg(feature = "packet-diagnostics")]
-                if let Some(capture) = self.read_capture.as_mut() {
+                if let Some(capture) = self.active_read_capture() {
+                    let mut capture = capture.lock();
                     capture.raw.push(byte);
                     capture.clear_frame.push(byte);
                 }
@@ -606,15 +668,17 @@ impl Ed2kTransport {
                             .into());
                         }
                         #[cfg(feature = "packet-diagnostics")]
-                        let raw = self
-                            .read_capture
+                        let capture = self.active_read_capture();
+                        #[cfg(feature = "packet-diagnostics")]
+                        let raw = capture
                             .as_ref()
                             .map(|_| bytes[offset..offset + received].to_vec());
                         if let Some(cipher) = self.receive_cipher.as_mut() {
                             cipher.apply(&mut bytes[offset..offset + received]);
                         }
                         #[cfg(feature = "packet-diagnostics")]
-                        if let (Some(capture), Some(raw)) = (self.read_capture.as_mut(), raw) {
+                        if let (Some(capture), Some(raw)) = (capture, raw) {
+                            let mut capture = capture.lock();
                             capture.raw.extend_from_slice(&raw);
                             capture
                                 .clear_frame
@@ -639,7 +703,8 @@ impl Ed2kTransport {
             bytes[offset..offset + take]
                 .copy_from_slice(&self.read_buf[self.read_pos..self.read_pos + take]);
             #[cfg(feature = "packet-diagnostics")]
-            if let Some(capture) = self.read_capture.as_mut() {
+            if let Some(capture) = self.active_read_capture() {
+                let mut capture = capture.lock();
                 capture
                     .raw
                     .extend_from_slice(&self.read_wire_buf[self.read_pos..self.read_pos + take]);
@@ -682,6 +747,13 @@ mod tests {
             // force EOF on a payload read).
             server,
         )
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    fn start_test_read_capture(transport: &mut Ed2kTransport) -> Arc<Mutex<Ed2kTcpReadCapture>> {
+        let capture = Arc::new(Mutex::new(Ed2kTcpReadCapture::default()));
+        transport.read_capture = Some(Arc::downgrade(&capture));
+        capture
     }
 
     fn header(protocol: u8, packet_length: u32, opcode: u8) -> Vec<u8> {
@@ -735,9 +807,10 @@ mod tests {
         sender_cipher.apply(&mut raw);
         server.write_all(&raw).await.unwrap();
 
-        transport.read_capture = Some(Ed2kTcpReadCapture::default());
+        let capture = start_test_read_capture(&mut transport);
         let packet = transport.read_packet().await.unwrap().unwrap();
-        let capture = transport.read_capture.take().unwrap();
+        transport.read_capture = None;
+        let capture = capture.lock();
 
         assert_eq!(packet.payload, vec![0xAA, 0xBB, 0xCC]);
         assert_eq!(capture.raw, raw);
@@ -755,12 +828,13 @@ mod tests {
         frame.extend_from_slice(&[0x01, 0x02, 0x03]);
         server.write_all(&frame).await.unwrap();
 
-        transport.read_capture = Some(Ed2kTcpReadCapture::default());
+        let capture = start_test_read_capture(&mut transport);
         let error = transport
             .read_packet()
             .await
             .expect_err("invalid packed payload must be rejected");
-        let capture = transport.read_capture.take().unwrap();
+        transport.read_capture = None;
+        let capture = capture.lock();
 
         assert!(
             error.to_string().contains("zlib"),
@@ -783,12 +857,13 @@ mod tests {
         server.write_all(&partial_payload).await.unwrap();
         drop(server);
 
-        transport.read_capture = Some(Ed2kTcpReadCapture::default());
+        let capture = start_test_read_capture(&mut transport);
         let error = transport
             .read_packet()
             .await
             .expect_err("partial large payload must end with EOF");
-        let capture = transport.read_capture.take().unwrap();
+        transport.read_capture = None;
+        let capture = capture.lock();
         let mut expected = header;
         expected.extend_from_slice(&partial_payload);
 
@@ -881,6 +956,40 @@ mod tests {
         let read = transport.read_packet().await.unwrap().unwrap();
         assert_eq!((read.protocol, read.opcode), (OP_EDONKEYPROT, OP_HELLO));
         assert_eq!(read.payload, vec![0x7F]);
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    #[tokio::test]
+    async fn cancelled_diagnostic_read_releases_capture_and_keeps_transport_usable() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut transport, mut server) = transport_with_prefetched(Vec::new()).await;
+        let remote_addr = server.local_addr().unwrap();
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            transport.read_packet_diagnostic("test", remote_addr, "session"),
+        )
+        .await;
+        assert!(timed_out.is_err(), "idle diagnostic read must time out");
+        assert!(
+            transport
+                .read_capture
+                .as_ref()
+                .is_some_and(|capture| capture.upgrade().is_none()),
+            "cancelled capture must not remain writable"
+        );
+
+        let mut packet = header(OP_EDONKEYPROT, 2, OP_HELLO);
+        packet.push(0x7F);
+        server.write_all(&packet).await.unwrap();
+        let read = transport
+            .read_packet_diagnostic("test", remote_addr, "session")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((read.protocol, read.opcode), (OP_EDONKEYPROT, OP_HELLO));
+        assert_eq!(read.payload, vec![0x7F]);
+        assert!(transport.read_capture.is_none());
     }
 
     #[tokio::test]

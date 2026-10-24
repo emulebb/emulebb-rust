@@ -86,7 +86,10 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
         body.insert("note".to_string(), json!(note));
     }
 
-    let severity = if matches!(record.outcome, "dropped" | "send_failed" | "send_cancelled") {
+    let severity = if matches!(
+        record.outcome,
+        "dropped" | "recv_cancelled" | "send_failed" | "send_cancelled"
+    ) {
         "warning"
     } else {
         "info"
