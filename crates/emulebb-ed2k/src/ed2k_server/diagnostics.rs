@@ -1,28 +1,14 @@
-// Gated by the `packet-diagnostics` Cargo feature (matches the client dump and
-// eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS): off-by-default builds compile the
-// server dump out (emitters become no-ops, record machinery is dead-eliminated).
-#![cfg_attr(
-    not(feature = "packet-diagnostics"),
-    expect(
-        dead_code,
-        unused_imports,
-        reason = "server diagnostic machinery is inert without its feature"
-    )
-)]
+// Gated by the `packet-diagnostics` Cargo feature: off-by-default builds keep
+// only no-op call boundaries and compile all unified diagnostic machinery out.
+use std::net::SocketAddr;
 
-use std::{
-    fs,
-    net::SocketAddr,
-    sync::{
-        Mutex as StdMutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+#[cfg(feature = "packet-diagnostics")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::SecondsFormat;
-use serde::Serialize;
+#[cfg(any(feature = "packet-diagnostics", test))]
 use serde_json::{Map, Value, json};
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 use super::{
     OP_CALLBACK_FAIL, OP_CALLBACKREQUEST, OP_CALLBACKREQUESTED, OP_FOUNDSOURCES,
     OP_FOUNDSOURCES_OBFU, OP_GETSERVERLIST, OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_GLOBCALLBACKREQ,
@@ -31,23 +17,20 @@ use super::{
     OP_IDCHANGE, OP_LOGINREQUEST, OP_OFFERFILES, OP_PACKEDPROT, OP_QUERY_MORE_RESULT, OP_REJECT,
     OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVER_DESC_REQ, OP_SERVER_DESC_RES, OP_SERVER_LIST_REQ,
     OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
-    OP_SERVERSTATUS, ResolvedServerEntry, ServerSession,
+    OP_SERVERSTATUS,
 };
-
-const ED2K_SERVER_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-server-dump-";
+use super::{ResolvedServerEntry, ServerSession};
 
 /// eD2k server protocol marker (OP_EDONKEYPROT) — server packets ride the eD2k
 /// protocol byte unless the server advertised packed payload support.
+#[cfg(any(feature = "packet-diagnostics", test))]
 const OP_EDONKEYPROT_MARKER: u8 = 0xE3;
 /// One server-flow packet in the converged `ed2k_packet_v1` shape (flow="server"),
 /// so client<->server traces diff 1:1 against eMuleBB's server-packet emitter.
 /// Carries server-session extras (role/trace_id) the diff harness ignores.
-#[derive(Debug, Serialize)]
+#[cfg(any(feature = "packet-diagnostics", test))]
+#[derive(Debug)]
 struct Ed2kServerDumpRecord<'a> {
-    schema: &'static str,
-    source: &'static str,
-    ts_utc: String,
-    event_seq: u64,
     trace_id: u64,
     trace_key: String,
     state_id: String,
@@ -251,10 +234,6 @@ pub(super) fn dump_ed2k_server_loop_meta(
 #[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<String>) {
     let record = Ed2kServerDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: next_ed2k_server_dump_event_seq(),
         trace_id: session.trace_id,
         trace_key: ed2k_server_trace_key(session),
         state_id: ed2k_server_state_id(session),
@@ -285,7 +264,7 @@ pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<Str
         payload_hex_truncated: None,
         note: Some(note.into()),
     };
-    dump_ed2k_server_record(&record);
+    emit_ed2k_server_diag_event(&record);
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -295,10 +274,6 @@ pub(super) fn dump_ed2k_server_loop_meta(
     note: impl Into<String>,
 ) {
     let record = Ed2kServerDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: next_ed2k_server_dump_event_seq(),
         trace_id: 0,
         trace_key: format!("server:background:loop:{endpoint}"),
         state_id: format!("server.background.{phase}"),
@@ -325,7 +300,7 @@ pub(super) fn dump_ed2k_server_loop_meta(
         payload_hex_truncated: None,
         note: Some(note.into()),
     };
-    dump_ed2k_server_record(&record);
+    emit_ed2k_server_diag_event(&record);
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
@@ -374,10 +349,6 @@ fn dump_ed2k_server_udp_packet_with_attempt(
         .map(ResolvedServerEntry::base_endpoint)
         .unwrap_or(remote_addr);
     let record = Ed2kServerDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: next_ed2k_server_dump_event_seq(),
         trace_id: 0,
         trace_key: format!("server:udp:{base_endpoint}"),
         state_id: format!("server.udp.{direction}"),
@@ -404,7 +375,7 @@ fn dump_ed2k_server_udp_packet_with_attempt(
         payload_hex_truncated: capture.payload.map(|_| false),
         note: capture.note,
     };
-    dump_ed2k_server_record(&record);
+    emit_ed2k_server_diag_event(&record);
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -429,10 +400,6 @@ fn dump_ed2k_server_packet_with_attempt(
         other => other,
     };
     let record = Ed2kServerDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: next_ed2k_server_dump_event_seq(),
         trace_id: session.trace_id,
         trace_key: ed2k_server_trace_key(session),
         state_id: ed2k_server_state_id(session),
@@ -459,9 +426,10 @@ fn dump_ed2k_server_packet_with_attempt(
         payload_hex_truncated: capture.payload.map(|_| false),
         note: capture.note,
     };
-    dump_ed2k_server_record(&record);
+    emit_ed2k_server_diag_event(&record);
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 fn server_protocol_name(protocol_marker: u8) -> &'static str {
     match protocol_marker {
         OP_EDONKEYPROT_MARKER => "ed2k",
@@ -470,13 +438,9 @@ fn server_protocol_name(protocol_marker: u8) -> &'static str {
     }
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 fn exact_packet_hex(bytes: &[u8]) -> String {
     hex::encode(bytes)
-}
-
-fn next_ed2k_server_dump_event_seq() -> u64 {
-    static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
-    NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -485,6 +449,7 @@ fn next_ed2k_server_send_attempt_id() -> u64 {
     NEXT_SEND_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+#[cfg(feature = "packet-diagnostics")]
 fn ed2k_server_trace_key(session: &ServerSession) -> String {
     format!(
         "server:{}:{}:{}",
@@ -492,58 +457,9 @@ fn ed2k_server_trace_key(session: &ServerSession) -> String {
     )
 }
 
+#[cfg(feature = "packet-diagnostics")]
 fn ed2k_server_state_id(session: &ServerSession) -> String {
     format!("server.{}.{}", session.trace_role, session.phase.as_str())
-}
-
-/// Open (create/append) the ed2k server dump file under `EMULEBB_RUST_LOG_DIR`.
-/// `None` when the env var is unset or the file cannot be created. Kept separate
-/// from the `OnceLock` cell so callers RE-ATTEMPT the open while the handle is
-/// still `None` (an early first-access must not permanently disable the dump).
-fn open_ed2k_server_dump_file() -> Option<fs::File> {
-    let dir = std::env::var("EMULEBB_RUST_LOG_DIR")
-        .ok()
-        .map(std::path::PathBuf::from)?;
-    fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!(
-        "{}{}.jsonl",
-        ED2K_SERVER_DUMP_FILE_PREFIX,
-        chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
-    ));
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()
-}
-
-fn ed2k_server_dump_file() -> &'static StdMutex<Option<fs::File>> {
-    static DUMP_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
-    DUMP_FILE.get_or_init(|| StdMutex::new(None))
-}
-
-// WHY: gated like its (all feature-on) callers because it calls the gated
-// `maybe_sync_ed2k_server_dump`; leaving it unconditional broke every
-// feature-off build with an unresolved-name error.
-#[cfg(feature = "packet-diagnostics")]
-fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
-    emit_ed2k_server_diag_event(record);
-    let Ok(line) = serde_json::to_string(record) else {
-        return;
-    };
-    let Ok(mut guard) = ed2k_server_dump_file().lock() else {
-        return;
-    };
-    if guard.is_none() {
-        *guard = open_ed2k_server_dump_file();
-    }
-    let Some(file) = guard.as_mut() else {
-        return;
-    };
-    let _ = std::io::Write::write_all(file, line.as_bytes());
-    let _ = std::io::Write::write_all(file, b"\n");
-    let _ = std::io::Write::flush(file);
-    maybe_sync_ed2k_server_dump(file);
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -716,17 +632,7 @@ fn ed2k_server_send_outcome_parts(
     )
 }
 
-#[cfg(feature = "packet-diagnostics")]
-fn maybe_sync_ed2k_server_dump(file: &fs::File) {
-    static SINCE_SYNC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    if SINCE_SYNC
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        .is_multiple_of(128)
-    {
-        let _ = file.sync_data();
-    }
-}
-
+#[cfg(any(feature = "packet-diagnostics", test))]
 fn server_opcode_name(opcode: u8) -> &'static str {
     match opcode {
         OP_LOGINREQUEST => "OP_LOGINREQUEST",
@@ -770,21 +676,12 @@ fn server_opcode_name(opcode: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ED2K_SERVER_DUMP_FILE_PREFIX, Ed2kServerDumpRecord, Ed2kServerSendContext,
-        Ed2kServerSendOutcome, OP_CALLBACKREQUEST, OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ,
-        OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
-        OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_PACKEDPROT, OP_SERVER_LIST_REQ,
-        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, ed2k_server_diag_event_parts,
+        Ed2kServerDumpRecord, Ed2kServerSendContext, Ed2kServerSendOutcome, OP_CALLBACKREQUEST,
+        OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ,
+        OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_PACKEDPROT,
+        OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, ed2k_server_diag_event_parts,
         ed2k_server_send_outcome_parts, exact_packet_hex, server_opcode_name, server_protocol_name,
     };
-
-    #[test]
-    fn server_dump_prefix_uses_emulebb_rust_name() {
-        assert_eq!(
-            ED2K_SERVER_DUMP_FILE_PREFIX,
-            "emulebb-rust-ed2k-server-dump-"
-        );
-    }
 
     #[test]
     fn server_tcp_send_outcome_preserves_attempt_correlation_and_terminal_state() {
@@ -870,10 +767,6 @@ mod tests {
         let raw = vec![0xAB; payload.len() + 6];
         let clear_frame = vec![0xBC; payload.len() + 6];
         let record = Ed2kServerDumpRecord {
-            schema: "ed2k_packet_v1",
-            source: "emulebb-rust",
-            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
-            event_seq: 1,
             trace_id: 7,
             trace_key: "server:background:7:198.51.100.1:4661".to_string(),
             state_id: "server.background.connected".to_string(),
@@ -931,10 +824,6 @@ mod tests {
     #[test]
     fn server_udp_common_event_uses_a_distinct_family() {
         let record = Ed2kServerDumpRecord {
-            schema: "ed2k_packet_v1",
-            source: "emulebb-rust",
-            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
-            event_seq: 1,
             trace_id: 0,
             trace_key: "server:udp:198.51.100.2:4661".to_string(),
             state_id: "server.udp.send".to_string(),
@@ -972,10 +861,6 @@ mod tests {
     #[test]
     fn server_udp_drop_keeps_raw_bytes_without_faking_decoded_stages() {
         let record = Ed2kServerDumpRecord {
-            schema: "ed2k_packet_v1",
-            source: "emulebb-rust",
-            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
-            event_seq: 1,
             trace_id: 0,
             trace_key: "server:udp:198.51.100.2:4665".to_string(),
             state_id: "server.udp.recv".to_string(),
@@ -1016,10 +901,6 @@ mod tests {
     #[test]
     fn server_meta_record_is_a_state_event_with_correlation() {
         let record = Ed2kServerDumpRecord {
-            schema: "ed2k_packet_v1",
-            source: "emulebb-rust",
-            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
-            event_seq: 1,
             trace_id: 11,
             trace_key: "server:background:11:198.51.100.3:4661".to_string(),
             state_id: "server.background.connected".to_string(),
