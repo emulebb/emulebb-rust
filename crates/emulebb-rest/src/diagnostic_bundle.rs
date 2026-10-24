@@ -417,6 +417,9 @@ fn is_sensitive_key(key: &str) -> bool {
         .filter(|character| character.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect::<String>();
+    if matches!(normalized.as_str(), "opcodename" | "statelabel") {
+        return false;
+    }
     matches!(
         normalized.as_str(),
         "address"
@@ -455,17 +458,33 @@ fn is_sensitive_key(key: &str) -> bool {
             | "userhash"
             | "wire"
     ) || normalized.contains("apikey")
+        || normalized.contains("filename")
         || normalized.contains("password")
         || normalized.contains("secret")
+        || normalized.ends_with("addr")
+        || normalized.ends_with("address")
         || normalized.ends_with("cidrs")
         || normalized.ends_with("directory")
+        || normalized.ends_with("endpoint")
+        || normalized.ends_with("hash")
+        || normalized.ends_with("host")
+        || normalized.ends_with("ip")
+        || normalized.ends_with("name")
         || normalized.ends_with("path")
         || normalized.ends_with("token")
 }
 
 fn fingerprint_value(value: &Value) -> Value {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    fingerprint_bytes(&bytes)
+    match value {
+        Value::String(value) => fingerprint_text(value),
+        Value::Number(value) => fingerprint_text(&value.to_string()),
+        Value::Bool(value) => fingerprint_text(if *value { "true" } else { "false" }),
+        Value::Null => fingerprint_text("null"),
+        Value::Array(_) | Value::Object(_) => {
+            let bytes = serde_json::to_vec(value).unwrap_or_default();
+            fingerprint_bytes(&bytes)
+        }
+    }
 }
 
 fn fingerprint_text(value: &str) -> Value {
@@ -492,19 +511,25 @@ mod tests {
     fn recursively_redacts_sensitive_fields_with_stable_fingerprints() {
         let redacted = redact_value(json!({
             "peer": "198.51.100.2:4662",
+            "remoteEndpoint": "203.0.113.8:4672",
+            "displayName": "private-file-name.bin",
             "opcodeName": "OP_HELLO",
             "nested": {"fileHash": "0123456789abcdef", "count": 3},
         }));
 
         assert_eq!(redacted["opcodeName"], "OP_HELLO");
         assert_eq!(redacted["nested"]["count"], 3);
-        assert_eq!(redacted["peer"]["length"], 19);
-        assert_eq!(redacted["nested"]["fileHash"]["length"], 18);
+        assert_eq!(redacted["peer"]["length"], 17);
+        assert_eq!(redacted["remoteEndpoint"]["length"], 16);
+        assert_eq!(redacted["displayName"]["length"], 21);
+        assert_eq!(redacted["nested"]["fileHash"]["length"], 16);
         assert_eq!(
             redacted["peer"]["sha256"],
             redact_value(json!({"peer": "198.51.100.2:4662"}))["peer"]["sha256"]
         );
         assert!(!redacted.to_string().contains("198.51.100.2"));
+        assert!(!redacted.to_string().contains("203.0.113.8"));
+        assert!(!redacted.to_string().contains("private-file-name"));
         assert!(!redacted.to_string().contains("0123456789abcdef"));
     }
 
