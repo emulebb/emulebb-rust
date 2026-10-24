@@ -201,6 +201,7 @@ async fn serve_callback_session(
         return Ok(());
     }
     let transport = Ed2kTransport::connect_outgoing(
+        "listener_callback",
         runtime.bind_ip,
         request.peer_addr,
         runtime.hello_identity.connect_options,

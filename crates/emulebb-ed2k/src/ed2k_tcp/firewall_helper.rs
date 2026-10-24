@@ -303,6 +303,7 @@ pub async fn request_udp_firewall_check(
     timeout: Duration,
 ) -> Result<()> {
     let mut transport = match Ed2kTransport::connect_outgoing(
+        "udp_firewall_check",
         bind_ip,
         helper_addr,
         hello_identity.connect_options,
@@ -540,6 +541,7 @@ pub async fn send_kad_firewall_tcp_ack(
     timeout: Duration,
 ) -> Result<Ed2kPeerConnectMode> {
     let mut transport = Ed2kTransport::connect_outgoing(
+        "kad_tcp_firewall_ack",
         bind_ip,
         peer_addr,
         hello_identity.connect_options,

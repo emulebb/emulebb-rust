@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use anyhow::Result;
 use md5::compute as md5_compute;
 use rand::RngExt;
@@ -105,6 +107,8 @@ fn random_non_protocol_marker() -> u8 {
 pub(super) async fn negotiate_outgoing_obfuscation_handshake(
     stream: &mut TcpStream,
     peer_user_hash: [u8; 16],
+    flow: &'static str,
+    peer_addr: SocketAddr,
 ) -> Result<(Rc4KeyStream, Rc4KeyStream)> {
     let random_key_part = rand::random::<u32>().to_le_bytes();
     let mut send_cipher = derive_obfuscation_key(
@@ -125,21 +129,35 @@ pub(super) async fn negotiate_outgoing_obfuscation_handshake(
     request.push(random_non_protocol_marker());
     request.extend_from_slice(&random_key_part);
 
-    let mut encrypted_tail = Vec::with_capacity(7 + request_padding_len);
-    encrypted_tail.extend_from_slice(&EMULE_TCP_CRYPT_MAGIC_SYNC.to_le_bytes());
-    encrypted_tail.push(EMULE_ENCRYPTION_METHOD_OBFUSCATION);
-    encrypted_tail.push(EMULE_ENCRYPTION_METHOD_OBFUSCATION);
-    encrypted_tail.push(u8::try_from(request_padding_len).expect("padding length fits in u8"));
+    let mut clear_tail = Vec::with_capacity(7 + request_padding_len);
+    clear_tail.extend_from_slice(&EMULE_TCP_CRYPT_MAGIC_SYNC.to_le_bytes());
+    clear_tail.push(EMULE_ENCRYPTION_METHOD_OBFUSCATION);
+    clear_tail.push(EMULE_ENCRYPTION_METHOD_OBFUSCATION);
+    clear_tail.push(u8::try_from(request_padding_len).expect("padding length fits in u8"));
     let mut request_padding = vec![0u8; request_padding_len];
     rand::rng().fill(&mut request_padding[..]);
-    encrypted_tail.extend_from_slice(&request_padding);
+    clear_tail.extend_from_slice(&request_padding);
+    let mut encrypted_tail = clear_tail.clone();
     send_cipher.apply(&mut encrypted_tail);
     request.extend_from_slice(&encrypted_tail);
+    let mut clear_request = request[..5].to_vec();
+    clear_request.extend_from_slice(&clear_tail);
     stream.write_all(&request).await?;
+    super::dump::dump_ed2k_tcp_handshake_step(
+        flow,
+        peer_addr,
+        "obfuscation_request",
+        "send",
+        "send_succeeded",
+        &request,
+        &clear_request,
+    );
 
     let mut encrypted_header = [0u8; 6];
     stream.read_exact(&mut encrypted_header).await?;
+    let mut raw_response = encrypted_header.to_vec();
     receive_cipher.apply(&mut encrypted_header);
+    let mut clear_response = encrypted_header.to_vec();
     let magic = u32::from_le_bytes(encrypted_header[..4].try_into().unwrap());
     if magic != EMULE_TCP_CRYPT_MAGIC_SYNC {
         anyhow::bail!("invalid obfuscated eD2k TCP response magic 0x{magic:08X}");
@@ -154,22 +172,47 @@ pub(super) async fn negotiate_outgoing_obfuscation_handshake(
     if padding_len > 0 {
         let mut encrypted_padding = vec![0u8; padding_len];
         stream.read_exact(&mut encrypted_padding).await?;
+        raw_response.extend_from_slice(&encrypted_padding);
         receive_cipher.apply(&mut encrypted_padding);
+        clear_response.extend_from_slice(&encrypted_padding);
     }
+    super::dump::dump_ed2k_tcp_handshake_step(
+        flow,
+        peer_addr,
+        "obfuscation_response",
+        "recv",
+        "accepted",
+        &raw_response,
+        &clear_response,
+    );
     Ok((receive_cipher, send_cipher))
 }
 
-pub(super) fn decode_incoming_obfuscation_header(
+fn decrypt_incoming_obfuscation_header(
     receive_cipher: &mut Rc4KeyStream,
     encrypted_header: [u8; 7],
-) -> Result<(usize, u8, u8)> {
+) -> Result<([u8; 7], usize, u8, u8)> {
     let mut decrypted = encrypted_header;
     receive_cipher.apply(&mut decrypted);
     let magic = u32::from_le_bytes(decrypted[..4].try_into().unwrap());
     if magic != EMULE_TCP_CRYPT_MAGIC_SYNC {
         anyhow::bail!("invalid obfuscated eD2k TCP magic 0x{magic:08X}");
     }
-    Ok((usize::from(decrypted[6]), decrypted[4], decrypted[5]))
+    Ok((
+        decrypted,
+        usize::from(decrypted[6]),
+        decrypted[4],
+        decrypted[5],
+    ))
+}
+
+pub(super) fn decode_incoming_obfuscation_header(
+    receive_cipher: &mut Rc4KeyStream,
+    encrypted_header: [u8; 7],
+) -> Result<(usize, u8, u8)> {
+    let (_, padding_len, supported_methods, requested_method) =
+        decrypt_incoming_obfuscation_header(receive_cipher, encrypted_header)?;
+    Ok((padding_len, supported_methods, requested_method))
 }
 
 pub(super) fn encode_incoming_obfuscation_response(
@@ -189,6 +232,8 @@ pub(super) async fn accept_incoming_obfuscation_handshake(
     stream: &mut TcpStream,
     local_user_hash: [u8; 16],
     first_marker: u8,
+    flow: &'static str,
+    peer_addr: SocketAddr,
 ) -> Result<(Rc4KeyStream, Rc4KeyStream)> {
     if is_plain_ed2k_protocol_marker(first_marker) {
         anyhow::bail!("plaintext marker 0x{first_marker:02X} cannot start obfuscated handshake");
@@ -196,6 +241,10 @@ pub(super) async fn accept_incoming_obfuscation_handshake(
 
     let mut random_key_part = [0u8; 4];
     stream.read_exact(&mut random_key_part).await?;
+    let mut raw_request = Vec::with_capacity(12);
+    raw_request.push(first_marker);
+    raw_request.extend_from_slice(&random_key_part);
+    let mut clear_request = raw_request.clone();
     let mut receive_cipher = derive_obfuscation_key(
         local_user_hash,
         EMULE_TCP_CRYPT_MAGIC_REQUESTER,
@@ -209,8 +258,10 @@ pub(super) async fn accept_incoming_obfuscation_handshake(
 
     let mut encrypted_header = [0u8; 7];
     stream.read_exact(&mut encrypted_header).await?;
-    let (padding_len, supported_methods, requested_method) =
-        decode_incoming_obfuscation_header(&mut receive_cipher, encrypted_header)?;
+    raw_request.extend_from_slice(&encrypted_header);
+    let (decrypted_header, padding_len, supported_methods, requested_method) =
+        decrypt_incoming_obfuscation_header(&mut receive_cipher, encrypted_header)?;
+    clear_request.extend_from_slice(&decrypted_header);
     if requested_method != EMULE_ENCRYPTION_METHOD_OBFUSCATION {
         debug!(
             "peer requested unsupported eD2k TCP encryption method 0x{requested_method:02X}; falling back to obfuscation"
@@ -225,14 +276,39 @@ pub(super) async fn accept_incoming_obfuscation_handshake(
     if padding_len > 0 {
         let mut ignored_padding = vec![0u8; padding_len];
         stream.read_exact(&mut ignored_padding).await?;
+        raw_request.extend_from_slice(&ignored_padding);
         receive_cipher.apply(&mut ignored_padding);
+        clear_request.extend_from_slice(&ignored_padding);
     }
+    super::dump::dump_ed2k_tcp_handshake_step(
+        flow,
+        peer_addr,
+        "obfuscation_request",
+        "recv",
+        "accepted",
+        &raw_request,
+        &clear_request,
+    );
 
     // Same stock CryptTCPPaddingLength=128 default profile as the request side.
     let response_padding_len = rand::rng().random_range(0..=128usize);
     let mut response_padding = vec![0u8; response_padding_len];
     rand::rng().fill(&mut response_padding[..]);
+    let mut clear_response = Vec::with_capacity(6 + response_padding.len());
+    clear_response.extend_from_slice(&EMULE_TCP_CRYPT_MAGIC_SYNC.to_le_bytes());
+    clear_response.push(EMULE_ENCRYPTION_METHOD_OBFUSCATION);
+    clear_response.push(u8::try_from(response_padding.len()).expect("padding length fits in u8"));
+    clear_response.extend_from_slice(&response_padding);
     let response = encode_incoming_obfuscation_response(&mut send_cipher, &response_padding);
     stream.write_all(&response).await?;
+    super::dump::dump_ed2k_tcp_handshake_step(
+        flow,
+        peer_addr,
+        "obfuscation_response",
+        "send",
+        "send_succeeded",
+        &response,
+        &clear_response,
+    );
     Ok((receive_cipher, send_cipher))
 }

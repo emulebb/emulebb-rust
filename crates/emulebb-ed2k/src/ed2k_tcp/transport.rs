@@ -323,6 +323,7 @@ impl Ed2kTransport {
     }
 
     pub(super) async fn connect_outgoing(
+        flow: &'static str,
         bind_ip: Ipv4Addr,
         peer_addr: SocketAddr,
         local_connect_options: u8,
@@ -367,7 +368,12 @@ impl Ed2kTransport {
             let peer_user_hash = peer_user_hash.expect("validated above");
             let (receive_cipher, send_cipher) = tokio::time::timeout(
                 timeout,
-                negotiate_outgoing_obfuscation_handshake(&mut stream, peer_user_hash),
+                negotiate_outgoing_obfuscation_handshake(
+                    &mut stream,
+                    peer_user_hash,
+                    flow,
+                    peer_addr,
+                ),
             )
             .await
             .with_context(|| {
@@ -392,6 +398,9 @@ impl Ed2kTransport {
     }
 
     pub(super) async fn accept(mut stream: TcpStream, local_user_hash: [u8; 16]) -> Result<Self> {
+        let peer_addr = stream
+            .peer_addr()
+            .context("failed to resolve incoming eD2K peer address")?;
         let mut first_byte = [0u8; 1];
         match stream.read_exact(&mut first_byte).await {
             Ok(_) => {}
@@ -419,9 +428,14 @@ impl Ed2kTransport {
             ));
         }
 
-        let (receive_cipher, send_cipher) =
-            accept_incoming_obfuscation_handshake(&mut stream, local_user_hash, first_byte[0])
-                .await?;
+        let (receive_cipher, send_cipher) = accept_incoming_obfuscation_handshake(
+            &mut stream,
+            local_user_hash,
+            first_byte[0],
+            "listener",
+            peer_addr,
+        )
+        .await?;
         Ok(Self::from_parts(
             stream,
             VecDeque::new(),
