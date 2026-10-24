@@ -23,8 +23,8 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::codec::{
-    OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKCALLBACKUDP,
-    OP_REASKFILEPING,
+    OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_PORTTEST, OP_QUEUEFULL, OP_REASKACK,
+    OP_REASKCALLBACKUDP, OP_REASKFILEPING,
 };
 use super::outbound::ClientUdpDatagram;
 use crate::ed2k_client_udp_obfuscation::deobfuscate_client_udp;
@@ -45,8 +45,10 @@ struct ClientUdpDumpRecord<'a> {
     flow: &'static str,
     phase: &'static str,
     direction: &'a str,
+    outcome: &'static str,
     remote_addr: String,
     transport_mode: &'a str,
+    obfuscated: Option<bool>,
     protocol: Option<&'static str>,
     protocol_marker: Option<u8>,
     opcode: Option<u8>,
@@ -57,6 +59,36 @@ struct ClientUdpDumpRecord<'a> {
     payload_hex: Option<String>,
     payload_hex_truncated: Option<bool>,
     note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClientUdpDumpOutcome {
+    Accepted,
+    Ignored,
+    Dropped,
+    SendSucceeded,
+    SendFailed,
+    SendCancelled,
+}
+
+impl ClientUdpDumpOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Ignored => "ignored",
+            Self::Dropped => "dropped",
+            Self::SendSucceeded => "send_succeeded",
+            Self::SendFailed => "send_failed",
+            Self::SendCancelled => "send_cancelled",
+        }
+    }
+
+    const fn severity(self) -> &'static str {
+        match self {
+            Self::Dropped | Self::SendFailed | Self::SendCancelled => "warning",
+            Self::Accepted | Self::Ignored | Self::SendSucceeded => "info",
+        }
+    }
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
@@ -77,12 +109,14 @@ pub(super) fn dump_client_udp_send(remote_addr: SocketAddr, datagram: &ClientUdp
         flow: "client_udp",
         phase: "reask",
         direction: "send",
+        outcome: ClientUdpDumpOutcome::SendSucceeded.as_str(),
         remote_addr: remote_addr.to_string(),
         transport_mode: if datagram.obfuscated {
             "obfuscated"
         } else {
             "plaintext"
         },
+        obfuscated: Some(datagram.obfuscated),
         protocol: Some("emule"),
         protocol_marker: Some(datagram.protocol_marker),
         opcode: Some(datagram.opcode),
@@ -101,6 +135,8 @@ pub(super) fn dump_client_udp_recv(
     _remote_addr: SocketAddr,
     _our_user_hash: &[u8; 16],
     _datagram: &[u8],
+    _outcome: ClientUdpDumpOutcome,
+    _note: Option<String>,
 ) {
 }
 
@@ -109,12 +145,25 @@ pub(super) fn dump_client_udp_recv(
     remote_addr: SocketAddr,
     our_user_hash: &[u8; 16],
     datagram: &[u8],
+    outcome: ClientUdpDumpOutcome,
+    note: Option<String>,
 ) {
-    let Some(decoded) = decode_client_udp_for_dump(our_user_hash, remote_addr, datagram) else {
-        return;
-    };
     let raw_hex = exact_packet_hex(datagram);
-    let payload_hex = exact_packet_hex(&decoded.payload);
+    let decoded = decode_client_udp_for_dump(our_user_hash, remote_addr, datagram);
+    let transport_mode = decoded.as_ref().map_or_else(
+        || {
+            if datagram.first() == Some(&OP_EMULEPROT_MARKER) {
+                "plaintext"
+            } else {
+                "unknown"
+            }
+        },
+        |decoded| decoded.transport_mode,
+    );
+    let payload_len = decoded.as_ref().map(|decoded| decoded.payload.len());
+    let payload_hex = decoded
+        .as_ref()
+        .map(|decoded| exact_packet_hex(&decoded.payload));
     dump_client_udp_record(&ClientUdpDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -126,18 +175,28 @@ pub(super) fn dump_client_udp_recv(
         flow: "client_udp",
         phase: "reask",
         direction: "recv",
+        outcome: outcome.as_str(),
         remote_addr: remote_addr.to_string(),
-        transport_mode: decoded.transport_mode,
-        protocol: Some(client_udp_protocol_name(decoded.protocol_marker)),
-        protocol_marker: Some(decoded.protocol_marker),
-        opcode: Some(decoded.opcode),
-        opcode_name: Some(client_udp_opcode_name(decoded.opcode)),
+        transport_mode,
+        obfuscated: match transport_mode {
+            "obfuscated" => Some(true),
+            "plaintext" => Some(false),
+            _ => None,
+        },
+        protocol: decoded
+            .as_ref()
+            .map(|decoded| client_udp_protocol_name(decoded.protocol_marker)),
+        protocol_marker: decoded.as_ref().map(|decoded| decoded.protocol_marker),
+        opcode: decoded.as_ref().map(|decoded| decoded.opcode),
+        opcode_name: decoded
+            .as_ref()
+            .map(|decoded| client_udp_opcode_name(decoded.opcode)),
         raw_len: datagram.len(),
         raw_hex,
-        payload_len: Some(decoded.payload.len()),
-        payload_hex: Some(payload_hex),
-        payload_hex_truncated: Some(false),
-        note: None,
+        payload_len,
+        payload_hex,
+        payload_hex_truncated: payload_len.map(|_| false),
+        note,
     });
 }
 
@@ -186,6 +245,7 @@ fn client_udp_opcode_name(opcode: u8) -> &'static str {
         OP_QUEUEFULL => "OP_QUEUEFULL",
         OP_REASKCALLBACKUDP => "OP_REASKCALLBACKUDP",
         OP_DIRECTCALLBACKREQ => "OP_DIRECTCALLBACKREQ",
+        OP_PORTTEST => "OP_PORTTEST",
         _ => "UNKNOWN",
     }
 }
@@ -259,12 +319,14 @@ fn dump_client_udp_record(record: &ClientUdpDumpRecord<'_>) {
 
 #[cfg(feature = "packet-diagnostics")]
 fn emit_client_udp_diag_event(record: &ClientUdpDumpRecord<'_>) {
-    let (family, keys, body) = client_udp_diag_event_parts(record);
-    crate::diag_event::emit(family, "packet", "info", keys, body);
+    let (family, severity, keys, body) = client_udp_diag_event_parts(record);
+    crate::diag_event::emit(family, "packet", severity, keys, body);
 }
 
 #[cfg(any(feature = "packet-diagnostics", test))]
-fn client_udp_diag_event_parts(record: &ClientUdpDumpRecord<'_>) -> (&'static str, Value, Value) {
+fn client_udp_diag_event_parts(
+    record: &ClientUdpDumpRecord<'_>,
+) -> (&'static str, &'static str, Value, Value) {
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(record.remote_addr));
     if let Some(protocol_marker) = record.protocol_marker {
@@ -276,17 +338,16 @@ fn client_udp_diag_event_parts(record: &ClientUdpDumpRecord<'_>) -> (&'static st
 
     let mut body = Map::new();
     body.insert("direction".to_string(), json!(record.direction));
-    body.insert("outcome".to_string(), json!("accepted"));
+    body.insert("outcome".to_string(), json!(record.outcome));
     body.insert("stateId".to_string(), json!(record.state_id));
     body.insert("stateLabel".to_string(), json!(record.state_label));
     body.insert("traceKey".to_string(), json!(record.trace_key));
     body.insert("flow".to_string(), json!(record.flow));
     body.insert("phase".to_string(), json!(record.phase));
     body.insert("transportMode".to_string(), json!(record.transport_mode));
-    body.insert(
-        "obfuscated".to_string(),
-        json!(record.transport_mode == "obfuscated"),
-    );
+    if let Some(obfuscated) = record.obfuscated {
+        body.insert("obfuscated".to_string(), json!(obfuscated));
+    }
     if let Some(protocol_marker) = record.protocol_marker {
         body.insert("protocolMarker".to_string(), json!(protocol_marker));
     }
@@ -317,7 +378,16 @@ fn client_udp_diag_event_parts(record: &ClientUdpDumpRecord<'_>) -> (&'static st
         body.insert("note".to_string(), json!(note));
     }
 
-    ("ed2k_client_udp", Value::Object(keys), Value::Object(body))
+    let severity = match record.outcome {
+        "dropped" | "send_failed" => ClientUdpDumpOutcome::Dropped.severity(),
+        _ => ClientUdpDumpOutcome::Accepted.severity(),
+    };
+    (
+        "ed2k_client_udp",
+        severity,
+        Value::Object(keys),
+        Value::Object(body),
+    )
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -334,9 +404,9 @@ fn maybe_sync_client_udp_dump(file: &fs::File) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CLIENT_UDP_DUMP_FILE_PREFIX, ClientUdpDumpRecord, OP_DIRECTCALLBACKREQ, OP_REASKACK,
-        OP_REASKCALLBACKUDP, OP_REASKFILEPING, client_udp_diag_event_parts, client_udp_opcode_name,
-        exact_packet_hex,
+        CLIENT_UDP_DUMP_FILE_PREFIX, ClientUdpDumpOutcome, ClientUdpDumpRecord,
+        OP_DIRECTCALLBACKREQ, OP_PORTTEST, OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING,
+        client_udp_diag_event_parts, client_udp_opcode_name, exact_packet_hex,
     };
     use crate::ed2k_client_udp::outbound::{OutboundReaskTarget, build_reask_file_ping_datagram};
     use emulebb_kad_proto::Ed2kHash;
@@ -369,6 +439,7 @@ mod tests {
             client_udp_opcode_name(OP_DIRECTCALLBACKREQ),
             "OP_DIRECTCALLBACKREQ"
         );
+        assert_eq!(client_udp_opcode_name(OP_PORTTEST), "OP_PORTTEST");
         assert_eq!(client_udp_opcode_name(0xFF), "UNKNOWN");
     }
 
@@ -387,8 +458,10 @@ mod tests {
             flow: "client_udp",
             phase: "reask",
             direction: "send",
+            outcome: ClientUdpDumpOutcome::SendSucceeded.as_str(),
             remote_addr: "198.51.100.2:4672".to_string(),
             transport_mode: "obfuscated",
+            obfuscated: Some(true),
             protocol: Some("emule"),
             protocol_marker: Some(0xC5),
             opcode: Some(OP_REASKFILEPING),
@@ -401,13 +474,14 @@ mod tests {
             note: None,
         };
 
-        let (family, keys, body) = client_udp_diag_event_parts(&record);
+        let (family, severity, keys, body) = client_udp_diag_event_parts(&record);
         assert_eq!(family, "ed2k_client_udp");
+        assert_eq!(severity, "info");
         assert_eq!(keys["peer"], "198.51.100.2:4672");
         assert_eq!(keys["protocolMarker"], 0xC5);
         assert_eq!(keys["opcode"], OP_REASKFILEPING);
         assert_eq!(body["direction"], "send");
-        assert_eq!(body["outcome"], "accepted");
+        assert_eq!(body["outcome"], "send_succeeded");
         assert_eq!(body["transportMode"], "obfuscated");
         assert_eq!(body["obfuscated"], true);
         assert_eq!(body["stateId"], "client_udp.reask");
@@ -420,6 +494,48 @@ mod tests {
             payload.len() * 2
         );
         assert_eq!(body["payloadHexTruncated"], false);
+    }
+
+    #[test]
+    fn client_udp_common_event_preserves_dropped_undecodable_wire() {
+        let raw = vec![0x42; 24];
+        let record = ClientUdpDumpRecord {
+            schema: "ed2k_packet_v1",
+            source: "emulebb-rust",
+            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
+            event_seq: 2,
+            trace_key: "client_udp:198.51.100.2:4672".to_string(),
+            state_id: "client_udp.reask",
+            state_label: "reask",
+            flow: "client_udp",
+            phase: "reask",
+            direction: "recv",
+            outcome: ClientUdpDumpOutcome::Dropped.as_str(),
+            remote_addr: "198.51.100.2:4672".to_string(),
+            transport_mode: "unknown",
+            obfuscated: None,
+            protocol: None,
+            protocol_marker: None,
+            opcode: None,
+            opcode_name: None,
+            raw_len: raw.len(),
+            raw_hex: exact_packet_hex(&raw),
+            payload_len: None,
+            payload_hex: None,
+            payload_hex_truncated: None,
+            note: Some("undecodable".to_string()),
+        };
+
+        let (family, severity, keys, body) = client_udp_diag_event_parts(&record);
+        assert_eq!(family, "ed2k_client_udp");
+        assert_eq!(severity, "warning");
+        assert_eq!(keys["peer"], "198.51.100.2:4672");
+        assert_eq!(body["outcome"], "dropped");
+        assert_eq!(body["transportMode"], "unknown");
+        assert!(body.get("obfuscated").is_none());
+        assert!(body.get("payloadHex").is_none());
+        assert_eq!(body["rawHex"].as_str().unwrap().len(), raw.len() * 2);
+        assert_eq!(body["note"], "undecodable");
     }
 
     #[test]

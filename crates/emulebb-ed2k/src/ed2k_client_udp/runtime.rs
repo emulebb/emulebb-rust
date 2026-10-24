@@ -28,8 +28,13 @@ use emulebb_kad_proto::Ed2kHash;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
-use super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
-use super::service::{ReaskInboundOutcome, ReaskService, ReaskTickPacing, TransferReaskInfo};
+use super::dispatch::{
+    InboundReaskMessage, InboundReaskParseError, classify_inbound_reask_datagram,
+};
+use super::dump::ClientUdpDumpOutcome;
+use super::service::{
+    ReaskIgnoredReason, ReaskInboundOutcome, ReaskService, ReaskTickPacing, TransferReaskInfo,
+};
 use super::state::{ReaskAction, ReaskSource};
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
@@ -396,9 +401,27 @@ async fn handle_inbound_datagram(
     data: &[u8],
     from: SocketAddr,
 ) {
+    if !from.is_ipv4() {
+        super::dump::dump_client_udp_recv(
+            from,
+            &our_user_hash,
+            data,
+            ClientUdpDumpOutcome::Dropped,
+            Some("non_ipv4".to_string()),
+        );
+        trace!("ed2k udp reask: dropping inbound datagram from non-IPv4 endpoint {from}");
+        return;
+    }
     // Drop datagrams from a filtered IP first (master ClientUDPSocket.cpp:129
     // IsFiltered).
     if is_filtered_reask_source(from, ip_filter) {
+        super::dump::dump_client_udp_recv(
+            from,
+            &our_user_hash,
+            data,
+            ClientUdpDumpOutcome::Dropped,
+            Some("filtered_ip".to_string()),
+        );
         trace!("ed2k udp reask: dropping inbound datagram from filtered IP {from}");
         return;
     }
@@ -408,6 +431,13 @@ async fn handle_inbound_datagram(
     if let SocketAddr::V4(v4) = from
         && transfer_runtime.is_client_banned(Some(*v4.ip()), None)
     {
+        super::dump::dump_client_udp_recv(
+            from,
+            &our_user_hash,
+            data,
+            ClientUdpDumpOutcome::Dropped,
+            Some("banned_ip".to_string()),
+        );
         trace!("ed2k udp reask: dropping inbound datagram from banned IP {from}");
         return;
     }
@@ -416,8 +446,7 @@ async fn handle_inbound_datagram(
         data.len(),
         hex_preview(data)
     );
-    super::dump::dump_client_udp_recv(from, &our_user_hash, data);
-    if !reask_enabled {
+    let (diagnostic_outcome, diagnostic_note) = if !reask_enabled {
         handle_reask_disabled_datagram(
             events,
             port_test_registry,
@@ -425,61 +454,119 @@ async fn handle_inbound_datagram(
             udp_version,
             data,
             from,
-        );
-        return;
-    }
-    let outcome = service.handle_inbound(data, from, Instant::now());
-    match outcome {
-        ReaskInboundOutcome::RoutedReply {
-            file_hash,
-            endpoint,
-            lease_endpoint,
-            action,
-        } => {
-            trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
-            // A re-engageable rank means we hand the source back to TCP first.
-            if matches!(action, ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD) {
-                service.remove_source(endpoint.0, endpoint.1);
-            }
-            // Emit loop->core events (lease release ordered before any re-engage).
-            for event in routed_reply_events(action, file_hash, endpoint, lease_endpoint) {
-                if let ReaskEvent::SourceReady { file_hash } = &event {
-                    trace!("ed2k udp reask: re-engage SourceReady for {file_hash}");
+        )
+    } else {
+        let outcome = service.handle_inbound(data, from, Instant::now());
+        match outcome {
+            ReaskInboundOutcome::RoutedReply {
+                file_hash,
+                endpoint,
+                lease_endpoint,
+                action,
+            } => {
+                trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
+                // A re-engageable rank means we hand the source back to TCP first.
+                if matches!(action, ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD)
+                {
+                    service.remove_source(endpoint.0, endpoint.1);
                 }
-                let _ = events.send(event);
+                // Emit loop->core events (lease release ordered before any re-engage).
+                let mut delivered = true;
+                for event in routed_reply_events(action, file_hash, endpoint, lease_endpoint) {
+                    if let ReaskEvent::SourceReady { file_hash } = &event {
+                        trace!("ed2k udp reask: re-engage SourceReady for {file_hash}");
+                    }
+                    delivered &= events.send(event).is_ok();
+                }
+                if delivered {
+                    (
+                        ClientUdpDumpOutcome::Accepted,
+                        Some(format!(
+                            "routed_reply action={action:?} file_hash={file_hash}"
+                        )),
+                    )
+                } else {
+                    (
+                        ClientUdpDumpOutcome::Dropped,
+                        Some("core_event_channel_closed".to_string()),
+                    )
+                }
             }
-        }
-        ReaskInboundOutcome::AnswerNeeded { ping, from } => {
-            // Answer the peer's OP_REASKFILEPING from upload-queue/catalog state.
-            match transfer_runtime
-                .reask_reciprocity_reply(&ping, from, our_public_ip)
-                .await
-            {
-                Some(reply) => {
-                    if let Err(err) = dht.send_raw_datagram(from, &reply.bytes).await {
-                        trace!("ed2k udp reask: reciprocity reply to {from} failed: {err}");
-                    } else {
-                        super::dump::dump_client_udp_send(from, &reply);
+            ReaskInboundOutcome::AnswerNeeded { ping, from } => {
+                // Answer the peer's OP_REASKFILEPING from upload-queue/catalog state.
+                match transfer_runtime
+                    .reask_reciprocity_reply(&ping, from, our_public_ip)
+                    .await
+                {
+                    Some(reply) => {
+                        if let Err(err) = dht.send_raw_datagram(from, &reply.bytes).await {
+                            trace!("ed2k udp reask: reciprocity reply to {from} failed: {err}");
+                        } else {
+                            super::dump::dump_client_udp_send(from, &reply);
+                        }
+                    }
+                    // Deliberate silence (force TCP / file mismatch); nothing to send.
+                    None => {
+                        trace!("ed2k udp reask: inbound reask from {from} answered with silence")
                     }
                 }
-                // Deliberate silence (force TCP / file mismatch); nothing to send.
-                None => trace!("ed2k udp reask: inbound reask from {from} answered with silence"),
+                (
+                    ClientUdpDumpOutcome::Accepted,
+                    Some("answer_needed".to_string()),
+                )
             }
+            ReaskInboundOutcome::BuddyRelay { callback, from } => {
+                // The relay forwards the post-buddy-id tail verbatim (oracle
+                // ClientUDPSocket.cpp memcpy(packet+16)), so our udp_version does not
+                // gate it.
+                if super::buddy_relay::relay_buddy_reask_callback(buddy_registry, &callback, from) {
+                    (
+                        ClientUdpDumpOutcome::Accepted,
+                        Some("buddy_relayed".to_string()),
+                    )
+                } else {
+                    (
+                        ClientUdpDumpOutcome::Dropped,
+                        Some("buddy_not_registered".to_string()),
+                    )
+                }
+            }
+            ReaskInboundOutcome::DirectCallbackReq { req, from } => {
+                if raise_direct_callback_event(events, req, from) {
+                    (
+                        ClientUdpDumpOutcome::Accepted,
+                        Some("direct_callback_raised".to_string()),
+                    )
+                } else {
+                    (
+                        ClientUdpDumpOutcome::Dropped,
+                        Some("direct_callback_not_delivered".to_string()),
+                    )
+                }
+            }
+            ReaskInboundOutcome::PortTest { from } => {
+                if acknowledge_port_test(port_test_registry, from) {
+                    (
+                        ClientUdpDumpOutcome::Accepted,
+                        Some("port_test_acknowledged".to_string()),
+                    )
+                } else {
+                    (
+                        ClientUdpDumpOutcome::Ignored,
+                        Some("port_test_not_pending".to_string()),
+                    )
+                }
+            }
+            ReaskInboundOutcome::Ignored(reason) => ignored_reason_disposition(&reason),
         }
-        ReaskInboundOutcome::BuddyRelay { callback, from } => {
-            // The relay forwards the post-buddy-id tail verbatim (oracle
-            // ClientUDPSocket.cpp memcpy(packet+16)), so our udp_version does not
-            // gate it.
-            super::buddy_relay::relay_buddy_reask_callback(buddy_registry, &callback, from);
-        }
-        ReaskInboundOutcome::DirectCallbackReq { req, from } => {
-            raise_direct_callback_event(events, req, from);
-        }
-        ReaskInboundOutcome::PortTest { from } => {
-            acknowledge_port_test(port_test_registry, from);
-        }
-        ReaskInboundOutcome::Ignored(_) => {}
-    }
+    };
+    super::dump::dump_client_udp_recv(
+        from,
+        &our_user_hash,
+        data,
+        diagnostic_outcome,
+        diagnostic_note,
+    );
 }
 
 fn handle_reask_disabled_datagram(
@@ -489,20 +576,75 @@ fn handle_reask_disabled_datagram(
     udp_version: u8,
     data: &[u8],
     from: SocketAddr,
-) {
+) -> (ClientUdpDumpOutcome, Option<String>) {
     let SocketAddr::V4(from_v4) = from else {
-        return;
+        return (ClientUdpDumpOutcome::Dropped, Some("non_ipv4".to_string()));
     };
-    match parse_inbound_reask_datagram(data, from_v4.ip().octets(), &our_user_hash, udp_version) {
-        Some(InboundReaskMessage::DirectCallbackReq(req)) => {
-            raise_direct_callback_event(events, req, from);
+    match classify_inbound_reask_datagram(data, from_v4.ip().octets(), &our_user_hash, udp_version)
+    {
+        Ok(InboundReaskMessage::DirectCallbackReq(req)) => {
+            if raise_direct_callback_event(events, req, from) {
+                (
+                    ClientUdpDumpOutcome::Accepted,
+                    Some("direct_callback_raised".to_string()),
+                )
+            } else {
+                (
+                    ClientUdpDumpOutcome::Dropped,
+                    Some("direct_callback_not_delivered".to_string()),
+                )
+            }
         }
-        Some(InboundReaskMessage::PortTest) => {
-            acknowledge_port_test(port_test_registry, from);
+        Ok(InboundReaskMessage::PortTest) => {
+            if acknowledge_port_test(port_test_registry, from) {
+                (
+                    ClientUdpDumpOutcome::Accepted,
+                    Some("port_test_acknowledged".to_string()),
+                )
+            } else {
+                (
+                    ClientUdpDumpOutcome::Ignored,
+                    Some("port_test_not_pending".to_string()),
+                )
+            }
         }
         // Source reask and buddy relay stay disabled. In particular, do not
         // route them through ReaskService, which could answer or mutate state.
-        _ => {}
+        Ok(_) => (
+            ClientUdpDumpOutcome::Ignored,
+            Some("reask_disabled".to_string()),
+        ),
+        Err(error) => parse_error_disposition(&error),
+    }
+}
+
+fn parse_error_disposition(
+    error: &InboundReaskParseError,
+) -> (ClientUdpDumpOutcome, Option<String>) {
+    let outcome = match error {
+        InboundReaskParseError::UnknownOpcode { .. } => ClientUdpDumpOutcome::Ignored,
+        InboundReaskParseError::Undecodable | InboundReaskParseError::Malformed { .. } => {
+            ClientUdpDumpOutcome::Dropped
+        }
+    };
+    (outcome, Some(format!("{}: {error}", error.reason())))
+}
+
+fn ignored_reason_disposition(
+    reason: &ReaskIgnoredReason,
+) -> (ClientUdpDumpOutcome, Option<String>) {
+    match reason {
+        ReaskIgnoredReason::Parse(error) => parse_error_disposition(error),
+        ReaskIgnoredReason::NonIpv4 => (
+            ClientUdpDumpOutcome::Dropped,
+            Some(reason.reason().to_string()),
+        ),
+        ReaskIgnoredReason::UnregisteredEndpoint
+        | ReaskIgnoredReason::MissingSourceSet
+        | ReaskIgnoredReason::UnsolicitedReply => (
+            ClientUdpDumpOutcome::Ignored,
+            Some(reason.reason().to_string()),
+        ),
     }
 }
 
@@ -510,7 +652,7 @@ fn raise_direct_callback_event(
     events: &ReaskEventSender,
     req: super::codec::DirectCallbackReq,
     from: SocketAddr,
-) {
+) -> bool {
     // We have no TCP-connect / hello-identity / firewalled-verdict state here,
     // so raise an event for core to gate (Kademlia::IsRunning() &&
     // IsFirewalled()) and connect out (oracle ClientUDPSocket.cpp
@@ -522,20 +664,24 @@ fn raise_direct_callback_event(
              (tcp_port={}); raising connect-out event",
             req.tcp_port
         );
-        let _ = events.send(ReaskEvent::DirectCallbackReq {
-            requester_ip: *v4.ip(),
-            tcp_port: req.tcp_port,
-            user_hash: req.user_hash,
-            connect_options: req.connect_options,
-        });
+        events
+            .send(ReaskEvent::DirectCallbackReq {
+                requester_ip: *v4.ip(),
+                tcp_port: req.tcp_port,
+                user_hash: req.user_hash,
+                connect_options: req.connect_options,
+            })
+            .is_ok()
     } else {
         trace!("ed2k client udp: dropping OP_DIRECTCALLBACKREQ from non-IPv4 requester {from}");
+        false
     }
 }
 
-fn acknowledge_port_test(port_test_registry: &PortTestRegistry, from: SocketAddr) {
+fn acknowledge_port_test(port_test_registry: &PortTestRegistry, from: SocketAddr) -> bool {
     let acknowledged = port_test_registry.acknowledge_udp_probe();
     debug!("ed2k udp port test probe from {from}: tcp_result_sent={acknowledged}");
+    acknowledged
 }
 
 /// Apply a download session's detach command to the reask source state.

@@ -242,13 +242,20 @@ fn inbound_direct_callback_req_raises_connect_out_event_when_reask_is_disabled()
 
     for datagram in [plain, obfuscated] {
         let (events, mut rx) = reask_event_channel();
-        handle_reask_disabled_datagram(
+        let disposition = handle_reask_disabled_datagram(
             &events,
             &PortTestRegistry::new(),
             our_user_hash,
             4,
             &datagram,
             requester,
+        );
+        assert_eq!(
+            disposition,
+            (
+                ClientUdpDumpOutcome::Accepted,
+                Some("direct_callback_raised".to_string())
+            )
         );
         match rx.try_recv().expect("a direct callback event") {
             ReaskEvent::DirectCallbackReq {
@@ -273,13 +280,20 @@ fn inbound_source_reask_remains_ignored_when_reask_is_disabled() {
     use crate::port_test::PortTestRegistry;
 
     let (events, mut rx) = reask_event_channel();
-    handle_reask_disabled_datagram(
+    let disposition = handle_reask_disabled_datagram(
         &events,
         &PortTestRegistry::new(),
         [0x10; 16],
         4,
         &[0xC5, OP_QUEUEFULL],
         "198.51.100.7:4662".parse().unwrap(),
+    );
+    assert_eq!(
+        disposition,
+        (
+            ClientUdpDumpOutcome::Ignored,
+            Some("reask_disabled".to_string())
+        )
     );
     assert!(rx.try_recv().is_err());
 }
