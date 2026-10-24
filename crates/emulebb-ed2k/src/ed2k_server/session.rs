@@ -23,7 +23,7 @@ use crate::ed2k_tcp::MAX_ED2K_PACKET_LEN;
 
 use super::Ed2kServerFailure;
 #[cfg(feature = "packet-diagnostics")]
-use super::diagnostics::Ed2kServerPacketEvidence;
+use super::diagnostics::Ed2kServerPacketCapture;
 use super::offer_policy::{
     OFFER_FILES_LEGACY_MIN_INTERVAL, OFFER_FILES_NEGOTIATION_WAIT,
     OfferFilesCapabilityAdvertisement, OfferFilesPolicy,
@@ -686,14 +686,17 @@ impl ServerSession {
         #[cfg(feature = "packet-diagnostics")]
         dump_ed2k_server_packet(
             self,
-            "tx",
-            transport_mode,
-            protocol_marker,
-            opcode,
-            Ed2kServerPacketEvidence {
+            Ed2kServerPacketCapture {
+                direction: "tx",
+                transport_mode,
+                obfuscated: Some(transport_mode == "obfuscated"),
+                protocol_marker: Some(protocol_marker),
+                opcode: Some(opcode),
                 raw: &packet,
-                clear_frame: &clear_frame,
-                payload,
+                clear_frame: Some(&clear_frame),
+                payload: Some(payload),
+                outcome: "accepted",
+                note: None,
             },
         );
         #[cfg(not(feature = "packet-diagnostics"))]
@@ -828,14 +831,17 @@ impl ServerSession {
             #[cfg(feature = "packet-diagnostics")]
             dump_ed2k_server_packet(
                 self,
-                "tx",
-                "obfuscated",
-                first_packet[0],
-                first_packet[5],
-                Ed2kServerPacketEvidence {
+                Ed2kServerPacketCapture {
+                    direction: "tx",
+                    transport_mode: "obfuscated",
+                    obfuscated: Some(true),
+                    protocol_marker: Some(first_packet[0]),
+                    opcode: Some(first_packet[5]),
                     raw: &response[first_packet_offset..],
-                    clear_frame: first_packet,
-                    payload: &first_packet[TCP_PACKET_HEADER_LEN..],
+                    clear_frame: Some(first_packet),
+                    payload: Some(&first_packet[TCP_PACKET_HEADER_LEN..]),
+                    outcome: "accepted",
+                    note: None,
                 },
             );
             #[cfg(not(feature = "packet-diagnostics"))]
@@ -899,15 +905,36 @@ impl ServerSession {
         if let Some(cipher) = self.receive_cipher.as_mut() {
             cipher.apply(&mut header);
         }
+        #[cfg(feature = "packet-diagnostics")]
+        let transport_mode = if self.receive_cipher.is_some() {
+            "obfuscated"
+        } else {
+            "plaintext"
+        };
 
         if !matches!(header[0], OP_EDONKEYPROT | OP_PACKEDPROT) {
-            dump_ed2k_server_meta(
-                self,
-                format!(
-                    "server session drop reason=read_error detail=unsupported_protocol_0x{:02X}",
-                    header[0]
-                ),
+            let note = format!(
+                "server session drop reason=read_error detail=unsupported_protocol_0x{:02X}",
+                header[0]
             );
+            #[cfg(feature = "packet-diagnostics")]
+            dump_ed2k_server_packet(
+                self,
+                Ed2kServerPacketCapture {
+                    direction: "rx",
+                    transport_mode,
+                    obfuscated: Some(transport_mode == "obfuscated"),
+                    protocol_marker: Some(header[0]),
+                    opcode: Some(header[5]),
+                    raw: &raw_header,
+                    clear_frame: Some(&header),
+                    payload: None,
+                    outcome: "dropped",
+                    note: Some(note),
+                },
+            );
+            #[cfg(not(feature = "packet-diagnostics"))]
+            dump_ed2k_server_meta(self, note);
             anyhow::bail!(
                 "unsupported ED2K server protocol 0x{:02X} from {}",
                 header[0],
@@ -917,29 +944,75 @@ impl ServerSession {
 
         let packet_length = u32::from_le_bytes([header[1], header[2], header[3], header[4]]);
         if packet_length == 0 {
-            dump_ed2k_server_meta(
+            let note = "server session drop reason=read_error detail=invalid_packet_length_0";
+            #[cfg(feature = "packet-diagnostics")]
+            dump_ed2k_server_packet(
                 self,
-                "server session drop reason=read_error detail=invalid_packet_length_0",
+                Ed2kServerPacketCapture {
+                    direction: "rx",
+                    transport_mode,
+                    obfuscated: Some(transport_mode == "obfuscated"),
+                    protocol_marker: Some(header[0]),
+                    opcode: Some(header[5]),
+                    raw: &raw_header,
+                    clear_frame: Some(&header),
+                    payload: None,
+                    outcome: "dropped",
+                    note: Some(note.to_string()),
+                },
             );
+            #[cfg(not(feature = "packet-diagnostics"))]
+            dump_ed2k_server_meta(self, note);
             anyhow::bail!("invalid ED2K server packet length 0");
         }
         let payload_len = match usize::try_from(packet_length - 1) {
             Ok(payload_len) => payload_len,
             Err(error) => {
-                dump_ed2k_server_meta(
+                let note =
+                    format!("server session drop reason=read_error detail=length_overflow {error}");
+                #[cfg(feature = "packet-diagnostics")]
+                dump_ed2k_server_packet(
                     self,
-                    format!("server session drop reason=read_error detail=length_overflow {error}"),
+                    Ed2kServerPacketCapture {
+                        direction: "rx",
+                        transport_mode,
+                        obfuscated: Some(transport_mode == "obfuscated"),
+                        protocol_marker: Some(header[0]),
+                        opcode: Some(header[5]),
+                        raw: &raw_header,
+                        clear_frame: Some(&header),
+                        payload: None,
+                        outcome: "dropped",
+                        note: Some(note),
+                    },
                 );
+                #[cfg(not(feature = "packet-diagnostics"))]
+                dump_ed2k_server_meta(self, note);
                 anyhow::bail!("server packet length overflow");
             }
         };
         if payload_len > MAX_ED2K_PACKET_LEN {
-            dump_ed2k_server_meta(
-                self,
-                format!(
-                    "server session drop reason=read_error detail=oversized_packet payload_len={payload_len} max={MAX_ED2K_PACKET_LEN}"
-                ),
+            let note = format!(
+                "server session drop reason=read_error detail=oversized_packet payload_len={payload_len} max={MAX_ED2K_PACKET_LEN}"
             );
+            #[cfg(feature = "packet-diagnostics")]
+            dump_ed2k_server_packet(
+                self,
+                Ed2kServerPacketCapture {
+                    direction: "rx",
+                    transport_mode,
+                    obfuscated: Some(transport_mode == "obfuscated"),
+                    protocol_marker: Some(header[0]),
+                    opcode: Some(header[5]),
+                    raw: &raw_header,
+                    clear_frame: Some(&header),
+                    payload: None,
+                    outcome: "dropped",
+                    note: Some(note),
+                },
+            );
+            #[cfg(not(feature = "packet-diagnostics"))]
+            dump_ed2k_server_meta(self, note);
             anyhow::bail!(
                 "oversized ED2K server packet length {} exceeds {} from {}",
                 payload_len,
@@ -962,6 +1035,16 @@ impl ServerSession {
         }
         #[cfg(feature = "packet-diagnostics")]
         let clear_payload = payload.clone();
+        #[cfg(feature = "packet-diagnostics")]
+        let (raw_frame, clear_frame) = {
+            let mut raw_frame = Vec::with_capacity(TCP_PACKET_HEADER_LEN + raw_payload.len());
+            raw_frame.extend_from_slice(&raw_header);
+            raw_frame.extend_from_slice(&raw_payload);
+            let mut clear_frame = Vec::with_capacity(TCP_PACKET_HEADER_LEN + clear_payload.len());
+            clear_frame.extend_from_slice(&header);
+            clear_frame.extend_from_slice(&clear_payload);
+            (raw_frame, clear_frame)
+        };
         let payload = match decode_server_payload(header[0], payload) {
             Ok(payload) => payload,
             Err(error) if header[0] == OP_PACKEDPROT => {
@@ -969,20 +1052,50 @@ impl ServerSession {
                     "dropping malformed bounded ED2K packed frame from {} opcode=0x{:02X} compressed_len={}: {error}",
                     self.endpoint, header[5], payload_len
                 );
-                dump_ed2k_server_meta(
-                    self,
-                    format!(
-                        "server packet drop reason=packed_decode opcode=0x{:02X} compressed_len={} detail={error}",
-                        header[5], payload_len
-                    ),
+                let note = format!(
+                    "server packet drop reason=packed_decode opcode=0x{:02X} compressed_len={} detail={error}",
+                    header[5], payload_len
                 );
+                #[cfg(feature = "packet-diagnostics")]
+                dump_ed2k_server_packet(
+                    self,
+                    Ed2kServerPacketCapture {
+                        direction: "rx",
+                        transport_mode,
+                        obfuscated: Some(transport_mode == "obfuscated"),
+                        protocol_marker: Some(header[0]),
+                        opcode: Some(header[5]),
+                        raw: &raw_frame,
+                        clear_frame: Some(&clear_frame),
+                        payload: None,
+                        outcome: "dropped",
+                        note: Some(note),
+                    },
+                );
+                #[cfg(not(feature = "packet-diagnostics"))]
+                dump_ed2k_server_meta(self, note);
                 return Ok(ServerPacketRead::DroppedPackedFrame);
             }
             Err(error) => {
-                dump_ed2k_server_meta(
+                let note = format!("server session drop reason=read_error detail=decode {error}");
+                #[cfg(feature = "packet-diagnostics")]
+                dump_ed2k_server_packet(
                     self,
-                    format!("server session drop reason=read_error detail=decode {error}"),
+                    Ed2kServerPacketCapture {
+                        direction: "rx",
+                        transport_mode,
+                        obfuscated: Some(transport_mode == "obfuscated"),
+                        protocol_marker: Some(header[0]),
+                        opcode: Some(header[5]),
+                        raw: &raw_frame,
+                        clear_frame: Some(&clear_frame),
+                        payload: None,
+                        outcome: "dropped",
+                        note: Some(note),
+                    },
                 );
+                #[cfg(not(feature = "packet-diagnostics"))]
+                dump_ed2k_server_meta(self, note);
                 return Err(error).with_context(|| {
                     format!("failed to decode ED2K server packet from {}", self.endpoint)
                 });
@@ -1000,27 +1113,19 @@ impl ServerSession {
         );
         #[cfg(feature = "packet-diagnostics")]
         {
-            let mut raw = Vec::with_capacity(TCP_PACKET_HEADER_LEN + raw_payload.len());
-            raw.extend_from_slice(&raw_header);
-            raw.extend_from_slice(&raw_payload);
-            let mut clear_frame = Vec::with_capacity(TCP_PACKET_HEADER_LEN + clear_payload.len());
-            clear_frame.extend_from_slice(&header);
-            clear_frame.extend_from_slice(&clear_payload);
-            let transport_mode = if self.receive_cipher.is_some() {
-                "obfuscated"
-            } else {
-                "plaintext"
-            };
             dump_ed2k_server_packet(
                 self,
-                "rx",
-                transport_mode,
-                header[0],
-                header[5],
-                Ed2kServerPacketEvidence {
-                    raw: &raw,
-                    clear_frame: &clear_frame,
-                    payload: &payload,
+                Ed2kServerPacketCapture {
+                    direction: "rx",
+                    transport_mode,
+                    obfuscated: Some(transport_mode == "obfuscated"),
+                    protocol_marker: Some(header[0]),
+                    opcode: Some(header[5]),
+                    raw: &raw_frame,
+                    clear_frame: Some(&clear_frame),
+                    payload: Some(&payload),
+                    outcome: "accepted",
+                    note: None,
                 },
             );
         }
