@@ -657,6 +657,71 @@ mod tests {
     }
 
     #[test]
+    fn size_rotation_keeps_an_exact_boundary_record_in_the_current_segment() {
+        let root = TempDir::new().unwrap();
+        let mut writer = test_writer(&root, 4096, Duration::from_secs(60), 4);
+        let keys = json!({"record": 1});
+        let body = json!({"padding": "stable"});
+        let pending = PendingEvent {
+            family: "sched",
+            event: "boundary",
+            severity: "info",
+            keys: &keys,
+            body: &body,
+            seq: 1,
+            stream_seq: 1,
+        };
+        writer.config.max_segment_bytes = writer.encode_record(&pending).unwrap().len() as u64;
+
+        assert!(writer.emit("sched", "boundary", "info", &keys, &body));
+        assert_eq!(writer.active_segment_id, 0);
+        assert_eq!(writer.active_segment_bytes, writer.config.max_segment_bytes);
+
+        assert!(writer.emit("sched", "boundary", "info", &keys, &body));
+        assert_eq!(writer.active_segment_id, 1);
+        assert_eq!(writer.rotations, 1);
+        let records = read_records(root.path());
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["segmentId"], 0);
+        assert_eq!(records[1]["segmentId"], 1);
+        assert_eq!(records[0]["seq"], 1);
+        assert_eq!(records[1]["seq"], 2);
+    }
+
+    #[test]
+    fn retention_never_deletes_segments_from_another_run() {
+        let root = TempDir::new().unwrap();
+        let run_a_files = {
+            let mut writer = test_writer_for_run(&root, "run-a", 420, 2);
+            for record_id in 0..20_u64 {
+                assert!(writer.emit(
+                    "sched",
+                    "rotate",
+                    "info",
+                    &json!({"record": record_id}),
+                    &json!({"padding": "x".repeat(80)}),
+                ));
+            }
+            segment_files_for_run(root.path(), "run-a")
+        };
+        assert_eq!(run_a_files.len(), 2);
+
+        let mut writer = test_writer_for_run(&root, "run-b", 420, 2);
+        for record_id in 0..20_u64 {
+            assert!(writer.emit(
+                "sched",
+                "rotate",
+                "info",
+                &json!({"record": record_id}),
+                &json!({"padding": "x".repeat(80)}),
+            ));
+        }
+
+        assert_eq!(segment_files_for_run(root.path(), "run-a"), run_a_files);
+        assert_eq!(segment_files_for_run(root.path(), "run-b").len(), 2);
+    }
+
+    #[test]
     fn oversized_records_are_dropped_and_counted() {
         let root = TempDir::new().unwrap();
         let mut writer = test_writer(&root, 128, Duration::from_secs(60), 2);
@@ -680,6 +745,37 @@ mod tests {
         max_segment_age: Duration,
         retained_segments: usize,
     ) -> SegmentedEventWriter {
+        test_writer_for_run_with_age(
+            root,
+            "testrun",
+            max_segment_bytes,
+            max_segment_age,
+            retained_segments,
+        )
+    }
+
+    fn test_writer_for_run(
+        root: &TempDir,
+        run_id: &str,
+        max_segment_bytes: u64,
+        retained_segments: usize,
+    ) -> SegmentedEventWriter {
+        test_writer_for_run_with_age(
+            root,
+            run_id,
+            max_segment_bytes,
+            Duration::from_secs(60),
+            retained_segments,
+        )
+    }
+
+    fn test_writer_for_run_with_age(
+        root: &TempDir,
+        run_id: &str,
+        max_segment_bytes: u64,
+        max_segment_age: Duration,
+        retained_segments: usize,
+    ) -> SegmentedEventWriter {
         SegmentedEventWriter::new(
             WriterConfig {
                 directory: root.path().to_path_buf(),
@@ -687,10 +783,21 @@ mod tests {
                 max_segment_age,
                 retained_segments,
             },
-            "testrun".to_string(),
+            run_id.to_string(),
             42,
         )
         .unwrap()
+    }
+
+    fn segment_files_for_run(root: &Path, run_id: &str) -> Vec<PathBuf> {
+        segment_files(root)
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(&format!("-{run_id}-")))
+            })
+            .collect()
     }
 
     fn segment_files(root: &Path) -> Vec<PathBuf> {
