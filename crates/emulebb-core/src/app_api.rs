@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub struct DiagnosticDumpFile {
+    pub path: PathBuf,
+    pub byte_count: u64,
+}
+
 impl EmulebbCore {
     pub fn app_info(&self) -> AppInfo {
         AppInfo {
@@ -32,6 +38,22 @@ impl EmulebbCore {
     }
 
     pub async fn capture_diagnostic_dump(&self, full_memory: bool) -> Result<DiagnosticDumpResult> {
+        let payload = json!({
+            "app": self.app_info(),
+            "status": self.status().await,
+            "fullMemory": full_memory,
+            "kind": "json",
+            "capturedAt": Utc::now(),
+        });
+        let dump = self.write_diagnostic_dump(&payload)?;
+        Ok(DiagnosticDumpResult {
+            ok: true,
+            path: dump.path.display().to_string(),
+            full_memory,
+        })
+    }
+
+    pub fn write_diagnostic_dump(&self, payload: &serde_json::Value) -> Result<DiagnosticDumpFile> {
         let dump_dir = self
             .transfer_root
             .parent()
@@ -49,19 +71,12 @@ impl EmulebbCore {
             "emulebb-rust-diagnostic-dump-{stamp}-{}.json",
             Uuid::new_v4()
         ));
-        let payload = serde_json::to_vec_pretty(&json!({
-            "app": self.app_info(),
-            "status": self.status().await,
-            "fullMemory": full_memory,
-            "kind": "json",
-            "capturedAt": Utc::now(),
-        }))?;
+        let payload = serde_json::to_vec_pretty(payload)?;
         fs::write(&path, &payload)
             .with_context(|| format!("failed to write diagnostic dump {}", path.display()))?;
-        Ok(DiagnosticDumpResult {
-            ok: true,
-            path: path.display().to_string(),
-            full_memory,
+        Ok(DiagnosticDumpFile {
+            path,
+            byte_count: payload.len() as u64,
         })
     }
 
