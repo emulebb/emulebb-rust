@@ -808,7 +808,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "sha2",
  "tokio",
  "tower",
  "tower-http 0.7.1",

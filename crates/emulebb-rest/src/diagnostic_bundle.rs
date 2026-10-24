@@ -9,8 +9,7 @@ use std::{
 
 use anyhow::Result;
 use chrono::Utc;
-use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::{Value, json};
 
 use crate::{
     RestState,
@@ -18,7 +17,7 @@ use crate::{
     responses::{app_info_response, runtime_diagnostics_response, status_response},
 };
 
-pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v1";
+pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v2";
 
 const MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_LOG_RECORDS: usize = 200;
@@ -115,25 +114,21 @@ pub(crate) async fn capture(
     state: &RestState,
     full_memory_requested: bool,
 ) -> Result<DiagnosticBundleCapture> {
-    let status = redact_value(status_response(state).await);
+    let status = status_response(state).await;
     let runtime_diagnostics = runtime_diagnostics_response(state).await;
     let unified_run = unified_run_selection(&runtime_diagnostics);
-    let runtime_diagnostics = redact_value(runtime_diagnostics);
     let settings = match state.core.app_settings().await {
-        Ok(settings) => redact_value(serde_json::to_value(settings)?),
+        Ok(settings) => serde_json::to_value(settings)?,
         Err(error) => json!({
             "available": false,
-            "error": fingerprint_text(&error.to_string()),
+            "error": error.to_string(),
         }),
     };
     let artifacts = collect_artifacts(
         std::env::var_os("EMULEBB_RUST_LOG_DIR").map(PathBuf::from),
         unified_run.as_ref(),
     );
-    let logs = recent_log_values(MAX_LOG_RECORDS)
-        .into_iter()
-        .map(redact_log_record)
-        .collect::<Vec<_>>();
+    let logs = recent_log_values(MAX_LOG_RECORDS);
 
     let payload = json!({
         "schema": DIAGNOSTIC_BUNDLE_SCHEMA,
@@ -144,8 +139,9 @@ pub(crate) async fn capture(
         "settings": settings,
         "settingsProvenance": {
             "source": "profileState",
-            "apiKeyIncluded": false,
-            "sensitiveValues": "stableSha256FingerprintAndLength",
+            "apiKeyIncluded": true,
+            "sensitiveValues": "exact",
+            "apiKey": state.api_key.as_str(),
         },
         "recentLogs": logs,
         "diagnosticArtifacts": {
@@ -210,7 +206,7 @@ fn collect_artifacts(
 
     let log_directory = json!({
         "configured": true,
-        "fingerprint": fingerprint_text(&log_dir.to_string_lossy()),
+        "path": log_dir.to_string_lossy(),
     });
     let entries = match fs::read_dir(&log_dir) {
         Ok(entries) => entries,
@@ -416,13 +412,14 @@ fn summarize_artifacts(
                 if let Some(sequence) = record.get(spec.sequence_field).and_then(Value::as_u64) {
                     sequences.push(sequence);
                 }
-                records.push(redact_value(record));
+                records.push(record);
             }
             Err(_) => {
                 parse_error_count += 1;
                 records.push(json!({
                     "parseError": true,
-                    "line": fingerprint_bytes(line),
+                    "lineByteCount": line.len(),
+                    "lineHex": encode_hex(line),
                 }));
             }
         }
@@ -546,132 +543,12 @@ fn sequence_summary(sequences: &[u64], field: &str, assessment: &str) -> Value {
     })
 }
 
-fn redact_log_record(record: Value) -> Value {
-    let timestamp = record.get("timestamp").cloned().unwrap_or(Value::Null);
-    let level = record.get("level").cloned().unwrap_or(Value::Null);
-    let message = record
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let debug = record.get("debug").and_then(Value::as_str);
-    json!({
-        "timestamp": timestamp,
-        "level": level,
-        "message": fingerprint_text(message),
-        "debug": debug.map(fingerprint_text),
-    })
-}
-
-fn redact_value(value: Value) -> Value {
-    match value {
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| {
-                    let value = if is_sensitive_key(&key) {
-                        fingerprint_value(&value)
-                    } else {
-                        redact_value(value)
-                    };
-                    (key, value)
-                })
-                .collect::<Map<_, _>>(),
-        ),
-        Value::Array(values) => Value::Array(values.into_iter().map(redact_value).collect()),
-        other => other,
-    }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    if matches!(normalized.as_str(), "opcodename" | "statelabel") {
-        return false;
-    }
-    matches!(
-        normalized.as_str(),
-        "address"
-            | "album"
-            | "artist"
-            | "bindip"
-            | "clienthash"
-            | "clientid"
-            | "comment"
-            | "decoded"
-            | "decodedhex"
-            | "directory"
-            | "filename"
-            | "filehash"
-            | "host"
-            | "incomingdir"
-            | "ip"
-            | "link"
-            | "localaddress"
-            | "name"
-            | "nickname"
-            | "nodeid"
-            | "path"
-            | "payload"
-            | "peer"
-            | "publicip"
-            | "query"
-            | "raw"
-            | "rawhex"
-            | "remote"
-            | "remoteaddress"
-            | "searchterm"
-            | "title"
-            | "tracekey"
-            | "url"
-            | "userhash"
-            | "wire"
-    ) || normalized.contains("apikey")
-        || normalized.contains("filename")
-        || normalized.contains("password")
-        || normalized.contains("secret")
-        || normalized.ends_with("addr")
-        || normalized.ends_with("address")
-        || normalized.ends_with("cidrs")
-        || normalized.ends_with("directory")
-        || normalized.ends_with("endpoint")
-        || normalized.ends_with("hash")
-        || normalized.ends_with("host")
-        || normalized.ends_with("ip")
-        || normalized.ends_with("name")
-        || normalized.ends_with("path")
-        || normalized.ends_with("token")
-}
-
-fn fingerprint_value(value: &Value) -> Value {
-    match value {
-        Value::String(value) => fingerprint_text(value),
-        Value::Number(value) => fingerprint_text(&value.to_string()),
-        Value::Bool(value) => fingerprint_text(if *value { "true" } else { "false" }),
-        Value::Null => fingerprint_text("null"),
-        Value::Array(_) | Value::Object(_) => {
-            let bytes = serde_json::to_vec(value).unwrap_or_default();
-            fingerprint_bytes(&bytes)
-        }
-    }
-}
-
-fn fingerprint_text(value: &str) -> Value {
-    fingerprint_bytes(value.as_bytes())
-}
-
-fn fingerprint_bytes(value: &[u8]) -> Value {
-    let digest = Sha256::digest(value);
-    let mut encoded = String::with_capacity(24);
-    for byte in digest.iter().take(12) {
+fn encode_hex(value: &[u8]) -> String {
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value {
         let _ = write!(encoded, "{byte:02x}");
     }
-    json!({
-        "sha256": encoded,
-        "length": value.len(),
-    })
+    encoded
 }
 
 #[cfg(test)]
@@ -679,34 +556,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recursively_redacts_sensitive_fields_with_stable_fingerprints() {
-        let redacted = redact_value(json!({
-            "peer": "198.51.100.2:4662",
-            "remoteEndpoint": "203.0.113.8:4672",
-            "displayName": "private-file-name.bin",
-            "opcodeName": "OP_HELLO",
-            "nested": {"fileHash": "0123456789abcdef", "count": 3},
-        }));
-
-        assert_eq!(redacted["opcodeName"], "OP_HELLO");
-        assert_eq!(redacted["nested"]["count"], 3);
-        assert_eq!(redacted["peer"]["length"], 17);
-        assert_eq!(redacted["remoteEndpoint"]["length"], 16);
-        assert_eq!(redacted["displayName"]["length"], 21);
-        assert_eq!(redacted["nested"]["fileHash"]["length"], 16);
-        assert_eq!(
-            redacted["peer"]["sha256"],
-            redact_value(json!({"peer": "198.51.100.2:4662"}))["peer"]["sha256"]
-        );
-        assert!(!redacted.to_string().contains("198.51.100.2"));
-        assert!(!redacted.to_string().contains("203.0.113.8"));
-        assert!(!redacted.to_string().contains("private-file-name"));
-        assert!(!redacted.to_string().contains("0123456789abcdef"));
+    fn malformed_lines_are_preserved_as_exact_hex() {
+        assert_eq!(encode_hex(b"{not-json:\xff}"), "7b6e6f742d6a736f6e3aff7d");
     }
 
     #[test]
     fn artifact_summary_is_bounded_and_reports_schema_and_sequence_issues() {
         let root = test_dir("artifact-summary");
+        let root_text = root.to_string_lossy().to_string();
         let file_name = "emulebb-rust-diag-42-test-run-000003.jsonl";
         let path = root.join(file_name);
         let mut content = String::new();
@@ -756,8 +613,42 @@ mod tests {
         assert_eq!(unified["sequence"]["duplicateCount"], 1);
         assert_eq!(unified["sequence"]["decreaseCount"], 1);
         assert!(unified["sequence"]["gapCount"].as_u64().unwrap() > 0);
-        assert!(!unified.to_string().contains("198.51.100.2"));
+        assert!(unified.to_string().contains("198.51.100.2"));
+        assert_eq!(artifacts.log_directory["path"], root_text);
         assert_eq!(artifacts.missing_families.len(), 4);
+    }
+
+    #[test]
+    fn artifact_summary_preserves_malformed_lines_losslessly() {
+        let root = test_dir("malformed-artifact-line");
+        let file_name = "emulebb-rust-diag-42-test-run-000000.jsonl";
+        let mut content = json!({
+            "schema": "diag_event_v2",
+            "runId": "test-run",
+            "processId": 42,
+            "segmentId": 0,
+            "seq": 1,
+        })
+        .to_string()
+        .into_bytes();
+        content.push(b'\n');
+        content.extend_from_slice(b"{not-json:\xff}\n");
+        fs::write(root.join(file_name), content).unwrap();
+
+        let selection = UnifiedRunSelection {
+            run_id: "test-run".to_string(),
+            process_id: 42,
+            active_file_name: file_name.to_string(),
+        };
+        let artifacts = collect_artifacts(Some(root), Some(&selection));
+        let unified = artifacts
+            .families
+            .iter()
+            .find(|family| family["family"] == "unifiedEvents")
+            .unwrap();
+        assert_eq!(unified["parseErrorCount"], 1);
+        assert_eq!(unified["records"][1]["lineByteCount"], 12);
+        assert_eq!(unified["records"][1]["lineHex"], "7b6e6f742d6a736f6e3aff7d");
     }
 
     #[test]
