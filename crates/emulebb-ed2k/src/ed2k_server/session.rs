@@ -23,7 +23,7 @@ use crate::ed2k_tcp::MAX_ED2K_PACKET_LEN;
 
 use super::Ed2kServerFailure;
 #[cfg(feature = "packet-diagnostics")]
-use super::diagnostics::{Ed2kServerPacketCapture, Ed2kServerTcpSendAttempt};
+use super::diagnostics::{Ed2kServerPacketCapture, Ed2kServerSendAttempt};
 use super::offer_policy::{
     OFFER_FILES_LEGACY_MIN_INTERVAL, OFFER_FILES_NEGOTIATION_WAIT,
     OfferFilesCapabilityAdvertisement, OfferFilesPolicy,
@@ -684,7 +684,7 @@ impl ServerSession {
             cipher.apply(&mut packet);
         }
         #[cfg(feature = "packet-diagnostics")]
-        let send_attempt = Ed2kServerTcpSendAttempt::new(
+        let send_attempt = Ed2kServerSendAttempt::tcp(
             self,
             Ed2kServerPacketCapture {
                 direction: "tx",

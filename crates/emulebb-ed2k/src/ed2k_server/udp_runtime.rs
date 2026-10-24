@@ -1,13 +1,13 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rand::RngExt;
 use tokio::net::UdpSocket;
 
 use emulebb_kad_proto::Ed2kHash;
 
 #[cfg(feature = "packet-diagnostics")]
-use super::diagnostics::Ed2kServerPacketCapture;
+use super::diagnostics::{Ed2kServerPacketCapture, Ed2kServerSendAttempt};
 use super::{
     Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
     ResolvedServerEntry, ServerUdpPacket, decode_server_udp_datagram,
@@ -54,11 +54,11 @@ pub(super) async fn send_server_udp_packet(
         "obfuscated"
     };
     #[cfg(feature = "packet-diagnostics")]
-    {
+    let send_attempt = {
         let mut clear_frame = Vec::with_capacity(payload.len() + 2);
         clear_frame.extend_from_slice(&[OP_EDONKEYPROT, opcode]);
         clear_frame.extend_from_slice(payload);
-        dump_ed2k_server_udp_packet(
+        Ed2kServerSendAttempt::udp(
             Some(server),
             endpoint,
             Ed2kServerPacketCapture {
@@ -70,20 +70,40 @@ pub(super) async fn send_server_udp_packet(
                 raw: &packet,
                 clear_frame: Some(&clear_frame),
                 payload: Some(payload),
-                outcome: "accepted",
+                outcome: "attempted",
                 note: None,
             },
-        );
-    }
+        )
+    };
     #[cfg(not(feature = "packet-diagnostics"))]
     dump_ed2k_server_udp_packet(server, "tx", endpoint, transport_mode, opcode, payload);
-    socket.send_to(&packet, endpoint).await.with_context(|| {
+    let send_result = socket.send_to(&packet, endpoint).await.with_context(|| {
         format!(
             "failed to send ED2K server UDP opcode=0x{opcode:02X} to {}",
             endpoint
         )
-    })?;
-    Ok(())
+    });
+    match send_result {
+        Ok(sent_len) if sent_len == packet.len() => {
+            #[cfg(feature = "packet-diagnostics")]
+            send_attempt.succeeded();
+            Ok(())
+        }
+        Ok(sent_len) => {
+            let error = anyhow!(
+                "short ED2K server UDP send to {endpoint}: wrote {sent_len} of {} bytes",
+                packet.len()
+            );
+            #[cfg(feature = "packet-diagnostics")]
+            send_attempt.failed(error.to_string());
+            Err(error)
+        }
+        Err(error) => {
+            #[cfg(feature = "packet-diagnostics")]
+            send_attempt.failed(format!("{error:#}"));
+            Err(error)
+        }
+    }
 }
 
 /// Request the server's peer list using the client-safe `OP_SERVER_LIST_REQ2`
@@ -130,7 +150,7 @@ pub(super) async fn send_server_udp_crypt_status_request(
     let packet = encode_server_udp_crypt_ping(challenge, &padding);
     let endpoint = server_udp_crypt_ping_endpoint(server);
     #[cfg(feature = "packet-diagnostics")]
-    dump_ed2k_server_udp_packet(
+    let send_attempt = Ed2kServerSendAttempt::udp(
         Some(server),
         endpoint,
         Ed2kServerPacketCapture {
@@ -142,17 +162,37 @@ pub(super) async fn send_server_udp_crypt_status_request(
             raw: &packet,
             clear_frame: None,
             payload: None,
-            outcome: "probe",
+            outcome: "attempted",
             note: Some(format!(
                 "server UDP crypt-ping challenge={challenge} padding_len={padding_len}"
             )),
         },
     );
-    socket
+    let send_result = socket
         .send_to(&packet, endpoint)
         .await
-        .with_context(|| format!("failed to send ED2K server UDP crypt-ping to {endpoint}"))?;
-    Ok(challenge)
+        .with_context(|| format!("failed to send ED2K server UDP crypt-ping to {endpoint}"));
+    match send_result {
+        Ok(sent_len) if sent_len == packet.len() => {
+            #[cfg(feature = "packet-diagnostics")]
+            send_attempt.succeeded();
+            Ok(challenge)
+        }
+        Ok(sent_len) => {
+            let error = anyhow!(
+                "short ED2K server UDP crypt-ping send to {endpoint}: wrote {sent_len} of {} bytes",
+                packet.len()
+            );
+            #[cfg(feature = "packet-diagnostics")]
+            send_attempt.failed(error.to_string());
+            Err(error)
+        }
+        Err(error) => {
+            #[cfg(feature = "packet-diagnostics")]
+            send_attempt.failed(format!("{error:#}"));
+            Err(error)
+        }
+    }
 }
 
 pub(super) async fn send_udp_keyword_search(
@@ -387,9 +427,14 @@ fn udp_response_candidate_servers(
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::time::Duration;
 
-    use super::super::{ConfiguredServerEntry, ResolvedServerEntry};
-    use super::udp_response_candidate_servers;
+    use tokio::{net::UdpSocket, time::timeout};
+
+    use super::super::{
+        ConfiguredServerEntry, OP_EDONKEYPROT, OP_SERVER_DESC_REQ, ResolvedServerEntry,
+    };
+    use super::{send_server_udp_packet, udp_response_candidate_servers};
 
     fn resolved(ip: Ipv4Addr, port: u16) -> ResolvedServerEntry {
         ResolvedServerEntry {
@@ -432,6 +477,29 @@ mod tests {
             )
             .next()
             .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn server_udp_send_reaches_the_resolved_udp_endpoint() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let receiver_port = receiver.local_addr().unwrap().port();
+        let server = resolved(Ipv4Addr::LOCALHOST, receiver_port.checked_sub(4).unwrap());
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let payload = [0xAA, 0xBB];
+
+        send_server_udp_packet(&sender, &server, OP_SERVER_DESC_REQ, &payload)
+            .await
+            .unwrap();
+
+        let mut datagram = [0u8; 16];
+        let (len, _) = timeout(Duration::from_secs(1), receiver.recv_from(&mut datagram))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            &datagram[..len],
+            &[OP_EDONKEYPROT, OP_SERVER_DESC_REQ, 0xAA, 0xBB]
         );
     }
 }

@@ -91,6 +91,7 @@ pub(super) struct Ed2kServerPacketCapture<'a> {
 
 #[cfg(any(feature = "packet-diagnostics", test))]
 struct Ed2kServerSendContext {
+    family: &'static str,
     attempt_id: u64,
     trace_id: u64,
     trace_key: String,
@@ -133,16 +134,17 @@ impl Ed2kServerSendOutcome {
 }
 
 #[cfg(feature = "packet-diagnostics")]
-pub(super) struct Ed2kServerTcpSendAttempt {
+pub(super) struct Ed2kServerSendAttempt {
     context: Ed2kServerSendContext,
     completed: bool,
 }
 
 #[cfg(feature = "packet-diagnostics")]
-impl Ed2kServerTcpSendAttempt {
-    pub(super) fn new(session: &ServerSession, capture: Ed2kServerPacketCapture<'_>) -> Self {
+impl Ed2kServerSendAttempt {
+    pub(super) fn tcp(session: &ServerSession, capture: Ed2kServerPacketCapture<'_>) -> Self {
         let attempt_id = next_ed2k_server_send_attempt_id();
         let context = Ed2kServerSendContext {
+            family: "ed2k_tcp",
             attempt_id,
             trace_id: session.trace_id,
             trace_key: ed2k_server_trace_key(session),
@@ -158,6 +160,38 @@ impl Ed2kServerTcpSendAttempt {
             attempted_len: capture.raw.len(),
         };
         dump_ed2k_server_packet_with_attempt(session, capture, Some(attempt_id));
+        Self {
+            context,
+            completed: false,
+        }
+    }
+
+    pub(super) fn udp(
+        server: Option<&ResolvedServerEntry>,
+        remote_addr: SocketAddr,
+        capture: Ed2kServerPacketCapture<'_>,
+    ) -> Self {
+        let attempt_id = next_ed2k_server_send_attempt_id();
+        let base_endpoint = server
+            .map(ResolvedServerEntry::base_endpoint)
+            .unwrap_or(remote_addr);
+        let context = Ed2kServerSendContext {
+            family: "ed2k_server_udp",
+            attempt_id,
+            trace_id: 0,
+            trace_key: format!("server:udp:{base_endpoint}"),
+            state_id: "server.udp.send".to_string(),
+            state_label: "udp",
+            role: "udp",
+            phase: "udp",
+            remote_addr: remote_addr.to_string(),
+            transport_mode: capture.transport_mode,
+            obfuscated: capture.obfuscated,
+            protocol_marker: capture.protocol_marker,
+            opcode: capture.opcode,
+            attempted_len: capture.raw.len(),
+        };
+        dump_ed2k_server_udp_packet_with_attempt(server, remote_addr, capture, Some(attempt_id));
         Self {
             context,
             completed: false,
@@ -184,13 +218,20 @@ impl Ed2kServerTcpSendAttempt {
 }
 
 #[cfg(feature = "packet-diagnostics")]
-impl Drop for Ed2kServerTcpSendAttempt {
+impl Drop for Ed2kServerSendAttempt {
     fn drop(&mut self) {
         if !self.completed {
             self.settle(
                 Ed2kServerSendOutcome::Cancelled,
                 false,
-                Some("server TCP send future cancelled before completion".to_string()),
+                Some(format!(
+                    "server {} send future cancelled before completion",
+                    if self.context.role == "udp" {
+                        "UDP"
+                    } else {
+                        "TCP"
+                    }
+                )),
             );
         }
     }
@@ -314,6 +355,16 @@ pub(super) fn dump_ed2k_server_udp_packet(
     remote_addr: SocketAddr,
     capture: Ed2kServerPacketCapture<'_>,
 ) {
+    dump_ed2k_server_udp_packet_with_attempt(server, remote_addr, capture, None);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+fn dump_ed2k_server_udp_packet_with_attempt(
+    server: Option<&ResolvedServerEntry>,
+    remote_addr: SocketAddr,
+    capture: Ed2kServerPacketCapture<'_>,
+    send_attempt_id: Option<u64>,
+) {
     let direction = match capture.direction {
         "tx" => "send",
         "rx" => "recv",
@@ -336,7 +387,7 @@ pub(super) fn dump_ed2k_server_udp_packet(
         phase: "udp",
         direction,
         outcome: capture.outcome,
-        send_attempt_id: None,
+        send_attempt_id,
         remote_addr: remote_addr.to_string(),
         transport_mode: capture.transport_mode,
         obfuscated: capture.obfuscated,
@@ -603,9 +654,9 @@ fn emit_ed2k_server_send_outcome(
     delivery_known: bool,
     note: Option<&str>,
 ) {
-    let (severity, keys, body) =
+    let (family, severity, keys, body) =
         ed2k_server_send_outcome_parts(context, outcome, delivery_known, note);
-    crate::diag_event::emit("ed2k_tcp", "send_outcome", severity, keys, body);
+    crate::diag_event::emit(family, "send_outcome", severity, keys, body);
 }
 
 #[cfg(any(feature = "packet-diagnostics", test))]
@@ -614,7 +665,7 @@ fn ed2k_server_send_outcome_parts(
     outcome: Ed2kServerSendOutcome,
     delivery_known: bool,
     note: Option<&str>,
-) -> (&'static str, Value, Value) {
+) -> (&'static str, &'static str, Value, Value) {
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(context.remote_addr));
     keys.insert("sendAttemptId".to_string(), json!(context.attempt_id));
@@ -657,7 +708,12 @@ fn ed2k_server_send_outcome_parts(
         body.insert("note".to_string(), json!(note));
     }
 
-    (outcome.severity(), Value::Object(keys), Value::Object(body))
+    (
+        context.family,
+        outcome.severity(),
+        Value::Object(keys),
+        Value::Object(body),
+    )
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -717,9 +773,9 @@ mod tests {
         ED2K_SERVER_DUMP_FILE_PREFIX, Ed2kServerDumpRecord, Ed2kServerSendContext,
         Ed2kServerSendOutcome, OP_CALLBACKREQUEST, OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ,
         OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
-        OP_GLOBSEARCHRES, OP_PACKEDPROT, OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2,
-        OP_SERVER_LIST_RES, ed2k_server_diag_event_parts, ed2k_server_send_outcome_parts,
-        exact_packet_hex, server_opcode_name, server_protocol_name,
+        OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_PACKEDPROT, OP_SERVER_LIST_REQ,
+        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, ed2k_server_diag_event_parts,
+        ed2k_server_send_outcome_parts, exact_packet_hex, server_opcode_name, server_protocol_name,
     };
 
     #[test]
@@ -733,6 +789,7 @@ mod tests {
     #[test]
     fn server_tcp_send_outcome_preserves_attempt_correlation_and_terminal_state() {
         let context = Ed2kServerSendContext {
+            family: "ed2k_tcp",
             attempt_id: 42,
             trace_id: 7,
             trace_key: "server:background:7:198.51.100.1:4661".to_string(),
@@ -748,8 +805,9 @@ mod tests {
             attempted_len: 73,
         };
 
-        let (severity, keys, body) =
+        let (family, severity, keys, body) =
             ed2k_server_send_outcome_parts(&context, Ed2kServerSendOutcome::Succeeded, true, None);
+        assert_eq!(family, "ed2k_tcp");
         assert_eq!(severity, "info");
         assert_eq!(keys["sendAttemptId"], 42);
         assert_eq!(body["outcome"], "send_succeeded");
@@ -758,7 +816,7 @@ mod tests {
         assert_eq!(body["traceKey"], context.trace_key);
         assert_eq!(body["stateId"], context.state_id);
 
-        let (severity, _, body) = ed2k_server_send_outcome_parts(
+        let (_, severity, _, body) = ed2k_server_send_outcome_parts(
             &context,
             Ed2kServerSendOutcome::Cancelled,
             false,
@@ -768,6 +826,42 @@ mod tests {
         assert_eq!(body["outcome"], "send_cancelled");
         assert_eq!(body["deliveryKnown"], false);
         assert_eq!(body["note"], "cancelled");
+    }
+
+    #[test]
+    fn server_udp_send_outcome_uses_distinct_family_and_server_trace() {
+        let context = Ed2kServerSendContext {
+            family: "ed2k_server_udp",
+            attempt_id: 43,
+            trace_id: 0,
+            trace_key: "server:udp:198.51.100.2:4661".to_string(),
+            state_id: "server.udp.send".to_string(),
+            state_label: "udp",
+            role: "udp",
+            phase: "udp",
+            remote_addr: "198.51.100.2:4665".to_string(),
+            transport_mode: "obfuscated",
+            obfuscated: Some(true),
+            protocol_marker: Some(OP_EDONKEYPROT_MARKER),
+            opcode: Some(OP_GLOBSERVSTATREQ),
+            attempted_len: 12,
+        };
+
+        let (family, severity, keys, body) = ed2k_server_send_outcome_parts(
+            &context,
+            Ed2kServerSendOutcome::Failed,
+            true,
+            Some("send failed"),
+        );
+        assert_eq!(family, "ed2k_server_udp");
+        assert_eq!(severity, "warning");
+        assert_eq!(keys["peer"], "198.51.100.2:4665");
+        assert_eq!(keys["sendAttemptId"], 43);
+        assert_eq!(body["outcome"], "send_failed");
+        assert_eq!(body["traceKey"], "server:udp:198.51.100.2:4661");
+        assert_eq!(body["stateId"], "server.udp.send");
+        assert_eq!(body["transportMode"], "obfuscated");
+        assert_eq!(body["note"], "send failed");
     }
 
     #[test]
