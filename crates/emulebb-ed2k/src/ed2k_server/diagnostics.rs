@@ -56,8 +56,10 @@ struct Ed2kServerDumpRecord<'a> {
     flow: &'static str,
     phase: &'a str,
     direction: &'a str,
+    outcome: &'a str,
     remote_addr: String,
     transport_mode: &'a str,
+    obfuscated: Option<bool>,
     protocol: Option<&'static str>,
     protocol_marker: Option<u8>,
     opcode: Option<u8>,
@@ -73,10 +75,17 @@ struct Ed2kServerDumpRecord<'a> {
 }
 
 #[cfg(feature = "packet-diagnostics")]
-pub(super) struct Ed2kServerPacketEvidence<'a> {
+pub(super) struct Ed2kServerPacketCapture<'a> {
+    pub(super) direction: &'static str,
+    pub(super) transport_mode: &'static str,
+    pub(super) obfuscated: Option<bool>,
+    pub(super) protocol_marker: Option<u8>,
+    pub(super) opcode: Option<u8>,
     pub(super) raw: &'a [u8],
-    pub(super) clear_frame: &'a [u8],
-    pub(super) payload: &'a [u8],
+    pub(super) clear_frame: Option<&'a [u8]>,
+    pub(super) payload: Option<&'a [u8]>,
+    pub(super) outcome: &'static str,
+    pub(super) note: Option<String>,
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
@@ -105,12 +114,14 @@ pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<Str
         flow: "server",
         phase: session.phase.as_str(),
         direction: "meta",
+        outcome: "meta",
         remote_addr: session.endpoint.to_string(),
         transport_mode: if session.send_cipher.is_some() {
             "obfuscated"
         } else {
             "plaintext"
         },
+        obfuscated: Some(session.send_cipher.is_some()),
         protocol: None,
         protocol_marker: None,
         opcode: None,
@@ -146,8 +157,10 @@ pub(super) fn dump_ed2k_server_loop_meta(
         flow: "server",
         phase,
         direction: "meta",
+        outcome: "meta",
         remote_addr: endpoint.to_string(),
         transport_mode: "unknown",
+        obfuscated: None,
         protocol: None,
         protocol_marker: None,
         opcode: None,
@@ -187,20 +200,18 @@ pub(super) fn dump_ed2k_server_udp_packet(
 
 #[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_ed2k_server_udp_packet(
-    server: &ResolvedServerEntry,
-    direction: &'static str,
+    server: Option<&ResolvedServerEntry>,
     remote_addr: SocketAddr,
-    transport_mode: &'static str,
-    opcode: u8,
-    evidence: Ed2kServerPacketEvidence<'_>,
+    capture: Ed2kServerPacketCapture<'_>,
 ) {
-    let direction = match direction {
+    let direction = match capture.direction {
         "tx" => "send",
         "rx" => "recv",
         other => other,
     };
-    let payload_hex = exact_packet_hex(evidence.payload);
-    let base_endpoint = server.base_endpoint();
+    let base_endpoint = server
+        .map(ResolvedServerEntry::base_endpoint)
+        .unwrap_or(remote_addr);
     let record = Ed2kServerDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -214,20 +225,22 @@ pub(super) fn dump_ed2k_server_udp_packet(
         flow: "server",
         phase: "udp",
         direction,
+        outcome: capture.outcome,
         remote_addr: remote_addr.to_string(),
-        transport_mode,
-        protocol: Some("ed2k"),
-        protocol_marker: Some(OP_EDONKEYPROT_MARKER),
-        opcode: Some(opcode),
-        opcode_name: Some(server_opcode_name(opcode)),
-        raw_len: Some(evidence.raw.len()),
-        raw_hex: Some(exact_packet_hex(evidence.raw)),
-        clear_frame_len: Some(evidence.clear_frame.len()),
-        clear_frame_hex: Some(exact_packet_hex(evidence.clear_frame)),
-        payload_len: Some(evidence.payload.len()),
-        payload_hex: Some(payload_hex),
-        payload_hex_truncated: Some(false),
-        note: None,
+        transport_mode: capture.transport_mode,
+        obfuscated: capture.obfuscated,
+        protocol: capture.protocol_marker.map(server_protocol_name),
+        protocol_marker: capture.protocol_marker,
+        opcode: capture.opcode,
+        opcode_name: capture.opcode.map(server_opcode_name),
+        raw_len: Some(capture.raw.len()),
+        raw_hex: Some(exact_packet_hex(capture.raw)),
+        clear_frame_len: capture.clear_frame.map(<[u8]>::len),
+        clear_frame_hex: capture.clear_frame.map(exact_packet_hex),
+        payload_len: capture.payload.map(<[u8]>::len),
+        payload_hex: capture.payload.map(exact_packet_hex),
+        payload_hex_truncated: capture.payload.map(|_| false),
+        note: capture.note,
     };
     dump_ed2k_server_record(&record);
 }
@@ -235,20 +248,15 @@ pub(super) fn dump_ed2k_server_udp_packet(
 #[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_ed2k_server_packet(
     session: &ServerSession,
-    direction: &'static str,
-    transport_mode: &'static str,
-    protocol_marker: u8,
-    opcode: u8,
-    evidence: Ed2kServerPacketEvidence<'_>,
+    capture: Ed2kServerPacketCapture<'_>,
 ) {
     // Normalize the wire direction to the shared send/recv vocabulary so the
     // packet-trace diff harness aligns these with eMuleBB's server packets.
-    let direction = match direction {
+    let direction = match capture.direction {
         "tx" => "send",
         "rx" => "recv",
         other => other,
     };
-    let payload_hex = exact_packet_hex(evidence.payload);
     let record = Ed2kServerDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -262,20 +270,22 @@ pub(super) fn dump_ed2k_server_packet(
         flow: "server",
         phase: session.phase.as_str(),
         direction,
+        outcome: capture.outcome,
         remote_addr: session.endpoint.to_string(),
-        transport_mode,
-        protocol: Some(server_protocol_name(protocol_marker)),
-        protocol_marker: Some(protocol_marker),
-        opcode: Some(opcode),
-        opcode_name: Some(server_opcode_name(opcode)),
-        raw_len: Some(evidence.raw.len()),
-        raw_hex: Some(exact_packet_hex(evidence.raw)),
-        clear_frame_len: Some(evidence.clear_frame.len()),
-        clear_frame_hex: Some(exact_packet_hex(evidence.clear_frame)),
-        payload_len: Some(evidence.payload.len()),
-        payload_hex: Some(payload_hex),
-        payload_hex_truncated: Some(false),
-        note: None,
+        transport_mode: capture.transport_mode,
+        obfuscated: capture.obfuscated,
+        protocol: capture.protocol_marker.map(server_protocol_name),
+        protocol_marker: capture.protocol_marker,
+        opcode: capture.opcode,
+        opcode_name: capture.opcode.map(server_opcode_name),
+        raw_len: Some(capture.raw.len()),
+        raw_hex: Some(exact_packet_hex(capture.raw)),
+        clear_frame_len: capture.clear_frame.map(<[u8]>::len),
+        clear_frame_hex: capture.clear_frame.map(exact_packet_hex),
+        payload_len: capture.payload.map(<[u8]>::len),
+        payload_hex: capture.payload.map(exact_packet_hex),
+        payload_hex_truncated: capture.payload.map(|_| false),
+        note: capture.note,
     };
     dump_ed2k_server_record(&record);
 }
@@ -361,7 +371,12 @@ fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
 #[cfg(feature = "packet-diagnostics")]
 fn emit_ed2k_server_diag_event(record: &Ed2kServerDumpRecord<'_>) {
     let (family, keys, body) = ed2k_server_diag_event_parts(record);
-    crate::diag_event::emit(family, "packet", "info", keys, body);
+    let severity = if record.outcome == "dropped" {
+        "warn"
+    } else {
+        "info"
+    };
+    crate::diag_event::emit(family, "packet", severity, keys, body);
 }
 
 #[cfg(any(feature = "packet-diagnostics", test))]
@@ -383,6 +398,7 @@ fn ed2k_server_diag_event_parts(record: &Ed2kServerDumpRecord<'_>) -> (&'static 
 
     let mut body = Map::new();
     body.insert("direction".to_string(), json!(record.direction));
+    body.insert("outcome".to_string(), json!(record.outcome));
     if let Some(protocol_marker) = record.protocol_marker {
         body.insert("protocolMarker".to_string(), json!(protocol_marker));
     }
@@ -416,13 +432,8 @@ fn ed2k_server_diag_event_parts(record: &Ed2kServerDumpRecord<'_>) -> (&'static 
     if let Some(truncated) = record.payload_hex_truncated {
         body.insert("payloadHexTruncated".to_string(), json!(truncated));
     }
-    if record.transport_mode != "unknown" {
-        body.insert(
-            "obfuscated".to_string(),
-            json!(
-                record.transport_mode.contains("obfusc") || record.transport_mode.contains("crypt")
-            ),
-        );
+    if let Some(obfuscated) = record.obfuscated {
+        body.insert("obfuscated".to_string(), json!(obfuscated));
     }
     body.insert("transportMode".to_string(), json!(record.transport_mode));
     body.insert("flow".to_string(), json!(record.flow));
@@ -523,8 +534,10 @@ mod tests {
             flow: "server",
             phase: "connected",
             direction: "recv",
+            outcome: "accepted",
             remote_addr: "198.51.100.1:4661".to_string(),
             transport_mode: "plaintext",
+            obfuscated: Some(false),
             protocol: Some("ed2k"),
             protocol_marker: Some(OP_EDONKEYPROT_MARKER),
             opcode: Some(OP_GLOBSEARCHRES),
@@ -542,6 +555,8 @@ mod tests {
         let (family, keys, body) = ed2k_server_diag_event_parts(&record);
         assert_eq!(family, "ed2k_tcp");
         assert_eq!(keys["peer"], "198.51.100.1:4661");
+        assert_eq!(body["outcome"], "accepted");
+        assert_eq!(body["obfuscated"], false);
         assert_eq!(body["rawLen"], raw.len());
         assert_eq!(body["rawHex"].as_str().unwrap().len(), raw.len() * 2);
         assert_eq!(body["clearFrameLen"], clear_frame.len());
@@ -572,8 +587,10 @@ mod tests {
             flow: "server",
             phase: "udp",
             direction: "send",
+            outcome: "accepted",
             remote_addr: "198.51.100.2:4665".to_string(),
             transport_mode: "obfuscated",
+            obfuscated: Some(true),
             protocol: Some("ed2k"),
             protocol_marker: Some(OP_EDONKEYPROT_MARKER),
             opcode: Some(OP_GLOBSEARCHREQ),
@@ -591,6 +608,47 @@ mod tests {
         let (family, _, body) = ed2k_server_diag_event_parts(&record);
         assert_eq!(family, "ed2k_server_udp");
         assert_eq!(body["obfuscated"], true);
+    }
+
+    #[test]
+    fn server_udp_drop_keeps_raw_bytes_without_faking_decoded_stages() {
+        let record = Ed2kServerDumpRecord {
+            schema: "ed2k_packet_v1",
+            source: "emulebb-rust",
+            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
+            event_seq: 1,
+            trace_id: 0,
+            trace_key: "server:udp:198.51.100.2:4665".to_string(),
+            state_id: "server.udp.recv".to_string(),
+            state_label: "udp",
+            role: "udp",
+            flow: "server",
+            phase: "udp",
+            direction: "recv",
+            outcome: "dropped",
+            remote_addr: "198.51.100.2:4665".to_string(),
+            transport_mode: "obfuscated",
+            obfuscated: Some(true),
+            protocol: None,
+            protocol_marker: None,
+            opcode: None,
+            opcode_name: None,
+            raw_len: Some(4),
+            raw_hex: Some("1234abcd".to_string()),
+            clear_frame_len: None,
+            clear_frame_hex: None,
+            payload_len: None,
+            payload_hex: None,
+            payload_hex_truncated: None,
+            note: Some("decode failed".to_string()),
+        };
+
+        let (family, _, body) = ed2k_server_diag_event_parts(&record);
+        assert_eq!(family, "ed2k_server_udp");
+        assert_eq!(body["outcome"], "dropped");
+        assert_eq!(body["rawHex"], "1234abcd");
+        assert!(body.get("clearFrameHex").is_none());
+        assert!(body.get("payloadHex").is_none());
     }
 
     #[test]

@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use emulebb_kad_proto::Ed2kHash;
 
 #[cfg(feature = "packet-diagnostics")]
-use super::diagnostics::Ed2kServerPacketEvidence;
+use super::diagnostics::Ed2kServerPacketCapture;
 use super::{
     Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
     ResolvedServerEntry, ServerUdpPacket, decode_server_udp_datagram,
@@ -59,15 +59,19 @@ pub(super) async fn send_server_udp_packet(
         clear_frame.extend_from_slice(&[OP_EDONKEYPROT, opcode]);
         clear_frame.extend_from_slice(payload);
         dump_ed2k_server_udp_packet(
-            server,
-            "tx",
+            Some(server),
             endpoint,
-            transport_mode,
-            opcode,
-            Ed2kServerPacketEvidence {
+            Ed2kServerPacketCapture {
+                direction: "tx",
+                transport_mode,
+                obfuscated: Some(transport_mode == "obfuscated"),
+                protocol_marker: Some(OP_EDONKEYPROT),
+                opcode: Some(opcode),
                 raw: &packet,
-                clear_frame: &clear_frame,
-                payload,
+                clear_frame: Some(&clear_frame),
+                payload: Some(payload),
+                outcome: "accepted",
+                note: None,
             },
         );
     }
@@ -125,6 +129,25 @@ pub(super) async fn send_server_udp_crypt_status_request(
         .collect::<Vec<_>>();
     let packet = encode_server_udp_crypt_ping(challenge, &padding);
     let endpoint = server_udp_crypt_ping_endpoint(server);
+    #[cfg(feature = "packet-diagnostics")]
+    dump_ed2k_server_udp_packet(
+        Some(server),
+        endpoint,
+        Ed2kServerPacketCapture {
+            direction: "tx",
+            transport_mode: "crypt-ping",
+            obfuscated: Some(false),
+            protocol_marker: None,
+            opcode: None,
+            raw: &packet,
+            clear_frame: None,
+            payload: None,
+            outcome: "probe",
+            note: Some(format!(
+                "server UDP crypt-ping challenge={challenge} padding_len={padding_len}"
+            )),
+        },
+    );
     socket
         .send_to(&packet, endpoint)
         .await
@@ -192,24 +215,66 @@ pub(super) async fn read_server_udp_packet_with_key(
     };
     let Some(packet) = decode_server_udp_datagram_with_key(server, &buffer[..len], decryption_key)
     else {
+        #[cfg(feature = "packet-diagnostics")]
+        dump_ed2k_server_udp_packet(
+            Some(server),
+            from,
+            Ed2kServerPacketCapture {
+                direction: "rx",
+                transport_mode,
+                obfuscated: Some(transport_mode == "obfuscated"),
+                protocol_marker: None,
+                opcode: None,
+                raw: &buffer[..len],
+                clear_frame: None,
+                payload: None,
+                outcome: "dropped",
+                note: Some(format!(
+                    "server UDP datagram decode failed decryption_key={decryption_key:?}"
+                )),
+            },
+        );
         return Ok(None);
     };
     if packet.len() < 2 || packet[0] != OP_EDONKEYPROT {
+        #[cfg(feature = "packet-diagnostics")]
+        dump_ed2k_server_udp_packet(
+            Some(server),
+            from,
+            Ed2kServerPacketCapture {
+                direction: "rx",
+                transport_mode,
+                obfuscated: Some(transport_mode == "obfuscated"),
+                protocol_marker: packet.first().copied(),
+                opcode: packet.get(1).copied(),
+                raw: &buffer[..len],
+                clear_frame: Some(&packet),
+                payload: None,
+                outcome: "dropped",
+                note: Some(format!(
+                    "server UDP decoded frame is invalid decryption_key={decryption_key:?}"
+                )),
+            },
+        );
         return Ok(None);
     }
     let opcode = packet[1];
     let payload = packet[2..].to_vec();
     #[cfg(feature = "packet-diagnostics")]
     dump_ed2k_server_udp_packet(
-        server,
-        "rx",
+        Some(server),
         from,
-        transport_mode,
-        opcode,
-        Ed2kServerPacketEvidence {
+        Ed2kServerPacketCapture {
+            direction: "rx",
+            transport_mode,
+            obfuscated: Some(transport_mode == "obfuscated"),
+            protocol_marker: Some(OP_EDONKEYPROT),
+            opcode: Some(opcode),
             raw: &buffer[..len],
-            clear_frame: &packet,
-            payload: &payload,
+            clear_frame: Some(&packet),
+            payload: Some(&payload),
+            outcome: "accepted",
+            note: decryption_key.map(|key| format!("server UDP response decryption_key={key}")),
         },
     );
     #[cfg(not(feature = "packet-diagnostics"))]
@@ -235,26 +300,42 @@ pub(super) async fn read_server_udp_packet_from_any(
     } else {
         "obfuscated"
     };
+    #[cfg(feature = "packet-diagnostics")]
+    let mut candidate_count = 0usize;
+    #[cfg(feature = "packet-diagnostics")]
+    let mut rejected_clear_frame = None;
     for server in udp_response_candidate_servers(servers, from) {
+        #[cfg(feature = "packet-diagnostics")]
+        {
+            candidate_count += 1;
+        }
         let Some(packet) = decode_server_udp_datagram(server, &buffer[..len]) else {
             continue;
         };
         if packet.len() < 2 || packet[0] != OP_EDONKEYPROT {
+            #[cfg(feature = "packet-diagnostics")]
+            if rejected_clear_frame.is_none() {
+                rejected_clear_frame = Some(packet);
+            }
             continue;
         }
         let opcode = packet[1];
         let payload = packet[2..].to_vec();
         #[cfg(feature = "packet-diagnostics")]
         dump_ed2k_server_udp_packet(
-            server,
-            "rx",
+            Some(server),
             from,
-            transport_mode,
-            opcode,
-            Ed2kServerPacketEvidence {
+            Ed2kServerPacketCapture {
+                direction: "rx",
+                transport_mode,
+                obfuscated: Some(transport_mode == "obfuscated"),
+                protocol_marker: Some(OP_EDONKEYPROT),
+                opcode: Some(opcode),
                 raw: &buffer[..len],
-                clear_frame: &packet,
-                payload: &payload,
+                clear_frame: Some(&packet),
+                payload: Some(&payload),
+                outcome: "accepted",
+                note: None,
             },
         );
         #[cfg(not(feature = "packet-diagnostics"))]
@@ -268,6 +349,29 @@ pub(super) async fn read_server_udp_packet_from_any(
             },
         )));
     }
+    #[cfg(feature = "packet-diagnostics")]
+    dump_ed2k_server_udp_packet(
+        None,
+        from,
+        Ed2kServerPacketCapture {
+            direction: "rx",
+            transport_mode,
+            obfuscated: Some(transport_mode == "obfuscated"),
+            protocol_marker: rejected_clear_frame
+                .as_deref()
+                .and_then(|packet| packet.first().copied()),
+            opcode: rejected_clear_frame
+                .as_deref()
+                .and_then(|packet| packet.get(1).copied()),
+            raw: &buffer[..len],
+            clear_frame: rejected_clear_frame.as_deref(),
+            payload: None,
+            outcome: "dropped",
+            note: Some(format!(
+                "server UDP datagram rejected by {candidate_count} candidate decoder(s)"
+            )),
+        },
+    );
     Ok(None)
 }
 
