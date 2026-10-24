@@ -416,7 +416,7 @@ async fn handle_inbound_datagram(
         data.len(),
         hex_preview(data)
     );
-    super::dump::dump_client_udp_recv(from, &our_user_hash, our_public_ip, data);
+    super::dump::dump_client_udp_recv(from, &our_user_hash, data);
     if !reask_enabled {
         handle_reask_disabled_datagram(
             events,
