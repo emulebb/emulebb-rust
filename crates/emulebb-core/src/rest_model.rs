@@ -31,8 +31,6 @@ pub struct AppInfo {
 pub struct DiagnosticDumpResult {
     pub ok: bool,
     pub path: String,
-    pub full_memory: bool,
-    pub full_memory_included: bool,
     pub schema: String,
     pub byte_count: u64,
     pub artifact_file_count: u64,

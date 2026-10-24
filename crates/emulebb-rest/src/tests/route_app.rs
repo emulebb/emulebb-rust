@@ -73,7 +73,7 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
                 .uri("/api/v1/diagnostics/dumps")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"confirmDump":false,"fullMemory":false}"#))
+                .body(Body::from(r#"{"confirmDump":false}"#))
                 .unwrap(),
         )
         .await
@@ -87,7 +87,7 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
                 .uri("/api/v1/diagnostics/dumps")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"confirmDump":true,"fullMemory":false}"#))
+                .body(Body::from(r#"{"confirmDump":true}"#))
                 .unwrap(),
         )
         .await
@@ -96,8 +96,8 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
     let body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["ok"], true);
-    assert_eq!(value["data"]["fullMemory"], false);
-    assert_eq!(value["data"]["fullMemoryIncluded"], false);
+    assert!(value["data"].get("fullMemory").is_none());
+    assert!(value["data"].get("fullMemoryIncluded").is_none());
     assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v2");
     let path = value["data"]["path"].as_str().unwrap();
     assert!(std::path::Path::new(path).is_file());
@@ -113,8 +113,7 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
 
     let bundle: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v2");
-    assert_eq!(bundle["memory"]["requested"], false);
-    assert_eq!(bundle["memory"]["included"], false);
+    assert!(bundle.get("memory").is_none());
     assert_eq!(bundle["settingsProvenance"]["apiKeyIncluded"], true);
     assert_eq!(bundle["settingsProvenance"]["sensitiveValues"], "exact");
     assert_eq!(bundle["settingsProvenance"]["apiKey"], "secret");
