@@ -71,6 +71,8 @@ pub(super) struct Ed2kTcpDumpRecord<'a> {
     pub(super) raw_hex: Option<String>,
     pub(super) clear_frame_len: Option<usize>,
     pub(super) clear_frame_hex: Option<String>,
+    pub(super) attempted_len: Option<usize>,
+    pub(super) written_len: Option<usize>,
     pub(super) payload_len: Option<usize>,
     pub(super) payload_hex: Option<String>,
     pub(super) payload_hex_truncated: Option<bool>,
@@ -396,6 +398,8 @@ fn dump_ed2k_tcp_meta(
         raw_hex: None,
         clear_frame_len: None,
         clear_frame_hex: None,
+        attempted_len: None,
+        written_len: None,
         payload_len: None,
         payload_hex: None,
         payload_hex_truncated: None,
@@ -450,6 +454,8 @@ fn dump_ed2k_tcp_send(
         raw_hex: Some(raw_hex),
         clear_frame_len: Some(bytes.len()),
         clear_frame_hex: Some(exact_packet_hex(bytes)),
+        attempted_len: Some(bytes.len()),
+        written_len: None,
         payload_len: payload.map(<[u8]>::len),
         payload_hex,
         payload_hex_truncated: payload.map(|_| false),
@@ -496,6 +502,8 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
         raw_hex: Some(exact_packet_hex(raw)),
         clear_frame_len: Some(clear_frame.len()),
         clear_frame_hex: Some(exact_packet_hex(clear_frame)),
+        attempted_len: None,
+        written_len: None,
         payload_len: Some(packet.payload.len()),
         payload_hex: Some(payload_hex),
         payload_hex_truncated: Some(false),
@@ -545,10 +553,71 @@ pub(super) fn dump_ed2k_tcp_recv_failure(
         raw_hex: Some(exact_packet_hex(raw)),
         clear_frame_len: (!clear_frame.is_empty()).then_some(clear_frame.len()),
         clear_frame_hex: (!clear_frame.is_empty()).then(|| exact_packet_hex(clear_frame)),
+        attempted_len: None,
+        written_len: None,
         payload_len: None,
         payload_hex: None,
         payload_hex_truncated: None,
         note: Some(detail),
+    };
+    dump_ed2k_tcp_record(&record);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+#[expect(clippy::too_many_arguments, reason = "flat diagnostic packet boundary")]
+pub(super) fn dump_ed2k_tcp_send_capture(
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    clear_frame: &[u8],
+    raw: &[u8],
+    attempted_len: usize,
+    outcome: &'static str,
+    detail: Option<String>,
+) {
+    let protocol = clear_frame.first().copied();
+    let opcode = clear_frame.get(TCP_PACKET_HEADER_LEN - 1).copied();
+    if outcome == "send_succeeded"
+        && let (Some(protocol), Some(opcode)) = (protocol, opcode)
+        && should_skip_bulk_packet(protocol, opcode, false)
+    {
+        return;
+    }
+    let payload =
+        (clear_frame.len() > TCP_PACKET_HEADER_LEN).then(|| &clear_frame[TCP_PACKET_HEADER_LEN..]);
+    let canonical_phase = canonical_ed2k_send_phase(flow, phase, protocol, opcode);
+    let record = Ed2kTcpDumpRecord {
+        schema: "ed2k_packet_v1",
+        source: "emulebb-rust",
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        event_seq: ed2k_tcp_dump_event_seq(),
+        trace_key: ed2k_tcp_trace_key(flow, remote_addr),
+        state_id: ed2k_tcp_state_id(flow, canonical_phase.as_ref()),
+        state_label: canonical_phase.as_ref(),
+        flow,
+        phase: canonical_phase.as_ref(),
+        direction: "send",
+        outcome,
+        remote_addr: remote_addr.to_string(),
+        transport_mode: transport_mode.as_str(),
+        obfuscated: Some(transport_mode.is_obfuscated()),
+        protocol: protocol.map(ed2k_protocol_name),
+        protocol_marker: protocol,
+        opcode,
+        opcode_name: protocol
+            .zip(opcode)
+            .map(|(protocol, opcode)| ed2k_opcode_name(protocol, opcode)),
+        raw_len: Some(raw.len()),
+        raw_hex: Some(exact_packet_hex(raw)),
+        clear_frame_len: Some(clear_frame.len()),
+        clear_frame_hex: Some(exact_packet_hex(clear_frame)),
+        attempted_len: Some(attempted_len),
+        written_len: Some(raw.len()),
+        payload_len: payload.map(<[u8]>::len),
+        payload_hex: payload.map(exact_packet_hex),
+        payload_hex_truncated: payload.map(|_| false),
+        note: detail,
     };
     dump_ed2k_tcp_record(&record);
 }
