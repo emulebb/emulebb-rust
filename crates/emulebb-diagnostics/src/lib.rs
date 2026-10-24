@@ -341,6 +341,10 @@ impl SegmentedEventWriter {
                     return false;
                 }
             };
+            if line.len() as u64 > self.config.max_segment_bytes {
+                self.dropped_events = self.dropped_events.saturating_add(1);
+                return false;
+            }
         }
         if let Err(error) = self.active_file.write_all(&line) {
             self.write_errors = self.write_errors.saturating_add(1);
@@ -418,23 +422,43 @@ impl SegmentedEventWriter {
             self.retention_delete_errors = self.retention_delete_errors.saturating_add(1);
             return;
         };
-        let mut segments = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let file_name = entry.file_name().to_string_lossy().into_owned();
-                if !file_name.starts_with(&run_prefix) || !file_name.ends_with(".jsonl") {
-                    return None;
-                }
+        let mut prior_run_segments = Vec::new();
+        let mut current_run_segments = Vec::new();
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path == self.active_path {
+                continue;
+            }
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if !file_name.starts_with(DIAG_EVENT_FILE_PREFIX) || !file_name.ends_with(".jsonl") {
+                continue;
+            }
+            if let Some(segment_id) = file_name
+                .strip_prefix(&run_prefix)
+                .and_then(|tail| tail.strip_suffix(".jsonl"))
+                .and_then(|tail| tail.parse::<u64>().ok())
+            {
+                current_run_segments.push((segment_id, file_name, path));
+            } else {
                 let modified = entry
                     .metadata()
                     .and_then(|metadata| metadata.modified())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
-                Some((modified, file_name, entry.path()))
-            })
-            .collect::<Vec<_>>();
-        segments.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        let delete_count = segments.len().saturating_sub(self.config.retained_segments);
-        for (_, _, path) in segments.into_iter().take(delete_count) {
+                prior_run_segments.push((modified, file_name, path));
+            }
+        }
+        prior_run_segments
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        current_run_segments
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        let total_segments = prior_run_segments.len() + current_run_segments.len() + 1;
+        let delete_count = total_segments.saturating_sub(self.config.retained_segments);
+        let delete_paths = prior_run_segments
+            .into_iter()
+            .map(|(_, _, path)| path)
+            .chain(current_run_segments.into_iter().map(|(_, _, path)| path))
+            .take(delete_count);
+        for path in delete_paths {
             match fs::remove_file(path) {
                 Ok(()) => {
                     self.retention_deletes = self.retention_deletes.saturating_add(1);
@@ -689,9 +713,9 @@ mod tests {
     }
 
     #[test]
-    fn retention_never_deletes_segments_from_another_run() {
+    fn retention_bounds_segments_across_runs_and_preserves_the_active_segment() {
         let root = TempDir::new().unwrap();
-        let run_a_files = {
+        {
             let mut writer = test_writer_for_run(&root, "run-a", 420, 2);
             for record_id in 0..20_u64 {
                 assert!(writer.emit(
@@ -702,9 +726,8 @@ mod tests {
                     &json!({"padding": "x".repeat(80)}),
                 ));
             }
-            segment_files_for_run(root.path(), "run-a")
-        };
-        assert_eq!(run_a_files.len(), 2);
+            assert_eq!(segment_files_for_run(root.path(), "run-a").len(), 2);
+        }
 
         let mut writer = test_writer_for_run(&root, "run-b", 420, 2);
         for record_id in 0..20_u64 {
@@ -717,8 +740,37 @@ mod tests {
             ));
         }
 
-        assert_eq!(segment_files_for_run(root.path(), "run-a"), run_a_files);
+        assert!(segment_files_for_run(root.path(), "run-a").is_empty());
         assert_eq!(segment_files_for_run(root.path(), "run-b").len(), 2);
+        assert_eq!(segment_files(root.path()).len(), 2);
+        assert!(writer.active_path.exists());
+        assert!(writer.health().retention_deletes >= 2);
+    }
+
+    #[test]
+    fn rollover_revalidates_size_after_segment_id_growth() {
+        let root = TempDir::new().unwrap();
+        let mut writer = test_writer(&root, 4096, Duration::from_secs(60), 4);
+        writer.active_segment_id = 999_999;
+        writer.active_segment_bytes = 1;
+        writer.records_written = 1;
+        let keys = json!({});
+        let body = json!({"padding": "stable"});
+        let pending = PendingEvent {
+            family: "sched",
+            event: "segment_width",
+            severity: "info",
+            keys: &keys,
+            body: &body,
+            seq: writer.next_seq,
+            stream_seq: 1,
+        };
+        writer.config.max_segment_bytes = writer.encode_record(&pending).unwrap().len() as u64;
+
+        assert!(!writer.emit("sched", "segment_width", "info", &keys, &body));
+        assert_eq!(writer.active_segment_id, 1_000_000);
+        assert_eq!(writer.active_segment_bytes, 0);
+        assert_eq!(writer.dropped_events, 1);
     }
 
     #[test]
