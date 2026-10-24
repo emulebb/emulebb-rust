@@ -1,4 +1,4 @@
-//! Oracle-shaped UDP JSONL dump for Kad parity work.
+//! Unified Kad UDP diagnostics for protocol parity work.
 
 #![cfg_attr(
     not(feature = "packet-diagnostics"),
@@ -8,32 +8,7 @@
     )
 )]
 
-use chrono::Local;
-use serde::Serialize;
-use std::env;
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::{
-    Mutex, OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
-use std::time::Instant;
-use tracing::warn;
-
-const EMULEBB_RUST_TMP_DIR_ENV: &str = "EMULEBB_RUST_TMP_DIR";
-const EMULEBB_RUST_LOG_DIR_ENV: &str = "EMULEBB_RUST_LOG_DIR";
-const EMULEBB_WORKSPACE_OUTPUT_ROOT_ENV: &str = "EMULEBB_WORKSPACE_OUTPUT_ROOT";
-const DEFAULT_WORKSPACE_TMP_DIR_NAME: &str = "emulebb-rust";
-const DUMP_FILE_PREFIX: &str = "emulebb-rust-kad-udp-dump-";
-const DUMP_FILE_SUFFIX: &str = ".jsonl";
-/// Buffer the dump writer generously so packets batch into few large writes.
-const DUMP_WRITER_BUF_BYTES: usize = 256 * 1024;
-/// Flush the buffered dump once per this many records instead of per packet.
-const DUMP_FLUSH_EVERY: u64 = 512;
-
-static UDP_DUMP_WRITER: OnceLock<Option<UdpDumpWriter>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum KadUdpOutcome {
@@ -100,131 +75,6 @@ pub struct KadUdpDumpSummary {
     pub tracker_max_packets: Option<u32>,
 }
 
-impl KadUdpDumpSummary {
-    fn summary_string(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(protocol) = self.protocol {
-            parts.push(format!("protocol=0x{protocol:02X}"));
-        }
-        if let Some(opcode) = self.opcode {
-            parts.push(format!("opcode=0x{opcode:02X}"));
-        }
-        if let Some(opcode_name) = self.opcode_name {
-            parts.push(format!("opcode_name={opcode_name}"));
-        }
-        parts.push(format!("raw_obfuscated={}", yes_no(self.raw_obfuscated)));
-        if let Some(transport_mode) = self.transport_mode {
-            parts.push(format!("transport_mode={transport_mode}"));
-        }
-        if let Some(requested_obfuscation) = self.requested_obfuscation {
-            parts.push(format!(
-                "requested_obfuscation={}",
-                yes_no(requested_obfuscation)
-            ));
-        }
-        if let Some(receiver_verify_key) = self.receiver_verify_key {
-            parts.push(format!("receiver_verify_key={receiver_verify_key}"));
-        }
-        if let Some(sender_verify_key) = self.sender_verify_key {
-            parts.push(format!("sender_verify_key={sender_verify_key}"));
-        }
-        if let Some(receiver_verify_key_valid) = self.receiver_verify_key_valid {
-            parts.push(format!(
-                "receiver_verify_key_valid={}",
-                yes_no(receiver_verify_key_valid)
-            ));
-        }
-        if let Some(tracked_request_opcode) = self.tracked_request_opcode {
-            parts.push(format!("tracked_request_opcode={tracked_request_opcode}"));
-        }
-        if let Some(drop_reason) = self.drop_reason {
-            parts.push(format!("drop_reason={drop_reason}"));
-        }
-        if let Some(detail) = self.detail.as_deref() {
-            parts.push(format!("detail={detail}"));
-        }
-        parts.push(format!("outcome={}", self.outcome.as_str()));
-        if let Some(tracker_bucket) = self.tracker_bucket {
-            parts.push(format!("tracker_bucket={tracker_bucket}"));
-        }
-        if let Some(tracker_action) = self.tracker_action {
-            parts.push(format!("tracker_action={tracker_action}"));
-        }
-        if let Some(tracker_observed_packets) = self.tracker_observed_packets {
-            parts.push(format!(
-                "tracker_observed_packets={tracker_observed_packets}"
-            ));
-        }
-        if let Some(tracker_max_packets) = self.tracker_max_packets {
-            parts.push(format!("tracker_max_packets={tracker_max_packets}"));
-        }
-        parts.join(" ")
-    }
-}
-
-#[derive(Debug)]
-struct UdpDumpWriter {
-    path: PathBuf,
-    writer: Mutex<BufWriter<File>>,
-}
-
-#[derive(Debug, Serialize)]
-struct UdpDumpRecord {
-    schema: &'static str,
-    source: &'static str,
-    ts: String,
-    event_seq: u64,
-    trace_key: String,
-    state_id: String,
-    state_label: String,
-    direction: &'static str,
-    outcome: &'static str,
-    family: &'static str,
-    peer: String,
-    wire_len: usize,
-    wire_hex: String,
-    decoded_len: usize,
-    decoded_hex: String,
-    summary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    protocol: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    opcode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    opcode_name: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    raw_obfuscated: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    transport_mode: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    requested_obfuscation: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    receiver_verify_key: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sender_verify_key: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    receiver_verify_key_valid: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tracked_request_opcode: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    drop_reason: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tracker_bucket: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tracker_action: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tracker_observed_packets: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tracker_max_packets: Option<u32>,
-}
-
-fn next_udp_dump_event_seq() -> u64 {
-    static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
-    NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
 fn udp_trace_key(peer: SocketAddr) -> String {
     format!("kad:{}", peer)
 }
@@ -244,7 +94,7 @@ fn udp_state_id(direction: &str, summary: &KadUdpDumpSummary) -> String {
     )
 }
 
-/// Append one oracle-shaped Kad UDP packet record to the current eMuleBB Rust dump file.
+/// Emit one exact Kad UDP packet record to the bounded unified diagnostics stream.
 #[cfg(feature = "packet-diagnostics")]
 pub fn dump_kad_udp_packet(
     direction: &'static str,
@@ -253,70 +103,7 @@ pub fn dump_kad_udp_packet(
     decoded_payload: &[u8],
     summary: KadUdpDumpSummary,
 ) {
-    // The converged stream is the primary diagnostic contract. Emit it before
-    // touching the optional legacy side file so directory, lock, serialization,
-    // or write failures cannot erase packet evidence from `diag_event_v2`.
     emit_kad_udp_diag_event(direction, peer, wire_payload, decoded_payload, &summary);
-
-    let Some(writer) = udp_dump_writer() else {
-        return;
-    };
-
-    let record = UdpDumpRecord {
-        schema: "udp_packet_v1",
-        source: "emulebb-rust",
-        ts: Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
-        event_seq: next_udp_dump_event_seq(),
-        trace_key: udp_trace_key(peer),
-        state_id: udp_state_id(direction, &summary),
-        state_label: udp_state_label(&summary),
-        direction,
-        outcome: summary.outcome.as_str(),
-        family: "kad",
-        peer: peer.to_string(),
-        wire_len: wire_payload.len(),
-        wire_hex: encode_hex_upper(wire_payload),
-        decoded_len: decoded_payload.len(),
-        decoded_hex: encode_hex_upper(decoded_payload),
-        summary: summary.summary_string(),
-        protocol: summary.protocol.map(|protocol| format!("0x{protocol:02X}")),
-        opcode: summary.opcode.map(|opcode| format!("0x{opcode:02X}")),
-        opcode_name: summary.opcode_name,
-        raw_obfuscated: Some(summary.raw_obfuscated),
-        transport_mode: summary.transport_mode,
-        requested_obfuscation: summary.requested_obfuscation,
-        receiver_verify_key: summary.receiver_verify_key,
-        sender_verify_key: summary.sender_verify_key,
-        receiver_verify_key_valid: summary.receiver_verify_key_valid,
-        tracked_request_opcode: summary.tracked_request_opcode,
-        drop_reason: summary.drop_reason,
-        detail: summary.detail.clone(),
-        tracker_bucket: summary.tracker_bucket,
-        tracker_action: summary.tracker_action,
-        tracker_observed_packets: summary.tracker_observed_packets,
-        tracker_max_packets: summary.tracker_max_packets,
-    };
-
-    let Ok(mut guard) = writer.writer.lock() else {
-        warn!("failed to lock Kad UDP dump writer");
-        return;
-    };
-
-    if serde_json::to_writer(&mut *guard, &record).is_err() || guard.write_all(b"\n").is_err() {
-        warn!(
-            "failed to write Kad UDP dump line to {}",
-            writer.path.display()
-        );
-        return;
-    }
-
-    // Flush periodically, NOT per packet. A forced flush() on every inbound
-    // datagram is a blocking write() syscall on the Kad receive loop's runtime
-    // worker; under an inbound packet flood that starved the REST/control plane.
-    // The BufWriter batches (and flushes when full); we additionally flush every
-    // DUMP_FLUSH_EVERY records so a tailing reader sees data and crash loss is
-    // bounded. Full coverage (including dropped/flood packets) is preserved.
-    maybe_periodic_flush(&mut guard, &writer.path);
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
@@ -483,90 +270,6 @@ fn kad_udp_diag_event_parts(
     )
 }
 
-fn udp_dump_writer() -> Option<&'static UdpDumpWriter> {
-    UDP_DUMP_WRITER.get_or_init(init_udp_dump_writer).as_ref()
-}
-
-/// Flush on the first packet, at most once per second during light traffic,
-/// and every `DUMP_FLUSH_EVERY` packets during a flood. Live monitors must see
-/// low-rate request/response exchanges before the daemon exits.
-fn maybe_periodic_flush(guard: &mut BufWriter<File>, path: &Path) {
-    static SINCE_FLUSH: AtomicU64 = AtomicU64::new(0);
-    static START: OnceLock<Instant> = OnceLock::new();
-    static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
-    let count = SINCE_FLUSH.fetch_add(1, Ordering::Relaxed);
-    let elapsed_ms = START.get_or_init(Instant::now).elapsed().as_millis() as u64;
-    let due = count.is_multiple_of(DUMP_FLUSH_EVERY)
-        || elapsed_ms.saturating_sub(LAST_FLUSH_MS.load(Ordering::Relaxed)) >= 1_000;
-    if due {
-        LAST_FLUSH_MS.store(elapsed_ms, Ordering::Relaxed);
-    }
-    if due && let Err(error) = guard.flush() {
-        warn!(
-            "failed to flush Kad UDP dump writer at {}: {}",
-            path.display(),
-            error
-        );
-    }
-}
-
-fn init_udp_dump_writer() -> Option<UdpDumpWriter> {
-    let log_dir = workspace_log_dir();
-    if let Err(error) = fs::create_dir_all(&log_dir) {
-        warn!(
-            "failed to create Kad UDP dump directory {}: {}",
-            log_dir.display(),
-            error
-        );
-        return None;
-    }
-
-    let file_name = format!(
-        "{}{}{}",
-        DUMP_FILE_PREFIX,
-        Local::now().format("%Y.%m.%d-%H.%M.%S"),
-        DUMP_FILE_SUFFIX
-    );
-    let path = log_dir.join(file_name);
-    let file = match File::create(&path) {
-        Ok(file) => file,
-        Err(error) => {
-            warn!(
-                "failed to create Kad UDP dump file {}: {}",
-                path.display(),
-                error
-            );
-            return None;
-        }
-    };
-
-    Some(UdpDumpWriter {
-        path,
-        writer: Mutex::new(BufWriter::with_capacity(DUMP_WRITER_BUF_BYTES, file)),
-    })
-}
-
-fn workspace_log_dir() -> PathBuf {
-    read_env_path(EMULEBB_RUST_LOG_DIR_ENV).unwrap_or_else(workspace_tmp_dir)
-}
-
-fn workspace_tmp_dir() -> PathBuf {
-    read_env_path(EMULEBB_RUST_TMP_DIR_ENV)
-        .or_else(|| {
-            read_env_path(EMULEBB_WORKSPACE_OUTPUT_ROOT_ENV)
-                .map(|root| root.join("tmp").join(DEFAULT_WORKSPACE_TMP_DIR_NAME))
-        })
-        .unwrap_or_else(|| env::temp_dir().join(DEFAULT_WORKSPACE_TMP_DIR_NAME))
-}
-
-fn read_env_path(name: &str) -> Option<PathBuf> {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
 fn encode_hex_upper(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));
@@ -577,17 +280,9 @@ fn encode_hex_upper(bytes: &[u8]) -> String {
     output
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_WORKSPACE_TMP_DIR_NAME, DUMP_FILE_PREFIX, EMULEBB_RUST_LOG_DIR_ENV,
-        EMULEBB_RUST_TMP_DIR_ENV, KadUdpDumpSummary, KadUdpOutcome, encode_hex_upper,
-        kad_udp_diag_event_parts,
-    };
+    use super::{KadUdpDumpSummary, KadUdpOutcome, encode_hex_upper, kad_udp_diag_event_parts};
     use std::net::SocketAddr;
 
     #[test]
@@ -601,34 +296,6 @@ mod tests {
         let encoded = encode_hex_upper(&payload);
         assert_eq!(encoded.len(), payload.len() * 2);
         assert!(encoded.ends_with("AB"));
-    }
-
-    #[test]
-    fn summary_string_is_machine_friendly() {
-        let summary = KadUdpDumpSummary {
-            protocol: Some(0xE4),
-            opcode: Some(0x21),
-            opcode_name: Some("KADEMLIA2_HELLO_REQ"),
-            raw_obfuscated: true,
-            transport_mode: Some("receiver_verify_key"),
-            requested_obfuscation: Some(true),
-            receiver_verify_key: Some(123),
-            sender_verify_key: Some(456),
-            receiver_verify_key_valid: Some(true),
-            tracked_request_opcode: Some("KADEMLIA2_HELLO_REQ"),
-            drop_reason: Some("tracker_drop"),
-            detail: Some("exact failure".to_string()),
-            outcome: KadUdpOutcome::Dropped,
-            tracker_bucket: Some("hello_req"),
-            tracker_action: Some("drop"),
-            tracker_observed_packets: Some(4),
-            tracker_max_packets: Some(3),
-        };
-
-        assert_eq!(
-            summary.summary_string(),
-            "protocol=0xE4 opcode=0x21 opcode_name=KADEMLIA2_HELLO_REQ raw_obfuscated=yes transport_mode=receiver_verify_key requested_obfuscation=yes receiver_verify_key=123 sender_verify_key=456 receiver_verify_key_valid=yes tracked_request_opcode=KADEMLIA2_HELLO_REQ drop_reason=tracker_drop detail=exact failure outcome=dropped tracker_bucket=hello_req tracker_action=drop tracker_observed_packets=4 tracker_max_packets=3"
-        );
     }
 
     #[test]
@@ -686,13 +353,5 @@ mod tests {
         assert_eq!(body["outcome"], "send_rejected");
         assert_eq!(body["dropReason"], "encode_failed");
         assert_eq!(body["detail"], "exact encoder error");
-    }
-
-    #[test]
-    fn dump_defaults_use_emulebb_rust_names() {
-        assert_eq!(EMULEBB_RUST_TMP_DIR_ENV, "EMULEBB_RUST_TMP_DIR");
-        assert_eq!(EMULEBB_RUST_LOG_DIR_ENV, "EMULEBB_RUST_LOG_DIR");
-        assert_eq!(DEFAULT_WORKSPACE_TMP_DIR_NAME, "emulebb-rust");
-        assert_eq!(DUMP_FILE_PREFIX, "emulebb-rust-kad-udp-dump-");
     }
 }
