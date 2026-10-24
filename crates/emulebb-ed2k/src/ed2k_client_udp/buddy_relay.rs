@@ -136,10 +136,10 @@ pub(super) fn relay_buddy_reask_callback(
     buddy_registry: &BuddySocketRegistry,
     callback: &super::codec::ReaskCallbackUdp,
     from: SocketAddr,
-) {
+) -> bool {
     let SocketAddr::V4(v4) = from else {
         trace!("ed2k udp reask: dropping OP_REASKCALLBACKUDP from non-IPv4 requester {from}");
-        return;
+        return false;
     };
     let frame = encode_reask_callback_tcp_relay(callback, *v4.ip(), v4.port());
     // The registry relays only when the buddy-id matches the held inbound buddy
@@ -152,11 +152,13 @@ pub(super) fn relay_buddy_reask_callback(
              (file {})",
             callback.file_hash
         );
+        true
     } else {
         trace!(
             "ed2k udp reask: OP_REASKCALLBACKUDP from {from} matched no held buddy socket \
              (buddy-id mismatch or no served buddy); dropping"
         );
+        false
     }
 }
 
