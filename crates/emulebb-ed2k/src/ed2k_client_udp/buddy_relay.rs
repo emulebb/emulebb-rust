@@ -35,6 +35,7 @@ use emulebb_kad_proto::Ed2kHash as KadEd2kHash;
 use super::codec::OP_REASKCALLBACKUDP;
 use super::outbound::{ClientUdpDatagram, build_reask_callback_udp_packet};
 use super::state::ReaskSource;
+use super::transport::{ClientUdpSendRole, send_client_udp_datagram};
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
@@ -181,7 +182,10 @@ pub(super) async fn answer_buddy_relayed_reask(
         .await
     {
         Some(reply) => {
-            if let Err(err) = dht.send_raw_datagram(dest, &reply.bytes).await {
+            if let Err(err) =
+                send_client_udp_datagram(dht, dest, ClientUdpSendRole::BuddyRelayReply, &reply)
+                    .await
+            {
                 trace!("ed2k udp reask: buddy-relayed reask answer to {dest} failed: {err}");
             } else {
                 super::dump::dump_client_udp_send(dest, &reply);
