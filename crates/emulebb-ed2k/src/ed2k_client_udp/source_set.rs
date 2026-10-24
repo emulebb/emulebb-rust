@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use emulebb_kad_proto::Ed2kHash;
 
 use super::buddy_relay::build_downloader_callback_origination;
-use super::outbound::{ClientUdpDatagram, OutboundReaskTarget, build_reask_file_ping_packet};
+use super::outbound::{OutboundReaskTarget, ReaskSend, build_reask_file_ping_packet};
 use super::registry::ReaskPendingRegistry;
 use super::state::{ReaskAction, ReaskReply, ReaskSource, apply_reask_reply};
 
@@ -52,14 +52,15 @@ impl ReaskSourceSet {
     }
 
     /// Build the outbound reask datagrams for every source that is due (and not
-    /// already awaiting a reply), marking each pending. Each entry is
-    /// `(destination, datagram)`: a HighID source gets a direct `OP_REASKFILEPING`
-    /// to its own endpoint; a firewalled LowID source whose Kad buddy is known gets
-    /// an `OP_REASKCALLBACKUDP` targeted at the **buddy** endpoint instead (oracle
-    /// `UDPReaskForDownload` LowID branch). LowID sources without a complete buddy
-    /// endpoint + id are skipped because MFC cannot route the callback request.
-    /// Either send path keys the pending gate on the **source** endpoint, since the
-    /// source itself answers (directly, or relayed back over UDP via its buddy).
+    /// already awaiting a reply), marking each pending. Each [`ReaskSend`]
+    /// retains both the source endpoint and actual destination: a HighID source
+    /// gets a direct `OP_REASKFILEPING` to its own endpoint; a firewalled LowID
+    /// source whose Kad buddy is known gets an `OP_REASKCALLBACKUDP` targeted at
+    /// the **buddy** endpoint instead (oracle `UDPReaskForDownload` LowID branch).
+    /// LowID sources without a complete buddy endpoint + id are skipped because
+    /// MFC cannot route the callback request. Either send path keys the pending
+    /// gate on the **source** endpoint, since the source itself answers (directly,
+    /// or relayed back over UDP via its buddy).
     /// UDP-disqualified sources (`fallback_tcp_only`) are skipped — the caller
     /// reasks those over TCP.
     pub(crate) fn due_datagrams(
@@ -68,7 +69,7 @@ impl ReaskSourceSet {
         our_part_status: Option<&[bool]>,
         complete_source_count: u16,
         our_public_ip: [u8; 4],
-    ) -> Vec<(SocketAddr, ClientUdpDatagram)> {
+    ) -> Vec<ReaskSend> {
         let mut out = Vec::new();
         for (ip, udp_port) in self.due(now) {
             let Some(source) = self.sources.get(&(ip, udp_port)) else {
@@ -79,11 +80,12 @@ impl ReaskSourceSet {
             }
             // LowID source with a known buddy: originate a buddy-relayed reask to
             // the buddy endpoint instead of a direct (unreachable) client-UDP ping.
-            let entry = if let Some((buddy_addr, datagram)) = build_downloader_callback_origination(
-                source,
-                our_part_status,
-                complete_source_count,
-            ) {
+            let (destination, datagram) = if let Some((buddy_addr, datagram)) =
+                build_downloader_callback_origination(
+                    source,
+                    our_part_status,
+                    complete_source_count,
+                ) {
                 (buddy_addr, datagram)
             } else if source.low_id {
                 // WHY: MFC only sends OP_REASKCALLBACKUDP for LowID sources when
@@ -112,7 +114,11 @@ impl ReaskSourceSet {
                 (SocketAddr::new(ip.into(), udp_port), datagram)
             };
             self.mark_reasked(ip, udp_port, now);
-            out.push(entry);
+            out.push(ReaskSend {
+                source_endpoint: (ip, udp_port),
+                destination,
+                datagram,
+            });
         }
         out
     }
@@ -338,7 +344,7 @@ mod tests {
             ));
             let datagrams = set.due_datagrams(now, Some(&part_status), 2, our_ip);
             assert_eq!(datagrams.len(), 1);
-            lens.push(datagrams[0].1.payload.len());
+            lens.push(datagrams[0].datagram.payload.len());
         }
         assert_eq!(lens[0], 16); // v2: hash only
         assert_eq!(lens[1], 16 + 2); // v3: + complete-source count
@@ -362,13 +368,14 @@ mod tests {
         assert_eq!(datagrams.len(), 1);
         // A HighID source's direct ping is destined to the source's own endpoint.
         assert_eq!(
-            datagrams[0].0,
+            datagrams[0].destination,
             SocketAddr::new(endpoint.0.into(), endpoint.1)
         );
+        assert_eq!(datagrams[0].source_endpoint, endpoint);
 
         // The built datagram is a valid OP_REASKFILEPING the peer (keying on its
         // own hash == peer_hash + our IP as the sender) can parse back.
-        let msg = parse_inbound_reask_datagram(&datagrams[0].1.bytes, our_ip, &peer_hash, 4)
+        let msg = parse_inbound_reask_datagram(&datagrams[0].datagram.bytes, our_ip, &peer_hash, 4)
             .expect("peer should parse our reask");
         match msg {
             InboundReaskMessage::FilePing(ping) => {
@@ -389,7 +396,7 @@ mod tests {
         let tcp_dest = SocketAddr::new(tcp_endpoint.0.into(), tcp_endpoint.1);
         let next = set.due_datagrams(now, None, 0, our_ip);
         assert!(
-            next.iter().all(|(dest, _)| *dest != tcp_dest),
+            next.iter().all(|send| send.destination != tcp_dest),
             "tcp-fallback source must not get a UDP reask datagram"
         );
     }
@@ -418,12 +425,13 @@ mod tests {
         assert_eq!(datagrams.len(), 1);
         // The reask is targeted at the BUDDY endpoint, not the (unreachable) source.
         assert_eq!(
-            datagrams[0].0,
+            datagrams[0].destination,
             SocketAddr::new(buddy_endpoint.0.into(), buddy_endpoint.1)
         );
+        assert_eq!(datagrams[0].source_endpoint, source_endpoint);
 
         // It is a plaintext OP_REASKCALLBACKUDP carrying [buddy_id][file_hash][tail].
-        let datagram = &datagrams[0].1;
+        let datagram = &datagrams[0].datagram;
         assert_eq!(datagram.bytes[0], 0xC5); // OP_EMULEPROT (never obfuscated)
         assert_eq!(datagram.bytes[1], OP_REASKCALLBACKUDP);
         assert_eq!(datagram.opcode, OP_REASKCALLBACKUDP);
@@ -458,9 +466,9 @@ mod tests {
         ));
         let next = set.due_datagrams(now, None, 0, our_ip);
         assert!(
-            next.iter().all(
-                |(dest, _)| *dest != SocketAddr::new(no_id_endpoint.0.into(), no_id_endpoint.1)
-            ),
+            next.iter().all(|send| {
+                send.destination != SocketAddr::new(no_id_endpoint.0.into(), no_id_endpoint.1)
+            }),
             "LowID source without a complete buddy target must not be direct-pinged"
         );
         assert!(

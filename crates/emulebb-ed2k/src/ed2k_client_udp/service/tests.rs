@@ -62,11 +62,13 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
         complete_source_count: 4,
     });
     assert_eq!(out.send.len(), 1);
-    let (dest, datagram) = &out.send[0];
+    let send = &out.send[0];
     assert_eq!(
-        *dest,
+        send.destination,
         SocketAddr::new(buddy_endpoint.0.into(), buddy_endpoint.1)
     );
+    assert_eq!(send.source_endpoint, source_endpoint);
+    let datagram = &send.datagram;
     assert_eq!(datagram.bytes[0], 0xC5);
     assert_eq!(datagram.bytes[1], OP_REASKCALLBACKUDP);
     assert_eq!(datagram.opcode, OP_REASKCALLBACKUDP);
@@ -87,7 +89,8 @@ fn tick_emits_due_ping_then_routes_the_ack() {
         complete_source_count: 1,
     });
     assert_eq!(out.send.len(), 1);
-    assert_eq!(out.send[0].0, peer_addr());
+    assert_eq!(out.send[0].destination, peer_addr());
+    assert_eq!(out.send[0].source_endpoint, peer_v4());
 
     let ack = build_reask_ack_datagram(
         None,

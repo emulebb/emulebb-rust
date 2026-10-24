@@ -16,10 +16,10 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::Ed2kHash;
 
-use super::ClientUdpDatagram;
 use super::dispatch::{
     InboundReaskMessage, InboundReaskParseError, classify_inbound_reask_datagram,
 };
+use super::outbound::ReaskSend;
 use super::source_set::ReaskSourceSet;
 use super::state::{ReaskAction, ReaskReply, ReaskSource};
 use crate::reachability::ExternalReachability;
@@ -103,8 +103,9 @@ impl ReaskIgnoredReason {
 /// reask timed out (for TCP-fallback reasks the caller drives separately).
 #[derive(Debug, Default)]
 pub(crate) struct ReaskTickOutput {
-    /// `(destination, datagram)` reask pings to send via the shared socket.
-    pub send: Vec<(SocketAddr, ClientUdpDatagram)>,
+    /// Reask pings to send via the shared socket, retaining the logical source
+    /// endpoint separately from the actual wire destination.
+    pub send: Vec<ReaskSend>,
     /// Endpoints whose UDP reask timed out and the resulting action
     /// (`RetryUdp`/`RetryTcp`).
     pub timed_out: Vec<(SocketAddr, ReaskAction)>,
@@ -353,13 +354,13 @@ impl ReaskService {
                 continue;
             }
             let info = info_for(&file_hash);
-            for (dest, datagram) in set.due_datagrams(
+            for send in set.due_datagrams(
                 now,
                 info.part_status.as_deref(),
                 info.complete_source_count,
                 self.public_ip.octets(),
             ) {
-                out.send.push((dest, datagram));
+                out.send.push(send);
             }
         }
         out

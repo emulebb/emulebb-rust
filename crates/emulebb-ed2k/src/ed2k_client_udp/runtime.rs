@@ -795,7 +795,9 @@ async fn drive_reask_tick(
             admit: Some(&admit_udp),
         },
     );
-    for (addr, datagram) in out.send {
+    for send in out.send {
+        let addr = send.destination;
+        let datagram = send.datagram;
         let role = if datagram.opcode == super::codec::OP_REASKCALLBACKUDP {
             ClientUdpSendRole::BuddyRelayRequest
         } else {

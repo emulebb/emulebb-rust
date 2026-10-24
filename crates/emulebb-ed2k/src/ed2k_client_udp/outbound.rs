@@ -6,6 +6,8 @@
 //! transport-free; the per-transfer ticker / reciprocity path does the actual
 //! socket send. `docs/design/udp-source-reask.md` §4.2-§4.5.
 
+use std::net::{Ipv4Addr, SocketAddr};
+
 use emulebb_kad_proto::Ed2kHash;
 
 use super::codec::{
@@ -28,6 +30,16 @@ pub(crate) struct ClientUdpDatagram {
     pub opcode: u8,
     pub payload: Vec<u8>,
     pub obfuscated: bool,
+}
+
+/// One scheduled downloader reask send. `source_endpoint` identifies the peer
+/// whose reply gate the send belongs to; `destination` is the actual wire
+/// target and can instead be that source's Kad buddy for a LowID relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReaskSend {
+    pub source_endpoint: (Ipv4Addr, u16),
+    pub destination: SocketAddr,
+    pub datagram: ClientUdpDatagram,
 }
 
 /// Where to send and whether to obfuscate. eMule obfuscates client UDP toward a
