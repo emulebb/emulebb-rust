@@ -24,6 +24,7 @@ use emulebb_core::{
 };
 use tokio::sync::broadcast;
 
+use crate::diagnostic_bundle::{DIAGNOSTIC_BUNDLE_SCHEMA, capture as capture_bundle};
 use crate::handlers::{logs::recent_log_values, prelude::*};
 use crate::without_score_breakdown;
 
@@ -143,12 +144,24 @@ pub(crate) async fn capture_diagnostic_dump(
         )
         .into_response();
     }
-    match state
-        .core
-        .capture_diagnostic_dump(request.full_memory)
-        .await
-    {
-        Ok(result) => api_ok(result).into_response(),
+    match capture_bundle(&state, request.full_memory).await {
+        Ok(bundle) => match state.core.write_diagnostic_dump(&bundle.payload) {
+            Ok(dump) => api_ok(emulebb_core::DiagnosticDumpResult {
+                ok: true,
+                path: dump.path.display().to_string(),
+                full_memory: request.full_memory,
+                full_memory_included: false,
+                schema: DIAGNOSTIC_BUNDLE_SCHEMA.to_string(),
+                byte_count: dump.byte_count,
+                artifact_file_count: bundle.artifact_file_count,
+                missing_artifact_families: bundle.missing_artifact_families,
+                issue_count: bundle.issue_count,
+            })
+            .into_response(),
+            Err(error) => {
+                api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+            }
+        },
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }

@@ -50,6 +50,12 @@ impl EmulebbCore {
             ok: true,
             path: dump.path.display().to_string(),
             full_memory,
+            full_memory_included: false,
+            schema: "emulebb.legacy-diagnostic-dump.v1".to_string(),
+            byte_count: dump.byte_count,
+            artifact_file_count: 0,
+            missing_artifact_families: Vec::new(),
+            issue_count: 0,
         })
     }
 

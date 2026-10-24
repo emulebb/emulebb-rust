@@ -32,6 +32,12 @@ pub struct DiagnosticDumpResult {
     pub ok: bool,
     pub path: String,
     pub full_memory: bool,
+    pub full_memory_included: bool,
+    pub schema: String,
+    pub byte_count: u64,
+    pub artifact_file_count: u64,
+    pub missing_artifact_families: Vec<String>,
+    pub issue_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

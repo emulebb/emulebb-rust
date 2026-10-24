@@ -13,11 +13,13 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+chrono.workspace = true
 emulebb-core = { path = "../emulebb-core" }
 futures-util.workspace = true
 percent-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 serde_urlencoded.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 tower.workspace = true
