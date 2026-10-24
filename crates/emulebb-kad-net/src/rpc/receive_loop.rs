@@ -38,6 +38,21 @@ impl RpcManager {
                         // obfuscated packet (or one proving a key) is exempt.
                         if from.port() == 53 && !was_obfuscated && sender_verify_key.is_none() {
                             debug!("kad recv drop reason=sender_port_53 from={from}");
+                            dump_kad_udp_packet(
+                                "recv",
+                                from,
+                                &data,
+                                &plain,
+                                inbound_dump_summary(
+                                    &plain,
+                                    plain.get(1).copied(),
+                                    was_obfuscated,
+                                    sender_verify_key,
+                                    receiver_verify_key_valid,
+                                    Some("sender_port_53"),
+                                    None,
+                                ),
+                            );
                             continue;
                         }
 
@@ -60,30 +75,15 @@ impl RpcManager {
                                     from,
                                     &data,
                                     &plain,
-                                    KadUdpDumpSummary {
-                                        protocol: plain.first().copied().unwrap_or_default(),
-                                        opcode: plain.get(1).copied(),
-                                        // Name the heuristic opcode byte too (known name
-                                        // or the "UNKNOWN" marker) so decode-failed diag
-                                        // records stay self-sufficient for opcode-coverage
-                                        // crediting, matching the decoded-packet records.
-                                        opcode_name: plain.get(1).map(|&op| opcode_name(op)),
-                                        raw_obfuscated: was_obfuscated,
-                                        transport_mode: Some(inbound_transport_mode(
-                                            was_obfuscated,
-                                            receiver_verify_key_valid,
-                                        )),
-                                        requested_obfuscation: None,
-                                        receiver_verify_key: None,
+                                    inbound_dump_summary(
+                                        &plain,
+                                        plain.get(1).copied(),
+                                        was_obfuscated,
                                         sender_verify_key,
-                                        receiver_verify_key_valid: Some(receiver_verify_key_valid),
-                                        tracked_request_opcode: None,
-                                        drop_reason: Some("decode_failed"),
-                                        tracker_bucket: None,
-                                        tracker_action: None,
-                                        tracker_observed_packets: None,
-                                        tracker_max_packets: None,
-                                    },
+                                        receiver_verify_key_valid,
+                                        Some("decode_failed"),
+                                        Some(e.to_string()),
+                                    ),
                                 );
                                 trace!(
                                     from = %from,
@@ -102,6 +102,21 @@ impl RpcManager {
                         // packets after the operator pressed Stop.
                         if !inner.kad_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                             debug!("kad recv drop reason=kad_stopped from={from}");
+                            dump_kad_udp_packet(
+                                "recv",
+                                from,
+                                &data,
+                                &plain,
+                                inbound_dump_summary(
+                                    &plain,
+                                    Some(packet.opcode()),
+                                    was_obfuscated,
+                                    sender_verify_key,
+                                    receiver_verify_key_valid,
+                                    Some("kad_stopped"),
+                                    None,
+                                ),
+                            );
                             continue;
                         }
 
@@ -163,17 +178,23 @@ impl RpcManager {
                                 from.ip(),
                                 opcode_name(response_opcode),
                             );
-                            // WHY: the ban verdict is already emitted once as a
-                            // high-severity anti_flood_ban when the limiter trips
-                            // (the MassiveDrop branch below). A flood-banned IP keeps
-                            // sending, so re-emitting a high-severity event for every
-                            // dropped packet spammed the diagnostics (hundreds/min for
-                            // a single IP) and inflated the high-severity count.
-                            // Subsequent drops are still counted via
-                            // record_tracker_action above and debug-logged; stock
-                            // eMule likewise drops silently once an IP is banned, so
-                            // suppressing the per-packet event keeps diagnostics at
-                            // parity (uniform-diagnostics-v2 §3.4).
+                            let mut dump_summary = inbound_dump_summary(
+                                &plain,
+                                Some(response_opcode),
+                                was_obfuscated,
+                                sender_verify_key,
+                                receiver_verify_key_valid,
+                                Some("tracker_banned"),
+                                None,
+                            );
+                            dump_summary.tracker_bucket = Some(
+                                inbound
+                                    .tracker_bucket
+                                    .unwrap_or(PacketTrackerBucket::Default)
+                                    .label(),
+                            );
+                            dump_summary.tracker_action = Some("banned_drop");
+                            dump_kad_udp_packet("recv", from, &data, &plain, dump_summary);
                             continue;
                         }
 
@@ -215,6 +236,7 @@ impl RpcManager {
                                         receiver_verify_key_valid: Some(receiver_verify_key_valid),
                                         tracked_request_opcode: None,
                                         drop_reason,
+                                        detail: None,
                                         tracker_bucket: Some(bucket.label()),
                                         tracker_action: Some(decision.action.label()),
                                         tracker_observed_packets: Some(decision.observed_packets),
@@ -339,6 +361,7 @@ impl RpcManager {
                             receiver_verify_key_valid: Some(receiver_verify_key_valid),
                             tracked_request_opcode: dump_request_opcode.map(opcode_name),
                             drop_reason: None,
+                            detail: None,
                             tracker_bucket: inbound.tracker_bucket.map(PacketTrackerBucket::label),
                             tracker_action: inbound.tracker_bucket.map(|_| "allow"),
                             tracker_observed_packets: None,
@@ -446,6 +469,38 @@ impl RpcManager {
     }
 }
 
+fn inbound_dump_summary(
+    plain: &[u8],
+    opcode: Option<u8>,
+    was_obfuscated: bool,
+    sender_verify_key: Option<u32>,
+    receiver_verify_key_valid: bool,
+    drop_reason: Option<&'static str>,
+    detail: Option<String>,
+) -> KadUdpDumpSummary {
+    KadUdpDumpSummary {
+        protocol: plain.first().copied().unwrap_or_default(),
+        opcode,
+        opcode_name: opcode.map(opcode_name),
+        raw_obfuscated: was_obfuscated,
+        transport_mode: Some(inbound_transport_mode(
+            was_obfuscated,
+            receiver_verify_key_valid,
+        )),
+        requested_obfuscation: None,
+        receiver_verify_key: None,
+        sender_verify_key,
+        receiver_verify_key_valid: Some(receiver_verify_key_valid),
+        tracked_request_opcode: None,
+        drop_reason,
+        detail,
+        tracker_bucket: None,
+        tracker_action: None,
+        tracker_observed_packets: None,
+        tracker_max_packets: None,
+    }
+}
+
 /// Whether `ip` is a LAN/local address exempt from the public-network anti-flood
 /// guard (loopback, RFC1918 private, link-local, or unspecified). On a single
 /// host all local Kad nodes share one loopback IP, so per-IP throttling/banning
@@ -462,7 +517,7 @@ fn is_lan_ip(ip: std::net::IpAddr) -> bool {
 
 #[cfg(test)]
 mod lan_exempt_tests {
-    use super::is_lan_ip;
+    use super::{inbound_dump_summary, is_lan_ip};
     use std::net::IpAddr;
 
     #[test]
@@ -473,5 +528,26 @@ mod lan_exempt_tests {
         assert!(is_lan_ip("169.254.1.1".parse::<IpAddr>().unwrap()));
         assert!(!is_lan_ip("8.8.8.8".parse::<IpAddr>().unwrap()));
         assert!(!is_lan_ip("45.82.80.155".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn dropped_summary_keeps_exact_decode_context() {
+        let summary = inbound_dump_summary(
+            &[0xE4, 0x21, 0xAA],
+            Some(0x21),
+            true,
+            Some(123),
+            true,
+            Some("decode_failed"),
+            Some("exact codec error".to_string()),
+        );
+
+        assert_eq!(summary.protocol, 0xE4);
+        assert_eq!(summary.opcode, Some(0x21));
+        assert_eq!(summary.opcode_name, Some("KADEMLIA2_REQ"));
+        assert!(summary.raw_obfuscated);
+        assert_eq!(summary.sender_verify_key, Some(123));
+        assert_eq!(summary.drop_reason, Some("decode_failed"));
+        assert_eq!(summary.detail.as_deref(), Some("exact codec error"));
     }
 }

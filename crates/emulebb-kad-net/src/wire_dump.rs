@@ -60,6 +60,8 @@ pub struct KadUdpDumpSummary {
     pub tracked_request_opcode: Option<&'static str>,
     /// Stable drop reason recorded at the receive boundary, when the packet was not accepted.
     pub drop_reason: Option<&'static str>,
+    /// Exact local diagnostic detail for decode or policy failures.
+    pub detail: Option<String>,
     /// Oracle-shaped tracker bucket label, when one applied.
     pub tracker_bucket: Option<&'static str>,
     /// Oracle-shaped tracker action label, when a tracked inbound request was classified.
@@ -106,6 +108,9 @@ impl KadUdpDumpSummary {
         }
         if let Some(drop_reason) = self.drop_reason {
             parts.push(format!("drop_reason={drop_reason}"));
+        }
+        if let Some(detail) = self.detail.as_deref() {
+            parts.push(format!("detail={detail}"));
         }
         if let Some(tracker_bucket) = self.tracker_bucket {
             parts.push(format!("tracker_bucket={tracker_bucket}"));
@@ -170,6 +175,8 @@ struct UdpDumpRecord {
     tracked_request_opcode: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     drop_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tracker_bucket: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,6 +256,7 @@ pub fn dump_kad_udp_packet(
         receiver_verify_key_valid: summary.receiver_verify_key_valid,
         tracked_request_opcode: summary.tracked_request_opcode,
         drop_reason: summary.drop_reason,
+        detail: summary.detail.clone(),
         tracker_bucket: summary.tracker_bucket,
         tracker_action: summary.tracker_action,
         tracker_observed_packets: summary.tracker_observed_packets,
@@ -398,6 +406,9 @@ fn kad_udp_diag_event_parts(
     }
     if let Some(drop_reason) = summary.drop_reason {
         body.insert("dropReason".to_string(), serde_json::json!(drop_reason));
+    }
+    if let Some(detail) = summary.detail.as_deref() {
+        body.insert("detail".to_string(), serde_json::json!(detail));
     }
     if let Some(tracker_bucket) = summary.tracker_bucket {
         body.insert(
@@ -564,6 +575,7 @@ mod tests {
             receiver_verify_key_valid: Some(true),
             tracked_request_opcode: Some("KADEMLIA2_HELLO_REQ"),
             drop_reason: Some("tracker_drop"),
+            detail: Some("exact failure".to_string()),
             tracker_bucket: Some("hello_req"),
             tracker_action: Some("drop"),
             tracker_observed_packets: Some(4),
@@ -572,7 +584,7 @@ mod tests {
 
         assert_eq!(
             summary.summary_string(),
-            "protocol=0xE4 opcode=0x21 opcode_name=KADEMLIA2_HELLO_REQ raw_obfuscated=yes transport_mode=receiver_verify_key requested_obfuscation=yes receiver_verify_key=123 sender_verify_key=456 receiver_verify_key_valid=yes tracked_request_opcode=KADEMLIA2_HELLO_REQ drop_reason=tracker_drop tracker_bucket=hello_req tracker_action=drop tracker_observed_packets=4 tracker_max_packets=3"
+            "protocol=0xE4 opcode=0x21 opcode_name=KADEMLIA2_HELLO_REQ raw_obfuscated=yes transport_mode=receiver_verify_key requested_obfuscation=yes receiver_verify_key=123 sender_verify_key=456 receiver_verify_key_valid=yes tracked_request_opcode=KADEMLIA2_HELLO_REQ drop_reason=tracker_drop detail=exact failure tracker_bucket=hello_req tracker_action=drop tracker_observed_packets=4 tracker_max_packets=3"
         );
     }
 
