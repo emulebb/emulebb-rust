@@ -102,6 +102,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod app_api;
+pub use app_api::DiagnosticDumpFile;
 mod callback_tracker;
 mod categories;
 mod category_api;
