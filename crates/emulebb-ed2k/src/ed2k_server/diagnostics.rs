@@ -370,21 +370,28 @@ fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
 
 #[cfg(feature = "packet-diagnostics")]
 fn emit_ed2k_server_diag_event(record: &Ed2kServerDumpRecord<'_>) {
-    let (family, keys, body) = ed2k_server_diag_event_parts(record);
-    let severity = if record.outcome == "dropped" {
-        "warn"
-    } else {
-        "info"
-    };
-    crate::diag_event::emit(family, "packet", severity, keys, body);
+    let (family, event, severity, keys, body) = ed2k_server_diag_event_parts(record);
+    crate::diag_event::emit(family, event, severity, keys, body);
 }
 
 #[cfg(any(feature = "packet-diagnostics", test))]
-fn ed2k_server_diag_event_parts(record: &Ed2kServerDumpRecord<'_>) -> (&'static str, Value, Value) {
+fn ed2k_server_diag_event_parts(
+    record: &Ed2kServerDumpRecord<'_>,
+) -> (&'static str, &'static str, &'static str, Value, Value) {
     let family = if record.role == "udp" {
         "ed2k_server_udp"
     } else {
         "ed2k_tcp"
+    };
+    let event = if record.direction == "meta" {
+        "state"
+    } else {
+        "packet"
+    };
+    let severity = if matches!(record.outcome, "dropped" | "send_failed") {
+        "warning"
+    } else {
+        "info"
     };
 
     let mut keys = Map::new();
@@ -440,11 +447,20 @@ fn ed2k_server_diag_event_parts(record: &Ed2kServerDumpRecord<'_>) -> (&'static 
     body.insert("phase".to_string(), json!(record.phase));
     body.insert("role".to_string(), json!(record.role));
     body.insert("traceId".to_string(), json!(record.trace_id));
+    body.insert("traceKey".to_string(), json!(record.trace_key));
+    body.insert("stateId".to_string(), json!(record.state_id));
+    body.insert("stateLabel".to_string(), json!(record.state_label));
     if let Some(note) = record.note.as_deref() {
         body.insert("note".to_string(), json!(note));
     }
 
-    (family, Value::Object(keys), Value::Object(body))
+    (
+        family,
+        event,
+        severity,
+        Value::Object(keys),
+        Value::Object(body),
+    )
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -552,10 +568,15 @@ mod tests {
             note: None,
         };
 
-        let (family, keys, body) = ed2k_server_diag_event_parts(&record);
+        let (family, event, severity, keys, body) = ed2k_server_diag_event_parts(&record);
         assert_eq!(family, "ed2k_tcp");
+        assert_eq!(event, "packet");
+        assert_eq!(severity, "info");
         assert_eq!(keys["peer"], "198.51.100.1:4661");
         assert_eq!(body["outcome"], "accepted");
+        assert_eq!(body["traceKey"], "server:background:7:198.51.100.1:4661");
+        assert_eq!(body["stateId"], "server.background.connected");
+        assert_eq!(body["stateLabel"], "connected");
         assert_eq!(body["obfuscated"], false);
         assert_eq!(body["rawLen"], raw.len());
         assert_eq!(body["rawHex"].as_str().unwrap().len(), raw.len() * 2);
@@ -605,8 +626,10 @@ mod tests {
             note: None,
         };
 
-        let (family, _, body) = ed2k_server_diag_event_parts(&record);
+        let (family, event, severity, _, body) = ed2k_server_diag_event_parts(&record);
         assert_eq!(family, "ed2k_server_udp");
+        assert_eq!(event, "packet");
+        assert_eq!(severity, "info");
         assert_eq!(body["obfuscated"], true);
     }
 
@@ -643,12 +666,57 @@ mod tests {
             note: Some("decode failed".to_string()),
         };
 
-        let (family, _, body) = ed2k_server_diag_event_parts(&record);
+        let (family, event, severity, _, body) = ed2k_server_diag_event_parts(&record);
         assert_eq!(family, "ed2k_server_udp");
+        assert_eq!(event, "packet");
+        assert_eq!(severity, "warning");
         assert_eq!(body["outcome"], "dropped");
         assert_eq!(body["rawHex"], "1234abcd");
         assert!(body.get("clearFrameHex").is_none());
         assert!(body.get("payloadHex").is_none());
+    }
+
+    #[test]
+    fn server_meta_record_is_a_state_event_with_correlation() {
+        let record = Ed2kServerDumpRecord {
+            schema: "ed2k_packet_v1",
+            source: "emulebb-rust",
+            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
+            event_seq: 1,
+            trace_id: 11,
+            trace_key: "server:background:11:198.51.100.3:4661".to_string(),
+            state_id: "server.background.connected".to_string(),
+            state_label: "connected",
+            role: "background",
+            flow: "server",
+            phase: "connected",
+            direction: "meta",
+            outcome: "meta",
+            remote_addr: "198.51.100.3:4661".to_string(),
+            transport_mode: "plaintext",
+            obfuscated: Some(false),
+            protocol: None,
+            protocol_marker: None,
+            opcode: None,
+            opcode_name: None,
+            raw_len: None,
+            raw_hex: None,
+            clear_frame_len: None,
+            clear_frame_hex: None,
+            payload_len: None,
+            payload_hex: None,
+            payload_hex_truncated: None,
+            note: Some("connected".to_string()),
+        };
+
+        let (family, event, severity, _, body) = ed2k_server_diag_event_parts(&record);
+        assert_eq!(family, "ed2k_tcp");
+        assert_eq!(event, "state");
+        assert_eq!(severity, "info");
+        assert_eq!(body["traceId"], 11);
+        assert_eq!(body["traceKey"], "server:background:11:198.51.100.3:4661");
+        assert_eq!(body["stateId"], "server.background.connected");
+        assert_eq!(body["stateLabel"], "connected");
     }
 
     #[test]
