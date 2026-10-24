@@ -69,6 +69,8 @@ impl EmulebbCore {
                 // Explicit POST rejection (duplicate / queue full) — the
                 // allocated id is simply skipped, never inserted.
                 crate::diag_sched::keyword_search_queue(
+                    &search_id,
+                    &request.query,
                     "rejected",
                     &request.method,
                     Some(match error {
@@ -81,6 +83,8 @@ impl EmulebbCore {
             }
             spawn_drain = queue.claim_drain_task();
             crate::diag_sched::keyword_search_queue(
+                &search_id,
+                &request.query,
                 "queued",
                 &request.method,
                 Some(lane.waiting_reason()),
