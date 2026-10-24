@@ -43,6 +43,18 @@ impl OutboundRequestTracker {
         });
     }
 
+    /// Remove the newest matching request after a transport send failure.
+    pub fn remove_latest(&mut self, ip: IpAddr, opcode: u8) {
+        self.prune();
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.ip == ip && entry.opcode == opcode)
+        {
+            let _ = self.entries.remove(index);
+        }
+    }
+
     /// Find a matching tracked request by IP and opcode.
     ///
     /// When `remove` is true the newest matching request is consumed, mirroring
@@ -150,6 +162,20 @@ mod tests {
         tracker.record(ip, emulebb_kad_proto::constants::opcode::PUBLISH_RES);
 
         assert!(!tracker.contains(ip, emulebb_kad_proto::constants::opcode::PUBLISH_RES, false));
+    }
+
+    #[test]
+    fn failed_send_removes_only_the_newest_matching_request() {
+        let mut tracker = OutboundRequestTracker::new(Duration::from_secs(180));
+        let ip = parse_ip("1.2.3.4");
+        let opcode = emulebb_kad_proto::constants::opcode::PUBLISH_KEY_REQ;
+
+        tracker.record(ip, opcode);
+        tracker.record(ip, opcode);
+        tracker.remove_latest(ip, opcode);
+
+        assert!(tracker.contains(ip, opcode, true));
+        assert!(!tracker.contains(ip, opcode, false));
     }
 
     #[test]

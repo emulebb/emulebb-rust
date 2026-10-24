@@ -12,7 +12,7 @@ use super::{ReceivedKadPacket, RpcManager};
 use crate::error::NetError;
 use crate::obfuscation::DecryptResult;
 use crate::tracker::{PacketTrackerAction, PacketTrackerBucket, PacketTrackerKey};
-use crate::wire_dump::{KadUdpDumpSummary, dump_kad_udp_packet};
+use crate::wire_dump::{KadUdpDumpSummary, KadUdpOutcome, dump_kad_udp_packet};
 
 impl RpcManager {
     /// Start the background receive loop. Returns the JoinHandle.
@@ -222,7 +222,7 @@ impl RpcManager {
                                     &data,
                                     &plain,
                                     KadUdpDumpSummary {
-                                        protocol: plain.first().copied().unwrap_or_default(),
+                                        protocol: plain.first().copied(),
                                         opcode: Some(response_opcode),
                                         opcode_name: Some(opcode_name(response_opcode)),
                                         raw_obfuscated: was_obfuscated,
@@ -237,6 +237,7 @@ impl RpcManager {
                                         tracked_request_opcode: None,
                                         drop_reason,
                                         detail: None,
+                                        outcome: KadUdpOutcome::Dropped,
                                         tracker_bucket: Some(bucket.label()),
                                         tracker_action: Some(decision.action.label()),
                                         tracker_observed_packets: Some(decision.observed_packets),
@@ -347,7 +348,7 @@ impl RpcManager {
                             .or(tracked_request_opcode);
 
                         let mut dump_summary = KadUdpDumpSummary {
-                            protocol: plain.first().copied().unwrap_or_default(),
+                            protocol: plain.first().copied(),
                             opcode: Some(response_opcode),
                             opcode_name: Some(opcode_name(response_opcode)),
                             raw_obfuscated: was_obfuscated,
@@ -362,6 +363,7 @@ impl RpcManager {
                             tracked_request_opcode: dump_request_opcode.map(opcode_name),
                             drop_reason: None,
                             detail: None,
+                            outcome: KadUdpOutcome::Accepted,
                             tracker_bucket: inbound.tracker_bucket.map(PacketTrackerBucket::label),
                             tracker_action: inbound.tracker_bucket.map(|_| "allow"),
                             tracker_observed_packets: None,
@@ -479,7 +481,7 @@ fn inbound_dump_summary(
     detail: Option<String>,
 ) -> KadUdpDumpSummary {
     KadUdpDumpSummary {
-        protocol: plain.first().copied().unwrap_or_default(),
+        protocol: plain.first().copied(),
         opcode,
         opcode_name: opcode.map(opcode_name),
         raw_obfuscated: was_obfuscated,
@@ -494,6 +496,11 @@ fn inbound_dump_summary(
         tracked_request_opcode: None,
         drop_reason,
         detail,
+        outcome: if drop_reason.is_some() {
+            KadUdpOutcome::Dropped
+        } else {
+            KadUdpOutcome::Accepted
+        },
         tracker_bucket: None,
         tracker_action: None,
         tracker_observed_packets: None,
@@ -542,7 +549,7 @@ mod lan_exempt_tests {
             Some("exact codec error".to_string()),
         );
 
-        assert_eq!(summary.protocol, 0xE4);
+        assert_eq!(summary.protocol, Some(0xE4));
         assert_eq!(summary.opcode, Some(0x21));
         assert_eq!(summary.opcode_name, Some("KADEMLIA2_REQ"));
         assert!(summary.raw_obfuscated);
