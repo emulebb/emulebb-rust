@@ -11,10 +11,10 @@ description = "ED2K transfer runtime extracted for emulebb-rust"
 workspace = true
 
 [features]
-# Compile-time gate for the ed2k_packet_v1 packet dump (the Cargo equivalent of
+# Compile-time gate for exact protocol diagnostics (the Cargo equivalent of
 # eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS #ifdef). Off by default so release
-# builds compile the dump out entirely; enable for diagnostic/live-wire builds.
-# When enabled, the dump is still runtime-gated by the EMULEBB_RUST_LOG_DIR env var.
+# builds compile capture out entirely; enable for diagnostic/live-wire builds.
+# When enabled, emission is still runtime-gated by the EMULEBB_RUST_LOG_DIR env var.
 packet-diagnostics = [
     "emulebb-diagnostics/enabled",
     "emulebb-kad-dht/packet-diagnostics",
