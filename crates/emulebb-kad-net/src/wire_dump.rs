@@ -12,6 +12,7 @@ pub enum KadUdpOutcome {
     SendRejected,
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 impl KadUdpOutcome {
     fn as_str(self) -> &'static str {
         match self {
@@ -67,10 +68,12 @@ pub struct KadUdpDumpSummary {
     pub tracker_max_packets: Option<u32>,
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 fn udp_trace_key(peer: SocketAddr) -> String {
     format!("kad:{}", peer)
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 fn udp_state_label(summary: &KadUdpDumpSummary) -> String {
     summary
         .opcode_name
@@ -78,6 +81,7 @@ fn udp_state_label(summary: &KadUdpDumpSummary) -> String {
         .unwrap_or_else(|| "packet".to_string())
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 fn udp_state_id(direction: &str, summary: &KadUdpDumpSummary) -> String {
     format!(
         "kad.{}.{}",
@@ -262,6 +266,7 @@ fn kad_udp_diag_event_parts(
     )
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 fn encode_hex_upper(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));
