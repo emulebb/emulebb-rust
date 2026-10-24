@@ -287,6 +287,7 @@ pub fn dump_kad_udp_packet(
 ) {
 }
 
+#[cfg(feature = "packet-diagnostics")]
 fn emit_kad_udp_diag_event(
     direction: &'static str,
     peer: SocketAddr,
@@ -294,20 +295,19 @@ fn emit_kad_udp_diag_event(
     decoded_payload: &[u8],
     summary: &KadUdpDumpSummary,
 ) {
-    // Boundary parity with the MFC oracle's Kad recv hook, which sits AFTER the
-    // per-bucket anti-flood gate (`InTrackListIsAllowedPacket`): a flood-dropped
-    // packet never reaches MFC's kad_udp dump. So the converged `kad_udp/packet`
-    // stream carries only packets that passed the flood gate, keeping send/recv
-    // counts comparable. The flood drops are still fully represented — in the rich
-    // `udp_packet_v1` dump above (with `drop_reason`) and in the `bad_peer`
-    // anti_flood_drop/ban family. Non-flood drops (`decode_failed`,
-    // `unrequested_response`) occur post-gate, so MFC dumps them too and they stay.
-    if matches!(
-        summary.drop_reason,
-        Some("tracker_drop") | Some("tracker_massive_drop")
-    ) {
-        return;
-    }
+    let (severity, keys, body) =
+        kad_udp_diag_event_parts(direction, peer, wire_payload, decoded_payload, summary);
+    crate::diag_event::emit("kad_udp", "packet", severity, keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn kad_udp_diag_event_parts(
+    direction: &'static str,
+    peer: SocketAddr,
+    wire_payload: &[u8],
+    decoded_payload: &[u8],
+    summary: &KadUdpDumpSummary,
+) -> (&'static str, serde_json::Value, serde_json::Value) {
     let severity = if summary.drop_reason.is_some() {
         "low"
     } else {
@@ -325,6 +325,14 @@ fn emit_kad_udp_diag_event(
 
     let mut body = serde_json::Map::new();
     body.insert("direction".to_string(), serde_json::json!(direction));
+    body.insert(
+        "outcome".to_string(),
+        serde_json::json!(if summary.drop_reason.is_some() {
+            "dropped"
+        } else {
+            "accepted"
+        }),
+    );
     body.insert(
         "protocolMarker".to_string(),
         serde_json::json!(summary.protocol),
@@ -391,14 +399,36 @@ fn emit_kad_udp_diag_event(
     if let Some(drop_reason) = summary.drop_reason {
         body.insert("dropReason".to_string(), serde_json::json!(drop_reason));
     }
+    if let Some(tracker_bucket) = summary.tracker_bucket {
+        body.insert(
+            "trackerBucket".to_string(),
+            serde_json::json!(tracker_bucket),
+        );
+    }
+    if let Some(tracker_action) = summary.tracker_action {
+        body.insert(
+            "trackerAction".to_string(),
+            serde_json::json!(tracker_action),
+        );
+    }
+    if let Some(observed_packets) = summary.tracker_observed_packets {
+        body.insert(
+            "trackerObservedPackets".to_string(),
+            serde_json::json!(observed_packets),
+        );
+    }
+    if let Some(max_packets) = summary.tracker_max_packets {
+        body.insert(
+            "trackerMaxPackets".to_string(),
+            serde_json::json!(max_packets),
+        );
+    }
 
-    crate::diag_event::emit(
-        "kad_udp",
-        "packet",
+    (
         severity,
         serde_json::Value::Object(keys),
         serde_json::Value::Object(body),
-    );
+    )
 }
 
 fn udp_dump_writer() -> Option<&'static UdpDumpWriter> {
@@ -503,8 +533,9 @@ fn yes_no(value: bool) -> &'static str {
 mod tests {
     use super::{
         DEFAULT_WORKSPACE_TMP_DIR_NAME, DUMP_FILE_PREFIX, EMULEBB_RUST_LOG_DIR_ENV,
-        EMULEBB_RUST_TMP_DIR_ENV, KadUdpDumpSummary, encode_hex_upper,
+        EMULEBB_RUST_TMP_DIR_ENV, KadUdpDumpSummary, encode_hex_upper, kad_udp_diag_event_parts,
     };
+    use std::net::SocketAddr;
 
     #[test]
     fn encode_hex_upper_matches_oracle_style() {
@@ -543,6 +574,37 @@ mod tests {
             summary.summary_string(),
             "protocol=0xE4 opcode=0x21 opcode_name=KADEMLIA2_HELLO_REQ raw_obfuscated=yes transport_mode=receiver_verify_key requested_obfuscation=yes receiver_verify_key=123 sender_verify_key=456 receiver_verify_key_valid=yes tracked_request_opcode=KADEMLIA2_HELLO_REQ drop_reason=tracker_drop tracker_bucket=hello_req tracker_action=drop tracker_observed_packets=4 tracker_max_packets=3"
         );
+    }
+
+    #[test]
+    fn common_event_keeps_exact_tracker_drop_evidence() {
+        let summary = KadUdpDumpSummary {
+            protocol: 0xE4,
+            opcode: Some(0x21),
+            opcode_name: Some("KADEMLIA2_HELLO_REQ"),
+            raw_obfuscated: true,
+            transport_mode: Some("receiver_verify_key"),
+            drop_reason: Some("tracker_drop"),
+            tracker_bucket: Some("hello_req"),
+            tracker_action: Some("drop"),
+            tracker_observed_packets: Some(4),
+            tracker_max_packets: Some(3),
+            ..KadUdpDumpSummary::default()
+        };
+        let peer: SocketAddr = "198.51.100.1:4672".parse().unwrap();
+        let (severity, keys, body) =
+            kad_udp_diag_event_parts("recv", peer, &[0xAA, 0xBB], &[0xE4, 0x21], &summary);
+
+        assert_eq!(severity, "low");
+        assert_eq!(keys["peer"], peer.to_string());
+        assert_eq!(body["outcome"], "dropped");
+        assert_eq!(body["dropReason"], "tracker_drop");
+        assert_eq!(body["wireHex"], "AABB");
+        assert_eq!(body["decodedHex"], "E421");
+        assert_eq!(body["trackerBucket"], "hello_req");
+        assert_eq!(body["trackerAction"], "drop");
+        assert_eq!(body["trackerObservedPackets"], 4);
+        assert_eq!(body["trackerMaxPackets"], 3);
     }
 
     #[test]
