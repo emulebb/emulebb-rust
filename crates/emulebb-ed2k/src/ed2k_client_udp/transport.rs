@@ -36,8 +36,8 @@ impl ClientUdpSendRole {
     pub(super) const fn state_label(self) -> &'static str {
         match self {
             Self::ReaskRequest | Self::ReciprocityReply => "reask",
-            Self::BuddyRelayRequest | Self::BuddyRelayReply => "buddy relay",
-            Self::DirectCallbackRequest => "direct callback",
+            Self::BuddyRelayRequest | Self::BuddyRelayReply => "buddy_relay",
+            Self::DirectCallbackRequest => "direct_callback",
         }
     }
 
