@@ -175,16 +175,18 @@ pub(super) fn dump_client_udp_recv(
     let payload_hex = decoded
         .as_ref()
         .map(|decoded| exact_packet_hex(&decoded.payload));
+    let diagnostic_state =
+        client_udp_diagnostic_state(decoded.as_ref().map(|decoded| decoded.opcode));
     dump_client_udp_record(&ClientUdpDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
         ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         event_seq: next_client_udp_dump_event_seq(),
         trace_key: client_udp_trace_key(remote_addr),
-        state_id: "client_udp.reask",
-        state_label: "reask",
+        state_id: diagnostic_state.state_id,
+        state_label: diagnostic_state.state_label,
         flow: "client_udp",
-        phase: "reask",
+        phase: diagnostic_state.phase,
         direction: "recv",
         outcome: outcome.as_str(),
         send_attempt_id: None,
@@ -220,6 +222,13 @@ struct DecodedClientUdpDatagram {
     opcode: u8,
     payload: Vec<u8>,
     transport_mode: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClientUdpDiagnosticState {
+    state_id: &'static str,
+    state_label: &'static str,
+    phase: &'static str,
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -261,6 +270,41 @@ fn client_udp_opcode_name(opcode: u8) -> &'static str {
         OP_DIRECTCALLBACKREQ => "OP_DIRECTCALLBACKREQ",
         OP_PORTTEST => "OP_PORTTEST",
         _ => "UNKNOWN",
+    }
+}
+
+fn client_udp_diagnostic_state(opcode: Option<u8>) -> ClientUdpDiagnosticState {
+    match opcode {
+        Some(OP_REASKFILEPING) => ClientUdpDiagnosticState {
+            state_id: "client_udp.reask",
+            state_label: "reask",
+            phase: "reask_request",
+        },
+        Some(OP_REASKACK | OP_FILENOTFOUND | OP_QUEUEFULL) => ClientUdpDiagnosticState {
+            state_id: "client_udp.reask",
+            state_label: "reask",
+            phase: "reask_reply",
+        },
+        Some(OP_REASKCALLBACKUDP) => ClientUdpDiagnosticState {
+            state_id: "client_udp.buddy_relay",
+            state_label: "buddy_relay",
+            phase: "buddy_relay_request",
+        },
+        Some(OP_DIRECTCALLBACKREQ) => ClientUdpDiagnosticState {
+            state_id: "client_udp.direct_callback",
+            state_label: "direct_callback",
+            phase: "direct_callback_request",
+        },
+        Some(OP_PORTTEST) => ClientUdpDiagnosticState {
+            state_id: "client_udp.port_test",
+            state_label: "port_test",
+            phase: "port_test",
+        },
+        Some(_) | None => ClientUdpDiagnosticState {
+            state_id: "client_udp.unknown",
+            state_label: "unknown",
+            phase: "unknown",
+        },
     }
 }
 
@@ -513,8 +557,8 @@ mod tests {
     use super::{
         CLIENT_UDP_DUMP_FILE_PREFIX, ClientUdpDumpOutcome, ClientUdpDumpRecord,
         OP_DIRECTCALLBACKREQ, OP_PORTTEST, OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING,
-        client_udp_diag_event_parts, client_udp_opcode_name, client_udp_send_outcome_parts,
-        exact_packet_hex,
+        client_udp_diag_event_parts, client_udp_diagnostic_state, client_udp_opcode_name,
+        client_udp_send_outcome_parts, exact_packet_hex,
     };
     use crate::ed2k_client_udp::outbound::{
         ClientUdpDatagram, OutboundReaskTarget, build_reask_file_ping_datagram,
@@ -552,6 +596,33 @@ mod tests {
         );
         assert_eq!(client_udp_opcode_name(OP_PORTTEST), "OP_PORTTEST");
         assert_eq!(client_udp_opcode_name(0xFF), "UNKNOWN");
+    }
+
+    #[test]
+    fn client_udp_receive_state_tracks_opcode_role() {
+        let reask = client_udp_diagnostic_state(Some(OP_REASKFILEPING));
+        assert_eq!(reask.state_id, "client_udp.reask");
+        assert_eq!(reask.phase, "reask_request");
+
+        let reply = client_udp_diagnostic_state(Some(OP_REASKACK));
+        assert_eq!(reply.state_id, "client_udp.reask");
+        assert_eq!(reply.phase, "reask_reply");
+
+        let buddy = client_udp_diagnostic_state(Some(OP_REASKCALLBACKUDP));
+        assert_eq!(buddy.state_id, "client_udp.buddy_relay");
+        assert_eq!(buddy.phase, "buddy_relay_request");
+
+        let callback = client_udp_diagnostic_state(Some(OP_DIRECTCALLBACKREQ));
+        assert_eq!(callback.state_id, "client_udp.direct_callback");
+        assert_eq!(callback.phase, "direct_callback_request");
+
+        let port_test = client_udp_diagnostic_state(Some(OP_PORTTEST));
+        assert_eq!(port_test.state_id, "client_udp.port_test");
+        assert_eq!(port_test.phase, "port_test");
+
+        let unknown = client_udp_diagnostic_state(Some(0x01));
+        assert_eq!(unknown.state_id, "client_udp.unknown");
+        assert_eq!(unknown.phase, "unknown");
     }
 
     #[test]
