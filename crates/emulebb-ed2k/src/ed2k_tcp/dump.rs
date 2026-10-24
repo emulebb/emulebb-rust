@@ -73,20 +73,8 @@ pub(super) struct Ed2kTcpDumpRecord<'a> {
     pub(super) note: Option<String>,
 }
 
-/// Cap on hex-encoded bytes emitted per packet, matching the eMuleBB diagnostic
-/// build (`kMaxPacketDiagnosticsPayloadHexBytes` = 4 KiB) so the two clients'
-/// packet dumps stay byte-for-byte comparable.
-const MAX_PACKET_DUMP_HEX_BYTES: usize = 4 * 1024;
-
-/// Hex-encode up to `MAX_PACKET_DUMP_HEX_BYTES` bytes, returning the hex string
-/// and whether the source was truncated (matching eMuleBB's `payload_hex` +
-/// `payload_hex_truncated`).
-fn capped_packet_hex(bytes: &[u8]) -> (String, bool) {
-    if bytes.len() > MAX_PACKET_DUMP_HEX_BYTES {
-        (hex::encode(&bytes[..MAX_PACKET_DUMP_HEX_BYTES]), true)
-    } else {
-        (hex::encode(bytes), false)
-    }
+fn exact_packet_hex(bytes: &[u8]) -> String {
+    hex::encode(bytes)
 }
 
 fn ed2k_tcp_dump_event_seq() -> u64 {
@@ -429,14 +417,8 @@ fn dump_ed2k_tcp_send(
         None
     };
     let canonical_phase = canonical_ed2k_send_phase(flow, phase, protocol, opcode);
-    let (raw_hex, _) = capped_packet_hex(bytes);
-    let (payload_hex, payload_hex_truncated) = match payload {
-        Some(payload) => {
-            let (hex, truncated) = capped_packet_hex(payload);
-            (Some(hex), Some(truncated))
-        }
-        None => (None, None),
-    };
+    let raw_hex = exact_packet_hex(bytes);
+    let payload_hex = payload.map(exact_packet_hex);
     let record = Ed2kTcpDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -458,7 +440,7 @@ fn dump_ed2k_tcp_send(
         raw_hex: Some(raw_hex),
         payload_len: payload.map(<[u8]>::len),
         payload_hex,
-        payload_hex_truncated,
+        payload_hex_truncated: payload.map(|_| false),
         note: None,
     };
     dump_ed2k_tcp_record(&record);
@@ -476,12 +458,12 @@ fn dump_ed2k_tcp_recv(
         return;
     }
     let canonical_phase = canonical_ed2k_recv_phase(flow, phase, packet.protocol, packet.opcode);
-    let (raw_hex, _) = capped_packet_hex(&encode_packet(
+    let raw_hex = exact_packet_hex(&encode_packet(
         packet.protocol,
         packet.opcode,
         &packet.payload,
     ));
-    let (payload_hex, payload_hex_truncated) = capped_packet_hex(&packet.payload);
+    let payload_hex = exact_packet_hex(&packet.payload);
     let record = Ed2kTcpDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -503,7 +485,7 @@ fn dump_ed2k_tcp_recv(
         raw_hex: Some(raw_hex),
         payload_len: Some(packet.payload.len()),
         payload_hex: Some(payload_hex),
-        payload_hex_truncated: Some(payload_hex_truncated),
+        payload_hex_truncated: Some(false),
         note: None,
     };
     dump_ed2k_tcp_record(&record);
@@ -664,11 +646,22 @@ pub(super) fn dump_ed2k_tcp_download_recv(
 
 #[cfg(test)]
 mod tests {
-    use super::{ED2K_TCP_DUMP_FILE_PREFIX, OP_EMULEPROT, OP_SIGNATURE, canonical_ed2k_send_phase};
+    use super::{
+        ED2K_TCP_DUMP_FILE_PREFIX, OP_EMULEPROT, OP_SIGNATURE, canonical_ed2k_send_phase,
+        exact_packet_hex,
+    };
 
     #[test]
     fn tcp_dump_prefix_uses_emulebb_rust_name() {
         assert_eq!(ED2K_TCP_DUMP_FILE_PREFIX, "emulebb-rust-ed2k-tcp-dump-");
+    }
+
+    #[test]
+    fn packet_hex_preserves_payloads_larger_than_the_former_cap() {
+        let payload = vec![0xAB; 4 * 1024 + 1];
+        let encoded = exact_packet_hex(&payload);
+        assert_eq!(encoded.len(), payload.len() * 2);
+        assert!(encoded.ends_with("ab"));
     }
 
     // Regression guard: an early dump access before EMULEBB_RUST_LOG_DIR is

@@ -38,9 +38,6 @@ const ED2K_SERVER_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-server-dump-";
 /// eD2k server protocol marker (OP_EDONKEYPROT) — server packets ride the eD2k
 /// protocol byte unless the server advertised packed payload support.
 const OP_EDONKEYPROT_MARKER: u8 = 0xE3;
-/// Payload hex cap, matching the client dump + eMuleBB diagnostic build.
-const MAX_SERVER_DUMP_HEX_BYTES: usize = 4 * 1024;
-
 /// One server-flow packet in the converged `ed2k_packet_v1` shape (flow="server"),
 /// so client<->server traces diff 1:1 against eMuleBB's server-packet emitter.
 /// Carries server-session extras (role/trace_id) the diff harness ignores.
@@ -182,12 +179,7 @@ pub(super) fn dump_ed2k_server_udp_packet(
         "rx" => "recv",
         other => other,
     };
-    let truncated = payload.len() > MAX_SERVER_DUMP_HEX_BYTES;
-    let payload_hex = if truncated {
-        hex::encode(&payload[..MAX_SERVER_DUMP_HEX_BYTES])
-    } else {
-        hex::encode(payload)
-    };
+    let payload_hex = exact_packet_hex(payload);
     let base_endpoint = server.base_endpoint();
     let record = Ed2kServerDumpRecord {
         schema: "ed2k_packet_v1",
@@ -210,7 +202,7 @@ pub(super) fn dump_ed2k_server_udp_packet(
         opcode_name: Some(server_opcode_name(opcode)),
         payload_len: Some(payload.len()),
         payload_hex: Some(payload_hex),
-        payload_hex_truncated: Some(truncated),
+        payload_hex_truncated: Some(false),
         note: None,
     };
     dump_ed2k_server_record(&record);
@@ -231,12 +223,7 @@ pub(super) fn dump_ed2k_server_packet(
         "rx" => "recv",
         other => other,
     };
-    let truncated = payload.len() > MAX_SERVER_DUMP_HEX_BYTES;
-    let payload_hex = if truncated {
-        hex::encode(&payload[..MAX_SERVER_DUMP_HEX_BYTES])
-    } else {
-        hex::encode(payload)
-    };
+    let payload_hex = exact_packet_hex(payload);
     let record = Ed2kServerDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -262,7 +249,7 @@ pub(super) fn dump_ed2k_server_packet(
         opcode_name: Some(server_opcode_name(opcode)),
         payload_len: Some(payload.len()),
         payload_hex: Some(payload_hex),
-        payload_hex_truncated: Some(truncated),
+        payload_hex_truncated: Some(false),
         note: None,
     };
     dump_ed2k_server_record(&record);
@@ -274,6 +261,10 @@ fn server_protocol_name(protocol_marker: u8) -> &'static str {
         OP_PACKEDPROT => "packed",
         _ => "unknown",
     }
+}
+
+fn exact_packet_hex(bytes: &[u8]) -> String {
+    hex::encode(bytes)
 }
 
 fn next_ed2k_server_dump_event_seq() -> u64 {
@@ -398,7 +389,8 @@ mod tests {
         ED2K_SERVER_DUMP_FILE_PREFIX, OP_CALLBACKREQUEST, OP_EDONKEYPROT_MARKER,
         OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2,
         OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_PACKEDPROT, OP_SERVER_LIST_REQ,
-        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, server_opcode_name, server_protocol_name,
+        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, exact_packet_hex, server_opcode_name,
+        server_protocol_name,
     };
 
     #[test]
@@ -407,6 +399,14 @@ mod tests {
             ED2K_SERVER_DUMP_FILE_PREFIX,
             "emulebb-rust-ed2k-server-dump-"
         );
+    }
+
+    #[test]
+    fn server_packet_hex_preserves_payloads_larger_than_the_former_cap() {
+        let payload = vec![0xCD; 4 * 1024 + 1];
+        let encoded = exact_packet_hex(&payload);
+        assert_eq!(encoded.len(), payload.len() * 2);
+        assert!(encoded.ends_with("cd"));
     }
 
     #[test]
