@@ -11,8 +11,8 @@ use crate::ed2k_tcp::{
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_SIGNATURE_NEEDED,
     Ed2kSecureIdent, Ed2kTransport, OP_EMULEPROT, OP_PUBLICKEY, begin_secure_ident_probe,
     decode_public_key_payload, decode_secident_state, decode_signature_payload,
-    dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_send, encode_packet,
-    try_send_secure_ident_signature, verify_peer_secure_ident_signature,
+    dump_ed2k_tcp_download_meta, encode_packet, try_send_secure_ident_signature,
+    verify_peer_secure_ident_signature,
 };
 
 use crate::ed2k_transfer::Ed2kTransferRuntime;
@@ -41,9 +41,8 @@ pub(super) async fn handle_secident_state(
             OP_PUBLICKEY,
             &secure_ident.public_key_payload()?,
         );
-        dump_ed2k_tcp_download_send(peer_addr, transport.mode, "public_key", &public_key);
         transport
-            .write_all(&public_key)
+            .write_all_diagnostic("native_download", peer_addr, "public_key", &public_key)
             .await
             .with_context(|| format!("failed to send OP_PUBLICKEY to {peer_addr}"))?;
     }
@@ -59,14 +58,13 @@ pub(super) async fn handle_secident_state(
         && !session_state.peer_secure_ident.requested_peer_key
     {
         let secure_ident_probe = begin_secure_ident_probe(&mut session_state.peer_secure_ident);
-        dump_ed2k_tcp_download_send(
-            peer_addr,
-            transport.mode,
-            "secure_ident_probe",
-            &secure_ident_probe,
-        );
         transport
-            .write_all(&secure_ident_probe)
+            .write_all_diagnostic(
+                "native_download",
+                peer_addr,
+                "secure_ident_probe",
+                &secure_ident_probe,
+            )
             .await
             .with_context(|| format!("failed to send fallback OP_SECIDENTSTATE to {peer_addr}"))?;
         session_state.secure_ident_started = true;
