@@ -11,7 +11,7 @@ description = "Kad2 network layer — UDP transport, RPC manager, obfuscation"
 workspace = true
 
 [features]
-# Compile-time gate for Kad packet dumps and diag_event_v1 diagnostics. Runtime
+# Compile-time gate for Kad packet dumps and diag_event_v2 diagnostics. Runtime
 # EMULEBB_RUST_LOG_DIR only selects the output directory after this feature is
 # enabled by the diagnostics binary/build.
 packet-diagnostics = ["emulebb-diagnostics/enabled"]

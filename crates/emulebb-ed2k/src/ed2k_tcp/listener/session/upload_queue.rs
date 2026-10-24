@@ -41,7 +41,7 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     // was-granted peer from a never-granted one for the close-reason funnel, since
     // `granted_sent` is now reset on a demote-back-to-queue.
     ever_granted: bool,
-    // Stable peer identity for the `sched` diag_event_v1 emits, captured from the
+    // Stable peer identity for the `sched` diag_event_v2 emits, captured from the
     // advertised upload peer identity (so slot events align with the upload-queue
     // session key, not the ephemeral socket source port).
     diag_peer: Option<String>,

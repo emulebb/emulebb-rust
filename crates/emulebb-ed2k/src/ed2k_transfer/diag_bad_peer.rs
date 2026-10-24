@@ -1,4 +1,4 @@
-//! `family:"bad_peer"` `diag_event_v1` emitters for the inbound upload path and
+//! `family:"bad_peer"` `diag_event_v2` emitters for the inbound upload path and
 //! the outbound download path (first-payload timeout).
 //!
 //! Mirrors the eMuleBB (MFC) `BadPeerDiagnosticsSeams` bad-peer events so the

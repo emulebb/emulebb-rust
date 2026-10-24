@@ -130,7 +130,7 @@ pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnaps
 
 /// Outcome of a global connection-budget acquisition attempt, carrying the
 /// occupancy + binding cap so the caller can emit the `conn_budget`
-/// `diag_event_v1` event (uniform-diagnostics-v2 schema §3.5).
+/// `diag_event_v2` event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ed2kConnectionBudgetDecision {
     /// Whether a budget slot was granted (`outcome` admit vs deny).

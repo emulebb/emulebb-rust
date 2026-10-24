@@ -1,4 +1,4 @@
-//! `family:"sched"` `diag_event_v1` emitters for the inbound upload queue
+//! `family:"sched"` `diag_event_v2` emitters for the inbound upload queue
 //! (uniform-diagnostics-v2, lane D2). These mirror the download-side sched
 //! emitters in `emulebb-core` (`diag_sched.rs`) for the upload scheduling
 //! surface the eMuleBB master exposes via `LogUploadSlotDiagnostics`
