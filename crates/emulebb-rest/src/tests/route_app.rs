@@ -97,13 +97,31 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["ok"], true);
     assert_eq!(value["data"]["fullMemory"], false);
+    assert_eq!(value["data"]["fullMemoryIncluded"], false);
+    assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v1");
     let path = value["data"]["path"].as_str().unwrap();
     assert!(std::path::Path::new(path).is_file());
-    let keys = value["data"].as_object().unwrap();
-    assert_eq!(keys.len(), 3);
-    assert!(keys.contains_key("ok"));
-    assert!(keys.contains_key("path"));
-    assert!(keys.contains_key("fullMemory"));
+    assert!(value["data"]["byteCount"].as_u64().unwrap() > 0);
+    assert_eq!(value["data"]["artifactFileCount"], 0);
+    assert_eq!(
+        value["data"]["missingArtifactFamilies"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+
+    let bundle: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v1");
+    assert_eq!(bundle["memory"]["requested"], false);
+    assert_eq!(bundle["memory"]["included"], false);
+    assert_eq!(bundle["settingsProvenance"]["apiKeyIncluded"], false);
+    assert!(bundle["status"].is_object());
+    assert!(bundle["runtimeDiagnostics"].is_object());
+    assert!(bundle["settings"].is_object());
+    assert!(bundle["recentLogs"].is_array());
+    assert!(bundle["diagnosticArtifacts"]["families"].is_array());
+    assert!(!serde_json::to_string(&bundle).unwrap().contains("secret"));
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@ use tokio::sync::watch;
 mod log_buffer;
 pub use log_buffer::record_log;
 
+mod diagnostic_bundle;
 mod dto;
 mod envelope;
 mod handlers;
