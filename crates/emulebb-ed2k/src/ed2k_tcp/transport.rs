@@ -316,6 +316,57 @@ impl Ed2kTransport {
         Ok(())
     }
 
+    #[cfg(feature = "packet-diagnostics")]
+    pub(super) async fn write_all_diagnostic(
+        &mut self,
+        flow: &'static str,
+        remote_addr: SocketAddr,
+        phase: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let obfuscated = self.send_cipher.is_some();
+        if let Some(cipher) = self.send_cipher.as_mut() {
+            self.write_buf.clear();
+            self.write_buf.extend_from_slice(bytes);
+            cipher.apply(&mut self.write_buf);
+        }
+        let wire_bytes = if obfuscated {
+            self.write_buf.as_slice()
+        } else {
+            bytes
+        };
+        let (written_len, result) = write_with_progress(&mut self.stream, wire_bytes).await;
+        let outcome = if result.is_ok() {
+            "send_succeeded"
+        } else {
+            "send_failed"
+        };
+        let detail = result.as_ref().err().map(ToString::to_string);
+        super::dump::dump_ed2k_tcp_send_capture(
+            flow,
+            remote_addr,
+            self.mode,
+            phase,
+            bytes,
+            &wire_bytes[..written_len],
+            wire_bytes.len(),
+            outcome,
+            detail,
+        );
+        result.map_err(Into::into)
+    }
+
+    #[cfg(not(feature = "packet-diagnostics"))]
+    pub(super) async fn write_all_diagnostic(
+        &mut self,
+        _flow: &'static str,
+        _remote_addr: SocketAddr,
+        _phase: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.write_all(bytes).await
+    }
+
     /// Pull the next chunk off the socket into the (fully consumed) read
     /// buffer, decrypting it in place. Returns the byte count; 0 means EOF.
     ///
@@ -447,6 +498,27 @@ impl Ed2kTransport {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "packet-diagnostics")]
+async fn write_with_progress(stream: &mut TcpStream, bytes: &[u8]) -> (usize, io::Result<()>) {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        match stream.write(&bytes[written..]).await {
+            Ok(0) => {
+                return (
+                    written,
+                    Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write complete eD2k frame",
+                    )),
+                );
+            }
+            Ok(count) => written += count,
+            Err(error) => return (written, Err(error)),
+        }
+    }
+    (written, Ok(()))
 }
 
 #[cfg(test)]
@@ -593,6 +665,36 @@ mod tests {
         );
         assert_eq!(capture.raw, expected);
         assert_eq!(capture.clear_frame, expected);
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    #[tokio::test]
+    async fn diagnostic_send_writes_exact_obfuscated_frame() {
+        use super::super::derive_obfuscation_key;
+        use tokio::io::AsyncReadExt as _;
+
+        let (mut transport, mut server) = transport_with_prefetched(Vec::new()).await;
+        let user_hash = [0x51; 16];
+        let random_key_part = [0x61, 0x62, 0x63, 0x64];
+        let mut expected_cipher = derive_obfuscation_key(user_hash, 0x12, random_key_part);
+        transport.send_cipher = Some(derive_obfuscation_key(user_hash, 0x12, random_key_part));
+        transport.mode = Ed2kTransportMode::Obfuscated;
+
+        let mut clear_frame = header(OP_EDONKEYPROT, 4, OP_HELLO);
+        clear_frame.extend_from_slice(&[0xCA, 0xFE, 0x01]);
+        let mut expected_raw = clear_frame.clone();
+        expected_cipher.apply(&mut expected_raw);
+        let remote_addr = server.local_addr().unwrap();
+
+        transport
+            .write_all_diagnostic("test", remote_addr, "send", &clear_frame)
+            .await
+            .unwrap();
+        let mut actual_raw = vec![0u8; expected_raw.len()];
+        server.read_exact(&mut actual_raw).await.unwrap();
+
+        assert_eq!(actual_raw, expected_raw);
+        assert_ne!(actual_raw, clear_frame);
     }
 
     #[tokio::test]

@@ -61,6 +61,12 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
     if let Some(clear_frame_hex) = record.clear_frame_hex.as_deref() {
         body.insert("clearFrameHex".to_string(), json!(clear_frame_hex));
     }
+    if let Some(attempted_len) = record.attempted_len {
+        body.insert("attemptedLen".to_string(), json!(attempted_len));
+    }
+    if let Some(written_len) = record.written_len {
+        body.insert("writtenLen".to_string(), json!(written_len));
+    }
     if let Some(payload_len) = record.payload_len {
         body.insert("payloadLen".to_string(), json!(payload_len));
     }
@@ -80,7 +86,7 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
         body.insert("note".to_string(), json!(note));
     }
 
-    let severity = if record.outcome == "dropped" {
+    let severity = if matches!(record.outcome, "dropped" | "send_failed") {
         "warning"
     } else {
         "info"
