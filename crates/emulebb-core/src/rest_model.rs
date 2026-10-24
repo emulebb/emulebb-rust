@@ -1281,6 +1281,8 @@ pub struct IpFilterStatus {
     pub path: Option<String>,
     pub level: u32,
     pub range_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_sha256: Option<String>,
 }
 
 impl TransferEvent {

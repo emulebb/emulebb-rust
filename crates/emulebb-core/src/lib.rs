@@ -877,6 +877,7 @@ impl EmulebbCore {
                     path,
                     level: network.ip_filter_level,
                     range_count: network.ip_filter.len(),
+                    loaded_sha256: network.ip_filter.source_sha256(),
                 }
             }
             None => IpFilterStatus {
@@ -885,6 +886,7 @@ impl EmulebbCore {
                 path: None,
                 level: emulebb_ed2k::ipfilter::DEFAULT_FILTER_LEVEL,
                 range_count: 0,
+                loaded_sha256: None,
             },
         }
     }

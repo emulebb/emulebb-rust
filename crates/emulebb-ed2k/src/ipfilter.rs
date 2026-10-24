@@ -10,6 +10,7 @@
 use std::{net::Ipv4Addr, sync::Arc};
 
 use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 
 /// eMule default level for ranges parsed without an explicit level token.
 pub const DEFAULT_RANGE_LEVEL: u32 = 100;
@@ -31,6 +32,7 @@ struct IpRange {
 struct IpFilterInner {
     ranges: Vec<IpRange>,
     filter_level: u32,
+    source_sha256: Option<String>,
 }
 
 /// A loaded, sorted set of filtered IPv4 ranges.
@@ -73,6 +75,12 @@ impl IpFilter {
         self.inner.read().ranges.is_empty()
     }
 
+    /// SHA-256 of the exact UTF-8 bytes used for the currently loaded filter.
+    #[must_use]
+    pub fn source_sha256(&self) -> Option<String> {
+        self.inner.read().source_sha256.clone()
+    }
+
     /// Whether `ip` is filtered: it is contained in a range whose level is below
     /// the configured filter level. An empty filter never filters.
     #[must_use]
@@ -102,6 +110,7 @@ fn parse_inner(body: &str, filter_level: u32) -> IpFilterInner {
     IpFilterInner {
         ranges,
         filter_level,
+        source_sha256: Some(hex::encode(Sha256::digest(body.as_bytes()))),
     }
 }
 
@@ -215,6 +224,10 @@ mod tests {
         assert!(!captured.is_filtered(Ipv4Addr::new(1, 2, 3, 4)));
         assert!(captured.is_filtered(Ipv4Addr::new(9, 9, 9, 9)));
         assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured.source_sha256().as_deref(),
+            Some("902eaff0cf61fee392a3ebf7edf3cfff4597a3fad3aedd2c1f4f856ad89f255d")
+        );
     }
 
     #[test]
@@ -222,5 +235,9 @@ mod tests {
         let filter = IpFilter::parse("", DEFAULT_FILTER_LEVEL);
         assert!(filter.is_empty());
         assert!(!filter.is_filtered(Ipv4Addr::new(1, 1, 1, 1)));
+        assert_eq!(
+            filter.source_sha256().as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
     }
 }
