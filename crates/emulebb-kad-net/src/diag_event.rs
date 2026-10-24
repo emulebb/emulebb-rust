@@ -1,78 +1,9 @@
-//! `diag_event_v1` unified diagnostic event writer (uniform-diagnostics-v2, lane
-//! D2) — `emulebb-kad-net` twin of the `emulebb-ed2k` shim.
-//!
-//! `emulebb-kad-net` does not depend on `emulebb-ed2k` (and must not, to avoid a
-//! dependency cycle), so it carries its own copy of the identical `diag_event_v1`
-//! JSONL format. Every shim in one process writes to the SAME file
-//! `emulebb-rust-diag-<pid>.jsonl` in append mode. This module owns the single
-//! process-wide writer; the ed2k+core shim submits its encoded records through
-//! [`append_record_line`] so independent file handles cannot split/interleave a
-//! buffered write on DrvFS. See `crates/emulebb-ed2k/src/diag_event.rs` for the
-//! full layering rationale.
-//!
-//! Gating (schema §5): compiled only with the `packet-diagnostics` Cargo feature,
-//! then runtime-gated by `EMULEBB_RUST_LOG_DIR` for output placement. Regular
-//! builds compile the emitters to no-ops, so the environment variable alone
-//! cannot enable diagnostics.
+//! Shared diagnostic-event facade plus Kad-specific typed helpers.
 
-#![cfg_attr(
-    not(feature = "packet-diagnostics"),
-    expect(
-        dead_code,
-        reason = "packet-diagnostic event machinery is inert without its feature"
-    )
-)]
-
-use std::env;
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::{
-    Mutex, OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
-
-#[cfg(feature = "packet-diagnostics")]
-use chrono::SecondsFormat;
-use serde::Serialize;
 use serde_json::Value;
-use tracing::warn;
 
-const EMULEBB_RUST_LOG_DIR_ENV: &str = "EMULEBB_RUST_LOG_DIR";
-const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
+pub use emulebb_diagnostics::DiagWriterHealth;
 
-static DIAG_EVENT_WRITER: OnceLock<Option<DiagEventWriter>> = OnceLock::new();
-
-#[derive(Debug)]
-struct DiagEventWriter {
-    path: PathBuf,
-    writer: Mutex<File>,
-}
-
-/// One `diag_event_v1` envelope (schema §2). `keys` / `body` are arbitrary JSON
-/// objects supplied by the call site.
-#[derive(Debug, Serialize)]
-struct DiagEventRecord {
-    schema: &'static str,
-    client: &'static str,
-    ts: String,
-    seq: u64,
-    family: &'static str,
-    event: &'static str,
-    severity: &'static str,
-    keys: Value,
-    body: Value,
-}
-
-fn next_seq() -> u64 {
-    static NEXT_SEQ: AtomicU64 = AtomicU64::new(1);
-    NEXT_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Append one `diag_event_v1` record. Compiled to a no-op without
-/// `packet-diagnostics`; otherwise still no-ops when `EMULEBB_RUST_LOG_DIR` is
-/// unset.
-#[cfg(feature = "packet-diagnostics")]
 pub fn emit(
     family: &'static str,
     event: &'static str,
@@ -80,82 +11,13 @@ pub fn emit(
     keys: Value,
     body: Value,
 ) {
-    let record = DiagEventRecord {
-        schema: "diag_event_v1",
-        client: "rust",
-        ts: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        seq: next_seq(),
-        family,
-        event,
-        severity,
-        keys,
-        body,
-    };
-    let Some(line) = encode_record_line(&record) else {
-        warn!("failed to encode diag_event line");
-        return;
-    };
-    let _ = append_record_line(&line);
+    let _ = emulebb_diagnostics::emit(family, event, severity, keys, body);
 }
 
-/// Appends one already-encoded JSONL record through the only process-wide file
-/// handle. `emulebb-ed2k` uses this entrypoint as well as the Kad emitter so no
-/// second append handle can race a record write on DrvFS.
-#[cfg(feature = "packet-diagnostics")]
-pub fn append_record_line(line: &[u8]) -> bool {
-    // WHY: independent append handles first produced a tail-only JSONL fragment
-    // under sustained WSL/DrvFS diagnostics. A shared BufWriter then reproduced
-    // the failure exactly at an internal buffer split: the prefix disappeared but
-    // the record suffix and later records survived. Keep one handle and issue one
-    // complete encoded line through it while holding the process-wide lock.
-    let Some(writer) = diag_event_writer() else {
-        return false;
-    };
-    append_record_line_to(writer, line)
+pub fn writer_health() -> DiagWriterHealth {
+    emulebb_diagnostics::writer_health()
 }
 
-fn append_record_line_to(writer: &DiagEventWriter, line: &[u8]) -> bool {
-    let Ok(mut guard) = writer.writer.lock() else {
-        warn!("failed to lock diag_event writer");
-        return false;
-    };
-    if guard.write_all(line).is_err() {
-        warn!(
-            "failed to write diag_event line to {}",
-            writer.path.display()
-        );
-        return false;
-    }
-    true
-}
-
-#[cfg(not(feature = "packet-diagnostics"))]
-pub fn append_record_line(_line: &[u8]) -> bool {
-    true
-}
-
-#[cfg(not(feature = "packet-diagnostics"))]
-pub fn emit(
-    _family: &'static str,
-    _event: &'static str,
-    _severity: &'static str,
-    _keys: Value,
-    _body: Value,
-) {
-}
-
-fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
-    let mut line = serde_json::to_vec(record).ok()?;
-    line.push(b'\n');
-    Some(line)
-}
-
-/// `family:"kad_event"` `bootstrap` milestone `bootstrap_contact_added`
-/// (uniform-diagnostics-v2 §3.3): a contact was added to the routing table from a
-/// bootstrap response. `peer` is the contact's `ip:port` (Kad UDP endpoint).
-/// Typed wrapper so `emulebb-kad-dht` need not depend on `serde_json` directly.
-/// Compiled to a no-op without `packet-diagnostics`; otherwise still no-ops when
-/// `EMULEBB_RUST_LOG_DIR` is unset.
 #[cfg(feature = "packet-diagnostics")]
 pub fn kad_event_bootstrap_contact_added(peer: std::net::SocketAddr) {
     emit(
@@ -170,17 +32,6 @@ pub fn kad_event_bootstrap_contact_added(peer: std::net::SocketAddr) {
 #[cfg(not(feature = "packet-diagnostics"))]
 pub fn kad_event_bootstrap_contact_added(_peer: std::net::SocketAddr) {}
 
-/// `family:"bad_peer"` abuse event (uniform-diagnostics-v2 §3.4): a Kad UDP peer
-/// was dropped or banned by the public-network anti-flood guard. `behavior` is
-/// the abuse classification (e.g. `anti_flood_ban`, `anti_flood_drop`), `reason`
-/// the shared canonical anti-flood cause string (`request-token-deficit`) that
-/// the MFC oracle also emits; the machine action (`drop`/`massive_drop`) is
-/// carried separately in the body `action` field.
-/// `repeat_count` is the observed packet count in the tracker window;
-/// `window_seconds` the window. Only `peer` is known at the Kad UDP layer, so
-/// `peerHash`/`fileHash`/`searchId` are omitted (not faked). Compiled to a no-op
-/// without `packet-diagnostics`; otherwise still no-ops when
-/// `EMULEBB_RUST_LOG_DIR` is unset.
 #[cfg(feature = "packet-diagnostics")]
 pub fn bad_peer_kad_drop(
     event: &'static str,
@@ -218,6 +69,7 @@ pub fn bad_peer_kad_drop(
 ) {
 }
 
+#[cfg(any(feature = "packet-diagnostics", test))]
 fn bad_peer_action_for_behavior(behavior: &str) -> &'static str {
     if behavior == "anti_flood_ban" {
         "ban"
@@ -226,172 +78,11 @@ fn bad_peer_action_for_behavior(behavior: &str) -> &'static str {
     }
 }
 
-fn diag_event_writer() -> Option<&'static DiagEventWriter> {
-    DIAG_EVENT_WRITER
-        .get_or_init(init_diag_event_writer)
-        .as_ref()
-}
-
-fn init_diag_event_writer() -> Option<DiagEventWriter> {
-    let dir = read_env_path(EMULEBB_RUST_LOG_DIR_ENV)?;
-    if let Err(error) = fs::create_dir_all(&dir) {
-        warn!(
-            "failed to create diag_event directory {}: {}",
-            dir.display(),
-            error
-        );
-        return None;
-    }
-    let path = dir.join(format!(
-        "{DIAG_EVENT_FILE_PREFIX}{}.jsonl",
-        std::process::id()
-    ));
-    let file = match fs::OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => file,
-        Err(error) => {
-            warn!(
-                "failed to open diag_event file {}: {}",
-                path.display(),
-                error
-            );
-            return None;
-        }
-    };
-    Some(DiagEventWriter {
-        path,
-        writer: Mutex::new(file),
-    })
-}
-
-fn read_env_path(name: &str) -> Option<PathBuf> {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        DIAG_EVENT_FILE_PREFIX, DiagEventRecord, bad_peer_action_for_behavior, bad_peer_kad_drop,
-        encode_record_line, kad_event_bootstrap_contact_added,
+        bad_peer_action_for_behavior, bad_peer_kad_drop, kad_event_bootstrap_contact_added,
     };
-    use serde_json::json;
-
-    #[test]
-    fn diag_event_file_prefix_uses_emulebb_rust_name() {
-        assert_eq!(DIAG_EVENT_FILE_PREFIX, "emulebb-rust-diag-");
-    }
-
-    #[test]
-    fn encoded_diag_event_line_is_single_json_record_with_newline() {
-        let record = DiagEventRecord {
-            schema: "diag_event_v1",
-            client: "rust",
-            ts: "2026-06-18T00:00:00.000Z".to_string(),
-            seq: 1,
-            family: "kad_udp",
-            event: "packet",
-            severity: "info",
-            keys: json!({"peer": "192.0.2.20:4672"}),
-            body: json!({"direction": "recv"}),
-        };
-
-        let line = encode_record_line(&record).expect("line encoded");
-        assert_eq!(line.last(), Some(&b'\n'));
-        let without_newline = &line[..line.len() - 1];
-        let decoded: serde_json::Value = serde_json::from_slice(without_newline).unwrap();
-        assert_eq!(decoded["schema"], "diag_event_v1");
-        assert_eq!(decoded["family"], "kad_udp");
-    }
-
-    #[test]
-    fn shared_file_writer_preserves_high_volume_variable_length_jsonl() {
-        use super::{DiagEventWriter, append_record_line_to};
-        use std::fs::{self, File};
-        use std::sync::{Arc, Mutex};
-
-        let path = std::env::temp_dir().join(format!(
-            "emulebb-kad-net-diag-writer-{}-{}.jsonl",
-            std::process::id(),
-            super::next_seq()
-        ));
-        let writer = Arc::new(DiagEventWriter {
-            path: path.clone(),
-            writer: Mutex::new(File::create(&path).expect("create diagnostic test file")),
-        });
-        let threads = 8_u64;
-        let records_per_thread = 5_000_u64;
-        let mut workers = Vec::new();
-        for worker in 0..threads {
-            let writer = Arc::clone(&writer);
-            workers.push(std::thread::spawn(move || {
-                for record_index in 0..records_per_thread {
-                    let record = DiagEventRecord {
-                        schema: "diag_event_v1",
-                        client: "rust",
-                        ts: "2026-09-26T00:00:00.000Z".to_string(),
-                        seq: worker * records_per_thread + record_index,
-                        family: "sched",
-                        event: "writer_stress",
-                        severity: "info",
-                        keys: json!({"worker": worker, "record": record_index}),
-                        body: json!({
-                            "padding": "x".repeat(((record_index * 97 + worker) % 1_024) as usize)
-                        }),
-                    };
-                    let line = encode_record_line(&record).expect("encode stress record");
-                    assert!(append_record_line_to(&writer, &line));
-                }
-            }));
-        }
-        for worker in workers {
-            worker.join().expect("diagnostic writer worker completes");
-        }
-        drop(writer);
-
-        let bytes = fs::read(&path).expect("read diagnostic test file");
-        assert_eq!(bytes.last(), Some(&b'\n'));
-        let mut parsed = 0_u64;
-        for line in bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-        {
-            let record: serde_json::Value =
-                serde_json::from_slice(line).expect("every diagnostic line stays valid JSON");
-            assert_eq!(record["schema"], "diag_event_v1");
-            assert_eq!(record["event"], "writer_stress");
-            parsed += 1;
-        }
-        assert_eq!(parsed, threads * records_per_thread);
-        fs::remove_file(path).expect("remove diagnostic test file");
-    }
-
-    // Cross-crate diag_event_v1 envelope golden (C4): MUST be byte-identical to the
-    // same-named test in emulebb-ed2k's diag_event.rs. Both crates duplicate
-    // DiagEventRecord + encode_record_line and append to the SAME jsonl, so a field
-    // rename/reorder/addition in either (which would split the shared file) fails
-    // its golden test. Keep the two literals identical.
-    #[test]
-    fn encode_record_line_matches_cross_crate_golden() {
-        let record = DiagEventRecord {
-            schema: "diag_event_v1",
-            client: "rust",
-            ts: "2026-06-18T00:00:00.000Z".to_string(),
-            seq: 1,
-            family: "sched",
-            event: "source_dropped",
-            severity: "info",
-            keys: json!({"peer": "192.0.2.10:4662"}),
-            body: json!({"outcome": "dropped"}),
-        };
-        let line = encode_record_line(&record).expect("line encoded");
-        assert_eq!(
-            String::from_utf8(line).unwrap(),
-            "{\"schema\":\"diag_event_v1\",\"client\":\"rust\",\"ts\":\"2026-06-18T00:00:00.000Z\",\"seq\":1,\"family\":\"sched\",\"event\":\"source_dropped\",\"severity\":\"info\",\"keys\":{\"peer\":\"192.0.2.10:4662\"},\"body\":{\"outcome\":\"dropped\"}}\n"
-        );
-    }
 
     #[test]
     fn bad_peer_action_matches_behavior() {
@@ -402,10 +93,6 @@ mod tests {
 
     #[test]
     fn typed_helpers_emit_without_panicking() {
-        // Exercises the bad_peer + kad_event(bootstrap) builder paths. Writes a
-        // real record only when packet-diagnostics is enabled and
-        // EMULEBB_RUST_LOG_DIR is set (used by the lane-E trace-capture run);
-        // otherwise a cheap no-op.
         kad_event_bootstrap_contact_added("1.2.3.4:4672".parse().unwrap());
         bad_peer_kad_drop(
             "anti_flood_ban",
