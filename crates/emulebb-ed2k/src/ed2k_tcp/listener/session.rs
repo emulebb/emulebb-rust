@@ -36,7 +36,7 @@ use super::super::download::{
     DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
     drive_download_session,
 };
-use super::super::dump::{dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_send};
+use super::super::dump::dump_ed2k_tcp_listener_meta;
 use super::super::firewall_helper::{
     complete_authorized_kad_callback, decode_kad_callback_if_running,
 };
@@ -313,8 +313,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // HELLO identity is bound; only then may OP_ACCEPTUPLOADREQ be sent.
     if session_phase.sends_outbound_hello() {
         let hello_packet = encode_hello_request(response_identity);
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hello_request", &hello_packet);
-        if let Err(error) = transport.write_all(&hello_packet).await {
+        if let Err(error) = transport
+            .write_all_diagnostic("listener", peer_addr, "hello_request", &hello_packet)
+            .await
+        {
             if let Some(grant) = pending_promoted_grant.take() {
                 transfer_runtime.release_upload_session(&grant.handle).await;
             }
@@ -365,13 +367,15 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 relay = hold.relay_rx.recv() => {
                     match relay {
                         Some(frame) => {
-                            dump_ed2k_tcp_listener_send(
-                                peer_addr,
-                                transport.mode,
-                                "buddy_callback_relay",
-                                &frame,
-                            );
-                            transport.write_all(&frame).await.with_context(|| {
+                            transport
+                                .write_all_diagnostic(
+                                    "listener",
+                                    peer_addr,
+                                    "buddy_callback_relay",
+                                    &frame,
+                                )
+                                .await
+                                .with_context(|| {
                                 format!("failed to relay OP_CALLBACK to buddy {peer_addr}")
                             })?;
                             continue;
@@ -530,9 +534,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     }
                 }
                 for reply in build_hello_responses(&packet.payload, response_identity)? {
-                    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hello_reply", &reply);
                     transport
-                        .write_all(&reply)
+                        .write_all_diagnostic("listener", peer_addr, "hello_reply", &reply)
                         .await
                         .with_context(|| format!("failed to reply to OP_HELLO from {peer_addr}"))?;
                 }
@@ -598,15 +601,17 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 peer_secure_ident.our_external_ip = reachability.get();
                 if hello_profile.supports_secure_ident && !peer_secure_ident.requested_peer_key {
                     let request = begin_secure_ident_probe(&mut peer_secure_ident);
-                    dump_ed2k_tcp_listener_send(
-                        peer_addr,
-                        transport.mode,
-                        "secure_ident_probe",
-                        &request,
-                    );
-                    transport.write_all(&request).await.with_context(|| {
-                        format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
-                    })?;
+                    transport
+                        .write_all_diagnostic(
+                            "listener",
+                            peer_addr,
+                            "secure_ident_probe",
+                            &request,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
+                        })?;
                 }
                 let callback_session = if upload_callback_claimed {
                     None
@@ -732,15 +737,17 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 peer_secure_ident.our_external_ip = reachability.get();
                 if hello_profile.supports_secure_ident && !peer_secure_ident.requested_peer_key {
                     let request = begin_secure_ident_probe(&mut peer_secure_ident);
-                    dump_ed2k_tcp_listener_send(
-                        peer_addr,
-                        transport.mode,
-                        "secure_ident_probe",
-                        &request,
-                    );
-                    transport.write_all(&request).await.with_context(|| {
-                        format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
-                    })?;
+                    transport
+                        .write_all_diagnostic(
+                            "listener",
+                            peer_addr,
+                            "secure_ident_probe",
+                            &request,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
+                        })?;
                 }
             }
             (OP_EMULEPROT, OP_MULTIPACKET) | (OP_EMULEPROT, OP_MULTIPACKET_EXT) => {
@@ -804,15 +811,17 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         .start_upload_reply(transfer_runtime, peer_identity, &requested)
                         .await
                     {
-                        dump_ed2k_tcp_listener_send(
-                            peer_addr,
-                            transport.mode,
-                            "start_upload",
-                            &reply,
-                        );
-                        transport.write_all(&reply).await.with_context(|| {
-                            format!("failed to send OP_STARTUPLOADREQ response to {peer_addr}")
-                        })?;
+                        transport
+                            .write_all_diagnostic(
+                                "listener",
+                                peer_addr,
+                                "start_upload",
+                                &reply,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!("failed to send OP_STARTUPLOADREQ response to {peer_addr}")
+                            })?;
                     }
                 } else {
                     // An OP_STARTUPLOADREQ for a file we do not serve gets NO
@@ -1016,9 +1025,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     .refresh_peer_state(transfer_runtime, &peer_upload_identity)
                     .await;
                 let reply = encode_emule_info_answer(reachability.advertised_udp_port(kad_udp_port));
-                dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "emule_info_answer", &reply);
                 transport
-                    .write_all(&reply)
+                    .write_all_diagnostic("listener", peer_addr, "emule_info_answer", &reply)
                     .await
                     .with_context(|| format!("failed to send OP_EMULEINFOANSWER to {peer_addr}"))?;
             }
@@ -1070,15 +1078,17 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 );
                 if let IpAddr::V4(peer_ip) = peer_addr.ip() {
                     let reply = encode_public_ip_answer(peer_ip);
-                    dump_ed2k_tcp_listener_send(
-                        peer_addr,
-                        transport.mode,
-                        "public_ip_answer",
-                        &reply,
-                    );
-                    transport.write_all(&reply).await.with_context(|| {
-                        format!("failed to send OP_PUBLICIP_ANSWER to {peer_addr}")
-                    })?;
+                    transport
+                        .write_all_diagnostic(
+                            "listener",
+                            peer_addr,
+                            "public_ip_answer",
+                            &reply,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("failed to send OP_PUBLICIP_ANSWER to {peer_addr}")
+                        })?;
                 }
             }
             (OP_EMULEPROT, OP_PUBLICIP_ANSWER) => {
@@ -1140,9 +1150,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 );
                 let reply = encode_port_test_answer();
                 port_test_registration = Some(port_test_registry.arm());
-                dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "port_test", &reply);
                 transport
-                    .write_all(&reply)
+                    .write_all_diagnostic("listener", peer_addr, "port_test", &reply)
                     .await
                     .with_context(|| format!("failed to send OP_PORTTEST to {peer_addr}"))?;
             }
@@ -1196,9 +1205,17 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 if let Some(hold) = buddy_hold.as_mut() {
                     if hold.allow_incoming_buddy_pingpong() {
                         let pong = encode_buddy_pong();
-                        transport.write_all(&pong).await.with_context(|| {
-                            format!("failed to send OP_BUDDYPONG to buddy {peer_addr}")
-                        })?;
+                        transport
+                            .write_all_diagnostic(
+                                "listener",
+                                peer_addr,
+                                "kad_buddy_ping_pong",
+                                &pong,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!("failed to send OP_BUDDYPONG to buddy {peer_addr}")
+                            })?;
                         hold.last_buddy_pingpong_at = Some(std::time::Instant::now());
                     } else {
                         debug!(
@@ -1251,10 +1268,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         "aich_recovery_failure",
                     ),
                 };
-                dump_ed2k_tcp_listener_send(peer_addr, transport.mode, dump_tag, &reply);
-                transport.write_all(&reply).await.with_context(|| {
-                    format!("failed to send OP_AICHANSWER to {peer_addr}")
-                })?;
+                transport
+                    .write_all_diagnostic("listener", peer_addr, dump_tag, &reply)
+                    .await
+                    .with_context(|| format!("failed to send OP_AICHANSWER to {peer_addr}"))?;
             }
             (OP_EMULEPROT, OP_AICHANSWER) => {
                 let answer = decode_aich_recovery_answer_payload(&packet.payload)?;
@@ -1403,9 +1420,8 @@ async fn handle_udp_port_test_event(
     }
 
     let reply = encode_port_test_result(b'1');
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "port_test_udp_result", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "port_test_udp_result", &reply)
         .await
         .with_context(|| format!("failed to send UDP OP_PORTTEST result to {peer_addr}"))?;
     *registration = None;

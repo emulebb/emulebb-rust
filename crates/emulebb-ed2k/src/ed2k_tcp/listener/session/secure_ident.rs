@@ -13,7 +13,7 @@ use tracing::debug;
 
 use crate::ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity};
 
-use super::super::super::dump::{dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_send};
+use super::super::super::dump::dump_ed2k_tcp_listener_meta;
 use super::super::super::identity::{
     Ed2kPeerSecureIdentState, decode_public_key_payload, decode_secident_state,
     decode_signature_payload, encode_secident_state, random_nonzero_u32,
@@ -50,9 +50,8 @@ pub(super) async fn handle_secident_state(
             OP_PUBLICKEY,
             &secure_ident.public_key_payload()?,
         );
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "public_key", &public_key);
         transport
-            .write_all(&public_key)
+            .write_all_diagnostic("listener", peer_addr, "public_key", &public_key)
             .await
             .with_context(|| format!("failed to send OP_PUBLICKEY to {peer_addr}"))?;
     }
@@ -73,9 +72,8 @@ pub(super) async fn handle_secident_state(
         peer_secure_ident.requested_peer_key = true;
         let request =
             encode_secident_state(ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, challenge_for);
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "secure_ident_probe", &request);
         transport
-            .write_all(&request)
+            .write_all_diagnostic("listener", peer_addr, "secure_ident_probe", &request)
             .await
             .with_context(|| format!("failed to send fallback OP_SECIDENTSTATE to {peer_addr}"))?;
     }

@@ -14,7 +14,7 @@ use super::super::super::codec::{
     decode_shared_files_dir_answer_payload, decode_shared_files_dir_request_payload,
     encode_empty_shared_files_answer, encode_shared_browse_denied_answer,
 };
-use super::super::super::dump::{dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_send};
+use super::super::super::dump::dump_ed2k_tcp_listener_meta;
 
 /// OP_ASKSHAREDFILES: reply with the empty shared-files answer.
 pub(super) async fn handle_ask_shared_files(
@@ -26,9 +26,8 @@ pub(super) async fn handle_ask_shared_files(
         format!("payload_len={payload_len}")
     });
     let reply = encode_empty_shared_files_answer();
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "shared_files_answer", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "shared_files_answer", &reply)
         .await
         .with_context(|| format!("failed to send OP_ASKSHAREDFILESANSWER to {peer_addr}"))
 }
@@ -43,9 +42,8 @@ pub(super) async fn handle_ask_shared_dirs(
         format!("payload_len={payload_len}")
     });
     let reply = encode_shared_browse_denied_answer();
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "shared_browse_denied", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "shared_browse_denied", &reply)
         .await
         .with_context(|| format!("failed to send OP_ASKSHAREDDENIEDANS to {peer_addr}"))
 }
@@ -64,9 +62,8 @@ pub(super) async fn handle_ask_shared_files_dir(
         || format!("dir={dir}"),
     );
     let reply = encode_shared_browse_denied_answer();
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "shared_browse_denied", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "shared_browse_denied", &reply)
         .await
         .with_context(|| format!("failed to send OP_ASKSHAREDDENIEDANS to {peer_addr}"))
 }

@@ -20,7 +20,6 @@ use super::super::super::codec::{
     encode_multipacket_answer, encode_multipacket_ext2_answer, encode_request_filename_answer,
     source_exchange_entry_count,
 };
-use super::super::super::dump::dump_ed2k_tcp_listener_send;
 
 /// Requester-side availability retained for the life of an upload connection.
 /// Stock keeps this on the upload-client object and consults it when choosing
@@ -114,10 +113,12 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
                     continue;
                 }
                 let reply = encode_answer_sources2(&requested, used_version, &sources)?;
-                dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
-                transport.write_all(&reply).await.with_context(|| {
-                    format!("failed to send source exchange reply to {peer_addr}")
-                })?;
+                transport
+                    .write_all_diagnostic("listener", peer_addr, "answer_sources", &reply)
+                    .await
+                    .with_context(|| {
+                        format!("failed to send source exchange reply to {peer_addr}")
+                    })?;
             }
             OP_AICHFILEHASHREQ => {}
             _ => {
@@ -133,9 +134,8 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
         include_filename,
         status_body.as_deref(),
     )?;
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "multipacket_ext2_answer", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "multipacket_ext2_answer", &reply)
         .await
         .with_context(|| format!("failed to send OP_MULTIPACKETANSWER_EXT2 to {peer_addr}"))?;
     Ok(Some(requested))
@@ -237,9 +237,8 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
             status_body.as_deref(),
             include_aich_root,
         )?;
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "multipacket_answer", &reply);
         transport
-            .write_all(&reply)
+            .write_all_diagnostic("listener", peer_addr, "multipacket_answer", &reply)
             .await
             .with_context(|| format!("failed to send OP_MULTIPACKETANSWER to {peer_addr}"))?;
     }
@@ -295,9 +294,8 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
         *requester_file_state = None;
         encode_file_req_ans_nofil(&requested)
     };
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "request_filename", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "request_filename", &reply)
         .await
         .with_context(|| format!("failed to send OP_REQFILENAMEANSWER to {peer_addr}"))?;
     // Propagate the user-set comment/rating right after the filename answer, like
@@ -312,9 +310,8 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
         )
     {
         let desc = encode_file_desc(manifest.rating, &manifest.comment);
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "file_desc", &desc);
         transport
-            .write_all(&desc)
+            .write_all_diagnostic("listener", peer_addr, "file_desc", &desc)
             .await
             .with_context(|| format!("failed to send OP_FILEDESC to {peer_addr}"))?;
     }
@@ -338,9 +335,8 @@ pub(in crate::ed2k_tcp) async fn handle_set_req_file_id(
     } else {
         encode_file_req_ans_nofil(&requested)
     };
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "set_req_file_id", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "set_req_file_id", &reply)
         .await
         .with_context(|| format!("failed to send OP_SETREQFILEID response to {peer_addr}"))?;
     Ok(Some(requested))
@@ -362,9 +358,8 @@ pub(in crate::ed2k_tcp) async fn handle_hashset_request(
     } else {
         encode_file_req_ans_nofil(&requested)
     };
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hashset_request", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "hashset_request", &reply)
         .await
         .with_context(|| format!("failed to send OP_HASHSETANSWER to {peer_addr}"))?;
     Ok(Some(requested))
@@ -405,9 +400,8 @@ pub(in crate::ed2k_tcp) async fn handle_hashset_request2(
     } else {
         encode_file_req_ans_nofil(&requested)
     };
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hashset_request", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "hashset_request", &reply)
         .await
         .with_context(|| format!("failed to send OP_HASHSETANSWER2 to {peer_addr}"))?;
     Ok(Some(requested))
@@ -445,9 +439,8 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
             return Ok(Some(requested));
         }
         let reply = encode_answer_sources2(&requested, used_version, &sources)?;
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
         transport
-            .write_all(&reply)
+            .write_all_diagnostic("listener", peer_addr, "answer_sources", &reply)
             .await
             .with_context(|| format!("failed to send source exchange response to {peer_addr}"))?;
     }
@@ -490,9 +483,8 @@ async fn answer_source_request_subpacket<'a>(
         return Ok(remaining);
     }
     let reply = encode_answer_sources2(requested, used_version, &sources)?;
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, "answer_sources", &reply)
         .await
         .with_context(|| format!("failed to send source exchange reply to {peer_addr}"))?;
     Ok(remaining)
@@ -663,9 +655,8 @@ pub(in crate::ed2k_tcp) async fn handle_aich_file_hash_request(
         && let Some(aich_root) = shared_aich_root(&shared)
     {
         let reply = encode_aich_file_hash_answer(&requested, aich_root);
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "aich_file_hash_answer", &reply);
         transport
-            .write_all(&reply)
+            .write_all_diagnostic("listener", peer_addr, "aich_file_hash_answer", &reply)
             .await
             .with_context(|| format!("failed to send OP_AICHFILEHASHANS to {peer_addr}"))?;
     }
@@ -687,9 +678,8 @@ async fn send_nofile(
     phase: &'static str,
 ) -> Result<()> {
     let reply = encode_file_req_ans_nofil(requested);
-    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, phase, &reply);
     transport
-        .write_all(&reply)
+        .write_all_diagnostic("listener", peer_addr, phase, &reply)
         .await
         .with_context(|| format!("failed to send OP_FILEREQANSNOFIL to {peer_addr}"))
 }
