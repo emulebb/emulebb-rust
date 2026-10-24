@@ -852,13 +852,17 @@ impl ServerSession {
                 self.endpoint
             )
         });
-        if let Err(error) = send_result {
-            #[cfg(feature = "packet-diagnostics")]
-            send_attempt.failed(format!("{error:#}"));
-            return Err(error);
+        match send_result {
+            Ok(()) => {
+                #[cfg(feature = "packet-diagnostics")]
+                send_attempt.succeeded();
+            }
+            Err(error) => {
+                #[cfg(feature = "packet-diagnostics")]
+                send_attempt.failed(format!("{error:#}"));
+                return Err(error);
+            }
         }
-        #[cfg(feature = "packet-diagnostics")]
-        send_attempt.succeeded();
 
         self.receive_cipher = Some(receive_cipher);
         self.send_cipher = Some(send_cipher);
