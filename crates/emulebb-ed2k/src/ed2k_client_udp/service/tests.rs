@@ -76,10 +76,16 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
     let decoded = decode_reask_callback_udp(&datagram.payload).unwrap();
     assert_eq!(decoded.buddy_id.0, buddy_id);
     assert_eq!(decoded.file_hash, file_hash());
+    assert!(svc.mark_reask_sent(send.source_endpoint, now));
+    let next = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert!(next.send.is_empty());
 }
 
 #[test]
-fn tick_emits_due_ping_then_routes_the_ack() {
+fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
     let now = Instant::now();
     let (mut svc, _reachability) = service();
     register(&mut svc, now);
@@ -102,6 +108,11 @@ fn tick_emits_due_ping_then_routes_the_ack() {
             obfuscate: true,
         },
     );
+    assert_eq!(
+        svc.handle_inbound(&ack, peer_addr(), now),
+        ReaskInboundOutcome::Ignored(ReaskIgnoredReason::UnsolicitedReply)
+    );
+    assert!(svc.mark_reask_sent(out.send[0].source_endpoint, now));
     let outcome = svc.handle_inbound(&ack, peer_addr(), now);
     assert_eq!(
         outcome,
@@ -201,10 +212,11 @@ fn file_not_found_drops_source_and_clears_routing() {
     let now = Instant::now();
     let (mut svc, _reachability) = service();
     register(&mut svc, now);
-    let _ = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
+    let out = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
         part_status: None,
         complete_source_count: 0,
     });
+    assert!(svc.mark_reask_sent(out.send[0].source_endpoint, now));
     let fnf = vec![0xC5u8, 0x92];
     let outcome = svc.handle_inbound(&fnf, peer_addr(), now);
     assert_eq!(
@@ -315,10 +327,11 @@ fn timed_out_reask_surfaces_in_tick_output() {
     let timeout = Duration::from_secs(20);
     let (mut svc, _reachability) = service();
     register(&mut svc, now);
-    let _ = svc.tick(now, timeout, |_| TransferReaskInfo {
+    let sent = svc.tick(now, timeout, |_| TransferReaskInfo {
         part_status: None,
         complete_source_count: 0,
     });
+    assert!(svc.mark_reask_sent(sent.send[0].source_endpoint, now));
     let later = now + timeout + Duration::from_secs(1);
     let out = svc.tick(later, timeout, |_| TransferReaskInfo {
         part_status: None,
@@ -326,4 +339,28 @@ fn timed_out_reask_surfaces_in_tick_output() {
     });
     assert_eq!(out.timed_out.len(), 1);
     assert_eq!(out.timed_out[0].0, peer_addr());
+}
+
+#[test]
+fn abandoned_staged_send_stays_due_without_remote_timeout_accounting() {
+    let now = Instant::now();
+    let timeout = Duration::from_secs(20);
+    let (mut svc, _reachability) = service();
+    register(&mut svc, now);
+
+    let abandoned = svc.tick(now, timeout, |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert_eq!(abandoned.send.len(), 1);
+
+    let retry = svc.tick(now + timeout + Duration::from_secs(1), timeout, |_| {
+        TransferReaskInfo {
+            part_status: None,
+            complete_source_count: 0,
+        }
+    });
+    assert!(retry.timed_out.is_empty());
+    assert_eq!(retry.send.len(), 1);
+    assert_eq!(retry.send[0].source_endpoint, peer_v4());
 }

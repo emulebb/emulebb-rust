@@ -226,6 +226,22 @@ impl ReaskService {
             .is_some_and(|set| set.mark_no_needed_parts(ip, udp_port, now))
     }
 
+    /// Confirm that a scheduled reask reached the local UDP socket. Only this
+    /// transition opens the pending-reply gate; failed or cancelled sends leave
+    /// the source due and cannot later be counted as remote timeouts.
+    pub(crate) fn mark_reask_sent(
+        &mut self,
+        source_endpoint: (Ipv4Addr, u16),
+        now: Instant,
+    ) -> bool {
+        let Some(file_hash) = self.endpoint_index.get(&source_endpoint).copied() else {
+            return false;
+        };
+        self.per_file
+            .get_mut(&file_hash)
+            .is_some_and(|set| set.mark_reasked(source_endpoint.0, source_endpoint.1, now))
+    }
+
     /// Route an inbound datagram. Downloader replies are applied to the matching
     /// source (correlated by endpoint); an inbound reask ping is handed back for
     /// the caller to answer.
@@ -307,7 +323,9 @@ impl ReaskService {
     }
 
     /// Produce the per-tick work: due reask pings (using each file's transfer
-    /// info from `info_for`) and timed-out reasks.
+    /// info from `info_for`) and timed-out reasks. Producing send work does not
+    /// open a pending-reply gate; the caller must invoke [`Self::mark_reask_sent`]
+    /// only after the local socket reports success.
     pub(crate) fn tick(
         &mut self,
         now: Instant,

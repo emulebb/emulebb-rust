@@ -102,6 +102,54 @@ fn udp_reask_sent_body_matches_mfc_diag_shape() {
 }
 
 #[test]
+fn reask_send_settlement_opens_pending_only_on_success() {
+    let now = Instant::now();
+    let timeout = Duration::from_secs(20);
+    let file_hash = Ed2kHash::from_bytes([0xAD; 16]);
+    let endpoint = (Ipv4Addr::new(198, 51, 100, 9), 4672);
+    let (mut svc, _reachability) = service();
+    svc.register_source(file_hash, ReaskSource::new(endpoint, file_hash, 4, now));
+
+    let failed = svc.tick(now, timeout, |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert_eq!(failed.send.len(), 1);
+    assert_eq!(
+        settle_reask_send(
+            &mut svc,
+            failed.send[0].source_endpoint,
+            Err::<(), _>("local send failed"),
+            now,
+        ),
+        Err("local send failed")
+    );
+
+    let retry_at = now + timeout + Duration::from_secs(1);
+    let retry = svc.tick(retry_at, timeout, |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert!(retry.timed_out.is_empty());
+    assert_eq!(retry.send.len(), 1);
+    assert_eq!(
+        settle_reask_send(
+            &mut svc,
+            retry.send[0].source_endpoint,
+            Ok::<(), &str>(()),
+            retry_at,
+        ),
+        Ok(true)
+    );
+
+    let gated = svc.tick(retry_at, timeout, |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert!(gated.send.is_empty());
+}
+
+#[test]
 fn remove_command_for_unknown_endpoint_releases_no_lease() {
     let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
