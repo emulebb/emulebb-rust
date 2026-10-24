@@ -22,6 +22,8 @@ use tracing::{debug, warn};
 use crate::ed2k_tcp::MAX_ED2K_PACKET_LEN;
 
 use super::Ed2kServerFailure;
+#[cfg(feature = "packet-diagnostics")]
+use super::diagnostics::Ed2kServerPacketEvidence;
 use super::offer_policy::{
     OFFER_FILES_LEGACY_MIN_INTERVAL, OFFER_FILES_NEGOTIATION_WAIT,
     OfferFilesCapabilityAdvertisement, OfferFilesPolicy,
@@ -655,6 +657,8 @@ impl ServerSession {
         let use_compression =
             server_opcode_allows_compression(opcode) && self.server_supports_compression();
         let mut packet = encode_packet(opcode, payload, use_compression)?;
+        #[cfg(feature = "packet-diagnostics")]
+        let clear_frame = packet.clone();
         // The wire may still be OP_EDONKEYPROT even when compression was permitted
         // (keep-if-smaller left the packet raw): report the actual protocol byte.
         let packed = packet[0] == OP_PACKEDPROT;
@@ -669,10 +673,31 @@ impl ServerSession {
             packet.len(),
             packed
         );
-        dump_ed2k_server_packet(self, "tx", packet[0], opcode, payload);
+        let protocol_marker = packet[0];
+        #[cfg(feature = "packet-diagnostics")]
+        let transport_mode = if self.send_cipher.is_some() {
+            "obfuscated"
+        } else {
+            "plaintext"
+        };
         if let Some(cipher) = self.send_cipher.as_mut() {
             cipher.apply(&mut packet);
         }
+        #[cfg(feature = "packet-diagnostics")]
+        dump_ed2k_server_packet(
+            self,
+            "tx",
+            transport_mode,
+            protocol_marker,
+            opcode,
+            Ed2kServerPacketEvidence {
+                raw: &packet,
+                clear_frame: &clear_frame,
+                payload,
+            },
+        );
+        #[cfg(not(feature = "packet-diagnostics"))]
+        dump_ed2k_server_packet(self, "tx", protocol_marker, opcode, payload);
         self.stream.write_all(&packet).await.with_context(|| {
             format!("failed to send opcode=0x{opcode:02X} to {}", self.endpoint)
         })?;
@@ -787,20 +812,6 @@ impl ServerSession {
             receive_cipher.apply(&mut encrypted_padding);
         }
 
-        // WHY: the obfuscated login path carries the first packet (the
-        // OP_LOGINREQUEST) inside the crypt-negotiation response, bypassing
-        // send_packet() and therefore its dump hook — live server dumps showed
-        // OP_IDCHANGE recvs with no matching login send. Dump it here exactly
-        // like the plain path does (plaintext opcode + payload, pre-cipher).
-        if first_packet.len() >= TCP_PACKET_HEADER_LEN {
-            dump_ed2k_server_packet(
-                self,
-                "tx",
-                first_packet[0],
-                first_packet[5],
-                &first_packet[TCP_PACKET_HEADER_LEN..],
-            );
-        }
         let response_padding_len = rand::rng().random_range(0..=SERVER_OBFUSCATION_MAX_PADDING_LEN);
         let mut response = Vec::with_capacity(6 + response_padding_len + first_packet.len());
         response.extend_from_slice(&EMULE_TCP_CRYPT_MAGIC_SYNC.to_le_bytes());
@@ -809,8 +820,33 @@ impl ServerSession {
         let mut response_padding = vec![0u8; response_padding_len];
         rand::rng().fill_bytes(&mut response_padding);
         response.extend_from_slice(&response_padding);
+        #[cfg(feature = "packet-diagnostics")]
+        let first_packet_offset = response.len();
         response.extend_from_slice(first_packet);
         send_cipher.apply(&mut response);
+        if first_packet.len() >= TCP_PACKET_HEADER_LEN {
+            #[cfg(feature = "packet-diagnostics")]
+            dump_ed2k_server_packet(
+                self,
+                "tx",
+                "obfuscated",
+                first_packet[0],
+                first_packet[5],
+                Ed2kServerPacketEvidence {
+                    raw: &response[first_packet_offset..],
+                    clear_frame: first_packet,
+                    payload: &first_packet[TCP_PACKET_HEADER_LEN..],
+                },
+            );
+            #[cfg(not(feature = "packet-diagnostics"))]
+            dump_ed2k_server_packet(
+                self,
+                "tx",
+                first_packet[0],
+                first_packet[5],
+                &first_packet[TCP_PACKET_HEADER_LEN..],
+            );
+        }
         self.stream.write_all(&response).await.with_context(|| {
             format!(
                 "failed to send ED2K server obfuscation response to {}",
@@ -858,6 +894,8 @@ impl ServerSession {
                 return Err(error.into());
             }
         }
+        #[cfg(feature = "packet-diagnostics")]
+        let raw_header = header;
         if let Some(cipher) = self.receive_cipher.as_mut() {
             cipher.apply(&mut header);
         }
@@ -917,9 +955,13 @@ impl ServerSession {
             );
             return Err(error.into());
         }
+        #[cfg(feature = "packet-diagnostics")]
+        let raw_payload = payload.clone();
         if let Some(cipher) = self.receive_cipher.as_mut() {
             cipher.apply(&mut payload);
         }
+        #[cfg(feature = "packet-diagnostics")]
+        let clear_payload = payload.clone();
         let payload = match decode_server_payload(header[0], payload) {
             Ok(payload) => payload,
             Err(error) if header[0] == OP_PACKEDPROT => {
@@ -956,6 +998,33 @@ impl ServerSession {
             header[5],
             payload.len()
         );
+        #[cfg(feature = "packet-diagnostics")]
+        {
+            let mut raw = Vec::with_capacity(TCP_PACKET_HEADER_LEN + raw_payload.len());
+            raw.extend_from_slice(&raw_header);
+            raw.extend_from_slice(&raw_payload);
+            let mut clear_frame = Vec::with_capacity(TCP_PACKET_HEADER_LEN + clear_payload.len());
+            clear_frame.extend_from_slice(&header);
+            clear_frame.extend_from_slice(&clear_payload);
+            let transport_mode = if self.receive_cipher.is_some() {
+                "obfuscated"
+            } else {
+                "plaintext"
+            };
+            dump_ed2k_server_packet(
+                self,
+                "rx",
+                transport_mode,
+                header[0],
+                header[5],
+                Ed2kServerPacketEvidence {
+                    raw: &raw,
+                    clear_frame: &clear_frame,
+                    payload: &payload,
+                },
+            );
+        }
+        #[cfg(not(feature = "packet-diagnostics"))]
         dump_ed2k_server_packet(self, "rx", header[0], header[5], &payload);
         Ok(ServerPacketRead::Packet(Ed2kPacket {
             opcode: header[5],

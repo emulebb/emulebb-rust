@@ -62,10 +62,21 @@ struct Ed2kServerDumpRecord<'a> {
     protocol_marker: Option<u8>,
     opcode: Option<u8>,
     opcode_name: Option<&'static str>,
+    raw_len: Option<usize>,
+    raw_hex: Option<String>,
+    clear_frame_len: Option<usize>,
+    clear_frame_hex: Option<String>,
     payload_len: Option<usize>,
     payload_hex: Option<String>,
     payload_hex_truncated: Option<bool>,
     note: Option<String>,
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) struct Ed2kServerPacketEvidence<'a> {
+    pub(super) raw: &'a [u8],
+    pub(super) clear_frame: &'a [u8],
+    pub(super) payload: &'a [u8],
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
@@ -104,6 +115,10 @@ pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<Str
         protocol_marker: None,
         opcode: None,
         opcode_name: None,
+        raw_len: None,
+        raw_hex: None,
+        clear_frame_len: None,
+        clear_frame_hex: None,
         payload_len: None,
         payload_hex: None,
         payload_hex_truncated: None,
@@ -137,6 +152,10 @@ pub(super) fn dump_ed2k_server_loop_meta(
         protocol_marker: None,
         opcode: None,
         opcode_name: None,
+        raw_len: None,
+        raw_hex: None,
+        clear_frame_len: None,
+        clear_frame_hex: None,
         payload_len: None,
         payload_hex: None,
         payload_hex_truncated: None,
@@ -173,14 +192,14 @@ pub(super) fn dump_ed2k_server_udp_packet(
     remote_addr: SocketAddr,
     transport_mode: &'static str,
     opcode: u8,
-    payload: &[u8],
+    evidence: Ed2kServerPacketEvidence<'_>,
 ) {
     let direction = match direction {
         "tx" => "send",
         "rx" => "recv",
         other => other,
     };
-    let payload_hex = exact_packet_hex(payload);
+    let payload_hex = exact_packet_hex(evidence.payload);
     let base_endpoint = server.base_endpoint();
     let record = Ed2kServerDumpRecord {
         schema: "ed2k_packet_v1",
@@ -201,7 +220,11 @@ pub(super) fn dump_ed2k_server_udp_packet(
         protocol_marker: Some(OP_EDONKEYPROT_MARKER),
         opcode: Some(opcode),
         opcode_name: Some(server_opcode_name(opcode)),
-        payload_len: Some(payload.len()),
+        raw_len: Some(evidence.raw.len()),
+        raw_hex: Some(exact_packet_hex(evidence.raw)),
+        clear_frame_len: Some(evidence.clear_frame.len()),
+        clear_frame_hex: Some(exact_packet_hex(evidence.clear_frame)),
+        payload_len: Some(evidence.payload.len()),
         payload_hex: Some(payload_hex),
         payload_hex_truncated: Some(false),
         note: None,
@@ -213,9 +236,10 @@ pub(super) fn dump_ed2k_server_udp_packet(
 pub(super) fn dump_ed2k_server_packet(
     session: &ServerSession,
     direction: &'static str,
+    transport_mode: &'static str,
     protocol_marker: u8,
     opcode: u8,
-    payload: &[u8],
+    evidence: Ed2kServerPacketEvidence<'_>,
 ) {
     // Normalize the wire direction to the shared send/recv vocabulary so the
     // packet-trace diff harness aligns these with eMuleBB's server packets.
@@ -224,7 +248,7 @@ pub(super) fn dump_ed2k_server_packet(
         "rx" => "recv",
         other => other,
     };
-    let payload_hex = exact_packet_hex(payload);
+    let payload_hex = exact_packet_hex(evidence.payload);
     let record = Ed2kServerDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -239,16 +263,16 @@ pub(super) fn dump_ed2k_server_packet(
         phase: session.phase.as_str(),
         direction,
         remote_addr: session.endpoint.to_string(),
-        transport_mode: if session.send_cipher.is_some() {
-            "obfuscated"
-        } else {
-            "plaintext"
-        },
+        transport_mode,
         protocol: Some(server_protocol_name(protocol_marker)),
         protocol_marker: Some(protocol_marker),
         opcode: Some(opcode),
         opcode_name: Some(server_opcode_name(opcode)),
-        payload_len: Some(payload.len()),
+        raw_len: Some(evidence.raw.len()),
+        raw_hex: Some(exact_packet_hex(evidence.raw)),
+        clear_frame_len: Some(evidence.clear_frame.len()),
+        clear_frame_hex: Some(exact_packet_hex(evidence.clear_frame)),
+        payload_len: Some(evidence.payload.len()),
         payload_hex: Some(payload_hex),
         payload_hex_truncated: Some(false),
         note: None,
@@ -371,6 +395,18 @@ fn ed2k_server_diag_event_parts(record: &Ed2kServerDumpRecord<'_>) -> (&'static 
     if let Some(opcode_name) = record.opcode_name {
         body.insert("opcodeName".to_string(), json!(opcode_name));
     }
+    if let Some(raw_len) = record.raw_len {
+        body.insert("rawLen".to_string(), json!(raw_len));
+    }
+    if let Some(raw_hex) = record.raw_hex.as_deref() {
+        body.insert("rawHex".to_string(), json!(raw_hex));
+    }
+    if let Some(clear_frame_len) = record.clear_frame_len {
+        body.insert("clearFrameLen".to_string(), json!(clear_frame_len));
+    }
+    if let Some(clear_frame_hex) = record.clear_frame_hex.as_deref() {
+        body.insert("clearFrameHex".to_string(), json!(clear_frame_hex));
+    }
     if let Some(payload_len) = record.payload_len {
         body.insert("payloadLen".to_string(), json!(payload_len));
     }
@@ -472,7 +508,8 @@ mod tests {
     #[test]
     fn server_common_event_preserves_payloads_larger_than_the_former_cap() {
         let payload = vec![0xCD; 4 * 1024 + 1];
-        let encoded = exact_packet_hex(&payload);
+        let raw = vec![0xAB; payload.len() + 6];
+        let clear_frame = vec![0xBC; payload.len() + 6];
         let record = Ed2kServerDumpRecord {
             schema: "ed2k_packet_v1",
             source: "emulebb-rust",
@@ -492,8 +529,12 @@ mod tests {
             protocol_marker: Some(OP_EDONKEYPROT_MARKER),
             opcode: Some(OP_GLOBSEARCHRES),
             opcode_name: Some(server_opcode_name(OP_GLOBSEARCHRES)),
+            raw_len: Some(raw.len()),
+            raw_hex: Some(exact_packet_hex(&raw)),
+            clear_frame_len: Some(clear_frame.len()),
+            clear_frame_hex: Some(exact_packet_hex(&clear_frame)),
             payload_len: Some(payload.len()),
-            payload_hex: Some(encoded),
+            payload_hex: Some(exact_packet_hex(&payload)),
             payload_hex_truncated: Some(false),
             note: None,
         };
@@ -501,6 +542,13 @@ mod tests {
         let (family, keys, body) = ed2k_server_diag_event_parts(&record);
         assert_eq!(family, "ed2k_tcp");
         assert_eq!(keys["peer"], "198.51.100.1:4661");
+        assert_eq!(body["rawLen"], raw.len());
+        assert_eq!(body["rawHex"].as_str().unwrap().len(), raw.len() * 2);
+        assert_eq!(body["clearFrameLen"], clear_frame.len());
+        assert_eq!(
+            body["clearFrameHex"].as_str().unwrap().len(),
+            clear_frame.len() * 2
+        );
         assert_eq!(body["payloadLen"], payload.len());
         assert_eq!(
             body["payloadHex"].as_str().unwrap().len(),
@@ -530,6 +578,10 @@ mod tests {
             protocol_marker: Some(OP_EDONKEYPROT_MARKER),
             opcode: Some(OP_GLOBSEARCHREQ),
             opcode_name: Some(server_opcode_name(OP_GLOBSEARCHREQ)),
+            raw_len: Some(4),
+            raw_hex: Some("1234abcd".to_string()),
+            clear_frame_len: Some(4),
+            clear_frame_hex: Some("e398abcd".to_string()),
             payload_len: Some(2),
             payload_hex: Some("abcd".to_string()),
             payload_hex_truncated: Some(false),
