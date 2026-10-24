@@ -17,50 +17,20 @@ use crate::{
     responses::{app_info_response, runtime_diagnostics_response, status_response},
 };
 
-pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v2";
+pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v3";
 
 const MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_LOG_RECORDS: usize = 200;
 const MAX_TAIL_BYTES: u64 = 256 * 1024;
 const MAX_TAIL_RECORDS: usize = 64;
 
-const ARTIFACT_FAMILIES: &[ArtifactFamilySpec] = &[
-    ArtifactFamilySpec {
-        family: "unifiedEvents",
-        file_prefix: "emulebb-rust-diag-",
-        expected_schema: "diag_event_v2",
-        sequence_field: "seq",
-        sequence_assessment: "processWideMonotonicTail",
-    },
-    ArtifactFamilySpec {
-        family: "ed2kPeerTcp",
-        file_prefix: "emulebb-rust-ed2k-tcp-dump-",
-        expected_schema: "ed2k_packet_v1",
-        sequence_field: "eventSeq",
-        sequence_assessment: "tailOnly",
-    },
-    ArtifactFamilySpec {
-        family: "ed2kClientUdp",
-        file_prefix: "emulebb-rust-ed2k-client-udp-dump-",
-        expected_schema: "ed2k_packet_v1",
-        sequence_field: "eventSeq",
-        sequence_assessment: "tailOnly",
-    },
-    ArtifactFamilySpec {
-        family: "ed2kServer",
-        file_prefix: "emulebb-rust-ed2k-server-dump-",
-        expected_schema: "ed2k_packet_v1",
-        sequence_field: "eventSeq",
-        sequence_assessment: "tailOnly",
-    },
-    ArtifactFamilySpec {
-        family: "kadUdp",
-        file_prefix: "emulebb-rust-kad-udp-dump-",
-        expected_schema: "udp_packet_v1",
-        sequence_field: "eventSeq",
-        sequence_assessment: "tailOnly",
-    },
-];
+const ARTIFACT_FAMILIES: &[ArtifactFamilySpec] = &[ArtifactFamilySpec {
+    family: "unifiedEvents",
+    file_prefix: "emulebb-rust-diag-",
+    expected_schema: "diag_event_v2",
+    sequence_field: "seq",
+    sequence_assessment: "processWideMonotonicTail",
+}];
 
 #[derive(Debug)]
 pub(crate) struct DiagnosticBundleCapture {
@@ -607,7 +577,7 @@ mod tests {
         assert!(unified["sequence"]["gapCount"].as_u64().unwrap() > 0);
         assert!(unified.to_string().contains("198.51.100.2"));
         assert_eq!(artifacts.log_directory["path"], root_text);
-        assert_eq!(artifacts.missing_families.len(), 4);
+        assert!(artifacts.missing_families.is_empty());
     }
 
     #[test]
@@ -722,6 +692,27 @@ mod tests {
                 .iter()
                 .all(|family| family["missingReason"] == "logDirectoryNotConfigured")
         );
+    }
+
+    #[test]
+    fn legacy_packet_files_are_not_bundle_artifacts() {
+        let root = test_dir("legacy-packet-files-ignored");
+        for file_name in [
+            "emulebb-rust-ed2k-tcp-dump-old.jsonl",
+            "emulebb-rust-ed2k-client-udp-dump-old.jsonl",
+            "emulebb-rust-ed2k-server-dump-old.jsonl",
+            "emulebb-rust-kad-udp-dump-old.jsonl",
+        ] {
+            fs::write(root.join(file_name), "{\"schema\":\"legacy\"}\n").unwrap();
+        }
+
+        let artifacts = collect_artifacts(Some(root), None);
+
+        assert_eq!(artifacts.file_count, 0);
+        assert_eq!(artifacts.families.len(), 1);
+        assert_eq!(artifacts.families[0]["family"], "unifiedEvents");
+        assert_eq!(artifacts.families[0]["present"], false);
+        assert_eq!(artifacts.missing_families, ["unifiedEvents"]);
     }
 
     fn test_dir(name: &str) -> PathBuf {
