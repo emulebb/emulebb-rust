@@ -21,6 +21,7 @@ use std::{
 
 use chrono::SecondsFormat;
 use serde::Serialize;
+use serde_json::{Map, Value, json};
 
 use super::{
     OP_CALLBACK_FAIL, OP_CALLBACKREQUEST, OP_CALLBACKREQUESTED, OP_FOUNDSOURCES,
@@ -314,6 +315,7 @@ fn ed2k_server_dump_file() -> &'static StdMutex<Option<fs::File>> {
 // feature-off build with an unresolved-name error.
 #[cfg(feature = "packet-diagnostics")]
 fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
+    emit_ed2k_server_diag_event(record);
     let Ok(line) = serde_json::to_string(record) else {
         return;
     };
@@ -330,6 +332,72 @@ fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
     let _ = std::io::Write::write_all(file, b"\n");
     let _ = std::io::Write::flush(file);
     maybe_sync_ed2k_server_dump(file);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+fn emit_ed2k_server_diag_event(record: &Ed2kServerDumpRecord<'_>) {
+    let (family, keys, body) = ed2k_server_diag_event_parts(record);
+    crate::diag_event::emit(family, "packet", "info", keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn ed2k_server_diag_event_parts(record: &Ed2kServerDumpRecord<'_>) -> (&'static str, Value, Value) {
+    let family = if record.role == "udp" {
+        "ed2k_server_udp"
+    } else {
+        "ed2k_tcp"
+    };
+
+    let mut keys = Map::new();
+    keys.insert("peer".to_string(), json!(record.remote_addr));
+    if let Some(protocol_marker) = record.protocol_marker {
+        keys.insert("protocolMarker".to_string(), json!(protocol_marker));
+    }
+    if let Some(opcode) = record.opcode {
+        keys.insert("opcode".to_string(), json!(opcode));
+    }
+
+    let mut body = Map::new();
+    body.insert("direction".to_string(), json!(record.direction));
+    if let Some(protocol_marker) = record.protocol_marker {
+        body.insert("protocolMarker".to_string(), json!(protocol_marker));
+    }
+    if let Some(protocol_name) = record.protocol {
+        body.insert("protocolName".to_string(), json!(protocol_name));
+    }
+    if let Some(opcode) = record.opcode {
+        body.insert("opcode".to_string(), json!(opcode));
+    }
+    if let Some(opcode_name) = record.opcode_name {
+        body.insert("opcodeName".to_string(), json!(opcode_name));
+    }
+    if let Some(payload_len) = record.payload_len {
+        body.insert("payloadLen".to_string(), json!(payload_len));
+    }
+    if let Some(payload_hex) = record.payload_hex.as_deref() {
+        body.insert("payloadHex".to_string(), json!(payload_hex));
+    }
+    if let Some(truncated) = record.payload_hex_truncated {
+        body.insert("payloadHexTruncated".to_string(), json!(truncated));
+    }
+    if record.transport_mode != "unknown" {
+        body.insert(
+            "obfuscated".to_string(),
+            json!(
+                record.transport_mode.contains("obfusc") || record.transport_mode.contains("crypt")
+            ),
+        );
+    }
+    body.insert("transportMode".to_string(), json!(record.transport_mode));
+    body.insert("flow".to_string(), json!(record.flow));
+    body.insert("phase".to_string(), json!(record.phase));
+    body.insert("role".to_string(), json!(record.role));
+    body.insert("traceId".to_string(), json!(record.trace_id));
+    if let Some(note) = record.note.as_deref() {
+        body.insert("note".to_string(), json!(note));
+    }
+
+    (family, Value::Object(keys), Value::Object(body))
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -386,11 +454,11 @@ fn server_opcode_name(opcode: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ED2K_SERVER_DUMP_FILE_PREFIX, OP_CALLBACKREQUEST, OP_EDONKEYPROT_MARKER,
-        OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2,
-        OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_PACKEDPROT, OP_SERVER_LIST_REQ,
-        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, exact_packet_hex, server_opcode_name,
-        server_protocol_name,
+        ED2K_SERVER_DUMP_FILE_PREFIX, Ed2kServerDumpRecord, OP_CALLBACKREQUEST,
+        OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ,
+        OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_PACKEDPROT, OP_SERVER_LIST_REQ,
+        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, ed2k_server_diag_event_parts, exact_packet_hex,
+        server_opcode_name, server_protocol_name,
     };
 
     #[test]
@@ -402,11 +470,75 @@ mod tests {
     }
 
     #[test]
-    fn server_packet_hex_preserves_payloads_larger_than_the_former_cap() {
+    fn server_common_event_preserves_payloads_larger_than_the_former_cap() {
         let payload = vec![0xCD; 4 * 1024 + 1];
         let encoded = exact_packet_hex(&payload);
-        assert_eq!(encoded.len(), payload.len() * 2);
-        assert!(encoded.ends_with("cd"));
+        let record = Ed2kServerDumpRecord {
+            schema: "ed2k_packet_v1",
+            source: "emulebb-rust",
+            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
+            event_seq: 1,
+            trace_id: 7,
+            trace_key: "server:background:7:198.51.100.1:4661".to_string(),
+            state_id: "server.background.connected".to_string(),
+            state_label: "connected",
+            role: "background",
+            flow: "server",
+            phase: "connected",
+            direction: "recv",
+            remote_addr: "198.51.100.1:4661".to_string(),
+            transport_mode: "plaintext",
+            protocol: Some("ed2k"),
+            protocol_marker: Some(OP_EDONKEYPROT_MARKER),
+            opcode: Some(OP_GLOBSEARCHRES),
+            opcode_name: Some(server_opcode_name(OP_GLOBSEARCHRES)),
+            payload_len: Some(payload.len()),
+            payload_hex: Some(encoded),
+            payload_hex_truncated: Some(false),
+            note: None,
+        };
+
+        let (family, keys, body) = ed2k_server_diag_event_parts(&record);
+        assert_eq!(family, "ed2k_tcp");
+        assert_eq!(keys["peer"], "198.51.100.1:4661");
+        assert_eq!(body["payloadLen"], payload.len());
+        assert_eq!(
+            body["payloadHex"].as_str().unwrap().len(),
+            payload.len() * 2
+        );
+        assert_eq!(body["payloadHexTruncated"], false);
+    }
+
+    #[test]
+    fn server_udp_common_event_uses_a_distinct_family() {
+        let record = Ed2kServerDumpRecord {
+            schema: "ed2k_packet_v1",
+            source: "emulebb-rust",
+            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
+            event_seq: 1,
+            trace_id: 0,
+            trace_key: "server:udp:198.51.100.2:4661".to_string(),
+            state_id: "server.udp.send".to_string(),
+            state_label: "udp",
+            role: "udp",
+            flow: "server",
+            phase: "udp",
+            direction: "send",
+            remote_addr: "198.51.100.2:4665".to_string(),
+            transport_mode: "obfuscated",
+            protocol: Some("ed2k"),
+            protocol_marker: Some(OP_EDONKEYPROT_MARKER),
+            opcode: Some(OP_GLOBSEARCHREQ),
+            opcode_name: Some(server_opcode_name(OP_GLOBSEARCHREQ)),
+            payload_len: Some(2),
+            payload_hex: Some("abcd".to_string()),
+            payload_hex_truncated: Some(false),
+            note: None,
+        };
+
+        let (family, _, body) = ed2k_server_diag_event_parts(&record);
+        assert_eq!(family, "ed2k_server_udp");
+        assert_eq!(body["obfuscated"], true);
     }
 
     #[test]
