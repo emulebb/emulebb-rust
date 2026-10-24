@@ -35,11 +35,37 @@ const DUMP_FLUSH_EVERY: u64 = 512;
 
 static UDP_DUMP_WRITER: OnceLock<Option<UdpDumpWriter>> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KadUdpOutcome {
+    #[default]
+    Accepted,
+    Dropped,
+    SendSucceeded,
+    SendFailed,
+    SendRejected,
+}
+
+impl KadUdpOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Dropped => "dropped",
+            Self::SendSucceeded => "send_succeeded",
+            Self::SendFailed => "send_failed",
+            Self::SendRejected => "send_rejected",
+        }
+    }
+
+    fn is_failure(self) -> bool {
+        matches!(self, Self::Dropped | Self::SendFailed | Self::SendRejected)
+    }
+}
+
 /// Stable metadata emitted for a single Kad UDP packet dump line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KadUdpDumpSummary {
     /// Kad protocol header byte after decode.
-    pub protocol: u8,
+    pub protocol: Option<u8>,
     /// Kad opcode, when available.
     pub opcode: Option<u8>,
     /// Stable Kad opcode label, when available.
@@ -62,6 +88,8 @@ pub struct KadUdpDumpSummary {
     pub drop_reason: Option<&'static str>,
     /// Exact local diagnostic detail for decode or policy failures.
     pub detail: Option<String>,
+    /// Terminal disposition for this receive or send operation.
+    pub outcome: KadUdpOutcome,
     /// Oracle-shaped tracker bucket label, when one applied.
     pub tracker_bucket: Option<&'static str>,
     /// Oracle-shaped tracker action label, when a tracked inbound request was classified.
@@ -74,7 +102,10 @@ pub struct KadUdpDumpSummary {
 
 impl KadUdpDumpSummary {
     fn summary_string(&self) -> String {
-        let mut parts = vec![format!("protocol=0x{:02X}", self.protocol)];
+        let mut parts = Vec::new();
+        if let Some(protocol) = self.protocol {
+            parts.push(format!("protocol=0x{protocol:02X}"));
+        }
         if let Some(opcode) = self.opcode {
             parts.push(format!("opcode=0x{opcode:02X}"));
         }
@@ -112,6 +143,7 @@ impl KadUdpDumpSummary {
         if let Some(detail) = self.detail.as_deref() {
             parts.push(format!("detail={detail}"));
         }
+        parts.push(format!("outcome={}", self.outcome.as_str()));
         if let Some(tracker_bucket) = self.tracker_bucket {
             parts.push(format!("tracker_bucket={tracker_bucket}"));
         }
@@ -146,6 +178,7 @@ struct UdpDumpRecord {
     state_id: String,
     state_label: String,
     direction: &'static str,
+    outcome: &'static str,
     family: &'static str,
     peer: String,
     wire_len: usize,
@@ -238,6 +271,7 @@ pub fn dump_kad_udp_packet(
         state_id: udp_state_id(direction, &summary),
         state_label: udp_state_label(&summary),
         direction,
+        outcome: summary.outcome.as_str(),
         family: "kad",
         peer: peer.to_string(),
         wire_len: wire_payload.len(),
@@ -245,7 +279,7 @@ pub fn dump_kad_udp_packet(
         decoded_len: decoded_payload.len(),
         decoded_hex: encode_hex_upper(decoded_payload),
         summary: summary.summary_string(),
-        protocol: Some(format!("0x{:02X}", summary.protocol)),
+        protocol: summary.protocol.map(|protocol| format!("0x{protocol:02X}")),
         opcode: summary.opcode.map(|opcode| format!("0x{opcode:02X}")),
         opcode_name: summary.opcode_name,
         raw_obfuscated: Some(summary.raw_obfuscated),
@@ -316,17 +350,16 @@ fn kad_udp_diag_event_parts(
     decoded_payload: &[u8],
     summary: &KadUdpDumpSummary,
 ) -> (&'static str, serde_json::Value, serde_json::Value) {
-    let severity = if summary.drop_reason.is_some() {
+    let severity = if summary.outcome.is_failure() {
         "low"
     } else {
         "info"
     };
     let mut keys = serde_json::Map::new();
     keys.insert("peer".to_string(), serde_json::json!(peer.to_string()));
-    keys.insert(
-        "protocolMarker".to_string(),
-        serde_json::json!(summary.protocol),
-    );
+    if let Some(protocol) = summary.protocol {
+        keys.insert("protocolMarker".to_string(), serde_json::json!(protocol));
+    }
     if let Some(opcode) = summary.opcode {
         keys.insert("opcode".to_string(), serde_json::json!(opcode));
     }
@@ -335,16 +368,11 @@ fn kad_udp_diag_event_parts(
     body.insert("direction".to_string(), serde_json::json!(direction));
     body.insert(
         "outcome".to_string(),
-        serde_json::json!(if summary.drop_reason.is_some() {
-            "dropped"
-        } else {
-            "accepted"
-        }),
+        serde_json::json!(summary.outcome.as_str()),
     );
-    body.insert(
-        "protocolMarker".to_string(),
-        serde_json::json!(summary.protocol),
-    );
+    if let Some(protocol) = summary.protocol {
+        body.insert("protocolMarker".to_string(), serde_json::json!(protocol));
+    }
     if let Some(opcode) = summary.opcode {
         body.insert("opcode".to_string(), serde_json::json!(opcode));
     }
@@ -544,7 +572,8 @@ fn yes_no(value: bool) -> &'static str {
 mod tests {
     use super::{
         DEFAULT_WORKSPACE_TMP_DIR_NAME, DUMP_FILE_PREFIX, EMULEBB_RUST_LOG_DIR_ENV,
-        EMULEBB_RUST_TMP_DIR_ENV, KadUdpDumpSummary, encode_hex_upper, kad_udp_diag_event_parts,
+        EMULEBB_RUST_TMP_DIR_ENV, KadUdpDumpSummary, KadUdpOutcome, encode_hex_upper,
+        kad_udp_diag_event_parts,
     };
     use std::net::SocketAddr;
 
@@ -564,7 +593,7 @@ mod tests {
     #[test]
     fn summary_string_is_machine_friendly() {
         let summary = KadUdpDumpSummary {
-            protocol: 0xE4,
+            protocol: Some(0xE4),
             opcode: Some(0x21),
             opcode_name: Some("KADEMLIA2_HELLO_REQ"),
             raw_obfuscated: true,
@@ -576,6 +605,7 @@ mod tests {
             tracked_request_opcode: Some("KADEMLIA2_HELLO_REQ"),
             drop_reason: Some("tracker_drop"),
             detail: Some("exact failure".to_string()),
+            outcome: KadUdpOutcome::Dropped,
             tracker_bucket: Some("hello_req"),
             tracker_action: Some("drop"),
             tracker_observed_packets: Some(4),
@@ -584,19 +614,20 @@ mod tests {
 
         assert_eq!(
             summary.summary_string(),
-            "protocol=0xE4 opcode=0x21 opcode_name=KADEMLIA2_HELLO_REQ raw_obfuscated=yes transport_mode=receiver_verify_key requested_obfuscation=yes receiver_verify_key=123 sender_verify_key=456 receiver_verify_key_valid=yes tracked_request_opcode=KADEMLIA2_HELLO_REQ drop_reason=tracker_drop detail=exact failure tracker_bucket=hello_req tracker_action=drop tracker_observed_packets=4 tracker_max_packets=3"
+            "protocol=0xE4 opcode=0x21 opcode_name=KADEMLIA2_HELLO_REQ raw_obfuscated=yes transport_mode=receiver_verify_key requested_obfuscation=yes receiver_verify_key=123 sender_verify_key=456 receiver_verify_key_valid=yes tracked_request_opcode=KADEMLIA2_HELLO_REQ drop_reason=tracker_drop detail=exact failure outcome=dropped tracker_bucket=hello_req tracker_action=drop tracker_observed_packets=4 tracker_max_packets=3"
         );
     }
 
     #[test]
     fn common_event_keeps_exact_tracker_drop_evidence() {
         let summary = KadUdpDumpSummary {
-            protocol: 0xE4,
+            protocol: Some(0xE4),
             opcode: Some(0x21),
             opcode_name: Some("KADEMLIA2_HELLO_REQ"),
             raw_obfuscated: true,
             transport_mode: Some("receiver_verify_key"),
             drop_reason: Some("tracker_drop"),
+            outcome: KadUdpOutcome::Dropped,
             tracker_bucket: Some("hello_req"),
             tracker_action: Some("drop"),
             tracker_observed_packets: Some(4),
@@ -617,6 +648,27 @@ mod tests {
         assert_eq!(body["trackerAction"], "drop");
         assert_eq!(body["trackerObservedPackets"], 4);
         assert_eq!(body["trackerMaxPackets"], 3);
+    }
+
+    #[test]
+    fn rejected_send_omits_unknown_protocol_bytes() {
+        let summary = KadUdpDumpSummary {
+            opcode: Some(0x21),
+            opcode_name: Some("KADEMLIA2_REQ"),
+            drop_reason: Some("encode_failed"),
+            detail: Some("exact encoder error".to_string()),
+            outcome: KadUdpOutcome::SendRejected,
+            ..KadUdpDumpSummary::default()
+        };
+        let peer: SocketAddr = "198.51.100.1:4672".parse().unwrap();
+        let (severity, keys, body) = kad_udp_diag_event_parts("send", peer, &[], &[], &summary);
+
+        assert_eq!(severity, "low");
+        assert!(keys.get("protocolMarker").is_none());
+        assert!(body.get("protocolMarker").is_none());
+        assert_eq!(body["outcome"], "send_rejected");
+        assert_eq!(body["dropReason"], "encode_failed");
+        assert_eq!(body["detail"], "exact encoder error");
     }
 
     #[test]

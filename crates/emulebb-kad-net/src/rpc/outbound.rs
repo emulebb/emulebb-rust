@@ -13,7 +13,7 @@ use super::{PendingEntry, RpcInner, RpcManager, RpcWorkClass};
 use crate::error::NetError;
 use crate::obfuscation::OutboundKadEncryptionMode;
 use crate::rate_limit::RateLimiter;
-use crate::wire_dump::{KadUdpDumpSummary, dump_kad_udp_packet};
+use crate::wire_dump::{KadUdpDumpSummary, KadUdpOutcome, dump_kad_udp_packet};
 
 /// RAII guard that guarantees a pending-request entry is removed from the
 /// `RpcManager` map exactly once, even if the awaiting request future is
@@ -180,6 +180,20 @@ impl RpcManager {
         work_class: RpcWorkClass,
     ) -> Result<(), NetError> {
         if !self.kad_enabled() {
+            dump_kad_udp_packet(
+                "send",
+                addr,
+                &[],
+                &[],
+                KadUdpDumpSummary {
+                    opcode: Some(packet.opcode()),
+                    opcode_name: Some(opcode_name(packet.opcode())),
+                    drop_reason: Some("kad_stopped"),
+                    detail: Some(NetError::KadStopped.to_string()),
+                    outcome: KadUdpOutcome::SendRejected,
+                    ..KadUdpDumpSummary::default()
+                },
+            );
             return Err(NetError::KadStopped);
         }
         let budget_started = std::time::Instant::now();
@@ -194,7 +208,26 @@ impl RpcManager {
         // (0xE4 -> 0xE5, zlib body); a stock node always does, so pack before
         // obfuscation to stay wire-identical (the header byte rides inside the
         // encrypted body).
-        let encoded = pack_kad_packet(packet.encode()?);
+        let encoded = match packet.encode() {
+            Ok(encoded) => pack_kad_packet(encoded),
+            Err(error) => {
+                dump_kad_udp_packet(
+                    "send",
+                    addr,
+                    &[],
+                    &[],
+                    KadUdpDumpSummary {
+                        opcode: Some(packet.opcode()),
+                        opcode_name: Some(opcode_name(packet.opcode())),
+                        drop_reason: Some("encode_failed"),
+                        detail: Some(error.to_string()),
+                        outcome: KadUdpOutcome::SendRejected,
+                        ..KadUdpDumpSummary::default()
+                    },
+                );
+                return Err(error.into());
+            }
+        };
         let outbound = self
             .inner
             .obfuscation
@@ -240,13 +273,28 @@ impl RpcManager {
                 crypt_target,
             );
         }
+        let send_result = self.inner.transport.send_raw(addr, &wire).await;
+        let (outcome, drop_reason, detail) = match &send_result {
+            Ok(()) => (KadUdpOutcome::SendSucceeded, None, None),
+            Err(error) => (
+                KadUdpOutcome::SendFailed,
+                Some("transport_failed"),
+                Some(error.to_string()),
+            ),
+        };
+        if send_result.is_err() {
+            self.inner
+                .outbound_tracker
+                .lock()
+                .remove_latest(addr.ip(), packet.opcode());
+        }
         dump_kad_udp_packet(
             "send",
             addr,
             &wire,
             &encoded,
             KadUdpDumpSummary {
-                protocol: encoded.first().copied().unwrap_or_default(),
+                protocol: encoded.first().copied(),
                 opcode: Some(packet.opcode()),
                 opcode_name: Some(opcode_name(packet.opcode())),
                 raw_obfuscated: !matches!(outbound.mode, OutboundKadEncryptionMode::Plaintext),
@@ -259,15 +307,16 @@ impl RpcManager {
                 sender_verify_key: outbound.sender_verify_key,
                 receiver_verify_key_valid: None,
                 tracked_request_opcode: None,
-                drop_reason: None,
-                detail: None,
+                outcome,
                 tracker_bucket: None,
                 tracker_action: None,
                 tracker_observed_packets: None,
                 tracker_max_packets: None,
+                drop_reason,
+                detail,
             },
         );
-        self.inner.transport.send_raw(addr, &wire).await
+        send_result
     }
 
     fn rate_limiter_for_class(&self, work_class: RpcWorkClass) -> &RateLimiter {
