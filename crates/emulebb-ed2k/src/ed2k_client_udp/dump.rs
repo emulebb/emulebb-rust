@@ -1,5 +1,5 @@
-// Gated by the `packet-diagnostics` Cargo feature, like the TCP/server packet
-// dumps. Release builds without the feature compile the writers to no-ops.
+// Gated by the `packet-diagnostics` Cargo feature. Release builds without the
+// feature compile the unified diagnostic emitters to no-ops.
 #![cfg_attr(
     not(feature = "packet-diagnostics"),
     expect(
@@ -10,16 +10,10 @@
 )]
 
 use std::{
-    fs,
     net::SocketAddr,
-    sync::{
-        Mutex as StdMutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
-use chrono::SecondsFormat;
-use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::codec::{
@@ -30,23 +24,17 @@ use super::outbound::ClientUdpDatagram;
 use super::transport::ClientUdpSendRole;
 use crate::ed2k_client_udp_obfuscation::deobfuscate_client_udp;
 
-const CLIENT_UDP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-client-udp-dump-";
 const OP_EMULEPROT_MARKER: u8 = 0xC5;
-const CLIENT_UDP_LIVE_SYNC_EVERY: u64 = 128;
 
-#[derive(Debug, Serialize)]
-struct ClientUdpDumpRecord<'a> {
-    schema: &'static str,
-    source: &'static str,
-    ts_utc: String,
-    event_seq: u64,
+#[derive(Debug)]
+struct ClientUdpDiagnosticRecord<'a> {
     trace_key: String,
     state_id: &'static str,
     state_label: &'static str,
     flow: &'static str,
     phase: &'static str,
     direction: &'a str,
-    outcome: &'static str,
+    outcome: ClientUdpDumpOutcome,
     send_attempt_id: Option<u64>,
     role: Option<&'static str>,
     remote_addr: String,
@@ -106,18 +94,14 @@ pub(super) fn dump_client_udp_send_attempt(
 ) {
     let raw_hex = exact_packet_hex(&datagram.bytes);
     let payload_hex = exact_packet_hex(&datagram.payload);
-    dump_client_udp_record(&ClientUdpDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: next_client_udp_dump_event_seq(),
+    emit_client_udp_packet(&ClientUdpDiagnosticRecord {
         trace_key: client_udp_trace_key(remote_addr),
         state_id: role.state_id(),
         state_label: role.state_label(),
         flow: "client_udp",
         phase: role.phase(),
         direction: "send",
-        outcome: ClientUdpDumpOutcome::Attempted.as_str(),
+        outcome: ClientUdpDumpOutcome::Attempted,
         send_attempt_id: Some(attempt_id),
         role: Some(role.as_str()),
         remote_addr: remote_addr.to_string(),
@@ -177,18 +161,14 @@ pub(super) fn dump_client_udp_recv(
         .map(|decoded| exact_packet_hex(&decoded.payload));
     let diagnostic_state =
         client_udp_diagnostic_state(decoded.as_ref().map(|decoded| decoded.opcode));
-    dump_client_udp_record(&ClientUdpDumpRecord {
-        schema: "ed2k_packet_v1",
-        source: "emulebb-rust",
-        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        event_seq: next_client_udp_dump_event_seq(),
+    emit_client_udp_packet(&ClientUdpDiagnosticRecord {
         trace_key: client_udp_trace_key(remote_addr),
         state_id: diagnostic_state.state_id,
         state_label: diagnostic_state.state_label,
         flow: "client_udp",
         phase: diagnostic_state.phase,
         direction: "recv",
-        outcome: outcome.as_str(),
+        outcome,
         send_attempt_id: None,
         role: None,
         remote_addr: remote_addr.to_string(),
@@ -319,41 +299,10 @@ fn client_udp_trace_key(remote_addr: SocketAddr) -> String {
     format!("client_udp:{remote_addr}")
 }
 
-fn next_client_udp_dump_event_seq() -> u64 {
-    static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
-    NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
 #[cfg(feature = "packet-diagnostics")]
 pub(super) fn next_client_udp_send_attempt_id() -> u64 {
     static NEXT_SEND_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
     NEXT_SEND_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Open (create/append) the ed2k client-UDP dump file under `EMULEBB_RUST_LOG_DIR`.
-/// `None` when the env var is unset or the file cannot be created. Kept separate
-/// from the `OnceLock` cell so callers RE-ATTEMPT the open while the handle is
-/// still `None` (an early first-access must not permanently disable the dump).
-fn open_client_udp_dump_file() -> Option<fs::File> {
-    let dir = std::env::var("EMULEBB_RUST_LOG_DIR")
-        .ok()
-        .map(std::path::PathBuf::from)?;
-    fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!(
-        "{}{}.jsonl",
-        CLIENT_UDP_DUMP_FILE_PREFIX,
-        chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
-    ));
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()
-}
-
-fn client_udp_dump_file() -> &'static StdMutex<Option<fs::File>> {
-    static DUMP_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
-    DUMP_FILE.get_or_init(|| StdMutex::new(None))
 }
 
 fn exact_packet_hex(bytes: &[u8]) -> String {
@@ -361,35 +310,14 @@ fn exact_packet_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(feature = "packet-diagnostics")]
-fn dump_client_udp_record(record: &ClientUdpDumpRecord<'_>) {
-    emit_client_udp_diag_event(record);
-    let Ok(line) = serde_json::to_string(record) else {
-        return;
-    };
-    let Ok(mut guard) = client_udp_dump_file().lock() else {
-        return;
-    };
-    if guard.is_none() {
-        *guard = open_client_udp_dump_file();
-    }
-    let Some(file) = guard.as_mut() else {
-        return;
-    };
-    let _ = std::io::Write::write_all(file, line.as_bytes());
-    let _ = std::io::Write::write_all(file, b"\n");
-    let _ = std::io::Write::flush(file);
-    maybe_sync_client_udp_dump(file);
-}
-
-#[cfg(feature = "packet-diagnostics")]
-fn emit_client_udp_diag_event(record: &ClientUdpDumpRecord<'_>) {
+fn emit_client_udp_packet(record: &ClientUdpDiagnosticRecord<'_>) {
     let (family, severity, keys, body) = client_udp_diag_event_parts(record);
     crate::diag_event::emit(family, "packet", severity, keys, body);
 }
 
 #[cfg(any(feature = "packet-diagnostics", test))]
 fn client_udp_diag_event_parts(
-    record: &ClientUdpDumpRecord<'_>,
+    record: &ClientUdpDiagnosticRecord<'_>,
 ) -> (&'static str, &'static str, Value, Value) {
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(record.remote_addr));
@@ -402,7 +330,7 @@ fn client_udp_diag_event_parts(
 
     let mut body = Map::new();
     body.insert("direction".to_string(), json!(record.direction));
-    body.insert("outcome".to_string(), json!(record.outcome));
+    body.insert("outcome".to_string(), json!(record.outcome.as_str()));
     if let Some(send_attempt_id) = record.send_attempt_id {
         keys.insert("sendAttemptId".to_string(), json!(send_attempt_id));
         body.insert("sendAttemptId".to_string(), json!(send_attempt_id));
@@ -452,13 +380,9 @@ fn client_udp_diag_event_parts(
         body.insert("note".to_string(), json!(note));
     }
 
-    let severity = match record.outcome {
-        "dropped" | "send_failed" => ClientUdpDumpOutcome::Dropped.severity(),
-        _ => ClientUdpDumpOutcome::Accepted.severity(),
-    };
     (
         "ed2k_client_udp",
-        severity,
+        record.outcome.severity(),
         Value::Object(keys),
         Value::Object(body),
     )
@@ -533,38 +457,19 @@ fn client_udp_send_outcome_parts(
     (outcome.severity(), keys, Value::Object(body))
 }
 
-#[cfg(feature = "packet-diagnostics")]
-fn maybe_sync_client_udp_dump(file: &fs::File) {
-    static CLIENT_UDP_LIVE_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
-    if CLIENT_UDP_LIVE_SYNC_COUNTER
-        .fetch_add(1, Ordering::Relaxed)
-        .is_multiple_of(CLIENT_UDP_LIVE_SYNC_EVERY)
-    {
-        let _ = file.sync_data();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CLIENT_UDP_DUMP_FILE_PREFIX, ClientUdpDumpOutcome, ClientUdpDumpRecord,
-        OP_DIRECTCALLBACKREQ, OP_PORTTEST, OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING,
-        client_udp_diag_event_parts, client_udp_diagnostic_state, client_udp_opcode_name,
-        client_udp_send_outcome_parts, exact_packet_hex,
+        ClientUdpDiagnosticRecord, ClientUdpDumpOutcome, OP_DIRECTCALLBACKREQ, OP_PORTTEST,
+        OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING, client_udp_diag_event_parts,
+        client_udp_diagnostic_state, client_udp_opcode_name, client_udp_send_outcome_parts,
+        exact_packet_hex,
     };
     use crate::ed2k_client_udp::outbound::{
         ClientUdpDatagram, OutboundReaskTarget, build_reask_file_ping_datagram,
     };
     use crate::ed2k_client_udp::transport::ClientUdpSendRole;
     use emulebb_kad_proto::Ed2kHash;
-
-    #[test]
-    fn client_udp_dump_prefix_uses_emulebb_rust_name() {
-        assert_eq!(
-            CLIENT_UDP_DUMP_FILE_PREFIX,
-            "emulebb-rust-ed2k-client-udp-dump-"
-        );
-    }
 
     #[test]
     fn client_udp_packet_hex_preserves_payloads_larger_than_the_former_cap() {
@@ -621,18 +526,14 @@ mod tests {
     fn client_udp_common_event_preserves_exact_wire_and_payload() {
         let raw = vec![0x11; 4 * 1024 + 1];
         let payload = vec![0x22; 4 * 1024 + 1];
-        let record = ClientUdpDumpRecord {
-            schema: "ed2k_packet_v1",
-            source: "emulebb-rust",
-            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
-            event_seq: 1,
+        let record = ClientUdpDiagnosticRecord {
             trace_key: "client_udp:198.51.100.2:4672".to_string(),
             state_id: "client_udp.reask",
             state_label: "reask",
             flow: "client_udp",
             phase: "reask",
             direction: "send",
-            outcome: ClientUdpDumpOutcome::Attempted.as_str(),
+            outcome: ClientUdpDumpOutcome::Attempted,
             send_attempt_id: Some(7),
             role: Some("reask_request"),
             remote_addr: "198.51.100.2:4672".to_string(),
@@ -680,18 +581,14 @@ mod tests {
     #[test]
     fn client_udp_common_event_preserves_dropped_undecodable_wire() {
         let raw = vec![0x42; 24];
-        let record = ClientUdpDumpRecord {
-            schema: "ed2k_packet_v1",
-            source: "emulebb-rust",
-            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
-            event_seq: 2,
+        let record = ClientUdpDiagnosticRecord {
             trace_key: "client_udp:198.51.100.2:4672".to_string(),
             state_id: "client_udp.reask",
             state_label: "reask",
             flow: "client_udp",
             phase: "reask",
             direction: "recv",
-            outcome: ClientUdpDumpOutcome::Dropped.as_str(),
+            outcome: ClientUdpDumpOutcome::Dropped,
             send_attempt_id: None,
             role: None,
             remote_addr: "198.51.100.2:4672".to_string(),
