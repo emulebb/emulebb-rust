@@ -478,7 +478,7 @@ async fn handle_inbound_datagram(
         ReaskInboundOutcome::PortTest { from } => {
             acknowledge_port_test(port_test_registry, from);
         }
-        ReaskInboundOutcome::Ignored => {}
+        ReaskInboundOutcome::Ignored(_) => {}
     }
 }
 

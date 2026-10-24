@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 use emulebb_kad_proto::Ed2kHash;
 
 use super::ClientUdpDatagram;
-use super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
+use super::dispatch::{
+    InboundReaskMessage, InboundReaskParseError, classify_inbound_reask_datagram,
+};
 use super::source_set::ReaskSourceSet;
 use super::state::{ReaskAction, ReaskReply, ReaskSource};
 use crate::reachability::ExternalReachability;
@@ -70,9 +72,31 @@ pub(crate) enum ReaskInboundOutcome {
     /// Valid UDP half of `OP_PORTTEST`; the runtime wakes the associated TCP
     /// test connection through [`crate::PortTestRegistry`].
     PortTest { from: SocketAddr },
-    /// Not a reask addressed to us (junk, a Kad packet, an unsolicited reply, or
-    /// an unknown source) — the caller ignores it.
-    Ignored,
+    /// The datagram was not actionable. The reason remains available to packet
+    /// diagnostics instead of collapsing every terminal path into `accepted`.
+    Ignored(ReaskIgnoredReason),
+}
+
+/// Stable terminal reason for a non-actionable inbound client-UDP datagram.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReaskIgnoredReason {
+    NonIpv4,
+    Parse(InboundReaskParseError),
+    UnregisteredEndpoint,
+    MissingSourceSet,
+    UnsolicitedReply,
+}
+
+impl ReaskIgnoredReason {
+    pub(crate) const fn reason(&self) -> &'static str {
+        match self {
+            Self::NonIpv4 => "non_ipv4",
+            Self::Parse(error) => error.reason(),
+            Self::UnregisteredEndpoint => "unregistered_endpoint",
+            Self::MissingSourceSet => "missing_source_set",
+            Self::UnsolicitedReply => "unsolicited_reply",
+        }
+    }
 }
 
 /// Per-tick work the caller must perform: datagrams to send, and sources whose
@@ -211,18 +235,20 @@ impl ReaskService {
         now: Instant,
     ) -> ReaskInboundOutcome {
         let SocketAddr::V4(v4) = from else {
-            return ReaskInboundOutcome::Ignored; // IPv4-only client
+            return ReaskInboundOutcome::Ignored(ReaskIgnoredReason::NonIpv4);
         };
         let ip = *v4.ip();
         let port = v4.port();
-        let msg = match parse_inbound_reask_datagram(
+        let msg = match classify_inbound_reask_datagram(
             datagram,
             ip.octets(),
             &self.our_user_hash,
             self.our_udp_version,
         ) {
-            Some(msg) => msg,
-            None => return ReaskInboundOutcome::Ignored,
+            Ok(msg) => msg,
+            Err(error) => {
+                return ReaskInboundOutcome::Ignored(ReaskIgnoredReason::Parse(error));
+            }
         };
 
         let reply = match msg {
@@ -253,10 +279,10 @@ impl ReaskService {
 
         // Correlate the reply to a source by endpoint, then by its file.
         let Some(file_hash) = self.endpoint_index.get(&(ip, port)).copied() else {
-            return ReaskInboundOutcome::Ignored;
+            return ReaskInboundOutcome::Ignored(ReaskIgnoredReason::UnregisteredEndpoint);
         };
         let Some(set) = self.per_file.get_mut(&file_hash) else {
-            return ReaskInboundOutcome::Ignored;
+            return ReaskInboundOutcome::Ignored(ReaskIgnoredReason::MissingSourceSet);
         };
         // Capture the lease key BEFORE applying the reply: `DropSource` removes
         // the source from the set, taking its TCP lease endpoint with it.
@@ -275,7 +301,7 @@ impl ReaskService {
                     action,
                 }
             }
-            None => ReaskInboundOutcome::Ignored, // unsolicited (failed the pending gate)
+            None => ReaskInboundOutcome::Ignored(ReaskIgnoredReason::UnsolicitedReply),
         }
     }
 
