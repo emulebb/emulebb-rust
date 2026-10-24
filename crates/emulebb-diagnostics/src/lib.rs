@@ -350,10 +350,6 @@ impl SegmentedEventWriter {
                 return false;
             }
         };
-        if line.len() as u64 > self.config.max_segment_bytes {
-            self.dropped_events = self.dropped_events.saturating_add(1);
-            return false;
-        }
         if self.should_rotate(line.len() as u64) {
             if let Err(error) = self.rotate() {
                 self.write_errors = self.write_errors.saturating_add(1);
@@ -369,10 +365,6 @@ impl SegmentedEventWriter {
                     return false;
                 }
             };
-            if line.len() as u64 > self.config.max_segment_bytes {
-                self.dropped_events = self.dropped_events.saturating_add(1);
-                return false;
-            }
         }
         if let Err(error) = self.active_file.write_all(&line) {
             self.write_errors = self.write_errors.saturating_add(1);
@@ -776,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn rollover_revalidates_size_after_segment_id_growth() {
+    fn rollover_preserves_a_record_that_exceeds_the_segment_target_after_reencoding() {
         let root = TempDir::new().unwrap();
         let mut writer = test_writer(&root, 4096, Duration::from_secs(60), 4);
         writer.active_segment_id = 999_999;
@@ -795,28 +787,41 @@ mod tests {
         };
         writer.config.max_segment_bytes = writer.encode_record(&pending).unwrap().len() as u64;
 
-        assert!(!writer.emit("sched", "segment_width", "info", &keys, &body));
+        assert!(writer.emit("sched", "segment_width", "info", &keys, &body));
         assert_eq!(writer.active_segment_id, 1_000_000);
-        assert_eq!(writer.active_segment_bytes, 0);
-        assert_eq!(writer.dropped_events, 1);
+        assert!(writer.active_segment_bytes > writer.config.max_segment_bytes);
+        assert_eq!(writer.dropped_events, 0);
+        assert_eq!(read_records(root.path()).len(), 1);
     }
 
     #[test]
-    fn oversized_records_are_dropped_and_counted() {
+    fn oversized_records_are_retained_in_an_isolated_segment() {
         let root = TempDir::new().unwrap();
         let mut writer = test_writer(&root, 128, Duration::from_secs(60), 2);
 
-        assert!(!writer.emit(
+        assert!(writer.emit(
             "sched",
             "oversized",
             "info",
             &json!({}),
             &json!({"padding": "x".repeat(512)}),
         ));
+        assert!(writer.active_segment_bytes > writer.config.max_segment_bytes);
+        assert_eq!(writer.active_segment_id, 0);
+
+        assert!(writer.emit(
+            "sched",
+            "following",
+            "info",
+            &json!({}),
+            &json!({"padding": "small"}),
+        ));
         let health = writer.health();
-        assert_eq!(health.records_written, 0);
-        assert_eq!(health.dropped_events, 1);
-        assert!(read_records(root.path()).is_empty());
+        assert_eq!(health.records_written, 2);
+        assert_eq!(health.dropped_events, 0);
+        assert_eq!(health.active_segment_id, Some(1));
+        assert_eq!(segment_files_for_run(root.path(), "testrun").len(), 2);
+        assert_eq!(read_records(root.path()).len(), 2);
     }
 
     #[cfg(feature = "enabled")]
