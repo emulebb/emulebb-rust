@@ -174,6 +174,7 @@ fn runtime_diagnostics_response_with(
         "sharedFileCount": shared_file_count,
         "sharedHashingCount": shared_hashing_count,
         "sharedDirectoryReloadProgress": shared_directory_reload_progress,
+        "diagnosticWriter": state.core.diagnostic_writer_health(),
         "ed2kPublish": state.core.ed2k_publish_diagnostics(),
         "kadPublish": state.core.kad_publish_diagnostics(),
         "transferEvents": state.core.transfer_event_diagnostics(),

@@ -670,6 +670,13 @@ async fn diagnostics_returns_runtime_diagnostics_directly() {
     );
     assert_eq!(value["data"]["ed2kPublish"]["phase"], "idle");
     assert_eq!(value["data"]["kadPublish"]["phase"], "idle");
+    assert_eq!(value["data"]["diagnosticWriter"]["schema"], "diag_event_v2");
+    assert_eq!(value["data"]["diagnosticWriter"]["enabled"], false);
+    assert_eq!(
+        value["data"]["diagnosticWriter"]["processId"],
+        std::process::id()
+    );
+    assert_eq!(value["data"]["diagnosticWriter"]["droppedEvents"], 0);
     assert_eq!(value["data"]["transferEvents"]["enabled"], true);
     assert_eq!(value["data"]["transferEvents"]["stream"], "sse");
     assert_eq!(value["data"]["transferEvents"]["channelCapacity"], 1024);
