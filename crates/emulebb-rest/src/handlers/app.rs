@@ -144,13 +144,11 @@ pub(crate) async fn capture_diagnostic_dump(
         )
         .into_response();
     }
-    match capture_bundle(&state, request.full_memory).await {
+    match capture_bundle(&state).await {
         Ok(bundle) => match state.core.write_diagnostic_dump(&bundle.payload) {
             Ok(dump) => api_ok(emulebb_core::DiagnosticDumpResult {
                 ok: true,
                 path: dump.path.display().to_string(),
-                full_memory: request.full_memory,
-                full_memory_included: false,
                 schema: DIAGNOSTIC_BUNDLE_SCHEMA.to_string(),
                 byte_count: dump.byte_count,
                 artifact_file_count: bundle.artifact_file_count,

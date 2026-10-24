@@ -216,8 +216,6 @@ pub(crate) struct ShutdownRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DiagnosticDumpRequest {
     pub(crate) confirm_dump: bool,
-    #[serde(default)]
-    pub(crate) full_memory: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

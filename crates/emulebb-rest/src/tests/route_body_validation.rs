@@ -1108,7 +1108,7 @@ async fn destructive_confirmation_bodies_use_canonical_validation() {
         (
             "POST",
             "/api/v1/diagnostics/dumps",
-            r#"{"confirmDump":false,"fullMemory":false}"#,
+            r#"{"confirmDump":false}"#,
             "confirmDump must be true",
         ),
         (
@@ -1144,29 +1144,15 @@ async fn destructive_confirmation_bodies_use_canonical_validation() {
 }
 
 #[tokio::test]
-async fn diagnostic_dump_body_uses_canonical_full_memory_validation() {
-    let app = test_router();
-    let cases = [
-        (
-            r#"{"confirmDump":true,"fullMemory":"false"}"#,
-            "fullMemory must be a boolean",
-        ),
-        (
-            r#"{"confirmDump":false,"fullMemory":"false"}"#,
-            "confirmDump must be true",
-        ),
-    ];
-
-    for (body, expected_message) in cases {
-        assert_invalid_json_response(
-            app.clone(),
-            "POST",
-            "/api/v1/diagnostics/dumps",
-            body.to_string(),
-            expected_message,
-        )
-        .await;
-    }
+async fn diagnostic_dump_body_rejects_retired_full_memory_field() {
+    assert_invalid_json_response(
+        test_router(),
+        "POST",
+        "/api/v1/diagnostics/dumps",
+        r#"{"confirmDump":true,"fullMemory":false}"#.to_string(),
+        "unknown JSON field: fullMemory",
+    )
+    .await;
 }
 
 #[tokio::test]

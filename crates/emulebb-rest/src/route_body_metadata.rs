@@ -14,13 +14,12 @@ use validators::{
     validate_app_settings_patch_body_fields, validate_category_create_body_fields,
     validate_category_patch_body_fields, validate_destructive_confirmation_body_field,
     validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
-    validate_known_file_policy_body_field, validate_optional_boolean_body_field,
-    validate_paused_body_field, validate_search_create_body_fields,
-    validate_server_create_body_fields, validate_server_patch_body_fields,
-    validate_shared_directories_patch_body_fields, validate_shared_directory_root_body_fields,
-    validate_shared_file_ignore_rule_body_fields, validate_shared_file_patch_body_fields,
-    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
-    validate_url_import_body_fields,
+    validate_known_file_policy_body_field, validate_paused_body_field,
+    validate_search_create_body_fields, validate_server_create_body_fields,
+    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
+    validate_shared_directory_root_body_fields, validate_shared_file_ignore_rule_body_fields,
+    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
+    validate_transfer_patch_body_fields, validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -162,8 +161,7 @@ fn validate_route_specific_body_fields(
         return validate_known_file_policy_body_field(object);
     }
     if method == "POST" && path == "/api/v1/diagnostics/dumps" {
-        validate_destructive_confirmation_body(method, path, object)?;
-        return validate_optional_boolean_body_field(object, "fullMemory");
+        return validate_destructive_confirmation_body(method, path, object);
     }
     validate_destructive_confirmation_body(method, path, object)
 }
@@ -185,7 +183,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const SHARED_FILE_IGNORE_RULE: &[&str] = &["enabled"];
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
-    const DIAGNOSTIC_DUMP: &[&str] = &["confirmDump", "fullMemory"];
+    const DIAGNOSTIC_DUMP: &[&str] = &["confirmDump"];
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
     const APP_SETTINGS: &[&str] = &[
         "core", "daemon", "ed2k", "kad", "nat", "vpnGuard", "ipFilter",

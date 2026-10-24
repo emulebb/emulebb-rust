@@ -110,10 +110,7 @@ struct TailRead {
     lines: Vec<Vec<u8>>,
 }
 
-pub(crate) async fn capture(
-    state: &RestState,
-    full_memory_requested: bool,
-) -> Result<DiagnosticBundleCapture> {
+pub(crate) async fn capture(state: &RestState) -> Result<DiagnosticBundleCapture> {
     let status = status_response(state).await;
     let runtime_diagnostics = runtime_diagnostics_response(state).await;
     let unified_run = unified_run_selection(&runtime_diagnostics);
@@ -148,11 +145,6 @@ pub(crate) async fn capture(
             "logDirectory": artifacts.log_directory,
             "families": artifacts.families,
             "directoryScanTruncated": artifacts.directory_scan_truncated,
-        },
-        "memory": {
-            "requested": full_memory_requested,
-            "included": false,
-            "reason": "process memory capture is intentionally excluded from bounded diagnostic bundles",
         },
         "limits": {
             "recentLogRecords": MAX_LOG_RECORDS,
