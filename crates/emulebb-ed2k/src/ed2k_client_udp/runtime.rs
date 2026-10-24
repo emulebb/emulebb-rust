@@ -36,6 +36,7 @@ use super::service::{
     ReaskIgnoredReason, ReaskInboundOutcome, ReaskService, ReaskTickPacing, TransferReaskInfo,
 };
 use super::state::{ReaskAction, ReaskSource};
+use super::transport::{ClientUdpSendRole, send_client_udp_datagram};
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 use crate::ipfilter::IpFilter;
@@ -499,7 +500,14 @@ async fn handle_inbound_datagram(
                     .await
                 {
                     Some(reply) => {
-                        if let Err(err) = dht.send_raw_datagram(from, &reply.bytes).await {
+                        if let Err(err) = send_client_udp_datagram(
+                            dht,
+                            from,
+                            ClientUdpSendRole::ReciprocityReply,
+                            &reply,
+                        )
+                        .await
+                        {
                             trace!("ed2k udp reask: reciprocity reply to {from} failed: {err}");
                         } else {
                             super::dump::dump_client_udp_send(from, &reply);
@@ -790,7 +798,12 @@ async fn drive_reask_tick(
         },
     );
     for (addr, datagram) in out.send {
-        match dht.send_raw_datagram(addr, &datagram.bytes).await {
+        let role = if datagram.opcode == super::codec::OP_REASKCALLBACKUDP {
+            ClientUdpSendRole::BuddyRelayRequest
+        } else {
+            ClientUdpSendRole::ReaskRequest
+        };
+        match send_client_udp_datagram(dht, addr, role, &datagram).await {
             Ok(()) => {
                 super::dump::dump_client_udp_send(addr, &datagram);
                 trace!(

@@ -14,6 +14,8 @@ use tracing::trace;
 
 use crate::reachability::{ExternalReachability, ReachabilityRuntimeAuthority};
 
+use super::transport::{ClientUdpSendRole, send_client_udp_datagram};
+
 /// Inputs for [`DirectCallbackSender::dispatch`]: everything needed to encode
 /// and address one `OP_DIRECTCALLBACKREQ`.
 #[derive(Debug, Clone)]
@@ -118,7 +120,14 @@ pub(super) async fn send_direct_callback_req(
         args.connect_options,
         &target,
     );
-    match dht.send_raw_datagram(args.dest, &datagram.bytes).await {
+    match send_client_udp_datagram(
+        dht,
+        args.dest,
+        ClientUdpSendRole::DirectCallbackRequest,
+        &datagram,
+    )
+    .await
+    {
         Ok(()) => {
             super::dump::dump_client_udp_send(args.dest, &datagram);
             trace!("ed2k udp: sent OP_DIRECTCALLBACKREQ to {}", args.dest);
