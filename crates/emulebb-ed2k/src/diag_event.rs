@@ -1,65 +1,12 @@
-//! `diag_event_v1` unified diagnostic event writer (uniform-diagnostics-v2, lane
-//! D2). One JSONL object per line under `EMULEBB_RUST_LOG_DIR`, mirroring the
-//! envelope in `docs/diagnostics/diag-event-v1-schema.md` §2.
+//! Shared diagnostic-event facade for eD2K and core producers.
 //!
-//! Writer placement: the `diag_event_v1` surface must be reachable from
-//! `emulebb-ed2k`, `emulebb-core`, and `emulebb-kad-net`. The only crate all
-//! three share is `emulebb-kad-proto` (a pure codec crate with no serde_json /
-//! chrono), so hosting the writer there would be a bad layering choice. Instead
-//! each crate carries a small emit shim encoding the IDENTICAL JSONL format.
-//! `emulebb-kad-net` owns the single process-wide buffered file handle, and this
-//! shim submits its complete encoded lines through that writer. `emulebb-core`
-//! depends on `emulebb-ed2k` and reuses THIS module directly (so there are only
-//! two copies of the format: this one for ed2k+core, and a twin in
-//! `emulebb-kad-net`). `seq` is a per-module monotonic counter, which the harness
-//! treats as client-specific intra-side ordering only (schema §2), so a
-//! per-module counter is sufficient.
-//!
-//! Gating (schema §5): the writer is compiled only with the
-//! `packet-diagnostics` Cargo feature, then runtime-gated by
-//! `EMULEBB_RUST_LOG_DIR` for output placement. Regular builds compile [`emit`]
-//! to a no-op, so the environment variable alone cannot enable diagnostics.
+//! Serialization, process-wide sequencing, segmented rotation, retention, and
+//! writer health live in the dependency-neutral `emulebb-diagnostics` crate.
 
-#![cfg_attr(
-    not(feature = "packet-diagnostics"),
-    expect(
-        dead_code,
-        reason = "packet-diagnostic event machinery is inert without its feature"
-    )
-)]
-
-use std::sync::atomic::{AtomicU64, Ordering};
-
-#[cfg(feature = "packet-diagnostics")]
-use chrono::SecondsFormat;
-use serde::Serialize;
 use serde_json::Value;
 
-/// One `diag_event_v1` envelope (schema §2). `keys` and `body` are arbitrary
-/// JSON objects supplied by the call site so each family maps its own §3 fields.
-#[derive(Debug, Serialize)]
-struct DiagEventRecord {
-    schema: &'static str,
-    client: &'static str,
-    ts: String,
-    seq: u64,
-    family: &'static str,
-    event: &'static str,
-    severity: &'static str,
-    keys: Value,
-    body: Value,
-}
+pub use emulebb_diagnostics::DiagWriterHealth;
 
-fn next_seq() -> u64 {
-    static NEXT_SEQ: AtomicU64 = AtomicU64::new(1);
-    NEXT_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Append one `diag_event_v1` record. `keys` / `body` are pre-built JSON values
-/// (use [`serde_json::json!`]); omit optional fields rather than emitting fake
-/// data. Compiled to a no-op without `packet-diagnostics`; otherwise still
-/// no-ops when `EMULEBB_RUST_LOG_DIR` is unset.
-#[cfg(feature = "packet-diagnostics")]
 pub fn emit(
     family: &'static str,
     event: &'static str,
@@ -67,88 +14,9 @@ pub fn emit(
     keys: Value,
     body: Value,
 ) {
-    let record = DiagEventRecord {
-        schema: "diag_event_v1",
-        client: "rust",
-        ts: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        seq: next_seq(),
-        family,
-        event,
-        severity,
-        keys,
-        body,
-    };
-    let Some(line) = encode_record_line(&record) else {
-        return;
-    };
-    let _ = emulebb_kad_net::diag_event::append_record_line(&line);
+    let _ = emulebb_diagnostics::emit(family, event, severity, keys, body);
 }
 
-#[cfg(not(feature = "packet-diagnostics"))]
-pub fn emit(
-    _family: &'static str,
-    _event: &'static str,
-    _severity: &'static str,
-    _keys: Value,
-    _body: Value,
-) {
-}
-
-fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
-    let mut line = serde_json::to_vec(record).ok()?;
-    line.push(b'\n');
-    Some(line)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{DiagEventRecord, encode_record_line};
-    use serde_json::json;
-
-    #[test]
-    fn encoded_diag_event_line_is_single_json_record_with_newline() {
-        let record = DiagEventRecord {
-            schema: "diag_event_v1",
-            client: "rust",
-            ts: "2026-06-18T00:00:00.000Z".to_string(),
-            seq: 1,
-            family: "sched",
-            event: "source_dropped",
-            severity: "info",
-            keys: json!({"peer": "192.0.2.10:4662"}),
-            body: json!({"outcome": "dropped"}),
-        };
-
-        let line = encode_record_line(&record).expect("line encoded");
-        assert_eq!(line.last(), Some(&b'\n'));
-        let without_newline = &line[..line.len() - 1];
-        let decoded: serde_json::Value = serde_json::from_slice(without_newline).unwrap();
-        assert_eq!(decoded["schema"], "diag_event_v1");
-        assert_eq!(decoded["family"], "sched");
-    }
-
-    // Cross-crate diag_event_v1 envelope golden (C4): the ed2k + kad-net emitters
-    // each duplicate DiagEventRecord + encode_record_line and append to the SAME
-    // jsonl. This exact byte string is asserted identically in BOTH crates, so a
-    // field rename/reorder/addition in one (which would split the shared file)
-    // fails its golden test. Keep the two literals byte-identical.
-    #[test]
-    fn encode_record_line_matches_cross_crate_golden() {
-        let record = DiagEventRecord {
-            schema: "diag_event_v1",
-            client: "rust",
-            ts: "2026-06-18T00:00:00.000Z".to_string(),
-            seq: 1,
-            family: "sched",
-            event: "source_dropped",
-            severity: "info",
-            keys: json!({"peer": "192.0.2.10:4662"}),
-            body: json!({"outcome": "dropped"}),
-        };
-        let line = encode_record_line(&record).expect("line encoded");
-        assert_eq!(
-            String::from_utf8(line).unwrap(),
-            "{\"schema\":\"diag_event_v1\",\"client\":\"rust\",\"ts\":\"2026-06-18T00:00:00.000Z\",\"seq\":1,\"family\":\"sched\",\"event\":\"source_dropped\",\"severity\":\"info\",\"keys\":{\"peer\":\"192.0.2.10:4662\"},\"body\":{\"outcome\":\"dropped\"}}\n"
-        );
-    }
+pub fn writer_health() -> DiagWriterHealth {
+    emulebb_diagnostics::writer_health()
 }

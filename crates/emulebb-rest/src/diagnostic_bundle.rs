@@ -29,9 +29,9 @@ const ARTIFACT_FAMILIES: &[ArtifactFamilySpec] = &[
     ArtifactFamilySpec {
         family: "unifiedEvents",
         file_prefix: "emulebb-rust-diag-",
-        expected_schema: "diag_event_v1",
+        expected_schema: "diag_event_v2",
         sequence_field: "seq",
-        sequence_assessment: "notGloballyReliableMultipleProducers",
+        sequence_assessment: "processWideMonotonicTail",
     },
     ArtifactFamilySpec {
         family: "ed2kPeerTcp",
@@ -542,16 +542,20 @@ mod tests {
             let schema = if sequence == 69 {
                 "unexpected"
             } else {
-                "diag_event_v1"
+                "diag_event_v2"
             };
             content.push_str(
                 &json!({
                     "schema": schema,
+                    "runId": "test-run",
+                    "processId": 42,
+                    "segmentId": 3,
                     "seq": match sequence {
                         69 => 72,
                         70 => 68,
                         _ => sequence,
                     },
+                    "streamSeq": sequence,
                     "family": "ed2k_tcp",
                     "event": "packet",
                     "keys": {"peer": "198.51.100.2:4662"},

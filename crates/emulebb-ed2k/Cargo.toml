@@ -15,7 +15,10 @@ workspace = true
 # eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS #ifdef). Off by default so release
 # builds compile the dump out entirely; enable for diagnostic/live-wire builds.
 # When enabled, the dump is still runtime-gated by the EMULEBB_RUST_LOG_DIR env var.
-packet-diagnostics = ["emulebb-kad-dht/packet-diagnostics"]
+packet-diagnostics = [
+    "emulebb-diagnostics/enabled",
+    "emulebb-kad-dht/packet-diagnostics",
+]
 # Forwards the test-only egress-audit seam down to emulebb-kad-net (via kad-dht).
 # Never enabled in a release/daemon build (see tools/check_rust_client_policy.py).
 egress-audit = ["emulebb-kad-dht/egress-audit"]
@@ -29,6 +32,7 @@ async-trait.workspace = true
 chrono.workspace = true
 emulebb-miniupnpc = { path = "../emulebb-miniupnpc" }
 emulebb-pcpnatpmp = { path = "../emulebb-pcpnatpmp" }
+emulebb-diagnostics = { path = "../emulebb-diagnostics" }
 emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }

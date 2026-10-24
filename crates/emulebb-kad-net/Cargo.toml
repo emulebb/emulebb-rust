@@ -14,7 +14,7 @@ workspace = true
 # Compile-time gate for Kad packet dumps and diag_event_v1 diagnostics. Runtime
 # EMULEBB_RUST_LOG_DIR only selects the output directory after this feature is
 # enabled by the diagnostics binary/build.
-packet-diagnostics = []
+packet-diagnostics = ["emulebb-diagnostics/enabled"]
 # Test-only egress-audit seam: records every P2P socket's bound local address and
 # read-back IP_UNICAST_IF pin so the RUST-FEAT-005 leak test can OBSERVE that no
 # socket is ever bound/pinned off the tunnel. Off by default; NEVER enabled in the
@@ -22,6 +22,7 @@ packet-diagnostics = []
 egress-audit = []
 
 [dependencies]
+emulebb-diagnostics = { path = "../emulebb-diagnostics" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
 thiserror = { workspace = true }
