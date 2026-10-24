@@ -82,6 +82,112 @@ impl Drop for Ed2kTcpSendCapture<'_> {
     }
 }
 
+#[cfg(feature = "packet-diagnostics")]
+pub(super) struct Ed2kTcpDiagnosticFrameWriter<'transport, 'frame> {
+    transport: &'transport mut Ed2kTransport,
+    capture: Ed2kTcpSendCapture<'frame>,
+    clear_written: usize,
+}
+
+#[cfg(feature = "packet-diagnostics")]
+impl Ed2kTcpDiagnosticFrameWriter<'_, '_> {
+    pub(super) async fn write_chunk(&mut self, clear_chunk: &[u8]) -> Result<()> {
+        let clear_end = self.clear_written.saturating_add(clear_chunk.len());
+        if clear_end > self.capture.clear_frame.len()
+            || self.capture.clear_frame[self.clear_written..clear_end] != *clear_chunk
+        {
+            let error = anyhow::anyhow!(
+                "eD2k diagnostic frame chunk does not match the declared clear frame"
+            );
+            self.capture.emit("send_failed", Some(error.to_string()));
+            return Err(error);
+        }
+
+        let obfuscated = self.transport.send_cipher.is_some();
+        if let Some(cipher) = self.transport.send_cipher.as_mut() {
+            self.transport.write_buf.clear();
+            self.transport.write_buf.extend_from_slice(clear_chunk);
+            cipher.apply(&mut self.transport.write_buf);
+        }
+        let wire_chunk = if obfuscated {
+            self.transport.write_buf.as_slice()
+        } else {
+            clear_chunk
+        };
+        let mut written = 0usize;
+        while written < wire_chunk.len() {
+            match self.transport.stream.write(&wire_chunk[written..]).await {
+                Ok(0) => {
+                    let error = io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write complete eD2k frame",
+                    );
+                    self.capture.emit("send_failed", Some(error.to_string()));
+                    return Err(error.into());
+                }
+                Ok(count) => {
+                    self.capture
+                        .record_written(&wire_chunk[written..written + count]);
+                    written += count;
+                }
+                Err(error) => {
+                    self.capture.emit("send_failed", Some(error.to_string()));
+                    return Err(error.into());
+                }
+            }
+        }
+        self.clear_written = clear_end;
+        Ok(())
+    }
+
+    pub(super) fn finish(mut self) -> Result<()> {
+        if self.clear_written != self.capture.clear_frame.len() {
+            let error = anyhow::anyhow!(
+                "eD2k diagnostic frame ended after {} of {} clear bytes",
+                self.clear_written,
+                self.capture.clear_frame.len()
+            );
+            self.capture.emit("send_failed", Some(error.to_string()));
+            return Err(error);
+        }
+        self.capture.emit("send_succeeded", None);
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+pub(super) struct Ed2kTcpDiagnosticFrameWriter<'transport, 'frame> {
+    transport: &'transport mut Ed2kTransport,
+    clear_frame: &'frame [u8],
+    clear_written: usize,
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+impl Ed2kTcpDiagnosticFrameWriter<'_, '_> {
+    pub(super) async fn write_chunk(&mut self, clear_chunk: &[u8]) -> Result<()> {
+        let clear_end = self.clear_written.saturating_add(clear_chunk.len());
+        if clear_end > self.clear_frame.len()
+            || self.clear_frame[self.clear_written..clear_end] != *clear_chunk
+        {
+            anyhow::bail!("eD2k diagnostic frame chunk does not match the declared clear frame");
+        }
+        self.transport.write_all(clear_chunk).await?;
+        self.clear_written = clear_end;
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> Result<()> {
+        if self.clear_written != self.clear_frame.len() {
+            anyhow::bail!(
+                "eD2k diagnostic frame ended after {} of {} clear bytes",
+                self.clear_written,
+                self.clear_frame.len()
+            );
+        }
+        Ok(())
+    }
+}
+
 /// One socket-read granularity for the buffered receive path. Headers are 6
 /// bytes and control packets tens of bytes, so one recv typically batches many
 /// packets (plus a data packet's tail); the old unbuffered path paid two
@@ -362,7 +468,6 @@ impl Ed2kTransport {
         Ok(())
     }
 
-    #[cfg(feature = "packet-diagnostics")]
     pub(super) async fn write_all_diagnostic(
         &mut self,
         flow: &'static str,
@@ -370,61 +475,50 @@ impl Ed2kTransport {
         phase: &str,
         bytes: &[u8],
     ) -> Result<()> {
-        let obfuscated = self.send_cipher.is_some();
-        if let Some(cipher) = self.send_cipher.as_mut() {
-            self.write_buf.clear();
-            self.write_buf.extend_from_slice(bytes);
-            cipher.apply(&mut self.write_buf);
+        let mut writer = self.diagnostic_frame_writer(flow, remote_addr, phase, bytes);
+        writer.write_chunk(bytes).await?;
+        writer.finish()
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    pub(super) fn diagnostic_frame_writer<'transport, 'frame>(
+        &'transport mut self,
+        flow: &'static str,
+        remote_addr: SocketAddr,
+        phase: &'frame str,
+        clear_frame: &'frame [u8],
+    ) -> Ed2kTcpDiagnosticFrameWriter<'transport, 'frame> {
+        let attempted_len = clear_frame.len();
+        let transport_mode = self.mode;
+        Ed2kTcpDiagnosticFrameWriter {
+            transport: self,
+            capture: Ed2kTcpSendCapture {
+                flow,
+                remote_addr,
+                transport_mode,
+                phase,
+                clear_frame,
+                raw: Vec::with_capacity(attempted_len),
+                attempted_len,
+                completed: false,
+            },
+            clear_written: 0,
         }
-        let wire_bytes = if obfuscated {
-            self.write_buf.as_slice()
-        } else {
-            bytes
-        };
-        let mut capture = Ed2kTcpSendCapture {
-            flow,
-            remote_addr,
-            transport_mode: self.mode,
-            phase,
-            clear_frame: bytes,
-            raw: Vec::with_capacity(wire_bytes.len()),
-            attempted_len: wire_bytes.len(),
-            completed: false,
-        };
-        let mut written = 0usize;
-        while written < wire_bytes.len() {
-            match self.stream.write(&wire_bytes[written..]).await {
-                Ok(0) => {
-                    let error = io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write complete eD2k frame",
-                    );
-                    capture.emit("send_failed", Some(error.to_string()));
-                    return Err(error.into());
-                }
-                Ok(count) => {
-                    capture.record_written(&wire_bytes[written..written + count]);
-                    written += count;
-                }
-                Err(error) => {
-                    capture.emit("send_failed", Some(error.to_string()));
-                    return Err(error.into());
-                }
-            }
-        }
-        capture.emit("send_succeeded", None);
-        Ok(())
     }
 
     #[cfg(not(feature = "packet-diagnostics"))]
-    pub(super) async fn write_all_diagnostic(
-        &mut self,
+    pub(super) fn diagnostic_frame_writer<'transport, 'frame>(
+        &'transport mut self,
         _flow: &'static str,
         _remote_addr: SocketAddr,
-        _phase: &str,
-        bytes: &[u8],
-    ) -> Result<()> {
-        self.write_all(bytes).await
+        _phase: &'frame str,
+        clear_frame: &'frame [u8],
+    ) -> Ed2kTcpDiagnosticFrameWriter<'transport, 'frame> {
+        Ed2kTcpDiagnosticFrameWriter {
+            transport: self,
+            clear_frame,
+            clear_written: 0,
+        }
     }
 
     /// Pull the next chunk off the socket into the (fully consumed) read
@@ -734,6 +828,37 @@ mod tests {
 
         assert_eq!(actual_raw, expected_raw);
         assert_ne!(actual_raw, clear_frame);
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    #[tokio::test]
+    async fn diagnostic_frame_writer_preserves_one_obfuscated_frame_across_chunks() {
+        use super::super::derive_obfuscation_key;
+        use tokio::io::AsyncReadExt as _;
+
+        let (mut transport, mut server) = transport_with_prefetched(Vec::new()).await;
+        let user_hash = [0x71; 16];
+        let random_key_part = [0x81, 0x82, 0x83, 0x84];
+        let mut expected_cipher = derive_obfuscation_key(user_hash, 0x12, random_key_part);
+        transport.send_cipher = Some(derive_obfuscation_key(user_hash, 0x12, random_key_part));
+        transport.mode = Ed2kTransportMode::Obfuscated;
+
+        let mut clear_frame = header(OP_EDONKEYPROT, 8, OP_HELLO);
+        clear_frame.extend_from_slice(&[0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70]);
+        let mut expected_raw = clear_frame.clone();
+        expected_cipher.apply(&mut expected_raw);
+        let remote_addr = server.local_addr().unwrap();
+
+        let mut writer =
+            transport.diagnostic_frame_writer("test", remote_addr, "send", &clear_frame);
+        for chunk in clear_frame.chunks(3) {
+            writer.write_chunk(chunk).await.unwrap();
+        }
+        writer.finish().unwrap();
+
+        let mut actual_raw = vec![0u8; expected_raw.len()];
+        server.read_exact(&mut actual_raw).await.unwrap();
+        assert_eq!(actual_raw, expected_raw);
     }
 
     #[tokio::test]

@@ -15,7 +15,6 @@ use super::{
     super::super::codec::{
         build_upload_part_packets, decode_request_parts_payload, encode_file_req_ans_nofil,
     },
-    super::super::dump::dump_ed2k_tcp_listener_send,
     upload_queue::{ListenerQueueDecision, ListenerUploadQueue},
 };
 
@@ -459,13 +458,18 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             )?;
             request_diag.payload_packets += replies.len();
             for reply in replies {
-                dump_ed2k_tcp_listener_send(peer_addr, transport.mode, reply.phase, &reply.packet);
                 let packet_len = u64::try_from(reply.packet.len()).unwrap_or(u64::MAX);
                 request_diag.sent_payload_bytes =
                     request_diag.sent_payload_bytes.saturating_add(packet_len);
                 let send_chunk_len = transfer_runtime
                     .upload_payload_send_chunk_len(reply.packet.len())
                     .await;
+                let mut frame_writer = transport.diagnostic_frame_writer(
+                    "listener",
+                    peer_addr,
+                    reply.phase,
+                    &reply.packet,
+                );
                 for chunk in reply.packet.chunks(send_chunk_len) {
                     let reservation = transfer_runtime
                         .reserve_upload_payload_budget(
@@ -488,7 +492,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                         _ = work_guard.cancelled() => {
                             return Ok(UploadPayloadOutcome::Close);
                         }
-                        result = transport.write_all(chunk) => {
+                        result = frame_writer.write_chunk(chunk) => {
                             result.with_context(|| {
                                 format!("failed to send ED2K upload payload to {peer_addr}")
                             })?;
@@ -496,6 +500,9 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                     }
                     work_guard.note_wire_progress(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
                 }
+                frame_writer.finish().with_context(|| {
+                    format!("failed to finish ED2K upload payload to {peer_addr}")
+                })?;
             }
             request_diag.served_bytes = request_diag.served_bytes.saturating_add(fragment_bytes);
             range_served = true;
