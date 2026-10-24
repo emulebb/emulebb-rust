@@ -7,6 +7,10 @@ pub struct DiagnosticDumpFile {
 }
 
 impl EmulebbCore {
+    pub fn diagnostic_writer_health(&self) -> emulebb_diagnostics::DiagWriterHealth {
+        emulebb_diagnostics::writer_health()
+    }
+
     pub fn app_info(&self) -> AppInfo {
         AppInfo {
             name: "eMuleBB".to_string(),

@@ -566,6 +566,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "data-encoding",
+ "emulebb-diagnostics",
  "emulebb-ed2k",
  "emulebb-index",
  "emulebb-kad-dht",

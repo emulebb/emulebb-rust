@@ -12,7 +12,10 @@ workspace = true
 
 [features]
 # Forwards the packet-diagnostics compile gate down to eD2K and Kad diagnostics.
-packet-diagnostics = ["emulebb-ed2k/packet-diagnostics"]
+packet-diagnostics = [
+    "emulebb-diagnostics/enabled",
+    "emulebb-ed2k/packet-diagnostics",
+]
 # Test-only: forwards the egress-audit seam down so the RUST-FEAT-005 leak test
 # (tests/vpn_leak_egress.rs) can observe P2P socket bind/pin. Never enabled in the
 # daemon/release build (guarded by tools/check_rust_client_policy.py).
@@ -23,6 +26,7 @@ anyhow.workspace = true
 chrono.workspace = true
 data-encoding.workspace = true
 emulebb-ed2k = { path = "../emulebb-ed2k" }
+emulebb-diagnostics = { path = "../emulebb-diagnostics" }
 emulebb-index = { path = "../emulebb-index" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
