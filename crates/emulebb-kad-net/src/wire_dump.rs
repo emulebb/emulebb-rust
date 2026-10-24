@@ -351,7 +351,7 @@ fn kad_udp_diag_event_parts(
     summary: &KadUdpDumpSummary,
 ) -> (&'static str, serde_json::Value, serde_json::Value) {
     let severity = if summary.outcome.is_failure() {
-        "low"
+        "warning"
     } else {
         "info"
     };
@@ -370,6 +370,19 @@ fn kad_udp_diag_event_parts(
         "outcome".to_string(),
         serde_json::json!(summary.outcome.as_str()),
     );
+    body.insert(
+        "traceKey".to_string(),
+        serde_json::json!(udp_trace_key(peer)),
+    );
+    body.insert(
+        "stateId".to_string(),
+        serde_json::json!(udp_state_id(direction, summary)),
+    );
+    body.insert(
+        "stateLabel".to_string(),
+        serde_json::json!(udp_state_label(summary)),
+    );
+    body.insert("flow".to_string(), serde_json::json!("kad"));
     if let Some(protocol) = summary.protocol {
         body.insert("protocolMarker".to_string(), serde_json::json!(protocol));
     }
@@ -638,9 +651,13 @@ mod tests {
         let (severity, keys, body) =
             kad_udp_diag_event_parts("recv", peer, &[0xAA, 0xBB], &[0xE4, 0x21], &summary);
 
-        assert_eq!(severity, "low");
+        assert_eq!(severity, "warning");
         assert_eq!(keys["peer"], peer.to_string());
         assert_eq!(body["outcome"], "dropped");
+        assert_eq!(body["traceKey"], "kad:198.51.100.1:4672");
+        assert_eq!(body["stateId"], "kad.recv.kademlia2_hello_req");
+        assert_eq!(body["stateLabel"], "KADEMLIA2_HELLO_REQ");
+        assert_eq!(body["flow"], "kad");
         assert_eq!(body["dropReason"], "tracker_drop");
         assert_eq!(body["wireHex"], "AABB");
         assert_eq!(body["decodedHex"], "E421");
@@ -663,7 +680,7 @@ mod tests {
         let peer: SocketAddr = "198.51.100.1:4672".parse().unwrap();
         let (severity, keys, body) = kad_udp_diag_event_parts("send", peer, &[], &[], &summary);
 
-        assert_eq!(severity, "low");
+        assert_eq!(severity, "warning");
         assert!(keys.get("protocolMarker").is_none());
         assert!(body.get("protocolMarker").is_none());
         assert_eq!(body["outcome"], "send_rejected");
