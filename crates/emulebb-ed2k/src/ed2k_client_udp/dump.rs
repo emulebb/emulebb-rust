@@ -20,6 +20,7 @@ use std::{
 
 use chrono::SecondsFormat;
 use serde::Serialize;
+use serde_json::{Map, Value, json};
 
 use super::codec::{
     OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKCALLBACKUDP,
@@ -236,6 +237,7 @@ fn exact_packet_hex(bytes: &[u8]) -> String {
 
 #[cfg(feature = "packet-diagnostics")]
 fn dump_client_udp_record(record: &ClientUdpDumpRecord<'_>) {
+    emit_client_udp_diag_event(record);
     let Ok(line) = serde_json::to_string(record) else {
         return;
     };
@@ -255,6 +257,69 @@ fn dump_client_udp_record(record: &ClientUdpDumpRecord<'_>) {
 }
 
 #[cfg(feature = "packet-diagnostics")]
+fn emit_client_udp_diag_event(record: &ClientUdpDumpRecord<'_>) {
+    let (family, keys, body) = client_udp_diag_event_parts(record);
+    crate::diag_event::emit(family, "packet", "info", keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn client_udp_diag_event_parts(record: &ClientUdpDumpRecord<'_>) -> (&'static str, Value, Value) {
+    let mut keys = Map::new();
+    keys.insert("peer".to_string(), json!(record.remote_addr));
+    if let Some(protocol_marker) = record.protocol_marker {
+        keys.insert("protocolMarker".to_string(), json!(protocol_marker));
+    }
+    if let Some(opcode) = record.opcode {
+        keys.insert("opcode".to_string(), json!(opcode));
+    }
+
+    let mut body = Map::new();
+    body.insert("direction".to_string(), json!(record.direction));
+    body.insert("outcome".to_string(), json!("accepted"));
+    body.insert("stateId".to_string(), json!(record.state_id));
+    body.insert("stateLabel".to_string(), json!(record.state_label));
+    body.insert("traceKey".to_string(), json!(record.trace_key));
+    body.insert("flow".to_string(), json!(record.flow));
+    body.insert("phase".to_string(), json!(record.phase));
+    body.insert("transportMode".to_string(), json!(record.transport_mode));
+    body.insert(
+        "obfuscated".to_string(),
+        json!(record.transport_mode == "obfuscated"),
+    );
+    if let Some(protocol_marker) = record.protocol_marker {
+        body.insert("protocolMarker".to_string(), json!(protocol_marker));
+    }
+    if let Some(protocol_name) = record.protocol {
+        body.insert("protocolName".to_string(), json!(protocol_name));
+    }
+    if let Some(opcode) = record.opcode {
+        body.insert("opcode".to_string(), json!(opcode));
+    }
+    if let Some(opcode_name) = record.opcode_name {
+        body.insert("opcodeName".to_string(), json!(opcode_name));
+    }
+    body.insert("rawLen".to_string(), json!(record.raw_len));
+    body.insert("rawHex".to_string(), json!(record.raw_hex));
+    if let Some(payload_len) = record.payload_len {
+        body.insert("payloadLen".to_string(), json!(payload_len));
+    }
+    if let Some(payload_hex) = record.payload_hex.as_deref() {
+        body.insert("payloadHex".to_string(), json!(payload_hex));
+    }
+    if let Some(payload_hex_truncated) = record.payload_hex_truncated {
+        body.insert(
+            "payloadHexTruncated".to_string(),
+            json!(payload_hex_truncated),
+        );
+    }
+    if let Some(note) = record.note.as_deref() {
+        body.insert("note".to_string(), json!(note));
+    }
+
+    ("ed2k_client_udp", Value::Object(keys), Value::Object(body))
+}
+
+#[cfg(feature = "packet-diagnostics")]
 fn maybe_sync_client_udp_dump(file: &fs::File) {
     static CLIENT_UDP_LIVE_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
     if CLIENT_UDP_LIVE_SYNC_COUNTER
@@ -268,8 +333,9 @@ fn maybe_sync_client_udp_dump(file: &fs::File) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CLIENT_UDP_DUMP_FILE_PREFIX, OP_DIRECTCALLBACKREQ, OP_REASKACK, OP_REASKCALLBACKUDP,
-        OP_REASKFILEPING, client_udp_opcode_name, exact_packet_hex,
+        CLIENT_UDP_DUMP_FILE_PREFIX, ClientUdpDumpRecord, OP_DIRECTCALLBACKREQ, OP_REASKACK,
+        OP_REASKCALLBACKUDP, OP_REASKFILEPING, client_udp_diag_event_parts, client_udp_opcode_name,
+        exact_packet_hex,
     };
     use crate::ed2k_client_udp::outbound::{OutboundReaskTarget, build_reask_file_ping_datagram};
     use emulebb_kad_proto::Ed2kHash;
@@ -303,6 +369,56 @@ mod tests {
             "OP_DIRECTCALLBACKREQ"
         );
         assert_eq!(client_udp_opcode_name(0xFF), "UNKNOWN");
+    }
+
+    #[test]
+    fn client_udp_common_event_preserves_exact_wire_and_payload() {
+        let raw = vec![0x11; 4 * 1024 + 1];
+        let payload = vec![0x22; 4 * 1024 + 1];
+        let record = ClientUdpDumpRecord {
+            schema: "ed2k_packet_v1",
+            source: "emulebb-rust",
+            ts_utc: "2026-10-24T00:00:00.000Z".to_string(),
+            event_seq: 1,
+            trace_key: "client_udp:198.51.100.2:4672".to_string(),
+            state_id: "client_udp.reask",
+            state_label: "reask",
+            flow: "client_udp",
+            phase: "reask",
+            direction: "send",
+            remote_addr: "198.51.100.2:4672".to_string(),
+            transport_mode: "obfuscated",
+            protocol: Some("emule"),
+            protocol_marker: Some(0xC5),
+            opcode: Some(OP_REASKFILEPING),
+            opcode_name: Some(client_udp_opcode_name(OP_REASKFILEPING)),
+            raw_len: raw.len(),
+            raw_hex: exact_packet_hex(&raw),
+            payload_len: Some(payload.len()),
+            payload_hex: Some(exact_packet_hex(&payload)),
+            payload_hex_truncated: Some(false),
+            note: None,
+        };
+
+        let (family, keys, body) = client_udp_diag_event_parts(&record);
+        assert_eq!(family, "ed2k_client_udp");
+        assert_eq!(keys["peer"], "198.51.100.2:4672");
+        assert_eq!(keys["protocolMarker"], 0xC5);
+        assert_eq!(keys["opcode"], OP_REASKFILEPING);
+        assert_eq!(body["direction"], "send");
+        assert_eq!(body["outcome"], "accepted");
+        assert_eq!(body["transportMode"], "obfuscated");
+        assert_eq!(body["obfuscated"], true);
+        assert_eq!(body["stateId"], "client_udp.reask");
+        assert_eq!(body["traceKey"], "client_udp:198.51.100.2:4672");
+        assert_eq!(body["rawLen"], raw.len());
+        assert_eq!(body["rawHex"].as_str().unwrap().len(), raw.len() * 2);
+        assert_eq!(body["payloadLen"], payload.len());
+        assert_eq!(
+            body["payloadHex"].as_str().unwrap().len(),
+            payload.len() * 2
+        );
+        assert_eq!(body["payloadHexTruncated"], false);
     }
 
     #[test]
