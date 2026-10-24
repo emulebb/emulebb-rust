@@ -1,13 +1,5 @@
 //! Unified Kad UDP diagnostics for protocol parity work.
 
-#![cfg_attr(
-    not(feature = "packet-diagnostics"),
-    expect(
-        dead_code,
-        reason = "packet-diagnostic machinery is inert without its feature"
-    )
-)]
-
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
