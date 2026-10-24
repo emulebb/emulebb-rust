@@ -282,6 +282,7 @@ impl UploadPromoteDriver {
                 anyhow::bail!("upload promotion lease was revoked before connect completed");
             }
             result = Ed2kTransport::connect_outgoing(
+                "upload_promote",
                 self.bind_ip,
                 peer_endpoint,
                 self.hello_identity.connect_options,

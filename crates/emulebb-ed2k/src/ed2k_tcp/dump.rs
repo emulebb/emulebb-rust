@@ -49,7 +49,7 @@ const ED2K_TCP_LIVE_SYNC_EVERY: u64 = 128;
 
 #[derive(Debug, Serialize)]
 pub(super) struct Ed2kTcpDumpRecord<'a> {
-    schema: &'static str,
+    pub(super) schema: &'static str,
     source: &'static str,
     ts_utc: String,
     event_seq: u64,
@@ -457,6 +457,53 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
 }
 
 #[cfg(feature = "packet-diagnostics")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic handshake boundary"
+)]
+pub(super) fn dump_ed2k_tcp_handshake_step(
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    phase: &'static str,
+    direction: &'static str,
+    outcome: &'static str,
+    raw: &[u8],
+    clear: &[u8],
+) {
+    let record = Ed2kTcpDumpRecord {
+        schema: "ed2k_handshake_v1",
+        source: "emulebb-rust",
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        event_seq: ed2k_tcp_dump_event_seq(),
+        trace_key: ed2k_tcp_trace_key(flow, remote_addr),
+        state_id: ed2k_tcp_state_id(flow, phase),
+        state_label: phase,
+        flow,
+        phase,
+        direction,
+        outcome,
+        remote_addr: remote_addr.to_string(),
+        transport_mode: Ed2kTransportMode::Obfuscated.as_str(),
+        obfuscated: Some(true),
+        protocol: None,
+        protocol_marker: None,
+        opcode: None,
+        opcode_name: None,
+        raw_len: Some(raw.len()),
+        raw_hex: Some(exact_packet_hex(raw)),
+        clear_frame_len: Some(clear.len()),
+        clear_frame_hex: Some(exact_packet_hex(clear)),
+        attempted_len: (direction == "send").then_some(raw.len()),
+        written_len: (direction == "send").then_some(raw.len()),
+        payload_len: None,
+        payload_hex: None,
+        payload_hex_truncated: None,
+        note: Some("eD2K TCP obfuscation handshake".to_string()),
+    };
+    dump_ed2k_tcp_record(&record);
+}
+
+#[cfg(feature = "packet-diagnostics")]
 #[expect(clippy::too_many_arguments, reason = "flat diagnostic packet boundary")]
 pub(super) fn dump_ed2k_tcp_recv_terminal(
     flow: &'static str,
@@ -577,6 +624,18 @@ fn dump_ed2k_tcp_meta(
     _transport_mode: Option<Ed2kTransportMode>,
     _phase: &str,
     _note: impl FnOnce() -> String,
+) {
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_tcp_handshake_step(
+    _flow: &'static str,
+    _remote_addr: SocketAddr,
+    _phase: &'static str,
+    _direction: &'static str,
+    _outcome: &'static str,
+    _raw: &[u8],
+    _clear: &[u8],
 ) {
 }
 

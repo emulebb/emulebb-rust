@@ -413,6 +413,7 @@ pub(super) async fn connect_obfuscated_peer_and_exchange_hello(
     peer_identity: Ed2kHelloIdentity,
 ) -> Ed2kTransport {
     let mut transport = Ed2kTransport::connect_outgoing(
+        "test",
         test_bind_ip(),
         peer_addr,
         emule_connect_options(true),

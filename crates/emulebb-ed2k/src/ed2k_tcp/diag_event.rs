@@ -94,9 +94,14 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
     } else {
         "info"
     };
+    let event = if record.schema == "ed2k_handshake_v1" {
+        "obfuscation_handshake"
+    } else {
+        "packet"
+    };
     crate::diag_event::emit(
         "ed2k_tcp",
-        "packet",
+        event,
         severity,
         Value::Object(keys),
         Value::Object(body),

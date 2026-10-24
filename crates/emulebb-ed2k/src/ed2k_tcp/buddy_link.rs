@@ -411,6 +411,7 @@ async fn connect_and_hello_buddy(
     timeout: Duration,
 ) -> Result<Ed2kTransport> {
     let mut transport = Ed2kTransport::connect_outgoing(
+        "kad_buddy",
         bind_ip,
         buddy_addr,
         hello_identity.connect_options,

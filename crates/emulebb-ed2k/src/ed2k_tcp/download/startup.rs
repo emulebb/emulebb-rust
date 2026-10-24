@@ -161,6 +161,7 @@ pub async fn download_files_from_peer(
     });
     async {
         let mut transport = Ed2kTransport::connect_outgoing(
+            "native_download",
             bind_ip,
             peer_addr,
             hello_identity.connect_options,
