@@ -273,7 +273,7 @@ pub fn dump_kad_udp_packet(
     drop(guard);
 
     // uniform-diagnostics-v2 (lane D2): also emit the converged `kad_udp`
-    // `diag_event_v1` record from the same data (schema §3.2). The `ts` is UTC
+    // `diag_event_v2` record from the same data. The `ts` is UTC
     // millis with a trailing `Z` (normalised; the v1 `udp_packet_v1` line above
     // keeps its legacy local-time `ts` during migration). Hex stays UPPER for
     // Kad parity. Optional fields are omitted when not known rather than faked.

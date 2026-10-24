@@ -355,7 +355,7 @@ fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
     }
 
     // uniform-diagnostics-v2 (lane D2): also emit the converged `ed2k_tcp`
-    // `diag_event_v1` record from the SAME data (schema §3.1). The legacy
+    // `diag_event_v2` record from the SAME data. The legacy
     // `ed2k_packet_v1` line above is kept during migration. Both writes are
     // already behind the `packet-diagnostics` feature (the only callers of this
     // fn are the feature-gated send/recv/meta builders). The mapping itself lives

@@ -1,7 +1,7 @@
-//! `family:"ed2k_tcp"` `diag_event_v1` mapping (uniform-diagnostics-v2, lane D2).
+//! `family:"ed2k_tcp"` `diag_event_v2` mapping.
 //!
 //! Re-shapes an [`Ed2kTcpDumpRecord`] (the legacy `ed2k_packet_v1` record) into
-//! the converged `ed2k_tcp` `diag_event_v1` envelope (schema §3.1) and forwards
+//! the converged `ed2k_tcp` `diag_event_v2` envelope and forwards
 //! it to the shared writer. Kept in its own module because diagnostics-envelope
 //! mapping is a separate responsibility from packet capture. Both writes are
 //! behind the `packet-diagnostics` feature: the only caller
@@ -20,7 +20,7 @@ use serde_json::{Map, Value, json};
 
 use super::dump::Ed2kTcpDumpRecord;
 
-/// Emit the converged `ed2k_tcp` `diag_event_v1` record from the same data that
+/// Emit the converged `ed2k_tcp` `diag_event_v2` record from the same data that
 /// built the legacy `ed2k_packet_v1` record. Optional `keys`/`body` fields are
 /// omitted when absent rather than faked (`peerHash`/`fileHash` are not known at
 /// this layer, so they are not emitted).
