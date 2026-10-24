@@ -36,6 +36,7 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
 
     let mut body = Map::new();
     body.insert("direction".to_string(), json!(record.direction));
+    body.insert("outcome".to_string(), json!(record.outcome));
     if let Some(protocol_marker) = record.protocol_marker {
         body.insert("protocolMarker".to_string(), json!(protocol_marker));
     }
@@ -54,6 +55,12 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
     if let Some(raw_hex) = record.raw_hex.as_deref() {
         body.insert("rawHex".to_string(), json!(raw_hex));
     }
+    if let Some(clear_frame_len) = record.clear_frame_len {
+        body.insert("clearFrameLen".to_string(), json!(clear_frame_len));
+    }
+    if let Some(clear_frame_hex) = record.clear_frame_hex.as_deref() {
+        body.insert("clearFrameHex".to_string(), json!(clear_frame_hex));
+    }
     if let Some(payload_len) = record.payload_len {
         body.insert("payloadLen".to_string(), json!(payload_len));
     }
@@ -63,10 +70,7 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
     if let Some(truncated) = record.payload_hex_truncated {
         body.insert("payloadHexTruncated".to_string(), json!(truncated));
     }
-    // `obfuscated` (C): real on-wire state derived from the transport-mode label.
-    // Pre-handshake meta events use `unknown`; omitting the field there avoids
-    // reporting a false plaintext verdict before the transport exists.
-    if let Some(obfuscated) = transport_mode_obfuscated(record.transport_mode) {
+    if let Some(obfuscated) = record.obfuscated {
         body.insert("obfuscated".to_string(), json!(obfuscated));
     }
     body.insert("transportMode".to_string(), json!(record.transport_mode));
@@ -83,24 +87,4 @@ pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDumpRecord<'_>) {
         Value::Object(keys),
         Value::Object(body),
     );
-}
-
-/// Whether an `Ed2kTransportMode` label denotes a known obfuscated on-wire transport.
-fn transport_mode_obfuscated(transport_mode: &str) -> Option<bool> {
-    match transport_mode {
-        "unknown" => None,
-        _ => Some(transport_mode.contains("obfusc") || transport_mode.contains("crypt")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::transport_mode_obfuscated;
-
-    #[test]
-    fn transport_obfuscation_is_omitted_until_mode_is_known() {
-        assert_eq!(transport_mode_obfuscated("unknown"), None);
-        assert_eq!(transport_mode_obfuscated("plaintext"), Some(false));
-        assert_eq!(transport_mode_obfuscated("obfuscated"), Some(true));
-    }
 }

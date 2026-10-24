@@ -208,7 +208,7 @@ async fn drive_buddy_link(
                 liveness.record_ping_sent(tokio::time::Instant::now());
                 debug!("sent OP_BUDDYPING to buddy {buddy_addr}");
             }
-            outcome = transport.read_packet() => {
+            outcome = transport.read_packet_diagnostic("kad_buddy", buddy_addr, "session") => {
                 match outcome {
                     Ok(None) => return Ok(BuddyLinkEnd::PeerClosed),
                     Ok(Some(packet)) => {
@@ -418,7 +418,12 @@ async fn connect_and_hello_buddy(
     let deadline = tokio::time::Instant::now() + timeout.min(Duration::from_secs(5));
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let packet = match tokio::time::timeout(remaining, transport.read_packet()).await {
+        let packet = match tokio::time::timeout(
+            remaining,
+            transport.read_packet_diagnostic("kad_buddy", buddy_addr, "hello_exchange"),
+        )
+        .await
+        {
             Ok(Ok(Some(packet))) => packet,
             Ok(Ok(None)) => break,
             Ok(Err(error)) if is_connection_shutdown_error(&error) => break,

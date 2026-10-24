@@ -29,6 +29,13 @@ pub struct EmuleTcpPacket {
     pub payload: Vec<u8>,
 }
 
+#[cfg(feature = "packet-diagnostics")]
+#[derive(Debug, Default)]
+struct Ed2kTcpReadCapture {
+    raw: Vec<u8>,
+    clear_frame: Vec<u8>,
+}
+
 /// One socket-read granularity for the buffered receive path. Headers are 6
 /// bytes and control packets tens of bytes, so one recv typically batches many
 /// packets (plus a data packet's tail); the old unbuffered path paid two
@@ -47,6 +54,13 @@ pub(super) struct Ed2kTransport {
     /// `read_pos` marks how far the buffer has been consumed.
     read_buf: Vec<u8>,
     read_pos: usize,
+    /// Exact socket bytes aligned with `read_buf`. The protocol reader decrypts
+    /// `read_buf` in place, so diagnostics retain this parallel copy while the
+    /// packet-diagnostics feature is enabled.
+    #[cfg(feature = "packet-diagnostics")]
+    read_wire_buf: Vec<u8>,
+    #[cfg(feature = "packet-diagnostics")]
+    read_capture: Option<Ed2kTcpReadCapture>,
     /// Reusable ciphertext scratch for obfuscated sends, so every write does
     /// not allocate a fresh copy of the packet.
     write_buf: Vec<u8>,
@@ -89,6 +103,10 @@ impl Ed2kTransport {
             mode,
             read_buf: Vec::new(),
             read_pos: 0,
+            #[cfg(feature = "packet-diagnostics")]
+            read_wire_buf: Vec::new(),
+            #[cfg(feature = "packet-diagnostics")]
+            read_capture: None,
             write_buf: Vec::new(),
         }
     }
@@ -239,6 +257,43 @@ impl Ed2kTransport {
         }))
     }
 
+    #[cfg(feature = "packet-diagnostics")]
+    pub(super) async fn read_packet_diagnostic(
+        &mut self,
+        flow: &'static str,
+        remote_addr: SocketAddr,
+        phase: &str,
+    ) -> Result<Option<EmuleTcpPacket>> {
+        self.read_capture = Some(Ed2kTcpReadCapture::default());
+        let result = self.read_packet().await;
+        let capture = self
+            .read_capture
+            .take()
+            .expect("diagnostic read capture must remain active");
+        if let Ok(Some(packet)) = result.as_ref() {
+            super::dump::dump_ed2k_tcp_recv_capture(
+                flow,
+                remote_addr,
+                self.mode,
+                phase,
+                packet,
+                &capture.raw,
+                &capture.clear_frame,
+            );
+        }
+        result
+    }
+
+    #[cfg(not(feature = "packet-diagnostics"))]
+    pub(super) async fn read_packet_diagnostic(
+        &mut self,
+        _flow: &'static str,
+        _remote_addr: SocketAddr,
+        _phase: &str,
+    ) -> Result<Option<EmuleTcpPacket>> {
+        self.read_packet().await
+    }
+
     pub(super) async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
         if let Some(cipher) = self.send_cipher.as_mut() {
             self.write_buf.clear();
@@ -265,6 +320,11 @@ impl Ed2kTransport {
         self.read_pos = 0;
         self.read_buf.reserve(READ_BUFFER_CHUNK);
         let received = self.stream.read_buf(&mut self.read_buf).await?;
+        #[cfg(feature = "packet-diagnostics")]
+        {
+            self.read_wire_buf.clear();
+            self.read_wire_buf.extend_from_slice(&self.read_buf);
+        }
         if received > 0
             && let Some(cipher) = self.receive_cipher.as_mut()
         {
@@ -275,6 +335,11 @@ impl Ed2kTransport {
 
     async fn read_u8(&mut self) -> Result<Option<u8>> {
         if let Some(byte) = self.prefetched.pop_front() {
+            #[cfg(feature = "packet-diagnostics")]
+            if let Some(capture) = self.read_capture.as_mut() {
+                capture.raw.push(byte);
+                capture.clear_frame.push(byte);
+            }
             return Ok(Some(byte));
         }
         if self.read_pos == self.read_buf.len() {
@@ -286,6 +351,11 @@ impl Ed2kTransport {
             }
         }
         let byte = self.read_buf[self.read_pos];
+        #[cfg(feature = "packet-diagnostics")]
+        if let Some(capture) = self.read_capture.as_mut() {
+            capture.raw.push(self.read_wire_buf[self.read_pos]);
+            capture.clear_frame.push(byte);
+        }
         self.read_pos += 1;
         Ok(Some(byte))
     }
@@ -295,6 +365,11 @@ impl Ed2kTransport {
         while offset < bytes.len() {
             if let Some(byte) = self.prefetched.pop_front() {
                 bytes[offset] = byte;
+                #[cfg(feature = "packet-diagnostics")]
+                if let Some(capture) = self.read_capture.as_mut() {
+                    capture.raw.push(byte);
+                    capture.clear_frame.push(byte);
+                }
                 offset += 1;
             } else {
                 break;
@@ -307,8 +382,15 @@ impl Ed2kTransport {
                 // buffer: read it directly and decrypt in place.
                 if bytes.len() - offset >= READ_BUFFER_CHUNK {
                     self.stream.read_exact(&mut bytes[offset..]).await?;
+                    #[cfg(feature = "packet-diagnostics")]
+                    let raw = self.read_capture.as_ref().map(|_| bytes[offset..].to_vec());
                     if let Some(cipher) = self.receive_cipher.as_mut() {
                         cipher.apply(&mut bytes[offset..]);
+                    }
+                    #[cfg(feature = "packet-diagnostics")]
+                    if let (Some(capture), Some(raw)) = (self.read_capture.as_mut(), raw) {
+                        capture.raw.extend_from_slice(&raw);
+                        capture.clear_frame.extend_from_slice(&bytes[offset..]);
                     }
                     return Ok(());
                 }
@@ -326,6 +408,15 @@ impl Ed2kTransport {
             let take = buffered.min(bytes.len() - offset);
             bytes[offset..offset + take]
                 .copy_from_slice(&self.read_buf[self.read_pos..self.read_pos + take]);
+            #[cfg(feature = "packet-diagnostics")]
+            if let Some(capture) = self.read_capture.as_mut() {
+                capture
+                    .raw
+                    .extend_from_slice(&self.read_wire_buf[self.read_pos..self.read_pos + take]);
+                capture
+                    .clear_frame
+                    .extend_from_slice(&self.read_buf[self.read_pos..self.read_pos + take]);
+            }
             self.read_pos += take;
             offset += take;
         }
@@ -393,6 +484,35 @@ mod tests {
         // Clean EOF at a packet boundary stays a clean close.
         drop(server);
         assert!(transport.read_packet().await.unwrap().is_none());
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    #[tokio::test]
+    async fn diagnostic_capture_preserves_obfuscated_wire_and_clear_frame() {
+        use super::super::derive_obfuscation_key;
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut transport, mut server) = transport_with_prefetched(Vec::new()).await;
+        let user_hash = [0x31; 16];
+        let random_key_part = [0x41, 0x42, 0x43, 0x44];
+        let mut sender_cipher = derive_obfuscation_key(user_hash, 0x12, random_key_part);
+        transport.receive_cipher = Some(derive_obfuscation_key(user_hash, 0x12, random_key_part));
+        transport.mode = Ed2kTransportMode::Obfuscated;
+
+        let mut clear_frame = header(OP_EDONKEYPROT, 4, OP_HELLO);
+        clear_frame.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        let mut raw = clear_frame.clone();
+        sender_cipher.apply(&mut raw);
+        server.write_all(&raw).await.unwrap();
+
+        transport.read_capture = Some(Ed2kTcpReadCapture::default());
+        let packet = transport.read_packet().await.unwrap().unwrap();
+        let capture = transport.read_capture.take().unwrap();
+
+        assert_eq!(packet.payload, vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(capture.raw, raw);
+        assert_eq!(capture.clear_frame, clear_frame);
+        assert_ne!(capture.raw, capture.clear_frame);
     }
 
     #[tokio::test]

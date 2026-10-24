@@ -41,7 +41,7 @@ use super::{
     OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQFILENAMEANSWER, OP_REQUESTFILENAME,
     OP_REQUESTPARTS, OP_REQUESTPARTS_I64, OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2,
     OP_SECIDENTSTATE, OP_SENDINGPART, OP_SENDINGPART_I64, OP_SETREQFILEID, OP_SIGNATURE,
-    OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN, encode_packet,
+    OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN,
 };
 
 const ED2K_TCP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-tcp-dump-";
@@ -59,14 +59,18 @@ pub(super) struct Ed2kTcpDumpRecord<'a> {
     pub(super) flow: &'static str,
     pub(super) phase: &'a str,
     pub(super) direction: &'a str,
+    pub(super) outcome: &'a str,
     pub(super) remote_addr: String,
     pub(super) transport_mode: &'a str,
+    pub(super) obfuscated: Option<bool>,
     pub(super) protocol: Option<&'static str>,
     pub(super) protocol_marker: Option<u8>,
     pub(super) opcode: Option<u8>,
     pub(super) opcode_name: Option<&'static str>,
     pub(super) raw_len: Option<usize>,
     pub(super) raw_hex: Option<String>,
+    pub(super) clear_frame_len: Option<usize>,
+    pub(super) clear_frame_hex: Option<String>,
     pub(super) payload_len: Option<usize>,
     pub(super) payload_hex: Option<String>,
     pub(super) payload_hex_truncated: Option<bool>,
@@ -380,14 +384,18 @@ fn dump_ed2k_tcp_meta(
         flow,
         phase,
         direction: "meta",
+        outcome: "meta",
         remote_addr: remote_addr.to_string(),
         transport_mode: transport_mode.map_or("unknown", Ed2kTransportMode::as_str),
+        obfuscated: transport_mode.map(Ed2kTransportMode::is_obfuscated),
         protocol: None,
         protocol_marker: None,
         opcode: None,
         opcode_name: None,
         raw_len: None,
         raw_hex: None,
+        clear_frame_len: None,
+        clear_frame_hex: None,
         payload_len: None,
         payload_hex: None,
         payload_hex_truncated: None,
@@ -430,14 +438,18 @@ fn dump_ed2k_tcp_send(
         flow,
         phase: canonical_phase.as_ref(),
         direction: "send",
+        outcome: "attempted",
         remote_addr: remote_addr.to_string(),
         transport_mode: transport_mode.as_str(),
+        obfuscated: Some(transport_mode.is_obfuscated()),
         protocol: protocol.map(ed2k_protocol_name),
         protocol_marker: protocol,
         opcode,
         opcode_name: protocol.zip(opcode).map(|(p, o)| ed2k_opcode_name(p, o)),
         raw_len: Some(bytes.len()),
         raw_hex: Some(raw_hex),
+        clear_frame_len: Some(bytes.len()),
+        clear_frame_hex: Some(exact_packet_hex(bytes)),
         payload_len: payload.map(<[u8]>::len),
         payload_hex,
         payload_hex_truncated: payload.map(|_| false),
@@ -447,22 +459,19 @@ fn dump_ed2k_tcp_send(
 }
 
 #[cfg(feature = "packet-diagnostics")]
-fn dump_ed2k_tcp_recv(
+pub(super) fn dump_ed2k_tcp_recv_capture(
     flow: &'static str,
     remote_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     phase: &str,
     packet: &EmuleTcpPacket,
+    raw: &[u8],
+    clear_frame: &[u8],
 ) {
     if should_skip_bulk_packet(packet.protocol, packet.opcode, true) {
         return;
     }
     let canonical_phase = canonical_ed2k_recv_phase(flow, phase, packet.protocol, packet.opcode);
-    let raw_hex = exact_packet_hex(&encode_packet(
-        packet.protocol,
-        packet.opcode,
-        &packet.payload,
-    ));
     let payload_hex = exact_packet_hex(&packet.payload);
     let record = Ed2kTcpDumpRecord {
         schema: "ed2k_packet_v1",
@@ -475,14 +484,18 @@ fn dump_ed2k_tcp_recv(
         flow,
         phase: canonical_phase.as_ref(),
         direction: "recv",
+        outcome: "accepted",
         remote_addr: remote_addr.to_string(),
         transport_mode: transport_mode.as_str(),
+        obfuscated: Some(transport_mode.is_obfuscated()),
         protocol: Some(ed2k_protocol_name(packet.protocol)),
         protocol_marker: Some(packet.protocol),
         opcode: Some(packet.opcode),
         opcode_name: Some(ed2k_opcode_name(packet.protocol, packet.opcode)),
-        raw_len: Some(TCP_PACKET_HEADER_LEN + packet.payload.len()),
-        raw_hex: Some(raw_hex),
+        raw_len: Some(raw.len()),
+        raw_hex: Some(exact_packet_hex(raw)),
+        clear_frame_len: Some(clear_frame.len()),
+        clear_frame_hex: Some(exact_packet_hex(clear_frame)),
         payload_len: Some(packet.payload.len()),
         payload_hex: Some(payload_hex),
         payload_hex_truncated: Some(false),
@@ -510,16 +523,6 @@ fn dump_ed2k_tcp_send(
     _transport_mode: Ed2kTransportMode,
     _phase: &str,
     _bytes: &[u8],
-) {
-}
-
-#[cfg(not(feature = "packet-diagnostics"))]
-fn dump_ed2k_tcp_recv(
-    _flow: &'static str,
-    _remote_addr: SocketAddr,
-    _transport_mode: Ed2kTransportMode,
-    _phase: &str,
-    _packet: &EmuleTcpPacket,
 ) {
 }
 
@@ -553,21 +556,6 @@ pub(super) fn dump_ed2k_tcp_helper_send(
     );
 }
 
-pub(super) fn dump_ed2k_tcp_helper_recv(
-    remote_addr: SocketAddr,
-    transport_mode: Ed2kTransportMode,
-    phase: &str,
-    packet: &EmuleTcpPacket,
-) {
-    dump_ed2k_tcp_recv(
-        "udp_firewall_check",
-        remote_addr,
-        transport_mode,
-        phase,
-        packet,
-    );
-}
-
 pub(super) fn dump_ed2k_tcp_listener_meta(
     remote_addr: SocketAddr,
     transport_mode: Option<Ed2kTransportMode>,
@@ -584,15 +572,6 @@ pub(super) fn dump_ed2k_tcp_listener_send(
     bytes: &[u8],
 ) {
     dump_ed2k_tcp_send("listener", remote_addr, transport_mode, phase, bytes);
-}
-
-pub(super) fn dump_ed2k_tcp_listener_recv(
-    remote_addr: SocketAddr,
-    transport_mode: Ed2kTransportMode,
-    phase: &str,
-    packet: &EmuleTcpPacket,
-) {
-    dump_ed2k_tcp_recv("listener", remote_addr, transport_mode, phase, packet);
 }
 
 /// Flow-parameterized send dump for shared session helpers (currently the
@@ -627,21 +606,6 @@ pub(super) fn dump_ed2k_tcp_download_send(
     bytes: &[u8],
 ) {
     dump_ed2k_tcp_send("native_download", remote_addr, transport_mode, phase, bytes);
-}
-
-pub(super) fn dump_ed2k_tcp_download_recv(
-    remote_addr: SocketAddr,
-    transport_mode: Ed2kTransportMode,
-    phase: &str,
-    packet: &EmuleTcpPacket,
-) {
-    dump_ed2k_tcp_recv(
-        "native_download",
-        remote_addr,
-        transport_mode,
-        phase,
-        packet,
-    );
 }
 
 #[cfg(test)]
