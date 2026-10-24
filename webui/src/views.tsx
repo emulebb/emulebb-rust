@@ -4102,7 +4102,6 @@ export function DiagnosticsView(props: {
   client: RestClient;
   run: RunFunction;
 }) {
-  const [fullMemory, setFullMemory] = useState(false);
   const [crashConfirm, setCrashConfirm] = useState("");
   const [shutdownConfirm, setShutdownConfirm] = useState("");
   const [dumpPath, setDumpPath] = useState("");
@@ -4121,7 +4120,7 @@ export function DiagnosticsView(props: {
         : "Polling";
 
   const captureDump = async () => {
-    const result = await props.client.post<{ path?: string }>("diagnostics/dumps", { confirmDump: true, fullMemory });
+    const result = await props.client.post<{ path?: string }>("diagnostics/dumps", { confirmDump: true });
     setDumpPath(result.path ?? "");
   };
 
@@ -4132,10 +4131,6 @@ export function DiagnosticsView(props: {
           <h2>Diagnostics</h2>
         </div>
         <div class="row-actions">
-          <label class="check">
-            <input class="form-check-input" type="checkbox" checked={fullMemory} onInput={(event) => setFullMemory(event.currentTarget.checked)} />
-            Full memory dump
-          </label>
           <button class="btn" type="button" onClick={() => void props.run(captureDump, "Diagnostic dump captured")}>
             <FileText size={15} />
             Capture dump
