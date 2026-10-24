@@ -33,10 +33,10 @@ use super::super::{
     decode_file_status_availability, decode_file_status_body_availability, decode_hashset_answer,
     decode_hashset_answer2, decode_hello_answer_profile, decode_hello_profile,
     decode_optional_file_hash_payload, decode_request_filename_answer,
-    decode_request_filename_answer_body, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_recv,
-    dump_ed2k_tcp_download_send, encode_aich_recovery_answer, encode_aich_recovery_failure_answer,
-    encode_emule_info_answer, encode_packet, encode_port_test_answer, encode_public_ip_answer,
-    handle_aich_recovery_answer, is_connection_shutdown_error, validate_file_status_part_count,
+    decode_request_filename_answer_body, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_send,
+    encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_emule_info_answer,
+    encode_packet, encode_port_test_answer, encode_public_ip_answer, handle_aich_recovery_answer,
+    is_connection_shutdown_error, validate_file_status_part_count,
 };
 use super::{
     AichRecoveryRequestState, DownloadRequestWindowOutcome, DownloadRequestWindowState,
@@ -362,7 +362,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 session_state.queued_until,
                 session_state.part_response_deadline,
             );
-            let packet = match tokio::time::timeout(read_timeout, transport.read_packet()).await {
+            let packet = match tokio::time::timeout(
+                read_timeout,
+                transport.read_packet_diagnostic("native_download", peer_addr, "session"),
+            )
+            .await
+            {
                 Ok(Ok(Some(packet))) => packet,
                 Ok(Ok(None)) => {
                     if session_state.hello_complete {
@@ -453,8 +458,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     anyhow::bail!("timed out waiting for ED2K peer packet from {peer_addr}");
                 }
             };
-            dump_ed2k_tcp_download_recv(peer_addr, transport.mode, "session", &packet);
-
             match (packet.protocol, packet.opcode) {
                 (OP_EDONKEYPROT, OP_HELLO) => {
                     let hello_profile = decode_hello_profile(&packet.payload)?;

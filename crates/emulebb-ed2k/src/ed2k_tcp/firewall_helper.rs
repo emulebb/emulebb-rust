@@ -13,9 +13,7 @@ use emulebb_kad_dht::DhtNode;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
 use super::codec::{KadCallbackRequest, decode_kad_callback_payload};
-use super::dump::{
-    dump_ed2k_tcp_helper_meta, dump_ed2k_tcp_helper_recv, dump_ed2k_tcp_helper_send,
-};
+use super::dump::{dump_ed2k_tcp_helper_meta, dump_ed2k_tcp_helper_send};
 use super::hello::{decode_hello_answer_profile, decode_hello_profile, encode_hello_answer};
 use super::{
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_SIGNATURE_NEEDED,
@@ -63,7 +61,16 @@ async fn drive_firewall_helper_hello_exchange(
     let exchange_deadline = tokio::time::Instant::now() + timeout.min(Duration::from_secs(3));
     while tokio::time::Instant::now() < exchange_deadline {
         let remaining = exchange_deadline.saturating_duration_since(tokio::time::Instant::now());
-        let packet = match tokio::time::timeout(remaining, transport.read_packet()).await {
+        let packet = match tokio::time::timeout(
+            remaining,
+            transport.read_packet_diagnostic(
+                "udp_firewall_check",
+                context.helper_addr,
+                "hello_exchange",
+            ),
+        )
+        .await
+        {
             Ok(Ok(Some(packet))) => packet,
             Ok(Ok(None)) => {
                 dump_ed2k_tcp_helper_meta(
@@ -89,15 +96,7 @@ async fn drive_firewall_helper_hello_exchange(
             Err(_) => break,
         };
         let packet_completed_hello = helper_packet_completes_hello(&packet);
-        if !handle_firewall_helper_packet(
-            transport,
-            context,
-            peer_secure_ident,
-            "hello_exchange",
-            packet,
-        )
-        .await?
-        {
+        if !handle_firewall_helper_packet(transport, context, peer_secure_ident, packet).await? {
             break;
         }
         hello_completed |= packet_completed_hello;
@@ -120,11 +119,8 @@ async fn handle_firewall_helper_packet(
     transport: &mut Ed2kTransport,
     context: FirewallHelperContext<'_>,
     peer_secure_ident: &mut Ed2kPeerSecureIdentState,
-    phase: &str,
     packet: EmuleTcpPacket,
 ) -> Result<bool> {
-    dump_ed2k_tcp_helper_recv(context.helper_addr, transport.mode, phase, &packet);
-
     match (packet.protocol, packet.opcode) {
         (OP_EDONKEYPROT, OP_HELLO) => {
             let hello_profile = decode_hello_profile(&packet.payload)?;
@@ -353,7 +349,12 @@ pub async fn request_udp_firewall_check(
     while tokio::time::Instant::now() < post_fwcheck_deadline {
         let remaining =
             post_fwcheck_deadline.saturating_duration_since(tokio::time::Instant::now());
-        let packet = match tokio::time::timeout(remaining, transport.read_packet()).await {
+        let packet = match tokio::time::timeout(
+            remaining,
+            transport.read_packet_diagnostic("udp_firewall_check", helper_addr, "post_fwcheck"),
+        )
+        .await
+        {
             Ok(Ok(Some(packet))) => packet,
             Ok(Ok(None)) => {
                 dump_ed2k_tcp_helper_meta(
@@ -380,7 +381,6 @@ pub async fn request_udp_firewall_check(
             &mut transport,
             helper_context,
             &mut peer_secure_ident,
-            "post_fwcheck",
             packet,
         )
         .await?

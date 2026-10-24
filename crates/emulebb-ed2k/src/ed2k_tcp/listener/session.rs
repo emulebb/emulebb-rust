@@ -36,9 +36,7 @@ use super::super::download::{
     DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
     drive_download_session,
 };
-use super::super::dump::{
-    dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_recv, dump_ed2k_tcp_listener_send,
-};
+use super::super::dump::{dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_send};
 use super::super::firewall_helper::{
     complete_authorized_kad_callback, decode_kad_callback_if_running,
 };
@@ -385,7 +383,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         }
                     }
                 }
-                read = tokio::time::timeout(read_timeout, transport.read_packet()) => {
+                read = tokio::time::timeout(
+                    read_timeout,
+                    transport.read_packet_diagnostic("listener", peer_addr, "session"),
+                ) => {
                     match read {
                         Ok(packet) => packet
                             .with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?,
@@ -417,7 +418,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     .await?;
                     continue;
                 }
-                read = tokio::time::timeout(read_timeout, transport.read_packet()) => {
+                read = tokio::time::timeout(
+                    read_timeout,
+                    transport.read_packet_diagnostic("listener", peer_addr, "session"),
+                ) => {
                     match read {
                         Ok(packet) => packet.with_context(|| {
                             format!("failed to read eD2k packet from {peer_addr}")
@@ -442,8 +446,6 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             break Ok(());
         };
         last_packet_at = tokio::time::Instant::now();
-        dump_ed2k_tcp_listener_recv(peer_addr, transport.mode, "session", &packet);
-
         if session_phase != PeerSessionPhase::Established {
             pre_establishment_frames = pre_establishment_frames.saturating_add(1);
             pre_establishment_bytes = pre_establishment_bytes
