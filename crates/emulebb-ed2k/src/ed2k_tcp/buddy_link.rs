@@ -202,7 +202,12 @@ async fn drive_buddy_link(
             () = tokio::time::sleep_until(liveness.next_ping_at()) => {
                 let ping = super::codec::encode_buddy_ping();
                 transport
-                    .write_all(&ping)
+                    .write_all_diagnostic(
+                        "kad_buddy",
+                        buddy_addr,
+                        "kad_buddy_ping_pong",
+                        &ping,
+                    )
                     .await
                     .with_context(|| format!("failed to send OP_BUDDYPING to buddy {buddy_addr}"))?;
                 liveness.record_ping_sent(tokio::time::Instant::now());
@@ -345,8 +350,9 @@ async fn handle_buddy_packet(
                 return Ok(BuddyPacketActivity::None);
             }
             if packet.opcode == OP_BUDDYPING {
+                let pong = super::codec::encode_buddy_pong();
                 transport
-                    .write_all(&super::codec::encode_buddy_pong())
+                    .write_all_diagnostic("kad_buddy", buddy_addr, "kad_buddy_ping_pong", &pong)
                     .await
                     .with_context(|| {
                         format!("failed to send OP_BUDDYPONG to buddy {buddy_addr}")
@@ -361,17 +367,23 @@ async fn handle_buddy_packet(
         // Late hello/info chatter from the buddy: answer info, otherwise ignore.
         (OP_EDONKEYPROT, OP_HELLO) => {
             for reply in build_hello_responses(&packet.payload, hello_identity)? {
-                transport.write_all(&reply).await.with_context(|| {
-                    format!("failed to reply to OP_HELLO from buddy {buddy_addr}")
-                })?;
+                transport
+                    .write_all_diagnostic("kad_buddy", buddy_addr, "hello_reply", &reply)
+                    .await
+                    .with_context(|| {
+                        format!("failed to reply to OP_HELLO from buddy {buddy_addr}")
+                    })?;
             }
             Ok(BuddyPacketActivity::Received)
         }
         (OP_EMULEPROT, OP_EMULEINFO) => {
             let reply = encode_emule_info_answer(hello_identity.udp_port);
-            transport.write_all(&reply).await.with_context(|| {
-                format!("failed to send OP_EMULEINFOANSWER to buddy {buddy_addr}")
-            })?;
+            transport
+                .write_all_diagnostic("kad_buddy", buddy_addr, "emule_info_answer", &reply)
+                .await
+                .with_context(|| {
+                    format!("failed to send OP_EMULEINFOANSWER to buddy {buddy_addr}")
+                })?;
             Ok(BuddyPacketActivity::Received)
         }
         (OP_EDONKEYPROT, OP_HELLOANSWER) | (OP_EMULEPROT, OP_EMULEINFOANSWER) => {
@@ -409,9 +421,12 @@ async fn connect_and_hello_buddy(
     .await?;
 
     let hello_packet = encode_hello_request(hello_identity);
-    tokio::time::timeout(timeout, transport.write_all(&hello_packet))
-        .await
-        .with_context(|| format!("timed out sending OP_HELLO to buddy {buddy_addr}"))??;
+    tokio::time::timeout(
+        timeout,
+        transport.write_all_diagnostic("kad_buddy", buddy_addr, "hello_request", &hello_packet),
+    )
+    .await
+    .with_context(|| format!("timed out sending OP_HELLO to buddy {buddy_addr}"))??;
 
     // Drive the hello exchange to completion (HELLOANSWER or a HELLO from the
     // buddy) so it has our identity before we start the keepalive.
@@ -436,18 +451,24 @@ async fn connect_and_hello_buddy(
         match (packet.protocol, packet.opcode) {
             (OP_EDONKEYPROT, OP_HELLO) => {
                 for reply in build_hello_responses(&packet.payload, hello_identity)? {
-                    transport.write_all(&reply).await.with_context(|| {
-                        format!("failed to reply to OP_HELLO from buddy {buddy_addr}")
-                    })?;
+                    transport
+                        .write_all_diagnostic("kad_buddy", buddy_addr, "hello_reply", &reply)
+                        .await
+                        .with_context(|| {
+                            format!("failed to reply to OP_HELLO from buddy {buddy_addr}")
+                        })?;
                 }
                 break;
             }
             (OP_EDONKEYPROT, OP_HELLOANSWER) | (OP_EMULEPROT, OP_EMULEINFOANSWER) => break,
             (OP_EMULEPROT, OP_EMULEINFO) => {
                 let reply = encode_emule_info_answer(hello_identity.udp_port);
-                transport.write_all(&reply).await.with_context(|| {
-                    format!("failed to send OP_EMULEINFOANSWER to buddy {buddy_addr}")
-                })?;
+                transport
+                    .write_all_diagnostic("kad_buddy", buddy_addr, "emule_info_answer", &reply)
+                    .await
+                    .with_context(|| {
+                        format!("failed to send OP_EMULEINFOANSWER to buddy {buddy_addr}")
+                    })?;
             }
             _ => {}
         }

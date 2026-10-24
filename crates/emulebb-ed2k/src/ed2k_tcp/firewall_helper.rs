@@ -13,7 +13,7 @@ use emulebb_kad_dht::DhtNode;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
 use super::codec::{KadCallbackRequest, decode_kad_callback_payload};
-use super::dump::{dump_ed2k_tcp_helper_meta, dump_ed2k_tcp_helper_send};
+use super::dump::dump_ed2k_tcp_helper_meta;
 use super::hello::{decode_hello_answer_profile, decode_hello_profile, encode_hello_answer};
 use super::{
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_SIGNATURE_NEEDED,
@@ -45,15 +45,17 @@ async fn drive_firewall_helper_hello_exchange(
 ) -> Result<bool> {
     let mut hello_completed = false;
     let hello_packet = encode_hello_request(context.hello_identity);
-    dump_ed2k_tcp_helper_send(
-        context.helper_addr,
-        transport.mode,
-        "hello_request",
-        &hello_packet,
-    );
-    tokio::time::timeout(timeout, transport.write_all(&hello_packet))
-        .await
-        .with_context(|| format!("timed out sending OP_HELLO to {}", context.helper_addr))??;
+    tokio::time::timeout(
+        timeout,
+        transport.write_all_diagnostic(
+            "udp_firewall_check",
+            context.helper_addr,
+            "hello_request",
+            &hello_packet,
+        ),
+    )
+    .await
+    .with_context(|| format!("timed out sending OP_HELLO to {}", context.helper_addr))??;
 
     // The oracle only advances the dedicated UDP firewall-check flow once the
     // HELLO side channel actually answered. Keep this bounded, but do not fall
@@ -125,21 +127,30 @@ async fn handle_firewall_helper_packet(
         (OP_EDONKEYPROT, OP_HELLO) => {
             let hello_profile = decode_hello_profile(&packet.payload)?;
             let reply = encode_hello_answer(context.hello_identity);
-            dump_ed2k_tcp_helper_send(context.helper_addr, transport.mode, "hello_answer", &reply);
-            transport.write_all(&reply).await.with_context(|| {
-                format!("failed to send OP_HELLOANSWER to {}", context.helper_addr)
-            })?;
+            transport
+                .write_all_diagnostic(
+                    "udp_firewall_check",
+                    context.helper_addr,
+                    "hello_answer",
+                    &reply,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to send OP_HELLOANSWER to {}", context.helper_addr)
+                })?;
             if hello_profile.supports_secure_ident && !peer_secure_ident.requested_peer_key {
                 let request = begin_secure_ident_probe(peer_secure_ident);
-                dump_ed2k_tcp_helper_send(
-                    context.helper_addr,
-                    transport.mode,
-                    "secure_ident_probe",
-                    &request,
-                );
-                transport.write_all(&request).await.with_context(|| {
-                    format!("failed to send OP_SECIDENTSTATE to {}", context.helper_addr)
-                })?;
+                transport
+                    .write_all_diagnostic(
+                        "udp_firewall_check",
+                        context.helper_addr,
+                        "secure_ident_probe",
+                        &request,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("failed to send OP_SECIDENTSTATE to {}", context.helper_addr)
+                    })?;
             }
         }
         (OP_EDONKEYPROT, OP_HELLOANSWER) => {
@@ -149,31 +160,35 @@ async fn handle_firewall_helper_packet(
             let hello_profile = decode_hello_answer_profile(&packet.payload)?;
             if hello_profile.supports_secure_ident && !peer_secure_ident.requested_peer_key {
                 let request = begin_secure_ident_probe(peer_secure_ident);
-                dump_ed2k_tcp_helper_send(
-                    context.helper_addr,
-                    transport.mode,
-                    "secure_ident_probe",
-                    &request,
-                );
-                transport.write_all(&request).await.with_context(|| {
-                    format!("failed to send OP_SECIDENTSTATE to {}", context.helper_addr)
-                })?;
+                transport
+                    .write_all_diagnostic(
+                        "udp_firewall_check",
+                        context.helper_addr,
+                        "secure_ident_probe",
+                        &request,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("failed to send OP_SECIDENTSTATE to {}", context.helper_addr)
+                    })?;
             }
         }
         (OP_EMULEPROT, OP_EMULEINFO) => {
             let reply = encode_emule_info_answer(context.kad_udp_port);
-            dump_ed2k_tcp_helper_send(
-                context.helper_addr,
-                transport.mode,
-                "emule_info_answer",
-                &reply,
-            );
-            transport.write_all(&reply).await.with_context(|| {
-                format!(
-                    "failed to send OP_EMULEINFOANSWER to {}",
-                    context.helper_addr
+            transport
+                .write_all_diagnostic(
+                    "udp_firewall_check",
+                    context.helper_addr,
+                    "emule_info_answer",
+                    &reply,
                 )
-            })?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to send OP_EMULEINFOANSWER to {}",
+                        context.helper_addr
+                    )
+                })?;
         }
         (OP_EMULEPROT, OP_EMULEINFOANSWER) => {}
         (OP_EMULEPROT, OP_SECIDENTSTATE) => {
@@ -188,15 +203,17 @@ async fn handle_firewall_helper_packet(
                     OP_PUBLICKEY,
                     &context.secure_ident.public_key_payload()?,
                 );
-                dump_ed2k_tcp_helper_send(
-                    context.helper_addr,
-                    transport.mode,
-                    "public_key",
-                    &public_key,
-                );
-                transport.write_all(&public_key).await.with_context(|| {
-                    format!("failed to send OP_PUBLICKEY to {}", context.helper_addr)
-                })?;
+                transport
+                    .write_all_diagnostic(
+                        "udp_firewall_check",
+                        context.helper_addr,
+                        "public_key",
+                        &public_key,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("failed to send OP_PUBLICKEY to {}", context.helper_addr)
+                    })?;
             }
             if !try_send_secure_ident_signature(
                 transport,
@@ -217,18 +234,20 @@ async fn handle_firewall_helper_packet(
                     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
                     challenge_for,
                 );
-                dump_ed2k_tcp_helper_send(
-                    context.helper_addr,
-                    transport.mode,
-                    "secure_ident_probe",
-                    &request,
-                );
-                transport.write_all(&request).await.with_context(|| {
-                    format!(
-                        "failed to send fallback OP_SECIDENTSTATE to {}",
-                        context.helper_addr
+                transport
+                    .write_all_diagnostic(
+                        "udp_firewall_check",
+                        context.helper_addr,
+                        "secure_ident_probe",
+                        &request,
                     )
-                })?;
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to send fallback OP_SECIDENTSTATE to {}",
+                            context.helper_addr
+                        )
+                    })?;
             }
         }
         (OP_EMULEPROT, OP_PUBLICKEY) => {
@@ -334,10 +353,17 @@ pub async fn request_udp_firewall_check(
     }
     let payload = request.encode();
     let packet = encode_packet(OP_EMULEPROT, OP_FWCHECKUDPREQ, &payload);
-    dump_ed2k_tcp_helper_send(helper_addr, transport.mode, "fwcheck_request", &packet);
-    tokio::time::timeout(timeout, transport.write_all(&packet))
-        .await
-        .with_context(|| format!("timed out sending OP_FWCHECKUDPREQ to {helper_addr}"))??;
+    tokio::time::timeout(
+        timeout,
+        transport.write_all_diagnostic(
+            "udp_firewall_check",
+            helper_addr,
+            "fwcheck_request",
+            &packet,
+        ),
+    )
+    .await
+    .with_context(|| format!("timed out sending OP_FWCHECKUDPREQ to {helper_addr}"))??;
 
     // Keep the helper TCP session around briefly so peers that finish their
     // hello side channel after receiving the request do not see an immediate
@@ -528,18 +554,34 @@ pub async fn send_kad_firewall_tcp_ack(
     };
 
     let hello_packet = encode_hello_request(hello_identity);
-    tokio::time::timeout(timeout, transport.write_all(&hello_packet))
-        .await
-        .with_context(|| {
-            format!("timed out sending OP_HELLO for Kad TCP firewall ACK to {peer_addr}")
-        })??;
+    tokio::time::timeout(
+        timeout,
+        transport.write_all_diagnostic(
+            "kad_firewall_tcp_ack",
+            peer_addr,
+            "hello_request",
+            &hello_packet,
+        ),
+    )
+    .await
+    .with_context(|| {
+        format!("timed out sending OP_HELLO for Kad TCP firewall ACK to {peer_addr}")
+    })??;
 
     let ack = encode_packet(OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK, &[]);
-    tokio::time::timeout(timeout, transport.write_all(&ack))
-        .await
-        .with_context(|| {
-            format!("timed out sending OP_KAD_FWTCPCHECK_ACK to Kad firewall peer {peer_addr}")
-        })??;
+    tokio::time::timeout(
+        timeout,
+        transport.write_all_diagnostic(
+            "kad_firewall_tcp_ack",
+            peer_addr,
+            "kad_firewall_tcp_ack",
+            &ack,
+        ),
+    )
+    .await
+    .with_context(|| {
+        format!("timed out sending OP_KAD_FWTCPCHECK_ACK to Kad firewall peer {peer_addr}")
+    })??;
 
     Ok(mode)
 }

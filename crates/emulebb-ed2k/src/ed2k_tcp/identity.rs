@@ -17,7 +17,7 @@ use sha1_legacy::Sha1;
 
 use super::{
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_KEY_BITS, Ed2kTransport,
-    OP_EMULEPROT, OP_SECIDENTSTATE, OP_SIGNATURE, dump_ed2k_tcp_send_for_flow, encode_packet,
+    OP_EMULEPROT, OP_SECIDENTSTATE, OP_SIGNATURE, encode_packet,
 };
 
 /// Stock eMule `MAXPUBKEYSIZE` (`ClientCredits.h`): the secure-ident public-key
@@ -462,9 +462,8 @@ pub(super) async fn try_send_secure_ident_signature(
             challenge_ip,
         )?,
     );
-    dump_ed2k_tcp_send_for_flow(flow, peer_addr, transport.mode, "signature", &signature);
     transport
-        .write_all(&signature)
+        .write_all_diagnostic(flow, peer_addr, "signature", &signature)
         .await
         .with_context(|| format!("failed to send OP_SIGNATURE to {peer_addr}"))?;
     peer_state.pending_signature = false;
