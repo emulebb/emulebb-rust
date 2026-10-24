@@ -18,7 +18,6 @@ use crate::{
 use super::super::super::codec::{
     encode_accept_upload_req, encode_out_of_part_reqs, encode_queue_ranking,
 };
-use super::super::super::dump::dump_ed2k_tcp_listener_send;
 
 pub(in crate::ed2k_tcp) enum ListenerQueuePoll {
     Continue,
@@ -257,13 +256,14 @@ impl ListenerUploadQueue {
                 if self.granted_sent {
                     if self.should_send_out_of_part_reqs() {
                         let packet = encode_out_of_part_reqs();
-                        dump_ed2k_tcp_listener_send(
-                            peer_addr,
-                            transport.mode,
-                            "out_of_part_reqs",
-                            &packet,
-                        );
-                        transport.write_all(&packet).await?;
+                        transport
+                            .write_all_diagnostic(
+                                "listener",
+                                peer_addr,
+                                "out_of_part_reqs",
+                                &packet,
+                            )
+                            .await?;
                         if let (Some(peer), Some(file_hash)) =
                             (self.diag_peer.as_deref(), self.file_hash.as_ref())
                         {
@@ -284,13 +284,14 @@ impl ListenerUploadQueue {
                         // `should_send_out_of_part_reqs` already excludes it (oracle
                         // bRequeue=false).
                         if let Some(rank_packet) = self.rank_packet(rank) {
-                            dump_ed2k_tcp_listener_send(
-                                peer_addr,
-                                transport.mode,
-                                "queue_ranking",
-                                &rank_packet,
-                            );
-                            transport.write_all(&rank_packet).await?;
+                            transport
+                                .write_all_diagnostic(
+                                    "listener",
+                                    peer_addr,
+                                    "queue_ranking",
+                                    &rank_packet,
+                                )
+                                .await?;
                         }
                     }
                     self.granted_sent = false;
@@ -328,13 +329,9 @@ impl ListenerUploadQueue {
                 // packet (oracle bRequeue=false, UploadQueue.cpp:2320-2321).
                 if self.should_send_out_of_part_reqs() {
                     let packet = encode_out_of_part_reqs();
-                    dump_ed2k_tcp_listener_send(
-                        peer_addr,
-                        transport.mode,
-                        "out_of_part_reqs",
-                        &packet,
-                    );
-                    let _ = transport.write_all(&packet).await;
+                    let _ = transport
+                        .write_all_diagnostic("listener", peer_addr, "out_of_part_reqs", &packet)
+                        .await;
                     if let (Some(peer), Some(file_hash)) =
                         (self.diag_peer.as_deref(), self.file_hash.as_ref())
                     {
@@ -733,9 +730,8 @@ impl ListenerUploadQueue {
             return Ok(());
         }
         let reply = encode_accept_upload_req();
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "accept_upload", &reply);
         transport
-            .write_all(&reply)
+            .write_all_diagnostic("listener", peer_addr, "accept_upload", &reply)
             .await
             .with_context(|| format!("failed to send OP_ACCEPTUPLOADREQ to {peer_addr}"))?;
         self.mark_granted_sent();
@@ -757,9 +753,8 @@ impl ListenerUploadQueue {
         let Some(reply) = self.rank_packet(rank) else {
             return Ok(());
         };
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "queue_ranking", &reply);
         transport
-            .write_all(&reply)
+            .write_all_diagnostic("listener", peer_addr, "queue_ranking", &reply)
             .await
             .with_context(|| format!("failed to send OP_QUEUERANKING to {peer_addr}"))?;
         Ok(())
