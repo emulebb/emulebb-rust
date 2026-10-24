@@ -6,6 +6,8 @@ use tokio::net::UdpSocket;
 
 use emulebb_kad_proto::Ed2kHash;
 
+#[cfg(feature = "packet-diagnostics")]
+use super::diagnostics::Ed2kServerPacketEvidence;
 use super::{
     Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
     ResolvedServerEntry, ServerUdpPacket, decode_server_udp_datagram,
@@ -51,6 +53,25 @@ pub(super) async fn send_server_udp_packet(
     } else {
         "obfuscated"
     };
+    #[cfg(feature = "packet-diagnostics")]
+    {
+        let mut clear_frame = Vec::with_capacity(payload.len() + 2);
+        clear_frame.extend_from_slice(&[OP_EDONKEYPROT, opcode]);
+        clear_frame.extend_from_slice(payload);
+        dump_ed2k_server_udp_packet(
+            server,
+            "tx",
+            endpoint,
+            transport_mode,
+            opcode,
+            Ed2kServerPacketEvidence {
+                raw: &packet,
+                clear_frame: &clear_frame,
+                payload,
+            },
+        );
+    }
+    #[cfg(not(feature = "packet-diagnostics"))]
     dump_ed2k_server_udp_packet(server, "tx", endpoint, transport_mode, opcode, payload);
     socket.send_to(&packet, endpoint).await.with_context(|| {
         format!(
@@ -178,6 +199,20 @@ pub(super) async fn read_server_udp_packet_with_key(
     }
     let opcode = packet[1];
     let payload = packet[2..].to_vec();
+    #[cfg(feature = "packet-diagnostics")]
+    dump_ed2k_server_udp_packet(
+        server,
+        "rx",
+        from,
+        transport_mode,
+        opcode,
+        Ed2kServerPacketEvidence {
+            raw: &buffer[..len],
+            clear_frame: &packet,
+            payload: &payload,
+        },
+    );
+    #[cfg(not(feature = "packet-diagnostics"))]
     dump_ed2k_server_udp_packet(server, "rx", from, transport_mode, opcode, &payload);
     Ok(Some(ServerUdpPacket {
         opcode,
@@ -209,6 +244,20 @@ pub(super) async fn read_server_udp_packet_from_any(
         }
         let opcode = packet[1];
         let payload = packet[2..].to_vec();
+        #[cfg(feature = "packet-diagnostics")]
+        dump_ed2k_server_udp_packet(
+            server,
+            "rx",
+            from,
+            transport_mode,
+            opcode,
+            Ed2kServerPacketEvidence {
+                raw: &buffer[..len],
+                clear_frame: &packet,
+                payload: &payload,
+            },
+        );
+        #[cfg(not(feature = "packet-diagnostics"))]
         dump_ed2k_server_udp_packet(server, "rx", from, transport_mode, opcode, &payload);
         return Ok(Some((
             server.clone(),
