@@ -16,7 +16,10 @@ use std::{
 #[cfg(feature = "enabled")]
 use std::{
     env,
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[cfg(any(feature = "enabled", test))]
@@ -142,6 +145,7 @@ struct SegmentedEventWriter {
 #[cfg(feature = "enabled")]
 struct WriterInitFailure {
     reason: String,
+    dropped_events: AtomicU64,
 }
 
 #[cfg(any(feature = "enabled", test))]
@@ -168,13 +172,19 @@ pub fn emit(
     keys: Value,
     body: Value,
 ) -> bool {
-    let writer = WRITER.get_or_init(initialize_global_writer);
-    let Ok(writer) = writer else {
-        return false;
+    let writer = match WRITER.get_or_init(initialize_global_writer) {
+        Ok(writer) => writer,
+        Err(error) => {
+            error.record_drop();
+            return false;
+        }
     };
-    let Ok(mut writer) = writer.lock() else {
-        warn!("failed to lock shared diagnostic event writer");
-        return false;
+    let mut writer = match writer.lock() {
+        Ok(writer) => writer,
+        Err(poisoned) => {
+            warn!("recovering poisoned shared diagnostic event writer lock");
+            poisoned.into_inner()
+        }
     };
     writer.emit(family, event, severity, &keys, &body)
 }
@@ -204,32 +214,50 @@ pub fn writer_health() -> DiagWriterHealth {
         match writer {
             Ok(writer) => match writer.lock() {
                 Ok(writer) => writer.health(),
-                Err(_) => DiagWriterHealth {
-                    initialization_failure: Some("writerLockPoisoned".to_string()),
-                    ..uninitialized_health()
-                },
+                Err(poisoned) => {
+                    let mut health = poisoned.into_inner().health();
+                    health.initialization_failure = Some("writerLockPoisoned".to_string());
+                    health
+                }
             },
-            Err(error) => DiagWriterHealth {
-                initialized: false,
-                initialization_failure: Some(error.reason.clone()),
-                ..uninitialized_health()
-            },
+            Err(error) => error.health(),
+        }
+    }
+}
+
+#[cfg(feature = "enabled")]
+impl WriterInitFailure {
+    fn new(reason: String) -> Self {
+        Self {
+            reason,
+            dropped_events: AtomicU64::new(0),
+        }
+    }
+
+    fn record_drop(&self) {
+        self.dropped_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn health(&self) -> DiagWriterHealth {
+        DiagWriterHealth {
+            dropped_events: self.dropped_events.load(Ordering::Relaxed),
+            initialization_failure: Some(self.reason.clone()),
+            ..uninitialized_health()
         }
     }
 }
 
 #[cfg(feature = "enabled")]
 fn initialize_global_writer() -> Result<Mutex<SegmentedEventWriter>, WriterInitFailure> {
-    let config = WriterConfig::from_environment().ok_or_else(|| WriterInitFailure {
-        reason: "logDirectoryNotConfigured".to_string(),
-    })?;
+    let config = WriterConfig::from_environment()
+        .ok_or_else(|| WriterInitFailure::new("logDirectoryNotConfigured".to_string()))?;
     let writer = SegmentedEventWriter::new(
         config,
         Uuid::new_v4().simple().to_string(),
         std::process::id(),
     )
-    .map_err(|error| WriterInitFailure {
-        reason: format!("writerInitializationFailed:{}", error.kind()),
+    .map_err(|error| {
+        WriterInitFailure::new(format!("writerInitializationFailed:{}", error.kind()))
     })?;
     Ok(Mutex::new(writer))
 }
@@ -789,6 +817,23 @@ mod tests {
         assert_eq!(health.records_written, 0);
         assert_eq!(health.dropped_events, 1);
         assert!(read_records(root.path()).is_empty());
+    }
+
+    #[cfg(feature = "enabled")]
+    #[test]
+    fn initialization_failures_count_every_dropped_event() {
+        let failure = WriterInitFailure::new("testFailure".to_string());
+        failure.record_drop();
+        failure.record_drop();
+
+        let health = failure.health();
+        assert!(health.enabled);
+        assert!(!health.initialized);
+        assert_eq!(health.dropped_events, 2);
+        assert_eq!(
+            health.initialization_failure.as_deref(),
+            Some("testFailure")
+        );
     }
 
     fn test_writer(
