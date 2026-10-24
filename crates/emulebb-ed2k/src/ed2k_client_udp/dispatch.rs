@@ -15,6 +15,7 @@
 //! `None`), and an obfuscated eD2k client packet will not validate as Kad.
 
 use std::borrow::Cow;
+use std::fmt;
 
 use super::codec::{
     DirectCallbackReq, OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_PORTTEST, OP_QUEUEFULL,
@@ -50,6 +51,102 @@ pub(crate) enum InboundReaskMessage {
     PortTest,
 }
 
+/// Stable reason why an inbound datagram could not become a client-UDP message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InboundReaskParseError {
+    /// The datagram was neither plaintext client UDP nor decryptable for us.
+    Undecodable,
+    /// A client-UDP frame or known opcode body was structurally invalid.
+    Malformed { opcode: Option<u8>, detail: String },
+    /// The frame was valid client UDP, but the opcode is outside our supported scope.
+    UnknownOpcode { opcode: u8 },
+}
+
+impl InboundReaskParseError {
+    pub(crate) const fn reason(&self) -> &'static str {
+        match self {
+            Self::Undecodable => "undecodable",
+            Self::Malformed { .. } => "malformed",
+            Self::UnknownOpcode { .. } => "unknown_opcode",
+        }
+    }
+}
+
+impl fmt::Display for InboundReaskParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Undecodable => formatter.write_str("datagram is not decodable client UDP"),
+            Self::Malformed { opcode, detail } => match opcode {
+                Some(opcode) => write!(formatter, "malformed opcode 0x{opcode:02X}: {detail}"),
+                None => write!(formatter, "malformed client UDP frame: {detail}"),
+            },
+            Self::UnknownOpcode { opcode } => {
+                write!(formatter, "unsupported client UDP opcode 0x{opcode:02X}")
+            }
+        }
+    }
+}
+
+/// Classify a raw inbound datagram without erasing why it was rejected.
+pub(crate) fn classify_inbound_reask_datagram(
+    datagram: &[u8],
+    sender_ip: [u8; 4],
+    our_user_hash: &[u8; 16],
+    our_udp_version: u8,
+) -> Result<InboundReaskMessage, InboundReaskParseError> {
+    let frame: Cow<'_, [u8]> = if datagram.first() == Some(&OP_EMULEPROT) {
+        Cow::Borrowed(datagram)
+    } else {
+        Cow::Owned(
+            deobfuscate_client_udp(our_user_hash, sender_ip, datagram)
+                .ok_or(InboundReaskParseError::Undecodable)?,
+        )
+    };
+
+    if frame.len() < 2 || frame[0] != OP_EMULEPROT {
+        return Err(InboundReaskParseError::Malformed {
+            opcode: frame.get(1).copied(),
+            detail: "missing OP_EMULEPROT marker or opcode".to_string(),
+        });
+    }
+    let opcode = frame[1];
+    let body = &frame[2..];
+    match opcode {
+        OP_REASKFILEPING => decode_reask_file_ping(body, our_udp_version)
+            .map(InboundReaskMessage::FilePing)
+            .map_err(|error| InboundReaskParseError::Malformed {
+                opcode: Some(opcode),
+                detail: error.to_string(),
+            }),
+        OP_REASKACK => decode_reask_ack(body, our_udp_version)
+            .map(InboundReaskMessage::Ack)
+            .map_err(|error| InboundReaskParseError::Malformed {
+                opcode: Some(opcode),
+                detail: error.to_string(),
+            }),
+        OP_QUEUEFULL => Ok(InboundReaskMessage::QueueFull),
+        OP_FILENOTFOUND => Ok(InboundReaskMessage::FileNotFound),
+        OP_REASKCALLBACKUDP => decode_reask_callback_udp(body)
+            .map(InboundReaskMessage::CallbackUdp)
+            .map_err(|error| InboundReaskParseError::Malformed {
+                opcode: Some(opcode),
+                detail: error.to_string(),
+            }),
+        OP_DIRECTCALLBACKREQ => decode_direct_callback_req(body)
+            .map(InboundReaskMessage::DirectCallbackReq)
+            .map_err(|error| InboundReaskParseError::Malformed {
+                opcode: Some(opcode),
+                detail: error.to_string(),
+            }),
+        OP_PORTTEST if body == [0x12] => Ok(InboundReaskMessage::PortTest),
+        OP_PORTTEST => Err(InboundReaskParseError::Malformed {
+            opcode: Some(opcode),
+            detail: "OP_PORTTEST body must be exactly 0x12".to_string(),
+        }),
+        _ => Err(InboundReaskParseError::UnknownOpcode { opcode }),
+    }
+}
+
 /// Parse a raw inbound datagram as a client-UDP reask message, or `None` if it
 /// is not one addressed to us (junk, a Kad packet, or an unknown opcode).
 ///
@@ -66,40 +163,7 @@ pub(crate) fn parse_inbound_reask_datagram(
     our_user_hash: &[u8; 16],
     our_udp_version: u8,
 ) -> Option<InboundReaskMessage> {
-    // Plaintext eD2k client packets start with the OP_EMULEPROT marker; obfuscated
-    // ones never do (it is a reserved byte excluded from the crypt marker), so try
-    // to deobfuscate those under our user-hash key.
-    let frame: Cow<'_, [u8]> = if datagram.first() == Some(&OP_EMULEPROT) {
-        Cow::Borrowed(datagram)
-    } else {
-        Cow::Owned(deobfuscate_client_udp(our_user_hash, sender_ip, datagram)?)
-    };
-
-    // After the [OP_EMULEPROT][opcode] header, the rest is the opcode body.
-    if frame.len() < 2 || frame[0] != OP_EMULEPROT {
-        return None;
-    }
-    let body = &frame[2..];
-    match frame[1] {
-        OP_REASKFILEPING => decode_reask_file_ping(body, our_udp_version)
-            .ok()
-            .map(InboundReaskMessage::FilePing),
-        OP_REASKACK => decode_reask_ack(body, our_udp_version)
-            .ok()
-            .map(InboundReaskMessage::Ack),
-        OP_QUEUEFULL => Some(InboundReaskMessage::QueueFull),
-        OP_FILENOTFOUND => Some(InboundReaskMessage::FileNotFound),
-        // The buddy relay forwards the post-buddy-id tail verbatim (oracle never
-        // parses it), so decode independently of our_udp_version.
-        OP_REASKCALLBACKUDP => decode_reask_callback_udp(body)
-            .ok()
-            .map(InboundReaskMessage::CallbackUdp),
-        OP_DIRECTCALLBACKREQ => decode_direct_callback_req(body)
-            .ok()
-            .map(InboundReaskMessage::DirectCallbackReq),
-        OP_PORTTEST if body == [0x12] => Some(InboundReaskMessage::PortTest),
-        _ => None,
-    }
+    classify_inbound_reask_datagram(datagram, sender_ip, our_user_hash, our_udp_version).ok()
 }
 
 #[cfg(test)]
@@ -252,5 +316,35 @@ mod tests {
         assert!(parse_inbound_reask_datagram(&[OP_EMULEPROT], SENDER_IP, &OUR_HASH, 4).is_none());
         // Random non-OP_EMULEPROT bytes that don't decrypt to our sync magic.
         assert!(parse_inbound_reask_datagram(&[0x42; 24], SENDER_IP, &OUR_HASH, 4).is_none());
+    }
+
+    #[test]
+    fn classification_preserves_terminal_parse_reasons() {
+        assert_eq!(
+            classify_inbound_reask_datagram(&[0x42; 24], SENDER_IP, &OUR_HASH, 4),
+            Err(InboundReaskParseError::Undecodable)
+        );
+        assert_eq!(
+            classify_inbound_reask_datagram(&[OP_EMULEPROT], SENDER_IP, &OUR_HASH, 4),
+            Err(InboundReaskParseError::Malformed {
+                opcode: None,
+                detail: "missing OP_EMULEPROT marker or opcode".to_string(),
+            })
+        );
+        assert_eq!(
+            classify_inbound_reask_datagram(
+                &frame(OP_DIRECTCALLBACKREQ, &[0x01]),
+                SENDER_IP,
+                &OUR_HASH,
+                4,
+            )
+            .expect_err("short direct callback must be malformed")
+            .reason(),
+            "malformed"
+        );
+        assert_eq!(
+            classify_inbound_reask_datagram(&frame(0x01, &[1, 2, 3]), SENDER_IP, &OUR_HASH, 4),
+            Err(InboundReaskParseError::UnknownOpcode { opcode: 0x01 })
+        );
     }
 }

@@ -164,7 +164,7 @@ fn unsolicited_reply_without_pending_is_ignored() {
     );
     assert_eq!(
         svc.handle_inbound(&ack, peer_addr(), now),
-        ReaskInboundOutcome::Ignored
+        ReaskInboundOutcome::Ignored(ReaskIgnoredReason::UnsolicitedReply)
     );
 }
 
@@ -216,7 +216,7 @@ fn file_not_found_drops_source_and_clears_routing() {
     assert_eq!(svc.source_count(), 0);
     assert_eq!(
         svc.handle_inbound(&fnf, peer_addr(), now),
-        ReaskInboundOutcome::Ignored
+        ReaskInboundOutcome::Ignored(ReaskIgnoredReason::UnregisteredEndpoint)
     );
 }
 
@@ -266,12 +266,14 @@ fn junk_and_non_ipv4_are_ignored() {
     register(&mut svc, now);
     assert_eq!(
         svc.handle_inbound(&[0x42; 30], peer_addr(), now),
-        ReaskInboundOutcome::Ignored
+        ReaskInboundOutcome::Ignored(ReaskIgnoredReason::Parse(
+            InboundReaskParseError::Undecodable
+        ))
     );
     let v6: SocketAddr = "[2001:db8::1]:4672".parse().unwrap();
     assert_eq!(
         svc.handle_inbound(&[0xC5, 0x93], v6, now),
-        ReaskInboundOutcome::Ignored
+        ReaskInboundOutcome::Ignored(ReaskIgnoredReason::NonIpv4)
     );
 }
 
