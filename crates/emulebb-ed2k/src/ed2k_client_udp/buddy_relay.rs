@@ -188,7 +188,6 @@ pub(super) async fn answer_buddy_relayed_reask(
             {
                 trace!("ed2k udp reask: buddy-relayed reask answer to {dest} failed: {err}");
             } else {
-                super::dump::dump_client_udp_send(dest, &reply);
                 trace!(
                     "ed2k udp reask: answered buddy-relayed reask for {file_hash} over UDP to {dest}"
                 );
