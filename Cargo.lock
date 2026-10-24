@@ -623,6 +623,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "emulebb-diagnostics"
+version = "0.1.0-beta.2"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "emulebb-ed2k"
 version = "0.1.0-beta.2"
 dependencies = [
