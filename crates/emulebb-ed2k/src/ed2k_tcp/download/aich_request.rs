@@ -18,10 +18,7 @@ use crate::ed2k_transfer::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, decode_aich_hash_hex,
 };
 
-use super::super::{
-    Ed2kTransport, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_send,
-    encode_aich_recovery_request,
-};
+use super::super::{Ed2kTransport, dump_ed2k_tcp_download_meta, encode_aich_recovery_request};
 
 /// Mutable per-session AICH-recovery request bookkeeping.
 pub(in crate::ed2k_tcp) struct AichRecoveryRequestState<'a> {
@@ -104,9 +101,13 @@ pub(in crate::ed2k_tcp) async fn pump_aich_recovery_requests(
             continue;
         }
         let request = encode_aich_recovery_request(file_hash, part, master_hash);
-        dump_ed2k_tcp_download_send(peer_addr, transport.mode, "aich_recovery_request", &request);
         transport
-            .write_all(&request)
+            .write_all_diagnostic(
+                "native_download",
+                peer_addr,
+                "aich_recovery_request",
+                &request,
+            )
             .await
             .with_context(|| format!("failed to send OP_AICHREQUEST to {peer_addr}"))?;
         state.inflight.push(part);

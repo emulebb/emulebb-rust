@@ -8,10 +8,7 @@ use crate::ed2k_transfer::{
     expected_piece_length,
 };
 
-use super::super::{
-    Ed2kTransport, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_send,
-    encode_request_parts_batch,
-};
+use super::super::{Ed2kTransport, dump_ed2k_tcp_download_meta, encode_request_parts_batch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ed2k_tcp) struct ActiveDownloadPiece {
@@ -184,9 +181,13 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
     }
 
     let request_parts = encode_request_parts_batch(file_hash, &requested_ranges)?;
-    dump_ed2k_tcp_download_send(peer_addr, transport.mode, "request_parts", &request_parts);
     transport
-        .write_all(&request_parts)
+        .write_all_diagnostic(
+            "native_download",
+            peer_addr,
+            "request_parts",
+            &request_parts,
+        )
         .await
         .with_context(|| format!("failed to send OP_REQUESTPARTS to {peer_addr}"))?;
     for index in request_indices {

@@ -12,7 +12,7 @@ use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job
 
 use super::super::{
     Ed2kHelloIdentity, Ed2kSecureIdent, Ed2kTransport, dump_ed2k_tcp_download_meta,
-    dump_ed2k_tcp_download_send, encode_hello_request,
+    encode_hello_request,
 };
 use super::session::{
     DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
@@ -179,9 +179,8 @@ pub async fn download_files_from_peer(
         // freeing the half-open budget for the next pending source connect.
         transfer_runtime.mark_connection_established();
         let hello = encode_hello_request(hello_identity);
-        dump_ed2k_tcp_download_send(peer_addr, transport.mode, "hello", &hello);
         transport
-            .write_all(&hello)
+            .write_all_diagnostic("native_download", peer_addr, "hello", &hello)
             .await
             .with_context(|| format!("failed to send OP_HELLO to {peer_addr}"))?;
         let mut report = Ed2kPeerDownloadReport {

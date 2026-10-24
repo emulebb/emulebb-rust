@@ -18,8 +18,8 @@ use crate::{
     ed2k_tcp::{
         Ed2kTransport, Ed2kTransportMode, EmuleTcpPacket, OP_CANCELTRANSFER, OP_COMPRESSEDPART,
         OP_COMPRESSEDPART_I64, OP_EDONKEYPROT, OP_SENDINGPART_I64, decode_compressed_part_fragment,
-        decode_sending_part_payload, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_send,
-        encode_packet, inflate_compressed_part_fragment,
+        decode_sending_part_payload, dump_ed2k_tcp_download_meta, encode_packet,
+        inflate_compressed_part_fragment,
     },
     ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, diag_bad_peer},
 };
@@ -518,14 +518,13 @@ async fn drop_stale_block_packet(
         );
     }
     let cancel = encode_packet(OP_EDONKEYPROT, OP_CANCELTRANSFER, &[]);
-    dump_ed2k_tcp_download_send(
-        peer_addr,
-        transport.mode,
-        "cancel_stale_block_packets",
-        &cancel,
-    );
     transport
-        .write_all(&cancel)
+        .write_all_diagnostic(
+            "native_download",
+            peer_addr,
+            "cancel_stale_block_packets",
+            &cancel,
+        )
         .await
         .with_context(|| format!("failed to send OP_CANCELTRANSFER to {peer_addr}"))?;
     dump_ed2k_tcp_download_meta(

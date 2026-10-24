@@ -33,9 +33,9 @@ use super::super::{
     decode_file_status_availability, decode_file_status_body_availability, decode_hashset_answer,
     decode_hashset_answer2, decode_hello_answer_profile, decode_hello_profile,
     decode_optional_file_hash_payload, decode_request_filename_answer,
-    decode_request_filename_answer_body, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_send,
-    encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_emule_info_answer,
-    encode_packet, encode_port_test_answer, encode_public_ip_answer, handle_aich_recovery_answer,
+    decode_request_filename_answer_body, dump_ed2k_tcp_download_meta, encode_aich_recovery_answer,
+    encode_aich_recovery_failure_answer, encode_emule_info_answer, encode_packet,
+    encode_port_test_answer, encode_public_ip_answer, handle_aich_recovery_answer,
     is_connection_shutdown_error, validate_file_status_part_count,
 };
 use super::{
@@ -321,15 +321,17 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         // useful to neither peer. Mirror MFC SendBlockRequests by freeing
                         // the remote slot immediately instead of idling until timeout.
                         let cancel = encode_packet(OP_EDONKEYPROT, OP_CANCELTRANSFER, &[]);
-                        dump_ed2k_tcp_download_send(
-                            peer_addr,
-                            transport.mode,
-                            "cancel_no_needed_parts",
-                            &cancel,
-                        );
-                        transport.write_all(&cancel).await.with_context(|| {
-                            format!("failed to send OP_CANCELTRANSFER to {peer_addr}")
-                        })?;
+                        transport
+                            .write_all_diagnostic(
+                                "native_download",
+                                peer_addr,
+                                "cancel_no_needed_parts",
+                                &cancel,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!("failed to send OP_CANCELTRANSFER to {peer_addr}")
+                            })?;
                         dump_ed2k_tcp_download_meta(
                             peer_addr,
                             Some(transport.mode),
@@ -470,10 +472,19 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         session_state.peer_client_software = software.clone();
                     }
                     for reply in build_hello_responses(&packet.payload, hello_identity)? {
-                        dump_ed2k_tcp_download_send(peer_addr, transport.mode, "hello_reply", &reply);
-                        transport.write_all(&reply).await.with_context(|| {
-                            format!("failed to reply to OP_HELLO during download with {peer_addr}")
-                        })?;
+                        transport
+                            .write_all_diagnostic(
+                                "native_download",
+                                peer_addr,
+                                "hello_reply",
+                                &reply,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed to reply to OP_HELLO during download with {peer_addr}"
+                                )
+                            })?;
                     }
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
@@ -509,14 +520,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         && !session_state.peer_secure_ident.requested_peer_key
                     {
                         let secure_ident_probe = begin_secure_ident_probe(&mut session_state.peer_secure_ident);
-                        dump_ed2k_tcp_download_send(
-                            peer_addr,
-                            transport.mode,
-                            "secure_ident_probe",
-                            &secure_ident_probe,
-                        );
                         transport
-                            .write_all(&secure_ident_probe)
+                            .write_all_diagnostic(
+                                "native_download",
+                                peer_addr,
+                                "secure_ident_probe",
+                                &secure_ident_probe,
+                            )
                             .await
                             .with_context(|| {
                                 format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
@@ -570,14 +580,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         && !session_state.peer_secure_ident.requested_peer_key
                     {
                         let secure_ident_probe = begin_secure_ident_probe(&mut session_state.peer_secure_ident);
-                        dump_ed2k_tcp_download_send(
-                            peer_addr,
-                            transport.mode,
-                            "secure_ident_probe",
-                            &secure_ident_probe,
-                        );
                         transport
-                            .write_all(&secure_ident_probe)
+                            .write_all_diagnostic(
+                                "native_download",
+                                peer_addr,
+                                "secure_ident_probe",
+                                &secure_ident_probe,
+                            )
                             .await
                             .with_context(|| {
                                 format!("failed to send OP_SECIDENTSTATE to {peer_addr}")
@@ -622,17 +631,19 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             );
                         }
                         let cancel = encode_packet(OP_EDONKEYPROT, OP_CANCELTRANSFER, &[]);
-                        dump_ed2k_tcp_download_send(
-                            peer_addr,
-                            transport.mode,
-                            "cancel_accept_out_of_part_guard",
-                            &cancel,
-                        );
-                        transport.write_all(&cancel).await.with_context(|| {
-                            format!(
-                                "failed to send guarded OP_CANCELTRANSFER to {peer_addr}"
+                        transport
+                            .write_all_diagnostic(
+                                "native_download",
+                                peer_addr,
+                                "cancel_accept_out_of_part_guard",
+                                &cancel,
                             )
-                        })?;
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed to send guarded OP_CANCELTRANSFER to {peer_addr}"
+                                )
+                            })?;
                         session_state.queued_until =
                             Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
                         continue;
@@ -645,7 +656,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     let emule_info_profile = decode_emule_info_profile(&packet.payload)?;
                     apply_emule_info_profile(&mut session_state, emule_info_profile);
                     transport
-                        .write_all(&encode_emule_info_answer(hello_identity.udp_port))
+                        .write_all_diagnostic(
+                            "native_download",
+                            peer_addr,
+                            "emule_info_answer",
+                            &encode_emule_info_answer(hello_identity.udp_port),
+                        )
                         .await
                         .with_context(|| {
                             format!("failed to send OP_EMULEINFOANSWER to {peer_addr}")
@@ -688,15 +704,17 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 (OP_EMULEPROT, OP_PUBLICIP_REQ) => {
                     if let std::net::IpAddr::V4(peer_ip) = peer_addr.ip() {
                         let reply = encode_public_ip_answer(peer_ip);
-                        dump_ed2k_tcp_download_send(
-                            peer_addr,
-                            transport.mode,
-                            "public_ip_answer",
-                            &reply,
-                        );
-                        transport.write_all(&reply).await.with_context(|| {
-                            format!("failed to send OP_PUBLICIP_ANSWER to {peer_addr}")
-                        })?;
+                        transport
+                            .write_all_diagnostic(
+                                "native_download",
+                                peer_addr,
+                                "public_ip_answer",
+                                &reply,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!("failed to send OP_PUBLICIP_ANSWER to {peer_addr}")
+                            })?;
                     }
                 }
                 (OP_EMULEPROT, OP_PUBLICIP_ANSWER) => {
@@ -716,9 +734,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EMULEPROT, OP_PORTTEST) => {
                     let reply = encode_port_test_answer();
-                    dump_ed2k_tcp_download_send(peer_addr, transport.mode, "port_test", &reply);
                     transport
-                        .write_all(&reply)
+                        .write_all_diagnostic("native_download", peer_addr, "port_test", &reply)
                         .await
                         .with_context(|| format!("failed to send OP_PORTTEST to {peer_addr}"))?;
                 }
@@ -1333,10 +1350,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             "aich_recovery_failure",
                         ),
                     };
-                    dump_ed2k_tcp_download_send(peer_addr, transport.mode, dump_tag, &reply);
-                    transport.write_all(&reply).await.with_context(|| {
-                        format!("failed to send OP_AICHANSWER to {peer_addr}")
-                    })?;
+                    transport
+                        .write_all_diagnostic("native_download", peer_addr, dump_tag, &reply)
+                        .await
+                        .with_context(|| format!("failed to send OP_AICHANSWER to {peer_addr}"))?;
                 }
                 (OP_EMULEPROT, OP_AICHANSWER) => {
                     let answer = decode_aich_recovery_answer_payload(&packet.payload)?;
