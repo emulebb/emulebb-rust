@@ -13,7 +13,7 @@ afterEach(() => {
 describe("DiagnosticsView", () => {
   it("downloads caller-owned inline diagnostic bundles", async () => {
     const bundle = {
-      schema: "emulebb.diagnostic-bundle.v4",
+      schema: "emulebb.diagnostic-bundle.v5",
       capturedAt: "2026-10-25T12:34:56Z",
       summary: { artifactFileCount: 1, missingArtifactFamilies: [], issueCount: 0 }
     };

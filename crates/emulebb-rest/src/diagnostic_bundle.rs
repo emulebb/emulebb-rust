@@ -9,20 +9,31 @@ use std::{
 
 use anyhow::Result;
 use chrono::Utc;
+use emulebb_core::Search;
 use serde_json::{Value, json};
 
 use crate::{
     RestState,
     handlers::logs::recent_log_values,
-    responses::{app_info_response, runtime_diagnostics_response, status_response},
+    responses::{
+        app_info_response, runtime_diagnostics_response, search_results_response,
+        search_session_response, server_response, shared_file_response, status_response,
+    },
 };
 
-pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v4";
+pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v5";
 
 const MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_LOG_RECORDS: usize = 200;
 const MAX_TAIL_BYTES: u64 = 256 * 1024;
 const MAX_TAIL_RECORDS: usize = 64;
+const MAX_SERVER_SNAPSHOTS: usize = 512;
+const MAX_SHARED_FILE_SNAPSHOTS: usize = 512;
+const MAX_SEARCH_SNAPSHOTS: usize = 64;
+const MAX_SEARCH_RESULTS_PER_SNAPSHOT: usize = 128;
+const MAX_TRANSFER_SNAPSHOTS: usize = 512;
+const MAX_UPLOAD_SNAPSHOTS: usize = 512;
+const MAX_UPLOAD_QUEUE_SNAPSHOTS: usize = 512;
 
 const ARTIFACT_FAMILIES: &[ArtifactFamilySpec] = &[ArtifactFamilySpec {
     family: "unifiedEvents",
@@ -90,6 +101,7 @@ pub(crate) async fn capture(state: &RestState) -> Result<Value> {
         unified_run.as_ref(),
     );
     let logs = recent_log_values(MAX_LOG_RECORDS);
+    let operational_snapshots = operational_snapshots(state).await;
 
     let payload = json!({
         "schema": DIAGNOSTIC_BUNDLE_SCHEMA,
@@ -105,6 +117,7 @@ pub(crate) async fn capture(state: &RestState) -> Result<Value> {
             "apiKey": state.api_key.as_str(),
         },
         "recentLogs": logs,
+        "operationalSnapshots": operational_snapshots,
         "diagnosticHealth": {
             "writerIssues": writer_issues,
         },
@@ -119,6 +132,13 @@ pub(crate) async fn capture(state: &RestState) -> Result<Value> {
             "directoryEntriesScanned": MAX_DIRECTORY_ENTRIES,
             "tailBytesPerArtifact": MAX_TAIL_BYTES,
             "tailRecordsPerArtifact": MAX_TAIL_RECORDS,
+            "serverSnapshots": MAX_SERVER_SNAPSHOTS,
+            "sharedFileSnapshots": MAX_SHARED_FILE_SNAPSHOTS,
+            "searchSnapshots": MAX_SEARCH_SNAPSHOTS,
+            "searchResultsPerSnapshot": MAX_SEARCH_RESULTS_PER_SNAPSHOT,
+            "transferSnapshots": MAX_TRANSFER_SNAPSHOTS,
+            "uploadSnapshots": MAX_UPLOAD_SNAPSHOTS,
+            "uploadQueueSnapshots": MAX_UPLOAD_QUEUE_SNAPSHOTS,
         },
         "summary": {
             "artifactFileCount": artifacts.file_count,
@@ -128,6 +148,100 @@ pub(crate) async fn capture(state: &RestState) -> Result<Value> {
     });
 
     Ok(payload)
+}
+
+async fn operational_snapshots(state: &RestState) -> Value {
+    let mut servers = state.core.servers().await;
+    servers.sort_by(|left, right| left.endpoint.cmp(&right.endpoint));
+    let (shared_files, shared_file_total) =
+        state.core.shares_page(0, MAX_SHARED_FILE_SNAPSHOTS).await;
+    let mut searches = state.core.searches().await;
+    searches.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut transfers = state.core.transfers().await;
+    transfers.sort_by(|left, right| {
+        left.added_at
+            .cmp(&right.added_at)
+            .then_with(|| left.hash.cmp(&right.hash))
+    });
+    let uploads = state.core.uploads().await;
+    let upload_queue = state.core.upload_queue().await;
+    json!({
+        "servers": bounded_prefix_collection(
+            &servers,
+            servers.len(),
+            MAX_SERVER_SNAPSHOTS,
+            server_response,
+        ),
+        "sharedFiles": bounded_prefix_collection(
+            &shared_files,
+            shared_file_total,
+            MAX_SHARED_FILE_SNAPSHOTS,
+            |share| json!(shared_file_response(share)),
+        ),
+        "searches": bounded_tail_collection(&searches, MAX_SEARCH_SNAPSHOTS, search_snapshot),
+        "transfers": bounded_tail_collection(&transfers, MAX_TRANSFER_SNAPSHOTS, |transfer| json!(transfer)),
+        "uploads": bounded_prefix_collection(
+            &uploads,
+            uploads.len(),
+            MAX_UPLOAD_SNAPSHOTS,
+            |upload| json!(upload),
+        ),
+        "uploadQueue": bounded_prefix_collection(
+            &upload_queue,
+            upload_queue.len(),
+            MAX_UPLOAD_QUEUE_SNAPSHOTS,
+            |upload| json!(upload),
+        ),
+    })
+}
+
+fn bounded_tail_collection<T>(items: &[T], limit: usize, render: impl Fn(&T) -> Value) -> Value {
+    let omitted_before_limit = items.len().saturating_sub(limit);
+    let retained = &items[omitted_before_limit..];
+    json!({
+        "total": items.len(),
+        "included": retained.len(),
+        "omittedBeforeLimit": omitted_before_limit,
+        "limit": limit,
+        "items": retained.iter().map(render).collect::<Vec<_>>(),
+    })
+}
+
+fn bounded_prefix_collection<T>(
+    items: &[T],
+    total: usize,
+    limit: usize,
+    render: impl Fn(&T) -> Value,
+) -> Value {
+    let included = items.len().min(limit);
+    let retained = &items[..included];
+    json!({
+        "total": total,
+        "included": retained.len(),
+        "omittedAfterLimit": total.saturating_sub(retained.len()),
+        "limit": limit,
+        "items": retained.iter().map(render).collect::<Vec<_>>(),
+    })
+}
+
+fn search_snapshot(search: &Search) -> Value {
+    let included = search.results.len().min(MAX_SEARCH_RESULTS_PER_SNAPSHOT);
+    let retained = &search.results[..included];
+    let mut snapshot = search_session_response(search);
+    snapshot["createdAt"] = json!(search.created_at);
+    snapshot["updatedAt"] = json!(search.updated_at);
+    snapshot["results"] = json!({
+        "total": search.results.len(),
+        "included": retained.len(),
+        "omittedAfterLimit": search.results.len().saturating_sub(retained.len()),
+        "limit": MAX_SEARCH_RESULTS_PER_SNAPSHOT,
+        "items": search_results_response(retained, true),
+    });
+    snapshot
 }
 
 fn diagnostic_writer_issues(runtime_diagnostics: &Value) -> Vec<Value> {
@@ -573,6 +687,25 @@ mod tests {
     #[test]
     fn malformed_lines_are_preserved_as_exact_hex() {
         assert_eq!(encode_hex(b"{not-json:\xff}"), "7b6e6f742d6a736f6e3aff7d");
+    }
+
+    #[test]
+    fn bounded_operational_collections_report_exact_omissions() {
+        let values = ["zero", "one", "two", "three"];
+
+        let tail = bounded_tail_collection(&values, 2, |value| json!(value));
+        let prefix = bounded_prefix_collection(&values, values.len(), 2, |value| json!(value));
+
+        assert_eq!(tail["total"], 4);
+        assert_eq!(tail["included"], 2);
+        assert_eq!(tail["omittedBeforeLimit"], 2);
+        assert_eq!(tail["limit"], 2);
+        assert_eq!(tail["items"], json!(["two", "three"]));
+        assert_eq!(prefix["total"], 4);
+        assert_eq!(prefix["included"], 2);
+        assert_eq!(prefix["omittedAfterLimit"], 2);
+        assert_eq!(prefix["limit"], 2);
+        assert_eq!(prefix["items"], json!(["zero", "one"]));
     }
 
     #[test]
