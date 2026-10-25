@@ -4104,7 +4104,7 @@ export function DiagnosticsView(props: {
 }) {
   const [crashConfirm, setCrashConfirm] = useState("");
   const [shutdownConfirm, setShutdownConfirm] = useState("");
-  const [dumpPath, setDumpPath] = useState("");
+  const [bundleFileName, setBundleFileName] = useState("");
   const diagnostics = props.runtimeDiagnostics ?? {};
   const eventStream = props.eventStreamStatus;
   const transferEvents = diagnostics.transferEvents ?? {};
@@ -4119,9 +4119,22 @@ export function DiagnosticsView(props: {
         ? "Connecting"
         : "Polling";
 
-  const captureDump = async () => {
-    const result = await props.client.post<{ path?: string }>("diagnostics/dumps", { confirmDump: true });
-    setDumpPath(result.path ?? "");
+  const captureBundle = async () => {
+    const bundle = await props.client.post<Record<string, unknown>>(
+      "diagnostics/bundles",
+      { confirmCapture: true }
+    );
+    const capturedAt = typeof bundle.capturedAt === "string" ? bundle.capturedAt : new Date().toISOString();
+    const stamp = capturedAt.replace(/[^0-9A-Za-z]/g, "");
+    const fileName = `emulebb-rust-diagnostic-bundle-${stamp}.json`;
+    const blob = new Blob([`${JSON.stringify(bundle, null, 2)}\n`], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setBundleFileName(fileName);
   };
 
   return (
@@ -4131,12 +4144,12 @@ export function DiagnosticsView(props: {
           <h2>Diagnostics</h2>
         </div>
         <div class="row-actions">
-          <button class="btn" type="button" onClick={() => void props.run(captureDump, "Diagnostic dump captured")}>
+          <button class="btn" type="button" onClick={() => void props.run(captureBundle, "Diagnostic bundle downloaded")}>
             <FileText size={15} />
-            Capture dump
+            Capture bundle
           </button>
         </div>
-        {dumpPath && <p class="hint">Dump path: {dumpPath}</p>}
+        {bundleFileName && <p class="hint">Downloaded: {bundleFileName}</p>}
         <div class="form-row danger-row">
           <input class="form-control" value={crashConfirm} placeholder="Type CRASH" onInput={(event) => setCrashConfirm(event.currentTarget.value)} />
           <button class="btn"
