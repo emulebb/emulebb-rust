@@ -119,6 +119,20 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
     assert_eq!(bundle["settingsProvenance"]["apiKey"], "secret");
     assert!(bundle["status"].is_object());
     assert!(bundle["runtimeDiagnostics"].is_object());
+    assert_eq!(
+        bundle["runtimeDiagnostics"]["diagnosticWriter"]["enabled"],
+        false
+    );
+    assert_eq!(
+        bundle["status"]["runtimeDiagnostics"]["diagnosticWriter"]["enabled"],
+        false
+    );
+    assert!(
+        bundle["diagnosticHealth"]["writerIssues"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert!(bundle["settings"].is_object());
     assert!(bundle["recentLogs"].is_array());
     assert!(bundle["diagnosticArtifacts"]["families"].is_array());

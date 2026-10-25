@@ -84,6 +84,8 @@ pub(crate) async fn capture(state: &RestState) -> Result<DiagnosticBundleCapture
     let status = status_response(state).await;
     let runtime_diagnostics = runtime_diagnostics_response(state).await;
     let unified_run = unified_run_selection(&runtime_diagnostics);
+    let writer_issues = diagnostic_writer_issues(&runtime_diagnostics);
+    let writer_issue_count = writer_issues.len() as u64;
     let settings = match state.core.app_settings().await {
         Ok(settings) => serde_json::to_value(settings)?,
         Err(error) => json!({
@@ -111,6 +113,9 @@ pub(crate) async fn capture(state: &RestState) -> Result<DiagnosticBundleCapture
             "apiKey": state.api_key.as_str(),
         },
         "recentLogs": logs,
+        "diagnosticHealth": {
+            "writerIssues": writer_issues,
+        },
         "diagnosticArtifacts": {
             "logDirectory": artifacts.log_directory,
             "families": artifacts.families,
@@ -129,8 +134,64 @@ pub(crate) async fn capture(state: &RestState) -> Result<DiagnosticBundleCapture
         payload,
         artifact_file_count: artifacts.file_count,
         missing_artifact_families: artifacts.missing_families,
-        issue_count: artifacts.issue_count,
+        issue_count: artifacts.issue_count.saturating_add(writer_issue_count),
     })
+}
+
+fn diagnostic_writer_issues(runtime_diagnostics: &Value) -> Vec<Value> {
+    let Some(writer) = runtime_diagnostics.get("diagnosticWriter") else {
+        return vec![json!({"code": "diagnosticWriterMissing"})];
+    };
+    match writer.get("enabled").and_then(Value::as_bool) {
+        Some(false) => return Vec::new(),
+        Some(true) => {}
+        None => return vec![json!({"code": "diagnosticWriterStateInvalid"})],
+    }
+    if writer.get("configured").and_then(Value::as_bool) != Some(true) {
+        return vec![json!({"code": "diagnosticWriterNotConfigured"})];
+    }
+    if writer.get("initialized").and_then(Value::as_bool) != Some(true) {
+        return vec![json!({
+            "code": "diagnosticWriterNotInitialized",
+            "initializationFailure": writer.get("initializationFailure").cloned().unwrap_or(Value::Null),
+        })];
+    }
+
+    let mut issues = Vec::new();
+    if writer
+        .get("storageAuthorityFaulted")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        issues.push(json!({
+            "code": "diagnosticWriterStorageAuthorityFaulted",
+            "reason": writer.get("storageBlockReason").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    if writer.get("writerIoFaulted").and_then(Value::as_bool) == Some(true) {
+        issues.push(json!({"code": "diagnosticWriterIoFaulted"}));
+    }
+    if writer
+        .get("storagePolicySatisfied")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        issues.push(json!({
+            "code": "diagnosticWriterStoragePolicyUnsatisfied",
+            "reason": writer.get("storageBlockReason").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    let dropped_events = writer
+        .get("droppedEvents")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if dropped_events > 0 {
+        issues.push(json!({
+            "code": "diagnosticWriterDroppedEvents",
+            "count": dropped_events,
+        }));
+    }
+    issues
 }
 
 fn unified_run_selection(runtime_diagnostics: &Value) -> Option<UnifiedRunSelection> {
@@ -520,6 +581,49 @@ mod tests {
     #[test]
     fn malformed_lines_are_preserved_as_exact_hex() {
         assert_eq!(encode_hex(b"{not-json:\xff}"), "7b6e6f742d6a736f6e3aff7d");
+    }
+
+    #[test]
+    fn disabled_writer_adds_no_bundle_health_issue() {
+        let issues = diagnostic_writer_issues(&json!({
+            "diagnosticWriter": {
+                "enabled": false,
+            }
+        }));
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn unhealthy_writer_adds_explicit_bundle_health_issues() {
+        let issues = diagnostic_writer_issues(&json!({
+            "diagnosticWriter": {
+                "enabled": true,
+                "configured": true,
+                "initialized": true,
+                "storageAuthorityFaulted": true,
+                "writerIoFaulted": true,
+                "storagePolicySatisfied": false,
+                "storageBlockReason": "freeSpaceProbeFailure",
+                "droppedEvents": 3,
+            }
+        }));
+        let codes = issues
+            .iter()
+            .map(|issue| issue["code"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            codes,
+            [
+                "diagnosticWriterStorageAuthorityFaulted",
+                "diagnosticWriterIoFaulted",
+                "diagnosticWriterStoragePolicyUnsatisfied",
+                "diagnosticWriterDroppedEvents",
+            ]
+        );
+        assert_eq!(issues[0]["reason"], "freeSpaceProbeFailure");
+        assert_eq!(issues[3]["count"], 3);
     }
 
     #[test]
