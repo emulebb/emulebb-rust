@@ -4,7 +4,7 @@ use crate::rest_test_support::*;
 async fn write_routes_use_canonical_json_error_envelope() {
     let cases = [
         ("POST", "/api/v1/app/shutdown"),
-        ("POST", "/api/v1/diagnostics/dumps"),
+        ("POST", "/api/v1/diagnostics/bundles"),
         ("POST", "/api/v1/diagnostics/crash-tests"),
         ("POST", "/api/v1/categories"),
         ("PATCH", "/api/v1/categories/1"),

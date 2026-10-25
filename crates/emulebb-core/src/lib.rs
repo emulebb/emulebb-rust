@@ -101,7 +101,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod app_api;
-pub use app_api::DiagnosticDumpFile;
 mod callback_tracker;
 mod categories;
 mod category_api;
@@ -285,18 +284,18 @@ pub use emulebb_settings::{
 };
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
-    DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,
-    HostNameResolution, IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate,
-    NetworkStatus, NullableStringField, NullableU32Field, Search, SearchCreate, SearchProgress,
-    SearchResult, SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation,
-    SearchSpec, ServerCreate, ServerInfo, ServerUpdate, SharedFileKadKeywordPublish,
-    SharedFileListCursor, SharedFileListItem, SharedFileListPage, SharedFileListQuery,
-    SharedFilePublicationStatus, SharedFilePublishLane, SharedFilePublishState, SharedFileUpdate,
-    Status, Transfer, TransferComment, TransferCreate, TransferDetails, TransferEvent,
-    TransferEventDiagnostics, TransferEventResetReason, TransferEventType,
-    TransferFileNameObservation, TransferNameCandidate, TransferNameConsensus, TransferPart,
-    TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
-    UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution,
+    IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus,
+    NullableStringField, NullableU32Field, Search, SearchCreate, SearchProgress, SearchResult,
+    SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation, SearchSpec,
+    ServerCreate, ServerInfo, ServerUpdate, SharedFileKadKeywordPublish, SharedFileListCursor,
+    SharedFileListItem, SharedFileListPage, SharedFileListQuery, SharedFilePublicationStatus,
+    SharedFilePublishLane, SharedFilePublishState, SharedFileUpdate, Status, Transfer,
+    TransferComment, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
+    TransferEventResetReason, TransferEventType, TransferFileNameObservation,
+    TransferNameCandidate, TransferNameConsensus, TransferPart, TransferSource, TransferStats,
+    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
+    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,

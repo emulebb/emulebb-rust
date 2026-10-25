@@ -28,18 +28,6 @@ pub struct AppInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DiagnosticDumpResult {
-    pub ok: bool,
-    pub path: String,
-    pub schema: String,
-    pub byte_count: u64,
-    pub artifact_file_count: u64,
-    pub missing_artifact_families: Vec<String>,
-    pub issue_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AppLifecycle {
     pub state: String,
 }

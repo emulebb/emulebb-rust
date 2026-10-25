@@ -51,8 +51,8 @@ async fn app_shutdown_requires_confirmation_and_signals_daemon() {
 }
 
 #[tokio::test]
-async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
-    let runtime_dir = unique_test_dir("diagnostic-dump");
+async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
+    let runtime_dir = unique_test_dir("diagnostic-bundle");
     let transfer_root = runtime_dir.join("transfers");
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
@@ -70,10 +70,10 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/diagnostics/dumps")
+                .uri("/api/v1/diagnostics/bundles")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"confirmDump":false}"#))
+                .body(Body::from(r#"{"confirmCapture":false}"#))
                 .unwrap(),
         )
         .await
@@ -84,10 +84,10 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/diagnostics/dumps")
+                .uri("/api/v1/diagnostics/bundles")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"confirmDump":true}"#))
+                .body(Body::from(r#"{"confirmCapture":true}"#))
                 .unwrap(),
         )
         .await
@@ -95,24 +95,23 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
     assert_eq!(accepted.status(), StatusCode::OK);
     let body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
     assert!(value["data"].get("fullMemory").is_none());
     assert!(value["data"].get("fullMemoryIncluded").is_none());
-    assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v3");
-    let path = value["data"]["path"].as_str().unwrap();
-    assert!(std::path::Path::new(path).is_file());
-    assert!(value["data"]["byteCount"].as_u64().unwrap() > 0);
-    assert_eq!(value["data"]["artifactFileCount"], 0);
+    assert!(value["data"].get("path").is_none());
+    assert!(value["data"].get("byteCount").is_none());
+    assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v4");
+    assert_eq!(value["data"]["summary"]["artifactFileCount"], 0);
     assert_eq!(
-        value["data"]["missingArtifactFamilies"]
+        value["data"]["summary"]["missingArtifactFamilies"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
+    assert!(!runtime_dir.join("diagnostics").exists());
 
-    let bundle: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v3");
+    let bundle = &value["data"];
+    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v4");
     assert!(bundle.get("memory").is_none());
     assert_eq!(bundle["settingsProvenance"]["apiKeyIncluded"], true);
     assert_eq!(bundle["settingsProvenance"]["sensitiveValues"], "exact");

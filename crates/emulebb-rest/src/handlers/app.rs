@@ -24,7 +24,7 @@ use emulebb_core::{
 };
 use tokio::sync::broadcast;
 
-use crate::diagnostic_bundle::{DIAGNOSTIC_BUNDLE_SCHEMA, capture as capture_bundle};
+use crate::diagnostic_bundle::capture as capture_bundle;
 use crate::handlers::{logs::recent_log_values, prelude::*};
 use crate::without_score_breakdown;
 
@@ -128,38 +128,24 @@ pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) ->
     api_ok(json!({"ok": true})).into_response()
 }
 
-pub(crate) async fn capture_diagnostic_dump(
+pub(crate) async fn capture_diagnostic_bundle(
     State(state): State<RestState>,
     body: Bytes,
 ) -> impl IntoResponse {
-    let request = match parse_required_json_body::<DiagnosticDumpRequest>(&body) {
+    let request = match parse_required_json_body::<DiagnosticBundleCaptureRequest>(&body) {
         Ok(request) => request,
         Err(response) => return *response,
     };
-    if !request.confirm_dump {
+    if !request.confirm_capture {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "confirmDump must be true",
+            "confirmCapture must be true",
         )
         .into_response();
     }
     match capture_bundle(&state).await {
-        Ok(bundle) => match state.core.write_diagnostic_dump(&bundle.payload) {
-            Ok(dump) => api_ok(emulebb_core::DiagnosticDumpResult {
-                ok: true,
-                path: dump.path.display().to_string(),
-                schema: DIAGNOSTIC_BUNDLE_SCHEMA.to_string(),
-                byte_count: dump.byte_count,
-                artifact_file_count: bundle.artifact_file_count,
-                missing_artifact_families: bundle.missing_artifact_families,
-                issue_count: bundle.issue_count,
-            })
-            .into_response(),
-            Err(error) => {
-                api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-            }
-        },
+        Ok(bundle) => api_ok(bundle).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
