@@ -11,7 +11,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 #[cfg(feature = "enabled")]
 use std::{
@@ -30,6 +30,9 @@ use serde_json::Value;
 use tracing::warn;
 #[cfg(feature = "enabled")]
 use uuid::Uuid;
+
+#[cfg(any(feature = "enabled", test))]
+mod retention;
 
 pub const DIAG_EVENT_SCHEMA: &str = "diag_event_v2";
 pub const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
@@ -434,60 +437,17 @@ impl SegmentedEventWriter {
     }
 
     fn enforce_retention(&mut self) {
-        let run_prefix = format!(
-            "{DIAG_EVENT_FILE_PREFIX}{}-{}-",
-            self.process_id, self.run_id
+        let outcome = retention::enforce_segment_count(
+            &self.config.directory,
+            &self.active_path,
+            self.process_id,
+            &self.run_id,
+            self.config.retained_segments,
         );
-        let Ok(entries) = fs::read_dir(&self.config.directory) else {
-            self.retention_delete_errors = self.retention_delete_errors.saturating_add(1);
-            return;
-        };
-        let mut prior_run_segments = Vec::new();
-        let mut current_run_segments = Vec::new();
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path == self.active_path {
-                continue;
-            }
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            if !file_name.starts_with(DIAG_EVENT_FILE_PREFIX) || !file_name.ends_with(".jsonl") {
-                continue;
-            }
-            if let Some(segment_id) = file_name
-                .strip_prefix(&run_prefix)
-                .and_then(|tail| tail.strip_suffix(".jsonl"))
-                .and_then(|tail| tail.parse::<u64>().ok())
-            {
-                current_run_segments.push((segment_id, file_name, path));
-            } else {
-                let modified = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                prior_run_segments.push((modified, file_name, path));
-            }
-        }
-        prior_run_segments
-            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        current_run_segments
-            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        let total_segments = prior_run_segments.len() + current_run_segments.len() + 1;
-        let delete_count = total_segments.saturating_sub(self.config.retained_segments);
-        let delete_paths = prior_run_segments
-            .into_iter()
-            .map(|(_, _, path)| path)
-            .chain(current_run_segments.into_iter().map(|(_, _, path)| path))
-            .take(delete_count);
-        for path in delete_paths {
-            match fs::remove_file(path) {
-                Ok(()) => {
-                    self.retention_deletes = self.retention_deletes.saturating_add(1);
-                }
-                Err(_) => {
-                    self.retention_delete_errors = self.retention_delete_errors.saturating_add(1);
-                }
-            }
-        }
+        self.retention_deletes = self.retention_deletes.saturating_add(outcome.deleted);
+        self.retention_delete_errors = self
+            .retention_delete_errors
+            .saturating_add(outcome.delete_errors);
     }
 
     fn health(&self) -> DiagWriterHealth {
