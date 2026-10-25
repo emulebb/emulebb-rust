@@ -88,6 +88,18 @@ const MAX_MINIMUM_FREE_BYTES: u64 = MAX_TOTAL_BYTES;
 #[cfg(feature = "enabled")]
 static WRITER: OnceLock<Result<Mutex<SegmentedEventWriter>, WriterInitFailure>> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DiagStorageBlockReason {
+    RetentionScanFailure,
+    RetentionDeleteFailure,
+    FreeSpaceProbeFailure,
+    RetainedSegmentLimit,
+    AggregateByteLimit,
+    MinimumFreeSpace,
+    PendingRetentionDeletions,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagWriterHealth {
@@ -112,9 +124,17 @@ pub struct DiagWriterHealth {
     pub free_space_probe_errors: u64,
     pub retention_policy_errors: u64,
     pub storage_policy_drops: u64,
+    pub storage_fault_drops: u64,
+    pub retention_limit_drops: u64,
+    pub aggregate_limit_drops: u64,
+    pub minimum_free_space_drops: u64,
+    pub writer_fault_drops: u64,
     pub retained_segment_count: usize,
     pub retained_bytes: u64,
     pub available_bytes: Option<u64>,
+    pub storage_authority_faulted: bool,
+    pub writer_io_faulted: bool,
+    pub storage_block_reason: Option<DiagStorageBlockReason>,
     pub storage_policy_satisfied: Option<bool>,
     pub maximum_growth_bytes: Option<u64>,
     pub max_segment_bytes: Option<u64>,
@@ -181,9 +201,17 @@ struct SegmentedEventWriter {
     free_space_probe_errors: u64,
     retention_policy_errors: u64,
     storage_policy_drops: u64,
+    storage_fault_drops: u64,
+    retention_limit_drops: u64,
+    aggregate_limit_drops: u64,
+    minimum_free_space_drops: u64,
+    writer_fault_drops: u64,
     retained_segment_count: usize,
     retained_bytes: u64,
     available_bytes: Option<u64>,
+    storage_authority_faulted: bool,
+    writer_io_faulted: bool,
+    storage_block_reason: Option<DiagStorageBlockReason>,
     storage_policy_satisfied: bool,
     free_space_probe: Box<FreeSpaceProbe>,
 }
@@ -420,9 +448,17 @@ impl SegmentedEventWriter {
             free_space_probe_errors: 0,
             retention_policy_errors: 0,
             storage_policy_drops: 0,
+            storage_fault_drops: 0,
+            retention_limit_drops: 0,
+            aggregate_limit_drops: 0,
+            minimum_free_space_drops: 0,
+            writer_fault_drops: 0,
             retained_segment_count: 1,
             retained_bytes: 0,
             available_bytes: None,
+            storage_authority_faulted: false,
+            writer_io_faulted: false,
+            storage_block_reason: None,
             storage_policy_satisfied: true,
             free_space_probe: Box::new(free_space_probe),
         };
@@ -438,6 +474,14 @@ impl SegmentedEventWriter {
         keys: &Value,
         body: &Value,
     ) -> bool {
+        if self.writer_io_faulted {
+            self.record_writer_fault_drop();
+            return false;
+        }
+        if self.storage_authority_faulted {
+            self.record_storage_policy_drop();
+            return false;
+        }
         let seq = self.next_seq;
         let stream_seq = self.stream_sequences.get(family).copied().unwrap_or(1);
         let pending = PendingEvent {
@@ -472,9 +516,7 @@ impl SegmentedEventWriter {
                     return false;
                 }
                 Err(error) => {
-                    self.write_errors = self.write_errors.saturating_add(1);
-                    self.dropped_events = self.dropped_events.saturating_add(1);
-                    warn!("failed to rotate diagnostic event segment: {error}");
+                    self.record_writer_fault("rotate", &error);
                     return false;
                 }
             }
@@ -494,12 +536,7 @@ impl SegmentedEventWriter {
             return false;
         }
         if let Err(error) = self.active_file.write_all(&line) {
-            self.write_errors = self.write_errors.saturating_add(1);
-            self.dropped_events = self.dropped_events.saturating_add(1);
-            warn!(
-                "failed to write diagnostic event segment {}: {error}",
-                self.active_path.display()
-            );
+            self.record_writer_fault("write", &error);
             return false;
         }
 
@@ -574,6 +611,10 @@ impl SegmentedEventWriter {
             SystemTime::now(),
             self.free_space_probe.as_ref(),
         );
+        let block_reason = storage_block_reason(&outcome);
+        let authority_faulted = outcome.scan_errors > 0
+            || outcome.delete_errors > 0
+            || outcome.free_space_probe_errors > 0;
         self.retention_deletes = self.retention_deletes.saturating_add(outcome.deleted);
         self.retention_delete_errors = self
             .retention_delete_errors
@@ -590,14 +631,64 @@ impl SegmentedEventWriter {
         self.retained_segment_count = outcome.retained_segment_count;
         self.retained_bytes = outcome.retained_bytes;
         self.available_bytes = outcome.available_bytes;
-        self.storage_policy_satisfied = outcome.within_limits();
+        if authority_faulted {
+            self.storage_authority_faulted = true;
+            if self.storage_block_reason.is_none() {
+                self.storage_block_reason = block_reason;
+            }
+        } else if !self.storage_authority_faulted {
+            self.storage_block_reason = block_reason;
+        }
+        self.storage_policy_satisfied = !self.storage_authority_faulted && outcome.within_limits();
         self.storage_policy_satisfied
     }
 
     fn record_storage_policy_drop(&mut self) {
         self.storage_policy_drops = self.storage_policy_drops.saturating_add(1);
+        if self.storage_authority_faulted {
+            self.storage_fault_drops = self.storage_fault_drops.saturating_add(1);
+        } else {
+            match self.storage_block_reason {
+                Some(DiagStorageBlockReason::AggregateByteLimit) => {
+                    self.aggregate_limit_drops = self.aggregate_limit_drops.saturating_add(1);
+                }
+                Some(DiagStorageBlockReason::MinimumFreeSpace) => {
+                    self.minimum_free_space_drops = self.minimum_free_space_drops.saturating_add(1);
+                }
+                _ => {
+                    self.retention_limit_drops = self.retention_limit_drops.saturating_add(1);
+                }
+            }
+        }
         self.dropped_events = self.dropped_events.saturating_add(1);
-        warn!("diagnostic event dropped because storage policy cannot be satisfied");
+        warn!(
+            reason = ?self.storage_block_reason,
+            "diagnostic event dropped because storage policy cannot be satisfied"
+        );
+    }
+
+    fn record_writer_fault(&mut self, operation: &'static str, error: &io::Error) {
+        self.writer_io_faulted = true;
+        self.write_errors = self.write_errors.saturating_add(1);
+        self.record_writer_fault_drop();
+        if let Ok(metadata) = fs::metadata(&self.active_path) {
+            let actual_bytes = metadata.len();
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_sub(self.active_segment_bytes)
+                .saturating_add(actual_bytes);
+            self.active_segment_bytes = actual_bytes;
+        }
+        warn!(
+            operation,
+            path = %self.active_path.display(),
+            "diagnostic event writer faulted: {error}"
+        );
+    }
+
+    fn record_writer_fault_drop(&mut self) {
+        self.writer_fault_drops = self.writer_fault_drops.saturating_add(1);
+        self.dropped_events = self.dropped_events.saturating_add(1);
     }
 
     fn health(&self) -> DiagWriterHealth {
@@ -636,9 +727,17 @@ impl SegmentedEventWriter {
             free_space_probe_errors: self.free_space_probe_errors,
             retention_policy_errors: self.retention_policy_errors,
             storage_policy_drops: self.storage_policy_drops,
+            storage_fault_drops: self.storage_fault_drops,
+            retention_limit_drops: self.retention_limit_drops,
+            aggregate_limit_drops: self.aggregate_limit_drops,
+            minimum_free_space_drops: self.minimum_free_space_drops,
+            writer_fault_drops: self.writer_fault_drops,
             retained_segment_count: self.retained_segment_count,
             retained_bytes: self.retained_bytes,
             available_bytes: self.available_bytes,
+            storage_authority_faulted: self.storage_authority_faulted,
+            writer_io_faulted: self.writer_io_faulted,
+            storage_block_reason: self.storage_block_reason,
             storage_policy_satisfied: Some(self.storage_policy_satisfied),
             maximum_growth_bytes: Some(maximum_growth_bytes),
             max_segment_bytes: Some(self.config.max_segment_bytes),
@@ -650,6 +749,29 @@ impl SegmentedEventWriter {
             initialization_failure: None,
         }
     }
+}
+
+#[cfg(any(feature = "enabled", test))]
+fn storage_block_reason(outcome: &retention::RetentionOutcome) -> Option<DiagStorageBlockReason> {
+    if outcome.scan_errors > 0 {
+        return Some(DiagStorageBlockReason::RetentionScanFailure);
+    }
+    if outcome.delete_errors > 0 {
+        return Some(DiagStorageBlockReason::RetentionDeleteFailure);
+    }
+    if outcome.free_space_probe_errors > 0 {
+        return Some(DiagStorageBlockReason::FreeSpaceProbeFailure);
+    }
+    outcome
+        .unresolved_constraints
+        .iter()
+        .find_map(|constraint| match *constraint {
+            "retained_segments" => Some(DiagStorageBlockReason::RetainedSegmentLimit),
+            "max_total_bytes" => Some(DiagStorageBlockReason::AggregateByteLimit),
+            "minimum_free_bytes" => Some(DiagStorageBlockReason::MinimumFreeSpace),
+            "pending_deletions" => Some(DiagStorageBlockReason::PendingRetentionDeletions),
+            _ => None,
+        })
 }
 
 #[cfg(any(feature = "enabled", test))]
@@ -719,9 +841,17 @@ fn disabled_health() -> DiagWriterHealth {
         free_space_probe_errors: 0,
         retention_policy_errors: 0,
         storage_policy_drops: 0,
+        storage_fault_drops: 0,
+        retention_limit_drops: 0,
+        aggregate_limit_drops: 0,
+        minimum_free_space_drops: 0,
+        writer_fault_drops: 0,
         retained_segment_count: 0,
         retained_bytes: 0,
         available_bytes: None,
+        storage_authority_faulted: false,
+        writer_io_faulted: false,
+        storage_block_reason: None,
         storage_policy_satisfied: None,
         maximum_growth_bytes: None,
         max_segment_bytes: None,
@@ -942,6 +1072,8 @@ mod tests {
         assert_eq!(health.records_written, 1);
         assert_eq!(health.dropped_events, 1);
         assert_eq!(health.storage_policy_drops, 1);
+        assert_eq!(health.aggregate_limit_drops, 1);
+        assert_eq!(health.storage_block_reason, None);
         assert_eq!(health.storage_policy_satisfied, Some(true));
     }
 
@@ -979,6 +1111,11 @@ mod tests {
         assert_eq!(blocked_health.maximum_growth_bytes, Some(0));
         assert_eq!(blocked_health.storage_policy_satisfied, Some(false));
         assert_eq!(blocked_health.storage_policy_drops, 1);
+        assert_eq!(blocked_health.minimum_free_space_drops, 1);
+        assert_eq!(
+            blocked_health.storage_block_reason,
+            Some(DiagStorageBlockReason::MinimumFreeSpace)
+        );
 
         available_bytes.store(2000, Ordering::Relaxed);
         assert!(writer.emit(
@@ -992,12 +1129,13 @@ mod tests {
         assert_eq!(recovered_health.records_written, 1);
         assert_eq!(recovered_health.dropped_events, 1);
         assert_eq!(recovered_health.free_space_probe_errors, 0);
+        assert_eq!(recovered_health.storage_block_reason, None);
         assert_eq!(recovered_health.storage_policy_satisfied, Some(true));
         assert_eq!(recovered_health.maximum_growth_bytes, Some(1400));
     }
 
     #[test]
-    fn free_space_probe_failure_blocks_writes() {
+    fn free_space_probe_failure_latches_storage_authority() {
         let root = TempDir::new().unwrap();
         let mut writer = SegmentedEventWriter::new_with_free_space_probe(
             WriterConfig {
@@ -1025,9 +1163,51 @@ mod tests {
         let health = writer.health();
         assert_eq!(health.records_written, 0);
         assert_eq!(health.dropped_events, 1);
-        assert_eq!(health.free_space_probe_errors, 4);
+        assert_eq!(health.free_space_probe_errors, 2);
         assert_eq!(health.available_bytes, None);
+        assert!(health.storage_authority_faulted);
+        assert_eq!(health.storage_fault_drops, 1);
+        assert_eq!(
+            health.storage_block_reason,
+            Some(DiagStorageBlockReason::FreeSpaceProbeFailure)
+        );
         assert_eq!(health.storage_policy_satisfied, Some(false));
+    }
+
+    #[test]
+    fn write_failure_latches_writer_and_reconciles_active_size() {
+        let root = TempDir::new().unwrap();
+        let mut writer = test_writer(&root, 4096, Duration::from_secs(60), 4);
+        let read_only = std::fs::File::open(&writer.active_path).unwrap();
+        writer.active_file = read_only;
+
+        assert!(!writer.emit(
+            "sched",
+            "write-failure",
+            "info",
+            &json!({}),
+            &json!({"padding": "small"}),
+        ));
+        let faulted_health = writer.health();
+        assert!(faulted_health.writer_io_faulted);
+        assert_eq!(faulted_health.write_errors, 1);
+        assert_eq!(faulted_health.writer_fault_drops, 1);
+        assert_eq!(faulted_health.dropped_events, 1);
+        assert_eq!(faulted_health.active_segment_bytes, 0);
+        assert_eq!(faulted_health.retained_bytes, 0);
+
+        assert!(!writer.emit(
+            "sched",
+            "latched",
+            "info",
+            &json!({}),
+            &json!({"padding": "small"}),
+        ));
+        let latched_health = writer.health();
+        assert_eq!(latched_health.write_errors, 1);
+        assert_eq!(latched_health.writer_fault_drops, 2);
+        assert_eq!(latched_health.dropped_events, 2);
+        assert_eq!(latched_health.records_written, 0);
     }
 
     #[test]
