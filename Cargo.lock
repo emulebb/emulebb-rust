@@ -628,6 +628,7 @@ name = "emulebb-diagnostics"
 version = "0.1.0-beta.2"
 dependencies = [
  "chrono",
+ "fs4",
  "serde",
  "serde_json",
  "tempfile",

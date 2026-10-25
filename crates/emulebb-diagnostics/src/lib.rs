@@ -50,6 +50,8 @@ const MAX_TOTAL_BYTES_ENV: &str = "EMULEBB_RUST_DIAG_MAX_TOTAL_BYTES";
 #[cfg(feature = "enabled")]
 const MAX_RETAINED_SECONDS_ENV: &str = "EMULEBB_RUST_DIAG_MAX_RETAINED_SECONDS";
 #[cfg(feature = "enabled")]
+const MINIMUM_FREE_BYTES_ENV: &str = "EMULEBB_RUST_DIAG_MIN_FREE_BYTES";
+#[cfg(feature = "enabled")]
 const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(feature = "enabled")]
 const DEFAULT_SEGMENT_SECONDS: u64 = 60 * 60;
@@ -60,6 +62,8 @@ const DEFAULT_MAX_TOTAL_BYTES: u64 = DEFAULT_SEGMENT_BYTES * DEFAULT_RETAINED_SE
 #[cfg(feature = "enabled")]
 const DEFAULT_MAX_RETAINED_SECONDS: u64 =
     DEFAULT_SEGMENT_SECONDS * DEFAULT_RETAINED_SEGMENTS as u64;
+#[cfg(feature = "enabled")]
+const DEFAULT_MINIMUM_FREE_BYTES: u64 = 0;
 #[cfg(feature = "enabled")]
 const MIN_SEGMENT_BYTES: u64 = 1024 * 1024;
 #[cfg(feature = "enabled")]
@@ -78,6 +82,8 @@ const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
 const MIN_RETAINED_SECONDS: u64 = 60;
 #[cfg(feature = "enabled")]
 const MAX_RETAINED_SECONDS: u64 = 365 * 24 * 60 * 60;
+#[cfg(feature = "enabled")]
+const MAX_MINIMUM_FREE_BYTES: u64 = MAX_TOTAL_BYTES;
 
 #[cfg(feature = "enabled")]
 static WRITER: OnceLock<Result<Mutex<SegmentedEventWriter>, WriterInitFailure>> = OnceLock::new();
@@ -103,10 +109,12 @@ pub struct DiagWriterHealth {
     pub retention_deletes: u64,
     pub retention_delete_errors: u64,
     pub retention_scan_errors: u64,
+    pub free_space_probe_errors: u64,
     pub retention_policy_errors: u64,
     pub storage_policy_drops: u64,
     pub retained_segment_count: usize,
     pub retained_bytes: u64,
+    pub available_bytes: Option<u64>,
     pub storage_policy_satisfied: Option<bool>,
     pub maximum_growth_bytes: Option<u64>,
     pub max_segment_bytes: Option<u64>,
@@ -114,6 +122,7 @@ pub struct DiagWriterHealth {
     pub retained_segments: Option<usize>,
     pub max_total_bytes: Option<u64>,
     pub max_retained_seconds: Option<u64>,
+    pub minimum_free_bytes: Option<u64>,
     pub initialization_failure: Option<String>,
 }
 
@@ -145,9 +154,9 @@ struct WriterConfig {
     retained_segments: usize,
     max_total_bytes: u64,
     max_retained_age: Duration,
+    minimum_free_bytes: u64,
 }
 
-#[derive(Debug)]
 #[cfg(any(feature = "enabled", test))]
 struct SegmentedEventWriter {
     config: WriterConfig,
@@ -169,12 +178,18 @@ struct SegmentedEventWriter {
     retention_deletes: u64,
     retention_delete_errors: u64,
     retention_scan_errors: u64,
+    free_space_probe_errors: u64,
     retention_policy_errors: u64,
     storage_policy_drops: u64,
     retained_segment_count: usize,
     retained_bytes: u64,
+    available_bytes: Option<u64>,
     storage_policy_satisfied: bool,
+    free_space_probe: Box<FreeSpaceProbe>,
 }
+
+#[cfg(any(feature = "enabled", test))]
+type FreeSpaceProbe = dyn Fn(&Path) -> io::Result<u64> + Send + Sync;
 
 #[derive(Debug)]
 #[cfg(feature = "enabled")]
@@ -354,6 +369,12 @@ impl WriterConfig {
                 MIN_RETAINED_SECONDS,
                 MAX_RETAINED_SECONDS,
             )),
+            minimum_free_bytes: environment_u64(
+                MINIMUM_FREE_BYTES_ENV,
+                DEFAULT_MINIMUM_FREE_BYTES,
+                0,
+                MAX_MINIMUM_FREE_BYTES,
+            ),
         })
     }
 }
@@ -361,6 +382,17 @@ impl WriterConfig {
 #[cfg(any(feature = "enabled", test))]
 impl SegmentedEventWriter {
     fn new(config: WriterConfig, run_id: String, process_id: u32) -> io::Result<Self> {
+        Self::new_with_free_space_probe(config, run_id, process_id, |path: &Path| {
+            fs4::available_space(path)
+        })
+    }
+
+    fn new_with_free_space_probe(
+        config: WriterConfig,
+        run_id: String,
+        process_id: u32,
+        free_space_probe: impl Fn(&Path) -> io::Result<u64> + Send + Sync + 'static,
+    ) -> io::Result<Self> {
         fs::create_dir_all(&config.directory)?;
         let active_segment_id = 0;
         let active_path = segment_path(&config.directory, process_id, &run_id, active_segment_id);
@@ -385,11 +417,14 @@ impl SegmentedEventWriter {
             retention_deletes: 0,
             retention_delete_errors: 0,
             retention_scan_errors: 0,
+            free_space_probe_errors: 0,
             retention_policy_errors: 0,
             storage_policy_drops: 0,
             retained_segment_count: 1,
             retained_bytes: 0,
+            available_bytes: None,
             storage_policy_satisfied: true,
+            free_space_probe: Box::new(free_space_probe),
         };
         writer.enforce_retention(writer.config.max_segment_bytes);
         Ok(writer)
@@ -533,9 +568,11 @@ impl SegmentedEventWriter {
                 retained_segments: self.config.retained_segments,
                 max_total_bytes: self.config.max_total_bytes,
                 max_retained_age: self.config.max_retained_age,
+                minimum_free_bytes: self.config.minimum_free_bytes,
             },
             reserved_bytes,
             SystemTime::now(),
+            self.free_space_probe.as_ref(),
         );
         self.retention_deletes = self.retention_deletes.saturating_add(outcome.deleted);
         self.retention_delete_errors = self
@@ -544,11 +581,15 @@ impl SegmentedEventWriter {
         self.retention_scan_errors = self
             .retention_scan_errors
             .saturating_add(outcome.scan_errors);
+        self.free_space_probe_errors = self
+            .free_space_probe_errors
+            .saturating_add(outcome.free_space_probe_errors);
         self.retention_policy_errors = self
             .retention_policy_errors
             .saturating_add(outcome.policy_failures);
         self.retained_segment_count = outcome.retained_segment_count;
         self.retained_bytes = outcome.retained_bytes;
+        self.available_bytes = outcome.available_bytes;
         self.storage_policy_satisfied = outcome.within_limits();
         self.storage_policy_satisfied
     }
@@ -560,6 +601,16 @@ impl SegmentedEventWriter {
     }
 
     fn health(&self) -> DiagWriterHealth {
+        let aggregate_growth_bytes = self
+            .config
+            .max_total_bytes
+            .saturating_sub(self.retained_bytes);
+        let maximum_growth_bytes =
+            self.available_bytes
+                .map_or(aggregate_growth_bytes, |available| {
+                    aggregate_growth_bytes
+                        .min(available.saturating_sub(self.config.minimum_free_bytes))
+                });
         DiagWriterHealth {
             schema: DIAG_EVENT_SCHEMA,
             enabled: true,
@@ -582,21 +633,20 @@ impl SegmentedEventWriter {
             retention_deletes: self.retention_deletes,
             retention_delete_errors: self.retention_delete_errors,
             retention_scan_errors: self.retention_scan_errors,
+            free_space_probe_errors: self.free_space_probe_errors,
             retention_policy_errors: self.retention_policy_errors,
             storage_policy_drops: self.storage_policy_drops,
             retained_segment_count: self.retained_segment_count,
             retained_bytes: self.retained_bytes,
+            available_bytes: self.available_bytes,
             storage_policy_satisfied: Some(self.storage_policy_satisfied),
-            maximum_growth_bytes: Some(
-                self.config
-                    .max_total_bytes
-                    .saturating_sub(self.retained_bytes),
-            ),
+            maximum_growth_bytes: Some(maximum_growth_bytes),
             max_segment_bytes: Some(self.config.max_segment_bytes),
             max_segment_seconds: Some(self.config.max_segment_age.as_secs()),
             retained_segments: Some(self.config.retained_segments),
             max_total_bytes: Some(self.config.max_total_bytes),
             max_retained_seconds: Some(self.config.max_retained_age.as_secs()),
+            minimum_free_bytes: Some(self.config.minimum_free_bytes),
             initialization_failure: None,
         }
     }
@@ -666,10 +716,12 @@ fn disabled_health() -> DiagWriterHealth {
         retention_deletes: 0,
         retention_delete_errors: 0,
         retention_scan_errors: 0,
+        free_space_probe_errors: 0,
         retention_policy_errors: 0,
         storage_policy_drops: 0,
         retained_segment_count: 0,
         retained_bytes: 0,
+        available_bytes: None,
         storage_policy_satisfied: None,
         maximum_growth_bytes: None,
         max_segment_bytes: None,
@@ -677,6 +729,7 @@ fn disabled_health() -> DiagWriterHealth {
         retained_segments: None,
         max_total_bytes: None,
         max_retained_seconds: None,
+        minimum_free_bytes: None,
         initialization_failure: None,
     }
 }
@@ -696,6 +749,7 @@ fn uninitialized_health() -> DiagWriterHealth {
         max_retained_seconds: config
             .as_ref()
             .map(|config| config.max_retained_age.as_secs()),
+        minimum_free_bytes: config.as_ref().map(|config| config.minimum_free_bytes),
         ..disabled_health()
     }
 }
@@ -703,7 +757,10 @@ fn uninitialized_health() -> DiagWriterHealth {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
         thread,
     };
 
@@ -886,6 +943,91 @@ mod tests {
         assert_eq!(health.dropped_events, 1);
         assert_eq!(health.storage_policy_drops, 1);
         assert_eq!(health.storage_policy_satisfied, Some(true));
+    }
+
+    #[test]
+    fn minimum_free_space_blocks_writes_and_recovers_after_capacity_returns() {
+        let root = TempDir::new().unwrap();
+        let available_bytes = Arc::new(AtomicU64::new(500));
+        let probe_available_bytes = Arc::clone(&available_bytes);
+        let mut writer = SegmentedEventWriter::new_with_free_space_probe(
+            WriterConfig {
+                directory: root.path().to_path_buf(),
+                max_segment_bytes: 256,
+                max_segment_age: Duration::from_secs(60),
+                retained_segments: 8,
+                max_total_bytes: 2048,
+                max_retained_age: Duration::MAX,
+                minimum_free_bytes: 600,
+            },
+            "testrun".to_string(),
+            42,
+            move |_| Ok(probe_available_bytes.load(Ordering::Relaxed)),
+        )
+        .unwrap();
+
+        assert!(!writer.emit(
+            "sched",
+            "blocked",
+            "info",
+            &json!({}),
+            &json!({"padding": "small"}),
+        ));
+        let blocked_health = writer.health();
+        assert_eq!(blocked_health.available_bytes, Some(500));
+        assert_eq!(blocked_health.minimum_free_bytes, Some(600));
+        assert_eq!(blocked_health.maximum_growth_bytes, Some(0));
+        assert_eq!(blocked_health.storage_policy_satisfied, Some(false));
+        assert_eq!(blocked_health.storage_policy_drops, 1);
+
+        available_bytes.store(2000, Ordering::Relaxed);
+        assert!(writer.emit(
+            "sched",
+            "recovered",
+            "info",
+            &json!({}),
+            &json!({"padding": "small"}),
+        ));
+        let recovered_health = writer.health();
+        assert_eq!(recovered_health.records_written, 1);
+        assert_eq!(recovered_health.dropped_events, 1);
+        assert_eq!(recovered_health.free_space_probe_errors, 0);
+        assert_eq!(recovered_health.storage_policy_satisfied, Some(true));
+        assert_eq!(recovered_health.maximum_growth_bytes, Some(1400));
+    }
+
+    #[test]
+    fn free_space_probe_failure_blocks_writes() {
+        let root = TempDir::new().unwrap();
+        let mut writer = SegmentedEventWriter::new_with_free_space_probe(
+            WriterConfig {
+                directory: root.path().to_path_buf(),
+                max_segment_bytes: 256,
+                max_segment_age: Duration::from_secs(60),
+                retained_segments: 8,
+                max_total_bytes: 2048,
+                max_retained_age: Duration::MAX,
+                minimum_free_bytes: 600,
+            },
+            "testrun".to_string(),
+            42,
+            |_| Err(io::Error::other("probe failed")),
+        )
+        .unwrap();
+
+        assert!(!writer.emit(
+            "sched",
+            "blocked",
+            "info",
+            &json!({}),
+            &json!({"padding": "small"}),
+        ));
+        let health = writer.health();
+        assert_eq!(health.records_written, 0);
+        assert_eq!(health.dropped_events, 1);
+        assert_eq!(health.free_space_probe_errors, 4);
+        assert_eq!(health.available_bytes, None);
+        assert_eq!(health.storage_policy_satisfied, Some(false));
     }
 
     #[test]
@@ -1094,6 +1236,7 @@ mod tests {
                 retained_segments,
                 max_total_bytes,
                 max_retained_age,
+                minimum_free_bytes: 0,
             },
             run_id.to_string(),
             42,
