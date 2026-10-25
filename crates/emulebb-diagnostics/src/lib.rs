@@ -11,7 +11,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 #[cfg(feature = "enabled")]
 use std::{
@@ -46,11 +46,20 @@ const SEGMENT_SECONDS_ENV: &str = "EMULEBB_RUST_DIAG_SEGMENT_SECONDS";
 #[cfg(feature = "enabled")]
 const RETAINED_SEGMENTS_ENV: &str = "EMULEBB_RUST_DIAG_RETAINED_SEGMENTS";
 #[cfg(feature = "enabled")]
+const MAX_TOTAL_BYTES_ENV: &str = "EMULEBB_RUST_DIAG_MAX_TOTAL_BYTES";
+#[cfg(feature = "enabled")]
+const MAX_RETAINED_SECONDS_ENV: &str = "EMULEBB_RUST_DIAG_MAX_RETAINED_SECONDS";
+#[cfg(feature = "enabled")]
 const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(feature = "enabled")]
 const DEFAULT_SEGMENT_SECONDS: u64 = 60 * 60;
 #[cfg(feature = "enabled")]
 const DEFAULT_RETAINED_SEGMENTS: usize = 8;
+#[cfg(feature = "enabled")]
+const DEFAULT_MAX_TOTAL_BYTES: u64 = DEFAULT_SEGMENT_BYTES * DEFAULT_RETAINED_SEGMENTS as u64;
+#[cfg(feature = "enabled")]
+const DEFAULT_MAX_RETAINED_SECONDS: u64 =
+    DEFAULT_SEGMENT_SECONDS * DEFAULT_RETAINED_SEGMENTS as u64;
 #[cfg(feature = "enabled")]
 const MIN_SEGMENT_BYTES: u64 = 1024 * 1024;
 #[cfg(feature = "enabled")]
@@ -63,6 +72,12 @@ const MAX_SEGMENT_SECONDS: u64 = 24 * 60 * 60;
 const MIN_RETAINED_SEGMENTS: usize = 2;
 #[cfg(feature = "enabled")]
 const MAX_RETAINED_SEGMENTS: usize = 128;
+#[cfg(feature = "enabled")]
+const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
+#[cfg(feature = "enabled")]
+const MIN_RETAINED_SECONDS: u64 = 60;
+#[cfg(feature = "enabled")]
+const MAX_RETAINED_SECONDS: u64 = 365 * 24 * 60 * 60;
 
 #[cfg(feature = "enabled")]
 static WRITER: OnceLock<Result<Mutex<SegmentedEventWriter>, WriterInitFailure>> = OnceLock::new();
@@ -87,9 +102,18 @@ pub struct DiagWriterHealth {
     pub rotations: u64,
     pub retention_deletes: u64,
     pub retention_delete_errors: u64,
+    pub retention_scan_errors: u64,
+    pub retention_policy_errors: u64,
+    pub storage_policy_drops: u64,
+    pub retained_segment_count: usize,
+    pub retained_bytes: u64,
+    pub storage_policy_satisfied: Option<bool>,
+    pub maximum_growth_bytes: Option<u64>,
     pub max_segment_bytes: Option<u64>,
     pub max_segment_seconds: Option<u64>,
     pub retained_segments: Option<usize>,
+    pub max_total_bytes: Option<u64>,
+    pub max_retained_seconds: Option<u64>,
     pub initialization_failure: Option<String>,
 }
 
@@ -119,6 +143,8 @@ struct WriterConfig {
     max_segment_bytes: u64,
     max_segment_age: Duration,
     retained_segments: usize,
+    max_total_bytes: u64,
+    max_retained_age: Duration,
 }
 
 #[derive(Debug)]
@@ -142,6 +168,12 @@ struct SegmentedEventWriter {
     rotations: u64,
     retention_deletes: u64,
     retention_delete_errors: u64,
+    retention_scan_errors: u64,
+    retention_policy_errors: u64,
+    storage_policy_drops: u64,
+    retained_segment_count: usize,
+    retained_bytes: u64,
+    storage_policy_satisfied: bool,
 }
 
 #[derive(Debug)]
@@ -271,26 +303,57 @@ impl WriterConfig {
         let directory = env::var_os(LOG_DIR_ENV)
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty())?;
+        let max_segment_bytes = environment_u64(
+            SEGMENT_BYTES_ENV,
+            DEFAULT_SEGMENT_BYTES,
+            MIN_SEGMENT_BYTES,
+            MAX_SEGMENT_BYTES,
+        );
+        let max_segment_age = Duration::from_secs(environment_u64(
+            SEGMENT_SECONDS_ENV,
+            DEFAULT_SEGMENT_SECONDS,
+            MIN_SEGMENT_SECONDS,
+            MAX_SEGMENT_SECONDS,
+        ));
+        let retained_segments = environment_usize(
+            RETAINED_SEGMENTS_ENV,
+            DEFAULT_RETAINED_SEGMENTS,
+            MIN_RETAINED_SEGMENTS,
+            MAX_RETAINED_SEGMENTS,
+        );
+        let default_max_total_bytes = max_segment_bytes
+            .checked_mul(retained_segments as u64)
+            .unwrap_or(DEFAULT_MAX_TOTAL_BYTES);
+        let configured_max_total_bytes = environment_u64(
+            MAX_TOTAL_BYTES_ENV,
+            default_max_total_bytes,
+            MIN_SEGMENT_BYTES,
+            MAX_TOTAL_BYTES,
+        );
+        let max_total_bytes = if configured_max_total_bytes < max_segment_bytes {
+            warn!(
+                "ignoring {MAX_TOTAL_BYTES_ENV} below {SEGMENT_BYTES_ENV}; using {max_segment_bytes}"
+            );
+            max_segment_bytes
+        } else {
+            configured_max_total_bytes
+        };
+        let default_max_retained_seconds = max_segment_age
+            .as_secs()
+            .checked_mul(retained_segments as u64)
+            .unwrap_or(DEFAULT_MAX_RETAINED_SECONDS);
         Some(Self {
             directory,
-            max_segment_bytes: environment_u64(
-                SEGMENT_BYTES_ENV,
-                DEFAULT_SEGMENT_BYTES,
-                MIN_SEGMENT_BYTES,
-                MAX_SEGMENT_BYTES,
-            ),
-            max_segment_age: Duration::from_secs(environment_u64(
-                SEGMENT_SECONDS_ENV,
-                DEFAULT_SEGMENT_SECONDS,
-                MIN_SEGMENT_SECONDS,
-                MAX_SEGMENT_SECONDS,
+            max_segment_bytes,
+            max_segment_age,
+            retained_segments,
+            max_total_bytes,
+            max_retained_age: Duration::from_secs(environment_u64(
+                MAX_RETAINED_SECONDS_ENV,
+                default_max_retained_seconds,
+                MIN_RETAINED_SECONDS,
+                MAX_RETAINED_SECONDS,
             )),
-            retained_segments: environment_usize(
-                RETAINED_SEGMENTS_ENV,
-                DEFAULT_RETAINED_SEGMENTS,
-                MIN_RETAINED_SEGMENTS,
-                MAX_RETAINED_SEGMENTS,
-            ),
         })
     }
 }
@@ -321,8 +384,14 @@ impl SegmentedEventWriter {
             rotations: 0,
             retention_deletes: 0,
             retention_delete_errors: 0,
+            retention_scan_errors: 0,
+            retention_policy_errors: 0,
+            storage_policy_drops: 0,
+            retained_segment_count: 1,
+            retained_bytes: 0,
+            storage_policy_satisfied: true,
         };
-        writer.enforce_retention();
+        writer.enforce_retention(writer.config.max_segment_bytes);
         Ok(writer)
     }
 
@@ -353,12 +422,26 @@ impl SegmentedEventWriter {
                 return false;
             }
         };
-        if self.should_rotate(line.len() as u64) {
-            if let Err(error) = self.rotate() {
-                self.write_errors = self.write_errors.saturating_add(1);
-                self.dropped_events = self.dropped_events.saturating_add(1);
-                warn!("failed to rotate diagnostic event segment: {error}");
-                return false;
+        let line_bytes = line.len() as u64;
+        if !self.storage_policy_satisfied
+            && !self.enforce_retention(self.config.max_segment_bytes.max(line_bytes))
+        {
+            self.record_storage_policy_drop();
+            return false;
+        }
+        if self.should_rotate(line_bytes) {
+            match self.rotate(self.config.max_segment_bytes.max(line_bytes)) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.record_storage_policy_drop();
+                    return false;
+                }
+                Err(error) => {
+                    self.write_errors = self.write_errors.saturating_add(1);
+                    self.dropped_events = self.dropped_events.saturating_add(1);
+                    warn!("failed to rotate diagnostic event segment: {error}");
+                    return false;
+                }
             }
             line = match self.encode_record(&pending) {
                 Ok(line) => line,
@@ -368,6 +451,12 @@ impl SegmentedEventWriter {
                     return false;
                 }
             };
+        } else if self.active_segment_bytes == 0
+            && line_bytes > self.config.max_segment_bytes
+            && !self.enforce_retention(line_bytes)
+        {
+            self.record_storage_policy_drop();
+            return false;
         }
         if let Err(error) = self.active_file.write_all(&line) {
             self.write_errors = self.write_errors.saturating_add(1);
@@ -380,6 +469,7 @@ impl SegmentedEventWriter {
         }
 
         self.active_segment_bytes = self.active_segment_bytes.saturating_add(line.len() as u64);
+        self.retained_bytes = self.retained_bytes.saturating_add(line.len() as u64);
         self.records_written = self.records_written.saturating_add(1);
         self.bytes_written = self.bytes_written.saturating_add(line.len() as u64);
         self.next_seq = self.next_seq.saturating_add(1);
@@ -410,13 +500,13 @@ impl SegmentedEventWriter {
     }
 
     fn should_rotate(&self, next_line_bytes: u64) -> bool {
-        self.records_written > 0
+        self.active_segment_bytes > 0
             && (self.active_segment_bytes.saturating_add(next_line_bytes)
                 > self.config.max_segment_bytes
                 || self.active_segment_started.elapsed() >= self.config.max_segment_age)
     }
 
-    fn rotate(&mut self) -> io::Result<()> {
+    fn rotate(&mut self, reserved_bytes: u64) -> io::Result<bool> {
         self.active_file.flush()?;
         let next_segment_id = self.active_segment_id.saturating_add(1);
         let next_path = segment_path(
@@ -432,22 +522,41 @@ impl SegmentedEventWriter {
         self.active_segment_started = Instant::now();
         self.active_segment_bytes = 0;
         self.rotations = self.rotations.saturating_add(1);
-        self.enforce_retention();
-        Ok(())
+        Ok(self.enforce_retention(reserved_bytes))
     }
 
-    fn enforce_retention(&mut self) {
-        let outcome = retention::enforce_segment_count(
+    fn enforce_retention(&mut self, reserved_bytes: u64) -> bool {
+        let outcome = retention::enforce(
             &self.config.directory,
             &self.active_path,
-            self.process_id,
-            &self.run_id,
-            self.config.retained_segments,
+            retention::RetentionPolicy {
+                retained_segments: self.config.retained_segments,
+                max_total_bytes: self.config.max_total_bytes,
+                max_retained_age: self.config.max_retained_age,
+            },
+            reserved_bytes,
+            SystemTime::now(),
         );
         self.retention_deletes = self.retention_deletes.saturating_add(outcome.deleted);
         self.retention_delete_errors = self
             .retention_delete_errors
             .saturating_add(outcome.delete_errors);
+        self.retention_scan_errors = self
+            .retention_scan_errors
+            .saturating_add(outcome.scan_errors);
+        self.retention_policy_errors = self
+            .retention_policy_errors
+            .saturating_add(outcome.policy_failures);
+        self.retained_segment_count = outcome.retained_segment_count;
+        self.retained_bytes = outcome.retained_bytes;
+        self.storage_policy_satisfied = outcome.within_limits();
+        self.storage_policy_satisfied
+    }
+
+    fn record_storage_policy_drop(&mut self) {
+        self.storage_policy_drops = self.storage_policy_drops.saturating_add(1);
+        self.dropped_events = self.dropped_events.saturating_add(1);
+        warn!("diagnostic event dropped because storage policy cannot be satisfied");
     }
 
     fn health(&self) -> DiagWriterHealth {
@@ -472,9 +581,22 @@ impl SegmentedEventWriter {
             rotations: self.rotations,
             retention_deletes: self.retention_deletes,
             retention_delete_errors: self.retention_delete_errors,
+            retention_scan_errors: self.retention_scan_errors,
+            retention_policy_errors: self.retention_policy_errors,
+            storage_policy_drops: self.storage_policy_drops,
+            retained_segment_count: self.retained_segment_count,
+            retained_bytes: self.retained_bytes,
+            storage_policy_satisfied: Some(self.storage_policy_satisfied),
+            maximum_growth_bytes: Some(
+                self.config
+                    .max_total_bytes
+                    .saturating_sub(self.retained_bytes),
+            ),
             max_segment_bytes: Some(self.config.max_segment_bytes),
             max_segment_seconds: Some(self.config.max_segment_age.as_secs()),
             retained_segments: Some(self.config.retained_segments),
+            max_total_bytes: Some(self.config.max_total_bytes),
+            max_retained_seconds: Some(self.config.max_retained_age.as_secs()),
             initialization_failure: None,
         }
     }
@@ -543,9 +665,18 @@ fn disabled_health() -> DiagWriterHealth {
         rotations: 0,
         retention_deletes: 0,
         retention_delete_errors: 0,
+        retention_scan_errors: 0,
+        retention_policy_errors: 0,
+        storage_policy_drops: 0,
+        retained_segment_count: 0,
+        retained_bytes: 0,
+        storage_policy_satisfied: None,
+        maximum_growth_bytes: None,
         max_segment_bytes: None,
         max_segment_seconds: None,
         retained_segments: None,
+        max_total_bytes: None,
+        max_retained_seconds: None,
         initialization_failure: None,
     }
 }
@@ -561,6 +692,10 @@ fn uninitialized_health() -> DiagWriterHealth {
             .as_ref()
             .map(|config| config.max_segment_age.as_secs()),
         retained_segments: config.as_ref().map(|config| config.retained_segments),
+        max_total_bytes: config.as_ref().map(|config| config.max_total_bytes),
+        max_retained_seconds: config
+            .as_ref()
+            .map(|config| config.max_retained_age.as_secs()),
         ..disabled_health()
     }
 }
@@ -658,6 +793,99 @@ mod tests {
         let records = read_records(root.path());
         assert!(records.first().unwrap()["seq"].as_u64().unwrap() > 1);
         assert_eq!(records.last().unwrap()["seq"], 40);
+    }
+
+    #[test]
+    fn aggregate_retention_bounds_total_segment_bytes() {
+        let root = TempDir::new().unwrap();
+        let mut writer = test_writer_with_policy(
+            &root,
+            "testrun",
+            420,
+            Duration::from_secs(60),
+            100,
+            900,
+            Duration::MAX,
+        );
+        for record_id in 0..40_u64 {
+            assert!(writer.emit(
+                "sched",
+                "rotate",
+                "info",
+                &json!({"record": record_id}),
+                &json!({"padding": "x".repeat(80)}),
+            ));
+        }
+
+        let retained_bytes = segment_bytes(root.path());
+        let health = writer.health();
+        assert!(retained_bytes <= 900);
+        assert_eq!(health.retained_bytes, retained_bytes);
+        assert_eq!(health.records_written, 40);
+        assert_eq!(health.storage_policy_drops, 0);
+        assert_eq!(health.storage_policy_satisfied, Some(true));
+    }
+
+    #[test]
+    fn oversized_record_is_retained_when_aggregate_budget_allows_it() {
+        let root = TempDir::new().unwrap();
+        let mut writer = test_writer_with_policy(
+            &root,
+            "testrun",
+            256,
+            Duration::from_secs(60),
+            8,
+            2048,
+            Duration::MAX,
+        );
+
+        assert!(writer.emit(
+            "sched",
+            "oversized",
+            "info",
+            &json!({}),
+            &json!({"padding": "x".repeat(512)}),
+        ));
+        let health = writer.health();
+        assert!(health.active_segment_bytes > 256);
+        assert_eq!(health.storage_policy_drops, 0);
+        assert_eq!(health.storage_policy_satisfied, Some(true));
+    }
+
+    #[test]
+    fn aggregate_budget_drops_oversized_record_and_recovers_for_smaller_record() {
+        let root = TempDir::new().unwrap();
+        let mut writer = test_writer_with_policy(
+            &root,
+            "testrun",
+            256,
+            Duration::from_secs(60),
+            8,
+            600,
+            Duration::MAX,
+        );
+
+        assert!(!writer.emit(
+            "sched",
+            "oversized",
+            "info",
+            &json!({}),
+            &json!({"padding": "x".repeat(1024)}),
+        ));
+        assert_eq!(writer.health().storage_policy_satisfied, Some(false));
+
+        assert!(writer.emit(
+            "sched",
+            "small",
+            "info",
+            &json!({}),
+            &json!({"padding": "small"}),
+        ));
+        let health = writer.health();
+        assert_eq!(health.records_written, 1);
+        assert_eq!(health.dropped_events, 1);
+        assert_eq!(health.storage_policy_drops, 1);
+        assert_eq!(health.storage_policy_satisfied, Some(true));
     }
 
     #[test]
@@ -838,12 +1066,34 @@ mod tests {
         max_segment_age: Duration,
         retained_segments: usize,
     ) -> SegmentedEventWriter {
+        test_writer_with_policy(
+            root,
+            run_id,
+            max_segment_bytes,
+            max_segment_age,
+            retained_segments,
+            u64::MAX,
+            Duration::MAX,
+        )
+    }
+
+    fn test_writer_with_policy(
+        root: &TempDir,
+        run_id: &str,
+        max_segment_bytes: u64,
+        max_segment_age: Duration,
+        retained_segments: usize,
+        max_total_bytes: u64,
+        max_retained_age: Duration,
+    ) -> SegmentedEventWriter {
         SegmentedEventWriter::new(
             WriterConfig {
                 directory: root.path().to_path_buf(),
                 max_segment_bytes,
                 max_segment_age,
                 retained_segments,
+                max_total_bytes,
+                max_retained_age,
             },
             run_id.to_string(),
             42,
@@ -874,6 +1124,13 @@ mod tests {
             .collect::<Vec<_>>();
         paths.sort();
         paths
+    }
+
+    fn segment_bytes(root: &Path) -> u64 {
+        segment_files(root)
+            .into_iter()
+            .map(|path| fs::metadata(path).unwrap().len())
+            .sum()
     }
 
     fn read_records(root: &Path) -> Vec<Value> {
