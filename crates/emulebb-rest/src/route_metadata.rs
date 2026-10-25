@@ -578,7 +578,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("POST", "/api/v1/transfers/operations/clear-completed")
         | ("POST", "/api/v1/logs/operations/clear")
         | ("POST", "/api/v1/app/shutdown")
-        | ("POST", "/api/v1/diagnostics/dumps")
+        | ("POST", "/api/v1/diagnostics/bundles")
         | ("POST", "/api/v1/diagnostics/crash-tests") => Some(match path {
             "/api/v1/upload-queue" if method == "GET" => UPLOAD_QUEUE,
             _ => NONE,

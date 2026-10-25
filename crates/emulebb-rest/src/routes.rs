@@ -51,7 +51,10 @@ pub fn router_with_shutdown(
         .route("/api/v1/events/status", get(event_status))
         .route("/api/v1/app/shutdown", post(shutdown_app))
         .route("/api/v1/diagnostics", get(diagnostics))
-        .route("/api/v1/diagnostics/dumps", post(capture_diagnostic_dump))
+        .route(
+            "/api/v1/diagnostics/bundles",
+            post(capture_diagnostic_bundle),
+        )
         .route(
             "/api/v1/diagnostics/crash-tests",
             post(trigger_diagnostic_crash_test),

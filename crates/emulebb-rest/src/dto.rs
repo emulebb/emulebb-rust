@@ -214,8 +214,8 @@ pub(crate) struct ShutdownRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct DiagnosticDumpRequest {
-    pub(crate) confirm_dump: bool,
+pub(crate) struct DiagnosticBundleCaptureRequest {
+    pub(crate) confirm_capture: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

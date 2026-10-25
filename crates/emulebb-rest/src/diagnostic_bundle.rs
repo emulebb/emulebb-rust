@@ -17,7 +17,7 @@ use crate::{
     responses::{app_info_response, runtime_diagnostics_response, status_response},
 };
 
-pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v3";
+pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v4";
 
 const MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_LOG_RECORDS: usize = 200;
@@ -31,14 +31,6 @@ const ARTIFACT_FAMILIES: &[ArtifactFamilySpec] = &[ArtifactFamilySpec {
     sequence_field: "seq",
     sequence_assessment: "processWideMonotonicTail",
 }];
-
-#[derive(Debug)]
-pub(crate) struct DiagnosticBundleCapture {
-    pub payload: Value,
-    pub artifact_file_count: u64,
-    pub missing_artifact_families: Vec<String>,
-    pub issue_count: u64,
-}
 
 #[derive(Clone, Copy)]
 struct ArtifactFamilySpec {
@@ -80,7 +72,7 @@ struct TailRead {
     lines: Vec<Vec<u8>>,
 }
 
-pub(crate) async fn capture(state: &RestState) -> Result<DiagnosticBundleCapture> {
+pub(crate) async fn capture(state: &RestState) -> Result<Value> {
     let status = status_response(state).await;
     let runtime_diagnostics = runtime_diagnostics_response(state).await;
     let unified_run = unified_run_selection(&runtime_diagnostics);
@@ -128,14 +120,14 @@ pub(crate) async fn capture(state: &RestState) -> Result<DiagnosticBundleCapture
             "tailBytesPerArtifact": MAX_TAIL_BYTES,
             "tailRecordsPerArtifact": MAX_TAIL_RECORDS,
         },
+        "summary": {
+            "artifactFileCount": artifacts.file_count,
+            "missingArtifactFamilies": artifacts.missing_families,
+            "issueCount": artifacts.issue_count.saturating_add(writer_issue_count),
+        },
     });
 
-    Ok(DiagnosticBundleCapture {
-        payload,
-        artifact_file_count: artifacts.file_count,
-        missing_artifact_families: artifacts.missing_families,
-        issue_count: artifacts.issue_count.saturating_add(writer_issue_count),
-    })
+    Ok(payload)
 }
 
 fn diagnostic_writer_issues(runtime_diagnostics: &Value) -> Vec<Value> {

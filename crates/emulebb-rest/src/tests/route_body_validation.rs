@@ -1107,9 +1107,9 @@ async fn destructive_confirmation_bodies_use_canonical_validation() {
         ),
         (
             "POST",
-            "/api/v1/diagnostics/dumps",
-            r#"{"confirmDump":false}"#,
-            "confirmDump must be true",
+            "/api/v1/diagnostics/bundles",
+            r#"{"confirmCapture":false}"#,
+            "confirmCapture must be true",
         ),
         (
             "POST",
@@ -1144,12 +1144,12 @@ async fn destructive_confirmation_bodies_use_canonical_validation() {
 }
 
 #[tokio::test]
-async fn diagnostic_dump_body_rejects_retired_full_memory_field() {
+async fn diagnostic_bundle_body_rejects_retired_full_memory_field() {
     assert_invalid_json_response(
         test_router(),
         "POST",
-        "/api/v1/diagnostics/dumps",
-        r#"{"confirmDump":true,"fullMemory":false}"#.to_string(),
+        "/api/v1/diagnostics/bundles",
+        r#"{"confirmCapture":true,"fullMemory":false}"#.to_string(),
         "unknown JSON field: fullMemory",
     )
     .await;

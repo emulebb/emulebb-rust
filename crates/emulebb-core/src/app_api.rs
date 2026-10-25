@@ -1,11 +1,5 @@
 use super::*;
 
-#[derive(Debug, Clone)]
-pub struct DiagnosticDumpFile {
-    pub path: PathBuf,
-    pub byte_count: u64,
-}
-
 impl EmulebbCore {
     pub fn diagnostic_writer_health(&self) -> emulebb_diagnostics::DiagWriterHealth {
         emulebb_diagnostics::writer_health()
@@ -39,33 +33,6 @@ impl EmulebbCore {
                 "peerControls".to_string(),
             ],
         }
-    }
-
-    pub fn write_diagnostic_dump(&self, payload: &serde_json::Value) -> Result<DiagnosticDumpFile> {
-        let dump_dir = self
-            .transfer_root
-            .parent()
-            .unwrap_or(self.transfer_root.as_path())
-            .join("diagnostics");
-        fs::create_dir_all(&dump_dir).with_context(|| {
-            format!(
-                "failed to create diagnostics directory {}",
-                dump_dir.display()
-            )
-        })?;
-
-        let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-        let path = dump_dir.join(format!(
-            "emulebb-rust-diagnostic-dump-{stamp}-{}.json",
-            Uuid::new_v4()
-        ));
-        let payload = serde_json::to_vec_pretty(payload)?;
-        fs::write(&path, &payload)
-            .with_context(|| format!("failed to write diagnostic dump {}", path.display()))?;
-        Ok(DiagnosticDumpFile {
-            path,
-            byte_count: payload.len() as u64,
-        })
     }
 
     pub async fn core_settings(&self) -> CoreSettings {

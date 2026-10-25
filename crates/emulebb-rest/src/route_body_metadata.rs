@@ -160,7 +160,7 @@ fn validate_route_specific_body_fields(
         validate_paused_body_field(object)?;
         return validate_known_file_policy_body_field(object);
     }
-    if method == "POST" && path == "/api/v1/diagnostics/dumps" {
+    if method == "POST" && path == "/api/v1/diagnostics/bundles" {
         return validate_destructive_confirmation_body(method, path, object);
     }
     validate_destructive_confirmation_body(method, path, object)
@@ -183,7 +183,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const SHARED_FILE_IGNORE_RULE: &[&str] = &["enabled"];
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
-    const DIAGNOSTIC_DUMP: &[&str] = &["confirmDump"];
+    const DIAGNOSTIC_BUNDLE: &[&str] = &["confirmCapture"];
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
     const APP_SETTINGS: &[&str] = &[
         "core", "daemon", "ed2k", "kad", "nat", "vpnGuard", "ipFilter",
@@ -229,8 +229,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     if method == "POST" && path == "/api/v1/app/shutdown" {
         return Some(CONFIRM_SHUTDOWN);
     }
-    if method == "POST" && path == "/api/v1/diagnostics/dumps" {
-        return Some(DIAGNOSTIC_DUMP);
+    if method == "POST" && path == "/api/v1/diagnostics/bundles" {
+        return Some(DIAGNOSTIC_BUNDLE);
     }
     if method == "POST" && path == "/api/v1/diagnostics/crash-tests" {
         return Some(CONFIRM_CRASH);
@@ -367,7 +367,9 @@ fn destructive_confirmation_field(
         ("POST", "/api/v1/app/shutdown") => {
             Some(("confirmShutdown", "confirmShutdown must be true"))
         }
-        ("POST", "/api/v1/diagnostics/dumps") => Some(("confirmDump", "confirmDump must be true")),
+        ("POST", "/api/v1/diagnostics/bundles") => {
+            Some(("confirmCapture", "confirmCapture must be true"))
+        }
         ("POST", "/api/v1/diagnostics/crash-tests") => {
             Some(("confirmCrash", "confirmCrash must be true"))
         }
