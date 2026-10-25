@@ -99,7 +99,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(value["data"].get("fullMemoryIncluded").is_none());
     assert!(value["data"].get("path").is_none());
     assert!(value["data"].get("byteCount").is_none());
-    assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v4");
+    assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v5");
     assert_eq!(value["data"]["summary"]["artifactFileCount"], 0);
     assert_eq!(
         value["data"]["summary"]["missingArtifactFamilies"]
@@ -111,7 +111,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(!runtime_dir.join("diagnostics").exists());
 
     let bundle = &value["data"];
-    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v4");
+    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v5");
     assert!(bundle.get("memory").is_none());
     assert_eq!(bundle["settingsProvenance"]["apiKeyIncluded"], true);
     assert_eq!(bundle["settingsProvenance"]["sensitiveValues"], "exact");
@@ -134,8 +134,21 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     );
     assert!(bundle["settings"].is_object());
     assert!(bundle["recentLogs"].is_array());
+    assert!(bundle["operationalSnapshots"]["servers"]["items"].is_array());
+    assert!(bundle["operationalSnapshots"]["sharedFiles"]["items"].is_array());
+    assert!(bundle["operationalSnapshots"]["searches"]["items"].is_array());
+    assert!(bundle["operationalSnapshots"]["transfers"]["items"].is_array());
+    assert!(bundle["operationalSnapshots"]["uploads"]["items"].is_array());
+    assert!(bundle["operationalSnapshots"]["uploadQueue"]["items"].is_array());
     assert!(bundle["diagnosticArtifacts"]["families"].is_array());
     assert_eq!(bundle["limits"]["artifactFamilies"], 1);
+    assert_eq!(bundle["limits"]["serverSnapshots"], 512);
+    assert_eq!(bundle["limits"]["sharedFileSnapshots"], 512);
+    assert_eq!(bundle["limits"]["searchSnapshots"], 64);
+    assert_eq!(bundle["limits"]["searchResultsPerSnapshot"], 128);
+    assert_eq!(bundle["limits"]["transferSnapshots"], 512);
+    assert_eq!(bundle["limits"]["uploadSnapshots"], 512);
+    assert_eq!(bundle["limits"]["uploadQueueSnapshots"], 512);
     assert!(serde_json::to_string(&bundle).unwrap().contains("secret"));
 }
 
