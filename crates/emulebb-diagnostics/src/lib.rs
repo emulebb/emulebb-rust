@@ -58,11 +58,6 @@ const DEFAULT_SEGMENT_SECONDS: u64 = 60 * 60;
 #[cfg(feature = "enabled")]
 const DEFAULT_RETAINED_SEGMENTS: usize = 8;
 #[cfg(feature = "enabled")]
-const DEFAULT_MAX_TOTAL_BYTES: u64 = DEFAULT_SEGMENT_BYTES * DEFAULT_RETAINED_SEGMENTS as u64;
-#[cfg(feature = "enabled")]
-const DEFAULT_MAX_RETAINED_SECONDS: u64 =
-    DEFAULT_SEGMENT_SECONDS * DEFAULT_RETAINED_SEGMENTS as u64;
-#[cfg(feature = "enabled")]
 const DEFAULT_MINIMUM_FREE_BYTES: u64 = 0;
 #[cfg(feature = "enabled")]
 const MIN_SEGMENT_BYTES: u64 = 1024 * 1024;
@@ -328,6 +323,7 @@ impl WriterInitFailure {
 #[cfg(feature = "enabled")]
 fn initialize_global_writer() -> Result<Mutex<SegmentedEventWriter>, WriterInitFailure> {
     let config = WriterConfig::from_environment()
+        .map_err(WriterInitFailure::new)?
         .ok_or_else(|| WriterInitFailure::new("logDirectoryNotConfigured".to_string()))?;
     let writer = SegmentedEventWriter::new(
         config,
@@ -342,50 +338,45 @@ fn initialize_global_writer() -> Result<Mutex<SegmentedEventWriter>, WriterInitF
 
 #[cfg(feature = "enabled")]
 impl WriterConfig {
-    fn from_environment() -> Option<Self> {
-        let directory = env::var_os(LOG_DIR_ENV)
+    fn from_environment() -> Result<Option<Self>, String> {
+        let Some(directory) = env::var_os(LOG_DIR_ENV)
             .map(PathBuf::from)
-            .filter(|path| !path.as_os_str().is_empty())?;
+            .filter(|path| !path.as_os_str().is_empty())
+        else {
+            return Ok(None);
+        };
         let max_segment_bytes = environment_u64(
             SEGMENT_BYTES_ENV,
             DEFAULT_SEGMENT_BYTES,
             MIN_SEGMENT_BYTES,
             MAX_SEGMENT_BYTES,
-        );
+        )?;
         let max_segment_age = Duration::from_secs(environment_u64(
             SEGMENT_SECONDS_ENV,
             DEFAULT_SEGMENT_SECONDS,
             MIN_SEGMENT_SECONDS,
             MAX_SEGMENT_SECONDS,
-        ));
+        )?);
         let retained_segments = environment_usize(
             RETAINED_SEGMENTS_ENV,
             DEFAULT_RETAINED_SEGMENTS,
             MIN_RETAINED_SEGMENTS,
             MAX_RETAINED_SEGMENTS,
-        );
-        let default_max_total_bytes = max_segment_bytes
-            .checked_mul(retained_segments as u64)
-            .unwrap_or(DEFAULT_MAX_TOTAL_BYTES);
-        let configured_max_total_bytes = environment_u64(
+        )?;
+        let default_max_total_bytes = max_segment_bytes * retained_segments as u64;
+        let max_total_bytes = environment_u64(
             MAX_TOTAL_BYTES_ENV,
             default_max_total_bytes,
             MIN_SEGMENT_BYTES,
             MAX_TOTAL_BYTES,
-        );
-        let max_total_bytes = if configured_max_total_bytes < max_segment_bytes {
-            warn!(
-                "ignoring {MAX_TOTAL_BYTES_ENV} below {SEGMENT_BYTES_ENV}; using {max_segment_bytes}"
-            );
-            max_segment_bytes
-        } else {
-            configured_max_total_bytes
-        };
-        let default_max_retained_seconds = max_segment_age
-            .as_secs()
-            .checked_mul(retained_segments as u64)
-            .unwrap_or(DEFAULT_MAX_RETAINED_SECONDS);
-        Some(Self {
+        )?;
+        if max_total_bytes < max_segment_bytes {
+            return Err(format!(
+                "invalidConfiguration:{MAX_TOTAL_BYTES_ENV}:below:{SEGMENT_BYTES_ENV}"
+            ));
+        }
+        let default_max_retained_seconds = max_segment_age.as_secs() * retained_segments as u64;
+        Ok(Some(Self {
             directory,
             max_segment_bytes,
             max_segment_age,
@@ -396,14 +387,14 @@ impl WriterConfig {
                 default_max_retained_seconds,
                 MIN_RETAINED_SECONDS,
                 MAX_RETAINED_SECONDS,
-            )),
+            )?),
             minimum_free_bytes: environment_u64(
                 MINIMUM_FREE_BYTES_ENV,
                 DEFAULT_MINIMUM_FREE_BYTES,
                 0,
                 MAX_MINIMUM_FREE_BYTES,
-            ),
-        })
+            )?,
+        }))
     }
 }
 
@@ -787,35 +778,57 @@ fn create_segment(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(feature = "enabled")]
-fn environment_u64(name: &str, default: u64, minimum: u64, maximum: u64) -> u64 {
+fn environment_u64(name: &str, default: u64, minimum: u64, maximum: u64) -> Result<u64, String> {
     let Some(raw) = env::var_os(name) else {
-        return default;
+        return Ok(default);
     };
-    let Ok(value) = raw.to_string_lossy().trim().parse::<u64>() else {
-        warn!("ignoring invalid {name}; using {default}");
-        return default;
-    };
+    parse_bounded_u64(name, &raw.to_string_lossy(), minimum, maximum)
+}
+
+#[cfg(any(feature = "enabled", test))]
+fn parse_bounded_u64(name: &str, raw: &str, minimum: u64, maximum: u64) -> Result<u64, String> {
+    let value = raw
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("invalidConfiguration:{name}:expectedUnsignedInteger"))?;
     if !(minimum..=maximum).contains(&value) {
-        warn!("ignoring out-of-range {name}; using {default}");
-        return default;
+        return Err(format!(
+            "invalidConfiguration:{name}:outsideRange:{minimum}..={maximum}"
+        ));
     }
-    value
+    Ok(value)
 }
 
 #[cfg(feature = "enabled")]
-fn environment_usize(name: &str, default: usize, minimum: usize, maximum: usize) -> usize {
+fn environment_usize(
+    name: &str,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, String> {
     let Some(raw) = env::var_os(name) else {
-        return default;
+        return Ok(default);
     };
-    let Ok(value) = raw.to_string_lossy().trim().parse::<usize>() else {
-        warn!("ignoring invalid {name}; using {default}");
-        return default;
-    };
+    parse_bounded_usize(name, &raw.to_string_lossy(), minimum, maximum)
+}
+
+#[cfg(any(feature = "enabled", test))]
+fn parse_bounded_usize(
+    name: &str,
+    raw: &str,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, String> {
+    let value = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalidConfiguration:{name}:expectedUnsignedInteger"))?;
     if !(minimum..=maximum).contains(&value) {
-        warn!("ignoring out-of-range {name}; using {default}");
-        return default;
+        return Err(format!(
+            "invalidConfiguration:{name}:outsideRange:{minimum}..={maximum}"
+        ));
     }
-    value
+    Ok(value)
 }
 
 fn disabled_health() -> DiagWriterHealth {
@@ -866,21 +879,28 @@ fn disabled_health() -> DiagWriterHealth {
 
 #[cfg(feature = "enabled")]
 fn uninitialized_health() -> DiagWriterHealth {
-    let config = WriterConfig::from_environment();
-    DiagWriterHealth {
-        enabled: true,
-        configured: config.is_some(),
-        max_segment_bytes: config.as_ref().map(|config| config.max_segment_bytes),
-        max_segment_seconds: config
-            .as_ref()
-            .map(|config| config.max_segment_age.as_secs()),
-        retained_segments: config.as_ref().map(|config| config.retained_segments),
-        max_total_bytes: config.as_ref().map(|config| config.max_total_bytes),
-        max_retained_seconds: config
-            .as_ref()
-            .map(|config| config.max_retained_age.as_secs()),
-        minimum_free_bytes: config.as_ref().map(|config| config.minimum_free_bytes),
-        ..disabled_health()
+    match WriterConfig::from_environment() {
+        Ok(config) => DiagWriterHealth {
+            enabled: true,
+            configured: config.is_some(),
+            max_segment_bytes: config.as_ref().map(|config| config.max_segment_bytes),
+            max_segment_seconds: config
+                .as_ref()
+                .map(|config| config.max_segment_age.as_secs()),
+            retained_segments: config.as_ref().map(|config| config.retained_segments),
+            max_total_bytes: config.as_ref().map(|config| config.max_total_bytes),
+            max_retained_seconds: config
+                .as_ref()
+                .map(|config| config.max_retained_age.as_secs()),
+            minimum_free_bytes: config.as_ref().map(|config| config.minimum_free_bytes),
+            ..disabled_health()
+        },
+        Err(reason) => DiagWriterHealth {
+            enabled: true,
+            configured: true,
+            initialization_failure: Some(reason),
+            ..disabled_health()
+        },
     }
 }
 
@@ -898,6 +918,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn bounded_environment_values_reject_invalid_and_out_of_range_input() {
+        assert_eq!(parse_bounded_u64("TEST_BYTES", " 42 ", 1, 100), Ok(42));
+        assert_eq!(
+            parse_bounded_u64("TEST_BYTES", "many", 1, 100),
+            Err("invalidConfiguration:TEST_BYTES:expectedUnsignedInteger".to_string())
+        );
+        assert_eq!(
+            parse_bounded_u64("TEST_BYTES", "101", 1, 100),
+            Err("invalidConfiguration:TEST_BYTES:outsideRange:1..=100".to_string())
+        );
+        assert_eq!(parse_bounded_usize("TEST_COUNT", " 8 ", 2, 16), Ok(8));
+        assert_eq!(
+            parse_bounded_usize("TEST_COUNT", "1", 2, 16),
+            Err("invalidConfiguration:TEST_COUNT:outsideRange:2..=16".to_string())
+        );
+    }
 
     #[test]
     fn event_v2_records_process_run_segment_and_stream_identity() {
