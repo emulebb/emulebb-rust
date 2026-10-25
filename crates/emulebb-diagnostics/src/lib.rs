@@ -4,6 +4,12 @@
 //! by `EMULEBB_RUST_LOG_DIR`. Every producer in one process calls this crate so
 //! file order, process sequence numbers, stream sequence numbers, rotation,
 //! retention, and writer health share one authority.
+//!
+//! Configured writers reject invalid `EMULEBB_RUST_DIAG_SEGMENT_BYTES`,
+//! `EMULEBB_RUST_DIAG_SEGMENT_SECONDS`, `EMULEBB_RUST_DIAG_RETAINED_SEGMENTS`,
+//! `EMULEBB_RUST_DIAG_MAX_TOTAL_BYTES`, `EMULEBB_RUST_DIAG_MAX_RETAINED_SECONDS`,
+//! and `EMULEBB_RUST_DIAG_MIN_FREE_BYTES` values. Scan, deletion, free-space
+//! probe, and writer I/O faults fail closed and remain latched in writer health.
 
 #[cfg(any(feature = "enabled", test))]
 use std::{
@@ -938,6 +944,72 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_writer_health_serializes_stable_camel_case_contract() {
+        let value = serde_json::to_value(disabled_health()).unwrap();
+        let mut actual_keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        actual_keys.sort_unstable();
+        let mut expected_keys = vec![
+            "activeFileName",
+            "activeSegmentBytes",
+            "activeSegmentId",
+            "aggregateLimitDrops",
+            "availableBytes",
+            "bytesWritten",
+            "configured",
+            "droppedEvents",
+            "enabled",
+            "encodeErrors",
+            "freeSpaceProbeErrors",
+            "initializationFailure",
+            "initialized",
+            "maxRetainedSeconds",
+            "maxSegmentBytes",
+            "maxSegmentSeconds",
+            "maxTotalBytes",
+            "maximumGrowthBytes",
+            "minimumFreeBytes",
+            "minimumFreeSpaceDrops",
+            "processId",
+            "recordsWritten",
+            "retainedBytes",
+            "retainedSegmentCount",
+            "retainedSegments",
+            "retentionDeleteErrors",
+            "retentionDeletes",
+            "retentionLimitDrops",
+            "retentionPolicyErrors",
+            "retentionScanErrors",
+            "rotations",
+            "runId",
+            "schema",
+            "storageAuthorityFaulted",
+            "storageBlockReason",
+            "storageFaultDrops",
+            "storagePolicyDrops",
+            "storagePolicySatisfied",
+            "writeErrors",
+            "writerFaultDrops",
+            "writerIoFaulted",
+        ];
+        expected_keys.sort_unstable();
+
+        assert_eq!(actual_keys, expected_keys);
+        assert_eq!(value["schema"], DIAG_EVENT_SCHEMA);
+        assert_eq!(value["enabled"], false);
+        assert_eq!(value["storageAuthorityFaulted"], false);
+        assert_eq!(value["writerIoFaulted"], false);
+        assert_eq!(value["storageBlockReason"], Value::Null);
+        assert_eq!(value["storagePolicySatisfied"], Value::Null);
+        assert_eq!(value["maxTotalBytes"], Value::Null);
+        assert_eq!(value["minimumFreeBytes"], Value::Null);
+    }
+
+    #[test]
     fn event_v2_records_process_run_segment_and_stream_identity() {
         let root = TempDir::new().unwrap();
         let mut writer = test_writer(&root, 4096, Duration::from_secs(60), 4);
@@ -1208,6 +1280,10 @@ mod tests {
         assert_eq!(
             health.storage_block_reason,
             Some(DiagStorageBlockReason::FreeSpaceProbeFailure)
+        );
+        assert_eq!(
+            serde_json::to_value(&health).unwrap()["storageBlockReason"],
+            "freeSpaceProbeFailure"
         );
         assert_eq!(health.storage_policy_satisfied, Some(false));
     }

@@ -26,6 +26,28 @@ fn test_router() -> axum::Router {
     )
 }
 
+fn assert_disabled_diagnostic_writer(writer: &Value) {
+    assert_eq!(writer["schema"], "diag_event_v2");
+    assert_eq!(writer["enabled"], false);
+    assert_eq!(writer["configured"], false);
+    assert_eq!(writer["initialized"], false);
+    assert_eq!(writer["droppedEvents"], 0);
+    assert_eq!(writer["retentionScanErrors"], 0);
+    assert_eq!(writer["freeSpaceProbeErrors"], 0);
+    assert_eq!(writer["storagePolicyDrops"], 0);
+    assert_eq!(writer["storageFaultDrops"], 0);
+    assert_eq!(writer["writerFaultDrops"], 0);
+    assert_eq!(writer["storageAuthorityFaulted"], false);
+    assert_eq!(writer["writerIoFaulted"], false);
+    assert_eq!(writer["storageBlockReason"], Value::Null);
+    assert_eq!(writer["storagePolicySatisfied"], Value::Null);
+    assert_eq!(writer["availableBytes"], Value::Null);
+    assert_eq!(writer["maximumGrowthBytes"], Value::Null);
+    assert_eq!(writer["maxTotalBytes"], Value::Null);
+    assert_eq!(writer["maxRetainedSeconds"], Value::Null);
+    assert_eq!(writer["minimumFreeBytes"], Value::Null);
+}
+
 #[tokio::test]
 async fn healthz_is_unauthenticated_and_tracks_readiness() {
     let core =
@@ -629,6 +651,37 @@ async fn status_reports_shared_catalog_count_without_catalog_listing() {
 }
 
 #[tokio::test]
+async fn diagnostic_writer_health_is_exposed_on_status_and_snapshot() {
+    let router = test_router();
+    for (path, pointer) in [
+        (
+            "/api/v1/status",
+            "/data/runtimeDiagnostics/diagnosticWriter",
+        ),
+        (
+            "/api/v1/snapshot",
+            "/data/status/runtimeDiagnostics/diagnosticWriter",
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_disabled_diagnostic_writer(value.pointer(pointer).unwrap());
+    }
+}
+
+#[tokio::test]
 async fn diagnostics_returns_runtime_diagnostics_directly() {
     let router = test_router();
 
@@ -670,13 +723,11 @@ async fn diagnostics_returns_runtime_diagnostics_directly() {
     );
     assert_eq!(value["data"]["ed2kPublish"]["phase"], "idle");
     assert_eq!(value["data"]["kadPublish"]["phase"], "idle");
-    assert_eq!(value["data"]["diagnosticWriter"]["schema"], "diag_event_v2");
-    assert_eq!(value["data"]["diagnosticWriter"]["enabled"], false);
+    assert_disabled_diagnostic_writer(&value["data"]["diagnosticWriter"]);
     assert_eq!(
         value["data"]["diagnosticWriter"]["processId"],
         std::process::id()
     );
-    assert_eq!(value["data"]["diagnosticWriter"]["droppedEvents"], 0);
     assert_eq!(value["data"]["transferEvents"]["enabled"], true);
     assert_eq!(value["data"]["transferEvents"]["stream"], "sse");
     assert_eq!(value["data"]["transferEvents"]["channelCapacity"], 1024);
