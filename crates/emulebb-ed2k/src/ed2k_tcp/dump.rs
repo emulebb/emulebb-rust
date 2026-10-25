@@ -369,10 +369,6 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
 }
 
 #[cfg(feature = "packet-diagnostics")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "flat diagnostic handshake boundary"
-)]
 pub(super) fn dump_ed2k_tcp_handshake_step(
     flow: &'static str,
     remote_addr: SocketAddr,
