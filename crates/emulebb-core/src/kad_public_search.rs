@@ -45,6 +45,10 @@ pub(crate) async fn search_kad_keywords(
 
     let search_request = kad_public_search_request(request)?;
     let restrictive_payload = search_request.restrictive_payload.clone();
+    crate::diag_kad_event::lookup_started(
+        Some(search_id),
+        crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
+    );
     let mut stream = dht.search_keyword_request_with_cancel_and_class(
         search_request,
         cancel.clone(),
@@ -79,7 +83,7 @@ pub(crate) async fn search_kad_keywords(
     }
     crate::diag_kad_event::lookup_complete(
         Some(search_id),
-        crate::diag_kad_event::KAD_SEARCH_TYPE_KEYWORD,
+        crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
         results.len() as u32,
     );
     Ok(Some(KadKeywordSearchOutcome {

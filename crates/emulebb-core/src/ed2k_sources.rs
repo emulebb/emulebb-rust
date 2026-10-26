@@ -616,6 +616,7 @@ pub(crate) async fn collect_kad_ed2k_metadata(
     timeout: Duration,
 ) -> Option<LearnedEd2kMetadata> {
     let cancel = CancellationToken::new();
+    crate::diag_kad_event::lookup_started(None, crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD);
     let mut stream = dht.search_keywords_with_cancel_and_class(
         keyword_target(query),
         cancel.clone(),
@@ -648,7 +649,7 @@ pub(crate) async fn collect_kad_ed2k_metadata(
     // kad_event lookup_complete (uniform-diagnostics-v2 §3.3): keyword lookup done.
     crate::diag_kad_event::lookup_complete(
         None,
-        crate::diag_kad_event::KAD_SEARCH_TYPE_KEYWORD,
+        crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
         result_count,
     );
     (!learned.is_empty()).then_some(learned)
@@ -664,6 +665,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
     file_size: u64,
     timeout: Duration,
 ) -> Vec<Ed2kFoundSource> {
+    crate::diag_kad_event::lookup_started(None, crate::diag_kad_event::KAD_SEARCH_KIND_FILE);
     let mut sources = Vec::new();
     let deadline = Instant::now() + timeout;
     let retry_delay = Duration::from_millis(ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS);
@@ -710,7 +712,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
                         // kad_event lookup_complete (uniform-diagnostics-v2 §3.3).
                         crate::diag_kad_event::lookup_complete(
                             None,
-                            crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
+                            crate::diag_kad_event::KAD_SEARCH_KIND_FILE,
                             sources.len() as u32,
                         );
                         return sources;
@@ -735,7 +737,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
             // kad_event lookup_complete (uniform-diagnostics-v2 §3.3).
             crate::diag_kad_event::lookup_complete(
                 None,
-                crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
+                crate::diag_kad_event::KAD_SEARCH_KIND_FILE,
                 sources.len() as u32,
             );
             return sources;
@@ -756,7 +758,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
     // kad_event lookup_complete (uniform-diagnostics-v2 §3.3): exhausted = 0 found.
     crate::diag_kad_event::lookup_complete(
         None,
-        crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
+        crate::diag_kad_event::KAD_SEARCH_KIND_FILE,
         sources.len() as u32,
     );
     sources
