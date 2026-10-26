@@ -36,6 +36,8 @@ struct PendingEntry {
     remote_addr: SocketAddr,
     request_opcode: u8,
     expected_opcode: u8,
+    work_class: RpcWorkClass,
+    timeout_duration: Duration,
     tx: oneshot::Sender<KadPacket>,
     created_at: std::time::Instant,
 }

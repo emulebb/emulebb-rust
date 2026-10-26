@@ -1,6 +1,9 @@
 //! Shared diagnostic-event facade plus Kad-specific typed helpers.
 
 use serde_json::Value;
+use std::{net::SocketAddr, time::Duration};
+
+use crate::rpc::RpcWorkClass;
 
 pub use emulebb_diagnostics::DiagWriterHealth;
 
@@ -16,6 +19,104 @@ pub fn emit(
 
 pub fn writer_health() -> DiagWriterHealth {
     emulebb_diagnostics::writer_health()
+}
+
+#[cfg(feature = "packet-diagnostics")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the diagnostic event contract"
+)]
+pub(crate) fn kad_rpc_lifecycle(
+    request_id: u64,
+    peer: SocketAddr,
+    request_opcode: u8,
+    expected_opcode: u8,
+    response_opcode: Option<u8>,
+    work_class: RpcWorkClass,
+    timeout_duration: Duration,
+    elapsed: Duration,
+    outcome: &'static str,
+    detail: Option<&str>,
+) {
+    let (severity, keys, body) = kad_rpc_event_parts(
+        request_id,
+        peer,
+        request_opcode,
+        expected_opcode,
+        response_opcode,
+        work_class,
+        timeout_duration,
+        elapsed,
+        outcome,
+        detail,
+    );
+    emit("kad_event", "rpc", severity, keys, body);
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the diagnostic event contract"
+)]
+pub(crate) fn kad_rpc_lifecycle(
+    _request_id: u64,
+    _peer: SocketAddr,
+    _request_opcode: u8,
+    _expected_opcode: u8,
+    _response_opcode: Option<u8>,
+    _work_class: RpcWorkClass,
+    _timeout_duration: Duration,
+    _elapsed: Duration,
+    _outcome: &'static str,
+    _detail: Option<&str>,
+) {
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "builds one complete diagnostic event"
+)]
+fn kad_rpc_event_parts(
+    request_id: u64,
+    peer: SocketAddr,
+    request_opcode: u8,
+    expected_opcode: u8,
+    response_opcode: Option<u8>,
+    work_class: RpcWorkClass,
+    timeout_duration: Duration,
+    elapsed: Duration,
+    outcome: &'static str,
+    detail: Option<&str>,
+) -> (&'static str, Value, Value) {
+    let severity = match outcome {
+        "attempted" | "response" => "info",
+        _ => "warning",
+    };
+    let mut body = serde_json::json!({
+        "milestone": "rpc_request",
+        "action": outcome,
+        "outcome": outcome,
+        "requestOpcode": request_opcode,
+        "expectedOpcode": expected_opcode,
+        "workClass": work_class.label(),
+        "timeoutMillis": timeout_duration.as_millis(),
+        "elapsedMillis": elapsed.as_millis(),
+    });
+    if let Some(response_opcode) = response_opcode {
+        body["responseOpcode"] = serde_json::json!(response_opcode);
+    }
+    if let Some(detail) = detail {
+        body["detail"] = serde_json::json!(detail);
+    }
+    (
+        severity,
+        serde_json::json!({
+            "requestId": request_id,
+            "peer": peer.to_string(),
+        }),
+        body,
+    )
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -82,7 +183,10 @@ fn bad_peer_action_for_behavior(behavior: &str) -> &'static str {
 mod tests {
     use super::{
         bad_peer_action_for_behavior, bad_peer_kad_drop, kad_event_bootstrap_contact_added,
+        kad_rpc_event_parts,
     };
+    use crate::rpc::RpcWorkClass;
+    use std::time::Duration;
 
     #[test]
     fn bad_peer_action_matches_behavior() {
@@ -112,5 +216,34 @@ mod tests {
             7,
             10,
         );
+    }
+
+    #[test]
+    fn kad_rpc_event_carries_stable_request_lifecycle_context() {
+        let peer = "198.51.100.2:4672".parse().unwrap();
+        let (severity, keys, body) = kad_rpc_event_parts(
+            42,
+            peer,
+            0x21,
+            0x29,
+            Some(0x29),
+            RpcWorkClass::Interactive,
+            Duration::from_secs(5),
+            Duration::from_millis(125),
+            "response",
+            None,
+        );
+
+        assert_eq!(severity, "info");
+        assert_eq!(keys["requestId"], 42);
+        assert_eq!(keys["peer"], peer.to_string());
+        assert_eq!(body["milestone"], "rpc_request");
+        assert_eq!(body["action"], "response");
+        assert_eq!(body["requestOpcode"], 0x21);
+        assert_eq!(body["expectedOpcode"], 0x29);
+        assert_eq!(body["responseOpcode"], 0x29);
+        assert_eq!(body["workClass"], "interactive");
+        assert_eq!(body["timeoutMillis"], 5_000);
+        assert_eq!(body["elapsedMillis"], 125);
     }
 }

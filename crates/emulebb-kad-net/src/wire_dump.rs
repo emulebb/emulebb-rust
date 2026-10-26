@@ -32,6 +32,8 @@ impl KadUdpOutcome {
 /// Stable metadata emitted for a single Kad UDP packet dump line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KadUdpDumpSummary {
+    /// Process-local outbound RPC request identity, when this packet belongs to one.
+    pub request_id: Option<u64>,
     /// Kad protocol header byte after decode.
     pub protocol: Option<u8>,
     /// Kad opcode, when available.
@@ -140,6 +142,9 @@ fn kad_udp_diag_event_parts(
     };
     let mut keys = serde_json::Map::new();
     keys.insert("peer".to_string(), serde_json::json!(peer.to_string()));
+    if let Some(request_id) = summary.request_id {
+        keys.insert("requestId".to_string(), serde_json::json!(request_id));
+    }
     if let Some(protocol) = summary.protocol {
         keys.insert("protocolMarker".to_string(), serde_json::json!(protocol));
     }
@@ -153,6 +158,9 @@ fn kad_udp_diag_event_parts(
         "outcome".to_string(),
         serde_json::json!(summary.outcome.as_str()),
     );
+    if let Some(request_id) = summary.request_id {
+        body.insert("requestId".to_string(), serde_json::json!(request_id));
+    }
     body.insert(
         "traceKey".to_string(),
         serde_json::json!(udp_trace_key(peer)),
@@ -298,6 +306,7 @@ mod tests {
     #[test]
     fn common_event_keeps_exact_tracker_drop_evidence() {
         let summary = KadUdpDumpSummary {
+            request_id: Some(42),
             protocol: Some(0xE4),
             opcode: Some(0x21),
             opcode_name: Some("KADEMLIA2_HELLO_REQ"),
@@ -317,7 +326,9 @@ mod tests {
 
         assert_eq!(severity, "warning");
         assert_eq!(keys["peer"], peer.to_string());
+        assert_eq!(keys["requestId"], 42);
         assert_eq!(body["outcome"], "dropped");
+        assert_eq!(body["requestId"], 42);
         assert_eq!(body["traceKey"], "kad:198.51.100.1:4672");
         assert_eq!(body["stateId"], "kad.recv.kademlia2_hello_req");
         assert_eq!(body["stateLabel"], "KADEMLIA2_HELLO_REQ");

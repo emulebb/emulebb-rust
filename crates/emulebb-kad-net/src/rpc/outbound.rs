@@ -54,10 +54,33 @@ impl PendingGuard {
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        if !self.removed {
-            self.inner.pending.lock().remove(&self.id);
+        if !self.removed
+            && let Some(entry) = self.inner.pending.lock().remove(&self.id)
+        {
+            emit_rpc_terminal(self.id, &entry, None, "cancelled", None);
         }
     }
+}
+
+pub(super) fn emit_rpc_terminal(
+    request_id: u64,
+    entry: &PendingEntry,
+    response_opcode: Option<u8>,
+    outcome: &'static str,
+    detail: Option<&str>,
+) {
+    crate::diag_event::kad_rpc_lifecycle(
+        request_id,
+        entry.remote_addr,
+        entry.request_opcode,
+        entry.expected_opcode,
+        response_opcode,
+        entry.work_class,
+        entry.timeout_duration,
+        entry.created_at.elapsed(),
+        outcome,
+        detail,
+    );
 }
 
 impl RpcManager {
@@ -104,6 +127,8 @@ impl RpcManager {
                     remote_addr: addr,
                     request_opcode: packet.opcode(),
                     expected_opcode,
+                    work_class,
+                    timeout_duration,
                     tx,
                     created_at: std::time::Instant::now(),
                 },
@@ -115,6 +140,18 @@ impl RpcManager {
         // explicit removal arm runs, Drop still evicts the entry so it cannot
         // leak. Each explicit arm uses `guard.take()` to consume it deterministically.
         let mut guard = PendingGuard::new(Arc::clone(&self.inner), id);
+        crate::diag_event::kad_rpc_lifecycle(
+            id,
+            addr,
+            packet.opcode(),
+            expected_opcode,
+            None,
+            work_class,
+            timeout_duration,
+            Duration::ZERO,
+            "attempted",
+            None,
+        );
 
         if is_publish_opcode(packet.opcode()) || is_publish_opcode(expected_opcode) {
             debug!(
@@ -127,8 +164,13 @@ impl RpcManager {
             );
         }
 
-        if let Err(e) = self.send_with_class(addr, packet, work_class).await {
-            guard.take();
+        if let Err(e) = self
+            .send_with_class_for_request(addr, packet, work_class, Some(id))
+            .await
+        {
+            if let Some(entry) = guard.take() {
+                emit_rpc_terminal(id, &entry, None, "transport_failed", Some(&e.to_string()));
+            }
             return Err(e);
         }
 
@@ -140,14 +182,20 @@ impl RpcManager {
                 Ok(pkt)
             }
             Ok(Err(_)) => {
-                guard.take();
+                if let Some(entry) = guard.take() {
+                    emit_rpc_terminal(id, &entry, None, "channel_closed", None);
+                }
                 Err(NetError::ChannelClosed)
             }
             Err(_) => {
-                let elapsed_ms = guard
-                    .take()
+                let entry = guard.take();
+                let elapsed_ms = entry
+                    .as_ref()
                     .map(|entry| entry.created_at.elapsed().as_millis())
                     .unwrap_or_default();
+                if let Some(entry) = entry.as_ref() {
+                    emit_rpc_terminal(id, entry, None, "timeout", None);
+                }
                 if is_publish_opcode(packet.opcode()) || is_publish_opcode(expected_opcode) {
                     debug!(
                         "kad publish pending timeout pending_id={} request_opcode={} expected_opcode={} to={} age_ms={}",
@@ -179,6 +227,17 @@ impl RpcManager {
         packet: &KadPacket,
         work_class: RpcWorkClass,
     ) -> Result<(), NetError> {
+        self.send_with_class_for_request(addr, packet, work_class, None)
+            .await
+    }
+
+    async fn send_with_class_for_request(
+        &self,
+        addr: SocketAddr,
+        packet: &KadPacket,
+        work_class: RpcWorkClass,
+        request_id: Option<u64>,
+    ) -> Result<(), NetError> {
         if !self.kad_enabled() {
             dump_kad_udp_packet(
                 "send",
@@ -186,6 +245,7 @@ impl RpcManager {
                 &[],
                 &[],
                 KadUdpDumpSummary {
+                    request_id,
                     opcode: Some(packet.opcode()),
                     opcode_name: Some(opcode_name(packet.opcode())),
                     drop_reason: Some("kad_stopped"),
@@ -217,6 +277,7 @@ impl RpcManager {
                     &[],
                     &[],
                     KadUdpDumpSummary {
+                        request_id,
                         opcode: Some(packet.opcode()),
                         opcode_name: Some(opcode_name(packet.opcode())),
                         drop_reason: Some("encode_failed"),
@@ -294,6 +355,7 @@ impl RpcManager {
             &wire,
             &encoded,
             KadUdpDumpSummary {
+                request_id,
                 protocol: encoded.first().copied(),
                 opcode: Some(packet.opcode()),
                 opcode_name: Some(opcode_name(packet.opcode())),
