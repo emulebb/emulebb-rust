@@ -334,28 +334,36 @@ pub(crate) fn callback(
     emit(FAMILY, "callback", severity, keys, body);
 }
 
-fn lookup_complete_parts(
+fn lookup_parts(
+    milestone: &'static str,
     search_id: Option<&str>,
-    search_type: u32,
+    search_kind: &'static str,
     result_count: u32,
 ) -> (Value, Value) {
     let keys = search_id.map_or_else(|| json!({}), |search_id| json!({ "searchId": search_id }));
     let body = json!({
-        "milestone": "lookup_complete",
-        "action": "observe",
-        "searchType": search_type,
+        "milestone": milestone,
+        "action": "search",
+        "searchKind": search_kind,
         "resultCount": result_count,
     });
     (keys, body)
 }
 
-/// `lookup` milestone `lookup_complete` (schema §3.3): a Kad search/lookup
-/// completed. `searchId` correlates a public search with `sched/keyword_search`;
+/// Emits the start of one Kad lookup. `searchId` correlates public searches;
 /// internal metadata and source lookups omit it rather than inventing an ID.
-/// `searchType` mirrors the master's `LogSearchResponseEvent` search type
-/// integer; `resultCount` is the number of results gathered.
-pub(crate) fn lookup_complete(search_id: Option<&str>, search_type: u32, result_count: u32) {
-    let (keys, body) = lookup_complete_parts(search_id, search_type, result_count);
+pub(crate) fn lookup_started(search_id: Option<&str>, search_kind: &'static str) {
+    let (keys, body) = lookup_parts("lookup_started", search_id, search_kind, 0);
+    emit(FAMILY, "lookup", "info", keys, body);
+}
+
+/// Emits the terminal result count for one Kad lookup.
+pub(crate) fn lookup_complete(
+    search_id: Option<&str>,
+    search_kind: &'static str,
+    result_count: u32,
+) {
+    let (keys, body) = lookup_parts("lookup_complete", search_id, search_kind, result_count);
     emit(FAMILY, "lookup", "info", keys, body);
 }
 
@@ -418,40 +426,37 @@ pub(crate) fn local_store_summary(elapsed_secs: u64, summaries: &[KadLocalStoreP
     emit(FAMILY, "kad_local_store", "info", json!({}), body);
 }
 
-/// The master uses these Kad search-type integers in `LogSearchResponseEvent`
-/// (`KadSearchTypeFile`/`KadSearchTypeKeyword`). The rust lookup hooks know which
-/// kind they are, so map them to the same integers for harness alignment.
-pub(crate) const KAD_SEARCH_TYPE_KEYWORD: u32 = 0;
-pub(crate) const KAD_SEARCH_TYPE_FILE: u32 = 1;
+pub(crate) const KAD_SEARCH_KIND_KEYWORD: &str = "keyword";
+pub(crate) const KAD_SEARCH_KIND_FILE: &str = "file";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn search_type_constants_match_master() {
-        assert_eq!(KAD_SEARCH_TYPE_KEYWORD, 0);
-        assert_eq!(KAD_SEARCH_TYPE_FILE, 1);
+    fn search_kind_constants_are_stable() {
+        assert_eq!(KAD_SEARCH_KIND_KEYWORD, "keyword");
+        assert_eq!(KAD_SEARCH_KIND_FILE, "file");
     }
 
     #[test]
-    fn lookup_complete_correlates_public_searches() {
-        let (keys, body) = lookup_complete_parts(Some("42"), KAD_SEARCH_TYPE_KEYWORD, 7);
+    fn lookup_lifecycle_correlates_public_searches() {
+        let (keys, body) = lookup_parts("lookup_complete", Some("42"), KAD_SEARCH_KIND_KEYWORD, 7);
         assert_eq!(keys, json!({ "searchId": "42" }));
         assert_eq!(
             body,
             json!({
                 "milestone": "lookup_complete",
-                "action": "observe",
-                "searchType": KAD_SEARCH_TYPE_KEYWORD,
+                "action": "search",
+                "searchKind": KAD_SEARCH_KIND_KEYWORD,
                 "resultCount": 7,
             })
         );
     }
 
     #[test]
-    fn lookup_complete_omits_unknown_search_id() {
-        let (keys, _) = lookup_complete_parts(None, KAD_SEARCH_TYPE_FILE, 0);
+    fn lookup_lifecycle_omits_unknown_search_id() {
+        let (keys, _) = lookup_parts("lookup_started", None, KAD_SEARCH_KIND_FILE, 0);
         assert_eq!(keys, json!({}));
     }
 
@@ -481,7 +486,8 @@ mod tests {
             "192.0.2.77:4662".parse().unwrap(),
             "abc123",
         );
-        lookup_complete(None, KAD_SEARCH_TYPE_FILE, 7);
+        lookup_started(None, KAD_SEARCH_KIND_FILE);
+        lookup_complete(None, KAD_SEARCH_KIND_FILE, 7);
         routing_summary(
             true,
             false,
