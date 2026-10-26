@@ -316,7 +316,7 @@ impl Ed2kTransferRuntime {
 
         let _guard = self.lock_manifest(&manifest.file_hash).await;
         self.store_manifest_unlocked(&manifest).await?;
-        self.upsert_verified_catalog_entry(&manifest).await;
+        self.upsert_verified_catalog_entry_cached(&manifest).await;
         drop(_guard);
 
         Ok(Ed2kLocalIngestSummary {

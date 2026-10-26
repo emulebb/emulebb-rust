@@ -567,7 +567,7 @@ impl Ed2kTransferRuntime {
             (Vec::new(), true)
         } else {
             (
-                transfer_sql::completed_catalog_from_metadata_store(&metadata, root_dir)?,
+                transfer_sql::completed_catalog_from_metadata_store(&metadata)?,
                 false,
             )
         };
