@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 
 use emulebb_ed2k::diag_event::emit;
 use emulebb_kad_dht::{KadRoutingSummaryCounts, PublishAttemptStats};
-use serde_json::json;
+use serde_json::{Value, json};
 
 const FAMILY: &str = "kad_event";
 
@@ -334,17 +334,29 @@ pub(crate) fn callback(
     emit(FAMILY, "callback", severity, keys, body);
 }
 
-/// `lookup` milestone `lookup_complete` (schema §3.3): a Kad search/lookup
-/// completed. `searchType` mirrors the master's `LogSearchResponseEvent` search
-/// type integer; `resultCount` is the number of results gathered.
-pub(crate) fn lookup_complete(search_type: u32, result_count: u32) {
+fn lookup_complete_parts(
+    search_id: Option<&str>,
+    search_type: u32,
+    result_count: u32,
+) -> (Value, Value) {
+    let keys = search_id.map_or_else(|| json!({}), |search_id| json!({ "searchId": search_id }));
     let body = json!({
         "milestone": "lookup_complete",
         "action": "observe",
         "searchType": search_type,
         "resultCount": result_count,
     });
-    emit(FAMILY, "lookup", "info", json!({}), body);
+    (keys, body)
+}
+
+/// `lookup` milestone `lookup_complete` (schema §3.3): a Kad search/lookup
+/// completed. `searchId` correlates a public search with `sched/keyword_search`;
+/// internal metadata and source lookups omit it rather than inventing an ID.
+/// `searchType` mirrors the master's `LogSearchResponseEvent` search type
+/// integer; `resultCount` is the number of results gathered.
+pub(crate) fn lookup_complete(search_id: Option<&str>, search_type: u32, result_count: u32) {
+    let (keys, body) = lookup_complete_parts(search_id, search_type, result_count);
+    emit(FAMILY, "lookup", "info", keys, body);
 }
 
 /// `routing_summary` (schema §3.3, periodic): the routing-table + connection
@@ -423,6 +435,27 @@ mod tests {
     }
 
     #[test]
+    fn lookup_complete_correlates_public_searches() {
+        let (keys, body) = lookup_complete_parts(Some("42"), KAD_SEARCH_TYPE_KEYWORD, 7);
+        assert_eq!(keys, json!({ "searchId": "42" }));
+        assert_eq!(
+            body,
+            json!({
+                "milestone": "lookup_complete",
+                "action": "observe",
+                "searchType": KAD_SEARCH_TYPE_KEYWORD,
+                "resultCount": 7,
+            })
+        );
+    }
+
+    #[test]
+    fn lookup_complete_omits_unknown_search_id() {
+        let (keys, _) = lookup_complete_parts(None, KAD_SEARCH_TYPE_FILE, 0);
+        assert_eq!(keys, json!({}));
+    }
+
+    #[test]
     fn firewall_emit_is_a_noop_without_log_dir() {
         // EMULEBB_RUST_LOG_DIR is unset in the unit-test environment, so the
         // shared writer is a no-op; this just exercises the builder paths.
@@ -448,7 +481,7 @@ mod tests {
             "192.0.2.77:4662".parse().unwrap(),
             "abc123",
         );
-        lookup_complete(KAD_SEARCH_TYPE_FILE, 7);
+        lookup_complete(None, KAD_SEARCH_TYPE_FILE, 7);
         routing_summary(
             true,
             false,
