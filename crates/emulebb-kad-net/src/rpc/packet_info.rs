@@ -185,8 +185,10 @@ pub(super) fn opcode_name(opcode_value: u8) -> &'static str {
         opcode::HELLO_REQ => "KADEMLIA2_HELLO_REQ",
         opcode::HELLO_RES_DEPRECATED => "KADEMLIA_HELLO_RES_DEPRECATED",
         opcode::HELLO_RES => "KADEMLIA2_HELLO_RES",
-        opcode::HELLO_RES_ACK => "KADEMLIA2_HELLO_RES_ACK",
+        opcode::REQ_DEPRECATED => "KADEMLIA_REQ_DEPRECATED",
         opcode::REQ => "KADEMLIA2_REQ",
+        opcode::HELLO_RES_ACK => "KADEMLIA2_HELLO_RES_ACK",
+        opcode::RES_DEPRECATED => "KADEMLIA_RES_DEPRECATED",
         opcode::RES => "KADEMLIA2_RES",
         opcode::SEARCH_KEY_REQ => "KADEMLIA2_SEARCH_KEY_REQ",
         opcode::SEARCH_SOURCE_REQ => "KADEMLIA2_SEARCH_SOURCE_REQ",
@@ -328,13 +330,10 @@ mod tests {
     use super::{is_publish_opcode, is_tracked_response_opcode, opcode_name};
     use emulebb_kad_proto::constants::opcode;
 
-    // Regression (2026-07-06 parity audit): an unknown/legacy inbound Kad opcode
-    // (e.g. Kad1 KADEMLIA_REQ 0x20) must keep its RAW NUMERIC opcode through the
-    // decode + diag pipeline, with "UNKNOWN" as the name marker. If either ever
-    // becomes None/absent, the offline coverage tooling can no longer credit rust
-    // with receiving those opcodes from the diag stream alone.
+    // The unsupported Kad1 packet remains an Unknown protocol value, but
+    // diagnostics still identify its oracle-defined opcode by name.
     #[test]
-    fn unknown_legacy_inbound_opcode_keeps_raw_numeric_opcode_for_diagnostics() {
+    fn unsupported_legacy_inbound_opcode_keeps_named_diagnostics() {
         let datagram = [0xE4u8, 0x20, 0x01, 0x02, 0x03];
         let packet = emulebb_kad_proto::KadPacket::decode(&datagram).expect("decodes as Unknown");
         assert!(matches!(
@@ -342,7 +341,8 @@ mod tests {
             emulebb_kad_proto::KadPacket::Unknown { opcode: 0x20, .. }
         ));
         assert_eq!(packet.opcode(), 0x20);
-        assert_eq!(opcode_name(0x20), "UNKNOWN");
+        assert_eq!(opcode_name(0x20), "KADEMLIA_REQ_DEPRECATED");
+        assert_eq!(opcode_name(0x28), "KADEMLIA_RES_DEPRECATED");
     }
 
     #[test]

@@ -101,8 +101,12 @@ pub mod opcode {
     /// Legacy pre-Kad2 hello response; named for diagnostics only.
     pub const HELLO_RES_DEPRECATED: u8 = 0x18;
     pub const HELLO_RES: u8 = 0x19;
-    pub const HELLO_RES_ACK: u8 = 0x22;
+    /// Legacy pre-Kad2 routing request; named for diagnostics only.
+    pub const REQ_DEPRECATED: u8 = 0x20;
     pub const REQ: u8 = 0x21;
+    pub const HELLO_RES_ACK: u8 = 0x22;
+    /// Legacy pre-Kad2 routing response; named for diagnostics only.
+    pub const RES_DEPRECATED: u8 = 0x28;
     pub const RES: u8 = 0x29;
     pub const SEARCH_KEY_REQ: u8 = 0x33;
     pub const SEARCH_SOURCE_REQ: u8 = 0x34;
@@ -197,8 +201,10 @@ mod tests {
             ("HELLO_REQ", opcode::HELLO_REQ, 0x11),
             ("HELLO_RES_DEPRECATED", opcode::HELLO_RES_DEPRECATED, 0x18),
             ("HELLO_RES", opcode::HELLO_RES, 0x19),
+            ("REQ_DEPRECATED", opcode::REQ_DEPRECATED, 0x20),
             ("REQ", opcode::REQ, 0x21),
             ("HELLO_RES_ACK", opcode::HELLO_RES_ACK, 0x22),
+            ("RES_DEPRECATED", opcode::RES_DEPRECATED, 0x28),
             ("RES", opcode::RES, 0x29),
             ("SEARCH_REQ_LEGACY", opcode::SEARCH_REQ_LEGACY, 0x30),
             (
