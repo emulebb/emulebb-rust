@@ -10,11 +10,7 @@
     )
 )]
 
-use std::{
-    borrow::Cow,
-    net::SocketAddr,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{borrow::Cow, net::SocketAddr};
 
 use super::{
     Ed2kTransportMode, EmuleTcpPacket, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS,
@@ -289,41 +285,6 @@ pub(super) fn canonical_ed2k_recv_phase<'a>(
     Cow::Borrowed(fallback)
 }
 
-/// Whether to SKIP dumping this packet because it is a high-volume bulk file-data
-/// packet (OP_SENDINGPART / OP_COMPRESSEDPART, 32- and 64-bit) past its sample.
-///
-/// At download/upload throughput these data packets arrive thousands per second;
-/// each dumped line ALSO emits a converged `diag_event`, so an unsampled dump
-/// reaches tens of GB in a long soak. The control-plane packets (HELLO, SUI,
-/// REQUESTPARTS, MULTIPACKET, ...) carry the parity signal and are never skipped;
-/// for the bulk data opcodes we keep the first `HEAD` of each (coverage + sample
-/// structure) then 1-in-`EVERY` for long-soak liveness. Returns false for any
-/// non-bulk packet (never skipped).
-///
-/// Counters are kept PER DIRECTION (`from_recv`): a transfer both serves and
-/// pulls bulk parts, and a shared counter lets one direction consume the whole
-/// HEAD budget and starve the other's coverage entirely (e.g. SENDINGPART would
-/// show up only on `send`, falsely reading as a `recv` gap in a rust-vs-MFC diff).
-#[cfg(feature = "packet-diagnostics")]
-fn should_skip_bulk_packet(protocol: u8, opcode: u8, from_recv: bool) -> bool {
-    // Index [send, recv] per opcode so each direction keeps its own HEAD sample.
-    static SENDINGPART: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-    static COMPRESSEDPART: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-    static SENDINGPART_I64: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-    static COMPRESSEDPART_I64: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-    const HEAD: u64 = 64;
-    const EVERY: u64 = 8192;
-    let counters = match (protocol, opcode) {
-        (OP_EDONKEYPROT, OP_SENDINGPART) => &SENDINGPART,
-        (OP_EMULEPROT, OP_COMPRESSEDPART) => &COMPRESSEDPART,
-        (OP_EMULEPROT, OP_SENDINGPART_I64) => &SENDINGPART_I64,
-        (OP_EMULEPROT, OP_COMPRESSEDPART_I64) => &COMPRESSEDPART_I64,
-        _ => return false,
-    };
-    let n = counters[usize::from(from_recv)].fetch_add(1, Ordering::Relaxed);
-    !(n < HEAD || n % EVERY == 0)
-}
-
 fn emit_ed2k_tcp_record(record: &Ed2kTcpDiagnosticRecord<'_>) {
     super::diag_event::emit_ed2k_tcp_diag_event(record);
 }
@@ -380,9 +341,6 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
     raw: &[u8],
     clear_frame: &[u8],
 ) {
-    if should_skip_bulk_packet(packet.protocol, packet.opcode, true) {
-        return;
-    }
     let canonical_phase = canonical_ed2k_recv_phase(flow, phase, packet.protocol, packet.opcode);
     let payload_hex = exact_packet_hex(&packet.payload);
     let record = Ed2kTcpDiagnosticRecord {
@@ -530,12 +488,6 @@ pub(super) fn dump_ed2k_tcp_send_capture(
 ) {
     let protocol = clear_frame.first().copied();
     let opcode = clear_frame.get(TCP_PACKET_HEADER_LEN - 1).copied();
-    if outcome == "send_succeeded"
-        && let (Some(protocol), Some(opcode)) = (protocol, opcode)
-        && should_skip_bulk_packet(protocol, opcode, false)
-    {
-        return;
-    }
     let payload =
         (clear_frame.len() > TCP_PACKET_HEADER_LEN).then(|| &clear_frame[TCP_PACKET_HEADER_LEN..]);
     let canonical_phase = canonical_ed2k_send_phase(flow, phase, protocol, opcode);
