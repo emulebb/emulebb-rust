@@ -48,10 +48,9 @@ impl Ed2kTransferRuntime {
 
         let result = async {
             let metadata = self.metadata.clone();
-            let root_dir = self.root_dir.clone();
             let entries = tokio::task::spawn_blocking(move || {
                 super::transfer_sql::completed_catalog_page_from_metadata_store(
-                    &metadata, &root_dir, None, limit,
+                    &metadata, None, limit,
                 )
             })
             .await??;
@@ -112,12 +111,10 @@ impl Ed2kTransferRuntime {
             let mut hydrated = 0usize;
             loop {
                 let metadata = self.metadata.clone();
-                let root_dir = self.root_dir.clone();
                 let page_after = after_hash.clone();
                 let entries = tokio::task::spawn_blocking(move || {
                     super::transfer_sql::completed_catalog_page_from_metadata_store(
                         &metadata,
-                        &root_dir,
                         page_after.as_deref(),
                         HYDRATION_PAGE_SIZE,
                     )
@@ -244,6 +241,20 @@ impl Ed2kTransferRuntime {
     }
 
     pub(super) async fn upsert_verified_catalog_entry(&self, manifest: &Ed2kResumeManifest) {
+        self.upsert_verified_catalog_entry_with_media_refresh(manifest, true)
+            .await;
+    }
+
+    pub(super) async fn upsert_verified_catalog_entry_cached(&self, manifest: &Ed2kResumeManifest) {
+        self.upsert_verified_catalog_entry_with_media_refresh(manifest, false)
+            .await;
+    }
+
+    async fn upsert_verified_catalog_entry_with_media_refresh(
+        &self,
+        manifest: &Ed2kResumeManifest,
+        refresh_missing_media: bool,
+    ) {
         let Ok(file_hash) = Ed2kHash::from_str(&manifest.file_hash) else {
             return;
         };
@@ -262,7 +273,7 @@ impl Ed2kTransferRuntime {
                 });
             entry.media = if let Some(cached) = cached {
                 super::transfer_sql::media_from_metadata(cached)
-            } else if manifest.completed {
+            } else if manifest.completed && refresh_missing_media {
                 let path = manifest
                     .source_path
                     .as_deref()

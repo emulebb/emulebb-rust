@@ -849,7 +849,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_media_cache_is_refilled_once_on_runtime_load() {
+    async fn uncached_media_does_not_block_runtime_load() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("legacy-cache.mp3");
         let runtime_root = temp.path().join("runtime");
@@ -865,11 +865,12 @@ mod tests {
         };
         let metadata =
             emulebb_metadata::MetadataStore::open(runtime_root.join("metadata.sqlite")).unwrap();
+        let stale = emulebb_metadata::MetadataTransferMediaMetadata {
+            artist: "Stale Artist".to_owned(),
+            ..Default::default()
+        };
         metadata
-            .update_transfer_media_metadata(
-                &file_hash,
-                &emulebb_metadata::MetadataTransferMediaMetadata::default(),
-            )
+            .update_transfer_media_metadata(&file_hash, &stale)
             .unwrap();
         drop(metadata);
 
@@ -880,7 +881,7 @@ mod tests {
             .iter()
             .find(|entry| entry.file_hash == file_hash)
             .unwrap();
-        assert_eq!(entry.media.artist, "Example Artist");
+        assert!(entry.media.artist.is_empty());
         drop(guard);
 
         let metadata =
@@ -889,11 +890,8 @@ mod tests {
             .transfer_media_metadata(&file_hash)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            cached.extractor_version,
-            super::super::transfer_sql::MEDIA_METADATA_EXTRACTOR_VERSION
-        );
-        assert_eq!(cached.artist, "Example Artist");
+        assert_eq!(cached.extractor_version, 0);
+        assert_eq!(cached.artist, "Stale Artist");
     }
 
     #[test]

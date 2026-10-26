@@ -203,54 +203,31 @@ pub(super) fn manifest_from_metadata(
 
 pub(super) fn completed_catalog_from_metadata_store(
     metadata: &MetadataStore,
-    root_dir: &std::path::Path,
 ) -> Result<Vec<Ed2kSharedEntry>> {
     metadata
         .completed_transfer_catalog_entries()?
         .into_iter()
-        .map(|entry| shared_entry_from_catalog_entry(metadata, entry, root_dir))
+        .map(shared_entry_from_catalog_entry)
         .collect()
 }
 
 pub(super) fn completed_catalog_page_from_metadata_store(
     metadata: &MetadataStore,
-    root_dir: &std::path::Path,
     after_hash: Option<&str>,
     limit: usize,
 ) -> Result<Vec<Ed2kSharedEntry>> {
     metadata
         .completed_transfer_catalog_entries_after(after_hash, limit)?
         .into_iter()
-        .map(|entry| shared_entry_from_catalog_entry(metadata, entry, root_dir))
+        .map(shared_entry_from_catalog_entry)
         .collect()
 }
 
-fn shared_entry_from_catalog_entry(
-    metadata: &MetadataStore,
-    entry: MetadataTransferCatalogEntry,
-    root_dir: &std::path::Path,
-) -> Result<Ed2kSharedEntry> {
+fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Result<Ed2kSharedEntry> {
     let media = if entry.media.extractor_version == MEDIA_METADATA_EXTRACTOR_VERSION {
         media_from_metadata(entry.media.clone())
     } else {
-        let media_path = entry
-            .media_path
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                root_dir
-                    .join(&entry.file_hash)
-                    .join(super::PAYLOAD_FILE_NAME)
-            });
-        let media = super::media_metadata::extract_media_metadata(&media_path, &entry.display_name);
-        let persisted = media_to_metadata(&media, MEDIA_METADATA_EXTRACTOR_VERSION);
-        if let Err(error) = metadata.update_transfer_media_metadata(&entry.file_hash, &persisted) {
-            tracing::warn!(
-                file_hash = %entry.file_hash,
-                "failed to persist refreshed shared media metadata: {error:#}"
-            );
-        }
-        media
+        Default::default()
     };
     Ok(Ed2kSharedEntry {
         file_hash: entry.file_hash,
