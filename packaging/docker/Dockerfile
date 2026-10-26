@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 ARG VERSION=0.1.0-beta.2
-FROM lscr.io/linuxserver/baseimage-ubuntu:noble@sha256:94a6c41cbd36a3cdc38cf1f6d3ffd376e9349aabf8d9bbc825112e1a49f6c330
+FROM lscr.io/linuxserver/baseimage-ubuntu:noble@sha256:81fe4872e32337f95bc44169622eb6c53cbbadbfd32f5584442c87a8a16cefb2
 
 ARG VERSION
 ARG TARGETARCH
