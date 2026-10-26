@@ -77,6 +77,11 @@ pub(crate) async fn search_kad_keywords(
         }
         merge_kad_search_result(&mut results, &mut result_indexes, hash, mapped);
     }
+    crate::diag_kad_event::lookup_complete(
+        Some(search_id),
+        crate::diag_kad_event::KAD_SEARCH_TYPE_KEYWORD,
+        results.len() as u32,
+    );
     Ok(Some(KadKeywordSearchOutcome {
         results,
         aich_votes,

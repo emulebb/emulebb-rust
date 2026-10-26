@@ -647,6 +647,7 @@ pub(crate) async fn collect_kad_ed2k_metadata(
     cancel.cancel();
     // kad_event lookup_complete (uniform-diagnostics-v2 §3.3): keyword lookup done.
     crate::diag_kad_event::lookup_complete(
+        None,
         crate::diag_kad_event::KAD_SEARCH_TYPE_KEYWORD,
         result_count,
     );
@@ -708,6 +709,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
                         );
                         // kad_event lookup_complete (uniform-diagnostics-v2 §3.3).
                         crate::diag_kad_event::lookup_complete(
+                            None,
                             crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
                             sources.len() as u32,
                         );
@@ -732,6 +734,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
             );
             // kad_event lookup_complete (uniform-diagnostics-v2 §3.3).
             crate::diag_kad_event::lookup_complete(
+                None,
                 crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
                 sources.len() as u32,
             );
@@ -752,6 +755,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
     );
     // kad_event lookup_complete (uniform-diagnostics-v2 §3.3): exhausted = 0 found.
     crate::diag_kad_event::lookup_complete(
+        None,
         crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
         sources.len() as u32,
     );
