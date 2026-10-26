@@ -222,6 +222,7 @@ impl RpcManager {
                                     &data,
                                     &plain,
                                     KadUdpDumpSummary {
+                                        request_id: None,
                                         protocol: plain.first().copied(),
                                         opcode: Some(response_opcode),
                                         opcode_name: Some(opcode_name(response_opcode)),
@@ -331,6 +332,13 @@ impl RpcManager {
                                         age_ms,
                                     );
                                 }
+                                super::outbound::emit_rpc_terminal(
+                                    id,
+                                    &entry,
+                                    Some(response_opcode),
+                                    "response",
+                                    None,
+                                );
                                 let _ = entry.tx.send(packet.clone());
                                 Some((id, age_ms, entry.request_opcode, matched_by_ip_only))
                             } else {
@@ -348,6 +356,7 @@ impl RpcManager {
                             .or(tracked_request_opcode);
 
                         let mut dump_summary = KadUdpDumpSummary {
+                            request_id: matched.map(|(id, _, _, _)| id),
                             protocol: plain.first().copied(),
                             opcode: Some(response_opcode),
                             opcode_name: Some(opcode_name(response_opcode)),
@@ -481,6 +490,7 @@ fn inbound_dump_summary(
     detail: Option<String>,
 ) -> KadUdpDumpSummary {
     KadUdpDumpSummary {
+        request_id: None,
         protocol: plain.first().copied(),
         opcode,
         opcode_name: opcode.map(opcode_name),
