@@ -46,6 +46,8 @@ pub(super) struct Ed2kTcpDiagnosticRecord<'a> {
     pub(super) direction: &'a str,
     pub(super) outcome: &'a str,
     pub(super) remote_addr: String,
+    pub(super) peer_hash: Option<[u8; 16]>,
+    pub(super) file_hash: Option<[u8; 16]>,
     pub(super) transport_mode: &'a str,
     pub(super) obfuscated: Option<bool>,
     pub(super) protocol: Option<&'static str>,
@@ -66,6 +68,47 @@ pub(super) struct Ed2kTcpDiagnosticRecord<'a> {
 
 fn exact_packet_hex(bytes: &[u8]) -> String {
     hex::encode(bytes)
+}
+
+fn hash_at(payload: &[u8], offset: usize) -> Option<[u8; 16]> {
+    payload.get(offset..offset + 16)?.try_into().ok()
+}
+
+fn ed2k_tcp_file_hash(protocol: u8, opcode: u8, payload: &[u8]) -> Option<[u8; 16]> {
+    let offset = match (protocol, opcode) {
+        (
+            OP_EDONKEYPROT,
+            OP_END_OF_DOWNLOAD | OP_FILEREQANSNOFIL | OP_FILESTATUS | OP_HASHSETANSWER
+            | OP_HASHSETREQUEST | OP_REQFILENAMEANSWER | OP_REQUESTFILENAME | OP_REQUESTPARTS
+            | OP_SENDINGPART | OP_SETREQFILEID | OP_STARTUPLOADREQ,
+        )
+        | (
+            OP_EMULEPROT,
+            OP_AICHANSWER
+            | OP_AICHFILEHASHANS
+            | OP_AICHFILEHASHREQ
+            | OP_AICHREQUEST
+            | OP_ANSWERSOURCES
+            | OP_COMPRESSEDPART
+            | OP_COMPRESSEDPART_I64
+            | OP_MULTIPACKET
+            | OP_MULTIPACKETANSWER
+            | OP_MULTIPACKET_EXT
+            | OP_REQUESTSOURCES
+            | OP_SENDINGPART_I64,
+        ) => 0,
+        (OP_EMULEPROT, OP_ANSWERSOURCES2) => 1,
+        (OP_EMULEPROT, OP_REQUESTSOURCES2) => 3,
+        (
+            OP_EMULEPROT,
+            OP_HASHSETANSWER2
+            | OP_HASHSETREQUEST2
+            | OP_MULTIPACKETANSWER_EXT2
+            | OP_MULTIPACKET_EXT2,
+        ) => 1,
+        _ => return None,
+    };
+    hash_at(payload, offset)
 }
 
 fn ed2k_tcp_trace_key(flow: &'static str, remote_addr: SocketAddr) -> String {
@@ -303,6 +346,8 @@ fn dump_ed2k_tcp_meta(
         direction: "meta",
         outcome: "meta",
         remote_addr: remote_addr.to_string(),
+        peer_hash: None,
+        file_hash: None,
         transport_mode: transport_mode.map_or("unknown", Ed2kTransportMode::as_str),
         obfuscated: transport_mode.map(Ed2kTransportMode::is_obfuscated),
         protocol: None,
@@ -324,11 +369,13 @@ fn dump_ed2k_tcp_meta(
 }
 
 #[cfg(feature = "packet-diagnostics")]
+#[expect(clippy::too_many_arguments, reason = "flat diagnostic packet boundary")]
 pub(super) fn dump_ed2k_tcp_recv_capture(
     flow: &'static str,
     remote_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     phase: &str,
+    peer_hash: Option<[u8; 16]>,
     packet: &EmuleTcpPacket,
     raw: &[u8],
     clear_frame: &[u8],
@@ -348,6 +395,8 @@ pub(super) fn dump_ed2k_tcp_recv_capture(
         direction: "recv",
         outcome: "accepted",
         remote_addr: remote_addr.to_string(),
+        peer_hash,
+        file_hash: ed2k_tcp_file_hash(packet.protocol, packet.opcode, &packet.payload),
         transport_mode: transport_mode.as_str(),
         obfuscated: Some(transport_mode.is_obfuscated()),
         protocol: Some(ed2k_protocol_name(packet.protocol)),
@@ -388,6 +437,8 @@ pub(super) fn dump_ed2k_tcp_handshake_step(
         direction,
         outcome,
         remote_addr: remote_addr.to_string(),
+        peer_hash: None,
+        file_hash: None,
         transport_mode: Ed2kTransportMode::Obfuscated.as_str(),
         obfuscated: Some(true),
         protocol: None,
@@ -415,6 +466,7 @@ pub(super) fn dump_ed2k_tcp_recv_terminal(
     remote_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     phase: &str,
+    peer_hash: Option<[u8; 16]>,
     raw: &[u8],
     clear_frame: &[u8],
     outcome: &'static str,
@@ -436,6 +488,10 @@ pub(super) fn dump_ed2k_tcp_recv_terminal(
         direction: "recv",
         outcome,
         remote_addr: remote_addr.to_string(),
+        peer_hash,
+        file_hash: protocol.zip(opcode).and_then(|(protocol, opcode)| {
+            ed2k_tcp_file_hash(protocol, opcode, clear_frame.get(TCP_PACKET_HEADER_LEN..)?)
+        }),
         transport_mode: transport_mode.as_str(),
         obfuscated: Some(transport_mode.is_obfuscated()),
         protocol: protocol.map(ed2k_protocol_name),
@@ -465,6 +521,7 @@ pub(super) fn dump_ed2k_tcp_send_capture(
     remote_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     phase: &str,
+    peer_hash: Option<[u8; 16]>,
     clear_frame: &[u8],
     raw: &[u8],
     attempted_len: usize,
@@ -492,6 +549,10 @@ pub(super) fn dump_ed2k_tcp_send_capture(
         direction: "send",
         outcome,
         remote_addr: remote_addr.to_string(),
+        peer_hash,
+        file_hash: protocol
+            .zip(opcode)
+            .and_then(|(protocol, opcode)| ed2k_tcp_file_hash(protocol, opcode, payload?)),
         transport_mode: transport_mode.as_str(),
         obfuscated: Some(transport_mode.is_obfuscated()),
         protocol: protocol.map(ed2k_protocol_name),
@@ -573,7 +634,10 @@ pub(crate) fn dump_ed2k_tcp_download_meta(
 
 #[cfg(test)]
 mod tests {
-    use super::{OP_EMULEPROT, OP_SIGNATURE, canonical_ed2k_send_phase, exact_packet_hex};
+    use super::{
+        OP_EMULEPROT, OP_REQUESTSOURCES2, OP_SIGNATURE, canonical_ed2k_send_phase,
+        ed2k_tcp_file_hash, exact_packet_hex,
+    };
 
     #[test]
     fn packet_hex_preserves_payloads_larger_than_the_former_cap() {
@@ -593,6 +657,21 @@ mod tests {
                 Some(OP_SIGNATURE)
             ),
             "signature"
+        );
+    }
+
+    #[test]
+    fn packet_file_hash_uses_opcode_specific_offsets() {
+        let expected = [0xAB; 16];
+        let mut payload = vec![4, 0, 0];
+        payload.extend_from_slice(&expected);
+        assert_eq!(
+            ed2k_tcp_file_hash(OP_EMULEPROT, OP_REQUESTSOURCES2, &payload),
+            Some(expected)
+        );
+        assert_eq!(
+            ed2k_tcp_file_hash(OP_EMULEPROT, OP_SIGNATURE, &payload),
+            None
         );
     }
 }

@@ -22,6 +22,18 @@ use super::{
     is_plain_ed2k_protocol_marker, negotiate_outgoing_obfuscation_handshake,
     should_enable_outgoing_obfuscation,
 };
+#[cfg(feature = "packet-diagnostics")]
+use super::{OP_HELLO, OP_HELLOANSWER, decode_hello_answer_profile, decode_hello_profile};
+
+#[cfg(feature = "packet-diagnostics")]
+fn diagnostic_remote_peer_hash(packet: &EmuleTcpPacket) -> Option<[u8; 16]> {
+    match (packet.protocol, packet.opcode) {
+        (OP_EDONKEYPROT, OP_HELLO) => decode_hello_profile(&packet.payload).ok(),
+        (OP_EDONKEYPROT, OP_HELLOANSWER) => decode_hello_answer_profile(&packet.payload).ok(),
+        _ => None,
+    }
+    .map(|profile| profile.identity.user_hash)
+}
 
 /// One decoded eD2k TCP packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +59,7 @@ struct Ed2kTcpReadCaptureGuard<'a> {
     remote_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     phase: &'a str,
+    peer_hash: Option<[u8; 16]>,
     capture: Arc<Mutex<Ed2kTcpReadCapture>>,
     completed: bool,
 }
@@ -61,6 +74,7 @@ impl Ed2kTcpReadCaptureGuard<'_> {
             self.remote_addr,
             self.transport_mode,
             self.phase,
+            self.peer_hash,
             packet,
             &capture.raw,
             &capture.clear_frame,
@@ -75,6 +89,7 @@ impl Ed2kTcpReadCaptureGuard<'_> {
             self.remote_addr,
             self.transport_mode,
             self.phase,
+            self.peer_hash,
             &capture.raw,
             &capture.clear_frame,
             outcome,
@@ -101,6 +116,7 @@ struct Ed2kTcpSendCapture<'a> {
     remote_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     phase: &'a str,
+    peer_hash: Option<[u8; 16]>,
     clear_frame: &'a [u8],
     raw: Vec<u8>,
     attempted_len: usize,
@@ -120,6 +136,7 @@ impl Ed2kTcpSendCapture<'_> {
             self.remote_addr,
             self.transport_mode,
             self.phase,
+            self.peer_hash,
             self.clear_frame,
             &self.raw,
             self.attempted_len,
@@ -272,6 +289,8 @@ pub(super) struct Ed2kTransport {
     read_wire_buf: Vec<u8>,
     #[cfg(feature = "packet-diagnostics")]
     read_capture: Option<Weak<Mutex<Ed2kTcpReadCapture>>>,
+    #[cfg(feature = "packet-diagnostics")]
+    diagnostic_peer_hash: Option<[u8; 16]>,
     /// Reusable ciphertext scratch for obfuscated sends, so every write does
     /// not allocate a fresh copy of the packet.
     write_buf: Vec<u8>,
@@ -318,8 +337,21 @@ impl Ed2kTransport {
             read_wire_buf: Vec::new(),
             #[cfg(feature = "packet-diagnostics")]
             read_capture: None,
+            #[cfg(feature = "packet-diagnostics")]
+            diagnostic_peer_hash: None,
             write_buf: Vec::new(),
         }
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    fn with_diagnostic_peer_hash(mut self, peer_hash: Option<[u8; 16]>) -> Self {
+        self.diagnostic_peer_hash = peer_hash;
+        self
+    }
+
+    #[cfg(not(feature = "packet-diagnostics"))]
+    fn with_diagnostic_peer_hash(self, _peer_hash: Option<[u8; 16]>) -> Self {
+        self
     }
 
     pub(super) async fn connect_outgoing(
@@ -385,7 +417,8 @@ impl Ed2kTransport {
                 Some(receive_cipher),
                 Some(send_cipher),
                 Ed2kTransportMode::Obfuscated,
-            ));
+            )
+            .with_diagnostic_peer_hash(Some(peer_user_hash)));
         }
 
         Ok(Self::from_parts(
@@ -394,7 +427,8 @@ impl Ed2kTransport {
             None,
             None,
             Ed2kTransportMode::Plaintext,
-        ))
+        )
+        .with_diagnostic_peer_hash(peer_user_hash))
     }
 
     pub(super) async fn accept(mut stream: TcpStream, local_user_hash: [u8; 16]) -> Result<Self> {
@@ -496,12 +530,17 @@ impl Ed2kTransport {
             remote_addr,
             transport_mode: self.mode,
             phase,
+            peer_hash: self.diagnostic_peer_hash,
             capture,
             completed: false,
         };
         let result = self.read_packet().await;
         self.read_capture = None;
         if let Ok(Some(packet)) = result.as_ref() {
+            if let Some(peer_hash) = diagnostic_remote_peer_hash(packet) {
+                self.diagnostic_peer_hash = Some(peer_hash);
+                guard.peer_hash = Some(peer_hash);
+            }
             guard.emit_packet(packet);
         } else if let Ok(None) = result.as_ref() {
             guard.emit_terminal(
@@ -558,6 +597,7 @@ impl Ed2kTransport {
     ) -> Ed2kTcpDiagnosticFrameWriter<'transport, 'frame> {
         let attempted_len = clear_frame.len();
         let transport_mode = self.mode;
+        let peer_hash = self.diagnostic_peer_hash;
         Ed2kTcpDiagnosticFrameWriter {
             transport: self,
             capture: Ed2kTcpSendCapture {
@@ -565,6 +605,7 @@ impl Ed2kTransport {
                 remote_addr,
                 transport_mode,
                 phase,
+                peer_hash,
                 clear_frame,
                 raw: Vec::with_capacity(attempted_len),
                 attempted_len,

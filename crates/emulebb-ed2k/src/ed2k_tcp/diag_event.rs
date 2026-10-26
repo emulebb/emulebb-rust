@@ -18,8 +18,7 @@ use serde_json::{Map, Value, json};
 use super::dump::Ed2kTcpDiagnosticRecord;
 
 /// Emit one converged `ed2k_tcp` `diag_event_v2` record. Optional `keys`/`body`
-/// fields are omitted when absent rather than faked (`peerHash`/`fileHash` are
-/// not known at this layer, so they are not emitted).
+/// fields are omitted when absent rather than faked.
 pub(super) fn emit_ed2k_tcp_diag_event(record: &Ed2kTcpDiagnosticRecord<'_>) {
     let (event, severity, keys, body) = ed2k_tcp_diag_event_parts(record);
     crate::diag_event::emit("ed2k_tcp", event, severity, keys, body);
@@ -30,6 +29,12 @@ fn ed2k_tcp_diag_event_parts(
 ) -> (&'static str, &'static str, Value, Value) {
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(record.remote_addr));
+    if let Some(peer_hash) = record.peer_hash {
+        keys.insert("peerHash".to_string(), json!(hex::encode(peer_hash)));
+    }
+    if let Some(file_hash) = record.file_hash {
+        keys.insert("fileHash".to_string(), json!(hex::encode(file_hash)));
+    }
     if let Some(protocol_marker) = record.protocol_marker {
         keys.insert("protocolMarker".to_string(), json!(protocol_marker));
     }
@@ -127,6 +132,8 @@ mod tests {
             direction,
             outcome,
             remote_addr: "198.51.100.2:4662".to_string(),
+            peer_hash: None,
+            file_hash: None,
             transport_mode: "obfuscated",
             obfuscated: Some(true),
             protocol: None,
@@ -166,5 +173,16 @@ mod tests {
 
         assert_eq!(event, "obfuscation_handshake");
         assert_eq!(body["traceKey"], "native_download:198.51.100.2:4662");
+    }
+
+    #[test]
+    fn peer_tcp_packet_exposes_join_keys_when_known() {
+        let mut record = record("packet", "recv", "accepted");
+        record.peer_hash = Some([0x11; 16]);
+        record.file_hash = Some([0x22; 16]);
+        let (_, _, keys, _) = ed2k_tcp_diag_event_parts(&record);
+
+        assert_eq!(keys["peerHash"], "11111111111111111111111111111111");
+        assert_eq!(keys["fileHash"], "22222222222222222222222222222222");
     }
 }
