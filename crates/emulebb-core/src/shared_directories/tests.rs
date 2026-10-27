@@ -54,6 +54,18 @@ fn synthetic_fingerprint(size_bytes: u64, modified_nanoseconds: u32) -> NativeFi
     }
 }
 
+fn synthetic_windows_fingerprint(size_bytes: u64) -> NativeFileFingerprint {
+    NativeFileFingerprint {
+        identity: emulebb_metadata::NativeFileIdentity::WindowsHighResolution {
+            volume_serial_number: 13,
+            file_id: 17,
+        },
+        size_bytes,
+        modified: emulebb_metadata::NativeFileTimestamp::new(1_700_000_000, 0).unwrap(),
+        changed: Some(emulebb_metadata::NativeFileTimestamp::new(1_700_000_001, 0).unwrap()),
+    }
+}
+
 #[tokio::test]
 async fn set_shared_directories_canonicalizes_configured_root() {
     let root = scratch_dir("configured-root");
@@ -299,6 +311,70 @@ async fn incremental_reload_never_reuses_same_size_coarse_timestamp() {
     assert_eq!(plan.to_hash.len(), 1);
     assert!(plan.reused_shares.is_empty());
     assert_eq!(plan.stats.changed_count, 1);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn incremental_reload_reuses_windows_whole_second_timestamp_with_change_time() {
+    let root = scratch_dir("windows-whole-second-timestamp");
+    let source = root.join("Whole.Second.bin");
+    fs::write(&source, b"same-size").unwrap();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    let file_size = fs::metadata(&source).unwrap().len();
+    let fingerprint = synthetic_windows_fingerprint(file_size);
+    core.metadata_store
+        .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "Whole.Second.bin".to_string(),
+            display_name_pinned: false,
+            follow_majority_filename: false,
+            file_name_observations: Vec::new(),
+            file_size,
+            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+            completed: true,
+            final_rehash_pending: false,
+            md4_hashset_acquired: true,
+            md4_hashset: Vec::new(),
+            aich_hashset_acquired: false,
+            aich_root: None,
+            aich_hashset: Vec::new(),
+            verified_ranges: Vec::new(),
+            pieces: Vec::new(),
+            sources: Vec::new(),
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+            category_id: 0,
+            control_state: None,
+            transfer_row_removed: false,
+            delivery_state: emulebb_metadata::MetadataTransferDeliveryState::NotApplicable,
+            delivery_ownership: emulebb_metadata::MetadataTransferDeliveryOwnership::None,
+            delivered_path: None,
+            source_path: Some(source.clone()),
+            source_fingerprint: Some(fingerprint.clone()),
+            payload_fingerprint: None,
+        })
+        .unwrap();
+
+    let plan = plan_incremental_reload(
+        &core,
+        vec![ScannedSharedFile {
+            path: source.clone(),
+            key: long_path(&source),
+            disk_key: "disk:test".to_string(),
+            file_size,
+            source_fingerprint: Some(fingerprint),
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert!(plan.to_hash.is_empty());
+    assert_eq!(plan.reused_shares.len(), 1);
+    assert_eq!(plan.stats.planned_hash_count, 0);
+    assert_eq!(plan.stats.reused_count, 1);
     fs::remove_dir_all(&root).ok();
 }
 

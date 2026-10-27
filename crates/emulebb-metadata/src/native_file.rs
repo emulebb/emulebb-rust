@@ -114,13 +114,18 @@ impl NativeFileFingerprint {
     /// Return whether `current` is safe to reuse without re-hashing.
     ///
     /// Exact stable identity, size, modification time, and change time must all
-    /// match. A fingerprint whose available timestamps contain no subsecond
-    /// signal is treated as coarse and therefore never reusable: an in-place,
-    /// same-size rewrite inside one coarse timestamp tick must not silently keep
-    /// an obsolete ED2K hash.
+    /// match. Windows fingerprints require the independently maintained native
+    /// change time, whose precision is an operating-system property rather than
+    /// something inferred from whether one observed value lands on a whole
+    /// second. Other platforms retain the conservative subsecond-signal gate.
     #[must_use]
     pub fn safely_matches(&self, current: &Self) -> bool {
-        self == current && self.has_subsecond_signal()
+        self == current
+            && match self.identity {
+                NativeFileIdentity::WindowsLowResolution { .. }
+                | NativeFileIdentity::WindowsHighResolution { .. } => self.changed.is_some(),
+                NativeFileIdentity::Unix { .. } => self.has_subsecond_signal(),
+            }
     }
 
     pub(crate) fn storage_bytes(&self) -> Vec<u8> {
@@ -307,6 +312,44 @@ mod tests {
     #[test]
     fn coarse_fingerprint_is_never_reusable() {
         let baseline = fingerprint(0, Some(0));
+
+        assert!(!baseline.safely_matches(&baseline));
+    }
+
+    #[test]
+    fn windows_change_time_makes_whole_second_fingerprint_reusable() {
+        for identity in [
+            NativeFileIdentity::WindowsLowResolution {
+                volume_serial_number: 13,
+                file_index: 17,
+            },
+            NativeFileIdentity::WindowsHighResolution {
+                volume_serial_number: 19,
+                file_id: 23,
+            },
+        ] {
+            let baseline = NativeFileFingerprint {
+                identity,
+                size_bytes: 1024,
+                modified: NativeFileTimestamp::new(1_700_000_000, 0).unwrap(),
+                changed: Some(NativeFileTimestamp::new(1_700_000_001, 0).unwrap()),
+            };
+
+            assert!(baseline.safely_matches(&baseline));
+        }
+    }
+
+    #[test]
+    fn windows_fingerprint_without_change_time_is_never_reusable() {
+        let baseline = NativeFileFingerprint {
+            identity: NativeFileIdentity::WindowsHighResolution {
+                volume_serial_number: 19,
+                file_id: 23,
+            },
+            size_bytes: 1024,
+            modified: NativeFileTimestamp::new(1_700_000_000, 123_456_700).unwrap(),
+            changed: None,
+        };
 
         assert!(!baseline.safely_matches(&baseline));
     }

@@ -434,7 +434,7 @@ pub(crate) fn native_file_fingerprint_from_handle(
         return None;
     }
     let identity = native_file_identity_from_handle(file, metadata)?;
-    let (modified, changed) = native_file_timestamps(metadata)?;
+    let (modified, changed) = native_file_timestamps_from_handle(file, metadata)?;
     Some(NativeFileFingerprint {
         identity,
         size_bytes: metadata.len(),
@@ -456,7 +456,7 @@ pub(crate) fn native_file_fingerprint_from_unix_metadata(
         device_id: metadata.dev(),
         inode_number: metadata.ino(),
     };
-    let (modified, changed) = native_file_timestamps(metadata)?;
+    let (modified, changed) = native_file_timestamps_from_unix_metadata(metadata)?;
     Some(NativeFileFingerprint {
         identity,
         size_bytes: metadata.len(),
@@ -540,7 +540,15 @@ pub(crate) fn native_file_identity_from_handle(
 }
 
 #[cfg(unix)]
-fn native_file_timestamps(
+fn native_file_timestamps_from_handle(
+    _file: &File,
+    metadata: &Metadata,
+) -> Option<(NativeFileTimestamp, Option<NativeFileTimestamp>)> {
+    native_file_timestamps_from_unix_metadata(metadata)
+}
+
+#[cfg(unix)]
+fn native_file_timestamps_from_unix_metadata(
     metadata: &Metadata,
 ) -> Option<(NativeFileTimestamp, Option<NativeFileTimestamp>)> {
     use std::os::unix::fs::MetadataExt;
@@ -557,36 +565,59 @@ fn unix_timestamp(seconds: i64, nanoseconds: i64) -> Option<NativeFileTimestamp>
 }
 
 #[cfg(windows)]
-fn native_file_timestamps(
-    metadata: &Metadata,
+fn native_file_timestamps_from_handle(
+    file: &File,
+    _metadata: &Metadata,
 ) -> Option<(NativeFileTimestamp, Option<NativeFileTimestamp>)> {
-    Some((system_time_timestamp(metadata.modified().ok()?)?, None))
+    use std::{
+        mem::{MaybeUninit, size_of},
+        os::windows::io::AsRawHandle,
+    };
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx},
+    };
+
+    let handle = file.as_raw_handle() as HANDLE;
+    let mut basic_info = MaybeUninit::<FILE_BASIC_INFO>::zeroed();
+    // SAFETY: `handle` belongs to the borrowed open file and the output buffer
+    // has the exact type and size required by `FileBasicInfo`.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            basic_info.as_mut_ptr().cast(),
+            u32::try_from(size_of::<FILE_BASIC_INFO>()).ok()?,
+        )
+    } == 0
+    {
+        return None;
+    }
+    // SAFETY: the successful API call initialized the complete structure.
+    let basic_info = unsafe { basic_info.assume_init() };
+    Some((
+        windows_file_time_timestamp(basic_info.LastWriteTime)?,
+        Some(windows_file_time_timestamp(basic_info.ChangeTime)?),
+    ))
 }
 
 #[cfg(windows)]
-fn system_time_timestamp(timestamp: std::time::SystemTime) -> Option<NativeFileTimestamp> {
-    match timestamp.duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => NativeFileTimestamp::new(
-            i64::try_from(duration.as_secs()).ok()?,
-            duration.subsec_nanos(),
-        ),
-        Err(error) => {
-            let duration = error.duration();
-            let seconds = i64::try_from(duration.as_secs()).ok()?;
-            if duration.subsec_nanos() == 0 {
-                NativeFileTimestamp::new(seconds.checked_neg()?, 0)
-            } else {
-                NativeFileTimestamp::new(
-                    seconds.checked_add(1)?.checked_neg()?,
-                    1_000_000_000 - duration.subsec_nanos(),
-                )
-            }
-        }
-    }
+fn windows_file_time_timestamp(file_time_100ns: i64) -> Option<NativeFileTimestamp> {
+    const WINDOWS_TO_UNIX_EPOCH_100NS: i128 = 116_444_736_000_000_000;
+    const TICKS_PER_SECOND: i128 = 10_000_000;
+
+    let unix_ticks = i128::from(file_time_100ns) - WINDOWS_TO_UNIX_EPOCH_100NS;
+    let seconds = unix_ticks.div_euclid(TICKS_PER_SECOND);
+    let nanoseconds = unix_ticks.rem_euclid(TICKS_PER_SECOND) * 100;
+    NativeFileTimestamp::new(
+        i64::try_from(seconds).ok()?,
+        u32::try_from(nanoseconds).ok()?,
+    )
 }
 
 #[cfg(not(any(unix, windows)))]
-fn native_file_timestamps(
+fn native_file_timestamps_from_handle(
+    _file: &File,
     _metadata: &Metadata,
 ) -> Option<(NativeFileTimestamp, Option<NativeFileTimestamp>)> {
     None
@@ -610,6 +641,52 @@ mod native_file_fingerprint_tests {
 
         assert_eq!(first, second);
         assert_eq!(first.size_bytes, 7);
+        #[cfg(windows)]
+        assert!(first.changed.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn same_size_rewrite_with_restored_mtime_changes_windows_fingerprint() {
+        use std::fs::FileTimes;
+        use std::thread;
+        use std::time::Duration;
+
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("payload.bin");
+        fs::write(&source, b"original").unwrap();
+        let original_modified = fs::metadata(&source).unwrap().modified().unwrap();
+        let original = native_file_fingerprint(&source).unwrap();
+
+        thread::sleep(Duration::from_millis(20));
+        fs::write(&source, b"rewrote!").unwrap();
+        File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        let rewritten = native_file_fingerprint(&source).unwrap();
+
+        assert_eq!(original.size_bytes, rewritten.size_bytes);
+        assert_eq!(original.modified, rewritten.modified);
+        assert_ne!(original.changed, rewritten.changed);
+        assert!(!original.safely_matches(&rewritten));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_time_conversion_preserves_whole_seconds_and_pre_epoch_values() {
+        const WINDOWS_TO_UNIX_EPOCH_100NS: i64 = 116_444_736_000_000_000;
+
+        assert_eq!(
+            windows_file_time_timestamp(WINDOWS_TO_UNIX_EPOCH_100NS),
+            NativeFileTimestamp::new(0, 0)
+        );
+        assert_eq!(
+            windows_file_time_timestamp(WINDOWS_TO_UNIX_EPOCH_100NS - 1),
+            NativeFileTimestamp::new(-1, 999_999_900)
+        );
     }
 
     #[test]
