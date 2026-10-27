@@ -25,12 +25,12 @@ use emulebb_ed2k::{
     built_in_port_mapping_providers,
     config::Ed2kRuntimeConfig,
     ed2k_server::{
-        Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundSearchInterrupted, Ed2kFoundSource,
-        Ed2kServerConnectMode, Ed2kServerConnectPlan, Ed2kServerControlHandle,
-        Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
-        Ed2kUdpCallbackRequestOptions, Ed2kUdpKeywordSearchOptions,
-        Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats, SearchCriteria,
-        ed2k_server_control_channel, ed2k_server_list_event_channel,
+        Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundKeywordSearchOutcome,
+        Ed2kBackgroundSearchInterrupted, Ed2kFoundSource, Ed2kServerConnectMode,
+        Ed2kServerConnectPlan, Ed2kServerControlHandle, Ed2kServerLoopOptions,
+        Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpCallbackRequestOptions,
+        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
+        SearchCriteria, ed2k_server_control_channel, ed2k_server_list_event_channel,
         new_ed2k_server_search_channel, parse_server_met,
         publish_shared_catalog_via_background_session, request_callback_via_background_session,
         request_callback_via_udp_server, run_ed2k_server_loop, search_keyword_udp_servers,
@@ -1032,6 +1032,7 @@ impl EmulebbCore {
         let timeout = connected_server_keyword_search_timeout(&config);
         let criteria = search_criteria_from_request(request);
         let mut files = Vec::new();
+        let mut status_reason = None;
         match search_keyword_via_background_session(
             &handle,
             &request.query,
@@ -1041,10 +1042,10 @@ impl EmulebbCore {
         )
         .await
         {
-            Ok(background_files) => {
+            Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(background_files)) => {
                 if background_files.is_empty() {
                     tracing::warn!(
-                        "ED2K background keyword search returned no results query={:?}",
+                        "ED2K background keyword search received an empty result page query={:?}",
                         request.query
                     );
                 } else {
@@ -1064,6 +1065,13 @@ impl EmulebbCore {
                         files.push(("server", connected_server_endpoint, file));
                     }
                 }
+            }
+            Ok(Ed2kBackgroundKeywordSearchOutcome::TimedOut) => {
+                status_reason = Some("server-timeout");
+                tracing::warn!(
+                    "ED2K background keyword search timed out without OP_SEARCHRESULT query={:?}",
+                    request.query
+                );
             }
             // WHY: an interrupted send (stale handle / session dropped before
             // answering) must PROPAGATE so the queue re-queues the search; the
@@ -1144,14 +1152,15 @@ impl EmulebbCore {
                 ),
             }
         }
-        Ok(Ed2kServerSearchOutcome::Completed(
-            files
+        Ok(Ed2kServerSearchOutcome::Completed {
+            results: files
                 .into_iter()
                 .map(|(origin, server_endpoint, file)| {
                     search_result_from_ed2k(search_id, request, origin, server_endpoint, file)
                 })
                 .collect(),
-        ))
+            status_reason,
+        })
     }
 
     #[expect(
@@ -2576,7 +2585,7 @@ impl EmulebbCore {
             )
             .await
             {
-                Ok(results) => {
+                Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(results)) => {
                     if let Some(candidate) = select_ed2k_keyword_metadata(&results, file_hash) {
                         learned.merge_missing_from(candidate);
                         tracing::debug!(
@@ -2586,6 +2595,10 @@ impl EmulebbCore {
                         );
                     }
                 }
+                Ok(Ed2kBackgroundKeywordSearchOutcome::TimedOut) => tracing::debug!(
+                    "ED2K background metadata search timed out file_hash={}",
+                    file_hash
+                ),
                 Err(error) => tracing::warn!(
                     "ED2K background metadata search failed file_hash={} error={error}",
                     file_hash

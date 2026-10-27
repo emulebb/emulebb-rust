@@ -63,6 +63,7 @@ pub(super) enum ServerSessionPhase {
     OfferFilesSent,
     SearchActive,
     AwaitingMore,
+    TimedOut,
     Completed,
 }
 
@@ -83,6 +84,7 @@ impl ServerSessionPhase {
             Self::OfferFilesSent => "offer_files_sent",
             Self::SearchActive => "search_active",
             Self::AwaitingMore => "awaiting_more",
+            Self::TimedOut => "timed_out",
             Self::Completed => "completed",
         }
     }

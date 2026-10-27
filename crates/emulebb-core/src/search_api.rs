@@ -166,20 +166,30 @@ impl EmulebbCore {
                 .search_ed2k_servers(&search_id, &request, network_method, &cancel, None)
                 .await
                 .map(|outcome| match outcome {
-                    Ed2kServerSearchOutcome::Completed(results) => Some(
-                        crate::kad_public_search::KadKeywordSearchOutcome::without_aich(results),
+                    Ed2kServerSearchOutcome::Completed {
+                        results,
+                        status_reason,
+                    } => (
+                        Some(
+                            crate::kad_public_search::KadKeywordSearchOutcome::without_aich(
+                                results,
+                            ),
+                        ),
+                        status_reason,
                     ),
                     Ed2kServerSearchOutcome::Unavailable
-                    | Ed2kServerSearchOutcome::NotConnected => None,
+                    | Ed2kServerSearchOutcome::NotConnected => (None, None),
                 }),
             Some(SearchNetworkMethod::Kad) => match self.ed2k_dht_node().await {
-                Some(dht) => search_kad_keywords(dht, &search_id, &request, &cancel, None).await,
-                None => Ok(None),
+                Some(dht) => search_kad_keywords(dht, &search_id, &request, &cancel, None)
+                    .await
+                    .map(|outcome| (outcome, None)),
+                None => Ok((None, None)),
             },
-            None => Ok(None),
+            None => Ok((None, None)),
         };
         match outcome {
-            Ok(network_outcome) => {
+            Ok((network_outcome, status_reason)) => {
                 let (network_results, aich_votes) = match network_outcome {
                     Some(outcome) => (Some(outcome.results), Some(outcome.aich_votes)),
                     None => (None, None),
@@ -189,6 +199,7 @@ impl EmulebbCore {
                     &request,
                     method_str,
                     network_results,
+                    status_reason,
                     aich_votes,
                 )
                 .await;

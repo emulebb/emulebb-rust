@@ -16,14 +16,14 @@ use super::udp_runtime::{
 };
 use super::{
     BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
-    Ed2kServerFailure, Ed2kServerSearchInbox, Ed2kServerState, OP_FOUNDSOURCES,
-    OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT,
-    PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession, ServerSessionPhase,
-    ServerSessionRole, ServerTransportMode, annotate_found_sources_server, decode_found_sources,
-    decode_search_result_page, dump_ed2k_server_loop_meta, encode_login_request,
-    fail_background_search_request, fail_pending_background_search, format_connect_options,
-    handle_background_udp_packet, handle_server_packet, log_search_result_page,
-    login_identity_for_server_transport, run_server_transport_attempts,
+    Ed2kBackgroundKeywordSearchOutcome, Ed2kServerFailure, Ed2kServerSearchInbox, Ed2kServerState,
+    OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT,
+    OP_SEARCHRESULT, PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession,
+    ServerSessionPhase, ServerSessionRole, ServerTransportMode, annotate_found_sources_server,
+    decode_found_sources, decode_search_result_page, dump_ed2k_server_loop_meta,
+    encode_login_request, fail_background_search_request, fail_pending_background_search,
+    format_connect_options, handle_background_udp_packet, handle_server_packet,
+    log_search_result_page, login_identity_for_server_transport, run_server_transport_attempts,
     send_due_offer_files_advertisement, server_transport_attempts, server_udp_endpoint,
     start_background_server_search, validate_found_sources,
 };
@@ -578,8 +578,9 @@ pub(super) async fn run_one_server_session(
                     None => unreachable!("pending background search timeout without search"),
                 };
                 // WHY: timed_out (NOT interrupted): the request DID run on a live
-                // session and the server never answered - an honest empty outcome,
-                // not a retryable transport failure.
+                // session and the server never answered. Preserve that terminal
+                // outcome instead of conflating it with a valid empty reply.
+                session.set_phase(ServerSessionPhase::TimedOut, timeout_error);
                 fail_pending_background_search(
                     &mut pending_background_search,
                     &BackgroundSearchFailure::timed_out(timeout_error),
@@ -672,7 +673,9 @@ pub(super) async fn run_one_server_session(
                                 results.len(),
                                 page_count
                             );
-                            let _ = response.send(Ok(results));
+                            let _ = response.send(Ok(
+                                Ed2kBackgroundKeywordSearchOutcome::Replied(results),
+                            ));
                             continue;
                         }
                         (OP_FOUNDSOURCES | OP_FOUNDSOURCES_OBFU, PendingBackgroundServerSearch::Source {

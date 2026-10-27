@@ -246,7 +246,9 @@ async fn background_search_channel_round_trips_results() {
                 query, response, ..
             } => {
                 assert_eq!(query, "ubuntu linux");
-                let _ = response.send(Ok(vec![expected_for_task]));
+                let _ = response.send(Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(vec![
+                    expected_for_task,
+                ])));
             }
             other => panic!("unexpected background request: {other:?}"),
         }
@@ -262,7 +264,10 @@ async fn background_search_channel_round_trips_results() {
     .await
     .unwrap();
 
-    assert_eq!(results, vec![expected]);
+    assert_eq!(
+        results,
+        Ed2kBackgroundKeywordSearchOutcome::Replied(vec![expected])
+    );
     responder.await.unwrap();
 }
 
@@ -282,11 +287,46 @@ async fn cancelled_background_keyword_search_is_not_dispatched() {
     .await
     .unwrap();
 
-    assert!(results.is_empty());
+    assert_eq!(
+        results,
+        Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())
+    );
     assert!(matches!(
         inbox.receiver.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
+}
+
+#[tokio::test]
+async fn background_keyword_wrapper_waits_for_the_session_owned_deadline() {
+    let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+    let search = tokio::spawn(async move {
+        search_keyword_via_background_session(
+            &handle,
+            "delayed dispatch",
+            Default::default(),
+            Duration::from_millis(10),
+            &CancellationToken::new(),
+        )
+        .await
+    });
+    let request = inbox.receiver.recv().await.unwrap();
+    let BackgroundServerSearchRequest::Keyword {
+        timeout, response, ..
+    } = request
+    else {
+        panic!("expected keyword search command")
+    };
+    assert_eq!(timeout, Duration::from_millis(10));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    response
+        .send(Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())))
+        .unwrap();
+
+    assert_eq!(
+        search.await.unwrap().unwrap(),
+        Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())
+    );
 }
 
 #[tokio::test]
@@ -1480,7 +1520,73 @@ async fn reject_does_not_complete_or_disconnect_pending_background_search() {
         session_result.unwrap(),
         ServerSessionExit::IntentionalShutdown
     );
-    assert!(search_result.unwrap().is_empty());
+    assert_eq!(
+        search_result.unwrap(),
+        Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())
+    );
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn silent_server_returns_timed_out_and_keeps_the_session_connected() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        let high_id = u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]);
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+        loop {
+            let (opcode, _) = read_client_frame(&mut stream).await;
+            if opcode == OP_SEARCHREQUEST {
+                break;
+            }
+        }
+        std::future::pending::<()>().await;
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let context = background_test_context(Arc::clone(&state), Duration::from_secs(1));
+    let shutdown = Arc::clone(&context.shutdown);
+    let (handle, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+    let cancel = CancellationToken::new();
+
+    let search = async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.read().await.connected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background session should accept login");
+        let result = search_keyword_via_background_session(
+            &handle,
+            "silent server",
+            Default::default(),
+            Duration::from_millis(50),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(state.read().await.connected);
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        result
+    };
+    let (session_result, search_result) =
+        tokio::join!(run_test_server_session(&server, &context, &inbox), search);
+
+    assert_eq!(
+        session_result.unwrap(),
+        ServerSessionExit::IntentionalShutdown
+    );
+    assert_eq!(search_result, Ed2kBackgroundKeywordSearchOutcome::TimedOut);
     server_task.abort();
 }
 
@@ -1641,6 +1747,9 @@ async fn malformed_typed_replies_preserve_pending_request_and_session() {
         )
         .await
         .expect("valid final page must complete the original keyword request");
+        let Ed2kBackgroundKeywordSearchOutcome::Replied(keyword_results) = keyword_results else {
+            panic!("valid final page must be a server reply");
+        };
         assert_eq!(keyword_results.len(), 1);
         assert_eq!(keyword_results[0].file_hash, result_hash);
 

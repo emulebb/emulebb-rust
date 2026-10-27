@@ -37,8 +37,12 @@ pub(crate) enum Ed2kServerSearchOutcome {
     /// No connected background session at execution time (the readiness seen
     /// at dispatch evaporated): retry when a session is back.
     NotConnected,
-    /// The search ran on a live session (possibly returning nothing).
-    Completed(Vec<SearchResult>),
+    /// The search ran on a live session. `status_reason` preserves a missing
+    /// connected-server reply without changing the MFC-compatible completed status.
+    Completed {
+        results: Vec<SearchResult>,
+        status_reason: Option<&'static str>,
+    },
 }
 
 impl EmulebbCore {
@@ -191,13 +195,17 @@ impl EmulebbCore {
             )
             .await;
         match outcome {
-            Ok(Ed2kServerSearchOutcome::Completed(results)) => {
+            Ok(Ed2kServerSearchOutcome::Completed {
+                results,
+                status_reason,
+            }) => {
                 self.search_queue.lock().finish(lane);
                 self.complete_search_with_results(
                     &entry.search_id,
                     &entry.request,
                     method_token,
                     Some(results),
+                    status_reason,
                     None,
                 )
                 .await;
@@ -298,6 +306,7 @@ impl EmulebbCore {
                     &entry.request,
                     "kad",
                     Some(outcome.results),
+                    None,
                     Some(outcome.aich_votes),
                 )
                 .await;
@@ -503,6 +512,7 @@ impl EmulebbCore {
         request: &SearchCreate,
         method_token: &'static str,
         network_results: Option<Vec<SearchResult>>,
+        status_reason: Option<&str>,
         kad_aich_votes: Option<std::collections::HashMap<String, crate::KadAichSearchVotes>>,
     ) {
         let snapshot = {
@@ -530,7 +540,7 @@ impl EmulebbCore {
                     }
                 }
                 search.status = "completed".to_string();
-                search.status_reason = None;
+                search.status_reason = status_reason.map(str::to_string);
                 search.resolved_method = concrete_method(method_token).map(str::to_string);
                 search.progress.phase = "completed".to_string();
                 if let Some(total_units) = search.progress.total_units {
@@ -559,6 +569,7 @@ impl EmulebbCore {
             method_token,
             snapshot.results.len(),
             &snapshot.status,
+            snapshot.status_reason.as_deref(),
         );
         if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
             tracing::warn!("failed to persist completed search {search_id}: {error}");
@@ -595,6 +606,7 @@ impl EmulebbCore {
             method_token,
             snapshot.results.len(),
             &snapshot.status,
+            snapshot.status_reason.as_deref(),
         );
         if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
             tracing::warn!("failed to persist failed search {search_id}: {error}");

@@ -250,8 +250,9 @@ pub(crate) fn keyword_search(
     method: &str,
     result_count: usize,
     status: &str,
+    reason: Option<&str>,
 ) {
-    let (keys, body) = keyword_search_parts(search_id, query, method, result_count, status);
+    let (keys, body) = keyword_search_parts(search_id, query, method, result_count, status, reason);
     emit(FAMILY, "keyword_search", "info", keys, body);
 }
 
@@ -261,17 +262,19 @@ fn keyword_search_parts(
     method: &str,
     result_count: usize,
     status: &str,
+    reason: Option<&str>,
 ) -> (Value, Value) {
-    (
-        json!({ "searchId": search_id }),
-        json!({
-        "query": query,
-        "queryLen": query.chars().count(),
-        "method": method,
-        "resultCount": result_count,
-        "status": status,
-        }),
-    )
+    let keys = json!({ "searchId": search_id });
+    let mut body = Map::new();
+    body.insert("query".to_string(), json!(query));
+    body.insert("queryLen".to_string(), json!(query.chars().count()));
+    body.insert("method".to_string(), json!(method));
+    body.insert("resultCount".to_string(), json!(result_count));
+    body.insert("status".to_string(), json!(status));
+    if let Some(reason) = reason {
+        body.insert("reason".to_string(), json!(reason));
+    }
+    (keys, Value::Object(body))
 }
 
 /// `keyword_search_queue`: rust-only superset event tracing the connection-aware
@@ -358,8 +361,14 @@ mod tests {
 
     #[test]
     fn keyword_search_preserves_exact_query_and_search_identity() {
-        let (keys, body) =
-            keyword_search_parts("search-42", "βeta release", "kad", 17, "completed");
+        let (keys, body) = keyword_search_parts(
+            "search-42",
+            "βeta release",
+            "kad",
+            17,
+            "completed",
+            Some("server-timeout"),
+        );
 
         assert_eq!(keys, json!({ "searchId": "search-42" }));
         assert_eq!(body["query"], "βeta release");
@@ -367,6 +376,7 @@ mod tests {
         assert_eq!(body["method"], "kad");
         assert_eq!(body["resultCount"], 17);
         assert_eq!(body["status"], "completed");
+        assert_eq!(body["reason"], "server-timeout");
     }
 
     #[test]

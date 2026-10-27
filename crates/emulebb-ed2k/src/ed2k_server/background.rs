@@ -27,7 +27,7 @@ use super::{
 use crate::ed2k_transfer::Ed2kSharedCatalog;
 
 type BackgroundKeywordSearchResponse =
-    std::result::Result<Vec<Ed2kSearchFile>, BackgroundSearchFailure>;
+    std::result::Result<Ed2kBackgroundKeywordSearchOutcome, BackgroundSearchFailure>;
 type BackgroundSourceSearchResponse =
     std::result::Result<Vec<Ed2kFoundSource>, BackgroundSearchFailure>;
 type BackgroundSourceBatchSearchResponse =
@@ -55,6 +55,14 @@ impl std::fmt::Display for Ed2kBackgroundSearchInterrupted {
 }
 
 impl std::error::Error for Ed2kBackgroundSearchInterrupted {}
+
+/// Terminal outcome of a keyword search that ran on a live background server
+/// session. A timeout is distinct from a valid zero-result reply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Ed2kBackgroundKeywordSearchOutcome {
+    Replied(Vec<Ed2kSearchFile>),
+    TimedOut,
+}
 
 /// Failure detail carried on the background response channels. `interrupted`
 /// separates session-transition failures (the request never completed on a
@@ -250,9 +258,9 @@ pub async fn search_keyword_via_background_session(
     criteria: SearchCriteria,
     timeout: Duration,
     cancel: &CancellationToken,
-) -> Result<Vec<Ed2kSearchFile>> {
+) -> Result<Ed2kBackgroundKeywordSearchOutcome> {
     if cancel.is_cancelled() {
-        return Ok(Vec::new());
+        return Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new()));
     }
     let (response, receive_response) = oneshot::channel();
     let request = BackgroundServerSearchRequest::Keyword {
@@ -263,7 +271,9 @@ pub async fn search_keyword_via_background_session(
         response,
     };
     tokio::select! {
-        _ = cancel.cancelled() => return Ok(Vec::new()),
+        _ = cancel.cancelled() => {
+            return Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new()));
+        }
         sent = handle.sender.send(request) => {
             // WHY: a failed send means the background runtime is gone (stale
             // handle) - the search never reached any session, so it must be
@@ -273,12 +283,12 @@ pub async fn search_keyword_via_background_session(
     }
 
     tokio::select! {
-        _ = cancel.cancelled() => Ok(Vec::new()),
-        result = tokio::time::timeout(timeout, receive_response) => {
-            let response = result
-                .with_context(|| format!("timed out waiting for ED2K background search response after {timeout:?}"))?
-                // WHY: a dropped responder means the session task died before
-                // answering - also never-completed, so retryable-interrupted.
+        _ = cancel.cancelled() => Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())),
+        response = receive_response => {
+            // WHY: the connected session owns the on-wire deadline, starting
+            // only after dispatch. A wrapper timeout here would consume queue
+            // and offer-settlement time and race the authoritative deadline.
+            let response = response
                 .map_err(|_| interrupted_error("ED2K background search responder dropped"))?;
             response.map_err(BackgroundSearchFailure::into_anyhow)
         }
@@ -528,7 +538,7 @@ pub(super) fn handle_background_udp_packet(
                 result_count = results.len(),
                 "completed ED2K background UDP keyword search"
             );
-            let _ = response.send(Ok(results));
+            let _ = response.send(Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(results)));
         }
         OP_GLOBFOUNDSOURCES => {
             let Some(pending) = pending_background_search.take() else {
@@ -697,7 +707,11 @@ pub(super) fn fail_pending_background_search(
     if let Some(request) = request.take() {
         match request {
             Keyword { response, .. } => {
-                let _ = response.send(Err(failure.clone()));
+                if failure.interrupted {
+                    let _ = response.send(Err(failure.clone()));
+                } else {
+                    let _ = response.send(Ok(Ed2kBackgroundKeywordSearchOutcome::TimedOut));
+                }
             }
             Source { response, .. } => {
                 let _ = response.send(Err(failure.clone()));
@@ -757,7 +771,7 @@ pub(super) async fn start_background_server_search(
             response,
         } => {
             if cancel.is_cancelled() {
-                let _ = response.send(Ok(Vec::new()));
+                let _ = response.send(Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())));
                 return Ok(None);
             }
             let supports_64bit =
@@ -768,7 +782,7 @@ pub(super) async fn start_background_server_search(
             let search_payload =
                 encode_search_request_with_criteria(&query, criteria.as_ref(), supports_64bit)?;
             if search_payload.is_empty() {
-                let _ = response.send(Ok(Vec::new()));
+                let _ = response.send(Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())));
                 anyhow::bail!("ED2K background keyword search payload was unexpectedly empty");
             }
             wait_for_offer_files_settle(session).await;
