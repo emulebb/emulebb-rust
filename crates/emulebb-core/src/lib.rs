@@ -6673,15 +6673,24 @@ async fn handle_kad_find_buddy_req(
     // We cannot relay for others while firewalled ourselves (oracle refuses with
     // GetFirewalled() || IsFirewalledUDP(true) || !IsVerified()). IsFirewalledUDP
     // is "verified AND not open"; an unverified UDP status is also a refusal.
-    let self_firewalled = current_tcp_firewalled(ed2k_listener, server_state, kad_firewall).await
-        || {
-            let firewall = kad_firewall.lock().await;
-            !firewall.udp_verified || !firewall.udp_open
-        };
+    let tcp_firewalled = current_tcp_firewalled(ed2k_listener, server_state, kad_firewall).await;
+    let (udp_verified, udp_open) = {
+        let firewall = kad_firewall.lock().await;
+        (firewall.udp_verified, firewall.udp_open)
+    };
+    let self_firewalled = tcp_firewalled || !udp_verified || !udp_open;
     let tcp_port = ed2k_listener
         .local_addr()
         .context("failed to read eD2K listener address while handling Kad FINDBUDDY_REQ")?
         .port();
+    let diagnostic_state = diag_kad_event::KadBuddyRequestState {
+        tcp_firewalled,
+        udp_verified,
+        udp_open,
+        requester_has_udp_key,
+        requester_tcp_port: req.tcp_port,
+        local_tcp_port: tcp_port,
+    };
 
     // LOWID-G12: oracle IncomingBuddy pre-checks (ClientList.cpp:895-907), each a
     // silent abort before accepting a new incoming buddy.
@@ -6695,6 +6704,11 @@ async fn handle_kad_find_buddy_req(
     {
         let firewall = kad_firewall.lock().await;
         if firewall.is_tcp_firewall_check_ip(from.ip(), Utc::now()) {
+            diag_kad_event::buddy_request(
+                diag_kad_event::KadBuddyRequestDecision::TcpFirewallCheckCollision,
+                from,
+                diagnostic_state,
+            );
             tracing::debug!(
                 "ignoring Kad FINDBUDDY_REQ from {from}: Kad TCP firewall-check collision"
             );
@@ -6702,6 +6716,11 @@ async fn handle_kad_find_buddy_req(
         }
     }
     if find_buddy_req_is_self_endpoint(from.ip(), req.tcp_port, reachability.get(), tcp_port) {
+        diag_kad_event::buddy_request(
+            diag_kad_event::KadBuddyRequestDecision::SelfEndpoint,
+            from,
+            diagnostic_state,
+        );
         tracing::debug!("ignoring Kad FINDBUDDY_REQ from {from}: self endpoint");
         return Ok(());
     }
@@ -6719,10 +6738,20 @@ async fn handle_kad_find_buddy_req(
         match state.accept_incoming_buddy(self_firewalled, buddy.clone()) {
             Ok(()) => {}
             Err(FindBuddyReqRefusal::SelfFirewalled) => {
+                diag_kad_event::buddy_request(
+                    diag_kad_event::KadBuddyRequestDecision::SelfFirewalled,
+                    from,
+                    diagnostic_state,
+                );
                 tracing::debug!("ignoring Kad FINDBUDDY_REQ from {from}: we are firewalled");
                 return Ok(());
             }
             Err(FindBuddyReqRefusal::AlreadyHaveBuddy) => {
+                diag_kad_event::buddy_request(
+                    diag_kad_event::KadBuddyRequestDecision::AlreadyHaveBuddy,
+                    from,
+                    diagnostic_state,
+                );
                 tracing::debug!("ignoring Kad FINDBUDDY_REQ from {from}: already serving a buddy");
                 return Ok(());
             }
@@ -6752,6 +6781,11 @@ async fn handle_kad_find_buddy_req(
         .await
     {
         kad_buddy.lock().await.release_incoming_buddy(&buddy);
+        diag_kad_event::buddy_request(
+            diag_kad_event::KadBuddyRequestDecision::ResponseSendFailed,
+            from,
+            diagnostic_state,
+        );
         return Err(error).with_context(|| format!("failed to send Kad FINDBUDDY_RES to {from}"));
     }
 
@@ -6766,6 +6800,11 @@ async fn handle_kad_find_buddy_req(
             buddy_id: req.buddy_id,
         });
     }
+    diag_kad_event::buddy_request(
+        diag_kad_event::KadBuddyRequestDecision::Accepted,
+        from,
+        diagnostic_state,
+    );
     tracing::info!("accepted Kad buddy request from {from}; replied FINDBUDDY_RES");
     Ok(())
 }
