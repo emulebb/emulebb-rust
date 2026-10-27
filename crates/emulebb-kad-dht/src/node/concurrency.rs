@@ -60,6 +60,11 @@ impl SearchConcurrency {
         self.semaphore.available_permits()
     }
 
+    #[cfg(test)]
+    pub(super) fn close(&self) {
+        self.semaphore.close();
+    }
+
     /// Try to acquire a permit for `target`.
     ///
     /// The oracle does not build an unbounded async wait queue in front of

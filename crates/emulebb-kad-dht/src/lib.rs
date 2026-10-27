@@ -15,7 +15,8 @@ pub use node::{DhtConfig, DhtNode, KadRoutingContactSnapshot, KadRoutingSummaryC
 pub use publish::{KeywordPublishEntry, PublishAttemptStats};
 pub use types::{
     FirewallCheckHelper, KadAichCandidate, KadCallbackSearchDispatchOutcome,
-    KadCallbackSearchNotDispatchedReason, NoteResult, SearchResult, SourceResult,
+    KadCallbackSearchNotDispatchedReason, KadSearchStartError, NoteResult, SearchResult,
+    SourceResult,
 };
 
 /// Same-machine bind IP for tests that open a real socket.

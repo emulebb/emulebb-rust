@@ -21,6 +21,14 @@ pub(crate) struct KadKeywordSearchOutcome {
     pub(crate) aich_votes: HashMap<String, KadAichSearchVotes>,
 }
 
+pub(crate) enum KadKeywordSearchDispatchOutcome {
+    Completed(KadKeywordSearchOutcome),
+    NotDispatched {
+        reason: &'static str,
+        retryable: bool,
+    },
+}
+
 impl KadKeywordSearchOutcome {
     pub(crate) fn without_aich(results: Vec<SearchResult>) -> Self {
         Self {
@@ -38,21 +46,45 @@ pub(crate) async fn search_kad_keywords(
     incremental_results: Option<
         &tokio::sync::mpsc::UnboundedSender<crate::search_queue_runtime::SearchLiveUpdate>,
     >,
-) -> Result<Option<KadKeywordSearchOutcome>> {
+) -> Result<KadKeywordSearchDispatchOutcome> {
     if !dht.is_bootstrapped() {
-        return Ok(None);
+        let reason = "kad-not-ready";
+        crate::diag_kad_event::lookup_not_dispatched(
+            Some(search_id),
+            crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
+            reason,
+        );
+        return Ok(KadKeywordSearchDispatchOutcome::NotDispatched {
+            reason,
+            retryable: true,
+        });
     }
 
     let search_request = kad_public_search_request(request)?;
     let restrictive_payload = search_request.restrictive_payload.clone();
+    let mut stream = match dht
+        .search_keyword_request_with_cancel_and_class(
+            search_request,
+            cancel.clone(),
+            RpcWorkClass::Interactive,
+        )
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            let reason = error.reason();
+            let retryable = error.is_retryable();
+            crate::diag_kad_event::lookup_not_dispatched(
+                Some(search_id),
+                crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
+                reason,
+            );
+            return Ok(KadKeywordSearchDispatchOutcome::NotDispatched { reason, retryable });
+        }
+    };
     crate::diag_kad_event::lookup_started(
         Some(search_id),
         crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
-    );
-    let mut stream = dht.search_keyword_request_with_cancel_and_class(
-        search_request,
-        cancel.clone(),
-        RpcWorkClass::Interactive,
     );
     let mut results = Vec::<SearchResult>::new();
     let mut result_indexes = HashMap::<String, usize>::new();
@@ -86,10 +118,12 @@ pub(crate) async fn search_kad_keywords(
         crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
         results.len() as u32,
     );
-    Ok(Some(KadKeywordSearchOutcome {
-        results,
-        aich_votes,
-    }))
+    Ok(KadKeywordSearchDispatchOutcome::Completed(
+        KadKeywordSearchOutcome {
+            results,
+            aich_votes,
+        },
+    ))
 }
 
 fn merge_kad_search_result(

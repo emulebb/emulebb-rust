@@ -290,16 +290,28 @@ impl EmulebbCore {
                 .await
             }
             // Runtime torn down between dispatch and execution.
-            None => Ok(None),
+            None => Ok(
+                kad_public_search::KadKeywordSearchDispatchOutcome::NotDispatched {
+                    reason: "kad-runtime-unavailable",
+                    retryable: true,
+                },
+            ),
         };
         match outcome {
-            // `None` = not bootstrapped (or no runtime) at execution time:
-            // the readiness seen at dispatch evaporated, retry bounded.
-            Ok(None) => {
-                self.settle_retryable_dispatch(entry, lane, "kad", "kad-not-ready")
-                    .await;
+            Ok(kad_public_search::KadKeywordSearchDispatchOutcome::NotDispatched {
+                reason,
+                retryable,
+            }) => {
+                if retryable {
+                    self.settle_retryable_dispatch(entry, lane, "kad", reason)
+                        .await;
+                } else {
+                    self.search_queue.lock().finish(lane);
+                    self.fail_search(&entry.search_id, &entry.request, "kad", reason)
+                        .await;
+                }
             }
-            Ok(Some(outcome)) => {
+            Ok(kad_public_search::KadKeywordSearchDispatchOutcome::Completed(outcome)) => {
                 self.search_queue.lock().finish(lane);
                 self.complete_search_with_results(
                     &entry.search_id,

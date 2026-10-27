@@ -7,6 +7,45 @@ use std::net::Ipv4Addr;
 /// Larger values are treated as poisoned observations and reset to zero.
 const MAX_KAD_KEYWORD_AVAILABILITY: u32 = 65_500;
 
+/// Why a Kad keyword/source/notes search could not start a traversal.
+///
+/// A rejected start is not a completed search with zero results. Callers use
+/// this typed outcome to retry transient scheduler/routing conditions and to
+/// report an exact diagnostic reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum KadSearchStartError {
+    #[error("Kad search was cancelled before dispatch")]
+    Cancelled,
+    #[error("Kad search target is already in flight")]
+    DuplicateTarget,
+    #[error("Kad search capacity is busy")]
+    SearchCapacityBusy,
+    #[error("Kad search semaphore is closed")]
+    SearchSemaphoreClosed,
+    #[error("Kad search has no routing contacts")]
+    NoRoutingContacts,
+}
+
+impl KadSearchStartError {
+    /// Stable machine-readable reason used by queue state and diagnostics.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Cancelled => "kad-search-cancelled",
+            Self::DuplicateTarget => "kad-search-duplicate-target",
+            Self::SearchCapacityBusy => "kad-search-capacity-busy",
+            Self::SearchSemaphoreClosed => "kad-search-semaphore-closed",
+            Self::NoRoutingContacts => "kad-search-no-routing-contacts",
+        }
+    }
+
+    pub const fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::DuplicateTarget | Self::SearchCapacityBusy | Self::NoRoutingContacts
+        )
+    }
+}
+
 /// Local wire-dispatch result of a FINDSOURCE-assisted Kad callback walk.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

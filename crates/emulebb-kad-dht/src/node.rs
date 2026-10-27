@@ -464,13 +464,6 @@ impl DhtNode {
         self.inner.search_concurrency.try_acquire(target)
     }
 
-    /// A clone of this node's search/publish concurrency guard, for the streaming
-    /// search builders that acquire the permit inside their spawned task (they
-    /// return the stream synchronously and so cannot `.await` here).
-    pub(crate) fn search_concurrency(&self) -> concurrency::SearchConcurrency {
-        self.inner.search_concurrency.clone()
-    }
-
     /// Send an already-framed datagram on the shared Kad UDP socket without Kad
     /// encoding — for eD2k reask replies + the per-transfer ticker. Pass-through
     /// to `RpcManager::send_raw_datagram`.

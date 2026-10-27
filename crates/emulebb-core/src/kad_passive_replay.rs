@@ -124,11 +124,11 @@ async fn run_selected_passive_replay(
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     selected: PassiveReplaySelection,
 ) {
-    let (logical_key, result_count) = match selected {
+    let outcome = match selected {
         PassiveReplaySelection::Keyword(selected) => {
             let logical_key = selected.logical_key;
             let result_count = run_passive_keyword_replay(dht, index, selected.request).await;
-            (logical_key, result_count)
+            result_count.map(|result_count| (logical_key, result_count))
         }
         PassiveReplaySelection::Source(selected) => {
             let source_stop_after_results = {
@@ -142,15 +142,26 @@ async fn run_selected_passive_replay(
             let logical_key = selected.logical_key;
             let source_results =
                 run_passive_source_replay(dht, selected.request, source_stop_after_results).await;
-            remember_passive_source_results(transfer_runtime, &source_results).await;
-            (logical_key, source_results.len())
+            if let Some(source_results) = source_results {
+                remember_passive_source_results(transfer_runtime, &source_results).await;
+                Some((logical_key, source_results.len()))
+            } else {
+                None
+            }
         }
         PassiveReplaySelection::Notes(selected) => {
             let logical_key = selected.logical_key;
             let note_results = run_passive_notes_replay(dht, selected.request).await;
-            remember_passive_note_results(transfer_runtime, &note_results).await;
-            (logical_key, note_results.len())
+            if let Some(note_results) = note_results {
+                remember_passive_note_results(transfer_runtime, &note_results).await;
+                Some((logical_key, note_results.len()))
+            } else {
+                None
+            }
         }
+    };
+    let Some((logical_key, result_count)) = outcome else {
+        return;
     };
     snoop_queue
         .lock()
@@ -162,13 +173,26 @@ async fn run_passive_keyword_replay(
     dht: &DhtNode,
     index: &Arc<Mutex<FileIndex>>,
     request: SearchKeyReq,
-) -> usize {
+) -> Option<usize> {
     let cancel = CancellationToken::new();
-    let mut stream = dht.search_keyword_request_with_cancel_and_class(
-        request.clone(),
-        cancel.clone(),
-        RpcWorkClass::Harvest,
-    );
+    let mut stream = match dht
+        .search_keyword_request_with_cancel_and_class(
+            request.clone(),
+            cancel.clone(),
+            RpcWorkClass::Harvest,
+        )
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::debug!(
+                target = %request.target,
+                reason = error.reason(),
+                "deferred Kad passive keyword replay"
+            );
+            return None;
+        }
+    };
     let mut seen_hashes = HashSet::new();
     let mut result_count = 0usize;
     while let Some(result) = stream.next().await {
@@ -188,20 +212,33 @@ async fn run_passive_keyword_replay(
         result_count,
         "completed Kad passive keyword replay"
     );
-    result_count
+    Some(result_count)
 }
 
 async fn run_passive_source_replay(
     dht: &DhtNode,
     request: SearchSourceReq,
     source_stop_after_results: usize,
-) -> Vec<SourceResult> {
+) -> Option<Vec<SourceResult>> {
     let cancel = CancellationToken::new();
-    let mut stream = dht.search_source_request_with_cancel_and_class(
-        request.clone(),
-        cancel.clone(),
-        RpcWorkClass::Harvest,
-    );
+    let mut stream = match dht
+        .search_source_request_with_cancel_and_class(
+            request.clone(),
+            cancel.clone(),
+            RpcWorkClass::Harvest,
+        )
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::debug!(
+                target = %request.target,
+                reason = error.reason(),
+                "deferred Kad passive source replay"
+            );
+            return None;
+        }
+    };
     let mut seen_sources = HashSet::new();
     let mut results = Vec::new();
     while let Some(result) = stream.next().await {
@@ -222,7 +259,7 @@ async fn run_passive_source_replay(
         result_count = results.len(),
         "completed Kad passive source replay"
     );
-    results
+    Some(results)
 }
 
 pub(crate) async fn remember_passive_source_results(
@@ -257,15 +294,31 @@ pub(crate) async fn remember_passive_source_results(
     }
 }
 
-async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> Vec<KadNoteResult> {
+async fn run_passive_notes_replay(
+    dht: &DhtNode,
+    request: SearchNotesReq,
+) -> Option<Vec<KadNoteResult>> {
     let cancel = CancellationToken::new();
     let file_hash = Ed2kHash::from_bytes(request.target.to_be_bytes());
-    let mut stream = dht.search_notes_with_cancel_and_class(
-        file_hash,
-        request.size,
-        cancel.clone(),
-        RpcWorkClass::Harvest,
-    );
+    let mut stream = match dht
+        .search_notes_with_cancel_and_class(
+            file_hash,
+            request.size,
+            cancel.clone(),
+            RpcWorkClass::Harvest,
+        )
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::debug!(
+                target = %request.target,
+                reason = error.reason(),
+                "deferred Kad passive notes replay"
+            );
+            return None;
+        }
+    };
     let mut seen_notes = HashSet::new();
     let mut results = Vec::new();
     while let Some(result) = stream.next().await {
@@ -284,7 +337,7 @@ async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> Vec
         result_count = results.len(),
         "completed Kad passive notes replay"
     );
-    results
+    Some(results)
 }
 
 pub(crate) async fn remember_passive_note_results(
