@@ -12,6 +12,7 @@ use std::{
 use anyhow::{Context, Result};
 use num_bigint::BigUint;
 use rand::{Rng, RngExt};
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpSocket, TcpStream},
@@ -94,6 +95,8 @@ pub(super) struct ServerSession {
     pub(super) state: Arc<RwLock<Ed2kServerState>>,
     pub(super) trace_id: u64,
     pub(super) trace_role: &'static str,
+    pub(super) transport_mode: &'static str,
+    diagnostic_connection_state: &'static str,
     pub(super) last_tx: Instant,
     pub(super) receive_cipher: Option<Rc4KeyStream>,
     pub(super) send_cipher: Option<Rc4KeyStream>,
@@ -129,6 +132,70 @@ pub(super) struct ServerSession {
     pub(super) phase: ServerSessionPhase,
 }
 
+fn server_connection_event_parts(
+    endpoint: SocketAddr,
+    trace_id: u64,
+    transport_mode: &'static str,
+    previous_state: &'static str,
+    state: &'static str,
+    outcome: &'static str,
+    error: Option<&str>,
+) -> (&'static str, Value, Value) {
+    let peer = endpoint.to_string();
+    let severity = if outcome == "connection_failed" {
+        "warning"
+    } else {
+        "info"
+    };
+    (
+        severity,
+        json!({
+            "peer": peer,
+            "flow": "server",
+            "traceId": trace_id,
+        }),
+        json!({
+            "flow": "server",
+            "phase": "connection",
+            "traceKey": format!("server:tcp:{endpoint}"),
+            "traceId": trace_id,
+            "previousState": previous_state,
+            "state": state,
+            "outcome": outcome,
+            "transportMode": transport_mode,
+            "obfuscated": transport_mode == "obfuscated",
+            "error": error,
+        }),
+    )
+}
+
+fn emit_server_connection_state(
+    endpoint: SocketAddr,
+    trace_id: u64,
+    transport_mode: &'static str,
+    previous_state: &'static str,
+    state: &'static str,
+    outcome: &'static str,
+    error: Option<&str>,
+) {
+    let (severity, keys, body) = server_connection_event_parts(
+        endpoint,
+        trace_id,
+        transport_mode,
+        previous_state,
+        state,
+        outcome,
+        error,
+    );
+    crate::diag_event::emit("ed2k_tcp", "connection_state", severity, keys, body);
+}
+
+impl Drop for ServerSession {
+    fn drop(&mut self) {
+        self.transition_connection_state("disconnected", "connection_closed", None);
+    }
+}
+
 impl ServerSession {
     pub(super) async fn connect(
         bind_ip: Ipv4Addr,
@@ -142,6 +209,7 @@ impl ServerSession {
             endpoint,
             state,
             trace_role,
+            "plaintext",
             Instant::now() + timeout,
         )
         .await
@@ -152,8 +220,19 @@ impl ServerSession {
         endpoint: SocketAddr,
         state: Arc<RwLock<Ed2kServerState>>,
         trace_role: &'static str,
+        transport_mode: &'static str,
         pending_login_deadline: Instant,
     ) -> Result<Self> {
+        let trace_id = NEXT_SERVER_SESSION_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+        emit_server_connection_state(
+            endpoint,
+            trace_id,
+            transport_mode,
+            "not_connected",
+            "connecting",
+            "attempt_started",
+            None,
+        );
         {
             let mut guard = state.write().await;
             guard.connecting = true;
@@ -221,6 +300,15 @@ impl ServerSession {
         {
             Ok(stream) => stream,
             Err(error) => {
+                emit_server_connection_state(
+                    endpoint,
+                    trace_id,
+                    transport_mode,
+                    "connecting",
+                    "server_dead",
+                    "connection_failed",
+                    Some(&error.to_string()),
+                );
                 let mut guard = state.write().await;
                 if guard.connecting && guard.endpoint == Some(endpoint) {
                     guard.connecting = false;
@@ -229,13 +317,14 @@ impl ServerSession {
                 return Err(error);
             }
         };
-        let trace_id = NEXT_SERVER_SESSION_TRACE_ID.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             stream,
             endpoint,
             state,
             trace_id,
             trace_role,
+            transport_mode,
+            diagnostic_connection_state: "connecting",
             last_tx: Instant::now(),
             receive_cipher: None,
             send_cipher: None,
@@ -275,6 +364,8 @@ impl ServerSession {
             state: Arc::new(RwLock::new(Ed2kServerState::default())),
             trace_id,
             trace_role: "test",
+            transport_mode: "plaintext",
+            diagnostic_connection_state: "connecting",
             last_tx: Instant::now(),
             receive_cipher: None,
             send_cipher: None,
@@ -307,7 +398,42 @@ impl ServerSession {
 
     pub(super) fn set_phase(&mut self, phase: ServerSessionPhase, note: impl Into<String>) {
         self.phase = phase;
+        match phase {
+            ServerSessionPhase::AwaitingIdChange => {
+                self.transition_connection_state("awaiting_idchange", "transport_connected", None)
+            }
+            ServerSessionPhase::Connected => {
+                self.transition_connection_state("connected", "login_accepted", None);
+            }
+            _ => {}
+        }
         dump_ed2k_server_meta(self, note);
+    }
+
+    pub(super) fn fail_connection(&mut self, error: &str) {
+        self.transition_connection_state("server_dead", "connection_failed", Some(error));
+    }
+
+    fn transition_connection_state(
+        &mut self,
+        state: &'static str,
+        outcome: &'static str,
+        error: Option<&str>,
+    ) {
+        let previous_state = self.diagnostic_connection_state;
+        if previous_state == state {
+            return;
+        }
+        emit_server_connection_state(
+            self.endpoint,
+            self.trace_id,
+            self.transport_mode,
+            previous_state,
+            state,
+            outcome,
+            error,
+        );
+        self.diagnostic_connection_state = state;
     }
 
     pub(super) fn configure_offer_files_capability(&mut self, enabled: bool) {
@@ -1147,6 +1273,46 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn server_connection_event_matches_the_converged_lifecycle_contract() {
+        let endpoint: SocketAddr = "176.103.56.98:2442".parse().unwrap();
+
+        let (severity, keys, body) = server_connection_event_parts(
+            endpoint,
+            17,
+            "obfuscated",
+            "connecting",
+            "server_dead",
+            "connection_failed",
+            Some("connection timed out"),
+        );
+
+        assert_eq!(severity, "warning");
+        assert_eq!(
+            keys,
+            serde_json::json!({
+                "peer": "176.103.56.98:2442",
+                "flow": "server",
+                "traceId": 17,
+            })
+        );
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "flow": "server",
+                "phase": "connection",
+                "traceKey": "server:tcp:176.103.56.98:2442",
+                "traceId": 17,
+                "previousState": "connecting",
+                "state": "server_dead",
+                "outcome": "connection_failed",
+                "transportMode": "obfuscated",
+                "obfuscated": true,
+                "error": "connection timed out",
+            })
+        );
+    }
 
     /// A peer that declares an oversized server packet length must be dropped
     /// before the payload buffer is allocated (raw-length cap mirroring
