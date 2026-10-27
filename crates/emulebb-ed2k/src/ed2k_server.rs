@@ -66,8 +66,9 @@ use background::{
     handle_background_udp_packet, log_search_result_page, start_background_server_search,
 };
 pub use background::{
-    Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundSearchInterrupted, Ed2kServerSearchHandle,
-    Ed2kServerSearchInbox, Ed2kServerSourceBatchTarget, new_ed2k_server_search_channel,
+    Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundKeywordSearchOutcome,
+    Ed2kBackgroundSearchInterrupted, Ed2kServerSearchHandle, Ed2kServerSearchInbox,
+    Ed2kServerSourceBatchTarget, new_ed2k_server_search_channel,
     publish_shared_catalog_via_background_session, request_callback_via_background_session,
     search_keyword_via_background_session, search_source_batch_via_background_session,
     search_source_via_background_session,
