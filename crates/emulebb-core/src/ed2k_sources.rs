@@ -616,12 +616,25 @@ pub(crate) async fn collect_kad_ed2k_metadata(
     timeout: Duration,
 ) -> Option<LearnedEd2kMetadata> {
     let cancel = CancellationToken::new();
+    let mut stream = match dht
+        .search_keywords_with_cancel_and_class(
+            keyword_target(query),
+            cancel.clone(),
+            RpcWorkClass::Interactive,
+        )
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            crate::diag_kad_event::lookup_not_dispatched(
+                None,
+                crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
+                error.reason(),
+            );
+            return None;
+        }
+    };
     crate::diag_kad_event::lookup_started(None, crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD);
-    let mut stream = dht.search_keywords_with_cancel_and_class(
-        keyword_target(query),
-        cancel.clone(),
-        RpcWorkClass::Interactive,
-    );
     let sleep = tokio::time::sleep(timeout);
     tokio::pin!(sleep);
     let mut learned = LearnedEd2kMetadata::default();
@@ -665,11 +678,11 @@ pub(crate) async fn collect_kad_ed2k_sources(
     file_size: u64,
     timeout: Duration,
 ) -> Vec<Ed2kFoundSource> {
-    crate::diag_kad_event::lookup_started(None, crate::diag_kad_event::KAD_SEARCH_KIND_FILE);
     let mut sources = Vec::new();
     let deadline = Instant::now() + timeout;
     let retry_delay = Duration::from_millis(ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS);
     let mut attempts = 0usize;
+    let mut lookup_started = false;
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -678,7 +691,32 @@ pub(crate) async fn collect_kad_ed2k_sources(
         }
         attempts += 1;
         let cancel = CancellationToken::new();
-        let mut stream = dht.search_sources_with_cancel(file_hash, file_size, cancel.clone());
+        let mut stream = match dht
+            .search_sources_with_cancel(file_hash, file_size, cancel.clone())
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                crate::diag_kad_event::lookup_not_dispatched(
+                    None,
+                    crate::diag_kad_event::KAD_SEARCH_KIND_FILE,
+                    error.reason(),
+                );
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining <= retry_delay {
+                    break;
+                }
+                tokio::time::sleep(retry_delay).await;
+                continue;
+            }
+        };
+        if !lookup_started {
+            crate::diag_kad_event::lookup_started(
+                None,
+                crate::diag_kad_event::KAD_SEARCH_KIND_FILE,
+            );
+            lookup_started = true;
+        }
 
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -755,12 +793,13 @@ pub(crate) async fn collect_kad_ed2k_sources(
         file_hash,
         attempts
     );
-    // kad_event lookup_complete (uniform-diagnostics-v2 §3.3): exhausted = 0 found.
-    crate::diag_kad_event::lookup_complete(
-        None,
-        crate::diag_kad_event::KAD_SEARCH_KIND_FILE,
-        sources.len() as u32,
-    );
+    if lookup_started {
+        crate::diag_kad_event::lookup_complete(
+            None,
+            crate::diag_kad_event::KAD_SEARCH_KIND_FILE,
+            sources.len() as u32,
+        );
+    }
     sources
 }
 

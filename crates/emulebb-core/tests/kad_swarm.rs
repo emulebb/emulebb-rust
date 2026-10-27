@@ -54,7 +54,9 @@ async fn local_kad_swarm_publishes_and_searches_keywords() {
     let cancel = CancellationToken::new();
     let mut results = swarm.nodes[2]
         .dht
-        .search_keywords_with_cancel(target, cancel.clone());
+        .search_keywords_with_cancel(target, cancel.clone())
+        .await
+        .expect("start keyword search");
     let found = tokio::time::timeout(SEARCH_TIMEOUT, async {
         while let Some(result) = results.next().await {
             if result.hash == hash {
@@ -131,7 +133,9 @@ async fn local_kad_swarm_carries_aich_agreement_and_rejects_conflict() {
     let cancel = CancellationToken::new();
     let mut results = swarm.nodes[2]
         .dht
-        .search_keywords_with_cancel(target, cancel.clone());
+        .search_keywords_with_cancel(target, cancel.clone())
+        .await
+        .expect("start keyword search");
     let (agreed, conflicted) = tokio::time::timeout(SEARCH_TIMEOUT, async {
         let mut agreed = None;
         let mut conflicted = None;
@@ -185,10 +189,11 @@ async fn local_kad_swarm_publishes_and_searches_sources() {
     assert!(stats.acked_contacts > 0);
 
     let cancel = CancellationToken::new();
-    let mut results =
-        swarm.nodes[2]
-            .dht
-            .search_sources_with_cancel(hash, FILE_SIZE, cancel.clone());
+    let mut results = swarm.nodes[2]
+        .dht
+        .search_sources_with_cancel(hash, FILE_SIZE, cancel.clone())
+        .await
+        .expect("start source search");
     let found = tokio::time::timeout(SEARCH_TIMEOUT, async {
         while let Some(result) = results.next().await {
             if result.file_hash == hash {
@@ -235,7 +240,9 @@ async fn local_kad_swarm_publishes_and_searches_notes() {
     let cancel = CancellationToken::new();
     let mut results = swarm.nodes[2]
         .dht
-        .search_notes_with_cancel(hash, FILE_SIZE, cancel.clone());
+        .search_notes_with_cancel(hash, FILE_SIZE, cancel.clone())
+        .await
+        .expect("start notes search");
     let found = tokio::time::timeout(SEARCH_TIMEOUT, async {
         while let Some(result) = results.next().await {
             if result.file_hash == hash {

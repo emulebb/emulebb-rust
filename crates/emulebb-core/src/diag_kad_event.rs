@@ -471,8 +471,22 @@ pub(crate) fn lookup_complete(
     search_kind: &'static str,
     result_count: u32,
 ) {
-    let (keys, body) = lookup_parts("lookup_complete", search_id, search_kind, result_count);
+    let (keys, mut body) = lookup_parts("lookup_complete", search_id, search_kind, result_count);
+    body["outcome"] = json!("completed");
     emit(FAMILY, "lookup", "info", keys, body);
+}
+
+/// Emits a search start rejection separately from a legitimate completed-empty
+/// traversal. The exact reason is stable queue/diagnostic data.
+pub(crate) fn lookup_not_dispatched(
+    search_id: Option<&str>,
+    search_kind: &'static str,
+    reason: &'static str,
+) {
+    let (keys, mut body) = lookup_parts("lookup_not_dispatched", search_id, search_kind, 0);
+    body["outcome"] = json!("not-dispatched");
+    body["reason"] = json!(reason);
+    emit(FAMILY, "lookup", "low", keys, body);
 }
 
 /// `routing_summary` (schema §3.3, periodic): the routing-table + connection
@@ -608,6 +622,11 @@ mod tests {
         );
         lookup_started(None, KAD_SEARCH_KIND_FILE);
         lookup_complete(None, KAD_SEARCH_KIND_FILE, 7);
+        lookup_not_dispatched(
+            Some("search-1"),
+            KAD_SEARCH_KIND_KEYWORD,
+            "kad-search-capacity-busy",
+        );
         routing_summary(
             true,
             false,

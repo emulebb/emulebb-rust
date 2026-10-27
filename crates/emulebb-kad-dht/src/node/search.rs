@@ -1,13 +1,13 @@
 use super::{DhtNode, contact_helpers::addr_from_contact};
 use crate::error::DhtError;
-use crate::node::concurrency::SearchAcquireError;
+use crate::node::concurrency::{SearchAcquireError, SearchPermit};
 use crate::traversal::refresh::{NodeRefreshConfig, NodeRefreshOutcome, run_node_refresh_lookup};
 use crate::traversal::{
     MoreResultsMode, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
 };
 use crate::types::{
-    KadCallbackSearchDispatchOutcome, KadCallbackSearchNotDispatchedReason, NoteResult,
-    SearchResult, SourceResult,
+    KadCallbackSearchDispatchOutcome, KadCallbackSearchNotDispatchedReason, KadSearchStartError,
+    NoteResult, SearchResult, SourceResult,
 };
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::packet::{CallbackReq, FindBuddyReq};
@@ -299,27 +299,32 @@ impl DhtNode {
     }
 
     /// Search by keyword hash. Returns a Stream of results.
-    pub fn search_keywords(
+    pub async fn search_keywords(
         &self,
         target: NodeId,
-    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_keywords_with_cancel(target, CancellationToken::new())
+            .await
     }
 
-    pub fn search_keywords_with_cancel(
+    pub async fn search_keywords_with_cancel(
         &self,
         target: NodeId,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_keywords_with_cancel_and_class(target, cancel, RpcWorkClass::Interactive)
+            .await
     }
 
-    pub fn search_keywords_with_cancel_and_class(
+    pub async fn search_keywords_with_cancel_and_class(
         &self,
         target: NodeId,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_keyword_request_with_cancel_and_class(
             SearchKeyReq {
                 target,
@@ -329,74 +334,86 @@ impl DhtNode {
             cancel,
             work_class,
         )
+        .await
     }
 
     /// Replay a full Kad keyword request shape harvested from the network.
-    pub fn search_keyword_request(
+    pub async fn search_keyword_request(
         &self,
         request: SearchKeyReq,
-    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_keyword_request_with_cancel_and_class(
             request,
             CancellationToken::new(),
             RpcWorkClass::Interactive,
         )
+        .await
     }
 
-    pub fn search_keyword_request_with_cancel(
+    pub async fn search_keyword_request_with_cancel(
         &self,
         request: SearchKeyReq,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_keyword_request_with_cancel_and_class(
             request,
             cancel,
             RpcWorkClass::Interactive,
         )
+        .await
     }
 
-    pub fn search_keyword_request_with_cancel_and_class(
+    pub async fn search_keyword_request_with_cancel_and_class(
         &self,
         request: SearchKeyReq,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_keyword_request_with_phase2_fanout_and_cancel_and_class(
             request,
             self.inner.config.search_phase2_fanout,
             cancel,
             work_class,
         )
+        .await
     }
 
     /// Replay a harvested Kad keyword request shape with an explicit phase-2
     /// responder ceiling.
-    pub fn search_keyword_request_with_phase2_fanout_and_cancel(
+    pub async fn search_keyword_request_with_phase2_fanout_and_cancel(
         &self,
         request: SearchKeyReq,
         phase2_fanout: usize,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_keyword_request_with_phase2_fanout_and_cancel_and_class(
             request,
             phase2_fanout,
             cancel,
             RpcWorkClass::Interactive,
         )
+        .await
     }
 
     /// Replay a harvested Kad keyword request shape with an explicit phase-2
     /// responder ceiling and outbound work class.
-    pub fn search_keyword_request_with_phase2_fanout_and_cancel_and_class(
+    pub async fn search_keyword_request_with_phase2_fanout_and_cancel_and_class(
         &self,
         request: SearchKeyReq,
         phase2_fanout: usize,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
+    {
         let target = request.target;
-        let initial = self.closest_search_contacts(target, phase2_fanout);
-        crate::search::search_keywords_by_request(
+        let (initial, permit) = self
+            .prepare_search_start(target, phase2_fanout, &cancel)
+            .await?;
+        Ok(crate::search::search_keywords_by_request(
             self.inner.rpc.clone(),
             initial,
             request,
@@ -407,40 +424,45 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
-            Some(self.search_concurrency()),
-        )
+            permit,
+        ))
     }
 
     /// Search for file sources. Returns a Stream of results.
-    pub fn search_sources(
+    pub async fn search_sources(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_sources_with_cancel(file_hash, file_size, CancellationToken::new())
+            .await
     }
 
-    pub fn search_sources_with_cancel(
+    pub async fn search_sources_with_cancel(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_sources_with_cancel_and_class(
             file_hash,
             file_size,
             cancel,
             RpcWorkClass::Interactive,
         )
+        .await
     }
 
-    pub fn search_sources_with_cancel_and_class(
+    pub async fn search_sources_with_cancel_and_class(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_source_request_with_phase2_fanout_and_cancel_and_class(
             SearchSourceReq {
                 target: NodeId::from_be_bytes(file_hash.0),
@@ -451,70 +473,82 @@ impl DhtNode {
             cancel,
             work_class,
         )
+        .await
     }
 
     /// Replay a full Kad source request shape harvested from the network.
-    pub fn search_source_request(
+    pub async fn search_source_request(
         &self,
         request: SearchSourceReq,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_source_request_with_cancel_and_class(
             request,
             CancellationToken::new(),
             RpcWorkClass::Interactive,
         )
+        .await
     }
 
-    pub fn search_source_request_with_cancel(
+    pub async fn search_source_request_with_cancel(
         &self,
         request: SearchSourceReq,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_source_request_with_cancel_and_class(request, cancel, RpcWorkClass::Interactive)
+            .await
     }
 
-    pub fn search_source_request_with_cancel_and_class(
+    pub async fn search_source_request_with_cancel_and_class(
         &self,
         request: SearchSourceReq,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_source_request_with_phase2_fanout_and_cancel_and_class(
             request,
             self.inner.config.search_phase2_fanout,
             cancel,
             work_class,
         )
+        .await
     }
 
     /// Search for file sources with an explicit phase-2 responder ceiling while
     /// preserving the full request shape.
-    pub fn search_source_request_with_phase2_fanout_and_cancel(
+    pub async fn search_source_request_with_phase2_fanout_and_cancel(
         &self,
         request: SearchSourceReq,
         phase2_fanout: usize,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_source_request_with_phase2_fanout_and_cancel_and_class(
             request,
             phase2_fanout,
             cancel,
             RpcWorkClass::Interactive,
         )
+        .await
     }
 
     /// Search for file sources with an explicit phase-2 responder ceiling while
     /// preserving the full request shape and work class.
-    pub fn search_source_request_with_phase2_fanout_and_cancel_and_class(
+    pub async fn search_source_request_with_phase2_fanout_and_cancel_and_class(
         &self,
         request: SearchSourceReq,
         phase2_fanout: usize,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         let target = request.target;
-        let initial = self.closest_search_contacts(target, phase2_fanout);
-        crate::search::search_sources_by_request(
+        let (initial, permit) = self
+            .prepare_search_start(target, phase2_fanout, &cancel)
+            .await?;
+        Ok(crate::search::search_sources_by_request(
             self.inner.rpc.clone(),
             initial,
             request,
@@ -525,18 +559,19 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
-            Some(self.search_concurrency()),
-        )
+            permit,
+        ))
     }
 
     /// Search for file sources with an explicit phase-2 responder ceiling.
-    pub fn search_sources_with_phase2_fanout_and_cancel(
+    pub async fn search_sources_with_phase2_fanout_and_cancel(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
         phase2_fanout: usize,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_source_request_with_phase2_fanout_and_cancel(
             SearchSourceReq {
                 target: NodeId::from_be_bytes(file_hash.0),
@@ -546,38 +581,44 @@ impl DhtNode {
             phase2_fanout,
             cancel,
         )
+        .await
     }
 
     /// Search for notes/ratings. Returns a Stream of results.
-    pub fn search_notes(
+    pub async fn search_notes(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
-    ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_notes_with_cancel(file_hash, file_size, CancellationToken::new())
+            .await
     }
 
-    pub fn search_notes_with_cancel(
+    pub async fn search_notes_with_cancel(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_notes_with_cancel_and_class(
             file_hash,
             file_size,
             cancel,
             RpcWorkClass::Interactive,
         )
+        .await
     }
 
-    pub fn search_notes_with_cancel_and_class(
+    pub async fn search_notes_with_cancel_and_class(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_notes_with_phase2_fanout_and_cancel_and_class(
             file_hash,
             file_size,
@@ -585,16 +626,18 @@ impl DhtNode {
             cancel,
             work_class,
         )
+        .await
     }
 
     /// Search for notes/ratings with an explicit phase-2 responder ceiling.
-    pub fn search_notes_with_phase2_fanout_and_cancel(
+    pub async fn search_notes_with_phase2_fanout_and_cancel(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
         phase2_fanout: usize,
         cancel: CancellationToken,
-    ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
+    {
         self.search_notes_with_phase2_fanout_and_cancel_and_class(
             file_hash,
             file_size,
@@ -602,20 +645,24 @@ impl DhtNode {
             cancel,
             RpcWorkClass::Interactive,
         )
+        .await
     }
 
     /// Search for notes/ratings with an explicit phase-2 responder ceiling and work class.
-    pub fn search_notes_with_phase2_fanout_and_cancel_and_class(
+    pub async fn search_notes_with_phase2_fanout_and_cancel_and_class(
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
         phase2_fanout: usize,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
+    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
+    {
         let target = NodeId::from_be_bytes(file_hash.0);
-        let initial = self.closest_search_contacts(target, phase2_fanout);
-        crate::search::search_notes(
+        let (initial, permit) = self
+            .prepare_search_start(target, phase2_fanout, &cancel)
+            .await?;
+        Ok(crate::search::search_notes(
             self.inner.rpc.clone(),
             initial,
             crate::search::NotesSearchRequest {
@@ -630,32 +677,56 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
-            Some(self.search_concurrency()),
-        )
+            permit,
+        ))
+    }
+
+    /// Validate one search start before constructing its result stream.
+    async fn prepare_search_start(
+        &self,
+        target: NodeId,
+        phase2_fanout: usize,
+        cancel: &CancellationToken,
+    ) -> Result<(Vec<TraversalContact>, SearchPermit), KadSearchStartError> {
+        if cancel.is_cancelled() {
+            return Err(KadSearchStartError::Cancelled);
+        }
+        let initial = tokio::select! {
+            _ = cancel.cancelled() => return Err(KadSearchStartError::Cancelled),
+            initial = self.closest_search_contacts(target, phase2_fanout) => initial,
+        };
+        if initial.is_empty() {
+            return Err(KadSearchStartError::NoRoutingContacts);
+        }
+        let permit = self
+            .try_acquire_search_permit(target)
+            .map_err(|error| match error {
+                SearchAcquireError::Duplicate => KadSearchStartError::DuplicateTarget,
+                SearchAcquireError::Busy => KadSearchStartError::SearchCapacityBusy,
+                SearchAcquireError::Closed => KadSearchStartError::SearchSemaphoreClosed,
+            })?;
+        if cancel.is_cancelled() {
+            return Err(KadSearchStartError::Cancelled);
+        }
+        Ok((initial, permit))
     }
 
     /// Returns the routing-table contacts used to seed one Kad search walk.
-    fn closest_search_contacts(
+    async fn closest_search_contacts(
         &self,
         target: NodeId,
         phase2_fanout: usize,
     ) -> Vec<TraversalContact> {
-        match self.inner.routing_table.try_lock() {
-            Ok(rt) => rt
-                // MFC seeds searches with up to 50 nearby routing contacts.
-                // Use the configured result-contact fanout while retaining K
-                // as the minimum convergence/failure fallback set.
-                .get_closest(&target, phase2_fanout.max(K))
-                .into_iter()
-                .map(|c| TraversalContact {
-                    id: c.id,
-                    addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
-                    tcp_port: c.tcp_port,
-                    version: c.kad_version,
-                })
-                .collect(),
-            Err(_) => vec![],
-        }
+        let rt = self.inner.routing_table.lock().await;
+        rt.get_closest(&target, phase2_fanout.max(K))
+            .into_iter()
+            .map(|c| TraversalContact {
+                id: c.id,
+                addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
+                tcp_port: c.tcp_port,
+                version: c.kad_version,
+            })
+            .collect()
     }
 }
 
@@ -664,6 +735,7 @@ mod tests {
     use super::{FIND_BUDDY_LOOKUP_TIMEOUT, FIND_SOURCE_LOOKUP_TIMEOUT};
     use crate::{
         DhtConfig, DhtNode, KadCallbackSearchDispatchOutcome, KadCallbackSearchNotDispatchedReason,
+        KadSearchStartError,
     };
     use emulebb_kad_net::RpcWorkClass;
     use emulebb_kad_proto::{
@@ -704,6 +776,149 @@ mod tests {
             file_hash: Ed2kHash::from_bytes([0x44; 16]),
             tcp_port: 4662,
         }
+    }
+
+    #[tokio::test]
+    async fn every_public_search_kind_reports_no_routing_contacts() {
+        let dht = empty_test_dht().await;
+        let keyword_error = dht
+            .search_keywords(NodeId::from_bytes([0x31; 16]))
+            .await
+            .err();
+        assert_eq!(keyword_error, Some(KadSearchStartError::NoRoutingContacts));
+        let source_error = dht
+            .search_sources(Ed2kHash::from_bytes([0x32; 16]), 1024)
+            .await
+            .err();
+        assert_eq!(source_error, Some(KadSearchStartError::NoRoutingContacts));
+        let notes_error = dht
+            .search_notes(Ed2kHash::from_bytes([0x33; 16]), 1024)
+            .await
+            .err();
+        assert_eq!(notes_error, Some(KadSearchStartError::NoRoutingContacts));
+    }
+
+    #[tokio::test]
+    async fn search_start_cancels_while_waiting_for_routing_authority() {
+        let dht = empty_test_dht().await;
+        let target = NodeId::from_bytes([0x35; 16]);
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x42; 16]),
+            crate::test_bind_ip(),
+            42002,
+            42003,
+            9,
+        ))
+        .await
+        .unwrap();
+
+        let guard = dht.inner.routing_table.lock().await;
+        let cancel = CancellationToken::new();
+        let start_task = tokio::spawn({
+            let dht = dht.clone();
+            let cancel = cancel.clone();
+            async move { dht.prepare_search_start(target, 50, &cancel).await.err() }
+        });
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(1), start_task)
+            .await
+            .expect("cancelled start exits without routing lock release")
+            .unwrap();
+        assert_eq!(error, Some(KadSearchStartError::Cancelled));
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn search_seed_waits_for_routing_lock_instead_of_becoming_empty() {
+        let dht = empty_test_dht().await;
+        let target = NodeId::from_bytes([0x32; 16]);
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x41; 16]),
+            crate::test_bind_ip(),
+            42000,
+            42001,
+            9,
+        ))
+        .await
+        .unwrap();
+
+        let guard = dht.inner.routing_table.lock().await;
+        let seed_task = tokio::spawn({
+            let dht = dht.clone();
+            async move { dht.closest_search_contacts(target, 50).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !seed_task.is_finished(),
+            "routing contention must wait, not synthesize an empty seed"
+        );
+
+        drop(guard);
+        let seed = tokio::time::timeout(Duration::from_secs(1), seed_task)
+            .await
+            .expect("seed acquisition resumes after routing lock release")
+            .unwrap();
+        assert_eq!(seed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn public_search_start_preserves_duplicate_and_capacity_rejections() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::new(IpAddr::V4(crate::test_bind_ip()), 0)),
+            obfuscation_enabled: false,
+            max_concurrent_searches: 2,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x41; 16]),
+            crate::test_bind_ip(),
+            42000,
+            42001,
+            9,
+        ))
+        .await
+        .unwrap();
+
+        let first_target = NodeId::from_bytes([0x33; 16]);
+        let _first_permit = dht
+            .try_acquire_search_permit(first_target)
+            .expect("reserve first search slot");
+        let duplicate = dht.search_keywords(first_target).await.err();
+        assert_eq!(duplicate, Some(KadSearchStartError::DuplicateTarget));
+
+        let other_target = NodeId::from_bytes([0x34; 16]);
+        let _second_permit = dht
+            .try_acquire_search_permit(other_target)
+            .expect("reserve second search slot");
+        let busy = dht
+            .search_keywords(NodeId::from_bytes([0x36; 16]))
+            .await
+            .err();
+        assert_eq!(busy, Some(KadSearchStartError::SearchCapacityBusy));
+    }
+
+    #[tokio::test]
+    async fn public_search_start_reports_closed_scheduler() {
+        let dht = empty_test_dht().await;
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x43; 16]),
+            crate::test_bind_ip(),
+            42004,
+            42005,
+            9,
+        ))
+        .await
+        .unwrap();
+        dht.inner.search_concurrency.close();
+
+        let error = dht
+            .search_keywords(NodeId::from_bytes([0x37; 16]))
+            .await
+            .err();
+        assert_eq!(error, Some(KadSearchStartError::SearchSemaphoreClosed));
     }
 
     #[tokio::test]

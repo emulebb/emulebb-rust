@@ -176,20 +176,35 @@ impl EmulebbCore {
                             ),
                         ),
                         status_reason,
+                        None,
                     ),
                     Ed2kServerSearchOutcome::Unavailable
-                    | Ed2kServerSearchOutcome::NotConnected => (None, None),
+                    | Ed2kServerSearchOutcome::NotConnected => (None, None, None),
                 }),
             Some(SearchNetworkMethod::Kad) => match self.ed2k_dht_node().await {
                 Some(dht) => search_kad_keywords(dht, &search_id, &request, &cancel, None)
                     .await
-                    .map(|outcome| (outcome, None)),
-                None => Ok((None, None)),
+                    .map(|outcome| {
+                        match outcome {
+                            crate::kad_public_search::KadKeywordSearchDispatchOutcome::Completed(
+                                outcome,
+                            ) => (Some(outcome), None, None),
+                            crate::kad_public_search::KadKeywordSearchDispatchOutcome::NotDispatched {
+                                reason,
+                                ..
+                            } => (None, None, Some(reason)),
+                        }
+                    }),
+                None => Ok((None, None, Some("kad-runtime-unavailable"))),
             },
-            None => Ok((None, None)),
+            None => Ok((None, None, None)),
         };
         match outcome {
-            Ok((network_outcome, status_reason)) => {
+            Ok((_, _, Some(reason))) => {
+                self.fail_search(&search_id, &request, method_str, reason)
+                    .await;
+            }
+            Ok((network_outcome, status_reason, None)) => {
                 let (network_results, aich_votes) = match network_outcome {
                     Some(outcome) => (Some(outcome.results), Some(outcome.aich_votes)),
                     None => (None, None),
