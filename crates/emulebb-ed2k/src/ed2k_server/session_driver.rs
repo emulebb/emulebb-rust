@@ -129,6 +129,7 @@ async fn connect_server_transport_attempt(
         transport_endpoint,
         Arc::clone(&context.state),
         "background",
+        mode.label(),
         pending_login_deadline,
     )
     .await?;
@@ -163,21 +164,19 @@ async fn connect_server_transport_attempt(
         server.entry.udp_key != 0,
         transport_endpoint.port(),
     );
-    if use_server_obfuscation {
+    let login_result = if use_server_obfuscation {
         match tokio::time::timeout_at(
             TokioInstant::from_std(pending_login_deadline),
             session.negotiate_obfuscation_and_send(OP_LOGINREQUEST, &login_payload),
         )
         .await
         {
-            Ok(result) => result?,
-            Err(error) => {
-                return Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
-                    format!(
-                        "timed out negotiating ED2K server obfuscation with {transport_endpoint}: {error}"
-                    ),
-                )));
-            }
+            Ok(result) => result,
+            Err(error) => Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
+                format!(
+                    "timed out negotiating ED2K server obfuscation with {transport_endpoint}: {error}"
+                ),
+            ))),
         }
     } else {
         match tokio::time::timeout_at(
@@ -186,15 +185,17 @@ async fn connect_server_transport_attempt(
         )
         .await
         {
-            Ok(result) => result?,
-            Err(error) => {
-                return Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
-                    format!(
-                        "timed out sending ED2K server login request to {transport_endpoint}: {error}"
-                    ),
-                )));
-            }
+            Ok(result) => result,
+            Err(error) => Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
+                format!(
+                    "timed out sending ED2K server login request to {transport_endpoint}: {error}"
+                ),
+            ))),
         }
+    };
+    if let Err(error) = login_result {
+        session.fail_connection(&error.to_string());
+        return Err(error);
     }
     session.set_phase(
         ServerSessionPhase::AwaitingIdChange,
@@ -355,6 +356,7 @@ pub(super) async fn run_one_server_session(
                         "{timeout_error} before search completion"
                     )),
                 );
+                session.fail_connection(&timeout_error);
                 clear_server_connection_state(&context.state).await;
                 return Err(anyhow::Error::new(Ed2kServerFailure::connect_timeout(
                     timeout_error,
