@@ -27,6 +27,83 @@ use serde_json::{Value, json};
 
 const FAMILY: &str = "kad_event";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KadBuddyRequestDecision {
+    Accepted,
+    TcpFirewallCheckCollision,
+    SelfEndpoint,
+    SelfFirewalled,
+    AlreadyHaveBuddy,
+    ResponseSendFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KadBuddyRequestState {
+    pub(crate) tcp_firewalled: bool,
+    pub(crate) udp_verified: bool,
+    pub(crate) udp_open: bool,
+    pub(crate) requester_has_udp_key: bool,
+    pub(crate) requester_tcp_port: u16,
+    pub(crate) local_tcp_port: u16,
+}
+
+impl KadBuddyRequestDecision {
+    fn diagnostic_fields(
+        self,
+    ) -> (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ) {
+        match self {
+            Self::Accepted => (
+                "buddy_request_accepted",
+                "accept",
+                "accepted",
+                "eligible",
+                "info",
+            ),
+            Self::TcpFirewallCheckCollision => (
+                "buddy_request_refused",
+                "refuse",
+                "refused",
+                "tcp_firewall_check_collision",
+                "low",
+            ),
+            Self::SelfEndpoint => (
+                "buddy_request_refused",
+                "refuse",
+                "refused",
+                "self_endpoint",
+                "low",
+            ),
+            Self::SelfFirewalled => (
+                "buddy_request_refused",
+                "refuse",
+                "refused",
+                "self_firewalled",
+                "low",
+            ),
+            Self::AlreadyHaveBuddy => (
+                "buddy_request_refused",
+                "refuse",
+                "refused",
+                "already_serving_buddy",
+                "low",
+            ),
+            Self::ResponseSendFailed => (
+                "buddy_response_send_failed",
+                "reply",
+                "send_failed",
+                "response_send_failed",
+                "low",
+            ),
+        }
+    }
+}
+
 /// Which outbound Kad publish kind a milestone describes. Carried in
 /// `body.publishKind` so a live harness can split keyword vs source vs notes
 /// store rounds; the `event` value stays the coarse milestone bucket.
@@ -301,6 +378,37 @@ pub(crate) fn buddy(established: bool, peer: SocketAddr) {
     );
 }
 
+fn buddy_request_parts(
+    decision: KadBuddyRequestDecision,
+    peer: SocketAddr,
+    state: KadBuddyRequestState,
+) -> (&'static str, Value, Value) {
+    let (milestone, action, outcome, reason, severity) = decision.diagnostic_fields();
+    let keys = json!({ "peer": peer.to_string() });
+    let body = json!({
+        "milestone": milestone,
+        "action": action,
+        "outcome": outcome,
+        "reason": reason,
+        "tcpFirewalled": state.tcp_firewalled,
+        "udpVerified": state.udp_verified,
+        "udpOpen": state.udp_open,
+        "requesterHasUdpKey": state.requester_has_udp_key,
+        "requesterTcpPort": state.requester_tcp_port,
+        "localTcpPort": state.local_tcp_port,
+    });
+    (severity, keys, body)
+}
+
+pub(crate) fn buddy_request(
+    decision: KadBuddyRequestDecision,
+    peer: SocketAddr,
+    state: KadBuddyRequestState,
+) {
+    let (severity, keys, body) = buddy_request_parts(decision, peer, state);
+    emit(FAMILY, "buddy_request", severity, keys, body);
+}
+
 /// `callback` milestone (uniform-diagnostics-v2 §3.3, rust superset): we
 /// originated an outbound Kad `KADEMLIA_CALLBACK_REQ` to a firewalled buddy
 /// source's buddy so the source connects back to us (oracle `BaseClient.cpp`
@@ -468,6 +576,18 @@ mod tests {
         firewall(false);
         buddy(true, "1.2.3.4:4672".parse().unwrap());
         buddy(false, "1.2.3.4:4672".parse().unwrap());
+        buddy_request(
+            KadBuddyRequestDecision::Accepted,
+            "1.2.3.4:4672".parse().unwrap(),
+            KadBuddyRequestState {
+                tcp_firewalled: false,
+                udp_verified: true,
+                udp_open: true,
+                requester_has_udp_key: true,
+                requester_tcp_port: 4662,
+                local_tcp_port: 4663,
+            },
+        );
         callback(
             "sent",
             Some("198.51.100.9:5000".parse().unwrap()),
@@ -521,6 +641,84 @@ mod tests {
                 max_elapsed_us: 750,
             }],
         );
+    }
+
+    #[test]
+    fn buddy_request_diagnostics_preserve_terminal_decision_and_state() {
+        let peer = "198.51.100.7:4672".parse().unwrap();
+        let state = KadBuddyRequestState {
+            tcp_firewalled: true,
+            udp_verified: false,
+            udp_open: false,
+            requester_has_udp_key: true,
+            requester_tcp_port: 4662,
+            local_tcp_port: 4663,
+        };
+
+        let (severity, keys, body) =
+            buddy_request_parts(KadBuddyRequestDecision::SelfFirewalled, peer, state);
+
+        assert_eq!(severity, "low");
+        assert_eq!(keys, json!({ "peer": "198.51.100.7:4672" }));
+        assert_eq!(
+            body,
+            json!({
+                "milestone": "buddy_request_refused",
+                "action": "refuse",
+                "outcome": "refused",
+                "reason": "self_firewalled",
+                "tcpFirewalled": true,
+                "udpVerified": false,
+                "udpOpen": false,
+                "requesterHasUdpKey": true,
+                "requesterTcpPort": 4662,
+                "localTcpPort": 4663,
+            })
+        );
+    }
+
+    #[test]
+    fn buddy_request_decisions_have_stable_terminal_fields() {
+        let cases = [
+            (
+                KadBuddyRequestDecision::Accepted,
+                "buddy_request_accepted",
+                "accepted",
+                "eligible",
+            ),
+            (
+                KadBuddyRequestDecision::TcpFirewallCheckCollision,
+                "buddy_request_refused",
+                "refused",
+                "tcp_firewall_check_collision",
+            ),
+            (
+                KadBuddyRequestDecision::SelfEndpoint,
+                "buddy_request_refused",
+                "refused",
+                "self_endpoint",
+            ),
+            (
+                KadBuddyRequestDecision::AlreadyHaveBuddy,
+                "buddy_request_refused",
+                "refused",
+                "already_serving_buddy",
+            ),
+            (
+                KadBuddyRequestDecision::ResponseSendFailed,
+                "buddy_response_send_failed",
+                "send_failed",
+                "response_send_failed",
+            ),
+        ];
+
+        for (decision, milestone, outcome, reason) in cases {
+            let (actual_milestone, _, actual_outcome, actual_reason, _) =
+                decision.diagnostic_fields();
+            assert_eq!(actual_milestone, milestone);
+            assert_eq!(actual_outcome, outcome);
+            assert_eq!(actual_reason, reason);
+        }
     }
 
     #[test]
