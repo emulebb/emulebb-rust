@@ -69,7 +69,21 @@ def build_env() -> dict[str, str]:
             "CARGO_TARGET_DIR must be "
             f"{expected_target}, got {target}"
         )
+    configure_output_scratch(env, output_root)
     return env
+
+
+def configure_output_scratch(env: dict[str, str], output_root: Path) -> Path:
+    """Route child-process temporary files into the canonical output root."""
+
+    scratch = output_root / "cache" / "tmp"
+    pycache = output_root / "cache" / "pycache"
+    scratch.mkdir(parents=True, exist_ok=True)
+    pycache.mkdir(parents=True, exist_ok=True)
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        env[name] = str(scratch)
+    env["PYTHONPYCACHEPREFIX"] = str(pycache)
+    return scratch
 
 
 def require_path_env(env: dict[str, str], name: str) -> Path:
