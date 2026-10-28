@@ -26,6 +26,40 @@ pub enum KadSearchStartError {
     NoRoutingContacts,
 }
 
+/// Authoritative terminal state of a Kad search traversal after admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KadSearchTerminalReason {
+    Completed,
+    Cancelled,
+    NoRespondingContacts,
+    NoEligibleSearchContacts,
+    Phase2DeadlineElapsed,
+    Phase2SendFailed,
+}
+
+impl KadSearchTerminalReason {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "kad-search-cancelled",
+            Self::NoRespondingContacts => "kad-search-no-responding-contacts",
+            Self::NoEligibleSearchContacts => "kad-search-no-eligible-contacts",
+            Self::Phase2DeadlineElapsed => "kad-search-phase2-deadline-elapsed",
+            Self::Phase2SendFailed => "kad-search-phase2-send-failed",
+        }
+    }
+
+    pub const fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::NoRespondingContacts
+                | Self::NoEligibleSearchContacts
+                | Self::Phase2DeadlineElapsed
+                | Self::Phase2SendFailed
+        )
+    }
+}
+
 impl KadSearchStartError {
     /// Stable machine-readable reason used by queue state and diagnostics.
     pub const fn reason(self) -> &'static str {

@@ -809,6 +809,10 @@ async fn test_run_search_phase_collects_multiple_search_res_packets() {
             sent: 1,
         }
     );
+    assert_eq!(
+        search_phase.terminal_reason,
+        KadSearchTerminalReason::Completed
+    );
     let streamed_first = result_rx.recv().await.expect("first streamed result");
     let streamed_second = result_rx.recv().await.expect("second streamed result");
     assert_eq!(streamed_first.entry_id, Ed2kHash::from_bytes([1; 16]));
@@ -1304,6 +1308,55 @@ async fn keyword_traversal_collects_reply_after_active_deadline() {
     );
     assert_eq!(result.search_entries.len(), 1);
     assert_eq!(result.search_entries[0].0, Ed2kHash::from_bytes([0x88; 16]));
+    assert_eq!(result.routing_seed_count, 1);
+    assert_eq!(result.responding_contact_count, 1);
+    assert_eq!(result.phase2_dispatch.attempted, 1);
+    assert_eq!(result.phase2_dispatch.sent, 1);
+    assert_eq!(result.terminal_reason, KadSearchTerminalReason::Completed);
+    assert!(!result.elapsed.is_zero());
+}
+
+#[tokio::test]
+async fn search_phase_reports_no_responding_contacts_without_dispatch() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let cancel = CancellationToken::new();
+    let target = NodeId::from_bytes([0x77; 16]);
+    let search_phase = run_search_phase(
+        &rpc,
+        SearchPhaseConfig {
+            responded: &[],
+            kind: TraversalKind::Keyword {
+                request: SearchKeyReq {
+                    target,
+                    start_position: 0,
+                    restrictive_payload: Vec::new(),
+                },
+            },
+            target,
+            query_timeout: Duration::from_millis(100),
+            emit_deadline: Instant::now() + Duration::from_secs(1),
+            response_deadline: Instant::now() + Duration::from_secs(1),
+            phase2_fanout: 10,
+            last_lookup_response_at: None,
+            jumpstart_idle_grace: Duration::ZERO,
+            jumpstart_tick: Duration::from_millis(10),
+            work_class: RpcWorkClass::Interactive,
+            cancel: &cancel,
+            result_tx: None,
+        },
+    )
+    .await;
+
+    assert_eq!(search_phase.dispatch, Phase2DispatchStats::default());
+    assert_eq!(
+        search_phase.terminal_reason,
+        KadSearchTerminalReason::NoRespondingContacts
+    );
 }
 
 /// RUST-PAR-017 KAD-G1 guard: the NODE-lite refresh lookup must NOT change the

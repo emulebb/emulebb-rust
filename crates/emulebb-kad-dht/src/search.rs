@@ -3,7 +3,7 @@ use crate::traversal::{
     KadIpFilter, KadResContactSink, MoreResultsMode, SearchResultObservation, TraversalConfig,
     TraversalContact, TraversalKind, run_traversal,
 };
-use crate::types::{NoteResult, SearchResult, SourceResult};
+use crate::types::{KadSearchTerminalReason, NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::constants::SEARCH_RESULT_GRACE_SECS;
 use emulebb_kad_proto::{
@@ -11,8 +11,11 @@ use emulebb_kad_proto::{
 };
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -25,6 +28,67 @@ const SEARCH_RESULT_GRACE: Duration = Duration::from_secs(SEARCH_RESULT_GRACE_SE
 /// from one peer. Keeping this buffer comfortably above one page train avoids
 /// turning inbound harvest volume into backpressure on the traversal loop.
 const SEARCH_RESULT_STREAM_BUFFER: usize = 2048;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KadSearchCompletion {
+    pub terminal_reason: KadSearchTerminalReason,
+    pub routing_seed_count: usize,
+    pub responding_contact_count: usize,
+    pub phase2_attempted_count: usize,
+    pub phase2_sent_count: usize,
+    pub raw_result_count: usize,
+    pub accepted_result_count: usize,
+    pub elapsed: Duration,
+}
+
+impl KadSearchCompletion {
+    pub const fn search_packet_dispatched(self) -> bool {
+        self.phase2_sent_count != 0
+    }
+}
+
+pub struct KadSearchStream<T> {
+    results: ReceiverStream<T>,
+    completion: oneshot::Receiver<KadSearchCompletion>,
+}
+
+impl<T> KadSearchStream<T> {
+    fn new(results: mpsc::Receiver<T>, completion: oneshot::Receiver<KadSearchCompletion>) -> Self {
+        Self {
+            results: ReceiverStream::new(results),
+            completion,
+        }
+    }
+
+    pub async fn completion(self) -> Option<KadSearchCompletion> {
+        self.completion.await.ok()
+    }
+}
+
+impl<T> Stream for KadSearchStream<T> {
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.get_mut().results).poll_next(cx)
+    }
+}
+
+fn completion_from_traversal(
+    traversal: crate::traversal::TraversalResult,
+    raw_result_count: usize,
+    accepted_result_count: usize,
+) -> KadSearchCompletion {
+    KadSearchCompletion {
+        terminal_reason: traversal.terminal_reason,
+        routing_seed_count: traversal.routing_seed_count,
+        responding_contact_count: traversal.responding_contact_count,
+        phase2_attempted_count: traversal.phase2_dispatch.attempted,
+        phase2_sent_count: traversal.phase2_dispatch.sent,
+        raw_result_count,
+        accepted_result_count,
+        elapsed: traversal.elapsed,
+    }
+}
 
 /// Full notes-search identity so the stream builder stays request-shaped while
 /// the public helper surface avoids long argument lists.
@@ -64,8 +128,9 @@ pub(crate) fn search_keywords_by_request(
     ip_filter: Option<KadIpFilter>,
     res_contact_sink: Option<KadResContactSink>,
     permit: SearchPermit,
-) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+) -> KadSearchStream<SearchResult> {
     let (tx, rx) = mpsc::channel::<SearchResult>(SEARCH_RESULT_STREAM_BUFFER);
+    let (completion_tx, completion_rx) = oneshot::channel();
     let request_target = request.target;
     let restrictive_payload =
         ((request.start_position & 0x8000) != 0).then(|| request.restrictive_payload.clone());
@@ -90,9 +155,7 @@ pub(crate) fn search_keywords_by_request(
             res_contact_sink,
         };
 
-        let traversal = tokio::spawn(async move {
-            let _ = run_traversal(&rpc, initial, config).await;
-        });
+        let traversal = tokio::spawn(async move { run_traversal(&rpc, initial, config).await });
 
         let mut seen_hashes = HashSet::new();
         let mut raw_entry_count = 0usize;
@@ -162,7 +225,13 @@ pub(crate) fn search_keywords_by_request(
         }
 
         drop(raw_rx);
-        let _ = traversal.await;
+        if let Ok(traversal) = traversal.await {
+            let _ = completion_tx.send(completion_from_traversal(
+                traversal,
+                raw_entry_count,
+                accepted_count,
+            ));
+        }
         debug!(
             "kad keyword search stream summary target={} raw_entries={} accepted={} duplicates={} missing_name={} missing_size={} restrictive_mismatch={} result_cap={} sample_rejection={}",
             request_target,
@@ -176,7 +245,7 @@ pub(crate) fn search_keywords_by_request(
             sample_rejection.unwrap_or_else(|| "-".to_string())
         );
     });
-    ReceiverStream::new(rx)
+    KadSearchStream::new(rx, completion_rx)
 }
 
 /// Run a source search using a prebuilt Kad source request shape.
@@ -196,8 +265,9 @@ pub(crate) fn search_sources_by_request(
     ip_filter: Option<KadIpFilter>,
     res_contact_sink: Option<KadResContactSink>,
     permit: SearchPermit,
-) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+) -> KadSearchStream<SourceResult> {
     let (tx, rx) = mpsc::channel::<SourceResult>(SEARCH_RESULT_STREAM_BUFFER);
+    let (completion_tx, completion_rx) = oneshot::channel();
     let target = request.target;
     let requested_file_hash = Ed2kHash::from_bytes(target.to_be_bytes());
 
@@ -220,11 +290,10 @@ pub(crate) fn search_sources_by_request(
             res_contact_sink,
         };
 
-        let traversal = tokio::spawn(async move {
-            let _ = run_traversal(&rpc, initial, config).await;
-        });
+        let traversal = tokio::spawn(async move { run_traversal(&rpc, initial, config).await });
 
         let mut seen_sources = HashSet::<(Ipv4Addr, u16, u16)>::new();
+        let mut raw_result_count = 0usize;
         loop {
             let next = tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -233,6 +302,7 @@ pub(crate) fn search_sources_by_request(
             let Some(observation) = next else {
                 break;
             };
+            raw_result_count += 1;
             if seen_sources.len() >= result_cap {
                 break;
             }
@@ -254,9 +324,15 @@ pub(crate) fn search_sources_by_request(
         }
 
         drop(raw_rx);
-        let _ = traversal.await;
+        if let Ok(traversal) = traversal.await {
+            let _ = completion_tx.send(completion_from_traversal(
+                traversal,
+                raw_result_count,
+                seen_sources.len(),
+            ));
+        }
     });
-    ReceiverStream::new(rx)
+    KadSearchStream::new(rx, completion_rx)
 }
 
 /// Run a notes search.
@@ -276,8 +352,9 @@ pub(crate) fn search_notes(
     ip_filter: Option<KadIpFilter>,
     res_contact_sink: Option<KadResContactSink>,
     permit: SearchPermit,
-) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
+) -> KadSearchStream<NoteResult> {
     let (tx, rx) = mpsc::channel::<NoteResult>(SEARCH_RESULT_STREAM_BUFFER);
+    let (completion_tx, completion_rx) = oneshot::channel();
     let target = NodeId::from_be_bytes(request.file_hash.0);
 
     tokio::spawn(async move {
@@ -302,11 +379,10 @@ pub(crate) fn search_notes(
             res_contact_sink,
         };
 
-        let traversal = tokio::spawn(async move {
-            let _ = run_traversal(&rpc, initial, config).await;
-        });
+        let traversal = tokio::spawn(async move { run_traversal(&rpc, initial, config).await });
 
         let mut seen_sources = HashSet::new();
+        let mut raw_result_count = 0usize;
         loop {
             let next = tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -315,6 +391,7 @@ pub(crate) fn search_notes(
             let Some(observation) = next else {
                 break;
             };
+            raw_result_count += 1;
             if seen_sources.len() >= result_cap {
                 break;
             }
@@ -333,9 +410,15 @@ pub(crate) fn search_notes(
         }
 
         drop(raw_rx);
-        let _ = traversal.await;
+        if let Ok(traversal) = traversal.await {
+            let _ = completion_tx.send(completion_from_traversal(
+                traversal,
+                raw_result_count,
+                seen_sources.len(),
+            ));
+        }
     });
-    ReceiverStream::new(rx)
+    KadSearchStream::new(rx, completion_rx)
 }
 
 fn retain_matching_keyword_names(
@@ -358,6 +441,30 @@ fn retain_matching_keyword_names(
 mod tests {
     use super::*;
     use emulebb_kad_proto::{Tag, TagValue, tag_name};
+    use tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn search_stream_preserves_completion_after_results_close() {
+        let (result_tx, result_rx) = mpsc::channel::<SearchResult>(1);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let completion = KadSearchCompletion {
+            terminal_reason: KadSearchTerminalReason::Completed,
+            routing_seed_count: 4,
+            responding_contact_count: 2,
+            phase2_attempted_count: 2,
+            phase2_sent_count: 1,
+            raw_result_count: 3,
+            accepted_result_count: 1,
+            elapsed: Duration::from_millis(25),
+        };
+        let mut stream = KadSearchStream::new(result_rx, completion_rx);
+
+        drop(result_tx);
+        completion_tx.send(completion).expect("completion receipt");
+
+        assert!(stream.next().await.is_none());
+        assert_eq!(stream.completion().await, Some(completion));
+    }
 
     #[test]
     fn keyword_result_requires_filename_and_size() {
