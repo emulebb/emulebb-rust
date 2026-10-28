@@ -13,10 +13,11 @@ pub use emulebb_kad_net::{
 pub use error::DhtError;
 pub use node::{DhtConfig, DhtNode, KadRoutingContactSnapshot, KadRoutingSummaryCounts};
 pub use publish::{KeywordPublishEntry, PublishAttemptStats};
+pub use search::{KadSearchCompletion, KadSearchStream};
 pub use types::{
     FirewallCheckHelper, KadAichCandidate, KadCallbackSearchDispatchOutcome,
-    KadCallbackSearchNotDispatchedReason, KadSearchStartError, NoteResult, SearchResult,
-    SourceResult,
+    KadCallbackSearchNotDispatchedReason, KadSearchStartError, KadSearchTerminalReason, NoteResult,
+    SearchResult, SourceResult,
 };
 
 /// Same-machine bind IP for tests that open a real socket.

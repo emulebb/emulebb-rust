@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use emulebb_ed2k::ed2k_server::{encode_kad_search_expression, flat_and_search_terms};
 use emulebb_kad_dht::{DhtNode, RpcWorkClass};
 use emulebb_kad_proto::{NodeId, SearchKeyReq, matches_restrictive_keyword_payload};
@@ -113,11 +113,23 @@ pub(crate) async fn search_kad_keywords(
         }
         merge_kad_search_result(&mut results, &mut result_indexes, hash, mapped);
     }
-    crate::diag_kad_event::lookup_complete(
+    let completion = stream
+        .completion()
+        .await
+        .context("Kad keyword traversal ended without a completion receipt")?;
+    crate::diag_kad_event::lookup_finished(
         Some(search_id),
         crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
-        results.len() as u32,
+        completion,
     );
+    if !completion.search_packet_dispatched()
+        || completion.terminal_reason != emulebb_kad_dht::KadSearchTerminalReason::Completed
+    {
+        return Ok(KadKeywordSearchDispatchOutcome::NotDispatched {
+            reason: completion.terminal_reason.reason(),
+            retryable: completion.terminal_reason.is_retryable(),
+        });
+    }
     Ok(KadKeywordSearchDispatchOutcome::Completed(
         KadKeywordSearchOutcome {
             results,

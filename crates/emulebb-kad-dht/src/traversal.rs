@@ -10,6 +10,7 @@
 
 pub mod refresh;
 
+use crate::types::KadSearchTerminalReason;
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::{
     Ed2kHash, KadPacket, NodeId, Tag,
@@ -188,6 +189,10 @@ pub struct TraversalConfig {
 
 /// Final traversal outcome returned to the caller.
 pub struct TraversalResult {
+    /// Routing-table contacts supplied to phase 1.
+    pub routing_seed_count: usize,
+    /// Contacts that answered at least one phase-1 lookup request.
+    pub responding_contact_count: usize,
     /// K closest nodes that responded.
     pub closest: Vec<TraversalContact>,
     /// Raw SEARCH_RES entries collected for non-streaming callers.
@@ -201,6 +206,10 @@ pub struct TraversalResult {
     /// `KADEMLIA_CALLBACK_REQ` from one that found no route or whose sends all
     /// failed.
     pub phase2_dispatch: Phase2DispatchStats,
+    /// Why the traversal stopped after admission.
+    pub terminal_reason: KadSearchTerminalReason,
+    /// Total wall-clock duration of both traversal phases.
+    pub elapsed: Duration,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -212,6 +221,7 @@ pub struct Phase2DispatchStats {
 struct SearchPhaseResult {
     search_entries: Vec<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>,
     dispatch: Phase2DispatchStats,
+    terminal_reason: KadSearchTerminalReason,
 }
 
 fn traversal_closest_limit(search_kind: &TraversalKind, phase2_fanout: usize) -> usize {
@@ -281,6 +291,7 @@ pub async fn run_traversal(
     initial_candidates: Vec<TraversalContact>,
     config: TraversalConfig,
 ) -> TraversalResult {
+    let routing_seed_count = initial_candidates.len();
     let TraversalConfig {
         target,
         search_kind,
@@ -338,6 +349,7 @@ pub async fn run_traversal(
         TraversalKind::FindNode | TraversalKind::Store => SearchPhaseResult {
             search_entries: Vec::new(),
             dispatch: Phase2DispatchStats::default(),
+            terminal_reason: KadSearchTerminalReason::Completed,
         },
         kind => {
             run_search_phase(
@@ -363,9 +375,13 @@ pub async fn run_traversal(
     };
 
     TraversalResult {
+        routing_seed_count,
+        responding_contact_count: responded.len(),
         closest,
         search_entries: search_phase.search_entries,
         phase2_dispatch: search_phase.dispatch,
+        terminal_reason: search_phase.terminal_reason,
+        elapsed: started_at.elapsed(),
     }
 }
 
@@ -921,6 +937,7 @@ async fn run_search_phase(rpc: &RpcManager, config: SearchPhaseConfig<'_>) -> Se
         return SearchPhaseResult {
             search_entries: Vec::new(),
             dispatch: Phase2DispatchStats::default(),
+            terminal_reason: KadSearchTerminalReason::Cancelled,
         };
     }
     let now = Instant::now();
@@ -928,6 +945,7 @@ async fn run_search_phase(rpc: &RpcManager, config: SearchPhaseConfig<'_>) -> Se
         return SearchPhaseResult {
             search_entries: Vec::new(),
             dispatch: Phase2DispatchStats::default(),
+            terminal_reason: KadSearchTerminalReason::Phase2DeadlineElapsed,
         };
     }
     // Phase 2 must keep collecting SEARCH_RES for the FULL remaining search
@@ -953,6 +971,11 @@ async fn run_search_phase(rpc: &RpcManager, config: SearchPhaseConfig<'_>) -> Se
         return SearchPhaseResult {
             search_entries: Vec::new(),
             dispatch: Phase2DispatchStats::default(),
+            terminal_reason: if responded.is_empty() {
+                KadSearchTerminalReason::NoRespondingContacts
+            } else {
+                KadSearchTerminalReason::NoEligibleSearchContacts
+            },
         };
     }
 
@@ -1035,9 +1058,19 @@ async fn run_search_phase(rpc: &RpcManager, config: SearchPhaseConfig<'_>) -> Se
         search_entries.len()
     );
 
+    let terminal_reason = if cancel.is_cancelled() {
+        KadSearchTerminalReason::Cancelled
+    } else if dispatch.attempted != 0 && dispatch.sent == 0 {
+        KadSearchTerminalReason::Phase2SendFailed
+    } else if dispatch.sent == 0 {
+        KadSearchTerminalReason::Phase2DeadlineElapsed
+    } else {
+        KadSearchTerminalReason::Completed
+    };
     SearchPhaseResult {
         search_entries,
         dispatch,
+        terminal_reason,
     }
 }
 

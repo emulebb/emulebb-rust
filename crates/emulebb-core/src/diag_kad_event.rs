@@ -22,7 +22,7 @@
 use std::net::SocketAddr;
 
 use emulebb_ed2k::diag_event::emit;
-use emulebb_kad_dht::{KadRoutingSummaryCounts, PublishAttemptStats};
+use emulebb_kad_dht::{KadRoutingSummaryCounts, KadSearchCompletion, PublishAttemptStats};
 use serde_json::{Value, json};
 
 const FAMILY: &str = "kad_event";
@@ -487,6 +487,48 @@ pub(crate) fn lookup_not_dispatched(
     body["outcome"] = json!("not-dispatched");
     body["reason"] = json!(reason);
     emit(FAMILY, "lookup", "low", keys, body);
+}
+
+/// Emits the authoritative post-admission traversal receipt. A closed result
+/// stream is only a successful lookup when at least one phase-2 search packet
+/// reached the local UDP socket and the traversal completed normally.
+pub(crate) fn lookup_finished(
+    search_id: Option<&str>,
+    search_kind: &'static str,
+    completion: KadSearchCompletion,
+) {
+    let dispatched = completion.search_packet_dispatched();
+    let completed = dispatched
+        && completion.terminal_reason == emulebb_kad_dht::KadSearchTerminalReason::Completed;
+    let outcome = if completed {
+        "completed"
+    } else if completion.terminal_reason == emulebb_kad_dht::KadSearchTerminalReason::Cancelled {
+        "cancelled"
+    } else {
+        "not-dispatched"
+    };
+    let (keys, mut body) = lookup_parts(
+        "lookup_complete",
+        search_id,
+        search_kind,
+        completion.accepted_result_count as u32,
+    );
+    body["outcome"] = json!(outcome);
+    body["reason"] = json!(completion.terminal_reason.reason());
+    body["routingSeedCount"] = json!(completion.routing_seed_count);
+    body["respondingContactCount"] = json!(completion.responding_contact_count);
+    body["phase2AttemptedCount"] = json!(completion.phase2_attempted_count);
+    body["phase2SentCount"] = json!(completion.phase2_sent_count);
+    body["rawResultCount"] = json!(completion.raw_result_count);
+    body["acceptedResultCount"] = json!(completion.accepted_result_count);
+    body["elapsedMs"] = json!(completion.elapsed.as_millis());
+    emit(
+        FAMILY,
+        "lookup",
+        if completed { "info" } else { "low" },
+        keys,
+        body,
+    );
 }
 
 /// `routing_summary` (schema §3.3, periodic): the routing-table + connection

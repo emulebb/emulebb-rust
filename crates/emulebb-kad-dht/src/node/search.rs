@@ -32,6 +32,9 @@ const FIND_BUDDY_LOOKUP_TIMEOUT: Duration =
     Duration::from_secs(SEARCHFINDBUDDY_LIFETIME_SECS - STORE_STOP_GRACE_SECS);
 const FIND_SOURCE_LOOKUP_TIMEOUT: Duration =
     Duration::from_secs(SEARCHFINDSOURCE_LIFETIME_SECS - STORE_STOP_GRACE_SECS);
+type KeywordSearchStream = crate::search::KadSearchStream<SearchResult>;
+type SourceSearchStream = crate::search::KadSearchStream<SourceResult>;
+type NotesSearchStream = crate::search::KadSearchStream<NoteResult>;
 
 impl DhtNode {
     /// Iterative node lookup. Returns up to K contacts closest to target.
@@ -302,8 +305,7 @@ impl DhtNode {
     pub async fn search_keywords(
         &self,
         target: NodeId,
-    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<KeywordSearchStream, KadSearchStartError> {
         self.search_keywords_with_cancel(target, CancellationToken::new())
             .await
     }
@@ -312,8 +314,7 @@ impl DhtNode {
         &self,
         target: NodeId,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<KeywordSearchStream, KadSearchStartError> {
         self.search_keywords_with_cancel_and_class(target, cancel, RpcWorkClass::Interactive)
             .await
     }
@@ -323,8 +324,7 @@ impl DhtNode {
         target: NodeId,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<KeywordSearchStream, KadSearchStartError> {
         self.search_keyword_request_with_cancel_and_class(
             SearchKeyReq {
                 target,
@@ -341,8 +341,7 @@ impl DhtNode {
     pub async fn search_keyword_request(
         &self,
         request: SearchKeyReq,
-    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<KeywordSearchStream, KadSearchStartError> {
         self.search_keyword_request_with_cancel_and_class(
             request,
             CancellationToken::new(),
@@ -355,8 +354,7 @@ impl DhtNode {
         &self,
         request: SearchKeyReq,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<KeywordSearchStream, KadSearchStartError> {
         self.search_keyword_request_with_cancel_and_class(
             request,
             cancel,
@@ -370,8 +368,7 @@ impl DhtNode {
         request: SearchKeyReq,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<KeywordSearchStream, KadSearchStartError> {
         self.search_keyword_request_with_phase2_fanout_and_cancel_and_class(
             request,
             self.inner.config.search_phase2_fanout,
@@ -388,8 +385,7 @@ impl DhtNode {
         request: SearchKeyReq,
         phase2_fanout: usize,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<KeywordSearchStream, KadSearchStartError> {
         self.search_keyword_request_with_phase2_fanout_and_cancel_and_class(
             request,
             phase2_fanout,
@@ -407,8 +403,7 @@ impl DhtNode {
         phase2_fanout: usize,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> Result<impl tokio_stream::Stream<Item = SearchResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<KeywordSearchStream, KadSearchStartError> {
         let target = request.target;
         let (initial, permit) = self
             .prepare_search_start(target, phase2_fanout, &cancel)
@@ -433,8 +428,7 @@ impl DhtNode {
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         self.search_sources_with_cancel(file_hash, file_size, CancellationToken::new())
             .await
     }
@@ -444,8 +438,7 @@ impl DhtNode {
         file_hash: Ed2kHash,
         file_size: u64,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         self.search_sources_with_cancel_and_class(
             file_hash,
             file_size,
@@ -461,8 +454,7 @@ impl DhtNode {
         file_size: u64,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         self.search_source_request_with_phase2_fanout_and_cancel_and_class(
             SearchSourceReq {
                 target: NodeId::from_be_bytes(file_hash.0),
@@ -480,8 +472,7 @@ impl DhtNode {
     pub async fn search_source_request(
         &self,
         request: SearchSourceReq,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         self.search_source_request_with_cancel_and_class(
             request,
             CancellationToken::new(),
@@ -494,8 +485,7 @@ impl DhtNode {
         &self,
         request: SearchSourceReq,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         self.search_source_request_with_cancel_and_class(request, cancel, RpcWorkClass::Interactive)
             .await
     }
@@ -505,8 +495,7 @@ impl DhtNode {
         request: SearchSourceReq,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         self.search_source_request_with_phase2_fanout_and_cancel_and_class(
             request,
             self.inner.config.search_phase2_fanout,
@@ -523,8 +512,7 @@ impl DhtNode {
         request: SearchSourceReq,
         phase2_fanout: usize,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         self.search_source_request_with_phase2_fanout_and_cancel_and_class(
             request,
             phase2_fanout,
@@ -542,8 +530,7 @@ impl DhtNode {
         phase2_fanout: usize,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         let target = request.target;
         let (initial, permit) = self
             .prepare_search_start(target, phase2_fanout, &cancel)
@@ -570,8 +557,7 @@ impl DhtNode {
         file_size: u64,
         phase2_fanout: usize,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = SourceResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<SourceSearchStream, KadSearchStartError> {
         self.search_source_request_with_phase2_fanout_and_cancel(
             SearchSourceReq {
                 target: NodeId::from_be_bytes(file_hash.0),
@@ -589,8 +575,7 @@ impl DhtNode {
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
-    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<NotesSearchStream, KadSearchStartError> {
         self.search_notes_with_cancel(file_hash, file_size, CancellationToken::new())
             .await
     }
@@ -600,8 +585,7 @@ impl DhtNode {
         file_hash: Ed2kHash,
         file_size: u64,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<NotesSearchStream, KadSearchStartError> {
         self.search_notes_with_cancel_and_class(
             file_hash,
             file_size,
@@ -617,8 +601,7 @@ impl DhtNode {
         file_size: u64,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<NotesSearchStream, KadSearchStartError> {
         self.search_notes_with_phase2_fanout_and_cancel_and_class(
             file_hash,
             file_size,
@@ -636,8 +619,7 @@ impl DhtNode {
         file_size: u64,
         phase2_fanout: usize,
         cancel: CancellationToken,
-    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<NotesSearchStream, KadSearchStartError> {
         self.search_notes_with_phase2_fanout_and_cancel_and_class(
             file_hash,
             file_size,
@@ -656,8 +638,7 @@ impl DhtNode {
         phase2_fanout: usize,
         cancel: CancellationToken,
         work_class: RpcWorkClass,
-    ) -> Result<impl tokio_stream::Stream<Item = NoteResult> + Send + 'static, KadSearchStartError>
-    {
+    ) -> Result<NotesSearchStream, KadSearchStartError> {
         let target = NodeId::from_be_bytes(file_hash.0);
         let (initial, permit) = self
             .prepare_search_start(target, phase2_fanout, &cancel)
