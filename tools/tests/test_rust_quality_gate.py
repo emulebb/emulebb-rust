@@ -93,6 +93,15 @@ class TestDiagnosticsGate(unittest.TestCase):
             output_root / "tools" / "emulebb-rust" / "bin",
         )
 
+    def test_child_process_scratch_uses_output_root(self) -> None:
+        env = self.build_env_fixture()
+        output_root = Path(env["EMULEBB_WORKSPACE_OUTPUT_ROOT"]).resolve()
+        scratch = QUALITY_GATE.configure_output_scratch(env, output_root)
+        self.assertEqual(scratch, output_root / "cache" / "tmp")
+        for variable in ("TEMP", "TMP", "TMPDIR"):
+            self.assertEqual(env[variable], str(scratch))
+        self.assertEqual(env["PYTHONPYCACHEPREFIX"], str(output_root / "cache" / "pycache"))
+
     def test_missing_path_env_fails_instead_of_deriving(self) -> None:
         with self.assertRaises(SystemExit):
             QUALITY_GATE.require_path_env({}, "EMULEBB_WORKSPACE_OUTPUT_ROOT")

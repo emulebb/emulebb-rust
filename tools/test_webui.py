@@ -8,18 +8,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True
 
-ROOT = Path(__file__).resolve().parents[1]
-WEBUI_ROOT = ROOT / "webui"
+from webui_workspace import WebUiWorkspace, prepare_webui_workspace
 
 
 def main() -> int:
     npm = npm_command()
-    run([npm, "ci"])
-    run([npm, "run", "test:unit"])
-    run([npm, "exec", "--", "playwright", "install", "chromium"])
-    run([npm, "run", "test:e2e"])
-    run([npm, "run", "build"])
+    workspace = prepare_webui_workspace("webui-test")
+    run([npm, "ci", "--ignore-scripts"], workspace)
+    run([npm, "run", "test:unit"], workspace)
+    run([npm, "exec", "--", "playwright", "install", "chromium"], workspace)
+    run([npm, "run", "test:e2e"], workspace)
+    run(
+        [npm, "run", "build", "--", "--outDir", str(workspace.dist), "--emptyOutDir"],
+        workspace,
+    )
     return 0
 
 
@@ -30,9 +34,9 @@ def npm_command() -> str:
     return npm
 
 
-def run(command: list[str]) -> None:
+def run(command: list[str], workspace: WebUiWorkspace) -> None:
     print("+ " + " ".join(command), flush=True)
-    subprocess.run(command, cwd=WEBUI_ROOT, check=True)
+    subprocess.run(command, cwd=workspace.source, env=workspace.env, check=True)
 
 
 if __name__ == "__main__":
