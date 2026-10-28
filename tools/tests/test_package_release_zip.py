@@ -40,7 +40,7 @@ class TestExternalReleasePaths(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "release"
             self.assertEqual(
-                PACKAGER.external_path(path, "--out", workspace_root=PACKAGER.ROOT.parents[1]),
+                PACKAGER.external_path(path, "--out", workspace_root=PACKAGER.ROOT),
                 path.resolve(),
             )
 
@@ -90,7 +90,7 @@ class TestReleasePackage(unittest.TestCase):
             with patch.dict(
                 "os.environ",
                 {
-                    "EMULEBB_WORKSPACE_ROOT": str(PACKAGER.ROOT.parents[1]),
+                    "EMULEBB_WORKSPACE_ROOT": str(PACKAGER.ROOT),
                     "EMULEBB_WORKSPACE_OUTPUT_ROOT": str(output_root),
                     "CARGO_TARGET_DIR": str(output_root / "builds" / "rust" / "target"),
                 },
