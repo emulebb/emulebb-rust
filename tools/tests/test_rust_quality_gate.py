@@ -17,7 +17,7 @@ class TestDiagnosticsGate(unittest.TestCase):
     def build_env_fixture(self) -> dict[str, str]:
         output_root = Path(tempfile.gettempdir()) / "emulebb-out"
         return {
-            "EMULEBB_WORKSPACE_ROOT": str(QUALITY_GATE.ROOT.parent.parent),
+            "EMULEBB_WORKSPACE_ROOT": str(QUALITY_GATE.ROOT),
             "EMULEBB_WORKSPACE_OUTPUT_ROOT": str(output_root),
             "CARGO_TARGET_DIR": str(output_root / "builds" / "rust" / "target"),
         }
