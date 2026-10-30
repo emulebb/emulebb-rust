@@ -22,6 +22,7 @@ use tokio::sync::watch;
 
 use crate::envelope::api_error;
 use crate::handlers::*;
+use crate::request_body_policy::enforce_api_request_body_limit;
 use crate::responses::CONTRACT_VERSION;
 use crate::route_metadata::validate_route_metadata;
 use crate::webui::mount_webui;
@@ -281,6 +282,7 @@ pub fn router_with_shutdown(
         .route("/api/v1/{*path}", any(fallback))
         .layer(middleware::map_response(rewrite_method_not_allowed))
         .layer(middleware::from_fn(validate_route_metadata))
+        .layer(middleware::from_fn(enforce_api_request_body_limit))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
