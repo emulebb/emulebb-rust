@@ -29,7 +29,7 @@ address_family = "ipv4-only"
 compatibility = "stock/community eMule owns eD2K/Kad wire behavior; Rust REST/UI/settings are Rust-native async daemon surfaces, not MFC or legacy GUI mirrors; approved permanent protocol drops are explicit review-reporting exclusions"
 omission_registry = "policy/rust-client-omissions.toml"
 extension_registry = "policy/rust-client-extensions.toml"
-parity_model = "curated stock parity: network-critical and client-core behavior plus explicit permanent omissions"
+parity_model = "stock-observable eD2K/Kad parity with explicit permanent omissions and registered interoperable extensions"
 
 [behavior_authority]
 wire_protocol = "stock-community-emule"
@@ -71,7 +71,7 @@ qbittorrent_scope = "only the subset required by supported Prowlarr/Sonarr/Radar
 adapter_rule = "translate to canonical search and transfer services; never own parallel state"
 
 [http]
-default_exposure = "LAN-reachable with authentication"
+default_exposure = "loopback by default; explicit authenticated non-loopback binding for container networks or trusted reverse proxies"
 authentication = "required for each applicable first-party and compatibility route family"
 
 [review_reporting]
