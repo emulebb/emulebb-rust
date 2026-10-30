@@ -8,7 +8,9 @@ use std::net::Ipv4Addr;
 use chrono::{DateTime, Utc};
 use emulebb_kad_proto::{NodeId, Tag, TagName, TagValue, tag_name};
 
-use super::entry_store::{DedupEntry, TargetedEntry, TimedEntry, oldest_target_entry_index};
+use super::entry_store::{
+    AdmissionDisposition, DedupEntry, TargetedEntry, TimedEntry, oldest_target_entry_index,
+};
 use super::size_tags::{stock_first_file_size, stock_first_filename};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,14 +64,14 @@ pub(super) fn upsert_notes_entry(
     per_file_capacity: usize,
     capacity: usize,
     entry: StoredNotesPublish,
-) {
+) -> AdmissionDisposition {
     if let Some(existing) = entries.iter_mut().find(|candidate| {
         candidate.target == entry.target
             && (candidate.publisher_ip == entry.publisher_ip
                 || candidate.publisher_id == entry.publisher_id)
     }) {
         *existing = entry;
-        return;
+        return AdmissionDisposition::Refreshed;
     }
 
     // Per-file cap (stock KADEMLIAMAXNOTESPERFILE): evict the oldest note for
@@ -82,18 +84,17 @@ pub(super) fn upsert_notes_entry(
         && let Some(oldest_index) = oldest_target_entry_index(entries, entry.target)
     {
         entries.remove(oldest_index);
+        entries.push(entry);
+        return AdmissionDisposition::Recycled;
     }
 
-    // Global store cap: bound total memory across all files.
-    if entries.len() >= capacity
-        && let Some((oldest_index, _)) = entries
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, candidate)| candidate.observed_at())
-    {
-        entries.remove(oldest_index);
+    // The global finite-memory cap is an admission bound, not an eviction
+    // policy. A new publish must not displace an unrelated file's note.
+    if entries.len() >= capacity {
+        return AdmissionDisposition::RejectedGlobalCapacity;
     }
     entries.push(entry);
+    AdmissionDisposition::Inserted
 }
 
 pub(super) fn stock_notes_publish_load(

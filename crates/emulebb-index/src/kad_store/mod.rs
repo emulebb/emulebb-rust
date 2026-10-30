@@ -57,9 +57,9 @@ const STOCK_MAX_SOURCES_PER_FILE: usize = 1000;
 const STOCK_MAX_NOTES_PER_FILE: usize = 150;
 // Global store caps that bound total memory across all targets. The keyword
 // global mirrors stock `KADEMLIAMAXENTRIES` (re-exported from the keyword
-// submodule); the source/note globals are our finite-memory extension and are
-// deliberately larger than the per-file caps so the two semantics never
-// coincide.
+// submodule); the source/note globals are our finite-memory admission limits
+// and are deliberately larger than the per-file caps so the two semantics
+// never coincide.
 const DEFAULT_MAX_SOURCE_ENTRIES: usize = 100_000;
 const DEFAULT_MAX_NOTE_ENTRIES: usize = 60_000;
 
@@ -242,7 +242,7 @@ impl KadLocalStore {
             source_udp_port,
         );
         let dedup_key = source_dedup_key(target, source_ip, source_tcp_port, source_udp_port);
-        upsert_source_entry(
+        let disposition = upsert_source_entry(
             &mut self.source_entries,
             self.config.source_per_file_capacity,
             self.config.source_capacity,
@@ -257,7 +257,7 @@ impl KadLocalStore {
                 dedup_key,
             },
         );
-        Some(load)
+        Some(disposition.publish_load(load))
     }
 
     pub fn record_notes_publish(
@@ -283,7 +283,7 @@ impl KadLocalStore {
             publisher_ip,
         );
         let dedup_key = notes_dedup_key(target, publisher_id, publisher_ip);
-        upsert_notes_entry(
+        let disposition = upsert_notes_entry(
             &mut self.notes_entries,
             self.config.notes_per_file_capacity,
             self.config.notes_capacity,
@@ -296,7 +296,7 @@ impl KadLocalStore {
                 dedup_key,
             },
         );
-        Some(load)
+        Some(disposition.publish_load(load))
     }
 
     pub fn keyword_search_response(

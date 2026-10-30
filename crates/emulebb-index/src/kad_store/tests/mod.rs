@@ -12,6 +12,8 @@ use emulebb_kad_proto::{
 };
 use std::{net::Ipv4Addr, time::Duration};
 
+use crate::{KadNotePublishSnapshot, KadPublishCacheSnapshot, KadSourcePublishSnapshot};
+
 use helpers::*;
 
 fn config() -> KadLocalStoreConfig {
@@ -36,6 +38,45 @@ fn ts(seconds: i64) -> DateTime<Utc> {
 
 fn publisher_ip() -> Ipv4Addr {
     Ipv4Addr::new(198, 51, 100, 7)
+}
+
+fn source_snapshot(
+    observed_at: i64,
+    target: NodeId,
+    publisher_index: usize,
+    endpoint_index: usize,
+) -> KadSourcePublishSnapshot {
+    let source_tcp_port = 4_000 + endpoint_index as u16;
+    KadSourcePublishSnapshot {
+        observed_at: ts(observed_at),
+        target,
+        publisher_id: numbered_node_id(publisher_index),
+        source_ip: numbered_ipv4(endpoint_index),
+        source_tcp_port,
+        source_udp_port: 5_000 + endpoint_index as u16,
+        tags: source_publish_tags(source_tcp_port),
+        load: None,
+    }
+}
+
+fn note_snapshot(
+    observed_at: i64,
+    target: NodeId,
+    publisher_index: usize,
+    endpoint_index: usize,
+    description: &str,
+) -> KadNotePublishSnapshot {
+    KadNotePublishSnapshot {
+        observed_at: ts(observed_at),
+        target,
+        publisher_id: numbered_node_id(publisher_index),
+        publisher_ip: numbered_ipv4(endpoint_index),
+        tags: vec![
+            Tag::filesize(900),
+            Tag::new_short(tag_name::DESCRIPTION, TagValue::String(description.into())),
+        ],
+        load: None,
+    }
 }
 
 fn aich_result_roots(tags: &[Tag]) -> Vec<(u8, [u8; 20])> {
@@ -655,7 +696,85 @@ fn keyword_aich_provenance_is_not_reconstructed_from_snapshot_tags() {
 }
 
 #[test]
-fn source_store_eviction_keeps_newest_entries() {
+fn snapshot_restore_preserves_refresh_and_recycle_but_rejects_global_overflow() {
+    let mut config = config();
+    config.source_capacity = 3;
+    config.source_per_file_capacity = 1;
+    config.notes_capacity = 3;
+    config.notes_per_file_capacity = 1;
+    let mut store = KadLocalStore::new(config);
+
+    let source_target = NodeId::from_bytes([0xA1; 16]);
+    let source_unrelated = NodeId::from_bytes([0xB2; 16]);
+    let source_rejected = NodeId::from_bytes([0xC3; 16]);
+    let note_target = NodeId::from_bytes([0xD4; 16]);
+    let note_unrelated = NodeId::from_bytes([0xE5; 16]);
+    let note_rejected = NodeId::from_bytes([0xF6; 16]);
+
+    store.merge_publish_snapshot(
+        KadPublishCacheSnapshot {
+            keyword_publishes: Vec::new(),
+            source_publishes: vec![
+                source_snapshot(1, source_target, 1, 1),
+                source_snapshot(2, source_target, 2, 2),
+                source_snapshot(3, source_unrelated, 3, 3),
+                source_snapshot(4, source_rejected, 4, 4),
+                source_snapshot(5, source_target, 5, 2),
+                source_snapshot(6, source_target, 6, 6),
+            ],
+            note_publishes: vec![
+                note_snapshot(1, note_target, 11, 11, "first"),
+                note_snapshot(2, note_target, 12, 12, "second"),
+                note_snapshot(3, note_unrelated, 13, 13, "unrelated"),
+                note_snapshot(4, note_rejected, 14, 14, "rejected"),
+                note_snapshot(5, note_target, 15, 12, "refreshed"),
+                note_snapshot(6, note_target, 16, 16, "recycled"),
+            ],
+        },
+        ts(10),
+    );
+
+    let restored = store.publish_snapshot(ts(10));
+    assert_eq!(
+        restored
+            .source_publishes
+            .iter()
+            .map(|entry| (entry.target, entry.publisher_id))
+            .collect::<Vec<_>>(),
+        vec![
+            (source_target, numbered_node_id(5)),
+            (source_unrelated, numbered_node_id(3)),
+            (source_target, numbered_node_id(6)),
+        ]
+    );
+    assert_eq!(
+        restored
+            .note_publishes
+            .iter()
+            .map(|entry| (entry.target, entry.publisher_id))
+            .collect::<Vec<_>>(),
+        vec![
+            (note_target, numbered_node_id(15)),
+            (note_unrelated, numbered_node_id(13)),
+            (note_target, numbered_node_id(16)),
+        ]
+    );
+    assert!(
+        restored
+            .source_publishes
+            .iter()
+            .all(|entry| entry.target != source_rejected)
+    );
+    assert!(
+        restored
+            .note_publishes
+            .iter()
+            .all(|entry| entry.target != note_rejected)
+    );
+}
+
+#[test]
+fn source_global_capacity_rejects_new_publish_without_eviction() {
     let mut store = KadLocalStore::new(config());
     let target = NodeId::from_bytes([3; 16]);
     let publisher_one = NodeId::from_bytes([
@@ -707,7 +826,7 @@ fn source_store_eviction_keeps_newest_entries() {
             &tags,
             ts(3),
         ),
-        Some(0)
+        Some(100)
     );
 
     assert_eq!(store.source_entry_count(), 2);
@@ -724,11 +843,14 @@ fn source_store_eviction_keeps_newest_entries() {
         )
         .expect("source response");
     assert_eq!(response.results.len(), 2);
-    assert_eq!(
-        response.results[0].entry_id,
-        source_entry_id(publisher_three)
+    assert_eq!(response.results[0].entry_id, source_entry_id(publisher_two));
+    assert_eq!(response.results[1].entry_id, source_entry_id(publisher_one));
+    assert!(
+        response
+            .results
+            .iter()
+            .all(|entry| entry.entry_id != source_entry_id(publisher_three))
     );
-    assert_eq!(response.results[1].entry_id, source_entry_id(publisher_two));
     assert!(response.results.iter().all(|entry| {
         entry
             .tags
@@ -824,7 +946,9 @@ fn source_publish_without_stock_ip_or_udp_port_is_rejected() {
 
 #[test]
 fn source_publish_replaces_same_ip_and_tcp_or_udp_port_like_stock() {
-    let mut store = KadLocalStore::new(config());
+    let mut config = config();
+    config.source_capacity = 1;
+    let mut store = KadLocalStore::new(config);
     let target = NodeId::from_bytes([3; 16]);
     let first_publisher = NodeId::from_bytes([4; 16]);
     let second_publisher = NodeId::from_bytes([5; 16]);
@@ -1394,19 +1518,46 @@ fn per_file_and_global_source_caps_are_independent() {
     assert_eq!(store.source_entry_count(), 5);
 
     // A third source for file B is within file B's per-file cap, but would
-    // push the store to 6 entries: the global cap (5) evicts the oldest.
-    store.record_source_publish(
-        file_b,
-        numbered_node_id(102),
-        numbered_ipv4(102),
-        5102,
-        &source_publish_tags(4102),
-        ts(102),
+    // push the store to 6 entries. Global saturation rejects it without
+    // evicting any source from file A.
+    assert_eq!(
+        store.record_source_publish(
+            file_b,
+            numbered_node_id(102),
+            numbered_ipv4(102),
+            5102,
+            &source_publish_tags(4102),
+            ts(102),
+        ),
+        Some(100)
     );
     assert_eq!(
         store.source_entry_count(),
         5,
         "global cap bounds the whole store across files"
+    );
+    let snapshot = store.publish_snapshot(ts(103));
+    assert_eq!(
+        snapshot
+            .source_publishes
+            .iter()
+            .filter(|entry| entry.target == file_a)
+            .count(),
+        3
+    );
+    assert_eq!(
+        snapshot
+            .source_publishes
+            .iter()
+            .filter(|entry| entry.target == file_b)
+            .count(),
+        2
+    );
+    assert!(
+        snapshot
+            .source_publishes
+            .iter()
+            .all(|entry| entry.source_ip != numbered_ipv4(102))
     );
 }
 
@@ -1427,7 +1578,7 @@ fn default_source_caps_do_not_conflate_per_file_and_global() {
 #[test]
 fn source_overflow_evicts_tail_position_not_refreshed_timestamp_like_stock() {
     let mut config = config();
-    config.source_capacity = super::STOCK_MAX_SOURCES_PER_FILE + 2;
+    config.source_capacity = super::STOCK_MAX_SOURCES_PER_FILE + 1;
     config.source_ttl = std::time::Duration::from_secs(10_000);
     let mut store = KadLocalStore::new(config);
     let target = NodeId::from_bytes([3; 16]);
@@ -1654,7 +1805,9 @@ fn notes_publish_rejects_empty_stock_identity_or_tags() {
 
 #[test]
 fn notes_publish_replaces_same_ip_or_publisher_like_stock() {
-    let mut store = KadLocalStore::new(config());
+    let mut config = config();
+    config.notes_capacity = 1;
+    let mut store = KadLocalStore::new(config);
     let target = NodeId::from_bytes([7; 16]);
     let first_publisher = NodeId::from_bytes([8; 16]);
     let second_publisher = NodeId::from_bytes([9; 16]);
@@ -1709,6 +1862,83 @@ fn notes_publish_replaces_same_ip_or_publisher_like_stock() {
                 if *name == tag_name::DESCRIPTION && value == "second"
         )
     }));
+}
+
+#[test]
+fn notes_global_capacity_rejects_new_publish_without_eviction() {
+    let mut store = KadLocalStore::new(config());
+    let targets = [
+        NodeId::from_bytes([0x71; 16]),
+        NodeId::from_bytes([0x72; 16]),
+        NodeId::from_bytes([0x73; 16]),
+    ];
+    let tags = vec![
+        Tag::filesize(900),
+        Tag::new_short(tag_name::DESCRIPTION, TagValue::String("note".into())),
+    ];
+
+    for index in 0..2 {
+        assert_eq!(
+            store.record_notes_publish(
+                targets[index],
+                numbered_node_id(index),
+                numbered_ipv4(index),
+                &tags,
+                ts(index as i64 + 1),
+            ),
+            Some(1)
+        );
+    }
+    assert_eq!(
+        store.record_notes_publish(
+            targets[2],
+            numbered_node_id(2),
+            numbered_ipv4(2),
+            &tags,
+            ts(3),
+        ),
+        Some(100)
+    );
+    assert_eq!(store.notes_entry_count(), 2);
+    assert!(
+        store
+            .notes_search_response(
+                NodeId::from_bytes([9; 16]),
+                &SearchNotesReq {
+                    target: targets[0],
+                    size: 900,
+                },
+                10,
+                ts(4),
+            )
+            .is_some()
+    );
+    assert!(
+        store
+            .notes_search_response(
+                NodeId::from_bytes([9; 16]),
+                &SearchNotesReq {
+                    target: targets[1],
+                    size: 900,
+                },
+                10,
+                ts(4),
+            )
+            .is_some()
+    );
+    assert!(
+        store
+            .notes_search_response(
+                NodeId::from_bytes([9; 16]),
+                &SearchNotesReq {
+                    target: targets[2],
+                    size: 900,
+                },
+                10,
+                ts(4),
+            )
+            .is_none()
+    );
 }
 
 #[test]
@@ -1798,7 +2028,7 @@ fn notes_publish_filters_result_only_tags_like_stock() {
 #[test]
 fn notes_overflow_evicts_tail_position_not_refreshed_timestamp_like_stock() {
     let mut config = config();
-    config.notes_capacity = super::STOCK_MAX_NOTES_PER_FILE + 2;
+    config.notes_capacity = super::STOCK_MAX_NOTES_PER_FILE + 1;
     config.notes_ttl = std::time::Duration::from_secs(10_000);
     let mut store = KadLocalStore::new(config);
     let target = NodeId::from_bytes([7; 16]);
