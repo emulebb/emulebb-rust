@@ -6,9 +6,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore, MetadataTransferCounts,
-    MetadataTransferDirectoryDeletionAuthority, MetadataTransferPublishEntry,
-    MetadataTransferShareEntry, NativeFileFingerprint, NativeFileIdentity,
+    MetadataCategory, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
+    MetadataTransferCounts, MetadataTransferDirectoryDeletionAuthority,
+    MetadataTransferPublishEntry, MetadataTransferShareEntry, NativeFileFingerprint,
+    NativeFileIdentity,
 };
 use uuid::Uuid;
 
@@ -773,11 +774,55 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         category_id: u32,
     ) -> Result<Ed2kResumeManifest> {
+        let _category_guard = self.category_assignment_gate.lock().await;
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         manifest.category_id = category_id;
         self.store_manifest_unlocked(&manifest).await?;
         Ok(manifest)
+    }
+
+    /// Atomically delete one positional category and remap every persisted
+    /// transfer assignment which observes that positional namespace.
+    pub async fn delete_category_and_remap_transfers(
+        &self,
+        deleted_category_id: u32,
+        shifted_categories: Vec<MetadataCategory>,
+    ) -> Result<()> {
+        let _category_guard = self.category_assignment_gate.lock().await;
+        let metadata = self.metadata.clone();
+        let affected_hashes = tokio::task::spawn_blocking(move || {
+            metadata.transfer_hashes_requiring_category_remap(deleted_category_id)
+        })
+        .await
+        .context("category remap transfer inventory task panicked")??;
+
+        let mut manifest_guards = Vec::with_capacity(affected_hashes.len());
+        for file_hash in &affected_hashes {
+            manifest_guards.push(self.lock_manifest(file_hash).await);
+        }
+
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            metadata.delete_category_and_remap_transfers(deleted_category_id, &shifted_categories)
+        })
+        .await
+        .context("category delete transaction task panicked")??;
+
+        let mut cache = self.manifest_cache.lock().await;
+        for file_hash in affected_hashes {
+            let Some(manifest) = cache.get_mut(&file_hash) else {
+                continue;
+            };
+            manifest.category_id = if manifest.category_id == deleted_category_id {
+                0
+            } else {
+                manifest.category_id.saturating_sub(1)
+            };
+        }
+        drop(cache);
+        drop(manifest_guards);
+        Ok(())
     }
 
     /// Restore a completed transfer row when the same link is explicitly added again.

@@ -66,6 +66,7 @@ impl EmulebbCore {
             return Ok(Some(transfer));
         }
         if request.category_id.is_some() || request.category_name.is_some() {
+            let _category_guard = self.category_mutation_gate.lock().await;
             let (category_id, category_name) = self
                 .resolve_transfer_category(request.category_id, request.category_name.as_deref())
                 .await?;

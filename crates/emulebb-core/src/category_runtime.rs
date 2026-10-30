@@ -2,12 +2,13 @@
 
 use std::{
     collections::{BTreeMap, Bound},
+    future::Future,
     sync::Arc,
 };
 
 use anyhow::{Result, ensure};
 use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
-use emulebb_metadata::MetadataStore;
+use emulebb_metadata::{MetadataCategory, MetadataStore};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -67,81 +68,108 @@ pub(crate) async fn update_category(
 
 pub(crate) async fn delete_category(
     state: &Arc<Mutex<CoreState>>,
-    metadata_store: &MetadataStore,
     transfer_runtime: &Ed2kTransferRuntime,
     category_id: u32,
 ) -> Result<Option<Category>> {
+    delete_category_with_persist(state, category_id, |shifted_categories| async move {
+        transfer_runtime
+            .delete_category_and_remap_transfers(category_id, shifted_categories)
+            .await
+    })
+    .await
+}
+
+pub(crate) async fn delete_category_with_persist<P, F>(
+    state: &Arc<Mutex<CoreState>>,
+    category_id: u32,
+    persist: P,
+) -> Result<Option<Category>>
+where
+    P: FnOnce(Vec<MetadataCategory>) -> F,
+    F: Future<Output = Result<()>>,
+{
     ensure!(category_id != 0, "default category cannot be deleted");
-    let (deleted, transfer_updates) = {
-        let mut state = state.lock().await;
+    let plan = {
+        let state = state.lock().await;
         let Some(deleted) = state.categories.get(&category_id).cloned() else {
             return Ok(None);
         };
 
         let shifted = shifted_categories_after_delete(&state.categories, category_id);
-        metadata_store.delete_category(category_id)?;
+        let mut categories = state.categories.clone();
+        categories.remove(&category_id);
         for (old_id, _) in &shifted {
-            metadata_store.delete_category(*old_id)?;
+            categories.remove(old_id);
         }
         for (_, category) in &shifted {
-            profile_state::persist_category(metadata_store, category)?;
+            categories.insert(category.id, category.clone());
         }
-
-        state.categories.remove(&category_id);
-        for (old_id, _) in &shifted {
-            state.categories.remove(old_id);
-        }
-        for (_, category) in shifted {
-            state.categories.insert(category.id, category);
-        }
-        state.next_category_id = state
-            .categories
+        let next_category_id = categories
             .keys()
             .copied()
             .max()
             .unwrap_or_default()
             .saturating_add(1)
             .max(1);
-
-        let category_names = state
-            .categories
-            .iter()
-            .map(|(id, category)| (*id, category.name.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let default_name = category_names.get(&0).cloned().unwrap_or_default();
-        let mut transfer_updates = Vec::new();
-        for transfer in state.transfers.values_mut() {
-            let new_category_id = if transfer.category_id == category_id {
-                Some(0)
-            } else if transfer.category_id > category_id {
-                Some(transfer.category_id.saturating_sub(1))
-            } else {
-                None
-            };
-            let Some(new_category_id) = new_category_id else {
-                continue;
-            };
-            transfer.category_id = new_category_id;
-            // Resetting to the uncategorized pseudo-category (id 0) CLEARS the
-            // name (the transfer is no longer in a named category); a shift onto
-            // a surviving category keeps that category's name.
-            transfer.category_name = if new_category_id == 0 {
-                String::new()
-            } else {
-                category_names
-                    .get(&new_category_id)
-                    .cloned()
-                    .unwrap_or_else(|| default_name.clone())
-            };
-            transfer_updates.push((transfer.hash.clone(), new_category_id));
+        let shifted_categories = shifted
+            .into_iter()
+            .map(|(_, category)| MetadataCategory {
+                id: category.id,
+                name: category.name,
+                path: category.path,
+                comment: category.comment,
+                sort_order: category.priority,
+                color: category.color,
+            })
+            .collect();
+        CategoryDeletionPlan {
+            deleted,
+            categories,
+            next_category_id,
+            shifted_categories,
         }
-        (deleted, transfer_updates)
     };
 
-    for (hash, category_id) in transfer_updates {
-        transfer_runtime.set_category_id(&hash, category_id).await?;
+    persist(plan.shifted_categories).await?;
+
+    let mut state = state.lock().await;
+    state.categories = plan.categories;
+    state.next_category_id = plan.next_category_id;
+    let category_names = state
+        .categories
+        .iter()
+        .map(|(id, category)| (*id, category.name.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let default_name = category_names.get(&0).cloned().unwrap_or_default();
+    for transfer in state.transfers.values_mut() {
+        let new_category_id = if transfer.category_id == category_id {
+            Some(0)
+        } else if transfer.category_id > category_id {
+            Some(transfer.category_id.saturating_sub(1))
+        } else {
+            None
+        };
+        let Some(new_category_id) = new_category_id else {
+            continue;
+        };
+        transfer.category_id = new_category_id;
+        transfer.category_name = if new_category_id == 0 {
+            String::new()
+        } else {
+            category_names
+                .get(&new_category_id)
+                .cloned()
+                .unwrap_or_else(|| default_name.clone())
+        };
     }
-    Ok(Some(deleted))
+    Ok(Some(plan.deleted))
+}
+
+struct CategoryDeletionPlan {
+    deleted: Category,
+    categories: BTreeMap<u32, Category>,
+    next_category_id: u32,
+    shifted_categories: Vec<MetadataCategory>,
 }
 
 fn shifted_categories_after_delete(

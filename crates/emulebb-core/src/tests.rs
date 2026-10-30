@@ -75,6 +75,7 @@ fn ed2k_link_parser_enriches_duplicate_source_metadata() {
     assert_eq!(parsed.sources[0].connect_options, Some(3));
 }
 
+mod category_persistence;
 mod core_config;
 mod download_scheduler;
 mod download_source_policy;
