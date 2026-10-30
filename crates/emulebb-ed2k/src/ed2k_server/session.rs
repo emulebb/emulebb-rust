@@ -70,7 +70,6 @@ pub(super) enum ServerSessionPhase {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum OfferFilesPacingMode {
     AwaitingCapability,
-    FallbackReconnect { reason: String },
     Legacy { reason: String },
     Negotiated(OfferFilesPolicy),
 }
@@ -540,11 +539,9 @@ impl ServerSession {
             OfferFilesCapabilityAdvertisement::Absent => OfferFilesPacingMode::Legacy {
                 reason: "capability absent".to_string(),
             },
-            OfferFilesCapabilityAdvertisement::Invalid(reason) => {
-                OfferFilesPacingMode::FallbackReconnect {
-                    reason: format!("invalid capability: {reason}"),
-                }
-            }
+            OfferFilesCapabilityAdvertisement::Invalid(reason) => OfferFilesPacingMode::Legacy {
+                reason: format!("invalid capability: {reason}"),
+            },
         };
     }
 
@@ -587,19 +584,12 @@ impl ServerSession {
             self.offer_files_pacing,
             OfferFilesPacingMode::AwaitingCapability
         ) {
-            self.offer_files_pacing = OfferFilesPacingMode::FallbackReconnect {
+            self.offer_files_pacing = OfferFilesPacingMode::Legacy {
                 reason: "OP_SERVERIDENT capability timeout".to_string(),
             };
             self.offer_files_negotiation_deadline = None;
-            self.offer_files_next_publish_at = None;
+            self.schedule_offer_files_after_pacing_resolution();
             self.publish_offer_files_pacing_state().await;
-        }
-    }
-
-    pub(super) fn offer_files_fallback_reconnect_reason(&self) -> Option<&str> {
-        match &self.offer_files_pacing {
-            OfferFilesPacingMode::FallbackReconnect { reason } => Some(reason),
-            _ => None,
         }
     }
 
@@ -630,7 +620,6 @@ impl ServerSession {
             .then_some(self.offer_files_next_publish_at)
             .flatten();
         match self.offer_files_pacing {
-            OfferFilesPacingMode::FallbackReconnect { .. } => Some(Instant::now()),
             OfferFilesPacingMode::AwaitingCapability => {
                 match (publish_deadline, self.offer_files_negotiation_deadline) {
                     (Some(publish), Some(negotiation)) => Some(publish.min(negotiation)),
@@ -660,8 +649,7 @@ impl ServerSession {
                 self.server_soft_files,
                 self.server_hard_files,
             ),
-            OfferFilesPacingMode::AwaitingCapability
-            | OfferFilesPacingMode::FallbackReconnect { .. } => 0,
+            OfferFilesPacingMode::AwaitingCapability => 0,
         }
     }
 
@@ -671,8 +659,7 @@ impl ServerSession {
                 policy.effective_batch_max(self.offer_files_distinct_published_hashes.len())
             }
             OfferFilesPacingMode::Legacy { .. } => self.offer_files_batch_limit(),
-            OfferFilesPacingMode::AwaitingCapability
-            | OfferFilesPacingMode::FallbackReconnect { .. } => 0,
+            OfferFilesPacingMode::AwaitingCapability => 0,
         }
     }
 
@@ -724,8 +711,7 @@ impl ServerSession {
                     OfferFilesPacingMode::Legacy { .. } => {
                         Some(Instant::now() + OFFER_FILES_LEGACY_MIN_INTERVAL)
                     }
-                    OfferFilesPacingMode::AwaitingCapability
-                    | OfferFilesPacingMode::FallbackReconnect { .. } => None,
+                    OfferFilesPacingMode::AwaitingCapability => None,
                 }
             } else {
                 None
@@ -735,9 +721,6 @@ impl ServerSession {
     async fn publish_offer_files_pacing_state(&self) {
         let (mode, batch_max, min_interval_ms, fallback_reason) = match &self.offer_files_pacing {
             OfferFilesPacingMode::AwaitingCapability => ("awaitingCapability", None, None, None),
-            OfferFilesPacingMode::FallbackReconnect { reason } => {
-                ("fallbackReconnect", None, None, Some(reason.clone()))
-            }
             OfferFilesPacingMode::Legacy { reason } => (
                 "legacy",
                 Some(super::server_entry::server_offer_file_limit(
@@ -1529,7 +1512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_timeout_requires_a_fresh_legacy_connection() {
+    async fn capability_timeout_uses_legacy_publication_on_current_connection() {
         let (mut session, _peer) = connected_test_session_with_peer().await;
         session.login_accepted = true;
         session.configure_offer_files_capability(true);
@@ -1539,13 +1522,9 @@ mod tests {
 
         assert!(matches!(
             session.offer_files_pacing,
-            OfferFilesPacingMode::FallbackReconnect { .. }
+            OfferFilesPacingMode::Legacy { .. }
         ));
-        assert_eq!(
-            session.offer_files_fallback_reconnect_reason(),
-            Some("OP_SERVERIDENT capability timeout")
-        );
-        assert!(!session.offer_files_publish_due());
+        assert!(session.offer_files_publish_due());
         assert!(session.offer_files_wakeup_at().is_some());
     }
 
@@ -1564,7 +1543,6 @@ mod tests {
             session.offer_files_pacing,
             OfferFilesPacingMode::Legacy { .. }
         ));
-        assert_eq!(session.offer_files_fallback_reconnect_reason(), None);
         assert!(session.offer_files_publish_due());
     }
 
@@ -1587,9 +1565,9 @@ mod tests {
         assert_eq!(session.offer_files_capability_snapshot, Some(first));
         assert!(matches!(
             session.offer_files_pacing,
-            OfferFilesPacingMode::FallbackReconnect { .. }
+            OfferFilesPacingMode::Legacy { .. }
         ));
-        assert!(!session.offer_files_publish_due());
+        assert!(session.offer_files_publish_due());
     }
 
     #[tokio::test]
