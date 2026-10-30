@@ -31,7 +31,7 @@ use emulebb_kad_dht::DhtNode;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::buddy_socket::BuddySocketRegistry;
+use crate::buddy_socket::{BuddySocketRegistry, OutboundBuddyToken};
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
 use super::buddy_liveness::BuddyLiveness;
@@ -39,7 +39,10 @@ use super::codec::decode_reask_callback_tcp_payload;
 use super::firewall_helper::{
     complete_authorized_kad_callback, decode_kad_callback_if_running, is_connection_shutdown_error,
 };
-use super::hello::{build_hello_responses, encode_emule_info_answer, encode_hello_request};
+use super::hello::{
+    build_hello_responses, decode_hello_answer_profile, decode_hello_profile,
+    encode_emule_info_answer, encode_hello_request,
+};
 use super::transport::{Ed2kTransport, EmuleTcpPacket};
 use super::{
     Ed2kCallbackSessionHandle, Ed2kHelloIdentity, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK,
@@ -53,6 +56,7 @@ pub enum BuddyLinkEnd {
     Cancelled,
     PeerClosed,
     ReceiveTimedOut,
+    Replaced,
 }
 
 /// Inputs for the outbound buddy link task.
@@ -136,7 +140,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     .await
     .with_context(|| format!("failed to establish buddy link to {buddy_addr}"))?;
 
-    registry.register_outbound(buddy_ip, buddy_user_hash);
+    let registry_token = registry.register_outbound(buddy_ip, buddy_user_hash);
     info!(
         "established outbound Kad buddy link to {buddy_addr} transport={}",
         transport.mode.as_str()
@@ -150,11 +154,13 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         &transfer_runtime,
         &callback_sessions,
         reask_handle.as_ref(),
+        &registry,
+        registry_token,
         &cancel,
     )
     .await;
 
-    if !registry.evict_outbound_if(buddy_ip, buddy_user_hash) {
+    if !registry.evict_outbound_if(registry_token) {
         debug!(
             "outbound Kad buddy link to {buddy_addr} ended after its registry slot was replaced"
         );
@@ -168,6 +174,9 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         }
         Ok(BuddyLinkEnd::ReceiveTimedOut) => {
             info!("outbound Kad buddy link to {buddy_addr} receive-timed out; will re-search")
+        }
+        Ok(BuddyLinkEnd::Replaced) => {
+            info!("outbound Kad buddy link to {buddy_addr} replaced by a newer link")
         }
         Err(error) => debug!("outbound Kad buddy link to {buddy_addr} ended: {error:#}"),
     }
@@ -186,10 +195,15 @@ async fn drive_buddy_link(
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<&ReaskSourceHandle>,
+    registry: &BuddySocketRegistry,
+    registry_token: OutboundBuddyToken,
     cancel: &CancellationToken,
 ) -> Result<BuddyLinkEnd> {
     let mut liveness = BuddyLiveness::new(tokio::time::Instant::now());
     loop {
+        if !registry.is_current_outbound(registry_token) {
+            return Ok(BuddyLinkEnd::Replaced);
+        }
         tokio::select! {
             biased;
             // The buddy-management loop cancels this token when the relationship
@@ -200,6 +214,9 @@ async fn drive_buddy_link(
                 return Ok(BuddyLinkEnd::ReceiveTimedOut);
             }
             () = tokio::time::sleep_until(liveness.next_ping_at()) => {
+                if !registry.is_current_outbound(registry_token) {
+                    return Ok(BuddyLinkEnd::Replaced);
+                }
                 let ping = super::codec::encode_buddy_ping();
                 transport
                     .write_all_diagnostic(
@@ -217,6 +234,9 @@ async fn drive_buddy_link(
                 match outcome {
                     Ok(None) => return Ok(BuddyLinkEnd::PeerClosed),
                     Ok(Some(packet)) => {
+                        if !registry.is_current_outbound(registry_token) {
+                            return Ok(BuddyLinkEnd::Replaced);
+                        }
                         match handle_buddy_packet(
                             transport,
                             buddy_addr,
@@ -225,6 +245,7 @@ async fn drive_buddy_link(
                             transfer_runtime,
                             callback_sessions,
                             reask_handle,
+                            Some(registry_token),
                             packet,
                         )
                         .await? {
@@ -270,6 +291,7 @@ async fn handle_buddy_packet(
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     callback_sessions: &Ed2kCallbackSessionHandle,
     reask_handle: Option<&ReaskSourceHandle>,
+    buddy_token: Option<OutboundBuddyToken>,
     packet: EmuleTcpPacket,
 ) -> Result<BuddyPacketActivity> {
     match (packet.protocol, packet.opcode) {
@@ -315,9 +337,9 @@ async fn handle_buddy_packet(
             // inbound OP_REASKFILEPING (oracle ListenSocket.cpp OP_REASKCALLBACKTCP).
             match decode_reask_callback_tcp_payload(&packet.payload) {
                 Ok(reask) => {
-                    if let Some(handle) = reask_handle {
+                    if let (Some(handle), Some(buddy_token)) = (reask_handle, buddy_token) {
                         let dest = SocketAddr::new(IpAddr::V4(reask.dest_ip), reask.dest_port);
-                        handle.answer_callback_tcp(dest, reask.forwarded_reask);
+                        handle.answer_callback_tcp(buddy_token, dest, reask.forwarded_reask);
                         debug!(
                             "buddy {buddy_addr} relayed OP_REASKCALLBACKTCP file_hash={} \
                              requester={dest}; answering over UDP",
@@ -429,9 +451,10 @@ async fn connect_and_hello_buddy(
     .await
     .with_context(|| format!("timed out sending OP_HELLO to buddy {buddy_addr}"))??;
 
-    // Drive the hello exchange to completion (HELLOANSWER or a HELLO from the
-    // buddy) so it has our identity before we start the keepalive.
+    // Drive the hello exchange to completion and verify the peer's advertised
+    // identity before granting it the privileged outbound-buddy registry slot.
     let deadline = tokio::time::Instant::now() + timeout.min(Duration::from_secs(5));
+    let mut verified_identity = false;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let packet = match tokio::time::timeout(
@@ -451,6 +474,12 @@ async fn connect_and_hello_buddy(
         };
         match (packet.protocol, packet.opcode) {
             (OP_EDONKEYPROT, OP_HELLO) => {
+                let profile = decode_hello_profile(&packet.payload)
+                    .context("failed to decode buddy OP_HELLO identity")?;
+                anyhow::ensure!(
+                    profile.identity.user_hash == buddy_user_hash,
+                    "buddy OP_HELLO identity does not match FINDBUDDY_RES"
+                );
                 for reply in build_hello_responses(&packet.payload, hello_identity)? {
                     transport
                         .write_all_diagnostic("kad_buddy", buddy_addr, "hello_reply", &reply)
@@ -459,9 +488,20 @@ async fn connect_and_hello_buddy(
                             format!("failed to reply to OP_HELLO from buddy {buddy_addr}")
                         })?;
                 }
+                verified_identity = true;
                 break;
             }
-            (OP_EDONKEYPROT, OP_HELLOANSWER) | (OP_EMULEPROT, OP_EMULEINFOANSWER) => break,
+            (OP_EDONKEYPROT, OP_HELLOANSWER) => {
+                let profile = decode_hello_answer_profile(&packet.payload)
+                    .context("failed to decode buddy OP_HELLOANSWER identity")?;
+                anyhow::ensure!(
+                    profile.identity.user_hash == buddy_user_hash,
+                    "buddy OP_HELLOANSWER identity does not match FINDBUDDY_RES"
+                );
+                verified_identity = true;
+                break;
+            }
+            (OP_EMULEPROT, OP_EMULEINFOANSWER) => {}
             (OP_EMULEPROT, OP_EMULEINFO) => {
                 let reply = encode_emule_info_answer(hello_identity.udp_port);
                 transport
@@ -474,6 +514,11 @@ async fn connect_and_hello_buddy(
             _ => {}
         }
     }
+
+    anyhow::ensure!(
+        verified_identity,
+        "buddy closed or timed out before verified HELLO identity"
+    );
 
     Ok(transport)
 }
@@ -493,9 +538,13 @@ mod tests {
     use super::super::transport::{Ed2kTransport, Ed2kTransportMode};
     use super::super::{
         Ed2kHelloIdentity, EmuleTcpPacket, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_EMULEPROT,
-        OP_REASKCALLBACKTCP, encode_packet,
+        OP_HELLO, OP_REASKCALLBACKTCP, encode_hello_answer, encode_packet,
     };
-    use super::{BuddyLinkEnd, BuddyPacketActivity, drive_buddy_link, handle_buddy_packet};
+    use super::{
+        BuddyLinkEnd, BuddyPacketActivity, connect_and_hello_buddy, drive_buddy_link,
+        handle_buddy_packet,
+    };
+    use crate::buddy_socket::BuddySocketRegistry;
     use crate::ed2k_transfer::Ed2kTransferRuntime;
 
     fn dummy_hello_identity() -> Ed2kHelloIdentity {
@@ -511,10 +560,40 @@ mod tests {
         }
     }
 
+    fn buddy_hello_identity(user_hash: [u8; 16]) -> Ed2kHelloIdentity {
+        Ed2kHelloIdentity {
+            user_hash,
+            client_id: u32::from_le_bytes(crate::test_bind_ip().octets()),
+            tcp_port: 4662,
+            udp_port: 4672,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: 0,
+            direct_udp_callback: false,
+        }
+    }
+
+    async fn answer_buddy_hello(listener: TcpListener, identity: Ed2kHelloIdentity) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut peer = Ed2kTransport::from_parts(
+            stream,
+            VecDeque::new(),
+            None,
+            None,
+            Ed2kTransportMode::Plaintext,
+        );
+        let hello = peer.read_packet().await.unwrap().unwrap();
+        assert_eq!(hello.opcode, OP_HELLO);
+        peer.write_all(&encode_hello_answer(identity))
+            .await
+            .unwrap();
+    }
+
     async fn spawn_buddy_driver() -> (
         tokio::task::JoinHandle<anyhow::Result<BuddyLinkEnd>>,
         Ed2kTransport,
         CancellationToken,
+        BuddySocketRegistry,
     ) {
         let bind_ip = crate::test_bind_ip();
         let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
@@ -550,6 +629,9 @@ mod tests {
             super::super::ed2k_callback_session_channel();
         let cancel = CancellationToken::new();
         let driver_cancel = cancel.clone();
+        let registry = BuddySocketRegistry::new();
+        let token = registry.register_outbound(bind_ip, [0x44; 16]);
+        let driver_registry = registry.clone();
         let driver = tokio::spawn(async move {
             let _temp_dir = temp_dir;
             let _callback_session_inbox = callback_session_inbox;
@@ -561,12 +643,62 @@ mod tests {
                 &transfer_runtime,
                 &callback_sessions,
                 None,
+                &driver_registry,
+                token,
                 &driver_cancel,
             )
             .await
         });
         tokio::task::yield_now().await;
-        (driver, peer, cancel)
+        (driver, peer, cancel, registry)
+    }
+
+    #[tokio::test]
+    async fn outbound_buddy_registration_requires_matching_hello_identity() {
+        let bind_ip = crate::test_bind_ip();
+        let expected_hash = [0x44; 16];
+        let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
+        let buddy_addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(answer_buddy_hello(
+            listener,
+            buddy_hello_identity(expected_hash),
+        ));
+
+        connect_and_hello_buddy(
+            bind_ip,
+            buddy_addr,
+            expected_hash,
+            0,
+            dummy_hello_identity(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn outbound_buddy_hello_rejects_mismatched_identity() {
+        let bind_ip = crate::test_bind_ip();
+        let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
+        let buddy_addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(answer_buddy_hello(
+            listener,
+            buddy_hello_identity([0x99; 16]),
+        ));
+
+        let error = connect_and_hello_buddy(
+            bind_ip,
+            buddy_addr,
+            [0x44; 16],
+            0,
+            dummy_hello_identity(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match FINDBUDDY_RES"));
+        peer.await.unwrap();
     }
 
     /// The held buddy link follows the same stock pre-parse Kad-running gate as
@@ -609,6 +741,7 @@ mod tests {
                 &transfer_runtime,
                 &callback_sessions,
                 None,
+                None,
                 EmuleTcpPacket {
                     protocol: OP_EMULEPROT,
                     opcode: OP_CALLBACK,
@@ -627,14 +760,26 @@ mod tests {
     /// firewalled / Kad disconnects.
     #[tokio::test(start_paused = true)]
     async fn buddy_link_stops_and_stops_pinging_when_cancelled() {
-        let (driver, _peer, cancel) = spawn_buddy_driver().await;
+        let (driver, _peer, cancel, _registry) = spawn_buddy_driver().await;
         cancel.cancel();
         assert_eq!(driver.await.unwrap().unwrap(), BuddyLinkEnd::Cancelled);
     }
 
+    #[tokio::test]
+    async fn replaced_buddy_link_rejects_further_packets() {
+        let (driver, mut peer, _cancel, registry) = spawn_buddy_driver().await;
+        let replacement = registry.register_outbound(crate::test_bind_ip(), [0x44; 16]);
+        peer.write_all(&encode_packet(OP_EMULEPROT, OP_BUDDYPING, &[]))
+            .await
+            .unwrap();
+
+        assert_eq!(driver.await.unwrap().unwrap(), BuddyLinkEnd::Replaced);
+        assert!(registry.is_current_outbound(replacement));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn silent_buddy_expires_while_outbound_pings_succeed() {
-        let (driver, mut peer, _cancel) = spawn_buddy_driver().await;
+        let (driver, mut peer, _cancel, _registry) = spawn_buddy_driver().await;
 
         for _ in 0..2 {
             tokio::time::advance(Duration::from_secs(10 * 60)).await;
@@ -662,7 +807,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn valid_inbound_ping_is_answered_and_refreshes_receive_liveness() {
-        let (driver, mut peer, _cancel) = spawn_buddy_driver().await;
+        let (driver, mut peer, _cancel, _registry) = spawn_buddy_driver().await;
 
         tokio::time::advance(Duration::from_secs(9 * 60)).await;
         peer.write_all(&encode_packet(OP_EMULEPROT, OP_BUDDYPING, &[]))
@@ -686,7 +831,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn malformed_and_partial_traffic_do_not_refresh_receive_liveness() {
-        let (driver, mut peer, _cancel) = spawn_buddy_driver().await;
+        let (driver, mut peer, _cancel, _registry) = spawn_buddy_driver().await;
 
         tokio::time::advance(Duration::from_secs(24 * 60)).await;
         peer.write_all(&encode_packet(OP_EMULEPROT, OP_REASKCALLBACKTCP, &[1]))

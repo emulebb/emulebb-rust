@@ -37,7 +37,7 @@ use super::service::{
 };
 use super::state::{ReaskAction, ReaskSource};
 use super::transport::{ClientUdpSendRole, send_client_udp_datagram};
-use crate::buddy_socket::BuddySocketRegistry;
+use crate::buddy_socket::{BuddySocketRegistry, OutboundBuddyToken};
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 use crate::ipfilter::IpFilter;
 use crate::port_test::PortTestRegistry;
@@ -63,6 +63,7 @@ pub enum ReaskCommand {
     /// (oracle ListenSocket.cpp). The buddy-forwarded request body is retained so
     /// requester part status and complete-source count survive the relay.
     AnswerCallbackTcp {
+        buddy_token: OutboundBuddyToken,
         dest: SocketAddr,
         forwarded_reask: Vec<u8>,
     },
@@ -142,8 +143,14 @@ impl ReaskSourceHandle {
 
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the source).
     /// Best-effort: a full/closed channel drops the answer (downloader retries/TCP).
-    pub(crate) fn answer_callback_tcp(&self, dest: std::net::SocketAddr, forwarded_reask: Vec<u8>) {
+    pub(crate) fn answer_callback_tcp(
+        &self,
+        buddy_token: OutboundBuddyToken,
+        dest: std::net::SocketAddr,
+        forwarded_reask: Vec<u8>,
+    ) {
         let _ = self.0.try_send(ReaskCommand::AnswerCallbackTcp {
+            buddy_token,
             dest,
             forwarded_reask,
         });
@@ -301,20 +308,21 @@ pub async fn run_ed2k_udp_reask_loop(
                 let Some(command) = maybe else { break };
                 // AnswerCallbackTcp needs async UDP I/O; the rest are sync.
                 match command {
-                    ReaskCommand::AnswerCallbackTcp { dest, forwarded_reask } => {
-                        match super::codec::decode_reask_file_ping(&forwarded_reask, udp_version) {
-                            Ok(ping) => {
-                                super::buddy_relay::answer_buddy_relayed_reask(
-                                    &dht, &transfer_runtime, public_ip.octets(), dest, ping,
-                                )
-                                .await;
-                            }
-                            Err(error) => debug!(
-                                "ed2k udp reask: malformed buddy-relayed requester state from \
-                                 {dest}: {error:#}"
-                            ),
-                        }
-                    }
+                    ReaskCommand::AnswerCallbackTcp {
+                        buddy_token,
+                        dest,
+                        forwarded_reask,
+                    } => process_answer_callback_tcp(
+                        &dht,
+                        &transfer_runtime,
+                        public_ip.octets(),
+                        &buddy_registry,
+                        buddy_token,
+                        dest,
+                        &forwarded_reask,
+                        udp_version,
+                    )
+                    .await,
                     other => apply_reask_command(&mut service, &events, other),
                 }
             }
@@ -324,6 +332,41 @@ pub async fn run_ed2k_udp_reask_loop(
         }
     }
     debug!("ed2k udp reask loop stopped");
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
+async fn process_answer_callback_tcp(
+    dht: &DhtNode,
+    transfer_runtime: &Ed2kTransferRuntime,
+    our_public_ip: [u8; 4],
+    buddy_registry: &BuddySocketRegistry,
+    buddy_token: OutboundBuddyToken,
+    dest: SocketAddr,
+    forwarded_reask: &[u8],
+    udp_version: u8,
+) {
+    if !buddy_registry.is_current_outbound(buddy_token) {
+        debug!("ed2k udp reask: ignoring OP_REASKCALLBACKTCP from replaced outbound buddy link");
+        return;
+    }
+    match super::codec::decode_reask_file_ping(forwarded_reask, udp_version) {
+        Ok(ping) => {
+            super::buddy_relay::answer_buddy_relayed_reask(
+                dht,
+                transfer_runtime,
+                our_public_ip,
+                dest,
+                ping,
+            )
+            .await;
+        }
+        Err(error) => {
+            debug!("ed2k udp reask: malformed buddy-relayed requester state from {dest}: {error:#}")
+        }
+    }
 }
 
 /// Decide the loop->core events for a routed downloader reply. Pure so the

@@ -203,6 +203,7 @@ pub(super) async fn answer_buddy_relayed_reask(
 mod tests {
     use super::*;
     use crate::ed2k_client_udp::codec::ReaskCallbackUdp;
+    use crate::ed2k_client_udp::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 
     fn buddy() -> Ed2kHash {
         Ed2kHash::from_bytes([0x11; 16])
@@ -343,5 +344,51 @@ mod tests {
         assert_eq!(dest_ip, ip);
         assert_eq!(dest_port, port);
         assert_eq!(file_hash, file());
+    }
+
+    #[tokio::test]
+    async fn buddy_relayed_reask_sends_client_udp_response() {
+        use emulebb_kad_dht::DhtConfig;
+        use tokio::net::UdpSocket;
+
+        let bind_ip = crate::test_bind_ip();
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::from((bind_ip, 0))),
+            node_id: NodeId::from_bytes([0x22; 16]),
+            udp_key: 0x1122_3344,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let receiver = UdpSocket::bind((bind_ip, 0)).await.unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let transfer_runtime = Ed2kTransferRuntime::load_or_create(temp_dir.path()).unwrap();
+
+        answer_buddy_relayed_reask(
+            &dht,
+            &transfer_runtime,
+            bind_ip.octets(),
+            destination,
+            super::super::codec::ReaskFilePing {
+                file_hash: file(),
+                part_status: None,
+                complete_source_count: None,
+            },
+        )
+        .await;
+
+        let mut datagram = [0u8; 64];
+        let (len, _from) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            receiver.recv_from(&mut datagram),
+        )
+        .await
+        .expect("buddy-relayed response timeout")
+        .unwrap();
+        assert!(matches!(
+            parse_inbound_reask_datagram(&datagram[..len], bind_ip.octets(), &[0; 16], 4),
+            Some(InboundReaskMessage::FileNotFound)
+        ));
     }
 }

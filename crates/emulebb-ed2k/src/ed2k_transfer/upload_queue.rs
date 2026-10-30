@@ -506,6 +506,39 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub requester_complete_source_count: Option<u16>,
 }
 
+/// Waiting uploader selected for a client-UDP reask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Ed2kWaitingReaskClient {
+    key: Ed2kUploadSessionKey,
+    pub(super) file_hash: String,
+    pub(super) queue_rank: u16,
+    pub(super) udp_version: u8,
+    pub(super) should_crypt: bool,
+    pub(super) user_hash: Option<[u8; 16]>,
+}
+
+/// Typed result of stock `GetWaitingClientByIP_UDP(..., true)` matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Ed2kWaitingReaskLookup {
+    /// A single waiting client matched both source IP and advertised UDP port.
+    Exact(Ed2kWaitingReaskClient),
+    /// No port matched, but exactly one waiting client has the source IP.
+    UniqueIpFallback(Ed2kWaitingReaskClient),
+    /// Multiple waiting clients share the source IP and no exact port identifies one.
+    Ambiguous,
+    /// No waiting client has the source IP.
+    Missing,
+}
+
+impl Ed2kWaitingReaskLookup {
+    pub(super) fn client(&self) -> Option<&Ed2kWaitingReaskClient> {
+        match self {
+            Self::Exact(client) | Self::UniqueIpFallback(client) => Some(client),
+            Self::Ambiguous | Self::Missing => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Ed2kUploadSessionEntry {
     phase: Ed2kUploadSessionPhase,
@@ -1421,28 +1454,93 @@ impl Ed2kUploadQueueState {
         true
     }
 
-    /// Refresh the last-request time of the WAITING entry matched by a UDP
-    /// reask (oracle `SetLastUpRequest` on OP_REASKFILEPING,
-    /// ClientUDPSocket.cpp:307): a disconnected waiter that keeps re-asking
-    /// over UDP must not be purged by the waiting timeout (MAX_PURGEQUEUETIME).
-    pub(super) fn refresh_waiting_reask_state_by_udp(
+    /// Locate a waiting client with stock `GetWaitingClientByIP_UDP(..., true)`
+    /// semantics: prefer an exact `(IP, UDP port)` match, otherwise accept the
+    /// sole waiter on that IP, and report ambiguity when multiple candidates
+    /// remain so the caller can force a TCP refresh.
+    pub(super) fn lookup_waiting_reask_client(
         &mut self,
         ip: IpAddr,
         udp_port: u16,
+        now: Instant,
+    ) -> Ed2kWaitingReaskLookup {
+        self.reap_expired_sessions(now);
+        let same_ip = self
+            .sessions
+            .iter()
+            .filter(|(key, session)| {
+                session.phase == Ed2kUploadSessionPhase::Waiting && key.peer.ip == ip
+            })
+            .map(|(key, _session)| key.clone())
+            .collect::<Vec<_>>();
+        let exact = same_ip
+            .iter()
+            .filter(|key| key.peer.udp_port == Some(udp_port))
+            .collect::<Vec<_>>();
+
+        if exact.len() == 1 {
+            return self.waiting_reask_client(exact[0], now).map_or(
+                Ed2kWaitingReaskLookup::Missing,
+                Ed2kWaitingReaskLookup::Exact,
+            );
+        }
+        if exact.len() > 1 {
+            return Ed2kWaitingReaskLookup::Ambiguous;
+        }
+        match same_ip.as_slice() {
+            [] => Ed2kWaitingReaskLookup::Missing,
+            [key] => self.waiting_reask_client(key, now).map_or(
+                Ed2kWaitingReaskLookup::Missing,
+                Ed2kWaitingReaskLookup::UniqueIpFallback,
+            ),
+            _ => Ed2kWaitingReaskLookup::Ambiguous,
+        }
+    }
+
+    fn waiting_reask_client(
+        &self,
+        key: &Ed2kUploadSessionKey,
+        now: Instant,
+    ) -> Option<Ed2kWaitingReaskClient> {
+        let session = self.sessions.get(key)?;
+        (session.phase == Ed2kUploadSessionPhase::Waiting).then(|| Ed2kWaitingReaskClient {
+            key: key.clone(),
+            file_hash: key.file_hash.clone(),
+            queue_rank: self.rank_for_key(key, now),
+            udp_version: key.peer.udp_version,
+            should_crypt: key.peer.should_crypt,
+            user_hash: key.peer.user_hash,
+        })
+    }
+
+    pub(super) fn waiting_user_count(&self) -> u32 {
+        self.sessions
+            .values()
+            .filter(|session| session.phase == Ed2kUploadSessionPhase::Waiting)
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+
+    /// Refresh the exact WAITING entry selected by [`Self::lookup_waiting_reask_client`].
+    /// This avoids re-resolving a unique-IP fallback through the incoming port.
+    pub(super) fn refresh_waiting_reask_state(
+        &mut self,
+        client: &Ed2kWaitingReaskClient,
         requester_part_status: Option<Vec<bool>>,
         requester_complete_source_count: Option<u16>,
         now: Instant,
-    ) {
-        for (key, session) in &mut self.sessions {
-            if session.phase == Ed2kUploadSessionPhase::Waiting
-                && key.peer.ip == ip
-                && key.peer.udp_port == Some(udp_port)
-            {
-                session.last_activity = now;
-                session.requester_part_status = requester_part_status.clone();
-                session.requester_complete_source_count = requester_complete_source_count;
-            }
+    ) -> bool {
+        let Some(session) = self.sessions.get_mut(&client.key) else {
+            return false;
+        };
+        if session.phase != Ed2kUploadSessionPhase::Waiting {
+            return false;
         }
+        session.last_activity = now;
+        session.requester_part_status = requester_part_status;
+        session.requester_complete_source_count = requester_complete_source_count;
+        true
     }
 
     /// Drain queued connection-establishment work. HighID waiters already own a
