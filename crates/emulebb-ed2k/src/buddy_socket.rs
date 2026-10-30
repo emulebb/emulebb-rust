@@ -67,6 +67,19 @@ struct InboundBuddySocket {
 struct OutboundBuddy {
     ip: Ipv4Addr,
     user_hash: [u8; 16],
+    generation: u64,
+}
+
+/// Identity-safe lease for one registered outbound buddy link.
+///
+/// IP + user hash alone cannot distinguish a replaced TCP link that reconnects
+/// to the same buddy. The generation makes stale link tasks unable to process
+/// privileged buddy traffic or evict their replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboundBuddyToken {
+    ip: Ipv4Addr,
+    user_hash: [u8; 16],
+    generation: u64,
 }
 
 #[derive(Debug, Default)]
@@ -74,6 +87,7 @@ struct RegistryInner {
     expected_inbound: Option<ExpectedInboundBuddy>,
     inbound: Option<InboundBuddySocket>,
     outbound: Option<OutboundBuddy>,
+    next_outbound_generation: u64,
 }
 
 /// Shared, cheaply-cloneable handle to the single buddy-socket registry.
@@ -179,8 +193,27 @@ impl BuddySocketRegistry {
 
     /// Register the outbound buddy we acquired while firewalled (oracle
     /// `m_pBuddy` set on `KS_CONNECTED_BUDDY`). Replaces any prior outbound buddy.
-    pub fn register_outbound(&self, ip: Ipv4Addr, user_hash: [u8; 16]) {
-        self.lock().outbound = Some(OutboundBuddy { ip, user_hash });
+    pub(crate) fn register_outbound(
+        &self,
+        ip: Ipv4Addr,
+        user_hash: [u8; 16],
+    ) -> OutboundBuddyToken {
+        let mut inner = self.lock();
+        inner.next_outbound_generation = inner.next_outbound_generation.wrapping_add(1);
+        if inner.next_outbound_generation == 0 {
+            inner.next_outbound_generation = 1;
+        }
+        let token = OutboundBuddyToken {
+            ip,
+            user_hash,
+            generation: inner.next_outbound_generation,
+        };
+        inner.outbound = Some(OutboundBuddy {
+            ip,
+            user_hash,
+            generation: token.generation,
+        });
+        token
     }
 
     /// Drop the outbound buddy (oracle buddy-loss: `m_pBuddy = NULL`).
@@ -190,15 +223,27 @@ impl BuddySocketRegistry {
 
     /// Drop the outbound slot only when it still belongs to the specified link.
     /// Returns whether the matching slot was removed.
-    pub fn evict_outbound_if(&self, ip: Ipv4Addr, user_hash: [u8; 16]) -> bool {
+    pub(crate) fn evict_outbound_if(&self, token: OutboundBuddyToken) -> bool {
         let mut inner = self.lock();
-        let matches = inner
-            .outbound
-            .is_some_and(|buddy| buddy.ip == ip && buddy.user_hash == user_hash);
+        let matches = inner.outbound.is_some_and(|buddy| {
+            buddy.ip == token.ip
+                && buddy.user_hash == token.user_hash
+                && buddy.generation == token.generation
+        });
         if matches {
             inner.outbound = None;
         }
         matches
+    }
+
+    /// Whether `token` still owns the current outbound buddy slot.
+    #[must_use]
+    pub(crate) fn is_current_outbound(&self, token: OutboundBuddyToken) -> bool {
+        self.lock().outbound.is_some_and(|buddy| {
+            buddy.ip == token.ip
+                && buddy.user_hash == token.user_hash
+                && buddy.generation == token.generation
+        })
     }
 
     /// Whether a peer (by IP + user hash) is our outbound buddy. Mirrors the
@@ -310,26 +355,42 @@ mod tests {
         let registry = BuddySocketRegistry::new();
         let ip = Ipv4Addr::new(192, 0, 2, 50);
         assert!(!registry.has_outbound());
-        registry.register_outbound(ip, [0x77; 16]);
+        let first = registry.register_outbound(ip, [0x77; 16]);
         assert!(registry.has_outbound());
+        assert!(registry.is_current_outbound(first));
         assert!(registry.is_outbound_buddy(ip, [0x77; 16]));
         assert!(!registry.is_outbound_buddy(ip, [0x00; 16]));
         assert!(!registry.is_outbound_buddy(Ipv4Addr::new(10, 0, 0, 1), [0x77; 16]));
 
         // Re-register replaces (single outbound buddy).
         let ip2 = Ipv4Addr::new(192, 0, 2, 51);
-        registry.register_outbound(ip2, [0x88; 16]);
+        let second = registry.register_outbound(ip2, [0x88; 16]);
+        assert!(!registry.is_current_outbound(first));
+        assert!(registry.is_current_outbound(second));
         assert!(!registry.is_outbound_buddy(ip, [0x77; 16]));
         assert!(registry.is_outbound_buddy(ip2, [0x88; 16]));
 
-        assert!(!registry.evict_outbound_if(ip, [0x77; 16]));
+        assert!(!registry.evict_outbound_if(first));
         assert!(registry.is_outbound_buddy(ip2, [0x88; 16]));
-        assert!(registry.evict_outbound_if(ip2, [0x88; 16]));
+        assert!(registry.evict_outbound_if(second));
         assert!(!registry.has_outbound());
 
         registry.register_outbound(ip2, [0x88; 16]);
         registry.evict_outbound();
         assert!(!registry.has_outbound());
+    }
+
+    #[test]
+    fn replacement_with_same_identity_invalidates_old_token() {
+        let registry = BuddySocketRegistry::new();
+        let ip = Ipv4Addr::new(192, 0, 2, 50);
+        let first = registry.register_outbound(ip, [0x77; 16]);
+        let replacement = registry.register_outbound(ip, [0x77; 16]);
+
+        assert!(!registry.is_current_outbound(first));
+        assert!(registry.is_current_outbound(replacement));
+        assert!(!registry.evict_outbound_if(first));
+        assert!(registry.is_current_outbound(replacement));
     }
 
     #[test]

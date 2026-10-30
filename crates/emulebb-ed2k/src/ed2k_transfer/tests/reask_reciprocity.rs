@@ -40,14 +40,23 @@ fn shared_entry(file_hash: &Ed2kHash) -> Ed2kSharedEntry {
 
 /// A reasking peer that queues on us with a known UDP endpoint + crypt support.
 fn reasking_peer(udp_port: u16) -> Ed2kUploadPeerIdentity {
+    reasking_peer_with_identity(udp_port, 4662, PEER_USER_HASH, 0x0A00_0007)
+}
+
+fn reasking_peer_with_identity(
+    udp_port: u16,
+    tcp_port: u16,
+    user_hash: [u8; 16],
+    client_id: u32,
+) -> Ed2kUploadPeerIdentity {
     Ed2kUploadPeerIdentity {
         ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
-        tcp_port: 4662,
+        tcp_port,
         udp_port: Some(udp_port),
         udp_version: PEER_UDP_VERSION,
         should_crypt: true,
-        user_hash: Some(PEER_USER_HASH),
-        client_id: Some(0x0A00_0007),
+        user_hash: Some(user_hash),
+        client_id: Some(client_id),
         server_endpoint: None,
         friend_slot: false,
         ident_verified: false,
@@ -61,6 +70,146 @@ fn reasking_peer(udp_port: u16) -> Ed2kUploadPeerIdentity {
         firewall_context: Default::default(),
         client_software: None,
     }
+}
+
+#[tokio::test]
+async fn reciprocity_uses_unique_ip_fallback_and_refreshes_selected_waiter() {
+    let root = unique_test_dir("ed2k-reask-reciprocity-ip-fallback");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0xA1; 16]);
+    runtime
+        .shared_catalog()
+        .write()
+        .await
+        .push(shared_entry(&file_hash));
+
+    let (_granted, _) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
+        .await;
+    let stored_udp_port = 4672;
+    let (_waiting, _) = runtime
+        .begin_upload_session(reasking_peer(stored_udp_port), &file_hash)
+        .await;
+
+    let ping = ReaskFilePing {
+        file_hash,
+        part_status: Some(vec![false, true]),
+        complete_source_count: Some(4),
+    };
+    let remapped_source_port = 4999;
+    let from = SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
+        remapped_source_port,
+    );
+    let reply = runtime
+        .reask_reciprocity_reply(&ping, from, OUR_PUBLIC_IP)
+        .await
+        .expect("unique same-IP waiter should receive an ack");
+
+    assert_eq!(reply.opcode, OP_REASKACK);
+    assert!(matches!(
+        parse_inbound_reask_datagram(
+            &reply.bytes,
+            OUR_PUBLIC_IP,
+            &PEER_USER_HASH,
+            PEER_UDP_VERSION,
+        ),
+        Some(InboundReaskMessage::Ack(_))
+    ));
+    let snapshot = runtime.upload_queue_snapshot().await;
+    let selected = snapshot
+        .iter()
+        .find(|entry| entry.udp_port == Some(stored_udp_port))
+        .expect("selected waiter");
+    assert_eq!(selected.requester_part_status, Some(vec![false, true]));
+    assert_eq!(selected.requester_complete_source_count, Some(4));
+}
+
+#[tokio::test]
+async fn reciprocity_is_silent_when_same_ip_fallback_is_ambiguous() {
+    let root = unique_test_dir("ed2k-reask-reciprocity-ip-ambiguous");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0xA2; 16]);
+    runtime
+        .shared_catalog()
+        .write()
+        .await
+        .push(shared_entry(&file_hash));
+
+    let (_granted, _) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
+        .await;
+    for (udp_port, tcp_port, hash_byte, client_id) in [
+        (4672, 4662, 0x55, 0x0A00_0007),
+        (4673, 4663, 0x66, 0x0A00_0008),
+    ] {
+        let (_waiting, _) = runtime
+            .begin_upload_session(
+                reasking_peer_with_identity(udp_port, tcp_port, [hash_byte; 16], client_id),
+                &file_hash,
+            )
+            .await;
+    }
+
+    let ping = ReaskFilePing {
+        file_hash,
+        part_status: Some(vec![true]),
+        complete_source_count: Some(1),
+    };
+    let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 4999);
+    assert!(
+        runtime
+            .reask_reciprocity_reply(&ping, from, OUR_PUBLIC_IP)
+            .await
+            .is_none()
+    );
+    assert!(
+        runtime
+            .upload_queue_snapshot()
+            .await
+            .iter()
+            .filter(|entry| entry.ip == from.ip())
+            .all(|entry| entry.requester_part_status.is_none())
+    );
+}
+
+#[tokio::test]
+async fn unique_ip_fallback_preserves_encrypted_file_not_found() {
+    let root = unique_test_dir("ed2k-reask-reciprocity-ip-fallback-fnf");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0xA3; 16]);
+
+    let (_granted, _) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
+        .await;
+    let (_waiting, _) = runtime
+        .begin_upload_session(reasking_peer(4672), &file_hash)
+        .await;
+
+    let ping = ReaskFilePing {
+        file_hash,
+        part_status: None,
+        complete_source_count: None,
+    };
+    let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 4999);
+    let reply = runtime
+        .reask_reciprocity_reply(&ping, from, OUR_PUBLIC_IP)
+        .await
+        .expect("unshared file should receive file-not-found");
+
+    assert_eq!(reply.opcode, OP_FILENOTFOUND);
+    assert!(matches!(
+        parse_inbound_reask_datagram(
+            &reply.bytes,
+            OUR_PUBLIC_IP,
+            &PEER_USER_HASH,
+            PEER_UDP_VERSION,
+        ),
+        Some(InboundReaskMessage::FileNotFound)
+    ));
 }
 
 #[tokio::test]

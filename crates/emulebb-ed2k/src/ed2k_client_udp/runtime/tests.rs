@@ -11,6 +11,52 @@ fn service() -> (ReaskService, ReachabilityRuntimeLease) {
     (ReaskService::new([0x10; 16], 4, public_ip), lease)
 }
 
+#[tokio::test]
+async fn replaced_buddy_answer_command_sends_no_udp_response() {
+    use emulebb_kad_dht::DhtConfig;
+    use emulebb_kad_proto::NodeId;
+    use tokio::net::UdpSocket;
+
+    let bind_ip = crate::test_bind_ip();
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some(SocketAddr::from((bind_ip, 0))),
+        node_id: NodeId::from_bytes([0x21; 16]),
+        udp_key: 0x1122_3344,
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    let receiver = UdpSocket::bind((bind_ip, 0)).await.unwrap();
+    let destination = receiver.local_addr().unwrap();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let transfer_runtime = Ed2kTransferRuntime::load_or_create(temp_dir.path()).unwrap();
+    let registry = BuddySocketRegistry::new();
+    let stale = registry.register_outbound(bind_ip, [0x44; 16]);
+    let replacement = registry.register_outbound(bind_ip, [0x44; 16]);
+    let forwarded_reask =
+        super::super::codec::encode_reask_file_ping(&Ed2kHash::from_bytes([0xAB; 16]), None, 0, 4);
+
+    process_answer_callback_tcp(
+        &dht,
+        &transfer_runtime,
+        bind_ip.octets(),
+        &registry,
+        stale,
+        destination,
+        &forwarded_reask,
+        4,
+    )
+    .await;
+
+    let mut datagram = [0u8; 64];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), receiver.recv_from(&mut datagram))
+            .await
+            .is_err()
+    );
+    assert!(registry.is_current_outbound(replacement));
+}
+
 #[test]
 fn register_command_adds_a_source_and_remove_drops_it() {
     let (mut svc, _reachability) = service();

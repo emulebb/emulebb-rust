@@ -23,14 +23,15 @@ use crate::ed2k_client_udp::reciprocity::{
 use crate::ed2k_client_udp::service::TransferReaskInfo;
 
 use super::model::Ed2kTransferState;
-use super::upload_queue::Ed2kUploadSessionPhaseSnapshot;
+use super::upload_queue::Ed2kWaitingReaskLookup;
 use super::{Ed2kSharedEntry, Ed2kTransferRuntime};
 
 impl Ed2kTransferRuntime {
     /// Build the uploader's reply to an inbound `OP_REASKFILEPING` (or `None` for
     /// the deliberate-silence cases). Locates the sender in the global upload
-    /// queue by `(ip, udp_port)`, consults the shared catalog for the requested
-    /// file, and composes [`build_reciprocity_reply`].
+    /// queue by stock `(ip, udp_port, allow_unique_ip_fallback=true)` semantics,
+    /// consults the shared catalog for the requested file, and composes
+    /// [`build_reciprocity_reply_packet`].
     pub(crate) async fn reask_reciprocity_reply(
         &self,
         ping: &ReaskFilePing,
@@ -68,53 +69,39 @@ impl Ed2kTransferRuntime {
             (!e.verified_complete && !e.complete_parts.is_empty()).then(|| e.complete_parts.clone())
         });
 
-        let (snapshot, queue_size) = {
+        let now = Instant::now();
+        let (lookup, waiting_user_count, queue_size) = {
             let mut queue = self.upload_queue.lock().await;
-            let snapshot = queue.snapshot(Instant::now());
+            let lookup = queue.lookup_waiting_reask_client(sender_ip, sender_udp_port, now);
+            let waiting_user_count = queue.waiting_user_count();
             // eMule QUEUEFULL margin compares against the configured soft queue
             // size (thePrefs.GetQueueSize()), not the structural waiting_capacity.
-            (snapshot, queue.config().soft_queue_size)
+            let queue_size = queue.config().soft_queue_size;
+
+            if let Some(client) = lookup.client()
+                && client.file_hash.eq_ignore_ascii_case(&requested_hex)
+            {
+                queue.refresh_waiting_reask_state(
+                    client,
+                    ping.part_status.clone(),
+                    ping.complete_source_count,
+                    now,
+                );
+            }
+            (lookup, waiting_user_count, queue_size)
         };
 
-        // Among clients sharing the sender IP, locate the one on this UDP port
-        // (eMule `GetWaitingClientByIP_UDP`). More than one IP match with none on
-        // the port is the port-mapping ambiguity that forces a TCP connect.
-        let same_ip: Vec<_> = snapshot.iter().filter(|e| e.ip == sender_ip).collect();
-        let located = same_ip
-            .iter()
-            .copied()
-            .find(|e| e.udp_port == Some(sender_udp_port));
-        let waiting_user_count = snapshot
-            .iter()
-            .filter(|e| matches!(e.phase, Ed2kUploadSessionPhaseSnapshot::Waiting))
-            .count() as u32;
+        let located = lookup.client();
 
         let req = InboundReaskRequest {
             file_shared,
             sender_located: located.is_some(),
             file_matches: located.is_some_and(|e| e.file_hash.eq_ignore_ascii_case(&requested_hex)),
-            waiting_position: located.and_then(|e| e.queue_rank).unwrap_or(0),
-            sender_multiple_ip_unknown: located.is_none() && same_ip.len() > 1,
+            waiting_position: located.map_or(0, |e| e.queue_rank),
+            sender_multiple_ip_unknown: matches!(&lookup, Ed2kWaitingReaskLookup::Ambiguous),
             waiting_user_count,
             queue_size,
         };
-
-        // A located re-ask for the matching file refreshes the waiter's
-        // last-request time (oracle SetLastUpRequest, ClientUDPSocket.cpp:307):
-        // a disconnected waiter that keeps re-asking over UDP must not be
-        // purged by the waiting timeout (MAX_PURGEQUEUETIME).
-        if req.sender_located && req.file_matches {
-            self.upload_queue
-                .lock()
-                .await
-                .refresh_waiting_reask_state_by_udp(
-                    sender_ip,
-                    sender_udp_port,
-                    ping.part_status.clone(),
-                    ping.complete_source_count,
-                    Instant::now(),
-                );
-        }
 
         // Framing comes from the located client; for an unlocated FileNotFound /
         // QueueFull we have no hash/crypt context, so reply in the clear.
