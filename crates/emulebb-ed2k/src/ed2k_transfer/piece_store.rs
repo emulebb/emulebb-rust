@@ -95,6 +95,7 @@ enum VerifiedPayloadAuthority {
         expected: Option<NativeFileFingerprint>,
     },
     SharedFallback {
+        path: PathBuf,
         expected: NativeFileFingerprint,
     },
 }
@@ -106,7 +107,7 @@ impl VerifiedPayloadAuthority {
             Self::ManagedCompleted { expected } | Self::ManifestSource { expected, .. } => {
                 expected.as_ref()
             }
-            Self::SharedFallback { expected } => Some(expected),
+            Self::SharedFallback { expected, .. } => Some(expected),
         }
     }
 
@@ -867,17 +868,21 @@ impl Ed2kTransferRuntime {
                     )
                 }
                 None => match self.first_present_shared_source(&hash_hex).await? {
-                    Some(source) => (
-                        source.path,
-                        vec![Ed2kSharedRange {
-                            start: 0,
-                            end: manifest.file_size,
-                        }],
-                        VerifiedPayloadAuthority::SharedFallback {
-                            expected: source.fingerprint,
-                        },
-                        None,
-                    ),
+                    Some(source) => {
+                        let path = source.path;
+                        (
+                            path.clone(),
+                            vec![Ed2kSharedRange {
+                                start: 0,
+                                end: manifest.file_size,
+                            }],
+                            VerifiedPayloadAuthority::SharedFallback {
+                                path,
+                                expected: source.fingerprint,
+                            },
+                            None,
+                        )
+                    }
                     None => return Ok(None),
                 },
             }
@@ -993,9 +998,12 @@ impl Ed2kTransferRuntime {
                 {
                     return Ok(());
                 }
-                manifest.source_fingerprint = None;
+                let invalidated = manifest.source_fingerprint.take().is_some();
                 self.store_manifest_unlocked(&manifest).await?;
                 self.upsert_verified_catalog_entry(&manifest).await;
+                if invalidated {
+                    self.queue_shared_source_invalidation(file_hash, path);
+                }
                 Ok(())
             }
             VerifiedPayloadAuthority::ManagedCompleted { expected } => {
@@ -1016,11 +1024,17 @@ impl Ed2kTransferRuntime {
                 self.upsert_verified_catalog_entry(&manifest).await;
                 Ok(())
             }
-            VerifiedPayloadAuthority::SharedFallback { .. } => {
+            VerifiedPayloadAuthority::SharedFallback { path, expected } => {
                 let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
                 let _manifest_guard = self.lock_manifest(file_hash).await;
+                let invalidated = self
+                    .metadata
+                    .invalidate_shared_file_source(file_hash, path, expected)?;
                 if self.first_present_shared_source(file_hash).await?.is_none() {
                     self.remove_verified_catalog_entry(file_hash).await;
+                }
+                if invalidated {
+                    self.queue_shared_source_invalidation(file_hash, path);
                 }
                 Ok(())
             }

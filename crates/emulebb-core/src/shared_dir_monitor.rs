@@ -66,6 +66,10 @@ const SETTLE_WINDOW: Duration = Duration::from_secs(2);
 /// full reconciliation so memory use is independent of watcher event volume.
 const ACTION_CHANNEL_CAPACITY: usize = 256;
 
+const TARGETED_REHASH_DEBOUNCE: Duration = Duration::from_secs(2);
+const TARGETED_REHASH_RETRY_DELAY: Duration = Duration::from_secs(2);
+const TARGETED_REHASH_MAX_ATTEMPTS: usize = 3;
+
 /// `notify` 8.x uses one fixed 16 KiB `ReadDirectoryChangesW` buffer for a
 /// recursive Windows watch. Even a modest settled mutation burst can mean an
 /// earlier buffer overflow was silently dropped (renames are especially costly
@@ -470,6 +474,9 @@ async fn run_consumer<F, Fut>(
 // / `unshare_file` ingest/catalog paths so MD4/AICH/catalog stay consistent.
 // ---------------------------------------------------------------------------
 
+use emulebb_ed2k::ed2k_transfer::{
+    Ed2kSharedSourceInvalidation, Ed2kSharedSourceInvalidationSignal,
+};
 use emulebb_ed2k::long_path::long_path;
 
 use crate::EmulebbCore;
@@ -489,6 +496,210 @@ fn monitor_shared_key(path: &Path) -> PathBuf {
     long_path(path)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TargetedRehashPolicy {
+    debounce: Duration,
+    retry_delay: Duration,
+    max_attempts: usize,
+}
+
+impl Default for TargetedRehashPolicy {
+    fn default() -> Self {
+        Self {
+            debounce: TARGETED_REHASH_DEBOUNCE,
+            retry_delay: TARGETED_REHASH_RETRY_DELAY,
+            max_attempts: TARGETED_REHASH_MAX_ATTEMPTS,
+        }
+    }
+}
+
+enum TargetedRehashOutcome {
+    Complete,
+    Retry(anyhow::Error),
+}
+
+fn start_shared_source_reconcile_worker(core: &EmulebbCore) {
+    let mut worker = core.shared_source_reconcile_worker.lock().unwrap();
+    if worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
+        return;
+    }
+    if let Some(finished) = worker.take() {
+        finished.abort();
+    }
+    let signal = core.ed2k_transfers.shared_source_invalidation_signal();
+    let reconciler = core.clone();
+    *worker = Some(tokio::spawn(run_shared_source_reconcile_worker(
+        reconciler,
+        signal,
+        TargetedRehashPolicy::default(),
+    )));
+}
+
+async fn run_shared_source_reconcile_worker(
+    core: EmulebbCore,
+    signal: Ed2kSharedSourceInvalidationSignal,
+    policy: TargetedRehashPolicy,
+) {
+    loop {
+        let lease = signal.recv().await;
+        let invalidation = lease.invalidation().clone();
+        if !policy.debounce.is_zero() {
+            tokio::time::sleep(policy.debounce).await;
+        }
+
+        let attempts = policy.max_attempts.max(1);
+        if let Err(error) = run_targeted_rehash_attempts(policy, || {
+            reconcile_invalidated_shared_source(&core, &invalidation)
+        })
+        .await
+        {
+            tracing::warn!(
+                path = %invalidation.source_path.display(),
+                stale_hash = %invalidation.file_hash,
+                attempts,
+                error = %error,
+                "targeted shared-source reconciliation exhausted its retry budget",
+            );
+        }
+        lease.acknowledge();
+    }
+}
+
+async fn run_targeted_rehash_attempts<F, Fut>(
+    policy: TargetedRehashPolicy,
+    mut reconcile: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = TargetedRehashOutcome>,
+{
+    let max_attempts = policy.max_attempts.max(1);
+    for attempt in 1..=max_attempts {
+        match reconcile().await {
+            TargetedRehashOutcome::Complete => return Ok(()),
+            TargetedRehashOutcome::Retry(_error) if attempt < max_attempts => {
+                let delay = policy.retry_delay.saturating_mul(attempt as u32);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            TargetedRehashOutcome::Retry(error) => return Err(error),
+        }
+    }
+    unreachable!("the targeted re-hash attempt loop always returns")
+}
+
+async fn reconcile_invalidated_shared_source(
+    core: &EmulebbCore,
+    invalidation: &Ed2kSharedSourceInvalidation,
+) -> TargetedRehashOutcome {
+    let key = monitor_shared_key(&invalidation.source_path);
+    let metadata = match tokio::fs::metadata(&key).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => {
+            return finish_unavailable_invalidated_source(core, invalidation, &key).await;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return finish_unavailable_invalidated_source(core, invalidation, &key).await;
+        }
+        Err(error) => {
+            return TargetedRehashOutcome::Retry(anyhow::Error::new(error).context(format!(
+                "failed to inspect invalidated shared source {}",
+                key.display()
+            )));
+        }
+    };
+
+    match load_shared_file_exclusion_policy(core) {
+        Ok(policy) if policy.should_ignore(&key, &metadata) => {
+            return finish_unavailable_invalidated_source(core, invalidation, &key).await;
+        }
+        Ok(_) => {}
+        Err(error) => return TargetedRehashOutcome::Retry(error),
+    }
+
+    let (_, _file_size, source_fingerprint) =
+        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity_from_metadata(
+            &key, &metadata,
+        );
+    match core
+        .share_native_local_file_with_progress(&key, None, None)
+        .await
+    {
+        Ok(share) => {
+            let replaced =
+                register_monitor_shared_hash(core, key, &share.hash, source_fingerprint).await;
+            let mut stale_hashes = vec![invalidation.file_hash.clone()];
+            if let Some(replaced) = replaced
+                && !stale_hashes
+                    .iter()
+                    .any(|hash| hash.eq_ignore_ascii_case(&replaced.hash))
+            {
+                stale_hashes.push(replaced.hash);
+            }
+            for stale_hash in stale_hashes {
+                if stale_hash.eq_ignore_ascii_case(&share.hash) {
+                    continue;
+                }
+                match stale_hash_is_still_present(core, &stale_hash).await {
+                    Ok(true) => {}
+                    Ok(false) => forget_stale_shares(core, &[stale_hash], &share.hash).await,
+                    Err(error) => return TargetedRehashOutcome::Retry(error),
+                }
+            }
+            tracing::info!(
+                path = %invalidation.source_path.display(),
+                stale_hash = %invalidation.file_hash,
+                new_hash = %share.hash,
+                "re-hashed invalidated shared source",
+            );
+            TargetedRehashOutcome::Complete
+        }
+        Err(error) => TargetedRehashOutcome::Retry(error),
+    }
+}
+
+async fn finish_unavailable_invalidated_source(
+    core: &EmulebbCore,
+    invalidation: &Ed2kSharedSourceInvalidation,
+    key: &Path,
+) -> TargetedRehashOutcome {
+    {
+        let mut state = core.state.lock().await;
+        if state
+            .monitor_shared_hashes
+            .get(key)
+            .is_some_and(|entry| entry.hash.eq_ignore_ascii_case(&invalidation.file_hash))
+        {
+            state.monitor_shared_hashes.remove(key);
+        }
+    }
+    match stale_hash_is_still_present(core, &invalidation.file_hash).await {
+        Ok(true) => TargetedRehashOutcome::Complete,
+        Ok(false) => {
+            forget_stale_shares(core, &[invalidation.file_hash.clone()], "").await;
+            TargetedRehashOutcome::Complete
+        }
+        Err(error) => TargetedRehashOutcome::Retry(error),
+    }
+}
+
+async fn stale_hash_is_still_present(core: &EmulebbCore, file_hash: &str) -> anyhow::Result<bool> {
+    if core
+        .state
+        .lock()
+        .await
+        .monitor_shared_hashes
+        .values()
+        .any(|entry| entry.hash.eq_ignore_ascii_case(file_hash))
+    {
+        return Ok(true);
+    }
+    core.ed2k_transfers
+        .has_present_shared_source(file_hash)
+        .await
+}
+
 /// (Re)start the live shared-directory auto-pickup monitor for the configured
 /// roots. Tears down any previous monitor first, then watches each accessible
 /// root recursively. On a settled create/modify the file is
@@ -498,6 +709,7 @@ fn monitor_shared_key(path: &Path) -> PathBuf {
 pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
     // Drop any existing monitor before rebuilding the watch set.
     stop_shared_directory_monitor(core);
+    start_shared_source_reconcile_worker(core);
 
     let roots = core.state.lock().await.shared_directories.clone();
     let roots = roots
@@ -661,6 +873,9 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
 pub(crate) fn stop_shared_directory_monitor(core: &EmulebbCore) {
     if let Some(monitor) = core.shared_dir_monitor.lock().unwrap().take() {
         monitor.stop();
+    }
+    if let Some(worker) = core.shared_source_reconcile_worker.lock().unwrap().take() {
+        worker.abort();
     }
 }
 
@@ -1288,6 +1503,157 @@ mod tests {
         auto_share_monitored_path(&core, &source).await;
         assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn upload_invalidation_rehashes_stable_replacement_without_full_reload() {
+        use emulebb_kad_proto::Ed2kHash;
+        use std::str::FromStr;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "emulebb-targeted-rehash-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("Changed.After.Import.bin");
+        let original = root.join("Changed.After.Import.original.bin");
+        let trusted = vec![0x41; 4096];
+        let replacement = vec![0x92; 8192];
+        std::fs::write(&source, &trusted).unwrap();
+
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        auto_share_monitored_path(&core, &source).await;
+        let old_hash = core.shares().await[0].hash.clone();
+        let old_hash_value = Ed2kHash::from_str(&old_hash).unwrap();
+        let signal = core.ed2k_transfers.shared_source_invalidation_signal();
+        let worker = tokio::spawn(run_shared_source_reconcile_worker(
+            core.clone(),
+            signal.clone(),
+            TargetedRehashPolicy {
+                debounce: Duration::ZERO,
+                retry_delay: Duration::ZERO,
+                max_attempts: 3,
+            },
+        ));
+
+        std::fs::rename(&source, &original).unwrap();
+        std::fs::write(&source, &replacement).unwrap();
+        assert!(
+            core.ed2k_transfers
+                .read_verified_range(&old_hash_value, 0, trusted.len() as u64)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let new_hash = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let shares = core.shares().await;
+                if shares.len() == 1 && !shares[0].hash.eq_ignore_ascii_case(&old_hash) {
+                    break shares[0].hash.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("targeted re-hash should complete");
+
+        assert_ne!(new_hash, old_hash);
+        assert!(core.share(&old_hash).await.is_none());
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+        assert!(!core.shared_reload_running.load(Ordering::Acquire));
+        assert!(!core.shared_reload_pending.load(Ordering::Acquire));
+        assert!(signal.try_recv().is_none());
+        worker.abort();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn unavailable_invalidated_source_stays_withdrawn_without_retry_loop() {
+        use emulebb_kad_proto::Ed2kHash;
+        use std::str::FromStr;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "emulebb-targeted-missing-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("Unavailable.bin");
+        let payload = vec![0x51; 4096];
+        std::fs::write(&source, &payload).unwrap();
+
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        auto_share_monitored_path(&core, &source).await;
+        let old_hash = core.shares().await[0].hash.clone();
+        let old_hash_value = Ed2kHash::from_str(&old_hash).unwrap();
+        let signal = core.ed2k_transfers.shared_source_invalidation_signal();
+        let worker = tokio::spawn(run_shared_source_reconcile_worker(
+            core.clone(),
+            signal.clone(),
+            TargetedRehashPolicy {
+                debounce: Duration::ZERO,
+                retry_delay: Duration::ZERO,
+                max_attempts: 3,
+            },
+        ));
+
+        std::fs::remove_file(&source).unwrap();
+        assert!(
+            core.ed2k_transfers
+                .read_verified_range(&old_hash_value, 0, payload.len() as u64)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if core.ed2k_transfers.manifest(&old_hash).await.is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("missing invalidated source should be retired");
+        tokio::task::yield_now().await;
+        assert!(core.shares().await.is_empty());
+        assert!(signal.try_recv().is_none());
+        worker.abort();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn targeted_rehash_retry_budget_is_finite() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted_attempts = Arc::clone(&attempts);
+        let result = run_targeted_rehash_attempts(
+            TargetedRehashPolicy {
+                debounce: Duration::ZERO,
+                retry_delay: Duration::ZERO,
+                max_attempts: 3,
+            },
+            move || {
+                counted_attempts.fetch_add(1, Ordering::Relaxed);
+                async { TargetedRehashOutcome::Retry(anyhow::anyhow!("still changing")) }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]

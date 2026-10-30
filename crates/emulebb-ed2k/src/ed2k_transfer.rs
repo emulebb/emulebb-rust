@@ -11,7 +11,7 @@
 //! - compatibility catalog hints for server-side `OP_OFFERFILES`
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -381,6 +381,7 @@ pub struct Ed2kTransferRuntime {
     /// to queue the existing ED2K OP_OFFERFILES refresh worker.
     shared_publish_demand_revision: Arc<AtomicU64>,
     shared_publish_demand_notify: Arc<Notify>,
+    shared_source_invalidations: Ed2kSharedSourceInvalidationSignal,
     /// Whether the credit system weights upload scoring (eMule
     /// `thePrefs.GetCreditSystem()`). When false, every peer gets the neutral 1.0
     /// credit ratio (`DEFAULT_CREDIT_SCORE_PERMILLE`) so stored bytes never alter
@@ -445,6 +446,130 @@ impl From<&Ed2kRuntimeConfig> for Ed2kFileNamePolicy {
 pub struct Ed2kSharedPublishDemandSignal {
     revision: Arc<AtomicU64>,
     notify: Arc<Notify>,
+}
+
+const SHARED_SOURCE_INVALIDATION_CAPACITY: usize = 256;
+
+/// One locally confirmed share-in-place authority failure.
+///
+/// The path is already normalized for platform-native access. Core owns the
+/// recovery policy; the transfer runtime only reports the source identity that
+/// it withdrew before serving any bytes under the stale hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kSharedSourceInvalidation {
+    pub file_hash: String,
+    pub source_path: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct Ed2kSharedSourceInvalidationState {
+    pending: VecDeque<Ed2kSharedSourceInvalidation>,
+    scheduled: HashSet<(PathBuf, String)>,
+}
+
+/// Bounded, path-coalesced local invalidation signal consumed by core.
+#[derive(Debug, Clone)]
+pub struct Ed2kSharedSourceInvalidationSignal {
+    state: Arc<StdMutex<Ed2kSharedSourceInvalidationState>>,
+    notify: Arc<Notify>,
+}
+
+impl Default for Ed2kSharedSourceInvalidationSignal {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(StdMutex::new(Ed2kSharedSourceInvalidationState::default())),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+}
+
+impl Ed2kSharedSourceInvalidationSignal {
+    fn enqueue(&self, invalidation: Ed2kSharedSourceInvalidation) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let key = (
+            invalidation.source_path.clone(),
+            invalidation.file_hash.clone(),
+        );
+        if state.scheduled.contains(&key) {
+            return true;
+        }
+        if state.scheduled.len() >= SHARED_SOURCE_INVALIDATION_CAPACITY {
+            return false;
+        }
+        state.scheduled.insert(key);
+        state.pending.push_back(invalidation);
+        drop(state);
+        self.notify.notify_one();
+        true
+    }
+
+    /// Wait for the next distinct invalidated path.
+    ///
+    /// The returned lease keeps the path coalesced while reconciliation is in
+    /// flight. Acknowledging it completes the item; dropping it without an ack
+    /// requeues the item so task cancellation cannot lose local recovery work.
+    pub async fn recv(&self) -> Ed2kSharedSourceInvalidationLease {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(lease) = self.try_recv() {
+                return lease;
+            }
+            notified.await;
+        }
+    }
+
+    #[must_use]
+    pub fn try_recv(&self) -> Option<Ed2kSharedSourceInvalidationLease> {
+        let invalidation = self.state.lock().unwrap().pending.pop_front()?;
+        Some(Ed2kSharedSourceInvalidationLease {
+            signal: self.clone(),
+            invalidation: Some(invalidation),
+        })
+    }
+
+    fn acknowledge(&self, invalidation: &Ed2kSharedSourceInvalidation) {
+        self.state.lock().unwrap().scheduled.remove(&(
+            invalidation.source_path.clone(),
+            invalidation.file_hash.clone(),
+        ));
+    }
+
+    fn requeue(&self, invalidation: Ed2kSharedSourceInvalidation) {
+        self.state.lock().unwrap().pending.push_front(invalidation);
+        self.notify.notify_one();
+    }
+}
+
+/// In-flight ownership of one coalesced invalidation path.
+#[derive(Debug)]
+pub struct Ed2kSharedSourceInvalidationLease {
+    signal: Ed2kSharedSourceInvalidationSignal,
+    invalidation: Option<Ed2kSharedSourceInvalidation>,
+}
+
+impl Ed2kSharedSourceInvalidationLease {
+    #[must_use]
+    pub fn invalidation(&self) -> &Ed2kSharedSourceInvalidation {
+        self.invalidation
+            .as_ref()
+            .expect("invalidation lease must remain populated until acknowledgement")
+    }
+
+    pub fn acknowledge(mut self) {
+        let invalidation = self
+            .invalidation
+            .take()
+            .expect("invalidation lease must remain populated until acknowledgement");
+        self.signal.acknowledge(&invalidation);
+    }
+}
+
+impl Drop for Ed2kSharedSourceInvalidationLease {
+    fn drop(&mut self) {
+        if let Some(invalidation) = self.invalidation.take() {
+            self.signal.requeue(invalidation);
+        }
+    }
 }
 
 impl Ed2kSharedPublishDemandSignal {
@@ -632,6 +757,7 @@ impl Ed2kTransferRuntime {
             session_uploaded_bytes: AtomicU64::new(0),
             shared_publish_demand_revision: Arc::new(AtomicU64::new(0)),
             shared_publish_demand_notify: Arc::new(Notify::new()),
+            shared_source_invalidations: Ed2kSharedSourceInvalidationSignal::default(),
             credit_system_enabled: AtomicBool::new(true),
             ich_enabled: AtomicBool::new(true),
             ban_store,
@@ -684,6 +810,29 @@ impl Ed2kTransferRuntime {
         Ed2kSharedPublishDemandSignal {
             revision: Arc::clone(&self.shared_publish_demand_revision),
             notify: Arc::clone(&self.shared_publish_demand_notify),
+        }
+    }
+
+    /// Return the process-local stream of share-in-place authority failures.
+    #[must_use]
+    pub fn shared_source_invalidation_signal(&self) -> Ed2kSharedSourceInvalidationSignal {
+        self.shared_source_invalidations.clone()
+    }
+
+    fn queue_shared_source_invalidation(&self, file_hash: &str, source_path: &Path) {
+        if !self
+            .shared_source_invalidations
+            .enqueue(Ed2kSharedSourceInvalidation {
+                file_hash: file_hash.to_string(),
+                source_path: source_path.to_path_buf(),
+            })
+        {
+            tracing::warn!(
+                file_hash,
+                path = %source_path.display(),
+                capacity = SHARED_SOURCE_INVALIDATION_CAPACITY,
+                "shared-source invalidation queue is full; explicit reload remains the recovery fallback",
+            );
         }
     }
 
