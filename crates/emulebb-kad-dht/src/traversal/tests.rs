@@ -211,7 +211,12 @@ fn test_insert_response_contact_threads_res_tcp_port() {
         version: 9,
     };
 
-    insert_response_contact(&mut candidates, &mut seen, NodeId::ZERO, entry);
+    assert!(insert_response_contact(
+        &mut candidates,
+        &mut seen,
+        NodeId::ZERO,
+        entry
+    ));
 
     assert_eq!(candidates.len(), 1);
     let contact = &candidates[0].contact;
@@ -1628,7 +1633,7 @@ async fn maximize_more_results_reasks_four_distinct_responders_on_wire() {
         }
     }
     cancel.cancel();
-    let _ = run.await.unwrap();
+    let result = run.await.unwrap();
 
     assert_eq!(normal_targets.len(), 4);
     assert_eq!(wider_targets.len(), KADEMLIA_FIND_VALUE_MORE_REASKS);
@@ -1636,6 +1641,89 @@ async fn maximize_more_results_reasks_four_distinct_responders_on_wire() {
         wider_targets.iter().copied().collect::<HashSet<_>>().len(),
         KADEMLIA_FIND_VALUE_MORE_REASKS,
         "each wider request must target a distinct prior responder"
+    );
+    assert_eq!(
+        result.more_results.requested, KADEMLIA_FIND_VALUE_MORE_REASKS,
+        "diagnostics retain the bounded widening cost"
+    );
+}
+
+#[test]
+fn more_results_diagnostics_count_responses_and_unique_contact_yield() {
+    let responder_id = NodeId::from_bytes([0x01; 16]);
+    let responder = reask_candidate(0x01, CandidateState::Responded);
+    let duplicate_id = NodeId::from_bytes([0x20; 16]);
+    let mut candidates = vec![responder];
+    let mut seen = HashSet::from([responder_id, duplicate_id]);
+    let cancel = CancellationToken::new();
+    let kind = TraversalKind::Keyword {
+        request: SearchKeyReq {
+            target: NodeId::ZERO,
+            start_position: 0,
+            restrictive_payload: Vec::new(),
+        },
+    };
+    let config = LookupPhaseConfig {
+        target: NodeId::ZERO,
+        search_kind: &kind,
+        deadline: Instant::now() + Duration::from_secs(1),
+        query_timeout: Duration::from_secs(1),
+        closest_limit: K,
+        req_count: KADEMLIA_FIND_VALUE,
+        more_results: MoreResultsMode::Maximize,
+        work_class: RpcWorkClass::Interactive,
+        cancel: &cancel,
+        ip_filter: None,
+        res_contact_sink: None,
+    };
+    let more_asked = HashSet::from([responder_id]);
+    let mut stats = MoreResultsStats {
+        requested: 1,
+        ..MoreResultsStats::default()
+    };
+    let response = KadPacket::Res(emulebb_kad_proto::packet::Res {
+        target: NodeId::ZERO,
+        contacts: vec![
+            ContactEntry {
+                node_id: duplicate_id,
+                ip: 0x0A00_0001,
+                udp_port: 4672,
+                tcp_port: 4662,
+                version: 9,
+            },
+            ContactEntry {
+                node_id: NodeId::from_bytes([0x21; 16]),
+                ip: 0x0A00_0002,
+                udp_port: 4672,
+                tcp_port: 4662,
+                version: 9,
+            },
+            ContactEntry {
+                node_id: NodeId::from_bytes([0x22; 16]),
+                ip: 0x0A00_0103,
+                udp_port: 4672,
+                tcp_port: 4662,
+                version: 9,
+            },
+        ],
+    });
+
+    assert!(handle_lookup_response(
+        &mut candidates,
+        &mut seen,
+        &config,
+        responder_id,
+        &more_asked,
+        &mut stats,
+        Ok(response),
+    ));
+    assert_eq!(
+        stats,
+        MoreResultsStats {
+            requested: 1,
+            responded: 1,
+            yielded_contacts: 2,
+        }
     );
 }
 
