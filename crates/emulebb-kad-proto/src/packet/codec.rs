@@ -1,7 +1,7 @@
 use binrw::{BinReaderExt, BinWriterExt};
 use std::io::{Cursor, Read, Write};
 
-use crate::error::ProtoError;
+use crate::error::{ProtoError, wire_count_u8, wire_count_u16};
 use crate::hash::Ed2kHash;
 use crate::node_id::NodeId;
 use crate::tag::{StringDecodeMode, Tag};
@@ -86,11 +86,10 @@ pub(super) fn write_search_res(
 ) -> Result<(), ProtoError> {
     cursor.write_le(&packet.sender_id)?;
     cursor.write_le(&packet.target)?;
-    cursor
-        .write_le(&u16::try_from(packet.results.len()).expect("search result count exceeds u16"))?;
+    cursor.write_le(&wire_count_u16("SearchRes.results", packet.results.len())?)?;
     for result in &packet.results {
         write_kad_search_entry_id(cursor, &result.entry_id)?;
-        cursor.write_le(&u8::try_from(result.tags.len()).expect("tag count exceeds u8"))?;
+        cursor.write_le(&wire_count_u8("SearchResultEntry.tags", result.tags.len())?)?;
         for tag in &result.tags {
             cursor.write_le(tag)?;
         }
@@ -103,11 +102,13 @@ pub(super) fn write_legacy_search_res(
     packet: &LegacySearchRes,
 ) -> Result<(), ProtoError> {
     cursor.write_le(&packet.target)?;
-    cursor
-        .write_le(&u16::try_from(packet.results.len()).expect("search result count exceeds u16"))?;
+    cursor.write_le(&wire_count_u16(
+        "LegacySearchRes.results",
+        packet.results.len(),
+    )?)?;
     for result in &packet.results {
         write_kad_search_entry_id(cursor, &result.entry_id)?;
-        cursor.write_le(&u8::try_from(result.tags.len()).expect("tag count exceeds u8"))?;
+        cursor.write_le(&wire_count_u8("SearchResultEntry.tags", result.tags.len())?)?;
         for tag in &result.tags {
             cursor.write_le(tag)?;
         }
@@ -204,7 +205,10 @@ pub(super) fn write_legacy_publish_source_req(
     cursor.write_le(&packet.target)?;
     cursor.write_le(&1u16)?;
     cursor.write_le(&packet.publisher_id)?;
-    cursor.write_le(&u8::try_from(packet.tags.len()).expect("tag count exceeds u8"))?;
+    cursor.write_le(&wire_count_u8(
+        "LegacyPublishSourceReq.tags",
+        packet.tags.len(),
+    )?)?;
     for tag in &packet.tags {
         cursor.write_le(tag)?;
     }

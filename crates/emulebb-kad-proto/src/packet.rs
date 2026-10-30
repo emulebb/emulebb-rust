@@ -20,7 +20,7 @@ use binrw::{BinReaderExt, BinWriterExt};
 use std::io::{Cursor, Write};
 
 use crate::constants::{OP_KADEMLIAHEADER, OP_KADEMLIAPACKEDPROT, opcode};
-use crate::error::ProtoError;
+use crate::error::{ProtoError, wire_count_u8, wire_count_u16};
 #[cfg(test)]
 use crate::hash::Ed2kHash;
 #[cfg(test)]
@@ -144,6 +144,84 @@ pub enum KadPacket {
 }
 
 impl KadPacket {
+    fn validate_wire_counts(&self) -> Result<(), ProtoError> {
+        fn validate_tags(field: &'static str, tags: &[crate::tag::Tag]) -> Result<(), ProtoError> {
+            wire_count_u8(field, tags.len())?;
+            for tag in tags {
+                tag.validate_wire_counts()?;
+            }
+            Ok(())
+        }
+
+        fn validate_search_results(
+            field: &'static str,
+            results: &[SearchResultEntry],
+        ) -> Result<(), ProtoError> {
+            wire_count_u16(field, results.len())?;
+            for result in results {
+                validate_tags("SearchResultEntry.tags", &result.tags)?;
+            }
+            Ok(())
+        }
+
+        match self {
+            KadPacket::BootstrapRes(packet) => {
+                wire_count_u16("BootstrapRes.contacts", packet.contacts.len())?;
+            }
+            KadPacket::HelloReq(packet) => validate_tags("HelloReq.tags", &packet.tags)?,
+            KadPacket::HelloRes(packet) => validate_tags("HelloRes.tags", &packet.tags)?,
+            KadPacket::HelloResAck(packet) => {
+                validate_tags("HelloResAck.tags", &packet.tags)?;
+            }
+            KadPacket::Res(packet) => {
+                wire_count_u8("Res.contacts", packet.contacts.len())?;
+            }
+            KadPacket::SearchRes(packet) => {
+                validate_search_results("SearchRes.results", &packet.results)?;
+            }
+            KadPacket::LegacySearchRes(packet) | KadPacket::LegacySearchNotesRes(packet) => {
+                validate_search_results("LegacySearchRes.results", &packet.results)?;
+            }
+            KadPacket::PublishKeyReq(packet) => {
+                wire_count_u16("PublishKeyReq.entries", packet.entries.len())?;
+                for entry in &packet.entries {
+                    validate_tags("PublishEntry.tags", &entry.tags)?;
+                }
+            }
+            KadPacket::PublishSourceReq(packet) => {
+                validate_tags("PublishSourceReq.tags", &packet.tags)?;
+            }
+            KadPacket::LegacyPublishSourceReq(packet) => {
+                validate_tags("LegacyPublishSourceReq.tags", &packet.tags)?;
+            }
+            KadPacket::PublishNotesReq(packet) => {
+                validate_tags("PublishNotesReq.tags", &packet.tags)?;
+            }
+            KadPacket::BootstrapReq
+            | KadPacket::Req(_)
+            | KadPacket::SearchKeyReq(_)
+            | KadPacket::SearchSourceReq(_)
+            | KadPacket::SearchNotesReq(_)
+            | KadPacket::LegacySearchReq(_)
+            | KadPacket::LegacySearchNotesReq(_)
+            | KadPacket::PublishRes(_)
+            | KadPacket::LegacyPublishRes(_)
+            | KadPacket::PublishResAck
+            | KadPacket::FirewalledReq(_)
+            | KadPacket::Firewalled2Req(_)
+            | KadPacket::FirewalledRes(_)
+            | KadPacket::FirewalledAckRes
+            | KadPacket::FirewallUdp(_)
+            | KadPacket::FindBuddyReq(_)
+            | KadPacket::FindBuddyRes(_)
+            | KadPacket::CallbackReq(_)
+            | KadPacket::Ping
+            | KadPacket::Pong(_)
+            | KadPacket::Unknown { .. } => {}
+        }
+        Ok(())
+    }
+
     /// Decode a Kad2 packet from a raw buffer.
     /// Handles both plain (0xE4) and zlib-compressed (0xE5) packets.
     ///
@@ -319,6 +397,8 @@ impl KadPacket {
     ///
     /// Returns [`ProtoError`] when writing the packet body fails.
     pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        self.validate_wire_counts()?;
+
         let mut buf = Cursor::new(Vec::new());
         buf.write_le(&OP_KADEMLIAHEADER)?;
         let op = self.opcode();
