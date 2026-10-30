@@ -8,6 +8,51 @@ use emulebb_kad_routing::{
 use std::net::{IpAddr, SocketAddr};
 use tracing::{debug, warn};
 
+/// Routing-table mutation produced while processing a Kad HELLO packet.
+#[derive(Debug)]
+pub enum HelloRoutingMutation {
+    /// A previously unknown node ID was admitted to the routing table.
+    Inserted,
+    /// An existing node ID was refreshed with the HELLO contact data.
+    Updated,
+    /// The HELLO was valid but current routing policy intentionally made no change.
+    Unchanged(HelloRoutingUnchangedReason),
+    /// Routing admission rejected the contact.
+    Rejected(RoutingError),
+}
+
+impl HelloRoutingMutation {
+    /// Whether stock HELLO handling should treat this as added-or-updated.
+    #[must_use]
+    pub const fn added_or_updated(&self) -> bool {
+        matches!(self, Self::Inserted | Self::Updated)
+    }
+}
+
+/// Why valid HELLO metadata did not mutate the routing table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelloRoutingUnchangedReason {
+    /// Kad routing remains IPv4-only.
+    NonIpv4Source,
+    /// Stock excludes UDP-firewalled peers from routing admission.
+    UdpFirewalled,
+}
+
+/// Parsed HELLO metadata and its independent routing-table outcome.
+#[derive(Debug)]
+pub struct HelloRoutingOutcome {
+    pub metadata: HelloPeerMetadata,
+    pub mutation: HelloRoutingMutation,
+}
+
+impl HelloRoutingOutcome {
+    /// Whether the HELLO inserted or refreshed a routing contact.
+    #[must_use]
+    pub const fn added_or_updated(&self) -> bool {
+        self.mutation.added_or_updated()
+    }
+}
+
 impl DhtNode {
     /// Snapshot currently known contacts.
     pub async fn routing_contacts(&self) -> Vec<Contact> {
@@ -65,8 +110,10 @@ impl DhtNode {
         crate::bootstrap::encode_nodes_dat(&contacts)
     }
 
-    /// Upsert a single contact into the routing table.
-    pub async fn add_contact(&self, contact: Contact) -> Result<(), DhtError> {
+    async fn add_contact_with_mutation(
+        &self,
+        contact: Contact,
+    ) -> Result<HelloRoutingMutation, RoutingError> {
         let mut contact = contact;
         let addr = addr_from_contact(&contact);
         if contact.udp_key == KadUdpKey::ZERO
@@ -88,13 +135,24 @@ impl DhtNode {
         let contact_id = contact.id;
         let contact_ip = contact.ip;
         let contact_udp_port = contact.udp_port;
-        match self.inner.routing_table.lock().await.add_contact(contact) {
-            Ok(()) => Ok(()),
+        let mut routing_table = self.inner.routing_table.lock().await;
+        let contact_existed = routing_table.get(&contact_id).is_some();
+        match routing_table.add_contact(contact) {
+            Ok(()) if contact_existed => Ok(HelloRoutingMutation::Updated),
+            Ok(()) => Ok(HelloRoutingMutation::Inserted),
             Err(error) => {
                 log_routing_rejection(&error, contact_id, contact_ip, contact_udp_port);
-                Err(error.into())
+                Err(error)
             }
         }
+    }
+
+    /// Upsert a single contact into the routing table.
+    pub async fn add_contact(&self, contact: Contact) -> Result<(), DhtError> {
+        self.add_contact_with_mutation(contact)
+            .await
+            .map(|_| ())
+            .map_err(DhtError::from)
     }
 
     /// Run one oracle small-timer routing-maintenance sweep over the table:
@@ -230,7 +288,7 @@ impl DhtNode {
             .collect()
     }
 
-    /// Record a contact learned from a Kad HELLO request or response.
+    /// Parse HELLO metadata and report its routing-table mutation independently.
     pub async fn add_contact_from_hello(
         &self,
         from: SocketAddr,
@@ -238,14 +296,19 @@ impl DhtNode {
         tcp_port: u16,
         version: u8,
         tags: &[Tag],
-    ) -> Result<HelloPeerMetadata, DhtError> {
+    ) -> HelloRoutingOutcome {
         let mut metadata = parse_hello_peer_metadata(tags);
         if version < 8 {
             metadata.requests_hello_res_ack = false;
         }
 
         let IpAddr::V4(ip) = from.ip() else {
-            return Ok(metadata);
+            return HelloRoutingOutcome {
+                metadata,
+                mutation: HelloRoutingMutation::Unchanged(
+                    HelloRoutingUnchangedReason::NonIpv4Source,
+                ),
+            };
         };
 
         // Oracle AddContact_KADEMLIA2 (KademliaUDPListener.cpp:510-511): do not
@@ -259,7 +322,12 @@ impl DhtNode {
                 contact_ip = %ip,
                 "skipping UDP-firewalled Kad contact from HELLO"
             );
-            return Ok(metadata);
+            return HelloRoutingOutcome {
+                metadata,
+                mutation: HelloRoutingMutation::Unchanged(
+                    HelloRoutingUnchangedReason::UdpFirewalled,
+                ),
+            };
         }
         let mut contact = Contact::new(
             node_id,
@@ -277,8 +345,11 @@ impl DhtNode {
             contact.udp_key_ip = self.public_ip_for_udp_keys();
         }
 
-        self.add_contact(contact).await?;
-        Ok(metadata)
+        let mutation = match self.add_contact_with_mutation(contact).await {
+            Ok(mutation) => mutation,
+            Err(error) => HelloRoutingMutation::Rejected(error),
+        };
+        HelloRoutingOutcome { metadata, mutation }
     }
 }
 
@@ -403,7 +474,7 @@ mod tests {
         .unwrap();
         let node_id = NodeId::from_bytes([0x42; 16]);
 
-        let metadata = dht
+        let outcome = dht
             .add_contact_from_hello(
                 "198.51.100.22:41002".parse().unwrap(),
                 node_id,
@@ -414,13 +485,14 @@ mod tests {
                     Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x06)),
                 ],
             )
-            .await
-            .unwrap();
+            .await;
 
-        assert_eq!(metadata.hello_source_udp_port, Some(42002));
-        assert!(!metadata.udp_firewalled);
-        assert!(metadata.tcp_firewalled);
-        assert!(metadata.requests_hello_res_ack);
+        assert!(matches!(outcome.mutation, HelloRoutingMutation::Inserted));
+        assert!(outcome.added_or_updated());
+        assert_eq!(outcome.metadata.hello_source_udp_port, Some(42002));
+        assert!(!outcome.metadata.udp_firewalled);
+        assert!(outcome.metadata.tcp_firewalled);
+        assert!(outcome.metadata.requests_hello_res_ack);
         let contact = dht.routing_contacts().await.pop().unwrap();
         assert_eq!(contact.id, node_id);
         assert_eq!(contact.udp_port, 42002);
@@ -444,7 +516,7 @@ mod tests {
         .unwrap();
 
         // KADMISCOPTIONS bit0 set => UDP firewalled.
-        let metadata = dht
+        let outcome = dht
             .add_contact_from_hello(
                 "198.51.100.30:42030".parse().unwrap(),
                 NodeId::from_bytes([0x55; 16]),
@@ -452,11 +524,98 @@ mod tests {
                 8,
                 &[Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x01))],
             )
-            .await
-            .unwrap();
+            .await;
 
-        assert!(metadata.udp_firewalled);
+        assert!(outcome.metadata.udp_firewalled);
+        assert!(matches!(
+            outcome.mutation,
+            HelloRoutingMutation::Unchanged(HelloRoutingUnchangedReason::UdpFirewalled)
+        ));
+        assert!(!outcome.added_or_updated());
         // The firewalled peer must NOT be added to the routing table.
+        assert!(dht.routing_contacts().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hello_existing_contact_reports_updated() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let node_id = NodeId::from_bytes([0x56; 16]);
+        let from = "198.51.100.31:42031".parse().unwrap();
+
+        let inserted = dht
+            .add_contact_from_hello(from, node_id, 42032, 8, &[])
+            .await;
+        assert!(matches!(inserted.mutation, HelloRoutingMutation::Inserted));
+
+        let updated = dht
+            .add_contact_from_hello(from, node_id, 43032, 9, &[])
+            .await;
+        assert!(matches!(updated.mutation, HelloRoutingMutation::Updated));
+        assert!(updated.added_or_updated());
+        let contact = dht.routing_contacts().await.pop().unwrap();
+        assert_eq!(contact.tcp_port, 43032);
+        assert_eq!(contact.kad_version, 9);
+    }
+
+    #[tokio::test]
+    async fn hello_routing_rejection_is_typed() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let from = "198.51.100.32:42032".parse().unwrap();
+        dht.add_contact_from_hello(from, NodeId::from_bytes([0x57; 16]), 42033, 8, &[])
+            .await;
+
+        let rejected = dht
+            .add_contact_from_hello(from, NodeId::from_bytes([0x58; 16]), 42034, 8, &[])
+            .await;
+        assert!(matches!(
+            rejected.mutation,
+            HelloRoutingMutation::Rejected(RoutingError::IpLimitExceeded { .. })
+        ));
+        assert!(!rejected.added_or_updated());
+    }
+
+    #[tokio::test]
+    async fn hello_non_ipv4_source_is_unchanged() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+
+        let outcome = dht
+            .add_contact_from_hello(
+                "[2001:db8::1]:42035".parse().unwrap(),
+                NodeId::from_bytes([0x59; 16]),
+                42036,
+                8,
+                &[],
+            )
+            .await;
+        assert!(matches!(
+            outcome.mutation,
+            HelloRoutingMutation::Unchanged(HelloRoutingUnchangedReason::NonIpv4Source)
+        ));
+        assert!(!outcome.added_or_updated());
         assert!(dht.routing_contacts().await.is_empty());
     }
 
