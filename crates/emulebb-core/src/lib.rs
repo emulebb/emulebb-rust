@@ -612,6 +612,7 @@ impl EmulebbCore {
         });
         let kad_snoop_queue = ed2k_network
             .as_ref()
+            .filter(|network| network.kad_passive_replay_enabled)
             .map(|network| Arc::new(Mutex::new(SnoopQueue::new(network.kad_snoop_queue.clone()))));
         // Default incoming directory: a sibling of the transfer root (i.e.
         // `<runtime_dir>/incoming` when the transfer root is `<runtime_dir>/
@@ -5754,7 +5755,7 @@ struct KadLocalStoreRuntime {
     dht: DhtNode,
     local_store: Arc<Mutex<KadLocalStore>>,
     metadata_store: MetadataStore,
-    snoop_queue: Arc<Mutex<SnoopQueue>>,
+    snoop_queue: Option<Arc<Mutex<SnoopQueue>>>,
     ed2k_listener: Arc<TcpListener>,
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
@@ -6104,7 +6105,7 @@ async fn handle_kad_local_store_packet(
 ) -> Result<()> {
     let dht = &runtime.dht;
     let local_store = &runtime.local_store;
-    let snoop_queue = &runtime.snoop_queue;
+    let snoop_queue = runtime.snoop_queue.as_ref();
     let ed2k_listener = &runtime.ed2k_listener;
     let server_state = &runtime.server_state;
     let kad_firewall = &runtime.kad_firewall;
@@ -6420,7 +6421,9 @@ async fn handle_kad_local_store_packet(
         }
         KadPacket::SearchKeyReq(req) => {
             let now = Utc::now();
-            record_kad_snoop_entry(snoop_queue, build_keyword_snoop_entry(&req, now)).await;
+            if let Some(snoop_queue) = snoop_queue {
+                record_kad_snoop_entry(snoop_queue, build_keyword_snoop_entry(&req, now)).await;
+            }
             let response = {
                 let mut store = local_store.lock().await;
                 store.keyword_search_response(
@@ -6434,7 +6437,9 @@ async fn handle_kad_local_store_packet(
         }
         KadPacket::SearchSourceReq(req) => {
             let now = Utc::now();
-            record_kad_snoop_entry(snoop_queue, build_source_snoop_entry(&req, now)).await;
+            if let Some(snoop_queue) = snoop_queue {
+                record_kad_snoop_entry(snoop_queue, build_source_snoop_entry(&req, now)).await;
+            }
             let response = {
                 let mut store = local_store.lock().await;
                 store.source_search_response(
@@ -6448,7 +6453,9 @@ async fn handle_kad_local_store_packet(
         }
         KadPacket::SearchNotesReq(req) => {
             let now = Utc::now();
-            record_kad_snoop_entry(snoop_queue, build_notes_snoop_entry(&req, now)).await;
+            if let Some(snoop_queue) = snoop_queue {
+                record_kad_snoop_entry(snoop_queue, build_notes_snoop_entry(&req, now)).await;
+            }
             let response = {
                 let mut store = local_store.lock().await;
                 store.notes_search_response(

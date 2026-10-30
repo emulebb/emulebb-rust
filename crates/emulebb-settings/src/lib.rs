@@ -472,12 +472,7 @@ pub struct KadSettings {
     pub tcp_firewall_check_interval_secs: u64,
     pub buddy_enabled: bool,
     pub routing_maintenance_enabled: bool,
-    pub snoop_queue_dedup_window_secs: u64,
-    pub snoop_queue_general_max_queries_per_600s: u32,
-    pub snoop_queue_general_drain_cooldown_secs: u64,
-    pub snoop_queue_source_max_queries_per_600s: u32,
-    pub snoop_queue_source_drain_cooldown_secs: u64,
-    pub snoop_queue_source_stop_after_results: usize,
+    pub passive_replay_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -793,17 +788,7 @@ pub struct KadSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_maintenance_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snoop_queue_dedup_window_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snoop_queue_general_max_queries_per_600s: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snoop_queue_general_drain_cooldown_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snoop_queue_source_max_queries_per_600s: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snoop_queue_source_drain_cooldown_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snoop_queue_source_stop_after_results: Option<usize>,
+    pub passive_replay_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1047,12 +1032,7 @@ impl Default for KadSettings {
             tcp_firewall_check_interval_secs: 3_600,
             buddy_enabled: true,
             routing_maintenance_enabled: true,
-            snoop_queue_dedup_window_secs: 28_800,
-            snoop_queue_general_max_queries_per_600s: 24,
-            snoop_queue_general_drain_cooldown_secs: 900,
-            snoop_queue_source_max_queries_per_600s: 60,
-            snoop_queue_source_drain_cooldown_secs: 300,
-            snoop_queue_source_stop_after_results: 2,
+            passive_replay_enabled: false,
         }
     }
 }
@@ -1327,12 +1307,7 @@ impl KadSettingsUpdate {
             && self.tcp_firewall_check_interval_secs.is_none()
             && self.buddy_enabled.is_none()
             && self.routing_maintenance_enabled.is_none()
-            && self.snoop_queue_dedup_window_secs.is_none()
-            && self.snoop_queue_general_max_queries_per_600s.is_none()
-            && self.snoop_queue_general_drain_cooldown_secs.is_none()
-            && self.snoop_queue_source_max_queries_per_600s.is_none()
-            && self.snoop_queue_source_drain_cooldown_secs.is_none()
-            && self.snoop_queue_source_stop_after_results.is_none()
+            && self.passive_replay_enabled.is_none()
     }
 }
 
@@ -1658,23 +1633,8 @@ pub fn apply_kad_settings_update(settings: &mut KadSettings, update: KadSettings
     if let Some(value) = update.routing_maintenance_enabled {
         settings.routing_maintenance_enabled = value;
     }
-    if let Some(value) = update.snoop_queue_dedup_window_secs {
-        settings.snoop_queue_dedup_window_secs = value;
-    }
-    if let Some(value) = update.snoop_queue_general_max_queries_per_600s {
-        settings.snoop_queue_general_max_queries_per_600s = value;
-    }
-    if let Some(value) = update.snoop_queue_general_drain_cooldown_secs {
-        settings.snoop_queue_general_drain_cooldown_secs = value;
-    }
-    if let Some(value) = update.snoop_queue_source_max_queries_per_600s {
-        settings.snoop_queue_source_max_queries_per_600s = value;
-    }
-    if let Some(value) = update.snoop_queue_source_drain_cooldown_secs {
-        settings.snoop_queue_source_drain_cooldown_secs = value;
-    }
-    if let Some(value) = update.snoop_queue_source_stop_after_results {
-        settings.snoop_queue_source_stop_after_results = value;
+    if let Some(value) = update.passive_replay_enabled {
+        settings.passive_replay_enabled = value;
     }
 }
 
@@ -1864,22 +1824,7 @@ impl From<KadSettings> for KadSettingsUpdate {
             tcp_firewall_check_interval_secs: Some(settings.tcp_firewall_check_interval_secs),
             buddy_enabled: Some(settings.buddy_enabled),
             routing_maintenance_enabled: Some(settings.routing_maintenance_enabled),
-            snoop_queue_dedup_window_secs: Some(settings.snoop_queue_dedup_window_secs),
-            snoop_queue_general_max_queries_per_600s: Some(
-                settings.snoop_queue_general_max_queries_per_600s,
-            ),
-            snoop_queue_general_drain_cooldown_secs: Some(
-                settings.snoop_queue_general_drain_cooldown_secs,
-            ),
-            snoop_queue_source_max_queries_per_600s: Some(
-                settings.snoop_queue_source_max_queries_per_600s,
-            ),
-            snoop_queue_source_drain_cooldown_secs: Some(
-                settings.snoop_queue_source_drain_cooldown_secs,
-            ),
-            snoop_queue_source_stop_after_results: Some(
-                settings.snoop_queue_source_stop_after_results,
-            ),
+            passive_replay_enabled: Some(settings.passive_replay_enabled),
         }
     }
 }

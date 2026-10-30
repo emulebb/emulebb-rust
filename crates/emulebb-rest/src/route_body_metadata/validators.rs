@@ -93,12 +93,7 @@ const KAD_SETTINGS_FIELDS: &[&str] = &[
     "tcpFirewallCheckIntervalSecs",
     "buddyEnabled",
     "routingMaintenanceEnabled",
-    "snoopQueueDedupWindowSecs",
-    "snoopQueueGeneralMaxQueriesPer600s",
-    "snoopQueueGeneralDrainCooldownSecs",
-    "snoopQueueSourceMaxQueriesPer600s",
-    "snoopQueueSourceDrainCooldownSecs",
-    "snoopQueueSourceStopAfterResults",
+    "passiveReplayEnabled",
 ];
 const NAT_SETTINGS_FIELDS: &[&str] = &[
     "enabled",
@@ -510,42 +505,7 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
         "settings.kad.tcpFirewallCheckIntervalSecs",
         60,
     )?;
-    validate_unsigned_number_min(
-        object,
-        "snoopQueueDedupWindowSecs",
-        "settings.kad.snoopQueueDedupWindowSecs",
-        1,
-    )?;
-    validate_unsigned_number_min(
-        object,
-        "snoopQueueGeneralMaxQueriesPer600s",
-        "settings.kad.snoopQueueGeneralMaxQueriesPer600s",
-        1,
-    )?;
-    validate_unsigned_number_min(
-        object,
-        "snoopQueueGeneralDrainCooldownSecs",
-        "settings.kad.snoopQueueGeneralDrainCooldownSecs",
-        1,
-    )?;
-    validate_unsigned_number_min(
-        object,
-        "snoopQueueSourceMaxQueriesPer600s",
-        "settings.kad.snoopQueueSourceMaxQueriesPer600s",
-        1,
-    )?;
-    validate_unsigned_number_min(
-        object,
-        "snoopQueueSourceDrainCooldownSecs",
-        "settings.kad.snoopQueueSourceDrainCooldownSecs",
-        1,
-    )?;
-    validate_unsigned_number_min(
-        object,
-        "snoopQueueSourceStopAfterResults",
-        "settings.kad.snoopQueueSourceStopAfterResults",
-        1,
-    )
+    Ok(())
 }
 
 fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {

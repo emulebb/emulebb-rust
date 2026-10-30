@@ -1512,6 +1512,7 @@ pub struct Ed2kNetworkConfig {
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub kad_local_store: KadLocalStoreConfig,
     pub kad_snoop_queue: SnoopQueueConfig,
+    pub kad_passive_replay_enabled: bool,
     /// Validated persisted `nodes.dat` bytes used to seed a new Kad runtime.
     pub kad_nodes_dat: Option<Vec<u8>>,
     /// Destination for the live routing sample written atomically on Kad

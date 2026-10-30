@@ -244,7 +244,8 @@ impl DaemonProfile {
             user_hash,
             secure_ident,
             kad_local_store: kad_local_store_config(&self.kad),
-            kad_snoop_queue: kad_snoop_queue_config(&self.kad),
+            kad_snoop_queue: SnoopQueueConfig::default(),
+            kad_passive_replay_enabled: self.kad.passive_replay_enabled,
             kad_nodes_dat: discovery_bootstrap::load_valid_nodes_dat(&self.profile_dir)?,
             kad_nodes_dat_path: Some(self.profile_dir.join("nodes.dat")),
             kad_bootstrap_endpoints: self.kad_bootstrap_endpoints.clone(),
@@ -297,10 +298,6 @@ impl DaemonProfile {
 
     pub fn kad_local_store_config(&self) -> KadLocalStoreConfig {
         kad_local_store_config(&self.kad)
-    }
-
-    pub fn kad_snoop_queue_config(&self) -> SnoopQueueConfig {
-        kad_snoop_queue_config(&self.kad)
     }
 
     fn kad_bind_addr(&self, bind_ip: Ipv4Addr) -> Result<SocketAddr> {
@@ -641,17 +638,6 @@ fn kad_local_store_config(settings: &KadSettings) -> KadLocalStoreConfig {
         notes_capacity: settings.local_store_notes_capacity.max(1),
         source_per_file_capacity: settings.local_store_source_per_file_capacity.max(1),
         notes_per_file_capacity: settings.local_store_notes_per_file_capacity.max(1),
-    }
-}
-
-fn kad_snoop_queue_config(settings: &KadSettings) -> SnoopQueueConfig {
-    SnoopQueueConfig {
-        dedup_window_secs: settings.snoop_queue_dedup_window_secs.max(1),
-        general_max_queries_per_600s: settings.snoop_queue_general_max_queries_per_600s.max(1),
-        general_drain_cooldown_secs: settings.snoop_queue_general_drain_cooldown_secs.max(1),
-        source_max_queries_per_600s: settings.snoop_queue_source_max_queries_per_600s.max(1),
-        source_drain_cooldown_secs: settings.snoop_queue_source_drain_cooldown_secs.max(1),
-        source_stop_after_results: settings.snoop_queue_source_stop_after_results.max(1),
     }
 }
 

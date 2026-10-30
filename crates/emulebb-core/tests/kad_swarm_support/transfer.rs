@@ -119,6 +119,7 @@ fn test_network_config(
             ..KadLocalStoreConfig::default()
         },
         kad_snoop_queue: SnoopQueueConfig::default(),
+        kad_passive_replay_enabled: false,
         kad_nodes_dat: None,
         kad_nodes_dat_path: None,
         kad_bootstrap_endpoints: vec![bootstrap.to_string()],

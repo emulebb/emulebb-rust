@@ -246,6 +246,7 @@ fn test_network_config_with_store(
         ),
         kad_local_store,
         kad_snoop_queue,
+        kad_passive_replay_enabled: true,
         kad_nodes_dat: None,
         kad_nodes_dat_path: None,
         kad_bootstrap_endpoints: Vec::new(),

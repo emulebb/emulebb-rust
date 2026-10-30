@@ -133,6 +133,7 @@ fn test_network_config(root: &Path) -> Ed2kNetworkConfig {
         ),
         kad_local_store: KadLocalStoreConfig::default(),
         kad_snoop_queue: SnoopQueueConfig::default(),
+        kad_passive_replay_enabled: false,
         kad_nodes_dat: None,
         kad_nodes_dat_path: None,
         kad_bootstrap_endpoints: Vec::new(),

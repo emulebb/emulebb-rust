@@ -749,12 +749,7 @@ export type KadSettings = {
   tcpFirewallCheckIntervalSecs?: number;
   buddyEnabled?: boolean;
   routingMaintenanceEnabled?: boolean;
-  snoopQueueDedupWindowSecs?: number;
-  snoopQueueGeneralMaxQueriesPer600s?: number;
-  snoopQueueGeneralDrainCooldownSecs?: number;
-  snoopQueueSourceMaxQueriesPer600s?: number;
-  snoopQueueSourceDrainCooldownSecs?: number;
-  snoopQueueSourceStopAfterResults?: number;
+  passiveReplayEnabled?: boolean;
   [key: string]: unknown;
 };
 
