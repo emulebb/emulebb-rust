@@ -49,34 +49,6 @@ fn ed2k_wire_file_type(token: &str) -> Option<String> {
 pub(crate) enum SearchNetworkMethod {
     Ed2kServer,
     Ed2kGlobal,
-    Kad,
-}
-
-/// Resolve the public search method against live network state.
-///
-/// This mirrors the MFC client policy: automatic searches prefer ED2K global
-/// search when ED2K is connected, fall back to Kad only when Kad is the sole
-/// connected search network, and fail closed when no search network is ready.
-pub(crate) fn resolve_search_network_method(
-    method: &str,
-    ed2k_connected: bool,
-    kad_connected: bool,
-) -> Option<SearchNetworkMethod> {
-    match method.trim().to_ascii_lowercase().as_str() {
-        "server" => Some(SearchNetworkMethod::Ed2kServer),
-        "global" => Some(SearchNetworkMethod::Ed2kGlobal),
-        "kad" => Some(SearchNetworkMethod::Kad),
-        "" | "automatic" => {
-            if ed2k_connected {
-                Some(SearchNetworkMethod::Ed2kGlobal)
-            } else if kad_connected {
-                Some(SearchNetworkMethod::Kad)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
 }
 
 /// Apply the optional `SearchCreateRequest` filters for which every result has
@@ -172,14 +144,14 @@ fn refined_result_file_type(claimed: &str, name: &str) -> String {
         })
 }
 
-pub(crate) fn search_result_from_indexed(
+pub(crate) fn search_result_from_passive_cache(
     search_id: &str,
     request: &SearchCreate,
     file: IndexedFile,
 ) -> SearchResult {
     let file_type = refined_result_file_type(&file.content_type, &file.name);
     let observation = SearchResultObservation {
-        origin: "local_index".to_string(),
+        origin: "passive_cache".to_string(),
         server_endpoint: None,
         name: file.name,
         size_bytes: file.size_bytes,
@@ -357,42 +329,6 @@ mod tests {
             album: String::new(),
             artist: String::new(),
         }
-    }
-
-    #[test]
-    fn resolves_explicit_search_methods_without_cross_network_fallback() {
-        assert_eq!(
-            resolve_search_network_method("server", false, true),
-            Some(SearchNetworkMethod::Ed2kServer)
-        );
-        assert_eq!(
-            resolve_search_network_method("global", false, true),
-            Some(SearchNetworkMethod::Ed2kGlobal)
-        );
-        assert_eq!(
-            resolve_search_network_method("kad", true, false),
-            Some(SearchNetworkMethod::Kad)
-        );
-    }
-
-    #[test]
-    fn automatic_search_prefers_ed2k_global_then_kad() {
-        assert_eq!(
-            resolve_search_network_method("automatic", true, true),
-            Some(SearchNetworkMethod::Ed2kGlobal)
-        );
-        assert_eq!(
-            resolve_search_network_method("automatic", false, true),
-            Some(SearchNetworkMethod::Kad)
-        );
-        assert_eq!(
-            resolve_search_network_method("automatic", false, false),
-            None
-        );
-        assert_eq!(
-            resolve_search_network_method("", true, true),
-            Some(SearchNetworkMethod::Ed2kGlobal)
-        );
     }
 
     #[test]

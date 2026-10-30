@@ -27,4 +27,5 @@ tower-http.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }

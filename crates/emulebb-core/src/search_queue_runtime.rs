@@ -163,8 +163,7 @@ impl EmulebbCore {
         cancel: &CancellationToken,
     ) {
         // Explicit `server` keeps the connected-server-only search; `global`
-        // and `automatic` add the UDP pass (automatic resolves like
-        // resolve_search_network_method with the server connected).
+        // and `automatic` add the UDP pass.
         let network_method = if entry.request.method.trim().eq_ignore_ascii_case("server") {
             SearchNetworkMethod::Ed2kServer
         } else {

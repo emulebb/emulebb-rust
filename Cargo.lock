@@ -805,6 +805,7 @@ dependencies = [
  "axum",
  "chrono",
  "emulebb-core",
+ "emulebb-ed2k",
  "emulebb-index",
  "futures-util",
  "http-body-util",

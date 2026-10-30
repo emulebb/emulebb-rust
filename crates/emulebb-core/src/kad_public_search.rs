@@ -29,15 +29,6 @@ pub(crate) enum KadKeywordSearchDispatchOutcome {
     },
 }
 
-impl KadKeywordSearchOutcome {
-    pub(crate) fn without_aich(results: Vec<SearchResult>) -> Self {
-        Self {
-            results,
-            aich_votes: HashMap::new(),
-        }
-    }
-}
-
 pub(crate) async fn search_kad_keywords(
     dht: DhtNode,
     search_id: &str,

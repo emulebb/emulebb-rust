@@ -74,16 +74,44 @@ fn split_stock_search_responses_keeps_single_oversized_result_like_stock() {
 }
 
 #[tokio::test]
-async fn search_uses_local_index() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.index_file(IndexedFile {
-        ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-        name: "Local.Indexed.File.iso".to_string(),
-        size_bytes: 2048,
-        content_type: "iso".to_string(),
-        availability_score: 3,
-    })
-    .await
+async fn accepted_network_search_only_surfaces_enabled_passive_cache_results() {
+    let transfer_root = unique_runtime_dir("emulebb-core-search-passive-cache");
+    let mut index = FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap();
+    index
+        .upsert_file(
+            &IndexedFile {
+                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+                name: "Passive.Indexed.File.iso".to_string(),
+                size_bytes: 2048,
+                content_type: "iso".to_string(),
+                availability_score: 3,
+            },
+            emulebb_index::IndexedFileOrigin::PassiveCache,
+        )
+        .unwrap();
+    index
+        .upsert_file(
+            &IndexedFile {
+                ed2k_hash: "ffeeddccbbaa99887766554433221100".to_string(),
+                name: "Transfer.Indexed.File.iso".to_string(),
+                size_bytes: 4096,
+                content_type: "iso".to_string(),
+                availability_score: 9,
+            },
+            emulebb_index::IndexedFileOrigin::Transfer,
+        )
+        .unwrap();
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        index,
+        transfer_root.join("transfers"),
+        Some(network),
+    )
     .unwrap();
 
     let search = core
@@ -95,32 +123,72 @@ async fn search_uses_local_index() {
         })
         .await
         .unwrap();
-    // Local index results are present immediately while the search starts
-    // "running"; it flips to "completed" once the background pass finishes.
     assert_eq!(search.id, "1");
-    assert_eq!(search.status, "running");
+    assert_eq!(search.status, "queued");
     assert_eq!(search.spec.method, "automatic");
     assert_eq!(search.resolved_method, None);
     assert_eq!(search.results.len(), 1);
-    let mut completed = search;
-    for _ in 0..100 {
-        if completed.status == "completed" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        completed = core.search(&completed.id).await.unwrap();
-    }
-    assert_eq!(completed.status, "completed");
-    assert_eq!(completed.spec.method, "automatic");
-    assert_eq!(completed.resolved_method, None);
-    assert_eq!(completed.results.len(), 1);
+    assert_eq!(search.results[0].name, "Passive.Indexed.File.iso");
+    assert_eq!(search.results[0].observations[0].origin, "passive_cache");
+}
+
+#[tokio::test]
+async fn disabled_passive_replay_does_not_surface_persisted_cache() {
+    let transfer_root = unique_runtime_dir("emulebb-core-search-passive-cache-disabled");
+    let mut index = FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap();
+    index
+        .upsert_file(
+            &IndexedFile {
+                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+                name: "Passive.Indexed.File.iso".to_string(),
+                size_bytes: 2048,
+                content_type: "iso".to_string(),
+                availability_score: 3,
+            },
+            emulebb_index::IndexedFileOrigin::PassiveCache,
+        )
+        .unwrap();
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.kad_passive_replay_enabled = false;
+    let core = EmulebbCore::new_with_network(
+        "test",
+        index,
+        transfer_root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+
+    let search = core
+        .create_search(SearchCreate {
+            query: "indexed file".to_string(),
+            method: "automatic".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(search.status, "queued");
+    assert!(search.results.is_empty());
+    assert_eq!(
+        core.index
+            .lock()
+            .await
+            .search("indexed file", 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn explicit_network_search_without_runtime_is_rejected() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
 
-    for method in ["server", "global", "kad"] {
+    for method in ["automatic", "server", "global", "kad"] {
         let error = core
             .create_search(SearchCreate {
                 query: "must use requested network".to_string(),
@@ -158,22 +226,23 @@ async fn invalid_search_method_is_rejected_before_creating_a_search() {
         "search method must be one of automatic, server, global, kad"
     );
     assert!(core.searches().await.is_empty());
-
-    let search = core
-        .create_search(SearchCreate {
-            query: "valid method".to_string(),
-            method: " AUTOMATIC ".to_string(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(search.id, "1");
-    assert_eq!(search.spec.method, "automatic");
 }
 
 #[tokio::test]
 async fn search_spec_is_canonicalized_before_persistence() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let transfer_root = unique_runtime_dir("emulebb-core-search-canonicalization");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        transfer_root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
 
     let search = core
         .create_search(SearchCreate {
@@ -318,7 +387,7 @@ async fn explicit_network_search_respects_disabled_network_settings() {
 }
 
 #[tokio::test]
-async fn automatic_search_completes_locally_when_all_networks_are_disabled() {
+async fn automatic_search_is_rejected_when_all_networks_are_disabled() {
     let transfer_root = unique_runtime_dir("emulebb-core-search-disabled-auto");
     let network = test_network_config_with_store(
         &transfer_root,
@@ -340,27 +409,21 @@ async fn automatic_search_completes_locally_when_all_networks_are_disabled() {
     .await
     .unwrap();
 
-    let search = core
+    let error = core
         .create_search(SearchCreate {
             query: "local only automatic search".to_string(),
             method: "automatic".to_string(),
             ..Default::default()
         })
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(search.status, "running");
+    assert_eq!(
+        error.to_string(),
+        "search networks are disabled in settings.core"
+    );
     assert_eq!(core.search_queue.lock().pending_len(), 0);
-    let mut completed = search;
-    for _ in 0..100 {
-        if completed.status == "completed" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        completed = core.search(&completed.id).await.unwrap();
-    }
-    assert_eq!(completed.status, "completed");
-    assert_eq!(completed.resolved_method, None);
+    assert!(core.searches().await.is_empty());
 }
 
 #[tokio::test]

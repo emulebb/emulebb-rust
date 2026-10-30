@@ -338,7 +338,7 @@ async fn friends_use_canonical_crud_routes() {
 
 #[tokio::test]
 async fn search_clear_requires_canonical_query_confirmation() {
-    let app = test_router();
+    let app = test_search_router();
 
     for query in ["first", "second"] {
         let response = app
@@ -409,7 +409,7 @@ async fn search_clear_requires_canonical_query_confirmation() {
 
 #[tokio::test]
 async fn search_delete_uses_canonical_ok_response() {
-    let app = test_router();
+    let app = test_search_router();
     let response = app
         .clone()
         .oneshot(
@@ -450,35 +450,29 @@ async fn search_delete_uses_canonical_ok_response() {
 
 #[tokio::test]
 async fn search_results_use_canonical_paging_query() {
-    let core =
-        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    core.index_file(IndexedFile {
-        ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-        name: "Paged.Result.One.iso".to_string(),
-        size_bytes: 42,
-        content_type: "iso".to_string(),
-        availability_score: 2,
-    })
-    .await
-    .unwrap();
-    core.index_file(IndexedFile {
-        ed2k_hash: "ffeeddccbbaa99887766554433221100".to_string(),
-        name: "Paged.Result.Two.iso".to_string(),
-        size_bytes: 84,
-        content_type: "iso".to_string(),
-        availability_score: 3,
-    })
-    .await
-    .unwrap();
-    core.index_file(IndexedFile {
-        ed2k_hash: "11223344556677889900aabbccddeeff".to_string(),
-        name: "Paged.Result.Three.iso".to_string(),
-        size_bytes: 126,
-        content_type: "iso".to_string(),
-        availability_score: 4,
-    })
-    .await
-    .unwrap();
+    let core = test_search_core(&[
+        IndexedFile {
+            ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: "Paged.Result.One.iso".to_string(),
+            size_bytes: 42,
+            content_type: "iso".to_string(),
+            availability_score: 2,
+        },
+        IndexedFile {
+            ed2k_hash: "ffeeddccbbaa99887766554433221100".to_string(),
+            name: "Paged.Result.Two.iso".to_string(),
+            size_bytes: 84,
+            content_type: "iso".to_string(),
+            availability_score: 3,
+        },
+        IndexedFile {
+            ed2k_hash: "11223344556677889900aabbccddeeff".to_string(),
+            name: "Paged.Result.Three.iso".to_string(),
+            size_bytes: 126,
+            content_type: "iso".to_string(),
+            availability_score: 4,
+        },
+    ]);
     let app = router(
         core,
         RestServerSettings {
@@ -520,7 +514,7 @@ async fn search_results_use_canonical_paging_query() {
     assert_eq!(value["data"]["criteria"]["title"], "");
     assert_eq!(value["data"]["criteria"]["album"], "");
     assert_eq!(value["data"]["criteria"]["artist"], "");
-    assert_eq!(value["data"]["progress"]["phase"], "local-index");
+    assert_eq!(value["data"]["progress"]["phase"], "queued");
     assert_eq!(value["data"]["progress"]["completedUnits"], 0);
     assert!(value["data"]["progress"].get("totalUnits").is_none());
     assert_eq!(value["data"]["progress"]["unit"], "");
@@ -622,18 +616,14 @@ async fn search_results_use_canonical_paging_query() {
 }
 
 #[tokio::test]
-async fn search_to_download_flow_uses_local_index() {
-    let core =
-        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    core.index_file(IndexedFile {
+async fn search_to_download_flow_uses_passive_cache_observation() {
+    let core = test_search_core(&[IndexedFile {
         ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
         name: "Indexed.Result.iso".to_string(),
         size_bytes: 42,
         content_type: "iso".to_string(),
         availability_score: 2,
-    })
-    .await
-    .unwrap();
+    }]);
     let app = router(
         core,
         RestServerSettings {
@@ -712,17 +702,13 @@ async fn search_to_download_flow_uses_local_index() {
 
 #[tokio::test]
 async fn search_result_download_accepts_paused_request_body() {
-    let core =
-        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    core.index_file(IndexedFile {
+    let core = test_search_core(&[IndexedFile {
         ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
         name: "Paused.Indexed.Result.iso".to_string(),
         size_bytes: 42,
         content_type: "iso".to_string(),
         availability_score: 2,
-    })
-    .await
-    .unwrap();
+    }]);
     let app = router(
         core,
         RestServerSettings {

@@ -17,8 +17,15 @@ impl EmulebbCore {
         request.canonicalize();
         request.validate()?;
         let now = Utc::now();
-        // Local index results are cheap, so include them immediately.
-        let indexed = self.index.lock().await.search(&request.query, 200)?;
+        let passive_cached = if self.kad_snoop_queue.is_some() {
+            self.index.lock().await.search_by_origin(
+                &request.query,
+                emulebb_index::IndexedFileOrigin::PassiveCache,
+                200,
+            )?
+        } else {
+            Vec::new()
+        };
         let mut state = self.state.lock().await;
         match request.method.as_str() {
             "server" | "global" => {
@@ -43,38 +50,35 @@ impl EmulebbCore {
             }
             _ => {}
         }
-        // Network methods go through the connection-aware queue (operator
-        // directive 2026-07-06): a search submitted while its backend is still
-        // connecting/absent is QUEUED with an honest status+reason and drains
-        // automatically when the backend is ready — it is never fired into a
-        // stale handle and never silently "completed" with local-only results.
-        // Automatic searches without an eD2k network runtime keep the
-        // immediate running->completed local-index path. Explicit network
-        // methods were rejected above rather than misreported as local-only
-        // completed searches.
+        // Every public search is live-network work. The queue keeps an accepted
+        // search honest while its selected backend is still connecting; local
+        // metadata never creates an offline /searches mode.
         let queue_lane = automatic_search_queue_lane(
             &request,
             self.ed2k_network.is_some(),
             state.core_settings.network_ed2k,
             state.core_settings.network_kademlia,
         )?;
-        if queue_lane.is_some() {
-            let _ = emulebb_ed2k::ed2k_server::encode_kad_search_expression(
-                &request.query,
-                &search_criteria_from_request(&request),
-            )?;
-        }
+        let _ = emulebb_ed2k::ed2k_server::encode_kad_search_expression(
+            &request.query,
+            &search_criteria_from_request(&request),
+        )?;
         let (search_id, next_search_id) =
             search_state::allocate_search_id(&state.searches, state.next_search_id)?;
-        let mut results = indexed
+        let mut results = passive_cached
             .into_iter()
-            .map(|file| search_result_from_indexed(&search_id, &request, file))
+            .map(|file| search_result_from_passive_cache(&search_id, &request, file))
             .collect::<Vec<_>>();
         apply_search_filters(&mut results, &request);
-        let prepared_queue_entry = if let Some(lane) = queue_lane {
+        let prepared_queue_entry = {
             let queue = self.search_queue.lock();
-            match queue.prepare_enqueue(search_id.clone(), request.clone(), lane, Instant::now()) {
-                Ok(prepared) => Some(prepared),
+            match queue.prepare_enqueue(
+                search_id.clone(),
+                request.clone(),
+                queue_lane,
+                Instant::now(),
+            ) {
+                Ok(prepared) => prepared,
                 Err(error) => {
                     // Explicit POST rejection (duplicate / queue full) — the
                     // candidate id is never published or advanced.
@@ -92,159 +96,49 @@ impl EmulebbCore {
                     bail!("{error}");
                 }
             }
-        } else {
-            None
         };
         // Create the search and return immediately; the network part runs via
-        // the queue drain (or the legacy background task) and flips the status
+        // the queue drain and flips the status
         // queued->running->completed. This keeps the eMuleBB contract's
         // running->complete lifecycle: controllers (e.g. aMuTorrent) get a
         // prompt POST and poll GET for results; "queued" is an additive state
         // consumers treat like running (poll until "complete").
-        let (status, status_reason) = match queue_lane {
-            Some(lane) => ("queued", Some(lane.waiting_reason().to_string())),
-            None => ("running", None),
-        };
         let search = Search {
             id: search_id.clone(),
             spec: request.clone(),
             resolved_method: None,
-            status: status.to_string(),
-            status_reason,
-            progress: SearchProgress::new(
-                if queue_lane.is_some() {
-                    "queued"
-                } else {
-                    "local-index"
-                },
-                0,
-                None,
-                "",
-            ),
+            status: "queued".to_string(),
+            status_reason: Some(queue_lane.waiting_reason().to_string()),
+            progress: SearchProgress::new("queued", 0, None, ""),
             created_at: now,
             updated_at: now,
             results,
         };
         persist(&self.metadata_store, &search)?;
-        let spawn_drain = prepared_queue_entry.is_some_and(|prepared| {
+        let spawn_drain = {
             let mut queue = self.search_queue.lock();
-            queue.commit_enqueue(prepared);
+            queue.commit_enqueue(prepared_queue_entry);
             let spawn_drain = queue.claim_drain_task();
-            let lane = queue_lane.expect("prepared queue entry has a lane");
             crate::diag_sched::keyword_search_queue(
                 &search_id,
                 &request.query,
                 "queued",
                 &request.method,
-                Some(lane.waiting_reason()),
+                Some(queue_lane.waiting_reason()),
                 0,
             );
             spawn_drain
-        });
+        };
         state.next_search_id = next_search_id;
-        if queue_lane.is_some() {
-            state
-                .search_cancels
-                .insert(search_id.clone(), CancellationToken::new());
-        }
+        state
+            .search_cancels
+            .insert(search_id.clone(), CancellationToken::new());
         state.searches.insert(search_id.clone(), search.clone());
         drop(state);
-        if queue_lane.is_some() {
-            if spawn_drain {
-                self.spawn_search_queue_drain();
-            }
-        } else {
-            let core = self.clone();
-            tokio::spawn(async move {
-                core.run_background_search(search_id, request).await;
-            });
+        if spawn_drain {
+            self.spawn_search_queue_drain();
         }
         Ok(search)
-    }
-
-    /// Immediate path for a local-only automatic search: resolves any live
-    /// backend defensively, then completes with the local-index results when no
-    /// network is enabled/configured. Explicit network methods never reach this
-    /// path — they are either rejected or use the connection-aware queue.
-    async fn run_background_search(&self, search_id: String, request: SearchCreate) {
-        let cancel = CancellationToken::new();
-        let ed2k_connected = self.connected_ed2k_search_handle().await.is_some();
-        let kad_connected = self
-            .ed2k_dht_node()
-            .await
-            .is_some_and(|dht| dht.is_bootstrapped());
-        let network_method =
-            resolve_search_network_method(&request.method, ed2k_connected, kad_connected);
-        let method_str = match network_method {
-            Some(SearchNetworkMethod::Ed2kServer) => "server",
-            Some(SearchNetworkMethod::Ed2kGlobal) => "global",
-            Some(SearchNetworkMethod::Kad) => "kad",
-            None => "none",
-        };
-        let outcome = match network_method {
-            Some(SearchNetworkMethod::Ed2kServer | SearchNetworkMethod::Ed2kGlobal) => self
-                .search_ed2k_servers(&search_id, &request, network_method, &cancel, None)
-                .await
-                .map(|outcome| match outcome {
-                    Ed2kServerSearchOutcome::Completed {
-                        results,
-                        status_reason,
-                    } => (
-                        Some(
-                            crate::kad_public_search::KadKeywordSearchOutcome::without_aich(
-                                results,
-                            ),
-                        ),
-                        status_reason,
-                        None,
-                    ),
-                    Ed2kServerSearchOutcome::Unavailable
-                    | Ed2kServerSearchOutcome::NotConnected => (None, None, None),
-                }),
-            Some(SearchNetworkMethod::Kad) => match self.ed2k_dht_node().await {
-                Some(dht) => search_kad_keywords(dht, &search_id, &request, &cancel, None)
-                    .await
-                    .map(|outcome| {
-                        match outcome {
-                            crate::kad_public_search::KadKeywordSearchDispatchOutcome::Completed(
-                                outcome,
-                            ) => (Some(outcome), None, None),
-                            crate::kad_public_search::KadKeywordSearchDispatchOutcome::NotDispatched {
-                                reason,
-                                ..
-                            } => (None, None, Some(reason)),
-                        }
-                    }),
-                None => Ok((None, None, Some("kad-runtime-unavailable"))),
-            },
-            None => Ok((None, None, None)),
-        };
-        match outcome {
-            Ok((_, _, Some(reason))) => {
-                self.fail_search(&search_id, &request, method_str, reason)
-                    .await;
-            }
-            Ok((network_outcome, status_reason, None)) => {
-                let (network_results, aich_votes) = match network_outcome {
-                    Some(outcome) => (Some(outcome.results), Some(outcome.aich_votes)),
-                    None => (None, None),
-                };
-                self.complete_search_with_results(
-                    &search_id,
-                    &request,
-                    method_str,
-                    network_results,
-                    status_reason,
-                    aich_votes,
-                )
-                .await;
-            }
-            Err(error) => {
-                tracing::warn!("background search failed for {search_id}: {error:#}");
-                self.fail_search(&search_id, &request, method_str, "network-search-failed")
-                    .await;
-            }
-        }
     }
 
     pub async fn searches(&self) -> Vec<Search> {
@@ -296,31 +190,29 @@ fn automatic_search_queue_lane(
     runtime_configured: bool,
     ed2k_enabled: bool,
     kad_enabled: bool,
-) -> Result<Option<SearchQueueLane>> {
-    if !runtime_configured {
-        return Ok(None);
-    }
+) -> Result<SearchQueueLane> {
+    ensure!(runtime_configured, "search network is not configured");
     match SearchQueueLane::for_method(&request.method) {
-        Some(SearchQueueLane::Server) => Ok(Some(SearchQueueLane::Server)),
+        Some(SearchQueueLane::Server) => Ok(SearchQueueLane::Server),
         Some(SearchQueueLane::Kad) => {
             crate::kad_public_search::kad_public_search_keyword(&request.query)?;
-            Ok(Some(SearchQueueLane::Kad))
+            Ok(SearchQueueLane::Kad)
         }
         Some(SearchQueueLane::Auto) => match (ed2k_enabled, kad_enabled) {
-            (false, false) => Ok(None),
-            (true, false) => Ok(Some(SearchQueueLane::Server)),
+            (false, false) => bail!("search networks are disabled in settings.core"),
+            (true, false) => Ok(SearchQueueLane::Server),
             (false, true) => {
                 crate::kad_public_search::kad_public_search_keyword(&request.query)?;
-                Ok(Some(SearchQueueLane::Kad))
+                Ok(SearchQueueLane::Kad)
             }
-            (true, true) => Ok(Some(
+            (true, true) => Ok(
                 if crate::kad_public_search::kad_public_search_keyword(&request.query).is_ok() {
                     SearchQueueLane::Auto
                 } else {
                     SearchQueueLane::Server
                 },
-            )),
+            ),
         },
-        None => Ok(None),
+        None => bail!("unsupported search method {}", request.method),
     }
 }

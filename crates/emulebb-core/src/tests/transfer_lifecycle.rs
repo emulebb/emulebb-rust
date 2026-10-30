@@ -148,15 +148,30 @@ fn kad_search_result_exposes_exact_hash_metadata() {
 
 #[tokio::test]
 async fn download_search_result_creates_transfer() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.index_file(IndexedFile {
-        ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-        name: "Download.Me.bin".to_string(),
-        size_bytes: 4096,
-        content_type: "archive".to_string(),
-        availability_score: 1,
-    })
-    .await
+    let runtime_dir = unique_runtime_dir("emulebb-core-download-passive-search-result");
+    let mut index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
+    index
+        .upsert_file(
+            &IndexedFile {
+                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+                name: "Download.Me.bin".to_string(),
+                size_bytes: 4096,
+                content_type: "archive".to_string(),
+                availability_score: 1,
+            },
+            IndexedFileOrigin::PassiveCache,
+        )
+        .unwrap();
+    let core = EmulebbCore::new_with_network(
+        "test",
+        index,
+        &runtime_dir,
+        Some(test_network_config_with_store(
+            &runtime_dir,
+            KadLocalStoreConfig::default(),
+            SnoopQueueConfig::default(),
+        )),
+    )
     .unwrap();
     let search = core
         .create_search(SearchCreate {
@@ -195,22 +210,37 @@ async fn download_search_result_creates_transfer() {
         manifest.file_name_observations[0].normalized_name,
         "Download.Me.bin"
     );
-    assert_eq!(manifest.file_name_observations[0].origin, "local_index");
+    assert_eq!(manifest.file_name_observations[0].origin, "passive_cache");
     assert_eq!(manifest.file_name_observations[0].source_ip, None);
 }
 
 #[tokio::test]
 async fn download_search_result_rejects_missing_file_size() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let runtime_dir = unique_runtime_dir("emulebb-core-download-passive-missing-size");
+    let mut index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
     let file_hash = "ffeeddccbbaa99887766554433221100";
-    core.index_file(IndexedFile {
-        ed2k_hash: file_hash.to_string(),
-        name: "Missing.Size.bin".to_string(),
-        size_bytes: 0,
-        content_type: "archive".to_string(),
-        availability_score: 1,
-    })
-    .await
+    index
+        .upsert_file(
+            &IndexedFile {
+                ed2k_hash: file_hash.to_string(),
+                name: "Missing.Size.bin".to_string(),
+                size_bytes: 0,
+                content_type: "archive".to_string(),
+                availability_score: 1,
+            },
+            IndexedFileOrigin::PassiveCache,
+        )
+        .unwrap();
+    let core = EmulebbCore::new_with_network(
+        "test",
+        index,
+        &runtime_dir,
+        Some(test_network_config_with_store(
+            &runtime_dir,
+            KadLocalStoreConfig::default(),
+            SnoopQueueConfig::default(),
+        )),
+    )
     .unwrap();
     let search = core
         .create_search(SearchCreate {
@@ -231,16 +261,31 @@ async fn download_search_result_rejects_missing_file_size() {
 
 #[tokio::test]
 async fn download_search_result_replays_live_kad_aich_observations() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let runtime_dir = unique_runtime_dir("emulebb-core-download-passive-aich");
+    let mut index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
     let file_hash = "11111111111111111111111111111111";
-    core.index_file(IndexedFile {
-        ed2k_hash: file_hash.to_string(),
-        name: "Kad.AICH.bin".to_string(),
-        size_bytes: 4096,
-        content_type: "archive".to_string(),
-        availability_score: 1,
-    })
-    .await
+    index
+        .upsert_file(
+            &IndexedFile {
+                ed2k_hash: file_hash.to_string(),
+                name: "Kad.AICH.bin".to_string(),
+                size_bytes: 4096,
+                content_type: "archive".to_string(),
+                availability_score: 1,
+            },
+            IndexedFileOrigin::PassiveCache,
+        )
+        .unwrap();
+    let core = EmulebbCore::new_with_network(
+        "test",
+        index,
+        &runtime_dir,
+        Some(test_network_config_with_store(
+            &runtime_dir,
+            KadLocalStoreConfig::default(),
+            SnoopQueueConfig::default(),
+        )),
+    )
     .unwrap();
     let search = core
         .create_search(SearchCreate {
@@ -251,17 +296,6 @@ async fn download_search_result_replays_live_kad_aich_observations() {
         })
         .await
         .unwrap();
-    for _ in 0..20 {
-        if core
-            .search(&search.id)
-            .await
-            .is_some_and(|search| search.status == "completed")
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-
     let root = [0xAB; 20];
     let mut votes = KadAichSearchVotes::default();
     for index in 0..10u8 {

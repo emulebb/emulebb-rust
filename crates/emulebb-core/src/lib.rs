@@ -232,7 +232,6 @@ use kad_passive_replay::{
     remember_passive_note_results, remember_passive_source_results,
 };
 use kad_passive_replay::{PassiveReplayWorker, run_kad_passive_replay_loop};
-use kad_public_search::search_kad_keywords;
 pub use kad_publish_diagnostics::KadPublishDiagnostics;
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
@@ -243,8 +242,8 @@ use local_search_response::split_stock_search_responses;
 pub use network_binding::NetworkBindingStatus;
 use network_status_defaults::{ed2k_starting_status, ed2k_stopped_status, kad_starting_status};
 use search_query::{
-    SearchNetworkMethod, apply_search_filters, resolve_search_network_method,
-    search_criteria_from_request, search_result_from_ed2k, search_result_from_indexed,
+    SearchNetworkMethod, apply_search_filters, search_criteria_from_request,
+    search_result_from_ed2k, search_result_from_passive_cache,
 };
 use search_queue::{SearchQueue, SearchQueueLane};
 use search_queue_runtime::Ed2kServerSearchOutcome;
@@ -559,7 +558,17 @@ impl EmulebbCore {
             .into_iter()
             .map(shared_directory_from_index)
             .collect::<Vec<_>>();
-        let core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
+        let mut core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
+        let passive_replay_enabled = ed2k_network
+            .as_ref()
+            .is_some_and(|network| network.kad_passive_replay_enabled);
+        if !passive_replay_enabled {
+            for search in core_state.searches.values_mut() {
+                search
+                    .results
+                    .retain_mut(|result| result.remove_observation_origin("passive_cache"));
+            }
+        }
         let upload_queue_policy = initial_ed2k_upload_queue_policy(
             ed2k_network
                 .as_ref()
@@ -612,7 +621,7 @@ impl EmulebbCore {
         });
         let kad_snoop_queue = ed2k_network
             .as_ref()
-            .filter(|network| network.kad_passive_replay_enabled)
+            .filter(|_| passive_replay_enabled)
             .map(|network| Arc::new(Mutex::new(SnoopQueue::new(network.kad_snoop_queue.clone()))));
         // Default incoming directory: a sibling of the transfer root (i.e.
         // `<runtime_dir>/incoming` when the transfer root is `<runtime_dir>/
