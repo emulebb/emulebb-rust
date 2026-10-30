@@ -317,7 +317,9 @@ impl EmulebbCore {
             return Ok(status);
         }
 
-        self.ed2k_download_tasks.stop_and_drain().await;
+        self.ed2k_download_tasks
+            .stop_and_drain(self.ed2k_transfers.checkpoint_dirty_download_progress())
+            .await;
 
         let (search_handle, search_inbox) = new_ed2k_server_search_channel(32);
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
@@ -880,7 +882,9 @@ impl EmulebbCore {
             // server dial; the runtime has already been removed and tasks aborted.
             let _ = tokio::time::timeout(Duration::from_secs(2), nat.stop()).await;
         }
-        self.ed2k_download_tasks.stop_and_drain().await;
+        self.ed2k_download_tasks
+            .stop_and_drain(self.ed2k_transfers.checkpoint_dirty_download_progress())
+            .await;
         // Release detached-reask and active-worker source leases only after every
         // tracked download task has stopped, so no worker can reacquire a lease
         // after the reset while disconnect is still completing.

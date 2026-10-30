@@ -2446,14 +2446,15 @@ impl EmulebbCore {
     /// runtime. The dedup guard runs inside the spawned task.
     fn queue_ed2k_download_attempt(&self, transfer: Transfer) {
         let core = self.clone();
-        self.ed2k_download_tasks
-            .spawn(Self::run_queued_ed2k_download_attempt(core, transfer));
+        self.ed2k_download_tasks.spawn(move |shutdown| {
+            Self::run_queued_ed2k_download_attempt(core, transfer, shutdown)
+        });
     }
 
     fn queue_ed2k_download_retry(&self, hash: String) {
         let core = self.clone();
         self.ed2k_download_tasks
-            .spawn(Self::run_queued_ed2k_download_retry(core, hash));
+            .spawn(move |shutdown| Self::run_queued_ed2k_download_retry(core, hash, shutdown));
     }
 
     /// Body of one background download attempt, run as a tracked task.
@@ -2463,7 +2464,14 @@ impl EmulebbCore {
     /// panic that unwinds the task. Without the guard, a panic mid-attempt left the
     /// hash in the set forever, permanently blocking the transfer from restarting
     /// (FIX B2).
-    async fn run_queued_ed2k_download_attempt(core: EmulebbCore, transfer: Transfer) {
+    async fn run_queued_ed2k_download_attempt(
+        core: EmulebbCore,
+        transfer: Transfer,
+        shutdown: CancellationToken,
+    ) {
+        if shutdown.is_cancelled() {
+            return;
+        }
         let hash = transfer.hash.clone();
         // WHY: REST resume returns before the peer transfer finishes, so repeated
         // resume requests must not start duplicate writers for the same part file.
@@ -2494,7 +2502,15 @@ impl EmulebbCore {
             )
         };
 
-        let result = core.run_ed2k_download_attempt(&transfer, &cancel).await;
+        let attempt = core.run_ed2k_download_attempt(&transfer, &cancel);
+        tokio::pin!(attempt);
+        let result = tokio::select! {
+            result = &mut attempt => result,
+            () = shutdown.cancelled() => {
+                cancel.cancel();
+                attempt.await
+            }
+        };
         let mut retry_downloading = false;
         let settled_state: &str;
         match result {
@@ -2537,14 +2553,21 @@ impl EmulebbCore {
         // Process-style re-drive: sources, server availability, and peer upload
         // state can change after an attempt that made no immediate progress.
         crate::diag_sched::download_task_settled(&hash, settled_state, retry_downloading);
-        if retry_downloading {
+        if retry_downloading && !shutdown.is_cancelled() {
             core.queue_ed2k_download_retry(hash);
         }
     }
 
     /// Body of one delayed background download retry, run as a tracked task.
-    async fn run_queued_ed2k_download_retry(core: EmulebbCore, hash: String) {
-        tokio::time::sleep(Duration::from_secs(ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS)).await;
+    async fn run_queued_ed2k_download_retry(
+        core: EmulebbCore,
+        hash: String,
+        shutdown: CancellationToken,
+    ) {
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS)) => {}
+            () = shutdown.cancelled() => return,
+        }
         let Some(transfer) = core.transfer(&hash).await else {
             crate::diag_sched::download_retry_outcome(&hash, "missing", false);
             return;

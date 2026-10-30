@@ -1396,6 +1396,51 @@ async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() 
 }
 
 #[tokio::test]
+async fn final_shutdown_checkpoint_persists_acknowledged_progress_for_restart() {
+    let root = unique_test_dir("ed2k-transfer-shutdown-checkpoint");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let block = vec![0xA5; usize::try_from(ED2K_EMBLOCK_SIZE).unwrap()];
+    let file_hash = Ed2kHash::from_bytes([0x42; 16]);
+    let job = new_transfer_job(
+        file_hash,
+        "shutdown-progress.bin".to_string(),
+        ED2K_EMBLOCK_SIZE * 2,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .append_piece_block(&job.file_hash, 0, 0, ED2K_EMBLOCK_SIZE, &block)
+        .await
+        .unwrap();
+
+    let before_shutdown = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        before_shutdown
+            .manifest(&job.file_hash)
+            .await
+            .unwrap()
+            .pieces[0]
+            .bytes_written,
+        0,
+        "sub-threshold acknowledged progress should still be cache-only"
+    );
+
+    assert_eq!(
+        runtime.checkpoint_dirty_download_progress().await.unwrap(),
+        1
+    );
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        restarted.manifest(&job.file_hash).await.unwrap().pieces[0].bytes_written,
+        ED2K_EMBLOCK_SIZE
+    );
+    assert_eq!(
+        runtime.checkpoint_dirty_download_progress().await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn batched_checkpoint_persists_pieces_dirtied_by_other_appends() {
     let root = unique_test_dir("ed2k-transfer-dirty-piece-tracking");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
+use tokio::io::AsyncWriteExt;
 
 use super::manifest::manifest_progress_bytes;
 use super::transfer_sql::{manifest_from_metadata, manifest_to_metadata, piece_to_metadata};
@@ -31,6 +32,60 @@ const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 const ED2K_RESUME_CHECKPOINT_BYTES: u64 = 8 * ED2K_EMBLOCK_SIZE;
 
 impl Ed2kTransferRuntime {
+    /// Flush and persist every cache-only download progress update.
+    ///
+    /// Callers must first quiesce or abort download writers so no new dirty
+    /// progress can race this final checkpoint.
+    pub async fn checkpoint_dirty_download_progress(&self) -> Result<usize> {
+        let dirty_hashes = self
+            .manifest_checkpoint_state
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, state)| !state.dirty_piece_indexes.is_empty())
+            .map(|(file_hash, _)| file_hash.clone())
+            .collect::<Vec<_>>();
+        let mut checkpointed = 0;
+
+        for file_hash in dirty_hashes {
+            let _manifest_guard = self.lock_manifest(&file_hash).await;
+            let Some(current_piece) = self
+                .manifest_checkpoint_state
+                .lock()
+                .await
+                .get(&file_hash)
+                .and_then(|state| state.dirty_piece_indexes.first().copied())
+            else {
+                continue;
+            };
+            let manifest = self
+                .manifest_cache
+                .lock()
+                .await
+                .get(&file_hash)
+                .cloned()
+                .with_context(|| {
+                    format!("dirty ED2K download {file_hash} is missing its cached manifest")
+                })?;
+
+            // WHY: acknowledged blocks may still be buffered in the cached file
+            // handle while their manifest rows are cache-only. Flush payload bytes
+            // before committing the final row checkpoint so restart never observes
+            // progress beyond the cleanly written payload.
+            let mut file = self.take_payload_handle(&file_hash).await?;
+            file.flush().await?;
+            self.store_payload_handle(&file_hash, file);
+            self.store_manifest_piece_progress_unlocked(&manifest, current_piece)
+                .await
+                .with_context(|| {
+                    format!("failed to checkpoint final ED2K download progress for {file_hash}")
+                })?;
+            checkpointed += 1;
+        }
+
+        Ok(checkpointed)
+    }
+
     /// Acquire the lifecycle gate for one transfer. Delivery, row-only
     /// removal, and destructive deletion must hold this gate before taking the
     /// manifest lock so their filesystem and persisted-state transitions
