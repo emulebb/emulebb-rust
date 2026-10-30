@@ -6,11 +6,11 @@
 //! behavior is unchanged.
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{RawQuery, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{
-        IntoResponse,
+        IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
 };
@@ -24,7 +24,9 @@ use emulebb_core::{
 };
 use tokio::sync::broadcast;
 
-use crate::diagnostic_bundle::capture as capture_bundle;
+use crate::diagnostic_bundle::{
+    MAX_DIAGNOSTIC_BUNDLE_BYTES, MIN_DIAGNOSTIC_BUNDLE_BYTES, capture as capture_bundle,
+};
 use crate::handlers::{logs::recent_log_values, prelude::*};
 use crate::without_score_breakdown;
 
@@ -131,7 +133,7 @@ pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) ->
 pub(crate) async fn capture_diagnostic_bundle(
     State(state): State<RestState>,
     body: Bytes,
-) -> impl IntoResponse {
+) -> Response {
     let request = match parse_required_json_body::<DiagnosticBundleCaptureRequest>(&body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -144,8 +146,23 @@ pub(crate) async fn capture_diagnostic_bundle(
         )
         .into_response();
     }
-    match capture_bundle(&state).await {
-        Ok(bundle) => api_ok(bundle).into_response(),
+    if !(MIN_DIAGNOSTIC_BUNDLE_BYTES..=MAX_DIAGNOSTIC_BUNDLE_BYTES).contains(&request.max_bytes) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            format!(
+                "maxBytes must be in the range {MIN_DIAGNOSTIC_BUNDLE_BYTES}..={MAX_DIAGNOSTIC_BUNDLE_BYTES}"
+            ),
+        )
+        .into_response();
+    }
+    match capture_bundle(&state, request.max_bytes).await {
+        Ok(bundle) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, bundle.len().to_string())
+            .body(Body::from(bundle))
+            .expect("diagnostic bundle response must be valid"),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }

@@ -183,7 +183,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const SHARED_FILE_IGNORE_RULE: &[&str] = &["enabled"];
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
-    const DIAGNOSTIC_BUNDLE: &[&str] = &["confirmCapture"];
+    const DIAGNOSTIC_BUNDLE: &[&str] = &["confirmCapture", "maxBytes"];
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
     const APP_SETTINGS: &[&str] = &[
         "core", "daemon", "ed2k", "kad", "nat", "vpnGuard", "ipFilter",

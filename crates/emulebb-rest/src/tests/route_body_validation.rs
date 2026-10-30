@@ -1084,7 +1084,7 @@ async fn destructive_confirmation_bodies_use_canonical_validation() {
         (
             "POST",
             "/api/v1/diagnostics/bundles",
-            r#"{"confirmCapture":false}"#,
+            r#"{"confirmCapture":false,"maxBytes":4194304}"#,
             "confirmCapture must be true",
         ),
         (
@@ -1125,7 +1125,7 @@ async fn diagnostic_bundle_body_rejects_retired_full_memory_field() {
         test_router(),
         "POST",
         "/api/v1/diagnostics/bundles",
-        r#"{"confirmCapture":true,"fullMemory":false}"#.to_string(),
+        r#"{"confirmCapture":true,"maxBytes":4194304,"fullMemory":false}"#.to_string(),
         "unknown JSON field: fullMemory",
     )
     .await;

@@ -216,6 +216,7 @@ pub(crate) struct ShutdownRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DiagnosticBundleCaptureRequest {
     pub(crate) confirm_capture: bool,
+    pub(crate) max_bytes: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
