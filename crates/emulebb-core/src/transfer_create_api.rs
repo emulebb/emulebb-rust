@@ -8,6 +8,7 @@ impl EmulebbCore {
         request: SearchResultDownloadCreate,
     ) -> Result<Option<Transfer>> {
         let _creation_guard = self.transfer_creation_gate.lock().await;
+        let category_guard = self.category_mutation_gate.lock().await;
         ensure_category_selector_is_unambiguous(
             request.category_id,
             request.category_name.as_deref(),
@@ -63,6 +64,7 @@ impl EmulebbCore {
                 preflight.should_redownload(&request_identity.file_hash),
             )
             .await?;
+        drop(category_guard);
         if !aich_observations.is_empty() {
             // The search row's hidden AICH string is display metadata only.
             // Trust receives the actual live responder/root observations.
@@ -112,6 +114,7 @@ impl EmulebbCore {
 
     pub async fn create_transfers(&self, request: TransferCreate) -> Result<Vec<Transfer>> {
         let _creation_guard = self.transfer_creation_gate.lock().await;
+        let _category_guard = self.category_mutation_gate.lock().await;
         ensure_category_selector_is_unambiguous(
             request.category_id,
             request.category_name.as_deref(),

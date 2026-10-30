@@ -271,6 +271,11 @@ pub struct Ed2kTransferRuntime {
     /// block append of every concurrent download (and upload reader opens)
     /// behind one mutex.
     manifest_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Serializes category selection against compound category deletion. The
+    /// delete path takes this gate before locking every affected manifest, so
+    /// no assignment can be resolved against one category snapshot and commit
+    /// against another.
+    category_assignment_gate: Arc<Mutex<()>>,
     /// Per-transfer lifecycle serialization for delivery, row removal, and
     /// destructive deletion. Unlike the manifest IO lock this may be held
     /// across slow filesystem work without delaying unrelated manifest reads.
@@ -593,6 +598,7 @@ impl Ed2kTransferRuntime {
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_tickets: Arc::new(StdMutex::new(callback::CallbackTicketStore::default())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            category_assignment_gate: Arc::new(Mutex::new(())),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
