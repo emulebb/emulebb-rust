@@ -2,7 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use binrw::{BinRead, BinResult, BinWrite, binrw};
 
-use crate::error::ProtoError;
+use crate::error::{ProtoError, wire_count_u8, wire_count_u16};
 use crate::hash::Ed2kHash;
 use crate::node_id::NodeId;
 use crate::tag::Tag;
@@ -96,7 +96,7 @@ pub struct BootstrapRes {
     pub sender_tcp_port: u16,
     pub sender_version: u8,
     #[br(temp)]
-    #[bw(calc = u16::try_from(contacts.len()).expect("contact count exceeds u16"))]
+    #[bw(try_calc = wire_count_u16("BootstrapRes.contacts", contacts.len()))]
     count: u16,
     #[br(
         parse_with = read_counted_vector,
@@ -125,7 +125,7 @@ pub struct HelloReq {
     pub tcp_port: u16,
     pub version: u8,
     #[br(temp)]
-    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
+    #[bw(try_calc = wire_count_u8("HelloReq.tags", tags.len()))]
     tag_count: u8,
     #[br(
         parse_with = read_counted_vector,
@@ -145,7 +145,7 @@ pub struct HelloRes {
     pub tcp_port: u16,
     pub version: u8,
     #[br(temp)]
-    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
+    #[bw(try_calc = wire_count_u8("HelloRes.tags", tags.len()))]
     tag_count: u8,
     #[br(
         parse_with = read_counted_vector,
@@ -164,7 +164,7 @@ pub struct HelloResAck {
     /// Node ID that confirms the ACK sender's identity.
     pub node_id: NodeId,
     #[br(temp)]
-    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
+    #[bw(try_calc = wire_count_u8("HelloResAck.tags", tags.len()))]
     tag_count: u8,
     /// Reserved tag list. eMule currently sends an empty list here.
     #[br(
@@ -199,7 +199,7 @@ pub struct Req {
 pub struct Res {
     pub target: NodeId,
     #[br(temp)]
-    #[bw(calc = u8::try_from(contacts.len()).expect("contact count exceeds u8"))]
+    #[bw(try_calc = wire_count_u8("Res.contacts", contacts.len()))]
     count: u8,
     #[br(
         parse_with = read_counted_vector,
@@ -288,7 +288,7 @@ pub struct SearchResultEntry {
     /// identity.
     pub entry_id: Ed2kHash,
     #[br(temp)]
-    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
+    #[bw(try_calc = wire_count_u8("SearchResultEntry.tags", tags.len()))]
     tag_count: u8,
     #[br(
         parse_with = read_counted_vector,
@@ -317,7 +317,7 @@ pub struct SearchRes {
     /// searches echo the searched file hash in the same 16-byte slot.
     pub target: NodeId,
     #[br(temp)]
-    #[bw(calc = u16::try_from(results.len()).expect("result count exceeds u16"))]
+    #[bw(try_calc = wire_count_u16("SearchRes.results", results.len()))]
     count: u16,
     #[br(
         parse_with = read_counted_vector,
@@ -342,7 +342,7 @@ pub struct LegacySearchRes {
 pub struct PublishEntry {
     pub hash: Ed2kHash,
     #[br(temp)]
-    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
+    #[bw(try_calc = wire_count_u8("PublishEntry.tags", tags.len()))]
     tag_count: u8,
     #[br(
         parse_with = read_counted_vector,
@@ -359,7 +359,7 @@ pub struct PublishEntry {
 pub struct PublishKeyReq {
     pub target: NodeId,
     #[br(temp)]
-    #[bw(calc = u16::try_from(entries.len()).expect("entry count exceeds u16"))]
+    #[bw(try_calc = wire_count_u16("PublishKeyReq.entries", entries.len()))]
     count: u16,
     #[br(
         parse_with = read_counted_vector,
@@ -383,7 +383,7 @@ pub struct PublishSourceReq {
     /// opaque bytes.
     pub publisher_id: NodeId,
     #[br(temp)]
-    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
+    #[bw(try_calc = wire_count_u8("PublishSourceReq.tags", tags.len()))]
     tag_count: u8,
     #[br(
         parse_with = read_counted_vector,
@@ -406,7 +406,7 @@ pub struct PublishNotesReq {
     /// identity rather than a note-specific hash.
     pub publisher_id: NodeId,
     #[br(temp)]
-    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
+    #[bw(try_calc = wire_count_u8("PublishNotesReq.tags", tags.len()))]
     tag_count: u8,
     /// Note payload tags such as filename, filesize, rating, and description.
     #[br(

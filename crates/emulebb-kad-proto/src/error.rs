@@ -30,8 +30,30 @@ pub enum ProtoError {
         minimum_element_size: usize,
         remaining: usize,
     },
+    #[error("wire count overflow for {field}: maximum {maximum}, got {actual}")]
+    WireCountOverflow {
+        field: &'static str,
+        maximum: usize,
+        actual: usize,
+    },
     #[error("zlib decompression failed")]
     DecompressError,
+}
+
+pub(crate) fn wire_count_u8(field: &'static str, actual: usize) -> Result<u8, ProtoError> {
+    u8::try_from(actual).map_err(|_| ProtoError::WireCountOverflow {
+        field,
+        maximum: usize::from(u8::MAX),
+        actual,
+    })
+}
+
+pub(crate) fn wire_count_u16(field: &'static str, actual: usize) -> Result<u16, ProtoError> {
+    u16::try_from(actual).map_err(|_| ProtoError::WireCountOverflow {
+        field,
+        maximum: usize::from(u16::MAX),
+        actual,
+    })
 }
 
 impl From<binrw::Error> for ProtoError {
@@ -46,6 +68,17 @@ impl From<binrw::Error> for ProtoError {
                 count: *count,
                 minimum_element_size: *minimum_element_size,
                 remaining: *remaining,
+            }
+        } else if let Some(Self::WireCountOverflow {
+            field,
+            maximum,
+            actual,
+        }) = error.custom_err::<Self>()
+        {
+            Self::WireCountOverflow {
+                field,
+                maximum: *maximum,
+                actual: *actual,
             }
         } else {
             Self::BinRw(error)

@@ -29,6 +29,318 @@ fn assert_invalid_counted_vector(
     );
 }
 
+fn assert_wire_count_overflow(
+    packet: &KadPacket,
+    expected_field: &'static str,
+    expected_maximum: usize,
+    expected_actual: usize,
+) {
+    let result = packet.encode();
+    assert!(
+        matches!(
+            &result,
+            Err(ProtoError::WireCountOverflow {
+                field,
+                maximum,
+                actual,
+            }) if *field == expected_field
+                && *maximum == expected_maximum
+                && *actual == expected_actual
+        ),
+        "unexpected encode result: {result:?}"
+    );
+}
+
+fn boundary_contact() -> ContactEntry {
+    ContactEntry {
+        node_id: NodeId::from_bytes([0x11; 16]),
+        ip: 0x0102_0304,
+        udp_port: 4672,
+        tcp_port: 4662,
+        version: 9,
+    }
+}
+
+fn boundary_tag() -> Tag {
+    Tag::new_short(0x01, TagValue::U8(1))
+}
+
+fn boundary_search_result(tags: Vec<Tag>) -> SearchResultEntry {
+    SearchResultEntry {
+        entry_id: Ed2kHash::from_bytes([0x22; 16]),
+        tags,
+    }
+}
+
+fn boundary_publish_entry(tags: Vec<Tag>) -> PublishEntry {
+    PublishEntry {
+        hash: Ed2kHash::from_bytes([0x33; 16]),
+        tags,
+    }
+}
+
+#[test]
+fn u8_collection_counts_accept_maximum_stock_width() {
+    let max = usize::from(u8::MAX);
+    let tags = vec![boundary_tag(); max];
+    let contacts = vec![boundary_contact(); max];
+
+    for packet in [
+        KadPacket::HelloReq(HelloReq {
+            node_id: NodeId::ZERO,
+            tcp_port: 4662,
+            version: 9,
+            tags: tags.clone(),
+        }),
+        KadPacket::HelloRes(HelloRes {
+            node_id: NodeId::ZERO,
+            tcp_port: 4662,
+            version: 9,
+            tags: tags.clone(),
+        }),
+        KadPacket::HelloResAck(HelloResAck {
+            node_id: NodeId::ZERO,
+            tags: tags.clone(),
+        }),
+        KadPacket::Res(Res {
+            target: NodeId::ZERO,
+            contacts,
+        }),
+        KadPacket::SearchRes(SearchRes {
+            sender_id: NodeId::ZERO,
+            target: NodeId::ZERO,
+            results: vec![boundary_search_result(tags.clone())],
+        }),
+        KadPacket::LegacySearchRes(LegacySearchRes {
+            target: NodeId::ZERO,
+            results: vec![boundary_search_result(tags.clone())],
+        }),
+        KadPacket::PublishKeyReq(PublishKeyReq {
+            target: NodeId::ZERO,
+            entries: vec![boundary_publish_entry(tags.clone())],
+        }),
+        KadPacket::PublishSourceReq(PublishSourceReq {
+            target: NodeId::ZERO,
+            publisher_id: NodeId::ZERO,
+            tags: tags.clone(),
+        }),
+        KadPacket::LegacyPublishSourceReq(PublishSourceReq {
+            target: NodeId::ZERO,
+            publisher_id: NodeId::ZERO,
+            tags: tags.clone(),
+        }),
+        KadPacket::PublishNotesReq(PublishNotesReq {
+            target: NodeId::ZERO,
+            publisher_id: NodeId::ZERO,
+            tags,
+        }),
+    ] {
+        let encoded = packet.encode().expect("maximum u8 count must encode");
+        assert!(encoded.contains(&u8::MAX));
+    }
+}
+
+#[test]
+fn u8_collection_counts_reject_maximum_plus_one() {
+    let actual = usize::from(u8::MAX) + 1;
+    let tags = vec![boundary_tag(); actual];
+    let contacts = vec![boundary_contact(); actual];
+
+    let cases = [
+        (
+            KadPacket::HelloReq(HelloReq {
+                node_id: NodeId::ZERO,
+                tcp_port: 4662,
+                version: 9,
+                tags: tags.clone(),
+            }),
+            "HelloReq.tags",
+        ),
+        (
+            KadPacket::HelloRes(HelloRes {
+                node_id: NodeId::ZERO,
+                tcp_port: 4662,
+                version: 9,
+                tags: tags.clone(),
+            }),
+            "HelloRes.tags",
+        ),
+        (
+            KadPacket::HelloResAck(HelloResAck {
+                node_id: NodeId::ZERO,
+                tags: tags.clone(),
+            }),
+            "HelloResAck.tags",
+        ),
+        (
+            KadPacket::Res(Res {
+                target: NodeId::ZERO,
+                contacts,
+            }),
+            "Res.contacts",
+        ),
+        (
+            KadPacket::SearchRes(SearchRes {
+                sender_id: NodeId::ZERO,
+                target: NodeId::ZERO,
+                results: vec![boundary_search_result(tags.clone())],
+            }),
+            "SearchResultEntry.tags",
+        ),
+        (
+            KadPacket::LegacySearchNotesRes(LegacySearchRes {
+                target: NodeId::ZERO,
+                results: vec![boundary_search_result(tags.clone())],
+            }),
+            "SearchResultEntry.tags",
+        ),
+        (
+            KadPacket::PublishKeyReq(PublishKeyReq {
+                target: NodeId::ZERO,
+                entries: vec![boundary_publish_entry(tags.clone())],
+            }),
+            "PublishEntry.tags",
+        ),
+        (
+            KadPacket::PublishSourceReq(PublishSourceReq {
+                target: NodeId::ZERO,
+                publisher_id: NodeId::ZERO,
+                tags: tags.clone(),
+            }),
+            "PublishSourceReq.tags",
+        ),
+        (
+            KadPacket::LegacyPublishSourceReq(PublishSourceReq {
+                target: NodeId::ZERO,
+                publisher_id: NodeId::ZERO,
+                tags: tags.clone(),
+            }),
+            "LegacyPublishSourceReq.tags",
+        ),
+        (
+            KadPacket::PublishNotesReq(PublishNotesReq {
+                target: NodeId::ZERO,
+                publisher_id: NodeId::ZERO,
+                tags,
+            }),
+            "PublishNotesReq.tags",
+        ),
+    ];
+
+    for (packet, field) in cases {
+        assert_wire_count_overflow(&packet, field, usize::from(u8::MAX), actual);
+    }
+}
+
+#[test]
+fn u16_collection_counts_accept_maximum_stock_width() {
+    let max = usize::from(u16::MAX);
+
+    let bootstrap = KadPacket::BootstrapRes(BootstrapRes {
+        sender_id: NodeId::ZERO,
+        sender_tcp_port: 4662,
+        sender_version: 9,
+        contacts: vec![boundary_contact(); max],
+    });
+    let encoded = bootstrap.encode().expect("maximum bootstrap count");
+    assert_eq!(&encoded[21..23], &u16::MAX.to_le_bytes());
+
+    let result = boundary_search_result(Vec::new());
+    let search = KadPacket::SearchRes(SearchRes {
+        sender_id: NodeId::ZERO,
+        target: NodeId::ZERO,
+        results: vec![result.clone(); max],
+    });
+    let encoded = search.encode().expect("maximum search result count");
+    assert_eq!(&encoded[34..36], &u16::MAX.to_le_bytes());
+
+    let legacy = KadPacket::LegacySearchRes(LegacySearchRes {
+        target: NodeId::ZERO,
+        results: vec![result; max],
+    });
+    let encoded = legacy.encode().expect("maximum legacy result count");
+    assert_eq!(&encoded[18..20], &u16::MAX.to_le_bytes());
+
+    let publish = KadPacket::PublishKeyReq(PublishKeyReq {
+        target: NodeId::ZERO,
+        entries: vec![boundary_publish_entry(Vec::new()); max],
+    });
+    let encoded = publish.encode().expect("maximum publish entry count");
+    assert_eq!(&encoded[18..20], &u16::MAX.to_le_bytes());
+}
+
+#[test]
+fn u16_collection_counts_reject_maximum_plus_one() {
+    let actual = usize::from(u16::MAX) + 1;
+    let maximum = usize::from(u16::MAX);
+
+    assert_wire_count_overflow(
+        &KadPacket::BootstrapRes(BootstrapRes {
+            sender_id: NodeId::ZERO,
+            sender_tcp_port: 4662,
+            sender_version: 9,
+            contacts: vec![boundary_contact(); actual],
+        }),
+        "BootstrapRes.contacts",
+        maximum,
+        actual,
+    );
+
+    let results = vec![boundary_search_result(Vec::new()); actual];
+    assert_wire_count_overflow(
+        &KadPacket::SearchRes(SearchRes {
+            sender_id: NodeId::ZERO,
+            target: NodeId::ZERO,
+            results: results.clone(),
+        }),
+        "SearchRes.results",
+        maximum,
+        actual,
+    );
+    assert_wire_count_overflow(
+        &KadPacket::LegacySearchRes(LegacySearchRes {
+            target: NodeId::ZERO,
+            results,
+        }),
+        "LegacySearchRes.results",
+        maximum,
+        actual,
+    );
+    assert_wire_count_overflow(
+        &KadPacket::PublishKeyReq(PublishKeyReq {
+            target: NodeId::ZERO,
+            entries: vec![boundary_publish_entry(Vec::new()); actual],
+        }),
+        "PublishKeyReq.entries",
+        maximum,
+        actual,
+    );
+}
+
+#[test]
+fn constructible_count_boundaries_never_panic() {
+    for count in [0, 1, 254, 255, 256, 257] {
+        let packet = KadPacket::HelloReq(HelloReq {
+            node_id: NodeId::ZERO,
+            tcp_port: 4662,
+            version: 9,
+            tags: vec![boundary_tag(); count],
+        });
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| packet.encode()));
+        assert!(outcome.is_ok(), "u8 boundary count {count} panicked");
+    }
+
+    for count in [0, 1, 65_534, 65_535, 65_536, 65_537] {
+        let packet = KadPacket::SearchRes(SearchRes {
+            sender_id: NodeId::ZERO,
+            target: NodeId::ZERO,
+            results: vec![boundary_search_result(Vec::new()); count],
+        });
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| packet.encode()));
+        assert!(outcome.is_ok(), "u16 boundary count {count} panicked");
+    }
+}
+
 #[test]
 fn test_ping_roundtrip() {
     let pkt = KadPacket::Ping;

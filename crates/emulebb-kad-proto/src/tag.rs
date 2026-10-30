@@ -4,7 +4,7 @@ use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian};
 use encoding_rs::WINDOWS_1252;
 
 use crate::constants::tag_name;
-use crate::error::ProtoError;
+use crate::error::{ProtoError, wire_count_u8, wire_count_u16};
 use crate::hash::Ed2kHash;
 
 /// Kad tag-name representation.
@@ -132,6 +132,28 @@ impl Tag {
             name: TagName::Long(name.into()),
             value,
         }
+    }
+
+    pub(crate) fn validate_wire_counts(&self) -> Result<(), ProtoError> {
+        if let TagName::Long(name) = &self.name {
+            wire_count_u16("Tag.name", name.len())?;
+        }
+        match &self.value {
+            TagValue::String(value) => {
+                wire_count_u16("Tag.string", value.len())?;
+            }
+            TagValue::SmallBlob(value) => {
+                wire_count_u8("Tag.small_blob", value.len())?;
+            }
+            TagValue::Hash(_)
+            | TagValue::UInt(_)
+            | TagValue::U64(_)
+            | TagValue::U32(_)
+            | TagValue::U16(_)
+            | TagValue::U8(_)
+            | TagValue::Float(_) => {}
+        }
+        Ok(())
     }
 
     /// Create a `FILENAME` tag.
@@ -304,6 +326,13 @@ impl BinWrite for Tag {
         endian: Endian,
         _args: (),
     ) -> BinResult<()> {
+        if let Err(error) = self.validate_wire_counts() {
+            return Err(binrw::Error::Custom {
+                pos: writer.stream_position().unwrap_or(0),
+                err: Box::new(error),
+            });
+        }
+
         // Kad tags always encode the tag name as a u16 length followed by the
         // raw bytes. eMule does not use the eD2k short-name marker bit here.
         let type_byte: u8 = value_type_byte(&self.value);
@@ -318,7 +347,12 @@ impl BinWrite for Tag {
             }
             TagName::Long(s) => {
                 let bytes = s.as_bytes();
-                let len = u16::try_from(bytes.len()).expect("tag name length exceeds u16");
+                let len = wire_count_u16("Tag.name", bytes.len()).map_err(|error| {
+                    binrw::Error::Custom {
+                        pos: writer.stream_position().unwrap_or(0),
+                        err: Box::new(error),
+                    }
+                })?;
                 writer.write_type(&len, endian)?;
                 writer.write_all(bytes).map_err(binrw::Error::Io)?;
             }
@@ -330,17 +364,22 @@ impl BinWrite for Tag {
             }
             TagValue::String(s) => {
                 let bytes = s.as_bytes();
-                let len = u16::try_from(bytes.len()).expect("string tag length exceeds u16");
+                let len = wire_count_u16("Tag.string", bytes.len()).map_err(|error| {
+                    binrw::Error::Custom {
+                        pos: writer.stream_position().unwrap_or(0),
+                        err: Box::new(error),
+                    }
+                })?;
                 writer.write_type(&len, endian)?;
                 writer.write_all(bytes).map_err(binrw::Error::Io)?;
             }
             TagValue::UInt(v) => {
-                if *v <= u64::from(u8::MAX) {
-                    writer.write_type(&u8::try_from(*v).expect("value fits into u8"), endian)?;
-                } else if *v <= u64::from(u16::MAX) {
-                    writer.write_type(&u16::try_from(*v).expect("value fits into u16"), endian)?;
-                } else if *v <= u64::from(u32::MAX) {
-                    writer.write_type(&u32::try_from(*v).expect("value fits into u32"), endian)?;
+                if let Ok(value) = u8::try_from(*v) {
+                    writer.write_type(&value, endian)?;
+                } else if let Ok(value) = u16::try_from(*v) {
+                    writer.write_type(&value, endian)?;
+                } else if let Ok(value) = u32::try_from(*v) {
+                    writer.write_type(&value, endian)?;
                 } else {
                     writer.write_type(v, endian)?;
                 }
@@ -352,7 +391,12 @@ impl BinWrite for Tag {
                 writer.write_type(v, endian)?;
             }
             TagValue::SmallBlob(data) => {
-                let len = u8::try_from(data.len()).expect("small blob tag length exceeds Kad BSOB");
+                let len = wire_count_u8("Tag.small_blob", data.len()).map_err(|error| {
+                    binrw::Error::Custom {
+                        pos: writer.stream_position().unwrap_or(0),
+                        err: Box::new(error),
+                    }
+                })?;
                 writer.write_type(&len, endian)?;
                 writer.write_all(data).map_err(binrw::Error::Io)?;
             }
@@ -474,6 +518,82 @@ mod tests {
         let mut cursor = Cursor::new(bytes);
         let decoded = Tag::read_le(&mut cursor).unwrap();
         assert_eq!(decoded, t);
+    }
+
+    fn assert_tag_wire_count_overflow(
+        tag: &Tag,
+        expected_field: &'static str,
+        expected_maximum: usize,
+        expected_actual: usize,
+    ) {
+        let mut buffer = Cursor::new(Vec::new());
+        let error = tag
+            .write_le(&mut buffer)
+            .map_err(ProtoError::from)
+            .expect_err("oversized tag field must fail");
+        assert!(
+            matches!(
+                error,
+                ProtoError::WireCountOverflow {
+                    field,
+                    maximum,
+                    actual,
+                } if field == expected_field
+                    && maximum == expected_maximum
+                    && actual == expected_actual
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            buffer.into_inner().is_empty(),
+            "preflight wrote partial bytes"
+        );
+    }
+
+    #[test]
+    fn tag_collection_lengths_accept_stock_maximums() {
+        let long_name = Tag::new_long("n".repeat(usize::from(u16::MAX)), TagValue::U8(1));
+        let mut buffer = Cursor::new(Vec::new());
+        long_name.write_le(&mut buffer).expect("maximum tag name");
+        assert_eq!(&buffer.get_ref()[1..3], &u16::MAX.to_le_bytes());
+
+        let string = Tag::new_short(0x01, TagValue::String("v".repeat(usize::from(u16::MAX))));
+        let mut buffer = Cursor::new(Vec::new());
+        string.write_le(&mut buffer).expect("maximum string tag");
+        assert_eq!(&buffer.get_ref()[4..6], &u16::MAX.to_le_bytes());
+
+        let blob = Tag::new_short(0x01, TagValue::SmallBlob(vec![0xAA; usize::from(u8::MAX)]));
+        let mut buffer = Cursor::new(Vec::new());
+        blob.write_le(&mut buffer).expect("maximum small blob tag");
+        assert_eq!(buffer.get_ref()[4], u8::MAX);
+    }
+
+    #[test]
+    fn tag_collection_lengths_reject_stock_maximum_plus_one() {
+        assert_tag_wire_count_overflow(
+            &Tag::new_long("n".repeat(usize::from(u16::MAX) + 1), TagValue::U8(1)),
+            "Tag.name",
+            usize::from(u16::MAX),
+            usize::from(u16::MAX) + 1,
+        );
+        assert_tag_wire_count_overflow(
+            &Tag::new_short(
+                0x01,
+                TagValue::String("v".repeat(usize::from(u16::MAX) + 1)),
+            ),
+            "Tag.string",
+            usize::from(u16::MAX),
+            usize::from(u16::MAX) + 1,
+        );
+        assert_tag_wire_count_overflow(
+            &Tag::new_short(
+                0x01,
+                TagValue::SmallBlob(vec![0xAA; usize::from(u8::MAX) + 1]),
+            ),
+            "Tag.small_blob",
+            usize::from(u8::MAX),
+            usize::from(u8::MAX) + 1,
+        );
     }
 
     #[test]
