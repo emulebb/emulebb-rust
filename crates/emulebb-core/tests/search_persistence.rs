@@ -1,11 +1,21 @@
 use std::{
     fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use emulebb_core::{EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate};
-use emulebb_index::{FileIndex, IndexedFile};
+use emulebb_core::{
+    Ed2kNetworkConfig, EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate,
+    VpnGuardConfig,
+};
+use emulebb_ed2k::{
+    NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter,
+};
+use emulebb_index::{
+    FileIndex, IndexedFile, IndexedFileOrigin, KadLocalStoreConfig, SnoopQueueConfig,
+};
 
 #[tokio::test]
 async fn search_state_survives_core_restart_and_downloads_result() {
@@ -14,16 +24,17 @@ async fn search_state_survives_core_restart_and_downloads_result() {
     let metadata_path = runtime_dir.join("metadata.sqlite");
 
     let (search_id, file_hash) = {
+        seed_passive_file(
+            &metadata_path,
+            IndexedFile {
+                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+                name: "Sample Search Payload.bin".to_string(),
+                size_bytes: 1234,
+                content_type: "archive".to_string(),
+                availability_score: 7,
+            },
+        );
         let core = open_core(&metadata_path, &transfer_root);
-        core.index_file(IndexedFile {
-            ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: "Sample Search Payload.bin".to_string(),
-            size_bytes: 1234,
-            content_type: "archive".to_string(),
-            availability_score: 7,
-        })
-        .await
-        .unwrap();
         let search = core
             .create_search(SearchCreate {
                 query: "sample payload".to_string(),
@@ -91,24 +102,6 @@ async fn search_delete_and_clear_survive_core_restart() {
 
     let deleted_search_id = {
         let core = open_core(&metadata_path, &transfer_root);
-        core.index_file(IndexedFile {
-            ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: "Sample Alpha.bin".to_string(),
-            size_bytes: 10,
-            content_type: "archive".to_string(),
-            availability_score: 1,
-        })
-        .await
-        .unwrap();
-        core.index_file(IndexedFile {
-            ed2k_hash: "11223344556677889900aabbccddeeff".to_string(),
-            name: "Sample Beta.bin".to_string(),
-            size_bytes: 20,
-            content_type: "archive".to_string(),
-            availability_score: 1,
-        })
-        .await
-        .unwrap();
         let first = core
             .create_search(SearchCreate {
                 query: "alpha".to_string(),
@@ -140,22 +133,21 @@ async fn search_delete_and_clear_survive_core_restart() {
 }
 
 #[tokio::test]
-async fn shared_local_file_is_searchable_after_core_restart() {
+async fn shared_local_file_is_not_surfaced_by_network_search_after_core_restart() {
     let runtime_dir = unique_test_dir("shared-file-search-index");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
     let payload_path = runtime_dir.join("Local.Searchable.Payload.bin");
     fs::write(&payload_path, b"shared searchable payload").unwrap();
 
-    let share_hash = {
+    {
         let core = open_core(&metadata_path, &transfer_root);
-        let share = core
-            .share_local_file(LocalShareCreate {
-                path: payload_path.display().to_string(),
-                name: Some("Local.Searchable.Payload.bin".to_string()),
-            })
-            .await
-            .unwrap();
+        core.share_local_file(LocalShareCreate {
+            path: payload_path.display().to_string(),
+            name: Some("Local.Searchable.Payload.bin".to_string()),
+        })
+        .await
+        .unwrap();
         let search = core
             .create_search(SearchCreate {
                 query: "searchable payload".to_string(),
@@ -165,10 +157,8 @@ async fn shared_local_file_is_searchable_after_core_restart() {
             })
             .await
             .unwrap();
-        assert_eq!(search.results.len(), 1);
-        assert_eq!(search.results[0].hash, share.hash);
-        share.hash
-    };
+        assert!(search.results.is_empty());
+    }
 
     let reloaded = open_core(&metadata_path, &transfer_root);
     let search = reloaded
@@ -180,17 +170,63 @@ async fn shared_local_file_is_searchable_after_core_restart() {
         })
         .await
         .unwrap();
-    assert_eq!(search.results.len(), 1);
-    assert_eq!(search.results[0].hash, share_hash);
+    assert!(search.results.is_empty());
 }
 
 fn open_core(metadata_path: &Path, transfer_root: &Path) -> EmulebbCore {
-    EmulebbCore::new(
+    EmulebbCore::new_with_network(
         "test",
         FileIndex::open(metadata_path).unwrap(),
         transfer_root,
+        Some(test_network_config(transfer_root)),
     )
     .unwrap()
+}
+
+fn seed_passive_file(metadata_path: &Path, file: IndexedFile) {
+    FileIndex::open(metadata_path)
+        .unwrap()
+        .upsert_file(&file, IndexedFileOrigin::PassiveCache)
+        .unwrap();
+}
+
+fn test_network_config(runtime_dir: &Path) -> Ed2kNetworkConfig {
+    let bind_ip = Ipv4Addr::new(198, 51, 100, 10);
+    Ed2kNetworkConfig {
+        bind_ip,
+        kad_bind_addr: SocketAddr::new(IpAddr::V4(bind_ip), 4665),
+        listen_port: 4662,
+        user_hash: [0x44; 16],
+        secure_ident: Arc::new(
+            Ed2kSecureIdent::load_or_create(&runtime_dir.join("secure-ident.der")).unwrap(),
+        ),
+        kad_local_store: KadLocalStoreConfig::default(),
+        kad_snoop_queue: SnoopQueueConfig::default(),
+        kad_passive_replay_enabled: true,
+        kad_nodes_dat: None,
+        kad_nodes_dat_path: None,
+        kad_bootstrap_endpoints: Vec::new(),
+        kad_bootstrap_min_routing_contacts: 10,
+        kad_publish_shared_files: true,
+        kad_republish_interval_secs: 1_800,
+        kad_publish_contact_fanout: 4,
+        kad_routing_maintenance_enabled: true,
+        kad_udp_firewall_check_enabled: true,
+        kad_udp_firewall_check_interval_secs: 600,
+        kad_tcp_firewall_check_enabled: true,
+        kad_tcp_firewall_check_interval_secs: 600,
+        kad_buddy_enabled: true,
+        nat_config: NatConfig::default(),
+        ed2k: Ed2kRuntimeConfig::default(),
+        p2p_bind_ip: Some(bind_ip),
+        p2p_bind_interface: None,
+        vpn_guard: VpnGuardConfig::default(),
+        vpn_interface_bound: false,
+        vpn_interface_bound_runtime: None,
+        ip_filter: IpFilter::default(),
+        ip_filter_path: None,
+        ip_filter_level: emulebb_ed2k::ipfilter::DEFAULT_FILTER_LEVEL,
+    }
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {

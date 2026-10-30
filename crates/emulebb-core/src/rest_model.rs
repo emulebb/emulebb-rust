@@ -553,6 +553,17 @@ impl SearchResult {
         self.recompute_observation_aggregate();
     }
 
+    pub(crate) fn remove_observation_origin(&mut self, origin: &str) -> bool {
+        self.ensure_aggregate_observation();
+        self.observations
+            .retain(|observation| observation.origin != origin);
+        if self.observations.is_empty() {
+            return false;
+        }
+        self.recompute_observation_aggregate();
+        true
+    }
+
     fn ensure_aggregate_observation(&mut self) {
         if !self.observations.is_empty() {
             return;

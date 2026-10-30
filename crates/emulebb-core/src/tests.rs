@@ -1,5 +1,5 @@
 use emulebb_ed2k::{NatConfig, ipfilter::IpFilter};
-use emulebb_index::IndexedFile;
+use emulebb_index::{IndexedFile, IndexedFileOrigin};
 use emulebb_kad_proto::{NodeId, Tag, TagValue};
 use md4::{Digest, Md4};
 
