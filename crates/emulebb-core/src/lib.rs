@@ -39,11 +39,11 @@ use emulebb_ed2k::{
     },
     ed2k_tcp::{
         Ed2kCallbackSessionHandle, Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile,
-        Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport, Ed2kSecureIdent,
-        HelloBuddySnapshot, OutboundBuddyLinkOptions, download_files_from_peer,
-        ed2k_callback_session_channel, emule_connect_options, encode_kad_callback_relay_frame,
-        run_ed2k_listener, run_outbound_buddy_link, set_hello_buddy_snapshot,
-        set_publish_rust_identity,
+        Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport,
+        Ed2kPeerUploadContext, Ed2kSecureIdent, HelloBuddySnapshot, OutboundBuddyLinkOptions,
+        download_files_from_peer, ed2k_callback_session_channel, emule_connect_options,
+        encode_kad_callback_relay_frame, run_ed2k_listener, run_outbound_buddy_link,
+        set_hello_buddy_snapshot, set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackDownload,
@@ -1673,6 +1673,13 @@ impl EmulebbCore {
             }
 
             if acquired_direct_source_count != 0 {
+                let upload_context = {
+                    let runtime = self.ed2k_runtime.lock().await;
+                    runtime.as_ref().map(|runtime| Ed2kPeerUploadContext {
+                        server_state: Arc::clone(&runtime.server_state),
+                        kad_firewall: Arc::clone(&runtime.kad_firewall),
+                    })
+                };
                 let source_exchange_source_count = {
                     let mut state = self.state.lock().await;
                     let now = Instant::now();
@@ -1715,6 +1722,7 @@ impl EmulebbCore {
                           connect_timeout| {
                         let reask_register = reask_register.clone();
                         let a4af_alternates = Arc::clone(&a4af_alternates);
+                        let upload_context = upload_context.clone();
                         async move {
                             let alternate_files = a4af_alternates
                                 .get(&source_endpoint_key(&source))
@@ -1731,6 +1739,7 @@ impl EmulebbCore {
                                     file_size,
                                     current_source_count: source_exchange_source_count,
                                     timeout: connect_timeout,
+                                    upload_context,
                                     reask_register,
                                 },
                                 alternate_files,

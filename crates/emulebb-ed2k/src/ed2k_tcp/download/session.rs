@@ -16,8 +16,8 @@ use crate::{
 
 use super::super::{
     DecodedEmuleInfoProfile, Ed2kFileIdentifier, Ed2kHelloIdentity, Ed2kPeerDispatcher,
-    Ed2kSecureIdent, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHREQUEST,
-    OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
+    Ed2kPeerUploadContext, Ed2kSecureIdent, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS,
+    OP_AICHREQUEST, OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
     OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR,
     OP_ASKSHAREDFILESDIRANS, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER,
     OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_COMPRESSEDPART,
@@ -28,8 +28,8 @@ use super::super::{
     OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK,
     OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQFILENAMEANSWER, OP_REQUESTPREVIEW,
     OP_SECIDENTSTATE, OP_SENDINGPART, OP_SENDINGPART_I64, OP_SETREQFILEID, OP_SIGNATURE,
-    SourceExchangePeer, begin_secure_ident_probe, build_hello_responses,
-    decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
+    PeerUploadDispatch, PeerUploadFacet, SourceExchangePeer, begin_secure_ident_probe,
+    build_hello_responses, decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
     decode_aich_recovery_request_payload, decode_answer_sources_payload,
     decode_answer_sources2_payload, decode_client_id_change_payload, decode_client_message_payload,
     decode_edonkey_queue_rank_payload, decode_emule_info_profile,
@@ -231,6 +231,8 @@ pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
     /// Mutable connection-scoped profile reused across A4AF file sessions.
     /// `None` retains the callback/test compatibility initialization above.
     pub(in crate::ed2k_tcp) connection_state: Option<&'a mut DownloadConnectionState>,
+    pub(in crate::ed2k_tcp) upload_facet: Option<&'a mut PeerUploadFacet>,
+    pub(in crate::ed2k_tcp) upload_context: Option<&'a Ed2kPeerUploadContext>,
     /// When set (UDP reask enabled), a queued + UDP-eligible source detaches its TCP
     /// socket onto UDP reask via this handle. `None` keeps the legacy TCP-only path.
     pub(in crate::ed2k_tcp) reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
@@ -256,6 +258,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         peer_connect_options,
         reask_register,
         connection_state,
+        mut upload_facet,
+        upload_context,
     } = options;
     const QUEUE_RANK_GRACE: Duration = Duration::from_secs(75);
     const PART_RESPONSE_GRACE: Duration = Duration::from_secs(75);
@@ -361,13 +365,19 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 None
             };
             let now = tokio::time::Instant::now();
-            let read_timeout = next_download_read_timeout(
+            let download_read_timeout = next_download_read_timeout(
                 now,
                 timeout,
                 fallback_poll_delay,
                 session_state.queued_until,
                 session_state.part_response_deadline,
             );
+            let read_timeout = upload_facet
+                .as_deref()
+                .and_then(PeerUploadFacet::read_timeout)
+                .map_or(download_read_timeout, |upload_timeout| {
+                    download_read_timeout.min(upload_timeout)
+                });
             let packet = match tokio::time::timeout(
                 read_timeout,
                 transport.read_packet_diagnostic("native_download", peer_addr, "session"),
@@ -413,6 +423,14 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         .with_context(|| format!("failed to read eD2k packet from {peer_addr}"));
                 }
                 Err(_) => {
+                    if let Some(upload_facet) = upload_facet.as_deref_mut() {
+                        upload_facet
+                            .poll_on_timeout(transfer_runtime, transport, peer_addr)
+                            .await?;
+                    }
+                    if read_timeout < download_read_timeout {
+                        continue;
+                    }
                     if fallback_poll_delay.is_some() {
                         continue;
                     }
@@ -464,9 +482,52 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     anyhow::bail!("timed out waiting for ED2K peer packet from {peer_addr}");
                 }
             };
+            let upload_dispatch = if let Some(upload_facet) = upload_facet.as_deref_mut() {
+                upload_facet.note_packet();
+                upload_facet
+                    .handle_packet(
+                        transfer_runtime,
+                        upload_context,
+                        session_state.peer_secure_ident.peer_ident_verified,
+                        transport,
+                        peer_addr,
+                        &packet,
+                    )
+                    .await?
+            } else {
+                PeerUploadDispatch::Unhandled
+            };
+            match upload_dispatch {
+                PeerUploadDispatch::Unhandled | PeerUploadDispatch::ContinueDispatch => {}
+                PeerUploadDispatch::Handled => continue,
+                PeerUploadDispatch::ClosePeer => {
+                    if session_state.hello_complete {
+                        return Ok(incomplete_or_detached_queued_source(
+                            &reask_register,
+                            peer_addr,
+                            file_hash,
+                            &session_state,
+                            transport.mode.is_obfuscated(),
+                        ));
+                    }
+                    anyhow::bail!("upload abuse closed eD2k peer {peer_addr}");
+                }
+            }
             match (packet.protocol, packet.opcode) {
                 (OP_EDONKEYPROT, OP_HELLO) => {
                     let hello_profile = decode_hello_profile(&packet.payload)?;
+                    if let Some(upload_facet) = upload_facet.as_deref_mut()
+                        && !upload_facet
+                            .bind_hello(
+                                transfer_runtime,
+                                peer_addr,
+                                transport.mode.is_obfuscated(),
+                                &hello_profile,
+                            )
+                            .await
+                    {
+                        anyhow::bail!("rejected eD2k HELLO identity from {peer_addr}");
+                    }
                     if let Some(software) = &hello_profile.client_software {
                         transfer_runtime.note_download_source_software(
                             file_hash_hex,
@@ -542,6 +603,18 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EDONKEYPROT, OP_HELLOANSWER) => {
                     let hello_profile = decode_hello_answer_profile(&packet.payload)?;
+                    if let Some(upload_facet) = upload_facet.as_deref_mut()
+                        && !upload_facet
+                            .bind_hello(
+                                transfer_runtime,
+                                peer_addr,
+                                transport.mode.is_obfuscated(),
+                                &hello_profile,
+                            )
+                            .await
+                    {
+                        anyhow::bail!("rejected eD2k HELLOANSWER identity from {peer_addr}");
+                    }
                     if let Some(software) = &hello_profile.client_software {
                         transfer_runtime.note_download_source_software(
                             file_hash_hex,
@@ -662,6 +735,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EMULEPROT, OP_EMULEINFO) => {
                     let emule_info_profile = decode_emule_info_profile(&packet.payload)?;
+                    if let Some(upload_facet) = upload_facet.as_deref_mut() {
+                        upload_facet
+                            .apply_emule_info(transfer_runtime, &emule_info_profile)
+                            .await;
+                    }
                     apply_emule_info_profile(&mut session_state, emule_info_profile);
                     transport
                         .write_all_diagnostic(
@@ -677,6 +755,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EMULEPROT, OP_EMULEINFOANSWER) => {
                     let emule_info_profile = decode_emule_info_profile(&packet.payload)?;
+                    if let Some(upload_facet) = upload_facet.as_deref_mut() {
+                        upload_facet
+                            .apply_emule_info(transfer_runtime, &emule_info_profile)
+                            .await;
+                    }
                     apply_emule_info_profile(&mut session_state, emule_info_profile);
                 }
                 (OP_EMULEPROT, OP_SECIDENTSTATE) => {

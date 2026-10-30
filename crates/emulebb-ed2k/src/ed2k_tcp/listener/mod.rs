@@ -26,7 +26,7 @@ use crate::{
 use super::{Ed2kHelloIdentity, Ed2kSecureIdent};
 
 mod callback;
-mod session;
+pub(in crate::ed2k_tcp) mod session;
 
 pub use callback::{
     Ed2kCallbackDispatchError, Ed2kCallbackSessionHandle, Ed2kCallbackSessionInbox,
