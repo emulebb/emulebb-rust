@@ -677,7 +677,7 @@ async fn finish_unavailable_invalidated_source(
     match stale_hash_is_still_present(core, &invalidation.file_hash).await {
         Ok(true) => TargetedRehashOutcome::Complete,
         Ok(false) => {
-            forget_stale_shares(core, &[invalidation.file_hash.clone()], "").await;
+            forget_stale_shares(core, std::slice::from_ref(&invalidation.file_hash), "").await;
             TargetedRehashOutcome::Complete
         }
         Err(error) => TargetedRehashOutcome::Retry(error),
