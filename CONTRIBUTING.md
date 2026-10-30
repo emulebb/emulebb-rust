@@ -6,9 +6,9 @@ behavior, and keep the embedded SPA WebUI, REST contract, and tests aligned.
 
 ## Change Policy
 
-The public beta remains experimental, but the former pre-release freeze has
-ended. Every actionable change still needs a stable work-item ID and a public
-issue on the [eMuleBB Roadmap](https://github.com/orgs/emulebb/projects/3)
+The public beta remains compatibility-unstable, but the former pre-release
+freeze has ended. Every actionable change still needs a stable work-item ID and
+a public issue on the [eMuleBB Roadmap](https://github.com/orgs/emulebb/projects/3)
 before implementation. Keep each commit to one coherent change and include the
 stable ID in its subject.
 
