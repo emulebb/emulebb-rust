@@ -77,6 +77,7 @@ async fn test_search_res_uses_higher_flood_budget() {
         target: NodeId::from_bytes([0x55; 16]),
         results: Vec::new(),
     });
+    let _registration = rpc.register_search_response(NodeId::from_bytes([0x55; 16]), peer_addr);
     let encoded = packet.encode().unwrap();
 
     for _ in 0..40usize {

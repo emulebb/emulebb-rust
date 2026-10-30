@@ -21,7 +21,7 @@ pub use rate_limit::RateLimiter;
 pub use rpc::{
     ForeignDatagramHandler, ReceivedKadPacket, RpcClassBudgetConfig, RpcConfig, RpcManager,
     RpcObservabilitySnapshot, RpcResponseOpcodeSnapshot, RpcTrackerBucketSnapshot, RpcWorkClass,
-    RpcWorkClassSnapshot,
+    RpcWorkClassSnapshot, SearchResponseRegistration,
 };
 pub use tracker::PacketTracker;
 pub use transport::{MockTransport, Transport, UdpTransport};

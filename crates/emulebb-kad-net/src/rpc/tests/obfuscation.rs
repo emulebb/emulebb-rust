@@ -144,9 +144,11 @@ async fn test_lookup_search_response_does_not_teach_receiver_verify_key() {
     peer_obfuscation.register_peer_version(local_addr, 8);
     peer_obfuscation.register_peer_key(local_addr, rpc.verify_key_for_ip(peer_ip));
 
+    let target = NodeId::from_bytes([0x55; 16]);
+    let _registration = rpc.register_search_response(target, peer_addr);
     let search_res = KadPacket::SearchRes(emulebb_kad_proto::SearchRes {
         sender_id: peer_node_id,
-        target: NodeId::from_bytes([0x55; 16]),
+        target,
         results: Vec::new(),
     });
     let encrypted_search_res = peer_obfuscation.encrypt(

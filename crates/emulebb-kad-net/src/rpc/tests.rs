@@ -7,6 +7,7 @@ mod flood_observability;
 mod foreign_datagram;
 mod obfuscation;
 mod request_response;
+mod search_response_correlation;
 mod unsolicited;
 
 fn make_local_addr() -> SocketAddr {

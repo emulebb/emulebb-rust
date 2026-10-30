@@ -11,6 +11,7 @@ mod outbound;
 mod packet_info;
 mod peer_state;
 mod receive_loop;
+mod search_response_registry;
 
 pub use config::{MassiveFloodHandler, RpcClassBudgetConfig, RpcConfig, RpcWorkClass};
 use observability::RpcObservabilityState;
@@ -18,6 +19,7 @@ pub use observability::{
     RpcObservabilitySnapshot, RpcResponseOpcodeSnapshot, RpcTrackerBucketSnapshot,
     RpcWorkClassSnapshot,
 };
+pub use search_response_registry::SearchResponseRegistration;
 
 use crate::obfuscation::ObfuscationLayer;
 use crate::rate_limit::RateLimiter;
@@ -88,6 +90,7 @@ struct RpcInner {
     tracker: Mutex<PacketTracker>,
     outbound_tracker: Mutex<OutboundRequestTracker>,
     pending: Mutex<HashMap<u64, PendingEntry>>,
+    search_response_registry: search_response_registry::SearchResponseRegistry,
     next_id: AtomicU64,
     unsolicited_tx: broadcast::Sender<ReceivedKadPacket>,
     observability: Mutex<RpcObservabilityState>,
@@ -150,6 +153,7 @@ impl RpcManager {
             )),
             outbound_tracker: Mutex::new(OutboundRequestTracker::new(Duration::from_secs(180))),
             pending: Mutex::new(HashMap::new()),
+            search_response_registry: search_response_registry::SearchResponseRegistry::default(),
             next_id: AtomicU64::new(0),
             unsolicited_tx,
             observability: Mutex::new(RpcObservabilityState::default()),
