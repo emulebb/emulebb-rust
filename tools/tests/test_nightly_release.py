@@ -182,10 +182,13 @@ class TestNightlyNotes(unittest.TestCase):
         self.assertIn("## Fixed", rendered)
         self.assertIn("## Changed", rendered)
         self.assertIn("## Engineering", rendered)
+        self.assertIn("Automated nightly beta from `main`", rendered)
+        self.assertIn("not a formal beta release", rendered)
         self.assertIn("Metadata schema: `25` (changed from `24`", rendered)
         self.assertIn("Profile schema status: incompatible", rendered)
         self.assertIn("does not migrate, repair, or reset", rendered)
         self.assertIn("compare/rust-v0.1.0-beta.2...", rendered)
+        self.assertNotIn("experimental", rendered)
 
     def test_unchanged_schema_is_explicit(self) -> None:
         rendered = NIGHTLY.render_notes(
@@ -199,7 +202,9 @@ class TestNightlyNotes(unittest.TestCase):
 
         self.assertIn("Metadata schema: `25` (unchanged", rendered)
         self.assertIn("Profile schema status: unchanged", rendered)
+        self.assertIn("testing this nightly beta", rendered)
         self.assertNotIn("incompatible with the previous build", rendered)
+        self.assertNotIn("experimental", rendered)
 
 
 class TestNightlyGatesAndRetention(unittest.TestCase):
