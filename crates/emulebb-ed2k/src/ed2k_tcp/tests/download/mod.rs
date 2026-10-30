@@ -1,6 +1,7 @@
 use super::*;
 mod aich_recovery;
 mod anti_abuse;
+mod duplex_upload;
 mod frame_compressed;
 mod frame_sending_part;
 mod hashset_fallback;

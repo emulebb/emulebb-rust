@@ -11,8 +11,9 @@ use crate::ed2k_server::Ed2kFoundSource;
 use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job};
 
 use super::super::{
-    Ed2kHelloIdentity, Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher, Ed2kSecureIdent,
-    Ed2kTransport, dump_ed2k_tcp_download_meta, encode_hello_request,
+    Ed2kHelloIdentity, Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher, Ed2kPeerUploadContext,
+    Ed2kSecureIdent, Ed2kTransport, PeerUploadFacet, dump_ed2k_tcp_download_meta,
+    encode_hello_request,
 };
 use super::session::{
     DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
@@ -46,6 +47,10 @@ pub struct Ed2kPeerDownloadOptions<'a> {
     pub file_size: u64,
     pub current_source_count: usize,
     pub timeout: Duration,
+    /// Live server/Kad posture used when this outbound-established connection
+    /// also receives upload requests. Production callers should always supply
+    /// it; protocol tests may omit it when LowID admission is irrelevant.
+    pub upload_context: Option<Ed2kPeerUploadContext>,
     /// When set (UDP reask enabled), a queued + UDP-eligible source detaches onto
     /// UDP reask via this handle. `None` keeps the legacy TCP-only queued path.
     pub reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
@@ -114,6 +119,7 @@ pub async fn download_files_from_peer(
         file_size,
         current_source_count,
         timeout,
+        upload_context,
         reask_register,
     } = options;
     let first_file_hash = peer.file_hash;
@@ -175,6 +181,7 @@ pub async fn download_files_from_peer(
             peer_addr,
             Ed2kPeerConnectionOrigin::OutboundEstablished,
         );
+        let mut upload_facet = PeerUploadFacet::new(peer_addr, transport.mode.is_obfuscated());
         let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
         dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "connect_ready", || {
             format!("file_hash={first_file_hash_hex}")
@@ -229,6 +236,8 @@ pub async fn download_files_from_peer(
                 peer_user_hash: peer.user_hash,
                 peer_connect_options: peer.obfuscation_options,
                 connection_state: Some(&mut connection_state),
+                upload_facet: Some(&mut upload_facet),
+                upload_context: upload_context.as_ref(),
                 reask_register: reask_register.clone(),
             })
             .await;
@@ -284,13 +293,17 @@ pub async fn download_files_from_peer(
                         break;
                     }
                 }
-                Err(error) if report.file_outcomes.is_empty() => return Err(error),
+                Err(error) if report.file_outcomes.is_empty() => {
+                    upload_facet.release(transfer_runtime).await;
+                    return Err(error);
+                }
                 Err(error) => {
                     report.terminal_error = Some(error.to_string());
                     break;
                 }
             }
         }
+        upload_facet.release(transfer_runtime).await;
         Ok(report)
     }
     .await

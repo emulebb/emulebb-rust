@@ -67,9 +67,9 @@ use super::super::{
 mod browse;
 mod notify;
 mod secure_ident;
-mod shared_file;
-mod upload_payload;
-mod upload_queue;
+pub(in crate::ed2k_tcp) mod shared_file;
+pub(in crate::ed2k_tcp) mod upload_payload;
+pub(in crate::ed2k_tcp) mod upload_queue;
 
 use shared_file::{
     SourceExchangeResponseThrottle, handle_aich_file_hash_request, handle_hashset_request,
@@ -678,6 +678,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             peer_user_hash: Some(hello_profile.identity.user_hash),
                             peer_connect_options: Some(hello_profile.connect_options),
                             connection_state: Some(&mut connection_state),
+                            upload_facet: None,
+                            upload_context: None,
                             // Inbound callback downloads stay on TCP; UDP-reask detach
                             // is driven only from the outbound download driver.
                             reask_register: None,
@@ -1527,7 +1529,9 @@ fn callback_hello_identity(
     }
 }
 
-fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIdentity {
+pub(in crate::ed2k_tcp) fn upload_peer_identity_from_socket(
+    peer_addr: SocketAddr,
+) -> Ed2kUploadPeerIdentity {
     Ed2kUploadPeerIdentity {
         ip: peer_addr.ip(),
         tcp_port: peer_addr.port(),
@@ -1595,14 +1599,14 @@ fn upload_peer_identity_from_hello(
     }
 }
 
-struct PeerHelloStateRefs<'a> {
-    bound_user_hash: &'a mut Option<[u8; 16]>,
-    supports_aich: &'a mut bool,
-    supports_secure_ident: &'a mut bool,
-    supports_file_identifiers: &'a mut bool,
-    supports_unicode: &'a mut bool,
-    accept_comment_version: &'a mut u8,
-    upload_identity: &'a mut Ed2kUploadPeerIdentity,
+pub(in crate::ed2k_tcp) struct PeerHelloStateRefs<'a> {
+    pub(in crate::ed2k_tcp) bound_user_hash: &'a mut Option<[u8; 16]>,
+    pub(in crate::ed2k_tcp) supports_aich: &'a mut bool,
+    pub(in crate::ed2k_tcp) supports_secure_ident: &'a mut bool,
+    pub(in crate::ed2k_tcp) supports_file_identifiers: &'a mut bool,
+    pub(in crate::ed2k_tcp) supports_unicode: &'a mut bool,
+    pub(in crate::ed2k_tcp) accept_comment_version: &'a mut u8,
+    pub(in crate::ed2k_tcp) upload_identity: &'a mut Ed2kUploadPeerIdentity,
 }
 
 /// Bind one decoded HELLO or HELLOANSWER to the live peer session.
@@ -1611,7 +1615,7 @@ struct PeerHelloStateRefs<'a> {
 /// both packet forms carry the same identity and capability state. Keeping the
 /// binding here prevents an outbound session from serving with socket-only
 /// identity while the inbound path uses the decoded peer profile.
-fn apply_peer_hello_profile(
+pub(in crate::ed2k_tcp) fn apply_peer_hello_profile(
     state: PeerHelloStateRefs<'_>,
     transfer_runtime: &Ed2kTransferRuntime,
     peer_addr: SocketAddr,
@@ -1766,7 +1770,7 @@ async fn enrich_hello_identity(
 /// `theApp.IsFirewalled()` (server-assigned LowID or a Kad TCP-firewalled
 /// verdict). `peer_on_same_server` compares the peer's HELLO server provenance
 /// with the endpoint of our established server session (`IsLocalServer`).
-async fn upload_firewall_context(
+pub(in crate::ed2k_tcp) async fn upload_firewall_context(
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
     peer_server_endpoint: Option<SocketAddr>,

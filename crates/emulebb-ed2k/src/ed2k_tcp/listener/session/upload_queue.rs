@@ -87,6 +87,10 @@ impl ListenerUploadQueue {
         }
     }
 
+    pub(in crate::ed2k_tcp) const fn is_attached(&self) -> bool {
+        self.session.is_some()
+    }
+
     /// Record the most-specific reason for the next slot release, for the
     /// `upload_slot_closed` funnel diagnostic. Cheap `&'static str` assignment;
     /// the emit it feeds is compile-gated behind `packet-diagnostics`.

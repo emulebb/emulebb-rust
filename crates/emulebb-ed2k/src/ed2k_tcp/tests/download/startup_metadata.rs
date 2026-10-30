@@ -301,6 +301,7 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
             file_size: primary_size,
             current_source_count: 0,
             timeout: Duration::from_secs(3),
+            upload_context: None,
             reask_register: None,
         },
         vec![Ed2kPeerDownloadFile {

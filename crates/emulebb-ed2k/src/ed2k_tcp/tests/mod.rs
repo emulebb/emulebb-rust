@@ -128,6 +128,7 @@ macro_rules! download_file_from_peer_test {
             file_size: $file_size,
             current_source_count: 0,
             timeout: $timeout,
+            upload_context: None,
             reask_register: None,
         })
     };
