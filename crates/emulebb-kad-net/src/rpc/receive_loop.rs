@@ -5,8 +5,8 @@ use tracing::{debug, error, trace, warn};
 
 use super::packet_info::{
     inbound_transport_mode, inspect_inbound_packet, is_publish_opcode, is_tracked_response_opcode,
-    opcode_name, should_learn_sender_verify_key, should_log_unsolicited_opcode,
-    tracked_request_opcode_for_response,
+    opcode_name, search_response_target, should_learn_sender_verify_key,
+    should_log_unsolicited_opcode, tracked_request_opcode_for_response,
 };
 use super::{ReceivedKadPacket, RpcManager};
 use crate::error::NetError;
@@ -122,6 +122,34 @@ impl RpcManager {
 
                         let response_opcode = packet.opcode();
                         let inbound = inspect_inbound_packet(&packet);
+
+                        if let Some(target) = search_response_target(&packet)
+                            && !inner.search_response_registry.contains(target, from)
+                        {
+                            inner
+                                .observability
+                                .lock()
+                                .record_response_dropped_unrequested(response_opcode);
+                            let mut dump_summary = inbound_dump_summary(
+                                &plain,
+                                Some(response_opcode),
+                                was_obfuscated,
+                                sender_verify_key,
+                                receiver_verify_key_valid,
+                                Some("unregistered_search_response"),
+                                Some(format!("target={target}")),
+                            );
+                            dump_summary.tracker_bucket =
+                                inbound.tracker_bucket.map(PacketTrackerBucket::label);
+                            dump_kad_udp_packet("recv", from, &data, &plain, dump_summary);
+                            debug!(
+                                "kad recv dropping unregistered search response opcode={} from={} target={}",
+                                opcode_name(response_opcode),
+                                from,
+                                target,
+                            );
+                            continue;
+                        }
 
                         if let Some(peer_id) = inbound.peer_id {
                             inner.obfuscation.register_peer_identity(from, peer_id);

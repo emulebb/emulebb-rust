@@ -53,6 +53,16 @@ pub(super) fn inspect_inbound_packet(packet: &KadPacket) -> InboundKadPacketInfo
     }
 }
 
+pub(super) fn search_response_target(packet: &KadPacket) -> Option<NodeId> {
+    match packet {
+        KadPacket::SearchRes(response) => Some(response.target),
+        KadPacket::LegacySearchRes(response) | KadPacket::LegacySearchNotesRes(response) => {
+            Some(response.target)
+        }
+        _ => None,
+    }
+}
+
 fn tracker_bucket_for_opcode(opcode_value: u8) -> Option<PacketTrackerBucket> {
     match opcode_value {
         opcode::BOOTSTRAP_REQ => Some(PacketTrackerBucket::BootstrapReq),

@@ -11,7 +11,7 @@
 pub mod refresh;
 
 use crate::types::KadSearchTerminalReason;
-use emulebb_kad_net::{RpcManager, RpcWorkClass};
+use emulebb_kad_net::{RpcManager, RpcWorkClass, SearchResponseRegistration};
 use emulebb_kad_proto::{
     Ed2kHash, KadPacket, NodeId, Tag,
     constants::{
@@ -984,6 +984,7 @@ async fn run_search_phase(rpc: &RpcManager, config: SearchPhaseConfig<'_>) -> Se
     let mut pending_contacts = send_to.into_iter().collect::<VecDeque<_>>();
     let mut search_entries = Vec::new();
     let mut dispatch = Phase2DispatchStats::default();
+    let mut search_response_registrations = Vec::new();
     let should_collect_search_entries = result_tx.is_none();
     let result_tx = result_tx;
     let mut next_emit_at = compute_initial_jumpstart_emit_at(
@@ -1044,6 +1045,7 @@ async fn run_search_phase(rpc: &RpcManager, config: SearchPhaseConfig<'_>) -> Se
             jumpstart_tick,
             &mut pending_contacts,
             &mut queried_addrs,
+            &mut search_response_registrations,
         )
         .await
         {
@@ -1074,6 +1076,10 @@ async fn run_search_phase(rpc: &RpcManager, config: SearchPhaseConfig<'_>) -> Se
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat phase-2 dispatch state boundary"
+)]
 async fn emit_next_search_packet(
     rpc: &RpcManager,
     kind: &TraversalKind,
@@ -1082,10 +1088,16 @@ async fn emit_next_search_packet(
     jumpstart_tick: Duration,
     pending_contacts: &mut VecDeque<&TraversalContact>,
     queried_addrs: &mut HashMap<SocketAddr, u8>,
+    search_response_registrations: &mut Vec<SearchResponseRegistration>,
 ) -> Option<(Instant, bool)> {
     let contact = pending_contacts.pop_front()?;
     register_traversal_identity(rpc, contact);
     let packet = search_phase_packet(kind, target, contact.version);
+    let response_registration = rpc.register_search_response(target, contact.addr);
+    queried_addrs
+        .entry(contact.addr)
+        .and_modify(|version| *version = (*version).max(contact.version))
+        .or_insert(contact.version);
 
     debug!(
         "traversal phase2: jump-start send to {} remaining_contacts={}",
@@ -1099,10 +1111,9 @@ async fn emit_next_search_packet(
             false
         }
     };
-    queried_addrs
-        .entry(contact.addr)
-        .and_modify(|version| *version = (*version).max(contact.version))
-        .or_insert(contact.version);
+    if sent {
+        search_response_registrations.push(response_registration);
+    }
     Some((Instant::now() + jumpstart_tick, sent))
 }
 

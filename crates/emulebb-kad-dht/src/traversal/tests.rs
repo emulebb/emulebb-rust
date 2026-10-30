@@ -723,6 +723,114 @@ async fn test_run_search_phase_collects_results_after_query_timeout_until_deadli
 }
 
 #[tokio::test]
+async fn test_run_search_phase_cancellation_unregisters_search_response() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let injector = transport.injector();
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+    let mut observer = rpc.subscribe();
+    let target = NodeId::from_bytes([0x35; 16]);
+    let contact = TraversalContact {
+        id: target,
+        addr: "192.0.2.30:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+    let cancel = CancellationToken::new();
+    let task_rpc = rpc.clone();
+    let task_cancel = cancel.clone();
+    let task_contact = contact.clone();
+    let search_task = tokio::spawn(async move {
+        run_search_phase(
+            &task_rpc,
+            SearchPhaseConfig {
+                responded: std::slice::from_ref(&task_contact),
+                kind: TraversalKind::Keyword {
+                    request: SearchKeyReq {
+                        target,
+                        start_position: 0,
+                        restrictive_payload: Vec::new(),
+                    },
+                },
+                target,
+                query_timeout: Duration::from_millis(20),
+                emit_deadline: Instant::now() + Duration::from_secs(2),
+                response_deadline: Instant::now() + Duration::from_secs(2),
+                phase2_fanout: 1,
+                last_lookup_response_at: None,
+                jumpstart_idle_grace: Duration::ZERO,
+                jumpstart_tick: Duration::from_millis(10),
+                work_class: RpcWorkClass::Interactive,
+                cancel: &task_cancel,
+                result_tx: None,
+            },
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if !transport.drain_outgoing().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("phase-2 request sent");
+    cancel.cancel();
+    let search_phase = tokio::time::timeout(Duration::from_secs(1), search_task)
+        .await
+        .expect("cancelled search exits")
+        .expect("search task joins");
+    assert_eq!(
+        search_phase.terminal_reason,
+        KadSearchTerminalReason::Cancelled
+    );
+
+    injector
+        .send((
+            KadPacket::SearchRes(SearchRes {
+                sender_id: contact.id,
+                target,
+                results: Vec::new(),
+            })
+            .encode()
+            .unwrap(),
+            contact.addr,
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let dropped = rpc
+                .observability()
+                .response_opcodes
+                .iter()
+                .map(|snapshot| snapshot.dropped_unrequested)
+                .sum::<u64>();
+            if dropped != 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("late response rejected after cancellation cleanup");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), observer.recv())
+            .await
+            .is_err(),
+        "late response must not reach traversal broadcasts"
+    );
+}
+
+#[tokio::test]
 async fn test_run_search_phase_collects_multiple_search_res_packets() {
     let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
     let injector = transport.injector();
