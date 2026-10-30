@@ -549,17 +549,15 @@ impl EmulebbCore {
             ));
         }
         if kad_network_enabled
-            && let (Some(kad_local_store), Some(kad_snoop_queue)) = (
-                self.kad_local_store.as_ref().map(Arc::clone),
-                self.kad_snoop_queue.as_ref().map(Arc::clone),
-            )
+            && let Some(kad_local_store) = self.kad_local_store.as_ref().map(Arc::clone)
         {
+            let kad_snoop_queue = self.kad_snoop_queue.as_ref().map(Arc::clone);
             tasks.push(tokio::spawn(run_kad_local_store_loop(
                 KadLocalStoreRuntime {
                     dht: dht.clone(),
                     local_store: kad_local_store,
                     metadata_store: self.metadata_store.clone(),
-                    snoop_queue: Arc::clone(&kad_snoop_queue),
+                    snoop_queue: kad_snoop_queue.as_ref().map(Arc::clone),
                     ed2k_listener: Arc::clone(&ed2k_listener),
                     server_state: Arc::clone(&server_state),
                     kad_firewall: Arc::clone(&kad_firewall),
@@ -576,22 +574,24 @@ impl EmulebbCore {
                 },
                 Arc::clone(&shutdown),
             )));
-            tasks.push(tokio::spawn(run_kad_passive_replay_loop(
-                dht.clone(),
-                Arc::clone(&kad_snoop_queue),
-                Arc::clone(&self.index),
-                Arc::clone(&self.ed2k_transfers),
-                Arc::clone(&shutdown),
-                PassiveReplayWorker::Source,
-            )));
-            tasks.push(tokio::spawn(run_kad_passive_replay_loop(
-                dht.clone(),
-                kad_snoop_queue,
-                Arc::clone(&self.index),
-                Arc::clone(&self.ed2k_transfers),
-                Arc::clone(&shutdown),
-                PassiveReplayWorker::General,
-            )));
+            if let Some(kad_snoop_queue) = kad_snoop_queue {
+                tasks.push(tokio::spawn(run_kad_passive_replay_loop(
+                    dht.clone(),
+                    Arc::clone(&kad_snoop_queue),
+                    Arc::clone(&self.index),
+                    Arc::clone(&self.ed2k_transfers),
+                    Arc::clone(&shutdown),
+                    PassiveReplayWorker::Source,
+                )));
+                tasks.push(tokio::spawn(run_kad_passive_replay_loop(
+                    dht.clone(),
+                    kad_snoop_queue,
+                    Arc::clone(&self.index),
+                    Arc::clone(&self.ed2k_transfers),
+                    Arc::clone(&shutdown),
+                    PassiveReplayWorker::General,
+                )));
+            }
         }
         // Kad LowID buddy/firewalled-callback driver (default on). It seeks a
         // buddy when we are firewalled; inbound FINDBUDDY/CALLBACK packets are

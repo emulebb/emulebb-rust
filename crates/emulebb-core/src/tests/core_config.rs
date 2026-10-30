@@ -437,6 +437,27 @@ async fn network_config_initializes_kad_snoop_queue() {
 }
 
 #[tokio::test]
+async fn disabled_passive_replay_does_not_initialize_kad_snoop_queue() {
+    let transfer_root = unique_runtime_dir("emulebb-core-kad-snoop-queue-disabled");
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.kad_passive_replay_enabled = false;
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
+    .unwrap();
+
+    assert_eq!(core.kad_snoop_queue_config_for_tests().await, None);
+    assert_eq!(core.kad_snoop_queue_snapshot_for_tests().await, None);
+}
+
+#[tokio::test]
 async fn status_reports_live_dht_runtime_kad_contacts() {
     let transfer_root = unique_runtime_dir("emulebb-core-kad-status-runtime");
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();

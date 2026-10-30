@@ -514,12 +514,7 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
     assert!(profile.kad.publish_shared_files_enabled);
     assert_eq!(profile.kad.republish_interval_secs, 120);
     assert_eq!(profile.kad.publish_contact_fanout, 5);
-    assert_eq!(profile.kad.snoop_queue_dedup_window_secs, 28_800);
-    assert_eq!(profile.kad.snoop_queue_general_max_queries_per_600s, 24);
-    assert_eq!(profile.kad.snoop_queue_general_drain_cooldown_secs, 900);
-    assert_eq!(profile.kad.snoop_queue_source_max_queries_per_600s, 60);
-    assert_eq!(profile.kad.snoop_queue_source_drain_cooldown_secs, 300);
-    assert_eq!(profile.kad.snoop_queue_source_stop_after_results, 2);
+    assert!(!profile.kad.passive_replay_enabled);
     assert_eq!(profile.ed2k.listen_port, Some(41001));
     assert!(profile.ed2k.server_endpoints.is_empty());
     assert_eq!(profile.ed2k.connect_timeout_secs, 1);
@@ -814,29 +809,28 @@ fn kad_local_store_defaults_follow_index_defaults() {
 }
 
 #[test]
-fn kad_snoop_queue_config_is_config_driven_and_clamped() {
+fn kad_passive_replay_uses_one_default_off_switch_and_fixed_queue_policy() {
+    let temp = tempfile::tempdir().unwrap();
     let profile = DaemonProfile {
+        profile_dir: temp.path().to_path_buf(),
         kad: KadSettings {
             listen_port: Some(41002),
-            snoop_queue_dedup_window_secs: 0,
-            snoop_queue_general_max_queries_per_600s: 0,
-            snoop_queue_general_drain_cooldown_secs: 0,
-            snoop_queue_source_max_queries_per_600s: 0,
-            snoop_queue_source_drain_cooldown_secs: 0,
-            snoop_queue_source_stop_after_results: 0,
+            passive_replay_enabled: true,
             ..KadSettings::default()
+        },
+        ed2k: Ed2kRuntimeConfig {
+            listen_port: Some(41001),
+            ..Ed2kRuntimeConfig::default()
         },
         ..DaemonProfile::default()
     };
+    let config = profile
+        .ed2k_network_config(&metadata_store(&profile))
+        .unwrap()
+        .unwrap();
 
-    let queue = profile.kad_snoop_queue_config();
-
-    assert_eq!(queue.dedup_window_secs, 1);
-    assert_eq!(queue.general_max_queries_per_600s, 1);
-    assert_eq!(queue.general_drain_cooldown_secs, 1);
-    assert_eq!(queue.source_max_queries_per_600s, 1);
-    assert_eq!(queue.source_drain_cooldown_secs, 1);
-    assert_eq!(queue.source_stop_after_results, 1);
+    assert!(config.kad_passive_replay_enabled);
+    assert_eq!(config.kad_snoop_queue, SnoopQueueConfig::default());
 }
 
 #[test]
