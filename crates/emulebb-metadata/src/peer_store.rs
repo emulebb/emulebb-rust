@@ -175,10 +175,27 @@ impl super::MetadataStore {
         Ok(pruned)
     }
 
-    /// Bind a verified secure-ident public key to a peer, wiping its credits per
-    /// eMule `CClientCredits::Verified` (ClientCredits.cpp:338-356): the
-    /// anti-theft rule that accumulated credit cannot be claimed by a key that
-    /// was not present while the credit was earned.
+    /// Return the pinned secure-ident public key for a peer, if one has been
+    /// established by a successful verification.
+    pub fn peer_secure_ident_public_key(&self, user_hash: &str) -> Result<Option<Vec<u8>>> {
+        let user_hash_bytes = decode_fixed_hex(user_hash, 16, "peer user hash")?;
+        self.connection()?
+            .prepare_cached(
+                r#"
+                SELECT secure_ident_pubkey
+                FROM peers
+                WHERE user_hash = ?1
+                "#,
+            )?
+            .query_row(params![user_hash_bytes], |row| row.get(0))
+            .optional()
+            .map(|key| key.flatten().filter(|key: &Vec<u8>| !key.is_empty()))
+            .map_err(Into::into)
+    }
+
+    /// Pin a verified secure-ident public key to a peer, wiping unsecured
+    /// accumulated credit on the first bind per eMule
+    /// `CClientCredits::Verified` (ClientCredits.cpp:338-356).
     ///
     /// - no key bound yet (`nKeySize == 0`, first verify): bind the key, and if
     ///   the slot already holds accumulated credit (`GetDownloadedTotal() > 0`,
@@ -188,11 +205,17 @@ impl super::MetadataStore {
     ///   verifying with their own key. A fresh slot (no prior credit) keeps its
     ///   zero totals — there is nothing to wipe;
     /// - stored key == `public_key`: no change (the normal repeat verify);
-    /// - stored key != `public_key`: reset uploaded/downloaded to the neutral
-    ///   1-byte sentinel and store the new key (anti-takeover for a rebound key).
+    /// - stored key != `public_key`: retain the first verified key and all
+    ///   credit totals. The caller must reject the mismatched identity.
     ///
-    /// Returns `true` when accumulated credit was wiped.
-    pub fn record_verified_secure_ident(&self, user_hash: &str, public_key: &[u8]) -> Result<bool> {
+    /// Returns `(first_bind, credit_wiped, pinned_key)`. The effective pinned
+    /// key is returned so the ED2K runtime can classify a concurrent first-bind
+    /// race without repeating a non-atomic read.
+    pub fn pin_verified_secure_ident(
+        &self,
+        user_hash: &str,
+        public_key: &[u8],
+    ) -> Result<(bool, bool, Vec<u8>)> {
         let user_hash_bytes = decode_fixed_hex(user_hash, 16, "peer user hash")?;
         let now = unix_ms();
         let mut conn = self.connection()?;
@@ -215,24 +238,8 @@ impl super::MetadataStore {
             .filter(|key| !key.is_empty());
 
         let key_len = i64::try_from(public_key.len()).unwrap_or(i64::MAX);
-        let wiped = match bound_key {
-            Some(stored) if stored == public_key => false,
-            Some(_) => {
-                // A different key verified for this user hash: wipe credits.
-                tx.execute(
-                    r#"
-                    UPDATE peers
-                    SET secure_ident_pubkey = ?2,
-                        secure_ident_pubkey_len = ?3,
-                        uploaded_bytes = 1,
-                        downloaded_bytes = 1,
-                        last_seen_ms = ?4
-                    WHERE user_hash = ?1
-                    "#,
-                    params![user_hash_bytes, public_key, key_len, now],
-                )?;
-                true
-            }
+        let outcome = match bound_key {
+            Some(stored) => (false, false, stored),
             None if prior_downloaded > 0 => {
                 // First key bound to a slot that already accrued credit while
                 // unsecured: wipe it (eMule Verified, ClientCredits.cpp:345-350).
@@ -248,7 +255,7 @@ impl super::MetadataStore {
                     "#,
                     params![user_hash_bytes, public_key, key_len, now],
                 )?;
-                true
+                (true, true, public_key.to_vec())
             }
             None => {
                 // First verify on a fresh slot: bind the key, keep the (zero)
@@ -267,11 +274,18 @@ impl super::MetadataStore {
                     "#,
                     params![user_hash_bytes, public_key, key_len, now],
                 )?;
-                false
+                (true, false, public_key.to_vec())
             }
         };
         tx.commit()?;
-        Ok(wiped)
+        Ok(outcome)
+    }
+
+    /// Compatibility helper for runtime code that only needs to know whether
+    /// the first verified bind wiped unsecured accumulated credit.
+    pub fn record_verified_secure_ident(&self, user_hash: &str, public_key: &[u8]) -> Result<bool> {
+        self.pin_verified_secure_ident(user_hash, public_key)
+            .map(|(_, credit_wiped, _)| credit_wiped)
     }
 }
 
@@ -363,24 +377,27 @@ mod tests {
     }
 
     #[test]
-    fn different_verified_key_wipes_credits() {
-        // eMule CClientCredits::Verified anti-takeover: a different key verifying
-        // for the same user hash wipes the prior credits.
+    fn different_verified_key_keeps_first_key_and_credits() {
         let store = MetadataStore::in_memory().unwrap();
         let user_hash = "00112233445566778899aabbccddeeff";
-        store.add_peer_credit_delta(user_hash, 5000, 9000).unwrap();
         store
             .record_verified_secure_ident(user_hash, &[1u8; 80])
             .unwrap();
+        store.add_peer_credit_delta(user_hash, 5000, 9000).unwrap();
 
-        let wiped = store
-            .record_verified_secure_ident(user_hash, &[2u8; 80])
+        let (first_bind, wiped, pinned_key) = store
+            .pin_verified_secure_ident(user_hash, &[2u8; 80])
             .unwrap();
-        assert!(wiped, "a different key must wipe credits");
+        assert!(!first_bind);
+        assert!(!wiped, "a mismatched key must not mutate credits");
+        assert_eq!(pinned_key, vec![1u8; 80]);
+        assert_eq!(
+            store.peer_secure_ident_public_key(user_hash).unwrap(),
+            Some(vec![1u8; 80])
+        );
         let credit = store.peer_credit_by_hash(user_hash).unwrap().unwrap();
-        // Master resets to the 1-byte sentinel rather than deleting the row.
-        assert_eq!(credit.uploaded_bytes, 1);
-        assert_eq!(credit.downloaded_bytes, 1);
+        assert_eq!(credit.uploaded_bytes, 5000);
+        assert_eq!(credit.downloaded_bytes, 9000);
     }
 
     #[test]

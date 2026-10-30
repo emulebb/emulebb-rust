@@ -15,9 +15,9 @@ use crate::ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity};
 
 use super::super::super::dump::dump_ed2k_tcp_listener_meta;
 use super::super::super::identity::{
-    Ed2kPeerSecureIdentState, decode_public_key_payload, decode_secident_state,
-    decode_signature_payload, encode_secident_state, random_nonzero_u32,
-    try_send_secure_ident_signature, verify_peer_secure_ident_signature,
+    Ed2kPeerSecureIdentState, begin_secure_ident_probe, decode_public_key_payload,
+    decode_secident_state, decode_signature_payload, try_send_secure_ident_signature,
+    verify_peer_secure_ident_signature,
 };
 use super::super::super::{
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_SIGNATURE_NEEDED,
@@ -66,12 +66,8 @@ pub(super) async fn handle_secident_state(
         && state == ED2K_SECURE_IDENT_SIGNATURE_NEEDED
         && !peer_secure_ident.requested_peer_key
     {
-        let challenge_for = random_nonzero_u32();
-        peer_secure_ident.challenge_for = Some(challenge_for);
+        let request = begin_secure_ident_probe(peer_secure_ident);
         peer_secure_ident.pending_signature = true;
-        peer_secure_ident.requested_peer_key = true;
-        let request =
-            encode_secident_state(ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, challenge_for);
         transport
             .write_all_diagnostic("listener", peer_addr, "secure_ident_probe", &request)
             .await
@@ -130,18 +126,50 @@ pub(super) fn handle_signature(
 ) {
     match decode_signature_payload(payload) {
         Ok(signature) => {
-            let verified = verify_peer_secure_ident_signature(
+            if let Some(user_hash) = peer_upload_identity.user_hash {
+                match transfer_runtime.pinned_secure_ident_public_key(user_hash) {
+                    Ok(pinned_public_key) => {
+                        peer_secure_ident.pinned_public_key = pinned_public_key;
+                    }
+                    Err(error) => {
+                        debug!("failed to hydrate pinned secure-ident pubkey: {error:#}");
+                        peer_secure_ident.peer_ident_verified = false;
+                        peer_upload_identity.ident_verified = false;
+                        peer_upload_identity.ident_bad_guy = false;
+                        return;
+                    }
+                }
+            }
+            let verification = verify_peer_secure_ident_signature(
                 secure_ident,
                 peer_secure_ident,
                 &signature,
                 peer_addr,
                 external_ip,
             );
-            // On a successful verify, bind the peer's pubkey to its credit row
-            // (wiping credits if a different key verified for this user hash
-            // before -- eMule CClientCredits::Verified anti-takeover).
-            if verified {
-                bind_verified_pubkey(transfer_runtime, peer_secure_ident, peer_upload_identity);
+            let mut verified = verification.verified();
+            if verification.newly_verified()
+                && let (Some(user_hash), Some(public_key)) = (
+                    peer_upload_identity.user_hash,
+                    peer_secure_ident.peer_public_key.as_deref(),
+                )
+            {
+                match transfer_runtime.bind_verified_secure_ident(user_hash, public_key) {
+                    Ok(bind_outcome) => {
+                        peer_secure_ident.pinned_public_key =
+                            Some(bind_outcome.pinned_public_key().to_vec());
+                        if !bind_outcome.accepted() {
+                            verified = false;
+                            peer_secure_ident.peer_ident_verified = false;
+                            debug!("rejected mismatched secure-ident pubkey for pinned identity");
+                        }
+                    }
+                    Err(error) => {
+                        verified = false;
+                        peer_secure_ident.peer_ident_verified = false;
+                        debug!("failed to bind verified secure-ident pubkey: {error:#}");
+                    }
+                }
             }
             dump_ed2k_tcp_listener_meta(
                 peer_addr,
@@ -173,24 +201,5 @@ pub(super) fn handle_signature(
                 || format!("error={error:#}"),
             );
         }
-    }
-}
-
-/// Bind the just-verified peer pubkey to its credit row (eMule
-/// `CClientCredits::Verified`). Requires both the peer's user hash (from the
-/// hello) and its public key (from OP_PUBLICKEY); a missing either is a no-op.
-fn bind_verified_pubkey(
-    transfer_runtime: &Ed2kTransferRuntime,
-    peer_secure_ident: &Ed2kPeerSecureIdentState,
-    peer_upload_identity: &Ed2kUploadPeerIdentity,
-) {
-    let (Some(user_hash), Some(public_key)) = (
-        peer_upload_identity.user_hash,
-        peer_secure_ident.peer_public_key.as_deref(),
-    ) else {
-        return;
-    };
-    if let Err(error) = transfer_runtime.record_verified_secure_ident(user_hash, public_key) {
-        debug!("failed to bind verified secure-ident pubkey: {error:#}");
     }
 }

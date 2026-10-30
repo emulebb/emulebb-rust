@@ -19,6 +19,46 @@ use super::{
     upload_queue_config_from_policy, upload_queue_policy_from_config,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Ed2kSecureIdentBindOutcome {
+    BoundFirstKey {
+        pinned_public_key: Vec<u8>,
+        credit_wiped: bool,
+    },
+    MatchedPinnedKey {
+        pinned_public_key: Vec<u8>,
+    },
+    RejectedKeyMismatch {
+        pinned_public_key: Vec<u8>,
+    },
+}
+
+impl Ed2kSecureIdentBindOutcome {
+    pub(crate) fn accepted(&self) -> bool {
+        !matches!(self, Self::RejectedKeyMismatch { .. })
+    }
+
+    pub(crate) fn pinned_public_key(&self) -> &[u8] {
+        match self {
+            Self::BoundFirstKey {
+                pinned_public_key, ..
+            }
+            | Self::MatchedPinnedKey { pinned_public_key }
+            | Self::RejectedKeyMismatch { pinned_public_key } => pinned_public_key,
+        }
+    }
+
+    fn credit_wiped(&self) -> bool {
+        matches!(
+            self,
+            Self::BoundFirstKey {
+                credit_wiped: true,
+                ..
+            }
+        )
+    }
+}
+
 impl Ed2kTransferRuntime {
     /// Apply inbound uploader queue policy to the live runtime.
     pub async fn apply_upload_queue_policy(&self, policy: &Ed2kUploadQueueRuntimeConfig) {
@@ -590,23 +630,56 @@ impl Ed2kTransferRuntime {
         self.metadata.prune_aged_peers()
     }
 
-    /// Bind a verified secure-ident public key to the peer's credit row,
-    /// wiping its credits if a DIFFERENT key verified for the same user hash
-    /// before (eMule `CClientCredits::Verified` anti-takeover, ClientCredits.cpp
-    /// :338-356). Called from the secure-ident verify paths (upload listener +
-    /// download identity verify). Returns `true` when credits were wiped.
+    pub(crate) fn pinned_secure_ident_public_key(
+        &self,
+        user_hash: [u8; 16],
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        self.metadata
+            .peer_secure_ident_public_key(&hex::encode(user_hash))
+    }
+
+    /// Pin the first verified secure-ident key and classify later binds without
+    /// permitting a different key to replace persisted identity or credits.
+    pub(crate) fn bind_verified_secure_ident(
+        &self,
+        user_hash: [u8; 16],
+        public_key: &[u8],
+    ) -> anyhow::Result<Ed2kSecureIdentBindOutcome> {
+        if let Some(pinned_public_key) = self.pinned_secure_ident_public_key(user_hash)?
+            && pinned_public_key != public_key
+        {
+            return Ok(Ed2kSecureIdentBindOutcome::RejectedKeyMismatch { pinned_public_key });
+        }
+
+        // Commit parked pre-bind deltas FIRST (under the flush gate) so a first
+        // verified bind can wipe unsecured credit without a later background
+        // flush resurrecting it.
+        self.settle_parked_peer_credit(user_hash)?;
+        let (first_bind, credit_wiped, pinned_public_key) = self
+            .metadata
+            .pin_verified_secure_ident(&hex::encode(user_hash), public_key)?;
+        if first_bind {
+            return Ok(Ed2kSecureIdentBindOutcome::BoundFirstKey {
+                pinned_public_key,
+                credit_wiped,
+            });
+        }
+        if pinned_public_key == public_key {
+            Ok(Ed2kSecureIdentBindOutcome::MatchedPinnedKey { pinned_public_key })
+        } else {
+            Ok(Ed2kSecureIdentBindOutcome::RejectedKeyMismatch { pinned_public_key })
+        }
+    }
+
+    /// Compatibility bridge for callers that only need the first-bind credit
+    /// wipe result.
     pub(crate) fn record_verified_secure_ident(
         &self,
         user_hash: [u8; 16],
         public_key: &[u8],
     ) -> anyhow::Result<bool> {
-        // Commit parked pre-bind deltas FIRST (under the flush gate) so the
-        // wipe below wipes them with the rest: a background flush landing
-        // after the wipe would otherwise resurrect pre-bind credit, breaking
-        // the anti-theft rule.
-        self.settle_parked_peer_credit(user_hash)?;
-        self.metadata
-            .record_verified_secure_ident(&hex::encode(user_hash), public_key)
+        self.bind_verified_secure_ident(user_hash, public_key)
+            .map(|outcome| outcome.credit_wiped())
     }
 
     /// The requested file's size, feeding the queue's per-session transfer cap
