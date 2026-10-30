@@ -201,6 +201,14 @@ pub(crate) struct SearchQueueTick {
     pub(crate) expired: Vec<QueuedSearch>,
 }
 
+/// Queue entry validated for insertion but not yet visible to the drain.
+///
+/// Search creation persists its durable session after preparation and commits
+/// this entry only when persistence succeeds. Dropping a prepared entry is the
+/// rollback path: it leaves queue membership and drain ownership unchanged.
+#[derive(Debug)]
+pub(crate) struct PreparedQueuedSearch(QueuedSearch);
+
 /// Connection-aware search queue: FIFO within each lane, single in-flight
 /// search per concrete lane, [`SEARCH_QUEUE_DRAIN_SLOT`] spacing between
 /// dispatches on the same lane.
@@ -223,6 +231,11 @@ impl SearchQueue {
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
         self.pending.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_task_running(&self) -> bool {
+        self.drain_task_running
     }
 
     /// Removes a search that has not been dispatched yet.
@@ -248,6 +261,7 @@ impl SearchQueue {
     /// Rejects semantically duplicate complete requests and enforces
     /// [`SEARCH_QUEUE_CAP`]; both surface as explicit POST errors, never
     /// silent drops.
+    #[cfg(test)]
     pub(crate) fn enqueue(
         &mut self,
         search_id: String,
@@ -255,6 +269,23 @@ impl SearchQueue {
         lane: SearchQueueLane,
         now: Instant,
     ) -> Result<(), SearchEnqueueError> {
+        let prepared = self.prepare_enqueue(search_id, request, lane, now)?;
+        self.commit_enqueue(prepared);
+        Ok(())
+    }
+
+    /// Validates an enqueue without making the search runnable.
+    ///
+    /// A caller that releases the queue lock before [`Self::commit_enqueue`]
+    /// must serialize queue producers across the gap. Search creation does so
+    /// with the core state lock; the drain may only remove entries meanwhile.
+    pub(crate) fn prepare_enqueue(
+        &self,
+        search_id: String,
+        request: SearchCreate,
+        lane: SearchQueueLane,
+        now: Instant,
+    ) -> Result<PreparedQueuedSearch, SearchEnqueueError> {
         if self.pending.len() >= SEARCH_QUEUE_CAP {
             return Err(SearchEnqueueError::QueueFull);
         }
@@ -266,15 +297,19 @@ impl SearchQueue {
         {
             return Err(SearchEnqueueError::DuplicateQueued);
         }
-        self.pending.push_back(QueuedSearch {
+        Ok(PreparedQueuedSearch(QueuedSearch {
             search_id,
             request,
             fingerprint,
             lane,
             enqueued_at: now,
             send_attempts: 0,
-        });
-        Ok(())
+        }))
+    }
+
+    /// Makes a previously validated search visible to the queue drain.
+    pub(crate) fn commit_enqueue(&mut self, prepared: PreparedQueuedSearch) {
+        self.pending.push_back(prepared.0);
     }
 
     /// Claims the single drain-task slot; the caller that receives `true`

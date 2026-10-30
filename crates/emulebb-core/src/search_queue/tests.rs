@@ -377,3 +377,48 @@ fn drain_task_slot_is_claimed_once_and_released_only_when_idle() {
     assert!(queue.release_drain_task_if_idle());
     assert!(queue.claim_drain_task(), "slot reusable after release");
 }
+
+#[test]
+fn prepared_enqueue_is_rollback_safe_and_recovery_keeps_fifo_and_one_drain() {
+    let now = Instant::now();
+    let mut queue = SearchQueue::new();
+
+    let failed = queue
+        .prepare_enqueue(
+            "1".to_string(),
+            request("failed persistence"),
+            SearchQueueLane::Server,
+            now,
+        )
+        .expect("preflight succeeds");
+    drop(failed);
+
+    assert_eq!(queue.pending_len(), 0);
+    assert!(!queue.drain_task_running());
+
+    for (id, query) in [("1", "first durable"), ("2", "second durable")] {
+        let prepared = queue
+            .prepare_enqueue(id.to_string(), request(query), SearchQueueLane::Server, now)
+            .expect("recovery enqueue preflight succeeds");
+        queue.commit_enqueue(prepared);
+    }
+    assert!(queue.claim_drain_task());
+    assert!(!queue.claim_drain_task(), "only one drain owns the queue");
+
+    let mut first_tick = queue.tick(now, ready(true, false));
+    let first = first_tick
+        .dispatches
+        .pop()
+        .expect("first search dispatches");
+    assert_eq!(first.entry.search_id, "1");
+    queue.finish(first.lane);
+
+    let mut second_tick = queue.tick(now + SEARCH_QUEUE_DRAIN_SLOT, ready(true, false));
+    let second = second_tick
+        .dispatches
+        .pop()
+        .expect("second search dispatches");
+    assert_eq!(second.entry.search_id, "2");
+    queue.finish(second.lane);
+    assert!(queue.release_drain_task_if_idle());
+}
