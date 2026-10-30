@@ -72,9 +72,9 @@ mod upload_payload;
 mod upload_queue;
 
 use shared_file::{
-    handle_aich_file_hash_request, handle_hashset_request, handle_hashset_request2,
-    handle_multipacket_ext2_request, handle_multipacket_request, handle_request_filename,
-    handle_set_req_file_id, handle_source_request,
+    SourceExchangeResponseThrottle, handle_aich_file_hash_request, handle_hashset_request,
+    handle_hashset_request2, handle_multipacket_ext2_request, handle_multipacket_request,
+    handle_request_filename, handle_set_req_file_id, handle_source_request,
 };
 use upload_payload::{UploadPayloadOutcome, UploadPayloadRequest, serve_upload_payload};
 use upload_queue::{ListenerQueuePoll, ListenerUploadQueue};
@@ -272,6 +272,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     let mut peer_secure_ident = Ed2kPeerSecureIdentState::default();
     let mut requested_file_hash: Option<Ed2kHash> = None;
     let mut requester_file_state: Option<shared_file::RequesterFileState> = None;
+    let mut source_exchange_throttle = SourceExchangeResponseThrottle::default();
     let mut peer_supports_aich = false;
     // Whether the peer advertised secure-ident support in its hello. Gates the
     // credit-accrual identity check for served upload bytes (eMule
@@ -765,6 +766,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_supports_file_identifiers,
                     Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
                     &mut requester_file_state,
+                    &mut source_exchange_throttle,
                 )
                 .await?;
             }
@@ -776,6 +778,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &packet.payload,
                     Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
                     &mut requester_file_state,
+                    &mut source_exchange_throttle,
                 )
                 .await?;
             }
@@ -975,6 +978,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     packet.opcode,
                     &packet.payload,
                     requester_file_state.as_ref(),
+                    &mut source_exchange_throttle,
                 )
                 .await?;
             }

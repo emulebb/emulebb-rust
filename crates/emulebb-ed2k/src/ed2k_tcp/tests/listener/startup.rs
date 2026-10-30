@@ -376,6 +376,30 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
     assert_eq!(&filename_answer[6..22], &file_hash.0);
 
     stream
+        .write_all(&encode_packet(
+            OP_EMULEPROT,
+            OP_REQUESTSOURCES,
+            &file_hash.0,
+        ))
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_packet(OP_EMULEPROT, OP_PUBLICIP_REQ, &[]))
+        .await
+        .unwrap();
+    loop {
+        let packet = read_packet(&mut stream).await;
+        assert_ne!(
+            (packet[0], packet[5]),
+            (OP_EMULEPROT, OP_ANSWERSOURCES),
+            "the excluded SX1 request must remain unanswered"
+        );
+        if (packet[0], packet[5]) == (OP_EMULEPROT, OP_PUBLICIP_ANSWER) {
+            break;
+        }
+    }
+
+    stream
         .write_all(&super::encode_request_sources2(&file_hash))
         .await
         .unwrap();
@@ -395,18 +419,34 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
     assert_eq!(&source_answer[37..53], &[0x61; 16]);
     assert_eq!(source_answer[53], 0x03);
 
-    let mut older_source_request = super::encode_request_sources2(&file_hash);
-    older_source_request[6] = 2;
-    stream.write_all(&older_source_request).await.unwrap();
-    let older_source_answer =
-        read_until_opcode(&mut stream, OP_EMULEPROT, super::OP_ANSWERSOURCES2).await;
-    assert_eq!(older_source_answer[6], 2);
-    assert_eq!(&older_source_answer[7..23], &file_hash.0);
-    assert_eq!(
-        u16::from_le_bytes([older_source_answer[23], older_source_answer[24]]),
-        1
-    );
-    assert_eq!(&older_source_answer[25..29], &[10, 20, 30, 40]);
+    let identifier = super::Ed2kFileIdentifier::from_manifest(&manifest).unwrap();
+    let mut multipacket_payload = Vec::new();
+    identifier.encode_into(&mut multipacket_payload);
+    multipacket_payload.push(OP_REQUESTSOURCES2);
+    multipacket_payload.extend_from_slice(&encode_request_sources2_subpayload());
+    stream
+        .write_all(&encode_packet(
+            OP_EMULEPROT,
+            OP_MULTIPACKET_EXT2,
+            &multipacket_payload,
+        ))
+        .await
+        .unwrap();
+    loop {
+        let packet = read_packet(&mut stream).await;
+        assert_ne!(
+            (packet[0], packet[5]),
+            (OP_EMULEPROT, OP_ANSWERSOURCES2),
+            "multipacket SX2 must share the standalone connection throttle"
+        );
+        if (packet[0], packet[5]) == (OP_EMULEPROT, OP_MULTIPACKETANSWER_EXT2) {
+            let (returned_identifier, remaining) =
+                super::Ed2kFileIdentifier::decode(&packet[6..]).unwrap();
+            assert_eq!(returned_identifier.file_hash, file_hash);
+            assert!(remaining.is_empty());
+            break;
+        }
+    }
 
     let mut invalid_source_request = super::encode_request_sources2(&file_hash);
     invalid_source_request[6] = 0;
@@ -464,13 +504,25 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
     legacy_multipacket_payload.extend_from_slice(&request_filename[22..]);
     legacy_multipacket_payload.push(super::OP_SETREQFILEID);
     legacy_multipacket_payload.push(super::OP_AICHFILEHASHREQ);
+    legacy_multipacket_payload.push(OP_REQUESTSOURCES2);
+    legacy_multipacket_payload.extend_from_slice(&encode_request_sources2_subpayload());
     let legacy_multipacket = super::encode_packet(
         OP_EMULEPROT,
         super::OP_MULTIPACKET_EXT,
         &legacy_multipacket_payload,
     );
     stream.write_all(&legacy_multipacket).await.unwrap();
-    let legacy_answer = read_packet(&mut stream).await;
+    let legacy_answer = loop {
+        let packet = read_packet(&mut stream).await;
+        assert_ne!(
+            (packet[0], packet[5]),
+            (OP_EMULEPROT, OP_ANSWERSOURCES2),
+            "legacy multipacket SX2 must share the standalone connection throttle"
+        );
+        if (packet[0], packet[5]) == (OP_EMULEPROT, super::OP_MULTIPACKETANSWER) {
+            break packet;
+        }
+    };
     assert_eq!(legacy_answer[0], OP_EMULEPROT);
     assert_eq!(legacy_answer[5], super::OP_MULTIPACKETANSWER);
     assert_eq!(&legacy_answer[6..22], &file_hash.0);
