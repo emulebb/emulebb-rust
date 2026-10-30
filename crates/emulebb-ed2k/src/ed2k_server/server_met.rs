@@ -10,6 +10,8 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Result, ensure};
 
+use crate::ed2k_string::Ed2kStringEncoding;
+
 use super::tag_codec::{DecodedTagValue, decode_tag_value};
 
 const MET_HEADER: u8 = 0x0E;
@@ -50,7 +52,7 @@ pub fn parse_server_met(data: &[u8]) -> Result<Vec<ParsedServerMetEntry>> {
 
         let mut name = None;
         for _ in 0..tag_count {
-            let (tag_name, value, rest) = decode_tag_value(&data[pos..])?;
+            let (tag_name, value, rest) = decode_tag_value(&data[pos..], Ed2kStringEncoding::Utf8)?;
             let consumed = (data.len() - pos) - rest.len();
             pos += consumed;
             if tag_name == Some(TAG_SERVER_NAME)

@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use super::super::tag_codec::{DecodedTagValue, decode_tag_value};
-use crate::ed2k_transfer::Ed2kSharedEntry;
+use crate::{ed2k_string::Ed2kStringEncoding, ed2k_transfer::Ed2kSharedEntry};
 
 use super::*;
 
@@ -191,6 +191,38 @@ fn offer_files_uses_incomplete_sentinel_for_part_files() {
 }
 
 #[test]
+fn offer_files_uses_legacy_codepage_without_unicode_capability() {
+    let mut entry = one_entry();
+    entry.display_name = "café.bin".to_string();
+    let payload = encode_offer_files_payload(
+        &[entry],
+        Some(u32::from_le_bytes([192, 168, 1, 210])),
+        Ipv4Addr::new(192, 168, 1, 210),
+        4662,
+        None,
+    );
+
+    let tag_count_offset = 26;
+    let (tag_name, tag_value, _rest) =
+        decode_tag_value(&payload[tag_count_offset + 4..], Ed2kStringEncoding::Legacy).unwrap();
+    let encoded_name = Ed2kStringEncoding::Legacy.encode("café.bin");
+
+    assert_eq!(tag_name, Some(FT_FILENAME));
+    assert_eq!(
+        tag_value,
+        Some(DecodedTagValue::String(
+            Ed2kStringEncoding::Legacy.decode(&encoded_name)
+        ))
+    );
+    #[cfg(not(windows))]
+    assert!(
+        payload
+            .windows(encoded_name.len())
+            .any(|bytes| bytes == encoded_name.as_slice())
+    );
+}
+
+#[test]
 fn offer_files_publishes_nonzero_rating() {
     let mut entry = one_entry();
     entry.rating = 4;
@@ -212,7 +244,7 @@ fn offer_files_publishes_nonzero_rating() {
     let mut tags = &payload[tag_count_offset + 4..];
     let mut rating = None;
     for _ in 0..tag_count {
-        let (name, value, rest) = decode_tag_value(tags).unwrap();
+        let (name, value, rest) = decode_tag_value(tags, Ed2kStringEncoding::Utf8).unwrap();
         if name == Some(FT_FILERATING) {
             rating = value;
         }
@@ -250,7 +282,7 @@ fn offer_files_publish_stock_media_subset() {
     let mut tags = &payload[tag_count_offset + 4..];
     let mut decoded = Vec::new();
     for _ in 0..tag_count {
-        let (name, value, rest) = decode_tag_value(tags).unwrap();
+        let (name, value, rest) = decode_tag_value(tags, Ed2kStringEncoding::Utf8).unwrap();
         decoded.push((name, value));
         tags = rest;
     }
@@ -276,7 +308,7 @@ fn offer_files_preserves_unicode_filename_tag() {
         Some(u32::from_le_bytes([192, 168, 1, 210])),
         Ipv4Addr::new(192, 168, 1, 210),
         4662,
-        None,
+        Some(SERVER_TCP_FLAG_UNICODE),
     );
 
     let tag_count_offset = 26;
@@ -288,7 +320,8 @@ fn offer_files_preserves_unicode_filename_tag() {
         ),
         3
     );
-    let (tag_name, tag_value, _rest) = decode_tag_value(&payload[tag_count_offset + 4..]).unwrap();
+    let (tag_name, tag_value, _rest) =
+        decode_tag_value(&payload[tag_count_offset + 4..], Ed2kStringEncoding::Utf8).unwrap();
 
     assert_eq!(tag_name, Some(FT_FILENAME));
     assert_eq!(

@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 
+use crate::ed2k_string::Ed2kStringEncoding;
+
 use super::super::super::Ed2kTransport;
 use super::super::super::codec::{
     decode_shared_dirs_answer_payload, decode_shared_files_answer_payload,
@@ -53,8 +55,9 @@ pub(super) async fn handle_ask_shared_files_dir(
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<()> {
-    let dir = decode_shared_files_dir_request_payload(payload)?;
+    let dir = decode_shared_files_dir_request_payload(payload, encoding)?;
     dump_ed2k_tcp_listener_meta(
         peer_addr,
         Some(transport.mode),
@@ -94,8 +97,9 @@ pub(super) fn handle_ask_shared_dirs_answer(
     transport: &Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<()> {
-    let answer = decode_shared_dirs_answer_payload(payload)?;
+    let answer = decode_shared_dirs_answer_payload(payload, encoding)?;
     dump_ed2k_tcp_listener_meta(
         peer_addr,
         Some(transport.mode),
@@ -110,8 +114,9 @@ pub(super) fn handle_ask_shared_files_dir_answer(
     transport: &Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<()> {
-    let answer = decode_shared_files_dir_answer_payload(payload)?;
+    let answer = decode_shared_files_dir_answer_payload(payload, encoding)?;
     dump_ed2k_tcp_listener_meta(
         peer_addr,
         Some(transport.mode),

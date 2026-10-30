@@ -233,10 +233,10 @@ pub(crate) fn fuzz_binary_parsers(data: &[u8]) {
             let _ = packet_handler::decode_server_ident(payload);
         }
         10 => {
-            let _ = decode_tag(payload);
+            let _ = decode_tag(payload, crate::ed2k_string::Ed2kStringEncoding::Utf8);
         }
         11 => {
-            let _ = decode_ed2k_string(payload);
+            let _ = decode_ed2k_string(payload, crate::ed2k_string::Ed2kStringEncoding::Utf8);
         }
         12 => {
             let challenge = payload

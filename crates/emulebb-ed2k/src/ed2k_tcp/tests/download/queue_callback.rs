@@ -39,9 +39,15 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
         assert_eq!(multipacket_request[5], super::OP_MULTIPACKET_EXT);
         assert_eq!(&multipacket_request[6..22], &file_hash.0);
 
-        let startup_answer =
-            encode_multipacket_answer(&file_hash, "callback.epub", true, Some(&[0, 0]), None)
-                .unwrap();
+        let startup_answer = encode_multipacket_answer(
+            &file_hash,
+            "callback.epub",
+            crate::ed2k_string::Ed2kStringEncoding::Utf8,
+            true,
+            Some(&[0, 0]),
+            None,
+        )
+        .unwrap();
         stream.write_all(&startup_answer).await.unwrap();
 
         let start_upload = tokio::time::timeout(

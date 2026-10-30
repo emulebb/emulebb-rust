@@ -338,19 +338,31 @@ pub(crate) fn fuzz_binary_parsers(data: &[u8]) {
             let _ = codec::decode_file_status_availability(payload);
         }
         19 => {
-            let _ = codec::decode_file_description_payload(payload);
+            let _ = codec::decode_file_description_payload(
+                payload,
+                crate::ed2k_string::Ed2kStringEncoding::Utf8,
+            );
         }
         20 => {
             let _ = codec::decode_shared_files_answer_payload(payload);
         }
         21 => {
-            let _ = codec::decode_shared_dirs_answer_payload(payload);
+            let _ = codec::decode_shared_dirs_answer_payload(
+                payload,
+                crate::ed2k_string::Ed2kStringEncoding::Utf8,
+            );
         }
         22 => {
-            let _ = codec::decode_shared_files_dir_answer_payload(payload);
+            let _ = codec::decode_shared_files_dir_answer_payload(
+                payload,
+                crate::ed2k_string::Ed2kStringEncoding::Utf8,
+            );
         }
         23 => {
-            let _ = codec::decode_request_filename_answer(payload);
+            let _ = codec::decode_request_filename_answer(
+                payload,
+                crate::ed2k_string::Ed2kStringEncoding::Utf8,
+            );
         }
         24 => {
             let _ = identity::decode_secident_state(payload);

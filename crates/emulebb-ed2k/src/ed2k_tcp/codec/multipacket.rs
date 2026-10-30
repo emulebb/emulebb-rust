@@ -1,7 +1,10 @@
 use anyhow::Result;
 use emulebb_kad_proto::Ed2kHash;
 
-use crate::ed2k_transfer::{ED2K_PART_SIZE, Ed2kResumeManifest};
+use crate::{
+    ed2k_string::Ed2kStringEncoding,
+    ed2k_transfer::{ED2K_PART_SIZE, Ed2kResumeManifest},
+};
 
 use super::super::{
     Ed2kFileIdentifier, OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ, OP_EMULEPROT, OP_FILESTATUS,
@@ -83,6 +86,7 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_request(
 pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_answer(
     file_identifier: &Ed2kFileIdentifier,
     file_name: &str,
+    string_encoding: Ed2kStringEncoding,
     include_filename_answer: bool,
     file_status_body: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
@@ -90,7 +94,10 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_answer(
     file_identifier.encode_into(&mut payload);
     if include_filename_answer {
         payload.push(OP_REQFILENAMEANSWER);
-        payload.extend_from_slice(&encode_request_filename_answer_body(file_name)?);
+        payload.extend_from_slice(&encode_request_filename_answer_body(
+            file_name,
+            string_encoding,
+        )?);
     }
     if let Some(status_body) = file_status_body {
         payload.push(OP_FILESTATUS);
@@ -106,6 +113,7 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_answer(
 pub(in crate::ed2k_tcp) fn encode_multipacket_answer(
     file_hash: &Ed2kHash,
     file_name: &str,
+    string_encoding: Ed2kStringEncoding,
     include_filename_answer: bool,
     file_status_body: Option<&[u8]>,
     aich_root: Option<[u8; 20]>,
@@ -114,7 +122,10 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_answer(
     payload.extend_from_slice(&file_hash.0);
     if include_filename_answer {
         payload.push(OP_REQFILENAMEANSWER);
-        payload.extend_from_slice(&encode_request_filename_answer_body(file_name)?);
+        payload.extend_from_slice(&encode_request_filename_answer_body(
+            file_name,
+            string_encoding,
+        )?);
     }
     if let Some(status_body) = file_status_body {
         payload.push(OP_FILESTATUS);

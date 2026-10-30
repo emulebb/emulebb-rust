@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
+use crate::ed2k_string::Ed2kStringEncoding;
+
 use super::flags::is_low_id;
 use super::tag_codec::{DecodedTagName, DecodedTagValue, decode_tag_details};
 use super::{
@@ -187,7 +189,7 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
     let mut aich_hash = None;
     let mut directory = None;
     for _ in 0..tag_count {
-        let (tag, rest) = decode_tag_details(cursor)?;
+        let (tag, rest) = decode_tag_details(cursor, Ed2kStringEncoding::Utf8)?;
         cursor = rest;
         match (&tag.name, &tag.value) {
             (DecodedTagName::Numeric(FT_FILENAME), Some(DecodedTagValue::String(value)))
@@ -469,7 +471,7 @@ mod tests {
         payload.extend_from_slice(&[0u8; 4]); // client id
         payload.extend_from_slice(&[0u8; 2]); // port
         payload.extend_from_slice(&1u32.to_le_bytes()); // tag count = 1
-        push_short_string_tag(&mut payload, FT_FILENAME, "a.txt"); // one filename tag
+        push_short_string_tag(&mut payload, FT_FILENAME, "a.txt", Ed2kStringEncoding::Utf8); // one filename tag
         payload.push(0x00); // more-results marker
 
         let page = decode_search_result_page(&payload).expect("legitimate page decodes");
@@ -523,7 +525,12 @@ mod tests {
         payload.extend_from_slice(&[0u8; 4]); // client id
         payload.extend_from_slice(&[0u8; 2]); // port
         payload.extend_from_slice(&2u32.to_le_bytes()); // tag count
-        push_short_string_tag(&mut payload, FT_FILENAME, "Sample Payload.bin");
+        push_short_string_tag(
+            &mut payload,
+            FT_FILENAME,
+            "Sample Payload.bin",
+            Ed2kStringEncoding::Utf8,
+        );
         super::super::tag_codec::push_u32_tag(&mut payload, FT_FILESIZE, 12345);
 
         let pages = decode_udp_search_result_pages(&payload).expect("UDP result decodes");
@@ -587,13 +594,38 @@ mod tests {
         payload.extend_from_slice(&[0u8; 4]);
         payload.extend_from_slice(&[0u8; 2]);
         payload.extend_from_slice(&7u32.to_le_bytes());
-        push_short_string_tag(&mut payload, FT_FILENAME, "Example.mp3");
-        push_short_string_tag(&mut payload, FT_MEDIA_ARTIST, "Example Artist");
-        push_short_string_tag(&mut payload, FT_MEDIA_ALBUM, "Example Album");
-        push_short_string_tag(&mut payload, FT_MEDIA_TITLE, "Example Title");
+        push_short_string_tag(
+            &mut payload,
+            FT_FILENAME,
+            "Example.mp3",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_short_string_tag(
+            &mut payload,
+            FT_MEDIA_ARTIST,
+            "Example Artist",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_short_string_tag(
+            &mut payload,
+            FT_MEDIA_ALBUM,
+            "Example Album",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_short_string_tag(
+            &mut payload,
+            FT_MEDIA_TITLE,
+            "Example Title",
+            Ed2kStringEncoding::Utf8,
+        );
         push_short_int_tag(&mut payload, FT_MEDIA_LENGTH, 321);
         push_short_int_tag(&mut payload, FT_MEDIA_BITRATE, 192);
-        push_short_string_tag(&mut payload, FT_MEDIA_CODEC, "MP3");
+        push_short_string_tag(
+            &mut payload,
+            FT_MEDIA_CODEC,
+            "MP3",
+            Ed2kStringEncoding::Utf8,
+        );
         payload.push(0x00);
 
         let page = decode_search_result_page(&payload).expect("media result decodes");
@@ -623,13 +655,33 @@ mod tests {
         payload.extend_from_slice(&[0u8; 4]);
         payload.extend_from_slice(&[0u8; 2]);
         payload.extend_from_slice(&7u32.to_le_bytes());
-        push_short_string_tag(&mut payload, FT_FILENAME, "Legacy.mp3");
-        push_named_string_tag(&mut payload, "artist", "Example Artist");
-        push_named_string_tag(&mut payload, "album", "Example Album");
-        push_named_string_tag(&mut payload, "title", "Example Title");
-        push_named_string_tag(&mut payload, "length", "05:21");
+        push_short_string_tag(
+            &mut payload,
+            FT_FILENAME,
+            "Legacy.mp3",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_named_string_tag(
+            &mut payload,
+            "artist",
+            "Example Artist",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_named_string_tag(
+            &mut payload,
+            "album",
+            "Example Album",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_named_string_tag(
+            &mut payload,
+            "title",
+            "Example Title",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_named_string_tag(&mut payload, "length", "05:21", Ed2kStringEncoding::Utf8);
         push_named_int_tag(&mut payload, "bitrate", 192);
-        push_named_string_tag(&mut payload, "codec", "MP3");
+        push_named_string_tag(&mut payload, "codec", "MP3", Ed2kStringEncoding::Utf8);
         payload.push(0x00);
 
         let page = decode_search_result_page(&payload).expect("legacy media result decodes");

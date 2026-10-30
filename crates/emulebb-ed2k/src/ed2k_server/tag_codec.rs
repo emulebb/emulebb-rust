@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 
+use crate::ed2k_string::Ed2kStringEncoding;
+
 use super::{
     TAG_SHORT_NAME_MASK, TAGTYPE_BLOB, TAGTYPE_BOOL, TAGTYPE_BOOLARRAY, TAGTYPE_FLOAT32,
     TAGTYPE_HASH, TAGTYPE_STR1, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16, TAGTYPE_UINT32,
@@ -117,13 +119,18 @@ pub(super) fn ed2k_string_tag_type(len: usize) -> u8 {
     }
 }
 
-pub(super) fn push_string_tag(payload: &mut Vec<u8>, name: u8, value: &str) {
+pub(super) fn push_string_tag(
+    payload: &mut Vec<u8>,
+    name: u8,
+    value: &str,
+    encoding: Ed2kStringEncoding,
+) {
     // Server login string tags use eMule `CTag::WriteTagToFile`: always
     // `TAGTYPE_STRING` with a u16 length prefix, NEVER the `WriteNewEd2kTag`
     // compact-string optimization (that is `push_short_string_tag`, used for
     // OP_OFFERFILES). Emitting a compact STR type here (0x15…) produced a hybrid
     // no stock writer can generate — a unique non-stock fingerprint on every login.
-    let value_bytes = value.as_bytes();
+    let value_bytes = encoding.encode(value);
     payload.push(TAGTYPE_STRING);
     payload.extend_from_slice(&1u16.to_le_bytes());
     payload.push(name);
@@ -132,11 +139,16 @@ pub(super) fn push_string_tag(payload: &mut Vec<u8>, name: u8, value: &str) {
             .expect("string tag length fits in u16")
             .to_le_bytes(),
     );
-    payload.extend_from_slice(value_bytes);
+    payload.extend_from_slice(&value_bytes);
 }
 
-pub(super) fn push_short_string_tag(payload: &mut Vec<u8>, name: u8, value: &str) {
-    let value_bytes = value.as_bytes();
+pub(super) fn push_short_string_tag(
+    payload: &mut Vec<u8>,
+    name: u8,
+    value: &str,
+    encoding: Ed2kStringEncoding,
+) {
+    let value_bytes = encoding.encode(value);
     let type_byte = ed2k_string_tag_type(value_bytes.len());
     payload.push(TAG_SHORT_NAME_MASK | type_byte);
     payload.push(name);
@@ -147,12 +159,17 @@ pub(super) fn push_short_string_tag(payload: &mut Vec<u8>, name: u8, value: &str
                 .to_le_bytes(),
         );
     }
-    payload.extend_from_slice(value_bytes);
+    payload.extend_from_slice(&value_bytes);
 }
 
 /// `WriteNewEd2kTag` string encoding with a legacy textual tag name.
-pub(super) fn push_named_string_tag(payload: &mut Vec<u8>, name: &str, value: &str) {
-    let value_bytes = value.as_bytes();
+pub(super) fn push_named_string_tag(
+    payload: &mut Vec<u8>,
+    name: &str,
+    value: &str,
+    encoding: Ed2kStringEncoding,
+) {
+    let value_bytes = encoding.encode(value);
     let type_byte = ed2k_string_tag_type(value_bytes.len());
     payload.push(type_byte);
     payload.extend_from_slice(
@@ -168,10 +185,13 @@ pub(super) fn push_named_string_tag(payload: &mut Vec<u8>, name: &str, value: &s
                 .to_le_bytes(),
         );
     }
-    payload.extend_from_slice(value_bytes);
+    payload.extend_from_slice(&value_bytes);
 }
 
-pub(super) fn decode_ed2k_string(payload: &[u8]) -> Result<Option<String>> {
+pub(super) fn decode_ed2k_string(
+    payload: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> Result<Option<String>> {
     if payload.len() < 2 {
         return Ok(None);
     }
@@ -179,13 +199,14 @@ pub(super) fn decode_ed2k_string(payload: &[u8]) -> Result<Option<String>> {
     if payload.len() < len + 2 {
         anyhow::bail!("short ED2K string payload");
     }
-    Ok(Some(
-        String::from_utf8_lossy(&payload[2..2 + len]).into_owned(),
-    ))
+    Ok(Some(encoding.decode(&payload[2..2 + len])))
 }
 
-pub(super) fn decode_tag(bytes: &[u8]) -> Result<(Option<u8>, Option<String>, &[u8])> {
-    let (tag_name, tag_value, rest) = decode_tag_value(bytes)?;
+pub(super) fn decode_tag(
+    bytes: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> Result<(Option<u8>, Option<String>, &[u8])> {
+    let (tag_name, tag_value, rest) = decode_tag_value(bytes, encoding)?;
     let string_value = match tag_value {
         Some(DecodedTagValue::String(value)) => Some(value),
         _ => None,
@@ -195,8 +216,9 @@ pub(super) fn decode_tag(bytes: &[u8]) -> Result<(Option<u8>, Option<String>, &[
 
 pub(super) fn decode_tag_value(
     bytes: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<(Option<u8>, Option<DecodedTagValue>, &[u8])> {
-    let (tag, rest) = decode_tag_details(bytes)?;
+    let (tag, rest) = decode_tag_details(bytes, encoding)?;
     let numeric_name = match tag.name {
         DecodedTagName::Numeric(name) => Some(name),
         DecodedTagName::Text(_) => None,
@@ -204,7 +226,10 @@ pub(super) fn decode_tag_value(
     Ok((numeric_name, tag.value, rest))
 }
 
-pub(super) fn decode_tag_details(mut bytes: &[u8]) -> Result<(DecodedTag, &[u8])> {
+pub(super) fn decode_tag_details(
+    mut bytes: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> Result<(DecodedTag, &[u8])> {
     if bytes.len() < 2 {
         anyhow::bail!("short ED2K tag header");
     }
@@ -232,7 +257,7 @@ pub(super) fn decode_tag_details(mut bytes: &[u8]) -> Result<(DecodedTag, &[u8])
         let name = if name_len == 1 {
             DecodedTagName::Numeric(bytes[0])
         } else {
-            DecodedTagName::Text(String::from_utf8_lossy(&bytes[..name_len]).into_owned())
+            DecodedTagName::Text(Ed2kStringEncoding::Legacy.decode(&bytes[..name_len]))
         };
         bytes = &bytes[name_len..];
         name
@@ -248,7 +273,7 @@ pub(super) fn decode_tag_details(mut bytes: &[u8]) -> Result<(DecodedTag, &[u8])
             if bytes.len() < len {
                 anyhow::bail!("short ED2K string tag value");
             }
-            let value = String::from_utf8_lossy(&bytes[..len]).into_owned();
+            let value = encoding.decode(&bytes[..len]);
             bytes = &bytes[len..];
             Some(DecodedTagValue::String(value))
         }
@@ -257,7 +282,7 @@ pub(super) fn decode_tag_details(mut bytes: &[u8]) -> Result<(DecodedTag, &[u8])
             if bytes.len() < len {
                 anyhow::bail!("short ED2K compact string tag value");
             }
-            let value = String::from_utf8_lossy(&bytes[..len]).into_owned();
+            let value = encoding.decode(&bytes[..len]);
             bytes = &bytes[len..];
             Some(DecodedTagValue::String(value))
         }

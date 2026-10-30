@@ -6,9 +6,12 @@ use std::{
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
-use crate::ed2k_transfer::{
-    Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kTransferState, diag_bad_peer,
-    download_abuse::{OutOfPartAcceptGuard, OutOfPartDisposition, QueueRankDecision},
+use crate::{
+    ed2k_string::Ed2kStringEncoding,
+    ed2k_transfer::{
+        Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kTransferState, diag_bad_peer,
+        download_abuse::{OutOfPartAcceptGuard, OutOfPartDisposition, QueueRankDecision},
+    },
 };
 
 use super::super::{
@@ -512,6 +515,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     session_state.remote_supports_multipacket = hello_profile.supports_multipacket;
                     session_state.remote_supports_ext_multipacket =
                         hello_profile.supports_ext_multipacket;
+                    session_state.remote_supports_unicode =
+                        hello_profile.misc_options1.unicode_support;
                     session_state.remote_source_exchange_version =
                         hello_profile.source_exchange_version;
                     session_state.remote_supports_source_exchange = hello_profile.supports_source_exchange;
@@ -571,6 +576,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     session_state.remote_supports_multipacket = hello_profile.supports_multipacket;
                     session_state.remote_supports_ext_multipacket =
                         hello_profile.supports_ext_multipacket;
+                    session_state.remote_supports_unicode =
+                        hello_profile.misc_options1.unicode_support;
                     session_state.remote_source_exchange_version =
                         hello_profile.source_exchange_version;
                     session_state.remote_supports_source_exchange = hello_profile.supports_source_exchange;
@@ -792,8 +799,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                 }
                 (OP_EDONKEYPROT, OP_REQFILENAMEANSWER) => {
-                    let (returned_hash, returned_file_name) =
-                        decode_request_filename_answer(&packet.payload)?;
+                    let (returned_hash, returned_file_name) = decode_request_filename_answer(
+                        &packet.payload,
+                        Ed2kStringEncoding::from_unicode_support(
+                            session_state.remote_supports_unicode,
+                        ),
+                    )?;
                     if returned_hash != file_hash {
                         anyhow::bail!(
                             "OP_REQFILENAMEANSWER hash mismatch {} expected {}",
@@ -867,8 +878,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         remaining = rest;
                         match sub_opcode {
                             OP_REQFILENAMEANSWER => {
-                                let (file_name, rest) =
-                                    decode_request_filename_answer_body(remaining)?;
+                                let (file_name, rest) = decode_request_filename_answer_body(
+                                    remaining,
+                                    Ed2kStringEncoding::from_unicode_support(
+                                        session_state.remote_supports_unicode,
+                                    ),
+                                )?;
                                 remaining = rest;
                                 returned_file_name = Some(file_name);
                             }
@@ -973,8 +988,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         remaining = rest;
                         match sub_opcode {
                             OP_REQFILENAMEANSWER => {
-                                let (file_name, rest) =
-                                    decode_request_filename_answer_body(remaining)?;
+                                let (file_name, rest) = decode_request_filename_answer_body(
+                                    remaining,
+                                    Ed2kStringEncoding::from_unicode_support(
+                                        session_state.remote_supports_unicode,
+                                    ),
+                                )?;
                                 remaining = rest;
                                 returned_file_name = Some(file_name);
                             }
@@ -1273,20 +1292,37 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         .await?;
                 }
                 (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR) => {
-                    browse::handle_ask_shared_files_dir(transport, peer_addr, &packet.payload)
-                        .await?;
+                    browse::handle_ask_shared_files_dir(
+                        transport,
+                        peer_addr,
+                        &packet.payload,
+                        Ed2kStringEncoding::from_unicode_support(
+                            session_state.remote_supports_unicode,
+                        ),
+                    )
+                    .await?;
                 }
                 (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER) => {
                     browse::handle_ask_shared_files_answer(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EDONKEYPROT, OP_ASKSHAREDDIRSANS) => {
-                    browse::handle_ask_shared_dirs_answer(transport, peer_addr, &packet.payload)?;
+                    browse::handle_ask_shared_dirs_answer(
+                        transport,
+                        peer_addr,
+                        &packet.payload,
+                        Ed2kStringEncoding::from_unicode_support(
+                            session_state.remote_supports_unicode,
+                        ),
+                    )?;
                 }
                 (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIRANS) => {
                     browse::handle_ask_shared_files_dir_answer(
                         transport,
                         peer_addr,
                         &packet.payload,
+                        Ed2kStringEncoding::from_unicode_support(
+                            session_state.remote_supports_unicode,
+                        ),
                     )?;
                 }
                 (OP_EDONKEYPROT, OP_ASKSHAREDDENIEDANS) => {
@@ -1302,9 +1338,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         transfer_runtime,
                         file_hash_hex,
-                        session_state.peer_user_hash,
-                        session_state.peer_connect_options,
+                        connected_peer_source(peer_addr, &session_state),
                         &packet.payload,
+                        Ed2kStringEncoding::from_unicode_support(
+                            session_state.remote_supports_unicode,
+                        ),
                     )
                     .await?;
                 }

@@ -4,7 +4,10 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use flate2::read::ZlibDecoder;
 
-use crate::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState, ed2k_part_count};
+use crate::{
+    ed2k_string::Ed2kStringEncoding,
+    ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState, ed2k_part_count},
+};
 
 mod aich;
 mod buddy;
@@ -489,26 +492,40 @@ pub(super) fn encode_set_req_file_id(file_hash: &Ed2kHash) -> Vec<u8> {
     encode_packet(OP_EDONKEYPROT, OP_SETREQFILEID, &file_hash.0)
 }
 
-pub(super) fn encode_request_filename_answer_body(file_name: &str) -> Result<Vec<u8>> {
-    encode_ed2k_string_body(file_name, "ED2K string")
+pub(super) fn encode_request_filename_answer_body(
+    file_name: &str,
+    encoding: Ed2kStringEncoding,
+) -> Result<Vec<u8>> {
+    encode_ed2k_string_body(file_name, encoding, "ED2K string")
 }
 
-fn encode_ed2k_string_body(value: &str, context: &str) -> Result<Vec<u8>> {
-    let value = value.as_bytes();
+fn encode_ed2k_string_body(
+    value: &str,
+    encoding: Ed2kStringEncoding,
+    context: &str,
+) -> Result<Vec<u8>> {
+    let value = encoding.encode(value);
     let mut payload = Vec::with_capacity(2 + value.len());
     payload.extend_from_slice(
         &(u16::try_from(value.len()).with_context(|| format!("{context} too large"))?)
             .to_le_bytes(),
     );
-    payload.extend_from_slice(value);
+    payload.extend_from_slice(&value);
     Ok(payload)
 }
 
-pub(super) fn decode_request_filename_answer_body(payload: &[u8]) -> Result<(String, &[u8])> {
-    decode_ed2k_string_body(payload, "OP_REQFILENAMEANSWER")
+pub(super) fn decode_request_filename_answer_body(
+    payload: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> Result<(String, &[u8])> {
+    decode_ed2k_string_body(payload, encoding, "OP_REQFILENAMEANSWER")
 }
 
-fn decode_ed2k_string_body<'a>(payload: &'a [u8], context: &str) -> Result<(String, &'a [u8])> {
+fn decode_ed2k_string_body<'a>(
+    payload: &'a [u8],
+    encoding: Ed2kStringEncoding,
+    context: &str,
+) -> Result<(String, &'a [u8])> {
     if payload.len() < 2 {
         anyhow::bail!("short {context} string body");
     }
@@ -516,10 +533,7 @@ fn decode_ed2k_string_body<'a>(payload: &'a [u8], context: &str) -> Result<(Stri
     if payload.len() < 2 + len {
         anyhow::bail!("short {context} string");
     }
-    Ok((
-        String::from_utf8_lossy(&payload[2..2 + len]).into_owned(),
-        &payload[2 + len..],
-    ))
+    Ok((encoding.decode(&payload[2..2 + len]), &payload[2 + len..]))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,7 +566,10 @@ pub(super) struct SharedDirsAnswer {
     pub(super) dirs: Vec<String>,
 }
 
-pub(super) fn decode_shared_dirs_answer_payload(payload: &[u8]) -> Result<SharedDirsAnswer> {
+pub(super) fn decode_shared_dirs_answer_payload(
+    payload: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> Result<SharedDirsAnswer> {
     if payload.len() < 4 {
         anyhow::bail!("short OP_ASKSHAREDDIRSANS payload {}", payload.len());
     }
@@ -560,15 +577,18 @@ pub(super) fn decode_shared_dirs_answer_payload(payload: &[u8]) -> Result<Shared
     let mut remaining = &payload[4..];
     let mut dirs = Vec::new();
     for _ in 0..dir_count {
-        let (dir, rest) = decode_ed2k_string_body(remaining, "OP_ASKSHAREDDIRSANS")?;
+        let (dir, rest) = decode_ed2k_string_body(remaining, encoding, "OP_ASKSHAREDDIRSANS")?;
         dirs.push(dir);
         remaining = rest;
     }
     Ok(SharedDirsAnswer { dir_count, dirs })
 }
 
-pub(super) fn decode_shared_files_dir_request_payload(payload: &[u8]) -> Result<String> {
-    let (dir, _) = decode_ed2k_string_body(payload, "OP_ASKSHAREDFILESDIR")?;
+pub(super) fn decode_shared_files_dir_request_payload(
+    payload: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> Result<String> {
+    let (dir, _) = decode_ed2k_string_body(payload, encoding, "OP_ASKSHAREDFILESDIR")?;
     Ok(dir)
 }
 
@@ -581,8 +601,9 @@ pub(super) struct SharedFilesDirAnswer {
 
 pub(super) fn decode_shared_files_dir_answer_payload(
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<SharedFilesDirAnswer> {
-    let (dir, remaining) = decode_ed2k_string_body(payload, "OP_ASKSHAREDFILESDIRANS")?;
+    let (dir, remaining) = decode_ed2k_string_body(payload, encoding, "OP_ASKSHAREDFILESDIRANS")?;
     let files = decode_shared_files_answer_payload(remaining)?;
     Ok(SharedFilesDirAnswer {
         dir,
@@ -591,17 +612,21 @@ pub(super) fn decode_shared_files_dir_answer_payload(
     })
 }
 
-pub(super) fn decode_request_filename_answer(payload: &[u8]) -> Result<(Ed2kHash, String)> {
+pub(super) fn decode_request_filename_answer(
+    payload: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> Result<(Ed2kHash, String)> {
     let file_hash = decode_file_hash_payload(payload)?;
-    let (file_name, _) = decode_request_filename_answer_body(&payload[16..])?;
+    let (file_name, _) = decode_request_filename_answer_body(&payload[16..], encoding)?;
     Ok((file_hash, file_name))
 }
 
 pub(super) fn encode_request_filename_answer(
     file_hash: &Ed2kHash,
     file_name: &str,
+    encoding: Ed2kStringEncoding,
 ) -> Result<Vec<u8>> {
-    let body = encode_request_filename_answer_body(file_name)?;
+    let body = encode_request_filename_answer_body(file_name, encoding)?;
     let mut payload = Vec::with_capacity(16 + body.len());
     payload.extend_from_slice(&file_hash.0);
     payload.extend_from_slice(&body);
