@@ -8,7 +8,7 @@
 //! bridge the two with the established pattern:
 //!
 //! ```text
-//!   notify watcher thread --(debounced batches)--> mpsc channel --> tokio consumer task
+//!   notify watcher thread --(debounced batches)--> bounded mpsc --> tokio consumer task
 //! ```
 //!
 //! * **Debouncing.** A single logical change (a file copied in, an editor's
@@ -20,9 +20,11 @@
 //!   matching the manual full-tree scan.
 //! * **Thread -> channel -> tokio bridge.** The debouncer's event handler is a
 //!   small closure that classifies the settled events into [`MonitorAction`]s
-//!   (the pure decision -- share vs. remove) and forwards them over a
-//!   `tokio::sync::mpsc` channel. The async consumer applies each action via the
-//!   existing share / un-share core paths so MD4/AICH/catalog stay consistent.
+//!   (the pure decision -- share vs. remove) and forwards them over a bounded
+//!   `tokio::sync::mpsc` channel. Overflow collapses into one authoritative
+//!   reconciliation request instead of accumulating unbounded path work. The
+//!   async consumer applies each action via the existing share / un-share core
+//!   paths so MD4/AICH/catalog stay consistent.
 //! * **Graceful degradation.** Watching one root can fail (a vanished path; on
 //!   Linux a large recursive tree can exhaust the inotify watch limit). We log
 //!   and continue with the other roots rather than crashing the daemon: that
@@ -38,6 +40,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
@@ -45,7 +49,8 @@ use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::shared_directories::{SharedDirectoryRoot, load_shared_file_exclusion_policy};
 
@@ -55,6 +60,11 @@ use crate::shared_directories::{SharedDirectoryRoot, load_shared_file_exclusion_
 /// (eMule re-scans shared dirs on a coarse timer; a 2s settle is well within
 /// that responsiveness while avoiding mid-write hashing.)
 const SETTLE_WINDOW: Duration = Duration::from_secs(2);
+
+/// Maximum settled path actions retained while the serial async applier is
+/// busy. Normal bursts stay on the direct path; larger bursts collapse into a
+/// full reconciliation so memory use is independent of watcher event volume.
+const ACTION_CHANNEL_CAPACITY: usize = 256;
 
 /// `notify` 8.x uses one fixed 16 KiB `ReadDirectoryChangesW` buffer for a
 /// recursive Windows watch. Even a modest settled mutation burst can mean an
@@ -223,6 +233,60 @@ fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
     coalesced.into_iter().map(|(_, action)| action).collect()
 }
 
+/// Non-blocking ingress from the watcher callback into the async consumer.
+///
+/// Once the bounded queue fills, the first overflow latches a reconciliation
+/// request. Further callbacks skip redundant path actions until the consumer
+/// drains the queue and takes ownership of that request. The filesystem scan
+/// then observes the authoritative final state for every skipped action.
+struct MonitorIngress {
+    action_tx: Sender<MonitorAction>,
+    reconcile_required: Arc<AtomicBool>,
+}
+
+impl MonitorIngress {
+    fn try_send_actions(&self, actions: impl IntoIterator<Item = MonitorAction>) {
+        if self.reconcile_required.load(Ordering::Acquire) {
+            return;
+        }
+
+        for action in actions {
+            match self.action_tx.try_send(action) {
+                Ok(()) => {}
+                Err(TrySendError::Closed(_)) => return,
+                Err(TrySendError::Full(_)) => {
+                    // WHY: blocking the notify callback can stall the platform
+                    // watcher, while retaining every path permits remote/local
+                    // mutation bursts to grow memory without bound. One full
+                    // scan preserves eventual final intent for the whole burst.
+                    if !self.reconcile_required.swap(true, Ordering::AcqRel) {
+                        tracing::warn!(
+                            capacity = ACTION_CHANNEL_CAPACITY,
+                            "shared-directory watcher ingress overflowed; scheduling reconciliation",
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn monitor_action_channel(
+    capacity: usize,
+) -> (MonitorIngress, Receiver<MonitorAction>, Arc<AtomicBool>) {
+    let (action_tx, action_rx) = tokio::sync::mpsc::channel(capacity);
+    let reconcile_required = Arc::new(AtomicBool::new(false));
+    (
+        MonitorIngress {
+            action_tx,
+            reconcile_required: Arc::clone(&reconcile_required),
+        },
+        action_rx,
+        reconcile_required,
+    )
+}
+
 /// Handle to a running shared-directory monitor.
 ///
 /// Owns the `notify` debouncer (its `Drop` stops the watcher thread) and the
@@ -276,20 +340,14 @@ where
     }
 
     // notify watcher thread -> tokio consumer bridge. The debouncer's event
-    // handler runs on the watcher thread; it must not block, so it only
-    // classifies + forwards over an unbounded tokio channel (a non-blocking send
-    // that is safe to call from a non-async thread).
-    let (action_tx, action_rx): (
-        UnboundedSender<MonitorAction>,
-        UnboundedReceiver<MonitorAction>,
-    ) = tokio::sync::mpsc::unbounded_channel();
+    // handler runs on the watcher thread; it must not block. A full bounded
+    // queue therefore latches one authoritative reconciliation instead of
+    // waiting or retaining unbounded per-path work.
+    let (ingress, action_rx, reconcile_required) = monitor_action_channel(ACTION_CHANNEL_CAPACITY);
 
     let handler = move |result: DebounceEventResult| match result {
         Ok(events) => {
-            for action in coalesce_actions(actions_for_events(&events)) {
-                // Receiver gone == monitor stopped; drop silently.
-                let _ = action_tx.send(action);
-            }
+            ingress.try_send_actions(coalesce_actions(actions_for_events(&events)));
         }
         Err(errors) => {
             for error in errors {
@@ -345,7 +403,7 @@ where
         return None;
     }
 
-    let consumer = tokio::spawn(run_consumer(action_rx, apply));
+    let consumer = tokio::spawn(run_consumer(action_rx, reconcile_required, apply));
     Some(SharedDirMonitor {
         _debouncer: debouncer,
         consumer,
@@ -371,8 +429,11 @@ where
 /// authoritative `monitor_shared_hashes` map) is what closes that gap, without
 /// two maps redundantly tracking the same "is this shared?" question. Burst
 /// coalescing is intentionally stateless: the applier remains authoritative.
-async fn run_consumer<F, Fut>(mut action_rx: UnboundedReceiver<MonitorAction>, apply: F)
-where
+async fn run_consumer<F, Fut>(
+    mut action_rx: Receiver<MonitorAction>,
+    reconcile_required: Arc<AtomicBool>,
+    apply: F,
+) where
     F: Fn(MonitorAction) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
@@ -381,6 +442,18 @@ where
         while let Ok(action) = action_rx.try_recv() {
             pending.push(action);
         }
+
+        if reconcile_required.load(Ordering::Acquire) {
+            // Keep the latch set while draining so watcher callbacks continue
+            // collapsing into this same authoritative scan. Clearing it before
+            // the await lets events that happen during reconciliation queue for
+            // a subsequent final-intent pass.
+            while action_rx.try_recv().is_ok() {}
+            reconcile_required.store(false, Ordering::Release);
+            apply(MonitorAction::Reconcile).await;
+            continue;
+        }
+
         for action in coalesce_actions(pending) {
             apply(action).await;
         }
@@ -716,7 +789,6 @@ mod tests {
     use super::*;
     use notify_debouncer_full::notify::Event;
     use notify_debouncer_full::notify::event::{CreateKind, Flag, RemoveKind};
-    use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -957,13 +1029,11 @@ mod tests {
     /// cannot be tested deterministically).
     async fn applied_actions(inputs: Vec<MonitorAction>) -> Vec<MonitorAction> {
         let applied: Arc<Mutex<Vec<MonitorAction>>> = Arc::new(Mutex::new(Vec::new()));
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        for action in inputs {
-            tx.send(action).unwrap();
-        }
-        drop(tx);
+        let (ingress, rx, reconcile_required) = monitor_action_channel(inputs.len().max(1));
+        ingress.try_send_actions(inputs);
+        drop(ingress);
         let sink = Arc::clone(&applied);
-        let consumer = tokio::spawn(run_consumer(rx, move |action| {
+        let consumer = tokio::spawn(run_consumer(rx, reconcile_required, move |action| {
             let sink = Arc::clone(&sink);
             async move {
                 sink.lock().unwrap().push(action);
@@ -971,6 +1041,83 @@ mod tests {
         }));
         consumer.await.unwrap();
         Arc::try_unwrap(applied).unwrap().into_inner().unwrap()
+    }
+
+    #[test]
+    fn bounded_ingress_caps_large_burst_and_latches_one_reconcile() {
+        const TEST_CAPACITY: usize = 4;
+        let (ingress, mut rx, reconcile_required) = monitor_action_channel(TEST_CAPACITY);
+        let burst = (0..10_000)
+            .map(|index| share(&format!("/s/{index}.dat")))
+            .collect::<Vec<_>>();
+
+        ingress.try_send_actions(burst);
+
+        assert!(reconcile_required.load(Ordering::Acquire));
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok()).count(),
+            TEST_CAPACITY,
+        );
+        ingress.try_send_actions([share("/s/after-overflow.dat")]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn overflow_reconciles_each_episode_then_preserves_later_final_intent() {
+        let applied: Arc<Mutex<Vec<MonitorAction>>> = Arc::new(Mutex::new(Vec::new()));
+        let reconcile_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reconcile_started = Arc::new(tokio::sync::Notify::new());
+        let release_reconcile = Arc::new(tokio::sync::Notify::new());
+        let (ingress, rx, reconcile_required) = monitor_action_channel(2);
+
+        ingress.try_send_actions([
+            share("/s/pre-overflow-a.dat"),
+            remove("/s/pre-overflow-b.dat"),
+            share("/s/triggers-overflow.dat"),
+        ]);
+
+        let sink = Arc::clone(&applied);
+        let count = Arc::clone(&reconcile_count);
+        let started = Arc::clone(&reconcile_started);
+        let release = Arc::clone(&release_reconcile);
+        let consumer = tokio::spawn(run_consumer(rx, reconcile_required, move |action| {
+            let sink = Arc::clone(&sink);
+            let count = Arc::clone(&count);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                sink.lock().unwrap().push(action.clone());
+                if action == MonitorAction::Reconcile {
+                    count.fetch_add(1, Ordering::AcqRel);
+                    started.notify_one();
+                    release.notified().await;
+                }
+            }
+        }));
+
+        tokio::time::timeout(Duration::from_secs(1), reconcile_started.notified())
+            .await
+            .expect("overflow reconciliation did not start");
+        ingress.try_send_actions([
+            share("/s/during-reconcile-a.dat"),
+            remove("/s/during-reconcile-b.dat"),
+            share("/s/triggers-follow-up-overflow.dat"),
+        ]);
+        release_reconcile.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(1), reconcile_started.notified())
+            .await
+            .expect("follow-up overflow reconciliation did not start");
+        assert_eq!(reconcile_count.load(Ordering::Acquire), 2);
+        ingress.try_send_actions([remove("/s/final.dat"), share("/s/final.dat")]);
+        drop(ingress);
+        release_reconcile.notify_one();
+        consumer.await.unwrap();
+
+        assert_eq!(
+            Arc::try_unwrap(applied).unwrap().into_inner().unwrap(),
+            vec![reconcile(), reconcile(), share("/s/final.dat")],
+        );
     }
 
     /// The consumer forwards the final queued intent for each path, including a
