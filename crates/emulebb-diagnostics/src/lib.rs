@@ -22,10 +22,7 @@ use std::{
 #[cfg(feature = "enabled")]
 use std::{
     env,
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Mutex, OnceLock},
 };
 
 #[cfg(any(feature = "enabled", test))]
@@ -87,7 +84,7 @@ const MAX_RETAINED_SECONDS: u64 = 365 * 24 * 60 * 60;
 const MAX_MINIMUM_FREE_BYTES: u64 = MAX_TOTAL_BYTES;
 
 #[cfg(feature = "enabled")]
-static WRITER: OnceLock<Result<Mutex<SegmentedEventWriter>, WriterInitFailure>> = OnceLock::new();
+static WRITER: OnceLock<Mutex<RetryingEventWriter>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -220,11 +217,14 @@ struct SegmentedEventWriter {
 #[cfg(any(feature = "enabled", test))]
 type FreeSpaceProbe = dyn Fn(&Path) -> io::Result<u64> + Send + Sync;
 
-#[derive(Debug)]
-#[cfg(feature = "enabled")]
-struct WriterInitFailure {
-    reason: String,
-    dropped_events: AtomicU64,
+#[derive(Default)]
+#[cfg(any(feature = "enabled", test))]
+struct RetryingEventWriter {
+    writer: Option<SegmentedEventWriter>,
+    initialization_drops: u64,
+    last_configured: bool,
+    last_configuration: Option<WriterConfig>,
+    initialization_failure: Option<String>,
 }
 
 #[cfg(any(feature = "enabled", test))]
@@ -251,13 +251,7 @@ pub fn emit(
     keys: Value,
     body: Value,
 ) -> bool {
-    let writer = match WRITER.get_or_init(initialize_global_writer) {
-        Ok(writer) => writer,
-        Err(error) => {
-            error.record_drop();
-            return false;
-        }
-    };
+    let writer = WRITER.get_or_init(|| Mutex::new(RetryingEventWriter::default()));
     let mut writer = match writer.lock() {
         Ok(writer) => writer,
         Err(poisoned) => {
@@ -265,7 +259,15 @@ pub fn emit(
             poisoned.into_inner()
         }
     };
-    writer.emit(family, event, severity, &keys, &body)
+    writer.emit_with_config_provider(
+        WriterConfig::from_environment,
+        || (Uuid::new_v4().simple().to_string(), std::process::id()),
+        family,
+        event,
+        severity,
+        &keys,
+        &body,
+    )
 }
 
 #[cfg(not(feature = "enabled"))]
@@ -290,56 +292,111 @@ pub fn writer_health() -> DiagWriterHealth {
         let Some(writer) = WRITER.get() else {
             return uninitialized_health();
         };
-        match writer {
-            Ok(writer) => match writer.lock() {
-                Ok(writer) => writer.health(),
-                Err(poisoned) => {
-                    let mut health = poisoned.into_inner().health();
-                    health.initialization_failure = Some("writerLockPoisoned".to_string());
-                    health
-                }
-            },
-            Err(error) => error.health(),
+        match writer.lock() {
+            Ok(writer) => writer.health(),
+            Err(poisoned) => {
+                let mut health = poisoned.into_inner().health();
+                health.initialization_failure = Some("writerLockPoisoned".to_string());
+                health
+            }
         }
     }
 }
 
-#[cfg(feature = "enabled")]
-impl WriterInitFailure {
-    fn new(reason: String) -> Self {
-        Self {
-            reason,
-            dropped_events: AtomicU64::new(0),
+#[cfg(any(feature = "enabled", test))]
+impl RetryingEventWriter {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the diagnostic event boundary stays flat and allocation-free"
+    )]
+    fn emit_with_config_provider<ConfigProvider, IdentityProvider>(
+        &mut self,
+        config_provider: ConfigProvider,
+        identity_provider: IdentityProvider,
+        family: &'static str,
+        event: &'static str,
+        severity: &'static str,
+        keys: &Value,
+        body: &Value,
+    ) -> bool
+    where
+        ConfigProvider: FnOnce() -> Result<Option<WriterConfig>, String>,
+        IdentityProvider: FnOnce() -> (String, u32),
+    {
+        if self.writer.is_none() {
+            self.retry_initialization(config_provider, identity_provider);
         }
+        let Some(writer) = self.writer.as_mut() else {
+            self.initialization_drops = self.initialization_drops.saturating_add(1);
+            return false;
+        };
+        writer.emit(family, event, severity, keys, body)
     }
 
-    fn record_drop(&self) {
-        self.dropped_events.fetch_add(1, Ordering::Relaxed);
+    fn retry_initialization<ConfigProvider, IdentityProvider>(
+        &mut self,
+        config_provider: ConfigProvider,
+        identity_provider: IdentityProvider,
+    ) where
+        ConfigProvider: FnOnce() -> Result<Option<WriterConfig>, String>,
+        IdentityProvider: FnOnce() -> (String, u32),
+    {
+        let config = match config_provider() {
+            Ok(Some(config)) => {
+                self.last_configured = true;
+                self.last_configuration = Some(config.clone());
+                config
+            }
+            Ok(None) => {
+                self.last_configured = false;
+                self.last_configuration = None;
+                self.initialization_failure = Some("logDirectoryNotConfigured".to_string());
+                return;
+            }
+            Err(reason) => {
+                self.last_configured = true;
+                self.last_configuration = None;
+                self.initialization_failure = Some(reason);
+                return;
+            }
+        };
+        let (run_id, process_id) = identity_provider();
+        match SegmentedEventWriter::new(config, run_id, process_id) {
+            Ok(writer) => {
+                self.writer = Some(writer);
+                self.initialization_failure = None;
+            }
+            Err(error) => {
+                self.initialization_failure =
+                    Some(format!("writerInitializationFailed:{}", error.kind()));
+            }
+        }
     }
 
     fn health(&self) -> DiagWriterHealth {
+        if let Some(writer) = &self.writer {
+            let mut health = writer.health();
+            health.dropped_events = health
+                .dropped_events
+                .saturating_add(self.initialization_drops);
+            return health;
+        }
+
+        let config = self.last_configuration.as_ref();
         DiagWriterHealth {
-            dropped_events: self.dropped_events.load(Ordering::Relaxed),
-            initialization_failure: Some(self.reason.clone()),
-            ..uninitialized_health()
+            enabled: true,
+            configured: self.last_configured,
+            dropped_events: self.initialization_drops,
+            max_segment_bytes: config.map(|config| config.max_segment_bytes),
+            max_segment_seconds: config.map(|config| config.max_segment_age.as_secs()),
+            retained_segments: config.map(|config| config.retained_segments),
+            max_total_bytes: config.map(|config| config.max_total_bytes),
+            max_retained_seconds: config.map(|config| config.max_retained_age.as_secs()),
+            minimum_free_bytes: config.map(|config| config.minimum_free_bytes),
+            initialization_failure: self.initialization_failure.clone(),
+            ..disabled_health()
         }
     }
-}
-
-#[cfg(feature = "enabled")]
-fn initialize_global_writer() -> Result<Mutex<SegmentedEventWriter>, WriterInitFailure> {
-    let config = WriterConfig::from_environment()
-        .map_err(WriterInitFailure::new)?
-        .ok_or_else(|| WriterInitFailure::new("logDirectoryNotConfigured".to_string()))?;
-    let writer = SegmentedEventWriter::new(
-        config,
-        Uuid::new_v4().simple().to_string(),
-        std::process::id(),
-    )
-    .map_err(|error| {
-        WriterInitFailure::new(format!("writerInitializationFailed:{}", error.kind()))
-    })?;
-    Ok(Mutex::new(writer))
 }
 
 #[cfg(feature = "enabled")]
@@ -1448,21 +1505,75 @@ mod tests {
         assert_eq!(read_records(root.path()).len(), 2);
     }
 
-    #[cfg(feature = "enabled")]
     #[test]
-    fn initialization_failures_count_every_dropped_event() {
-        let failure = WriterInitFailure::new("testFailure".to_string());
-        failure.record_drop();
-        failure.record_drop();
+    fn retrying_writer_counts_each_initialization_drop() {
+        let mut writer = RetryingEventWriter::default();
+        for _ in 0..2 {
+            assert!(!writer.emit_with_config_provider(
+                || Err("testFailure".to_string()),
+                || panic!("identity must not be requested after configuration failure"),
+                "ed2k_tcp",
+                "packet",
+                "info",
+                &json!({}),
+                &json!({}),
+            ));
+        }
 
-        let health = failure.health();
+        let health = writer.health();
         assert!(health.enabled);
+        assert!(health.configured);
         assert!(!health.initialized);
         assert_eq!(health.dropped_events, 2);
         assert_eq!(
             health.initialization_failure.as_deref(),
             Some("testFailure")
         );
+    }
+
+    #[test]
+    fn retrying_writer_recovers_when_destination_becomes_available() {
+        let root = TempDir::new().unwrap();
+        let mut writer = RetryingEventWriter::default();
+
+        assert!(!writer.emit_with_config_provider(
+            || Ok(None),
+            || panic!("identity must not be requested without a destination"),
+            "ed2k_tcp",
+            "packet",
+            "info",
+            &json!({"attempt": "early"}),
+            &json!({}),
+        ));
+        assert!(segment_files(root.path()).is_empty());
+
+        assert!(writer.emit_with_config_provider(
+            || {
+                Ok(Some(test_config(
+                    &root,
+                    4096,
+                    Duration::from_secs(60),
+                    4,
+                    u64::MAX,
+                    Duration::MAX,
+                )))
+            },
+            || ("retry-run".to_string(), 42),
+            "ed2k_tcp",
+            "packet",
+            "info",
+            &json!({"attempt": "late"}),
+            &json!({}),
+        ));
+
+        let health = writer.health();
+        assert!(health.initialized);
+        assert_eq!(health.records_written, 1);
+        assert_eq!(health.dropped_events, 1);
+        assert_eq!(health.initialization_failure, None);
+        let records = read_records(root.path());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["keys"]["attempt"], "late");
     }
 
     fn test_writer(
@@ -1523,19 +1634,37 @@ mod tests {
         max_retained_age: Duration,
     ) -> SegmentedEventWriter {
         SegmentedEventWriter::new(
-            WriterConfig {
-                directory: root.path().to_path_buf(),
+            test_config(
+                root,
                 max_segment_bytes,
                 max_segment_age,
                 retained_segments,
                 max_total_bytes,
                 max_retained_age,
-                minimum_free_bytes: 0,
-            },
+            ),
             run_id.to_string(),
             42,
         )
         .unwrap()
+    }
+
+    fn test_config(
+        root: &TempDir,
+        max_segment_bytes: u64,
+        max_segment_age: Duration,
+        retained_segments: usize,
+        max_total_bytes: u64,
+        max_retained_age: Duration,
+    ) -> WriterConfig {
+        WriterConfig {
+            directory: root.path().to_path_buf(),
+            max_segment_bytes,
+            max_segment_age,
+            retained_segments,
+            max_total_bytes,
+            max_retained_age,
+            minimum_free_bytes: 0,
+        }
     }
 
     fn segment_files_for_run(root: &Path, run_id: &str) -> Vec<PathBuf> {
