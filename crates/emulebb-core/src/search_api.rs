@@ -1,7 +1,19 @@
 use super::*;
 
 impl EmulebbCore {
-    pub async fn create_search(&self, mut request: SearchCreate) -> Result<Search> {
+    pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
+        self.create_search_with_initial_persistence(request, search_state::persist_search)
+            .await
+    }
+
+    pub(crate) async fn create_search_with_initial_persistence<P>(
+        &self,
+        mut request: SearchCreate,
+        persist: P,
+    ) -> Result<Search>
+    where
+        P: FnOnce(&MetadataStore, &Search) -> Result<()>,
+    {
         request.canonicalize();
         request.validate()?;
         let now = Utc::now();
@@ -54,43 +66,35 @@ impl EmulebbCore {
         }
         let (search_id, next_search_id) =
             search_state::allocate_search_id(&state.searches, state.next_search_id)?;
-        state.next_search_id = next_search_id;
         let mut results = indexed
             .into_iter()
             .map(|file| search_result_from_indexed(&search_id, &request, file))
             .collect::<Vec<_>>();
         apply_search_filters(&mut results, &request);
-        let mut spawn_drain = false;
-        if let Some(lane) = queue_lane {
-            let mut queue = self.search_queue.lock();
-            if let Err(error) =
-                queue.enqueue(search_id.clone(), request.clone(), lane, Instant::now())
-            {
-                // Explicit POST rejection (duplicate / queue full) — the
-                // allocated id is simply skipped, never inserted.
-                crate::diag_sched::keyword_search_queue(
-                    &search_id,
-                    &request.query,
-                    "rejected",
-                    &request.method,
-                    Some(match error {
-                        search_queue::SearchEnqueueError::DuplicateQueued => "duplicate-queued",
-                        search_queue::SearchEnqueueError::QueueFull => "queue-full",
-                    }),
-                    0,
-                );
-                bail!("{error}");
+        let prepared_queue_entry = if let Some(lane) = queue_lane {
+            let queue = self.search_queue.lock();
+            match queue.prepare_enqueue(search_id.clone(), request.clone(), lane, Instant::now()) {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    // Explicit POST rejection (duplicate / queue full) — the
+                    // candidate id is never published or advanced.
+                    crate::diag_sched::keyword_search_queue(
+                        &search_id,
+                        &request.query,
+                        "rejected",
+                        &request.method,
+                        Some(match error {
+                            search_queue::SearchEnqueueError::DuplicateQueued => "duplicate-queued",
+                            search_queue::SearchEnqueueError::QueueFull => "queue-full",
+                        }),
+                        0,
+                    );
+                    bail!("{error}");
+                }
             }
-            spawn_drain = queue.claim_drain_task();
-            crate::diag_sched::keyword_search_queue(
-                &search_id,
-                &request.query,
-                "queued",
-                &request.method,
-                Some(lane.waiting_reason()),
-                0,
-            );
-        }
+        } else {
+            None
+        };
         // Create the search and return immediately; the network part runs via
         // the queue drain (or the legacy background task) and flips the status
         // queued->running->completed. This keeps the eMuleBB contract's
@@ -121,7 +125,23 @@ impl EmulebbCore {
             updated_at: now,
             results,
         };
-        search_state::persist_search(&self.metadata_store, &search)?;
+        persist(&self.metadata_store, &search)?;
+        let spawn_drain = prepared_queue_entry.is_some_and(|prepared| {
+            let mut queue = self.search_queue.lock();
+            queue.commit_enqueue(prepared);
+            let spawn_drain = queue.claim_drain_task();
+            let lane = queue_lane.expect("prepared queue entry has a lane");
+            crate::diag_sched::keyword_search_queue(
+                &search_id,
+                &request.query,
+                "queued",
+                &request.method,
+                Some(lane.waiting_reason()),
+                0,
+            );
+            spawn_drain
+        });
+        state.next_search_id = next_search_id;
         if queue_lane.is_some() {
             state
                 .search_cancels

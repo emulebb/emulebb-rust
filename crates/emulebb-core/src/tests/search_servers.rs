@@ -531,6 +531,52 @@ async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
 }
 
 #[tokio::test]
+async fn initial_persistence_failure_leaves_queue_runnable_for_the_next_search() {
+    let transfer_root = unique_runtime_dir("emulebb-core-search-persist-failure");
+    let network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        transfer_root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+    let request = SearchCreate {
+        query: "recover after persistence failure".to_string(),
+        method: "server".to_string(),
+        ..SearchCreate::default()
+    };
+
+    let error = core
+        .create_search_with_initial_persistence(request.clone(), |_, _| {
+            Err(anyhow::anyhow!(
+                "injected initial-search persistence failure"
+            ))
+        })
+        .await
+        .expect_err("injected persistence failure must reject the search");
+    assert_eq!(
+        error.to_string(),
+        "injected initial-search persistence failure"
+    );
+    assert!(core.searches().await.is_empty());
+    assert!(core.metadata_store.load_searches().unwrap().is_empty());
+    assert_eq!(core.search_queue.lock().pending_len(), 0);
+    assert!(!core.search_queue.lock().drain_task_running());
+
+    let search = core.create_search(request).await.unwrap();
+    assert_eq!(search.id, "1");
+    assert_eq!(search.status, "queued");
+    assert_eq!(core.metadata_store.load_searches().unwrap().len(), 1);
+    assert_eq!(core.search_queue.lock().pending_len(), 1);
+    assert!(core.search_queue.lock().drain_task_running());
+}
+
+#[tokio::test]
 async fn deleting_searches_cancels_pending_network_work() {
     let transfer_root = unique_runtime_dir("emulebb-core-search-queue-cancel");
     let network = test_network_config_with_store(
