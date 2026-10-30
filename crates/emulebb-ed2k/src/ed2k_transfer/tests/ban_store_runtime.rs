@@ -28,33 +28,46 @@ async fn runtime_ban_is_enforced_by_either_key() {
 }
 
 #[tokio::test]
-async fn first_verified_key_keeps_credits_then_different_key_wipes() {
+async fn first_verified_key_is_hydrated_after_restart_and_rejects_rebinding() {
     let root = unique_test_dir("ed2k-transfer-verified-ident");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
 
-    // Verify a first key on a fresh slot (no prior credit): key bound, nothing
-    // wiped. Then accumulate credit under the verified key.
-    let wiped_first = runtime
-        .record_verified_secure_ident(HASH_A, &[1u8; 80])
+    let first_key = [1u8; 80];
+    let replacement_key = [2u8; 80];
+    let first_bind = runtime
+        .bind_verified_secure_ident(HASH_A, &first_key)
         .unwrap();
-    assert!(!wiped_first);
+    assert!(first_bind.accepted());
+    assert_eq!(first_bind.pinned_public_key(), first_key);
     runtime.add_peer_credit_delta(HASH_A, 4000, 8000).unwrap();
+    runtime.flush_parked_credit().await;
+    drop(runtime);
+
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        runtime.pinned_secure_ident_public_key(HASH_A).unwrap(),
+        Some(first_key.to_vec())
+    );
     let credit = runtime.peer_credit_by_hash(HASH_A).unwrap().unwrap();
     assert_eq!(credit.uploaded_bytes, 4000);
     assert_eq!(credit.downloaded_bytes, 8000);
 
-    // Same key again: still kept.
-    let wiped_same = runtime
-        .record_verified_secure_ident(HASH_A, &[1u8; 80])
+    let same_key = runtime
+        .bind_verified_secure_ident(HASH_A, &first_key)
         .unwrap();
-    assert!(!wiped_same);
+    assert!(same_key.accepted());
+    assert_eq!(same_key.pinned_public_key(), first_key);
 
-    // A different key for the same user hash: credits wiped to the sentinel.
-    let wiped_new = runtime
-        .record_verified_secure_ident(HASH_A, &[2u8; 80])
+    let mismatch = runtime
+        .bind_verified_secure_ident(HASH_A, &replacement_key)
         .unwrap();
-    assert!(wiped_new);
+    assert!(!mismatch.accepted());
+    assert_eq!(mismatch.pinned_public_key(), first_key);
+    assert_eq!(
+        runtime.pinned_secure_ident_public_key(HASH_A).unwrap(),
+        Some(first_key.to_vec())
+    );
     let credit = runtime.peer_credit_by_hash(HASH_A).unwrap().unwrap();
-    assert_eq!(credit.uploaded_bytes, 1);
-    assert_eq!(credit.downloaded_bytes, 1);
+    assert_eq!(credit.uploaded_bytes, 4000);
+    assert_eq!(credit.downloaded_bytes, 8000);
 }

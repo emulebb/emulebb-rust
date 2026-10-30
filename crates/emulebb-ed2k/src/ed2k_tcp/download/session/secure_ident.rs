@@ -108,25 +108,48 @@ pub(super) fn handle_signature(
 ) {
     match decode_signature_payload(payload) {
         Ok(signature) => {
-            let verified = verify_peer_secure_ident_signature(
+            if let Some(user_hash) = session_state.peer_user_hash {
+                match transfer_runtime.pinned_secure_ident_public_key(user_hash) {
+                    Ok(pinned_public_key) => {
+                        session_state.peer_secure_ident.pinned_public_key = pinned_public_key;
+                    }
+                    Err(error) => {
+                        debug!("failed to hydrate pinned secure-ident pubkey: {error:#}");
+                        session_state.peer_secure_ident.peer_ident_verified = false;
+                        return;
+                    }
+                }
+            }
+            let verification = verify_peer_secure_ident_signature(
                 secure_ident,
                 &mut session_state.peer_secure_ident,
                 &signature,
                 peer_addr,
                 None,
             );
-            // Bind the just-verified uploader pubkey to its credit row (wiping
-            // credits if a different key verified for this user hash before --
-            // eMule CClientCredits::Verified anti-takeover).
-            if verified
+            let mut verified = verification.verified();
+            if verification.newly_verified()
                 && let (Some(user_hash), Some(public_key)) = (
                     session_state.peer_user_hash,
                     session_state.peer_secure_ident.peer_public_key.as_deref(),
                 )
-                && let Err(error) =
-                    transfer_runtime.record_verified_secure_ident(user_hash, public_key)
             {
-                debug!("failed to bind verified secure-ident pubkey: {error:#}");
+                match transfer_runtime.bind_verified_secure_ident(user_hash, public_key) {
+                    Ok(bind_outcome) => {
+                        session_state.peer_secure_ident.pinned_public_key =
+                            Some(bind_outcome.pinned_public_key().to_vec());
+                        if !bind_outcome.accepted() {
+                            verified = false;
+                            session_state.peer_secure_ident.peer_ident_verified = false;
+                            debug!("rejected mismatched secure-ident pubkey for pinned identity");
+                        }
+                    }
+                    Err(error) => {
+                        verified = false;
+                        session_state.peer_secure_ident.peer_ident_verified = false;
+                        debug!("failed to bind verified secure-ident pubkey: {error:#}");
+                    }
+                }
             }
             dump_ed2k_tcp_download_meta(
                 peer_addr,

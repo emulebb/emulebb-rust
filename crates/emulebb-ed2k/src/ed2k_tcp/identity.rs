@@ -160,6 +160,9 @@ impl Ed2kSecureIdent {
 #[derive(Debug, Clone, Default)]
 pub(super) struct Ed2kPeerSecureIdentState {
     pub(super) peer_public_key: Option<Vec<u8>>,
+    /// First successfully verified key loaded from the peer credit store. Once
+    /// present, a different wire key is never used for RSA verification.
+    pub(super) pinned_public_key: Option<Vec<u8>>,
     pub(super) peer_challenge_from: Option<u32>,
     pub(super) challenge_for: Option<u32>,
     pub(super) pending_signature: bool,
@@ -179,6 +182,33 @@ pub(super) struct Ed2kPeerSecureIdentState {
     /// the V2 signature can fold in the correct challenge IP without re-plumbing
     /// reachability through every signature call site. `None` = LowID / unknown.
     pub(super) our_external_ip: Option<Ipv4Addr>,
+    signature_verification_attempt: Option<SecureIdentVerificationAttempt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SecureIdentVerificationAttempt {
+    challenge: u32,
+    peer_ip: Ipv4Addr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PeerSecureIdentVerificationOutcome {
+    Verified,
+    Unverified,
+    AlreadyAttempted { verified: bool },
+}
+
+impl PeerSecureIdentVerificationOutcome {
+    pub(super) fn verified(self) -> bool {
+        matches!(
+            self,
+            Self::Verified | Self::AlreadyAttempted { verified: true }
+        )
+    }
+
+    pub(super) fn newly_verified(self) -> bool {
+        self == Self::Verified
+    }
 }
 
 /// eMule credit-accrual gate for `CClientCredits::AddUploaded` /
@@ -344,41 +374,60 @@ pub(super) fn verify_inbound_signature(
 /// Verify a received `OP_SIGNATURE` against the peer's public key + the challenge
 /// we issued, updating the peer secure-ident state. Always records that a
 /// signature arrived; sets `peer_ident_verified` only on a cryptographically
-/// valid signature (eMule `IS_IDENTIFIED`). Returns whether the peer is now
-/// proven, so the caller can gate credit attribution to the peer's user hash.
+/// valid signature (eMule `IS_IDENTIFIED`). At most one cryptographic attempt
+/// is made for each issued challenge and peer IP; repeated signatures preserve
+/// the first verdict.
 pub(super) fn verify_peer_secure_ident_signature(
     secure_ident: &Ed2kSecureIdent,
     peer_state: &mut Ed2kPeerSecureIdentState,
     signature: &SecureIdentSignature,
     peer_addr: SocketAddr,
     our_external_ip: Option<Ipv4Addr>,
-) -> bool {
+) -> PeerSecureIdentVerificationOutcome {
     peer_state.peer_signature_received = true;
-    peer_state.peer_ident_verified = false;
 
     let Some(peer_public_key) = peer_state.peer_public_key.as_deref() else {
-        return false; // no key to verify against (eMule drops these)
+        return PeerSecureIdentVerificationOutcome::Unverified;
     };
     let Some(challenge) = peer_state.challenge_for else {
-        return false; // we never issued a challenge (replay guard)
+        return PeerSecureIdentVerificationOutcome::Unverified;
     };
     let SocketAddr::V4(peer_v4) = peer_addr else {
-        return false; // IPv4-only client
+        return PeerSecureIdentVerificationOutcome::Unverified;
+    };
+    let attempt = SecureIdentVerificationAttempt {
+        challenge,
+        peer_ip: *peer_v4.ip(),
+    };
+    if peer_state.signature_verification_attempt == Some(attempt) {
+        return PeerSecureIdentVerificationOutcome::AlreadyAttempted {
+            verified: peer_state.peer_ident_verified,
+        };
+    }
+    peer_state.signature_verification_attempt = Some(attempt);
+    peer_state.peer_ident_verified = false;
+
+    let verification_key = match peer_state.pinned_public_key.as_deref() {
+        Some(pinned_public_key) if pinned_public_key != peer_public_key => {
+            return PeerSecureIdentVerificationOutcome::Unverified;
+        }
+        Some(pinned_public_key) => pinned_public_key,
+        None => peer_public_key,
     };
 
     match verify_inbound_signature(
         secure_ident.public_key_der(),
         challenge,
-        peer_public_key,
+        verification_key,
         signature,
         *peer_v4.ip(),
         our_external_ip,
     ) {
         Ok(true) => {
             peer_state.peer_ident_verified = true;
-            true
+            PeerSecureIdentVerificationOutcome::Verified
         }
-        Ok(false) | Err(_) => false,
+        Ok(false) | Err(_) => PeerSecureIdentVerificationOutcome::Unverified,
     }
 }
 
@@ -394,6 +443,9 @@ pub(super) fn random_nonzero_u32() -> u32 {
 pub(super) fn begin_secure_ident_probe(peer_state: &mut Ed2kPeerSecureIdentState) -> Vec<u8> {
     let challenge_for = random_nonzero_u32();
     peer_state.challenge_for = Some(challenge_for);
+    peer_state.signature_verification_attempt = None;
+    peer_state.peer_signature_received = false;
+    peer_state.peer_ident_verified = false;
     peer_state.requested_peer_key = true;
     encode_secident_state(ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, challenge_for)
 }

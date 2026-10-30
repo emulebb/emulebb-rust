@@ -255,7 +255,7 @@ fn emitted_public_key_is_spki_within_stock_cap() {
 }
 
 #[test]
-fn helper_sets_verified_only_on_valid_signature() {
+fn valid_first_attempt_is_preserved_for_repeated_signatures() {
     let us = ident();
     let peer = ident();
     let challenge = 0x5555_6666;
@@ -267,20 +267,105 @@ fn helper_sets_verified_only_on_valid_signature() {
         ..Default::default()
     };
     let good = peer_sign(&peer, us.public_key_der(), challenge, None);
-    assert!(verify_peer_secure_ident_signature(
-        &us, &mut state, &good, peer_addr, None
-    ));
+    assert_eq!(
+        verify_peer_secure_ident_signature(&us, &mut state, &good, peer_addr, None),
+        PeerSecureIdentVerificationOutcome::Verified
+    );
     assert!(state.peer_ident_verified);
     assert!(state.peer_signature_received);
 
-    // A subsequent tampered signature clears the verified flag.
+    // A subsequent packet for the same challenge and peer IP does not perform
+    // another RSA verification or overwrite the successful verdict.
     let mut bad = good.clone();
     bad.signature[3] ^= 0xFF;
-    assert!(!verify_peer_secure_ident_signature(
-        &us, &mut state, &bad, peer_addr, None
-    ));
-    assert!(!state.peer_ident_verified);
+    assert_eq!(
+        verify_peer_secure_ident_signature(&us, &mut state, &bad, peer_addr, None),
+        PeerSecureIdentVerificationOutcome::AlreadyAttempted { verified: true }
+    );
+    assert!(state.peer_ident_verified);
     assert!(state.peer_signature_received);
+}
+
+#[test]
+fn invalid_first_attempt_blocks_repeated_rsa_work() {
+    let us = ident();
+    let peer = ident();
+    let challenge = 0x1111_2222;
+    let peer_addr: SocketAddr = "198.51.100.7:4662".parse().unwrap();
+    let mut state = Ed2kPeerSecureIdentState {
+        peer_public_key: Some(peer.public_key_der().to_vec()),
+        challenge_for: Some(challenge),
+        ..Default::default()
+    };
+    let good = peer_sign(&peer, us.public_key_der(), challenge, None);
+    let mut bad = good.clone();
+    bad.signature[3] ^= 0xFF;
+
+    assert_eq!(
+        verify_peer_secure_ident_signature(&us, &mut state, &bad, peer_addr, None),
+        PeerSecureIdentVerificationOutcome::Unverified
+    );
+    assert_eq!(
+        verify_peer_secure_ident_signature(&us, &mut state, &good, peer_addr, None),
+        PeerSecureIdentVerificationOutcome::AlreadyAttempted { verified: false }
+    );
+    assert!(!state.peer_ident_verified);
+}
+
+#[test]
+fn new_challenge_allows_one_new_verification_attempt() {
+    let us = ident();
+    let peer = ident();
+    let first_challenge = 0x3333_4444;
+    let second_challenge = 0x5555_7777;
+    let peer_addr: SocketAddr = "198.51.100.7:4662".parse().unwrap();
+    let mut state = Ed2kPeerSecureIdentState {
+        peer_public_key: Some(peer.public_key_der().to_vec()),
+        challenge_for: Some(first_challenge),
+        ..Default::default()
+    };
+
+    let first = peer_sign(&peer, us.public_key_der(), first_challenge, None);
+    assert_eq!(
+        verify_peer_secure_ident_signature(&us, &mut state, &first, peer_addr, None),
+        PeerSecureIdentVerificationOutcome::Verified
+    );
+
+    state.challenge_for = Some(second_challenge);
+    let second = peer_sign(&peer, us.public_key_der(), second_challenge, None);
+    assert_eq!(
+        verify_peer_secure_ident_signature(&us, &mut state, &second, peer_addr, None),
+        PeerSecureIdentVerificationOutcome::Verified
+    );
+    assert!(state.peer_ident_verified);
+}
+
+#[test]
+fn pinned_key_mismatch_is_rejected_before_identity_verification() {
+    let us = ident();
+    let pinned_peer = ident();
+    let replacement_peer = ident();
+    let challenge = 0x8888_9999;
+    let peer_addr: SocketAddr = "198.51.100.7:4662".parse().unwrap();
+    let mut state = Ed2kPeerSecureIdentState {
+        peer_public_key: Some(replacement_peer.public_key_der().to_vec()),
+        pinned_public_key: Some(pinned_peer.public_key_der().to_vec()),
+        challenge_for: Some(challenge),
+        ..Default::default()
+    };
+    let replacement_signature = peer_sign(&replacement_peer, us.public_key_der(), challenge, None);
+
+    assert_eq!(
+        verify_peer_secure_ident_signature(
+            &us,
+            &mut state,
+            &replacement_signature,
+            peer_addr,
+            None,
+        ),
+        PeerSecureIdentVerificationOutcome::Unverified
+    );
+    assert!(!state.peer_ident_verified);
 }
 
 #[test]
