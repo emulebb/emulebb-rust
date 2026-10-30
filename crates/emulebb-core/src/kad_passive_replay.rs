@@ -390,13 +390,16 @@ pub(crate) async fn index_passive_keyword_result(
         if name.trim().is_empty() {
             continue;
         }
-        if let Err(error) = index.upsert_file(&IndexedFile {
-            ed2k_hash: result.hash.to_string(),
-            name: name.clone(),
-            size_bytes,
-            content_type: "unknown".to_string(),
-            availability_score,
-        }) {
+        if let Err(error) = index.upsert_file(
+            &IndexedFile {
+                ed2k_hash: result.hash.to_string(),
+                name: name.clone(),
+                size_bytes,
+                content_type: "unknown".to_string(),
+                availability_score,
+            },
+            emulebb_index::IndexedFileOrigin::PassiveCache,
+        ) {
             tracing::debug!(
                 file_hash = %result.hash,
                 name,

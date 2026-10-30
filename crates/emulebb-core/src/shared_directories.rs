@@ -1720,15 +1720,18 @@ async fn promote_imported_known_share(
         .await
         .unshared_hashes
         .remove(&summary.file_hash);
-    core.index.lock().await.upsert_file(&IndexedFile {
-        ed2k_hash: summary.file_hash.clone(),
-        name: summary.display_name.clone(),
-        size_bytes: summary.file_size,
-        content_type: crate::ed2k_file_type_search_term(&summary.display_name)
-            .unwrap_or("unknown")
-            .to_string(),
-        availability_score: 1,
-    })?;
+    core.index.lock().await.upsert_file(
+        &IndexedFile {
+            ed2k_hash: summary.file_hash.clone(),
+            name: summary.display_name.clone(),
+            size_bytes: summary.file_size,
+            content_type: crate::ed2k_file_type_search_term(&summary.display_name)
+                .unwrap_or("unknown")
+                .to_string(),
+            availability_score: 1,
+        },
+        emulebb_index::IndexedFileOrigin::LocalShare,
+    )?;
     register_monitor_shared_hash(core, source_path, &summary.file_hash, source_fingerprint).await;
     core.queue_ed2k_shared_catalog_publish();
     core.share(&summary.file_hash).await.with_context(|| {

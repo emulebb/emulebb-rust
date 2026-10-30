@@ -11,6 +11,7 @@ mod kad_store;
 mod snoop_model;
 mod snoop_queue;
 
+pub use emulebb_metadata::MetadataIndexedFileOrigin as IndexedFileOrigin;
 pub use kad_publish_snapshot::{
     KadKeywordPublishSnapshot, KadNotePublishSnapshot, KadPublishCacheSnapshot,
     KadSourcePublishSnapshot, metadata_from_publish_snapshot, publish_snapshot_from_metadata,
@@ -66,19 +67,35 @@ impl FileIndex {
         self.store.clone()
     }
 
-    pub fn upsert_file(&mut self, file: &IndexedFile) -> Result<()> {
-        self.store.upsert_indexed_file(&MetadataIndexedFile {
-            ed2k_hash: file.ed2k_hash.clone(),
-            name: file.name.clone(),
-            size_bytes: file.size_bytes,
-            content_type: file.content_type.clone(),
-            availability_score: file.availability_score,
-        })
+    pub fn upsert_file(&mut self, file: &IndexedFile, origin: IndexedFileOrigin) -> Result<()> {
+        self.store.upsert_indexed_file(
+            &MetadataIndexedFile {
+                ed2k_hash: file.ed2k_hash.clone(),
+                name: file.name.clone(),
+                size_bytes: file.size_bytes,
+                content_type: file.content_type.clone(),
+                availability_score: file.availability_score,
+            },
+            origin,
+        )
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<IndexedFile>> {
         self.store
             .search_index(query, limit)?
+            .into_iter()
+            .map(indexed_file_from_metadata)
+            .collect()
+    }
+
+    pub fn search_by_origin(
+        &self,
+        query: &str,
+        origin: IndexedFileOrigin,
+        limit: usize,
+    ) -> Result<Vec<IndexedFile>> {
+        self.store
+            .search_index_by_origin(query, origin, limit)?
             .into_iter()
             .map(indexed_file_from_metadata)
             .collect()
@@ -145,13 +162,16 @@ mod tests {
     fn fts_search_returns_indexed_file() {
         let mut index = FileIndex::in_memory().unwrap();
         index
-            .upsert_file(&IndexedFile {
-                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-                name: "Example.Movie.2026.1080p.mkv".to_string(),
-                size_bytes: 1024,
-                content_type: "video".to_string(),
-                availability_score: 7,
-            })
+            .upsert_file(
+                &IndexedFile {
+                    ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+                    name: "Example.Movie.2026.1080p.mkv".to_string(),
+                    size_bytes: 1024,
+                    content_type: "video".to_string(),
+                    availability_score: 7,
+                },
+                IndexedFileOrigin::Transfer,
+            )
             .unwrap();
 
         let results = index.search("example movie", 10).unwrap();
@@ -169,8 +189,12 @@ mod tests {
             content_type: "video".to_string(),
             availability_score: 1,
         };
-        index.upsert_file(&first).unwrap();
-        index.upsert_file(&first).unwrap();
+        index
+            .upsert_file(&first, IndexedFileOrigin::Transfer)
+            .unwrap();
+        index
+            .upsert_file(&first, IndexedFileOrigin::Transfer)
+            .unwrap();
 
         let results = index.search("example movie", 10).unwrap();
         assert_eq!(results.len(), 1);

@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::{
-    model::{MetadataIndexedFile, MetadataSharedDirectoryRoot},
+    model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot},
     native_path::{NativePath, current_platform},
     schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION},
     text::{normalize_path_key, normalize_search_text},
@@ -181,41 +181,113 @@ impl MetadataStore {
         Ok(())
     }
 
-    pub fn upsert_indexed_file(&mut self, file: &MetadataIndexedFile) -> Result<()> {
+    pub fn upsert_indexed_file(
+        &mut self,
+        file: &MetadataIndexedFile,
+        origin: MetadataIndexedFileOrigin,
+    ) -> Result<()> {
         let hash = decode_fixed_hex(&file.ed2k_hash, 16, "ED2K hash")?;
         let normalized = normalize_search_text(&file.name);
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        let existing = tx
+            .query_row(
+                r#"
+                SELECT known_files.id,
+                       max(CASE known_file_origins.origin
+                           WHEN 'local_share' THEN 3
+                           WHEN 'transfer' THEN 2
+                           WHEN 'passive_cache' THEN 1
+                           ELSE 0
+                       END)
+                FROM known_files
+                LEFT JOIN known_file_origins
+                    ON known_file_origins.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                GROUP BY known_files.id
+                "#,
+                params![hash],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let known_file_id = if let Some((known_file_id, strongest_origin)) = existing {
+            if origin.precedence() >= strongest_origin {
+                tx.execute(
+                    r#"
+                    UPDATE known_files
+                    SET size_bytes = ?2,
+                        display_name = ?3,
+                        content_type = ?4,
+                        availability_score = max(availability_score, ?5),
+                        last_seen_ms = ?6,
+                        updated_at_ms = ?6
+                    WHERE id = ?1
+                    "#,
+                    params![
+                        known_file_id,
+                        file.size_bytes as i64,
+                        file.name,
+                        file.content_type,
+                        file.availability_score,
+                        now,
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    r#"
+                    UPDATE known_files
+                    SET availability_score = max(availability_score, ?2),
+                        last_seen_ms = ?3,
+                        updated_at_ms = ?3
+                    WHERE id = ?1
+                    "#,
+                    params![known_file_id, file.availability_score, now],
+                )?;
+            }
+            known_file_id
+        } else {
+            tx.execute(
+                r#"
+                INSERT INTO known_files(
+                    ed2k_hash, size_bytes, display_name,
+                    content_type, availability_score, first_seen_ms, last_seen_ms, updated_at_ms
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
+                "#,
+                params![
+                    hash,
+                    file.size_bytes as i64,
+                    file.name,
+                    file.content_type,
+                    file.availability_score,
+                    now,
+                ],
+            )?;
+            tx.last_insert_rowid()
+        };
 
         tx.execute(
             r#"
-            INSERT INTO known_files(
-                ed2k_hash, size_bytes, display_name,
-                content_type, availability_score, first_seen_ms, last_seen_ms, updated_at_ms
+            INSERT INTO known_file_origins(
+                known_file_id, origin, size_bytes, content_type,
+                availability_score, first_seen_ms, last_seen_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
-            ON CONFLICT(ed2k_hash) DO UPDATE SET
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+            ON CONFLICT(known_file_id, origin) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
-                display_name = excluded.display_name,
                 content_type = excluded.content_type,
-                availability_score = max(known_files.availability_score, excluded.availability_score),
-                last_seen_ms = excluded.last_seen_ms,
-                updated_at_ms = excluded.updated_at_ms
+                availability_score = max(known_file_origins.availability_score, excluded.availability_score),
+                last_seen_ms = excluded.last_seen_ms
             "#,
             params![
-                hash,
+                known_file_id,
+                origin.as_str(),
                 file.size_bytes as i64,
-                file.name,
                 file.content_type,
                 file.availability_score,
                 now,
             ],
-        )?;
-        let known_file_id: i64 = tx.query_row(
-            "SELECT id FROM known_files WHERE ed2k_hash = ?1",
-            params![decode_fixed_hex(&file.ed2k_hash, 16, "ED2K hash")?],
-            |row| row.get(0),
         )?;
 
         tx.execute(
@@ -229,8 +301,64 @@ impl MetadataStore {
             "#,
             params![known_file_id, file.name, normalized, now],
         )?;
+        let file_name_id: i64 = tx.query_row(
+            "SELECT id FROM file_names WHERE known_file_id = ?1 AND normalized_name = ?2",
+            params![known_file_id, normalized],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO file_name_origins(file_name_id, origin, first_seen_ms, last_seen_ms)
+            VALUES (?1, ?2, ?3, ?3)
+            ON CONFLICT(file_name_id, origin) DO UPDATE SET
+                last_seen_ms = excluded.last_seen_ms
+            "#,
+            params![file_name_id, origin.as_str(), now],
+        )?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn search_index_by_origin(
+        &self,
+        query: &str,
+        origin: MetadataIndexedFileOrigin,
+        limit: usize,
+    ) -> Result<Vec<MetadataIndexedFile>> {
+        let normalized = normalize_search_text(query);
+        if normalized.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), file_names.name,
+                   known_file_origins.size_bytes, known_file_origins.content_type,
+                   known_file_origins.availability_score
+            FROM file_name_fts
+            JOIN file_names ON file_names.id = file_name_fts.rowid
+            JOIN file_name_origins ON file_name_origins.file_name_id = file_names.id
+            JOIN known_files ON known_files.id = file_names.known_file_id
+            JOIN known_file_origins
+              ON known_file_origins.known_file_id = known_files.id
+             AND known_file_origins.origin = file_name_origins.origin
+            WHERE file_name_fts MATCH ?1 AND file_name_origins.origin = ?2
+            ORDER BY bm25(file_name_fts), known_file_origins.availability_score DESC,
+                     file_names.seen_count DESC
+            LIMIT ?3
+            "#,
+        )?;
+        let rows = stmt.query_map(params![normalized, origin.as_str(), limit as i64], |row| {
+            Ok(MetadataIndexedFile {
+                ed2k_hash: row.get(0)?,
+                name: row.get(1)?,
+                size_bytes: row.get::<_, i64>(2)? as u64,
+                content_type: row.get(3)?,
+                availability_score: row.get(4)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn search_index(&self, query: &str, limit: usize) -> Result<Vec<MetadataIndexedFile>> {
@@ -272,12 +400,10 @@ impl MetadataStore {
         self.connection()?
             .query_row(
                 r#"
-                SELECT lower(hex(known_files.ed2k_hash)), file_names.name, known_files.size_bytes,
+                SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name, known_files.size_bytes,
                        known_files.content_type, known_files.availability_score
                 FROM known_files
-                JOIN file_names ON file_names.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
-                ORDER BY file_names.seen_count DESC, file_names.last_seen_ms DESC
                 LIMIT 1
                 "#,
                 params![hash],
@@ -656,13 +782,16 @@ mod tests {
     fn file_index_roundtrips_unicode_names() {
         let mut store = MetadataStore::in_memory().unwrap();
         store
-            .upsert_indexed_file(&MetadataIndexedFile {
-                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-                name: "Zażółć.Gęślą.Jaźń.2026.mkv".to_string(),
-                size_bytes: 1024,
-                content_type: "video".to_string(),
-                availability_score: 7,
-            })
+            .upsert_indexed_file(
+                &MetadataIndexedFile {
+                    ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+                    name: "Zażółć.Gęślą.Jaźń.2026.mkv".to_string(),
+                    size_bytes: 1024,
+                    content_type: "video".to_string(),
+                    availability_score: 7,
+                },
+                MetadataIndexedFileOrigin::Transfer,
+            )
             .unwrap();
 
         let results = store.search_index("gęślą jaźń", 10).unwrap();
@@ -680,10 +809,71 @@ mod tests {
             content_type: "video".to_string(),
             availability_score: 1,
         };
-        store.upsert_indexed_file(&file).unwrap();
-        store.upsert_indexed_file(&file).unwrap();
+        store
+            .upsert_indexed_file(&file, MetadataIndexedFileOrigin::Transfer)
+            .unwrap();
+        store
+            .upsert_indexed_file(&file, MetadataIndexedFileOrigin::Transfer)
+            .unwrap();
 
         assert_eq!(store.table_count("file_names").unwrap(), 1);
+    }
+
+    #[test]
+    fn indexed_origin_metadata_preserves_stronger_canonical_values() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let hash = "00112233445566778899aabbccddeeff";
+        let transfer = MetadataIndexedFile {
+            ed2k_hash: hash.to_string(),
+            name: "Transfer.Name.bin".to_string(),
+            size_bytes: 2_048,
+            content_type: "program".to_string(),
+            availability_score: 3,
+        };
+        let local_share = MetadataIndexedFile {
+            ed2k_hash: hash.to_string(),
+            name: "Local.Share.Name.bin".to_string(),
+            size_bytes: 4_096,
+            content_type: "program".to_string(),
+            availability_score: 1,
+        };
+        let passive = MetadataIndexedFile {
+            ed2k_hash: hash.to_string(),
+            name: "Passive.Cache.Name.bin".to_string(),
+            size_bytes: 999,
+            content_type: "unknown".to_string(),
+            availability_score: 12,
+        };
+
+        store
+            .upsert_indexed_file(&transfer, MetadataIndexedFileOrigin::Transfer)
+            .unwrap();
+        store
+            .upsert_indexed_file(&local_share, MetadataIndexedFileOrigin::LocalShare)
+            .unwrap();
+        store
+            .upsert_indexed_file(&passive, MetadataIndexedFileOrigin::PassiveCache)
+            .unwrap();
+        store
+            .upsert_indexed_file(&transfer, MetadataIndexedFileOrigin::Transfer)
+            .unwrap();
+
+        let canonical = store.find_indexed_file_by_hash(hash).unwrap().unwrap();
+        assert_eq!(canonical.name, local_share.name);
+        assert_eq!(canonical.size_bytes, local_share.size_bytes);
+        assert_eq!(canonical.content_type, local_share.content_type);
+        assert_eq!(canonical.availability_score, passive.availability_score);
+
+        let passive_results = store
+            .search_index_by_origin("passive cache", MetadataIndexedFileOrigin::PassiveCache, 10)
+            .unwrap();
+        assert_eq!(passive_results, vec![passive]);
+        assert!(
+            store
+                .search_index_by_origin("local share", MetadataIndexedFileOrigin::PassiveCache, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

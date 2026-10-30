@@ -86,15 +86,18 @@ impl EmulebbCore {
             .await
             .unshared_hashes
             .remove(&summary.file_hash);
-        self.index.lock().await.upsert_file(&IndexedFile {
-            ed2k_hash: summary.file_hash.clone(),
-            name: summary.display_name.clone(),
-            size_bytes: summary.file_size,
-            content_type: ed2k_file_type_search_term(&summary.display_name)
-                .unwrap_or("unknown")
-                .to_string(),
-            availability_score: 1,
-        })?;
+        self.index.lock().await.upsert_file(
+            &IndexedFile {
+                ed2k_hash: summary.file_hash.clone(),
+                name: summary.display_name.clone(),
+                size_bytes: summary.file_size,
+                content_type: ed2k_file_type_search_term(&summary.display_name)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                availability_score: 1,
+            },
+            emulebb_index::IndexedFileOrigin::LocalShare,
+        )?;
         self.queue_ed2k_shared_catalog_publish();
         Ok(local_share_from_summary(summary))
     }
