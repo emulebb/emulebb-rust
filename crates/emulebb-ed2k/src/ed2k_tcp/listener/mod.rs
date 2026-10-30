@@ -74,7 +74,8 @@ pub struct Ed2kListenerOptions {
     pub tcp_error_flooder_threshold: u32,
 }
 
-/// Run the minimal eD2k TCP listener needed for inbound hello parity and firewall checks.
+/// Run the long-lived eD2k peer listener used by callbacks, uploads, downloads,
+/// buddy traffic, and firewall verification.
 pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
     let Ed2kListenerOptions {
         listener,

@@ -1,21 +1,16 @@
-//! Minimal eD2k TCP support required for Kad firewall verification and TCP hello parity.
+//! eD2k TCP peer protocol for the focused Rust client.
 //!
-//! The full eD2k peer protocol is still out of scope for the current Rust client, but
-//! the Kad oracle exposes a real eD2k TCP surface during startup instead of a
-//! one-packet firewall helper stub. To stay wire-compatible with that bootstrap
-//! path, this module now implements a small stateful subset:
-//! - outbound `OP_HELLO` followed by `OP_FWCHECKUDPREQ` for UDP firewall checks
-//! - inbound basic eMule TCP obfuscation handshake
-//! - inbound `OP_HELLO` / `OP_HELLOANSWER` framing
-//! - inbound `OP_EMULEINFO` / `OP_EMULEINFOANSWER` framing
-//! - inbound `OP_FWCHECKUDPREQ`
+//! This module follows stock eMule connection behavior for the protocol surface
+//! the client needs: hello/capability negotiation, obfuscation, secure-ident,
+//! firewall and callback traffic, buddy relays, file metadata, SX2, uploads,
+//! downloads, and A4AF connection reuse. Connection direction does not define
+//! protocol role; one dispatcher owns each transport while upload and download
+//! facets share it without splitting the RC4 stream or creating competing
+//! writers.
 //!
-//! The listener intentionally does not claim full eD2k file-transfer support,
-//! but it now serves the verified upload subset that peers expect once they
-//! choose us as a source:
-//! - filename, file-status, and hashset answers for known files
-//! - upload-intent acknowledgement
-//! - range serving with eMule-style part fragmentation and optional compression
+//! The scope is protocol-compatible file sharing, not unrelated application
+//! features or retired extensions. Unsupported opcodes are handled according to
+//! stock tolerance rules instead of being used to broaden product scope.
 
 use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 

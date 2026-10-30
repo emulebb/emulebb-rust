@@ -1,17 +1,10 @@
-//! Minimal eD2k server session support used to obtain oracle-style HighID/LowID
-//! feedback and keep the Rust client visible on the ED2K side of the network.
+//! eD2k server protocol support for the focused Rust client.
 //!
-//! This intentionally does not implement the full server feature set yet. The
-//! current scope mirrors the parts of the oracle's `ServerConnect` and
-//! `ServerSocket` flow that matter for parity today:
-//! - connect from the VPN-bound interface to one configured ED2K server
-//! - send an oracle-shaped `OP_LOGINREQUEST`
-//! - advertise a minimal oracle-shaped shared-file catalog during the connected
-//!   transition so the server sees a credible `OP_OFFERFILES`
-//! - process `OP_IDCHANGE`, `OP_SERVERSTATUS`, and a few informational replies
-//! - execute keyword searches with oracle-style query trees and `More` paging
-//! - execute server source searches through the same long-lived TCP session
-//! - keep the TCP session alive with empty `OP_OFFERFILES` packets
+//! The implementation follows stock-compatible behavior for login and identity
+//! assignment, server discovery/status, keyword and source searches, callbacks,
+//! shared-file publication, UDP extensions, and the long-lived background
+//! session used by transfers. It remains scoped to protocol-compatible file
+//! sharing rather than unrelated server-era application features.
 
 use std::time::Duration;
 
