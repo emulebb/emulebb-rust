@@ -218,15 +218,22 @@ fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_
 }
 
 #[test]
-fn default_profile_bootstrap_creates_loopback_settings_and_network_ports() {
+fn default_profile_bootstrap_is_loopback_authenticated_and_seeds_network_ports() {
     let temp = tempfile::tempdir().unwrap();
     let profile_dir = temp.path().join("profile");
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
 
     create_default_profile_bootstrap(&profile_dir, &settings_path).unwrap();
     let text = fs::read_to_string(&settings_path).unwrap();
-    assert!(text.contains("bindAddr = \"127.0.0.1:4711\""));
-    assert!(text.contains("apiKey = \""));
+    let bootstrap: DaemonBootstrapSettings = toml::from_str(&text).unwrap();
+    assert_eq!(
+        bootstrap.rest.bind_addr,
+        Some("127.0.0.1:4711".parse().unwrap())
+    );
+    assert_eq!(bootstrap.rest.api_key.len(), MIN_REST_API_KEY_BYTES);
+    let mut profile = DaemonProfile::default();
+    profile.rest = bootstrap.rest;
+    profile.validate_rest_api_key().unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
