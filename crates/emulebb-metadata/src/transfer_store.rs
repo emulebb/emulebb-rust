@@ -161,6 +161,19 @@ impl super::MetadataStore {
                 params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
                 |row| row.get(0),
             )?;
+        tx.prepare_cached(
+            r#"
+            INSERT INTO known_file_origins(
+                known_file_id, origin, size_bytes, content_type,
+                availability_score, first_seen_ms, last_seen_ms
+            )
+            VALUES (?1, 'transfer', ?2, '', 0, ?3, ?3)
+            ON CONFLICT(known_file_id, origin) DO UPDATE SET
+                size_bytes = excluded.size_bytes,
+                last_seen_ms = excluded.last_seen_ms
+            "#,
+        )?
+        .execute(params![known_file_id, manifest.file_size as i64, now])?;
 
         tx.prepare_cached(
             r#"

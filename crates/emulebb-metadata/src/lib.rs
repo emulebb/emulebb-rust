@@ -29,7 +29,7 @@ pub use kad_publish_model::{
     MetadataKadOutboundPublishKind, MetadataKadOutboundPublishSchedule, MetadataKadPublishCache,
     MetadataKadSourcePublish,
 };
-pub use model::{MetadataIndexedFile, MetadataSharedDirectoryRoot};
+pub use model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot};
 pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp};
 pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;

@@ -717,7 +717,10 @@ impl EmulebbCore {
     }
 
     pub async fn index_file(&self, file: IndexedFile) -> Result<()> {
-        self.index.lock().await.upsert_file(&file)
+        self.index
+            .lock()
+            .await
+            .upsert_file(&file, emulebb_index::IndexedFileOrigin::Transfer)
     }
 
     async fn upsert_transfer_from_parts(

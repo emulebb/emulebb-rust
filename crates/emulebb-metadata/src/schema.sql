@@ -93,6 +93,20 @@ CREATE TABLE known_files (
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
 );
 
+CREATE TABLE known_file_origins (
+    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    origin TEXT NOT NULL CHECK(origin IN ('local_share', 'transfer', 'passive_cache')),
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+    content_type TEXT NOT NULL DEFAULT '',
+    availability_score INTEGER NOT NULL DEFAULT 0 CHECK(availability_score >= 0),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    PRIMARY KEY(known_file_id, origin)
+);
+
+CREATE INDEX known_file_origins_origin_idx
+    ON known_file_origins(origin, availability_score DESC, last_seen_ms DESC);
+
 -- Durable content identity for successful downloads. This intentionally has
 -- no foreign key to current known-file, transfer, share, or path rows: cleanup,
 -- moving, or deleting a payload must not erase the fact it completed, and a
@@ -116,6 +130,17 @@ CREATE TABLE file_names (
     last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     UNIQUE(known_file_id, normalized_name)
 );
+
+CREATE TABLE file_name_origins (
+    file_name_id INTEGER NOT NULL REFERENCES file_names(id) ON DELETE CASCADE,
+    origin TEXT NOT NULL CHECK(origin IN ('local_share', 'transfer', 'passive_cache')),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    PRIMARY KEY(file_name_id, origin)
+);
+
+CREATE INDEX file_name_origins_origin_idx
+    ON file_name_origins(origin, last_seen_ms DESC);
 
 CREATE VIRTUAL TABLE file_name_fts USING fts5(
     name,
