@@ -440,7 +440,7 @@ def render_notes(
     lines = [
         f"# eMuleBB Rust {version}",
         "",
-        "> Automated experimental nightly. It is unsigned, may be unstable, and is not a promoted beta.",
+        "> Automated nightly beta from `main`. It is unsigned, may be unstable, and is not a formal beta release.",
         "",
         f"- Base beta: `{parsed.group('base')}`",
         f"- Source: [`{source_sha[:8]}`](https://github.com/{repository}/commit/{source_sha})",
@@ -453,7 +453,7 @@ def render_notes(
         lines.extend(
             (
                 f"- Metadata schema: `{schema_version}` (unchanged from `{previous_ref}`).",
-                "- Profile schema status: unchanged. Back up the profile before testing this experimental build.",
+                "- Profile schema status: unchanged. Back up the profile before testing this nightly beta.",
                 "",
             )
         )
