@@ -56,6 +56,13 @@ impl SourceExchangeResponseThrottle {
     }
 }
 
+struct SourceExchangeReplyContext<'a> {
+    transfer_runtime: &'a Ed2kTransferRuntime,
+    transport: &'a mut Ed2kTransport,
+    peer_addr: SocketAddr,
+    throttle: &'a mut SourceExchangeResponseThrottle,
+}
+
 /// Requester-side availability retained for the life of an upload connection.
 /// Stock keeps this on the upload-client object and consults it when choosing
 /// useful SX peers. The complete-source count is retained alongside the bitmap
@@ -257,15 +264,17 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
             }
             OP_REQUESTSOURCES | OP_REQUESTSOURCES2 => {
                 remaining = answer_source_request_subpacket(
-                    transfer_runtime,
-                    transport,
-                    peer_addr,
+                    SourceExchangeReplyContext {
+                        transfer_runtime,
+                        transport,
+                        peer_addr,
+                        throttle: source_exchange_throttle,
+                    },
                     &requested,
                     sub_opcode,
                     remaining,
                     requester_file_state.as_ref(),
                     &shared,
-                    source_exchange_throttle,
                 )
                 .await?;
             }
@@ -513,15 +522,12 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
 }
 
 async fn answer_source_request_subpacket<'a>(
-    transfer_runtime: &Ed2kTransferRuntime,
-    transport: &mut Ed2kTransport,
-    peer_addr: SocketAddr,
+    context: SourceExchangeReplyContext<'_>,
     requested: &Ed2kHash,
     opcode: u8,
     remaining: &'a [u8],
     requester_file_state: Option<&RequesterFileState>,
     shared: &Ed2kSharedEntry,
-    source_exchange_throttle: &mut SourceExchangeResponseThrottle,
 ) -> Result<&'a [u8]> {
     // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
     // omission): inside a multipacket we answer the OP_REQUESTSOURCES2 sub-op only.
@@ -539,9 +545,9 @@ async fn answer_source_request_subpacket<'a>(
         return Ok(remaining);
     }
     if !source_exchange_request_allowed(
-        transfer_runtime,
+        context.transfer_runtime,
         shared,
-        source_exchange_throttle,
+        context.throttle,
         Instant::now(),
     )
     .await?
@@ -550,9 +556,9 @@ async fn answer_source_request_subpacket<'a>(
     }
     let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
     let sources = source_exchange_peers(
-        transfer_runtime,
+        context.transfer_runtime,
         requested,
-        peer_addr.ip(),
+        context.peer_addr.ip(),
         requester_file_state,
     )
     .await?;
@@ -560,10 +566,16 @@ async fn answer_source_request_subpacket<'a>(
         return Ok(remaining);
     }
     let reply = encode_answer_sources2(requested, used_version, &sources)?;
-    transport
-        .write_all_diagnostic("listener", peer_addr, "answer_sources", &reply)
+    context
+        .transport
+        .write_all_diagnostic("listener", context.peer_addr, "answer_sources", &reply)
         .await
-        .with_context(|| format!("failed to send source exchange reply to {peer_addr}"))?;
+        .with_context(|| {
+            format!(
+                "failed to send source exchange reply to {}",
+                context.peer_addr
+            )
+        })?;
     Ok(remaining)
 }
 
