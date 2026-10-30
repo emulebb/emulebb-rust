@@ -8,7 +8,9 @@ use std::net::Ipv4Addr;
 use chrono::{DateTime, Utc};
 use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
 
-use super::entry_store::{DedupEntry, TargetedEntry, TimedEntry, oldest_target_entry_index};
+use super::entry_store::{
+    AdmissionDisposition, DedupEntry, TargetedEntry, TimedEntry, oldest_target_entry_index,
+};
 use super::size_tags::{
     is_integer_tag_value, stock_first_keyword_source_file_size, stock_stored_publish_tags,
 };
@@ -155,7 +157,7 @@ pub(super) fn upsert_source_entry(
     per_file_capacity: usize,
     capacity: usize,
     entry: StoredSourcePublish,
-) {
+) -> AdmissionDisposition {
     if let Some(existing) = entries.iter_mut().find(|candidate| {
         candidate.target == entry.target
             && candidate.source_ip == entry.source_ip
@@ -163,7 +165,7 @@ pub(super) fn upsert_source_entry(
                 || candidate.source_udp_port == entry.source_udp_port)
     }) {
         *existing = entry;
-        return;
+        return AdmissionDisposition::Refreshed;
     }
 
     // Per-file cap (stock KADEMLIAMAXSOURCEPERFILE): evict the oldest entry for
@@ -176,18 +178,17 @@ pub(super) fn upsert_source_entry(
         && let Some(oldest_index) = oldest_target_entry_index(entries, entry.target)
     {
         entries.remove(oldest_index);
+        entries.push(entry);
+        return AdmissionDisposition::Recycled;
     }
 
-    // Global store cap: bound total memory across all files.
-    if entries.len() >= capacity
-        && let Some((oldest_index, _)) = entries
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, candidate)| candidate.observed_at())
-    {
-        entries.remove(oldest_index);
+    // The global finite-memory cap is an admission bound, not an eviction
+    // policy. A new publish must not displace an unrelated file's source.
+    if entries.len() >= capacity {
+        return AdmissionDisposition::RejectedGlobalCapacity;
     }
     entries.push(entry);
+    AdmissionDisposition::Inserted
 }
 
 pub(super) fn stock_source_publish_load(

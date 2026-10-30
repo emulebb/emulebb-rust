@@ -20,6 +20,23 @@ pub(super) trait TargetedEntry {
     fn target(&self) -> NodeId;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdmissionDisposition {
+    Inserted,
+    Refreshed,
+    Recycled,
+    RejectedGlobalCapacity,
+}
+
+impl AdmissionDisposition {
+    pub(super) fn publish_load(self, accepted_load: u8) -> u8 {
+        match self {
+            Self::RejectedGlobalCapacity => 100,
+            Self::Inserted | Self::Refreshed | Self::Recycled => accepted_load,
+        }
+    }
+}
+
 pub(super) fn purge_expired<T>(entries: &mut Vec<T>, ttl: Duration, now: DateTime<Utc>)
 where
     T: TimedEntry,
