@@ -15,20 +15,21 @@ use crate::{
 };
 
 use super::super::{
-    DecodedEmuleInfoProfile, Ed2kFileIdentifier, Ed2kHelloIdentity, Ed2kSecureIdent, Ed2kTransport,
-    OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHREQUEST, OP_ANSWERSOURCES,
-    OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS, OP_ASKSHAREDDIRSANS,
-    OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_ASKSHAREDFILESDIRANS,
-    OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID,
-    OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_COMPRESSEDPART, OP_COMPRESSEDPART_I64,
-    OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_END_OF_DOWNLOAD,
-    OP_FILEDESC, OP_FILEREQANSNOFIL, OP_FILESTATUS, OP_HASHSETANSWER, OP_HASHSETANSWER2, OP_HELLO,
-    OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE, OP_MULTIPACKETANSWER,
-    OP_MULTIPACKETANSWER_EXT2, OP_OUTOFPARTREQS, OP_PORTTEST, OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER,
-    OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING, OP_REASKCALLBACKTCP,
-    OP_REQFILENAMEANSWER, OP_REQUESTPREVIEW, OP_SECIDENTSTATE, OP_SENDINGPART, OP_SENDINGPART_I64,
-    OP_SETREQFILEID, OP_SIGNATURE, SourceExchangePeer, begin_secure_ident_probe,
-    build_hello_responses, decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
+    DecodedEmuleInfoProfile, Ed2kFileIdentifier, Ed2kHelloIdentity, Ed2kPeerDispatcher,
+    Ed2kSecureIdent, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHREQUEST,
+    OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
+    OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR,
+    OP_ASKSHAREDFILESDIRANS, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER,
+    OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_COMPRESSEDPART,
+    OP_COMPRESSEDPART_I64, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT,
+    OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FILEREQANSNOFIL, OP_FILESTATUS, OP_HASHSETANSWER,
+    OP_HASHSETANSWER2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE,
+    OP_MULTIPACKETANSWER, OP_MULTIPACKETANSWER_EXT2, OP_OUTOFPARTREQS, OP_PORTTEST,
+    OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK,
+    OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQFILENAMEANSWER, OP_REQUESTPREVIEW,
+    OP_SECIDENTSTATE, OP_SENDINGPART, OP_SENDINGPART_I64, OP_SETREQFILEID, OP_SIGNATURE,
+    SourceExchangePeer, begin_secure_ident_probe, build_hello_responses,
+    decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
     decode_aich_recovery_request_payload, decode_answer_sources_payload,
     decode_answer_sources2_payload, decode_client_id_change_payload, decode_client_message_payload,
     decode_edonkey_queue_rank_payload, decode_emule_info_profile,
@@ -213,7 +214,7 @@ pub enum Ed2kPeerDownloadOutcome {
 }
 
 pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
-    pub(in crate::ed2k_tcp) transport: &'a mut Ed2kTransport,
+    pub(in crate::ed2k_tcp) dispatcher: &'a mut Ed2kPeerDispatcher,
     pub(in crate::ed2k_tcp) peer_addr: SocketAddr,
     pub(in crate::ed2k_tcp) hello_identity: Ed2kHelloIdentity,
     pub(in crate::ed2k_tcp) secure_ident: &'a Ed2kSecureIdent,
@@ -239,7 +240,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
     options: DownloadSessionOptions<'_>,
 ) -> Result<Ed2kPeerDownloadOutcome> {
     let DownloadSessionOptions {
-        transport,
+        dispatcher: transport,
         peer_addr,
         hello_identity,
         secure_ident,
