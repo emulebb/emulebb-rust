@@ -230,12 +230,37 @@ fn kad_req_masks_type_to_low_five_bits_and_rejects_zero() {
 }
 
 #[test]
-fn hello_res_ack_requested_only_when_added_and_key_unverified() {
+fn hello_res_ack_requested_only_for_typed_mutations_and_unverified_key() {
+    use emulebb_kad_dht::HelloRoutingUnchangedReason;
+    use emulebb_kad_routing::RoutingError;
+
     // Oracle: SendMyDetails(..., bAddedOrUpdated && !bValidReceiverKey).
-    assert!(should_request_hello_res_ack(true, false));
-    assert!(!should_request_hello_res_ack(true, true));
-    assert!(!should_request_hello_res_ack(false, false));
-    assert!(!should_request_hello_res_ack(false, true));
+    for mutation in [
+        HelloRoutingMutation::Inserted,
+        HelloRoutingMutation::Updated,
+    ] {
+        assert!(should_request_hello_res_ack(
+            mutation.added_or_updated(),
+            false
+        ));
+        assert!(!should_request_hello_res_ack(
+            mutation.added_or_updated(),
+            true
+        ));
+    }
+    for mutation in [
+        HelloRoutingMutation::Unchanged(HelloRoutingUnchangedReason::UdpFirewalled),
+        HelloRoutingMutation::Rejected(RoutingError::TableFull { max: 0 }),
+    ] {
+        assert!(!should_request_hello_res_ack(
+            mutation.added_or_updated(),
+            false
+        ));
+        assert!(!should_request_hello_res_ack(
+            mutation.added_or_updated(),
+            true
+        ));
+    }
 }
 
 #[test]

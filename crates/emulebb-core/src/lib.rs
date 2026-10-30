@@ -73,8 +73,8 @@ use emulebb_index::{
 #[cfg(test)]
 use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig, SnoopQueueFamilyCounts};
 use emulebb_kad_dht::{
-    DhtConfig, DhtError, DhtNode, KeywordPublishEntry, PublishAttemptStats, ReceivedKadPacket,
-    RpcClassBudgetConfig, RpcWorkClass,
+    DhtConfig, DhtError, DhtNode, HelloRoutingMutation, KeywordPublishEntry, PublishAttemptStats,
+    ReceivedKadPacket, RpcClassBudgetConfig, RpcWorkClass,
 };
 #[cfg(test)]
 use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult};
@@ -6131,18 +6131,13 @@ async fn handle_kad_local_store_packet(
             // handshake to verify the remote's IP) only when the contact was
             // added/updated and the peer did not already prove a valid receiver
             // key. Mirrors SendMyDetails(..., bAddedOrUpdated && !bValidReceiverKey).
-            let added_or_updated = match dht
+            let routing_outcome = dht
                 .add_contact_from_hello(from, req.node_id, req.tcp_port, req.version, &req.tags)
-                .await
-            {
-                Ok(_) => true,
-                Err(error) => {
-                    tracing::debug!(
-                        "failed to record Kad HELLO_REQ contact from {from}: {error:#}"
-                    );
-                    false
-                }
-            };
+                .await;
+            if let HelloRoutingMutation::Rejected(error) = &routing_outcome.mutation {
+                tracing::debug!("failed to record Kad HELLO_REQ contact from {from}: {error:#}");
+            }
+            let added_or_updated = routing_outcome.added_or_updated();
             let request_ack =
                 should_request_hello_res_ack(added_or_updated, receiver_verify_key_valid);
             let response = build_kad_hello_response(
@@ -6174,30 +6169,23 @@ async fn handle_kad_local_store_packet(
             }
         }
         KadPacket::HelloRes(res) => {
-            let mut added_or_updated = false;
-            match dht
+            let routing_outcome = dht
                 .add_contact_from_hello(from, res.node_id, res.tcp_port, res.version, &res.tags)
-                .await
-            {
-                Ok(metadata) => {
-                    added_or_updated = true;
-                    if metadata.requests_hello_res_ack {
-                        dht.send_packet(
-                            from,
-                            &KadPacket::HelloResAck(HelloResAck {
-                                node_id: dht.own_id(),
-                                tags: Vec::new(),
-                            }),
-                        )
-                        .await?;
-                    }
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        "failed to record Kad HELLO_RES contact from {from}: {error:#}"
-                    );
-                }
+                .await;
+            if let HelloRoutingMutation::Rejected(error) = &routing_outcome.mutation {
+                tracing::debug!("failed to record Kad HELLO_RES contact from {from}: {error:#}");
             }
+            if routing_outcome.metadata.requests_hello_res_ack {
+                dht.send_packet(
+                    from,
+                    &KadPacket::HelloResAck(HelloResAck {
+                        node_id: dht.own_id(),
+                        tags: Vec::new(),
+                    }),
+                )
+                .await?;
+            }
+            let added_or_updated = routing_outcome.added_or_updated();
             // Oracle Process_KADEMLIA2_HELLO_RES: a pre-0.49a (version < 7)
             // contact answered our HELLO_REQ but supports no keys, and the
             // response could still be spoofed, so verify it with a legacy REQ

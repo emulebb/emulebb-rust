@@ -20,6 +20,7 @@ use legacy_challenge::LegacyChallengeTracker;
 
 pub use config::DhtConfig;
 use contact_helpers::expire_contact_for_massive_flood;
+pub use routing::{HelloRoutingMutation, HelloRoutingOutcome, HelloRoutingUnchangedReason};
 
 use crate::error::DhtError;
 use emulebb_kad_net::{

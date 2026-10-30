@@ -11,7 +11,10 @@ pub use emulebb_kad_net::{
     RpcWorkClass, RpcWorkClassSnapshot, socket_opts,
 };
 pub use error::DhtError;
-pub use node::{DhtConfig, DhtNode, KadRoutingContactSnapshot, KadRoutingSummaryCounts};
+pub use node::{
+    DhtConfig, DhtNode, HelloRoutingMutation, HelloRoutingOutcome, HelloRoutingUnchangedReason,
+    KadRoutingContactSnapshot, KadRoutingSummaryCounts,
+};
 pub use publish::{KeywordPublishEntry, PublishAttemptStats};
 pub use search::{KadSearchCompletion, KadSearchStream};
 pub use types::{
