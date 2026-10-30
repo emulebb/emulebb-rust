@@ -1,9 +1,9 @@
 # eMuleBB Rust
 
 **eMuleBB Rust** (`emulebb-rust`) is the forward eD2K/Kad client in the eMuleBB
-organization. **Status: Active beta.** The public baseline is `0.1.0-beta.2`,
-and current development is working toward Beta 3. Repeatedly tested on live
-eD2K/Kad networks.
+organization. **Status: Active beta.** CI-gated nightly builds are the current
+public testing lane. Repeatedly tested on live eD2K/Kad networks. Beta 3 is
+expected after a few more weeks of implementation and stabilization.
 
 It runs as a headless daemon with an embedded browser operations console and a
 Rust-forward `/api/v1` contract. Durable runtime metadata lives in one SQLite
@@ -12,14 +12,11 @@ remain separate profile artifacts.
 
 ## Get eMuleBB Rust
 
-1. **Current nightly beta — recommended for active testing:** download the
-   newest prerelease for Windows, Linux, or macOS from the
-   [GitHub Releases page](https://github.com/emulebb/emulebb-rust/releases).
-   A nightly is published only after the exact `main` commit passes the required
-   CI checks. Nightlies are unsigned and may be unstable.
-2. **Formal Beta 2 baseline:** download
-   [`rust-v0.1.0-beta.2`](https://github.com/emulebb/emulebb-rust/releases/tag/rust-v0.1.0-beta.2)
-   for the fixed public baseline and its retained release evidence.
+**Download the current nightly beta:** open the
+[GitHub Releases page](https://github.com/emulebb/emulebb-rust/releases) and
+choose the newest dated nightly prerelease for Windows, Linux, or macOS. A
+nightly is published only after the exact `main` commit passes the required CI
+checks. Nightlies are unsigned and may be unstable.
 
 See [Nightly beta builds](#nightly-beta-builds) for platform packages,
 container tags, versioning, retention, and generated changelogs.
@@ -55,7 +52,7 @@ in the Client phase until every active client item, including newly accepted
 work, closes. The future Indexer and Arr phases stay design-only until their
 preceding gates pass.
 
-The Beta 2 release decision and retained evidence are tracked in
+The historical Beta 2 release decision and retained evidence are tracked in
 [RUST-BUG-101 / issue 19](https://github.com/emulebb/emulebb-rust/issues/19).
 
 Rust development uses the exact toolchain declared in `rust-toolchain.toml`.
@@ -63,8 +60,9 @@ Update that pin, the workspace `rust-version`, and CI together in a dedicated
 toolchain commit after each stable Rust release has passed the full quality
 gate; normal development must not float independently on `stable`.
 
-The `0.1.0-beta.2` scope is eD2K/Kad protocol-operational parity: configured
-binding, interoperability, search, sharing, transfers, uploads, queues,
+The archived `0.1.0-beta.2` scope captured eD2K/Kad protocol-operational
+parity: configured binding, interoperability, search, sharing, transfers,
+uploads, queues,
 persistence, the protocol-required local Kad index, REST controller visibility,
 and embedded SPA operation. The autonomous persistent observation index is a
 future phase, not another name for the current local Kad index. Broadband-
@@ -368,7 +366,7 @@ Committed CodeQL analysis covers the Rust daemon, browser WebUI, Python release
 tooling, and GitHub Actions workflows on every `main` change and on a weekly
 schedule using the extended security query suite.
 
-## Beta.2 artifacts
+## Historical Beta 2 artifacts
 
 The published
 [`0.1.0-beta.2` GitHub Release](https://github.com/emulebb/emulebb-rust/releases/tag/rust-v0.1.0-beta.2)
