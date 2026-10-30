@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 
+use crate::ed2k_string::Ed2kStringEncoding;
+
 use super::super::super::Ed2kTransport;
 use super::super::super::codec::{
     decode_chat_captcha_request_payload, decode_chat_captcha_result_payload,
@@ -175,8 +177,9 @@ pub(super) fn handle_file_desc(
     transport: &Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<()> {
-    let file_desc = decode_file_description_payload(payload)?;
+    let file_desc = decode_file_description_payload(payload, encoding)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "file_desc", || {
         format!(
             "rating={} comment_len={}",

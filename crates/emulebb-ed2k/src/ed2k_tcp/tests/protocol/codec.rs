@@ -1,4 +1,6 @@
 use super::*;
+use crate::ed2k_string::Ed2kStringEncoding;
+use crate::ed2k_tcp::codec::encode_file_desc;
 use crate::ed2k_tcp::decode_answer_sources2_payload;
 
 #[test]
@@ -226,16 +228,41 @@ fn file_description_decodes_stock_rating_and_long_string() {
     payload.extend_from_slice(&5u32.to_le_bytes());
     payload.extend_from_slice(b"clean");
 
-    let decoded = decode_file_description_payload(&payload).unwrap();
+    let decoded = decode_file_description_payload(&payload, Ed2kStringEncoding::Utf8).unwrap();
 
     assert_eq!(decoded.rating, 4);
     assert_eq!(decoded.comment, "clean");
-    assert!(decode_file_description_payload(&payload[..4]).is_err());
+    assert!(decode_file_description_payload(&payload[..4], Ed2kStringEncoding::Utf8).is_err());
 
     payload.extend_from_slice(b"ignored");
-    let decoded = decode_file_description_payload(&payload).unwrap();
+    let decoded = decode_file_description_payload(&payload, Ed2kStringEncoding::Utf8).unwrap();
     assert_eq!(decoded.rating, 4);
     assert_eq!(decoded.comment, "clean");
+}
+
+#[test]
+fn file_description_uses_negotiated_string_encoding() {
+    let comment = "café";
+    let legacy = encode_file_desc(4, comment, Ed2kStringEncoding::Legacy);
+    let unicode = encode_file_desc(4, comment, Ed2kStringEncoding::Utf8);
+    let legacy_bytes = Ed2kStringEncoding::Legacy.encode(comment);
+
+    assert_eq!(&legacy[11..], legacy_bytes);
+    assert_eq!(&unicode[11..], comment.as_bytes());
+    assert_eq!(
+        decode_file_description_payload(&legacy[6..], Ed2kStringEncoding::Legacy)
+            .unwrap()
+            .comment,
+        Ed2kStringEncoding::Legacy.decode(&legacy_bytes)
+    );
+    assert_eq!(
+        decode_file_description_payload(&unicode[6..], Ed2kStringEncoding::Utf8)
+            .unwrap()
+            .comment,
+        comment
+    );
+    #[cfg(not(windows))]
+    assert_eq!(legacy_bytes, b"caf\xE9");
 }
 
 #[test]
@@ -345,13 +372,17 @@ fn shared_browse_packets_use_stock_empty_and_denied_shapes() {
     dir_request.extend_from_slice(&5u16.to_le_bytes());
     dir_request.extend_from_slice(b"Music");
     assert_eq!(
-        decode_shared_files_dir_request_payload(&dir_request).unwrap(),
+        decode_shared_files_dir_request_payload(&dir_request, Ed2kStringEncoding::Utf8).unwrap(),
         "Music"
     );
     let mut dir_request_with_trailing = dir_request.clone();
     dir_request_with_trailing.extend_from_slice(&[0xAA, 0xBB]);
     assert_eq!(
-        decode_shared_files_dir_request_payload(&dir_request_with_trailing).unwrap(),
+        decode_shared_files_dir_request_payload(
+            &dir_request_with_trailing,
+            Ed2kStringEncoding::Utf8,
+        )
+        .unwrap(),
         "Music"
     );
 
@@ -359,13 +390,16 @@ fn shared_browse_packets_use_stock_empty_and_denied_shapes() {
     dirs_answer.extend_from_slice(&1u32.to_le_bytes());
     dirs_answer.extend_from_slice(&dir_request);
     dirs_answer.extend_from_slice(&[0xAA, 0xBB]);
-    let decoded_dirs = decode_shared_dirs_answer_payload(&dirs_answer).unwrap();
+    let decoded_dirs =
+        decode_shared_dirs_answer_payload(&dirs_answer, Ed2kStringEncoding::Utf8).unwrap();
     assert_eq!(decoded_dirs.dir_count, 1);
     assert_eq!(decoded_dirs.dirs, vec!["Music"]);
 
     let mut dir_files_answer = dir_request;
     dir_files_answer.extend_from_slice(&0u32.to_le_bytes());
-    let decoded_dir_files = decode_shared_files_dir_answer_payload(&dir_files_answer).unwrap();
+    let decoded_dir_files =
+        decode_shared_files_dir_answer_payload(&dir_files_answer, Ed2kStringEncoding::Utf8)
+            .unwrap();
     assert_eq!(decoded_dir_files.dir, "Music");
     assert_eq!(decoded_dir_files.file_count, 0);
     assert_eq!(decoded_dir_files.entry_bytes, 0);
@@ -671,6 +705,7 @@ fn legacy_multipacket_answer_uses_hash_prefixed_subpackets() {
     let packet = encode_multipacket_answer(
         &file_hash,
         "legacy.avi",
+        Ed2kStringEncoding::Utf8,
         true,
         Some(&[0, 0]),
         Some(aich_root),
@@ -868,7 +903,12 @@ fn source_answer_sx2_stays_uncompressed_at_or_below_354_bytes() {
 #[test]
 fn request_filename_answer_uses_stock_u16_string_length_prefix() {
     let file_hash = Ed2kHash([0x55; 16]);
-    let packet = super::encode_request_filename_answer(&file_hash, "captured.epub").unwrap();
+    let packet = super::encode_request_filename_answer(
+        &file_hash,
+        "captured.epub",
+        Ed2kStringEncoding::Utf8,
+    )
+    .unwrap();
 
     assert_eq!(packet[0], OP_EDONKEYPROT);
     assert_eq!(packet[5], OP_REQFILENAMEANSWER);
@@ -882,9 +922,47 @@ fn request_filename_answer_uses_stock_u16_string_length_prefix() {
     let mut payload_with_trailing = packet[6..].to_vec();
     payload_with_trailing.extend_from_slice(&[0xAA, 0xBB]);
     assert_eq!(
-        decode_request_filename_answer(&payload_with_trailing).unwrap(),
+        decode_request_filename_answer(&payload_with_trailing, Ed2kStringEncoding::Utf8).unwrap(),
         (file_hash, "captured.epub".to_string())
     );
+}
+
+#[test]
+fn request_filename_answer_uses_negotiated_string_encoding() {
+    let file_hash = Ed2kHash([0x56; 16]);
+    let file_name = "café.bin";
+    let legacy =
+        encode_request_filename_answer(&file_hash, file_name, Ed2kStringEncoding::Legacy).unwrap();
+    let unicode =
+        encode_request_filename_answer(&file_hash, file_name, Ed2kStringEncoding::Utf8).unwrap();
+    let legacy_bytes = Ed2kStringEncoding::Legacy.encode(file_name);
+
+    assert_eq!(&legacy[24..], legacy_bytes);
+    assert_eq!(&unicode[24..], file_name.as_bytes());
+    assert_eq!(
+        decode_request_filename_answer(&legacy[6..], Ed2kStringEncoding::Legacy).unwrap(),
+        (file_hash, Ed2kStringEncoding::Legacy.decode(&legacy_bytes))
+    );
+    assert_eq!(
+        decode_request_filename_answer(&unicode[6..], Ed2kStringEncoding::Utf8).unwrap(),
+        (file_hash, file_name.to_string())
+    );
+    #[cfg(not(windows))]
+    assert_eq!(legacy_bytes, b"caf\xE9.bin");
+}
+
+#[test]
+fn request_filename_unicode_decode_falls_back_to_legacy_codepage() {
+    let file_hash = Ed2kHash([0x57; 16]);
+    let legacy_name = b"caf\xE9.bin";
+    let mut payload = file_hash.0.to_vec();
+    payload.extend_from_slice(&u16::try_from(legacy_name.len()).unwrap().to_le_bytes());
+    payload.extend_from_slice(legacy_name);
+
+    let (_, decoded) = decode_request_filename_answer(&payload, Ed2kStringEncoding::Utf8).unwrap();
+    assert_eq!(decoded, Ed2kStringEncoding::Legacy.decode(legacy_name));
+    #[cfg(not(windows))]
+    assert_eq!(decoded, "café.bin");
 }
 
 #[test]

@@ -5,6 +5,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use crate::ed2k_string::Ed2kStringEncoding;
+
 use super::hello_buddy::hello_buddy_snapshot;
 use super::hello_miscoptions::{
     MiscOptions1, decode_misc_options1, decode_misc_options2_connect_options,
@@ -553,11 +555,11 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
                 ));
             }
         }
-        if tag.tag_name == Some(CT_MOD_VERSION)
-            && let Ok(mod_version) = std::str::from_utf8(tag.value)
-            && super::hello_gpl::is_gpl_evildoer_mod_version(mod_version)
-        {
-            gpl_evildoer = true;
+        if tag.tag_name == Some(CT_MOD_VERSION) {
+            let mod_version = Ed2kStringEncoding::Utf8.decode(tag.value);
+            if super::hello_gpl::is_gpl_evildoer_mod_version(&mod_version) {
+                gpl_evildoer = true;
+            }
         }
         if tag.tag_name == Some(CT_EMULE_MISCOPTIONS2)
             && let Some(misc_options2) = decode_hello_tag_u32(&tag)

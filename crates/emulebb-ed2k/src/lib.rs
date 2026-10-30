@@ -5,6 +5,7 @@ pub mod diag_event;
 pub mod disk_space;
 mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;
+mod ed2k_string;
 mod file_name;
 pub use ed2k_client_udp::{
     DirectCallbackArgs, DirectCallbackDispatchOutcome, DirectCallbackSender, ReaskCommand,

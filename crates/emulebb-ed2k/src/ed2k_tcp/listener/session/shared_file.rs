@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
+    ed2k_string::Ed2kStringEncoding,
     ed2k_tcp::{
         ED2K_SOURCE_EXCHANGE2_VERSION, Ed2kFileIdentifier, Ed2kTransport, OP_AICHFILEHASHREQ,
         OP_MULTIPACKET_EXT, OP_REQUESTFILENAME, OP_REQUESTSOURCES, OP_REQUESTSOURCES2,
@@ -45,6 +46,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    string_encoding: Ed2kStringEncoding,
     requester_file_state: &mut Option<RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     let (requested_identifier, mut remaining) = Ed2kFileIdentifier::decode(payload)?;
@@ -131,6 +133,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     let reply = encode_multipacket_ext2_answer(
         &shared_identifier,
         &shared.display_name,
+        string_encoding,
         include_filename,
         status_body.as_deref(),
     )?;
@@ -153,6 +156,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     payload: &[u8],
     peer_supports_aich: bool,
     peer_supports_file_identifiers: bool,
+    string_encoding: Ed2kStringEncoding,
     requester_file_state: &mut Option<RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     if payload.len() < 16 {
@@ -233,6 +237,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
         let reply = encode_multipacket_answer(
             &requested,
             &shared.display_name,
+            string_encoding,
             include_filename,
             status_body.as_deref(),
             include_aich_root,
@@ -264,6 +269,7 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     peer_addr: SocketAddr,
     payload: &[u8],
     peer_accept_comment_version: u8,
+    string_encoding: Ed2kStringEncoding,
     requester_file_state: &mut Option<RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_file_hash_payload(payload)?;
@@ -289,7 +295,7 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
                 .as_ref()
                 .map_or(0, |info| info.complete_source_count),
         });
-        encode_request_filename_answer(&requested, &shared.display_name)?
+        encode_request_filename_answer(&requested, &shared.display_name, string_encoding)?
     } else {
         *requester_file_state = None;
         encode_file_req_ans_nofil(&requested)
@@ -309,7 +315,7 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
             &manifest.comment,
         )
     {
-        let desc = encode_file_desc(manifest.rating, &manifest.comment);
+        let desc = encode_file_desc(manifest.rating, &manifest.comment, string_encoding);
         transport
             .write_all_diagnostic("listener", peer_addr, "file_desc", &desc)
             .await
@@ -795,7 +801,7 @@ mod tests {
     #[test]
     fn file_desc_encodes_oracle_layout_and_round_trips() {
         use super::super::super::super::codec::decode_file_description_payload;
-        let frame = encode_file_desc(3, "nice");
+        let frame = encode_file_desc(3, "nice", Ed2kStringEncoding::Utf8);
         // Full eD2k frame: [OP_EMULEPROT][len u32 LE][OP_FILEDESC=0x61][body].
         assert_eq!(frame[0], 0xC5); // OP_EMULEPROT
         assert_eq!(frame[5], 0x61); // OP_FILEDESC
@@ -806,7 +812,7 @@ mod tests {
         assert_eq!(body[0], 3);
         assert_eq!(u32::from_le_bytes(body[1..5].try_into().unwrap()), 4);
         assert_eq!(&body[5..9], b"nice");
-        let decoded = decode_file_description_payload(body).unwrap();
+        let decoded = decode_file_description_payload(body, Ed2kStringEncoding::Utf8).unwrap();
         assert_eq!(decoded.rating, 3);
         assert_eq!(decoded.comment, "nice");
     }

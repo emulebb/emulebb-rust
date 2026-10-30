@@ -246,8 +246,14 @@ fn encode_startup_multipacket_ext2_answer_with_identifier(
     // The startup/answer fixtures cover complete-file shares, so a requested
     // status maps to the master "complete" body (`WriteUInt16(0)`).
     let status_body = include_file_status.then(|| 0u16.to_le_bytes().to_vec());
-    super::encode_multipacket_ext2_answer(file_identifier, file_name, true, status_body.as_deref())
-        .unwrap()
+    super::encode_multipacket_ext2_answer(
+        file_identifier,
+        file_name,
+        crate::ed2k_string::Ed2kStringEncoding::Utf8,
+        true,
+        status_body.as_deref(),
+    )
+    .unwrap()
 }
 
 fn encode_startup_multipacket_ext2_answer(

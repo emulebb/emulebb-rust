@@ -11,6 +11,7 @@ use tracing::debug;
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
+    ed2k_string::Ed2kStringEncoding,
     ed2k_tcp::Ed2kHelloIdentity,
     ed2k_transfer::{Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry},
     shared_publish_rank::{
@@ -36,10 +37,11 @@ use super::{
     OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
     OP_OFFERFILES, ResolvedServerEntry, SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_LARGEFILES,
     SERVER_TCP_FLAG_NEWTAGS, SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER,
-    SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2,
-    SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT,
-    SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES, SRVCAP_UNICODE,
-    SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta, is_low_id,
+    SERVER_TCP_FLAG_UNICODE, SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES,
+    SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS,
+    SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES,
+    SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta,
+    is_low_id,
 };
 
 const MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES: usize = 510;
@@ -96,7 +98,7 @@ pub(super) fn encode_login_request(
     let offer_files_v1 = role.advertises_offer_files_v1();
     let tag_count = 4 + u32::from(offer_files_v1);
     payload.extend_from_slice(&tag_count.to_le_bytes());
-    push_string_tag(&mut payload, CT_NAME, nickname);
+    push_string_tag(&mut payload, CT_NAME, nickname, Ed2kStringEncoding::Legacy);
     push_u32_tag(&mut payload, CT_VERSION, EDONKEY_VERSION);
     push_u32_tag(
         &mut payload,
@@ -161,6 +163,9 @@ fn encode_offered_files_catalog(
     let use_new_tags = server_flags.unwrap_or_default() & SERVER_TCP_FLAG_NEWTAGS != 0;
     let use_integer_media_length =
         server_flags.unwrap_or_default() & SERVER_TCP_FLAG_COMPRESSION != 0;
+    let string_encoding = Ed2kStringEncoding::from_unicode_support(
+        server_flags.unwrap_or_default() & SERVER_TCP_FLAG_UNICODE != 0,
+    );
     for (file_hash, file_name, file_size, file_type, verified_complete, rating, media) in
         &offered_files.entries
     {
@@ -200,7 +205,7 @@ fn encode_offered_files_catalog(
         payload.extend_from_slice(&advertised_client_id.to_le_bytes());
         payload.extend_from_slice(&advertised_client_port.to_le_bytes());
         payload.extend_from_slice(&tag_count.to_le_bytes());
-        push_short_string_tag(&mut payload, FT_FILENAME, file_name);
+        push_short_string_tag(&mut payload, FT_FILENAME, file_name, string_encoding);
         // Stock down-sizes integer tags via WriteNewEd2kTag, so a small file's size
         // is a u8/u16, not always u32.
         push_short_int_tag(&mut payload, FT_FILESIZE, u64::from(lower_file_size));
@@ -211,7 +216,7 @@ fn encode_offered_files_catalog(
             if use_integer_type {
                 push_short_u8_tag(&mut payload, FT_FILETYPE, *file_type);
             } else if let Some(term) = ed2k_file_type_search_term(*file_type) {
-                push_short_string_tag(&mut payload, FT_FILETYPE, term);
+                push_short_string_tag(&mut payload, FT_FILETYPE, term, string_encoding);
             }
         }
         // eServer 17.6+ accepts the local 1..5 rating without a capability
@@ -237,6 +242,7 @@ fn encode_offered_files_catalog(
                     &mut payload,
                     "length",
                     &format_media_length(media.length_seconds),
+                    string_encoding,
                 );
             }
         }
@@ -253,9 +259,9 @@ fn encode_offered_files_catalog(
         }
         if !media.codec.is_empty() {
             if use_new_tags {
-                push_short_string_tag(&mut payload, FT_MEDIA_CODEC, &media.codec);
+                push_short_string_tag(&mut payload, FT_MEDIA_CODEC, &media.codec, string_encoding);
             } else {
-                push_named_string_tag(&mut payload, "codec", &media.codec);
+                push_named_string_tag(&mut payload, "codec", &media.codec, string_encoding);
             }
         }
     }

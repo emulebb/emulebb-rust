@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use crate::{
     buddy_socket::BuddySocketRegistry,
     ed2k_server::Ed2kServerState,
+    ed2k_string::Ed2kStringEncoding,
     ed2k_transfer::{
         Ed2kCallbackHelloIdentity, Ed2kTransferRuntime, Ed2kUploadCallbackClaim,
         Ed2kUploadGrantedPromotion, Ed2kUploadPeerIdentity,
@@ -277,6 +278,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // IS_NOTAVAILABLE legacy peers are still credited); see credit_accrual_allowed.
     let mut peer_supports_secure_ident = false;
     let mut peer_supports_file_identifiers = false;
+    let mut peer_supports_unicode = false;
     // Peer's advertised comment-acceptance version (oracle m_byAcceptCommentVer);
     // gates whether we propagate our user-set comment/rating via OP_FILEDESC.
     let mut peer_accept_comment_version: u8 = 0;
@@ -491,6 +493,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         supports_aich: &mut peer_supports_aich,
                         supports_secure_ident: &mut peer_supports_secure_ident,
                         supports_file_identifiers: &mut peer_supports_file_identifiers,
+                        supports_unicode: &mut peer_supports_unicode,
                         accept_comment_version: &mut peer_accept_comment_version,
                         upload_identity: &mut peer_upload_identity,
                     },
@@ -705,6 +708,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         supports_aich: &mut peer_supports_aich,
                         supports_secure_ident: &mut peer_supports_secure_ident,
                         supports_file_identifiers: &mut peer_supports_file_identifiers,
+                        supports_unicode: &mut peer_supports_unicode,
                         accept_comment_version: &mut peer_accept_comment_version,
                         upload_identity: &mut peer_upload_identity,
                     },
@@ -759,6 +763,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &packet.payload,
                     peer_supports_aich,
                     peer_supports_file_identifiers,
+                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
                     &mut requester_file_state,
                 )
                 .await?;
@@ -769,6 +774,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &mut transport,
                     peer_addr,
                     &packet.payload,
+                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
                     &mut requester_file_state,
                 )
                 .await?;
@@ -780,6 +786,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     &packet.payload,
                     peer_accept_comment_version,
+                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
                     &mut requester_file_state,
                 )
                 .await?;
@@ -906,17 +913,32 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     .await?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR) => {
-                browse::handle_ask_shared_files_dir(&mut transport, peer_addr, &packet.payload)
-                    .await?;
+                browse::handle_ask_shared_files_dir(
+                    &mut transport,
+                    peer_addr,
+                    &packet.payload,
+                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
+                )
+                .await?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER) => {
                 browse::handle_ask_shared_files_answer(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDDIRSANS) => {
-                browse::handle_ask_shared_dirs_answer(&transport, peer_addr, &packet.payload)?;
+                browse::handle_ask_shared_dirs_answer(
+                    &transport,
+                    peer_addr,
+                    &packet.payload,
+                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
+                )?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIRANS) => {
-                browse::handle_ask_shared_files_dir_answer(&transport, peer_addr, &packet.payload)?;
+                browse::handle_ask_shared_files_dir_answer(
+                    &transport,
+                    peer_addr,
+                    &packet.payload,
+                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
+                )?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDDENIEDANS) => {
                 browse::handle_ask_shared_denied_answer(&transport, peer_addr, packet.payload.len());
@@ -1228,7 +1250,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 notify::handle_buddy_pong(&transport, peer_addr, buddy_hold.is_some());
             }
             (OP_EMULEPROT, OP_FILEDESC) => {
-                notify::handle_file_desc(&transport, peer_addr, &packet.payload)?;
+                notify::handle_file_desc(
+                    &transport,
+                    peer_addr,
+                    &packet.payload,
+                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
+                )?;
             }
             (OP_EMULEPROT, OP_REQUESTPREVIEW) => {
                 notify::handle_preview_request(&transport, peer_addr, &packet.payload)?;
@@ -1556,6 +1583,7 @@ struct PeerHelloStateRefs<'a> {
     supports_aich: &'a mut bool,
     supports_secure_ident: &'a mut bool,
     supports_file_identifiers: &'a mut bool,
+    supports_unicode: &'a mut bool,
     accept_comment_version: &'a mut u8,
     upload_identity: &'a mut Ed2kUploadPeerIdentity,
 }
@@ -1621,6 +1649,7 @@ fn apply_peer_hello_profile(
     *state.supports_aich = profile.supports_aich;
     *state.supports_secure_ident = profile.supports_secure_ident;
     *state.supports_file_identifiers = profile.supports_file_identifiers;
+    *state.supports_unicode = profile.misc_options1.unicode_support;
     // The modern hello MISCOPTIONS1 carries m_byAcceptCommentVer (bits 4-7).
     *state.accept_comment_version = profile.misc_options1.accept_comment_version;
     let previous_identity = state.upload_identity.clone();

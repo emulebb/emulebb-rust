@@ -8,13 +8,17 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 
-use crate::ed2k_tcp::{
-    Ed2kTransport, decode_chat_captcha_request_payload, decode_chat_captcha_result_payload,
-    decode_file_description_payload, decode_kad_callback_payload, decode_preview_answer_payload,
-    decode_preview_request_payload, decode_public_ip_answer_payload,
-    decode_reask_callback_tcp_payload, dump_ed2k_tcp_download_meta,
+use crate::{
+    ed2k_string::Ed2kStringEncoding,
+    ed2k_tcp::{
+        Ed2kTransport, decode_chat_captcha_request_payload, decode_chat_captcha_result_payload,
+        decode_file_description_payload, decode_kad_callback_payload,
+        decode_preview_answer_payload, decode_preview_request_payload,
+        decode_public_ip_answer_payload, decode_reask_callback_tcp_payload,
+        dump_ed2k_tcp_download_meta,
+    },
+    ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime},
 };
-use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime};
 
 const MAX_FILE_COMMENT_CHARS: usize = 128;
 
@@ -135,11 +139,11 @@ pub(super) async fn handle_file_desc(
     peer_addr: SocketAddr,
     transfer_runtime: &Ed2kTransferRuntime,
     file_hash_hex: &str,
-    peer_user_hash: Option<[u8; 16]>,
-    peer_connect_options: Option<u8>,
+    mut source: Ed2kSourceHint,
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<()> {
-    let file_desc = decode_file_description_payload(payload)?;
+    let file_desc = decode_file_description_payload(payload, encoding)?;
     let comment: String = file_desc
         .comment
         .chars()
@@ -152,18 +156,10 @@ pub(super) async fn handle_file_desc(
             comment.chars().count()
         )
     });
+    source.file_comment = comment;
+    source.file_rating = file_desc.rating;
     transfer_runtime
-        .remember_source_file_description(
-            file_hash_hex,
-            Ed2kSourceHint {
-                ip: peer_addr.ip().to_string(),
-                tcp_port: peer_addr.port(),
-                user_hash: peer_user_hash.map(hex::encode),
-                connect_options: peer_connect_options,
-                file_comment: comment,
-                file_rating: file_desc.rating,
-            },
-        )
+        .remember_source_file_description(file_hash_hex, source)
         .await?;
     Ok(())
 }

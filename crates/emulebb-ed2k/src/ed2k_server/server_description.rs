@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result};
 
+use crate::ed2k_string::Ed2kStringEncoding;
+
 use super::{
     ST_AUXPORTSLIST, ST_DESCRIPTION, ST_DYNIP, ST_SERVERNAME, ST_VERSION,
     tag_codec::{DecodedTagValue, decode_tag_value},
@@ -41,7 +43,7 @@ pub(super) fn decode_server_description_response(
         let mut version = None;
         let mut auxiliary_ports = Vec::new();
         for _ in 0..tag_count {
-            let (tag_name, tag_value, rest) = decode_tag_value(cursor)?;
+            let (tag_name, tag_value, rest) = decode_tag_value(cursor, Ed2kStringEncoding::Utf8)?;
             cursor = rest;
             match (tag_name, tag_value) {
                 (Some(ST_SERVERNAME), Some(DecodedTagValue::String(value))) => name = Some(value),
@@ -118,7 +120,7 @@ fn decode_legacy_string(payload: &[u8]) -> Result<(String, &[u8])> {
         anyhow::bail!("short string body");
     }
     Ok((
-        String::from_utf8_lossy(&payload[2..2 + len]).into_owned(),
+        Ed2kStringEncoding::Utf8.decode(&payload[2..2 + len]),
         &payload[2 + len..],
     ))
 }
@@ -140,11 +142,31 @@ mod tests {
         let challenge = 0x1234_F0FFu32;
         let mut payload = challenge.to_le_bytes().to_vec();
         payload.extend_from_slice(&5u32.to_le_bytes());
-        push_string_tag(&mut payload, ST_SERVERNAME, "Example Server");
-        push_string_tag(&mut payload, ST_DESCRIPTION, "Example Description");
-        push_string_tag(&mut payload, ST_DYNIP, "server.example.test");
+        push_string_tag(
+            &mut payload,
+            ST_SERVERNAME,
+            "Example Server",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_string_tag(
+            &mut payload,
+            ST_DESCRIPTION,
+            "Example Description",
+            Ed2kStringEncoding::Utf8,
+        );
+        push_string_tag(
+            &mut payload,
+            ST_DYNIP,
+            "server.example.test",
+            Ed2kStringEncoding::Utf8,
+        );
         push_u32_tag(&mut payload, ST_VERSION, (17 << 16) | 6);
-        push_string_tag(&mut payload, ST_AUXPORTSLIST, "4661, 4662,0,bad,4661");
+        push_string_tag(
+            &mut payload,
+            ST_AUXPORTSLIST,
+            "4661, 4662,0,bad,4661",
+            Ed2kStringEncoding::Utf8,
+        );
 
         let decoded = decode_server_description_response(&payload, challenge)
             .unwrap()

@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 
+use crate::ed2k_string::Ed2kStringEncoding;
+
 use super::{OP_EMULEPROT, OP_FILEDESC, encode_packet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,8 +10,12 @@ pub(in crate::ed2k_tcp) struct FileDescription {
     pub(in crate::ed2k_tcp) comment: String,
 }
 
-fn encode_file_description_body(rating: u8, comment: &str) -> Vec<u8> {
-    let comment_bytes = comment.as_bytes();
+fn encode_file_description_body(
+    rating: u8,
+    comment: &str,
+    encoding: Ed2kStringEncoding,
+) -> Vec<u8> {
+    let comment_bytes = encoding.encode(comment);
     let mut body = Vec::with_capacity(1 + 4 + comment_bytes.len());
     body.push(rating);
     body.extend_from_slice(
@@ -17,20 +23,25 @@ fn encode_file_description_body(rating: u8, comment: &str) -> Vec<u8> {
             .unwrap_or(u32::MAX)
             .to_le_bytes(),
     );
-    body.extend_from_slice(comment_bytes);
+    body.extend_from_slice(&comment_bytes);
     body
 }
 
-pub(in crate::ed2k_tcp) fn encode_file_desc(rating: u8, comment: &str) -> Vec<u8> {
+pub(in crate::ed2k_tcp) fn encode_file_desc(
+    rating: u8,
+    comment: &str,
+    encoding: Ed2kStringEncoding,
+) -> Vec<u8> {
     encode_packet(
         OP_EMULEPROT,
         OP_FILEDESC,
-        &encode_file_description_body(rating, comment),
+        &encode_file_description_body(rating, comment, encoding),
     )
 }
 
 pub(in crate::ed2k_tcp) fn decode_file_description_payload(
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<FileDescription> {
     if payload.len() < 5 {
         anyhow::bail!("short OP_FILEDESC payload {}", payload.len());
@@ -45,6 +56,6 @@ pub(in crate::ed2k_tcp) fn decode_file_description_payload(
             comment_len
         );
     }
-    let comment = String::from_utf8_lossy(&payload[5..5 + comment_len]).into_owned();
+    let comment = encoding.decode(&payload[5..5 + comment_len]);
     Ok(FileDescription { rating, comment })
 }

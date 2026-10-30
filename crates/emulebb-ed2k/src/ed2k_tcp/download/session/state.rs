@@ -19,6 +19,7 @@ pub(in crate::ed2k_tcp) struct DownloadConnectionState {
     remote_supports_file_identifiers: bool,
     remote_supports_multipacket: bool,
     remote_supports_ext_multipacket: bool,
+    remote_supports_unicode: bool,
     remote_source_exchange_version: u8,
     remote_supports_source_exchange: bool,
     remote_supports_source_exchange2: bool,
@@ -46,6 +47,7 @@ impl DownloadConnectionState {
             remote_supports_file_identifiers: profile.supports_file_identifiers,
             remote_supports_multipacket: profile.supports_multipacket,
             remote_supports_ext_multipacket: profile.supports_ext_multipacket,
+            remote_supports_unicode: profile.misc_options1.unicode_support,
             remote_source_exchange_version: profile.source_exchange_version,
             remote_supports_source_exchange: profile.supports_source_exchange,
             remote_supports_source_exchange2: profile.supports_source_exchange2,
@@ -69,6 +71,7 @@ pub(super) struct DownloadSessionState {
     pub(super) remote_supports_file_identifiers: bool,
     pub(super) remote_supports_multipacket: bool,
     pub(super) remote_supports_ext_multipacket: bool,
+    pub(super) remote_supports_unicode: bool,
     pub(super) remote_source_exchange_version: u8,
     pub(super) remote_supports_source_exchange: bool,
     pub(super) remote_supports_source_exchange2: bool,
@@ -150,6 +153,7 @@ impl DownloadSessionState {
                     remote_supports_secure_ident: initial_hello_complete,
                     remote_supports_multipacket: initial_hello_complete,
                     remote_supports_ext_multipacket: initial_hello_complete,
+                    remote_supports_unicode: initial_hello_complete,
                     remote_source_exchange_version: if initial_hello_complete {
                         ED2K_SOURCE_EXCHANGE2_VERSION
                     } else {
@@ -170,6 +174,7 @@ impl DownloadSessionState {
             remote_supports_file_identifiers: connection_state.remote_supports_file_identifiers,
             remote_supports_multipacket: connection_state.remote_supports_multipacket,
             remote_supports_ext_multipacket: connection_state.remote_supports_ext_multipacket,
+            remote_supports_unicode: connection_state.remote_supports_unicode,
             remote_source_exchange_version: connection_state.remote_source_exchange_version,
             remote_supports_source_exchange: connection_state.remote_supports_source_exchange,
             remote_supports_source_exchange2: connection_state.remote_supports_source_exchange2,
@@ -214,6 +219,7 @@ impl DownloadSessionState {
             remote_supports_file_identifiers: self.remote_supports_file_identifiers,
             remote_supports_multipacket: self.remote_supports_multipacket,
             remote_supports_ext_multipacket: self.remote_supports_ext_multipacket,
+            remote_supports_unicode: self.remote_supports_unicode,
             remote_source_exchange_version: self.remote_source_exchange_version,
             remote_supports_source_exchange: self.remote_supports_source_exchange,
             remote_supports_source_exchange2: self.remote_supports_source_exchange2,

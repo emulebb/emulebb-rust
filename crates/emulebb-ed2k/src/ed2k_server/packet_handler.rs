@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use anyhow::{Result, bail};
 use tracing::{debug, error, info, warn};
 
+use crate::ed2k_string::Ed2kStringEncoding;
 use crate::ed2k_tcp::{Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest};
 use crate::reachability::ServerReachabilityWriter;
 
@@ -14,11 +15,11 @@ use super::types::{CallbackRequest, ServerSessionContext};
 use super::{
     Ed2kPacket, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE, OP_QUERY_MORE_RESULT,
     OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
-    OP_SERVERSTATUS, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME, ST_SOFTFILES, ServerSession,
-    ServerSessionPhase, TAGTYPE_UINT32, decode_ed2k_string, decode_search_result_page,
-    decode_server_list, encode_search_request, format_connect_options, format_server_flags,
-    ipv4_from_client_id, is_low_id, log_search_result_page, send_connected_server_startup,
-    wait_for_offer_files_settle,
+    OP_SERVERSTATUS, SERVER_TCP_FLAG_UNICODE, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME,
+    ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32, decode_ed2k_string,
+    decode_search_result_page, decode_server_list, encode_search_request, format_connect_options,
+    format_server_flags, ipv4_from_client_id, is_low_id, log_search_result_page,
+    send_connected_server_startup, wait_for_offer_files_settle,
 };
 
 pub(super) fn log_uncorrelated_server_reject(endpoint: SocketAddr, payload_len: usize) {
@@ -207,7 +208,10 @@ pub(super) async fn handle_server_packet(
                     session.endpoint
                 );
             } else {
-                let ident = decode_server_ident_snapshot(&packet.payload);
+                let ident = decode_server_ident_snapshot_with_encoding(
+                    &packet.payload,
+                    server_string_encoding(session.server_flags),
+                );
                 {
                     let mut guard = session.state.write().await;
                     if let Some(name) = &ident.name {
@@ -261,7 +265,10 @@ pub(super) async fn handle_server_packet(
             }
         }
         OP_SERVERMESSAGE => {
-            if let Some(message) = decode_ed2k_string(&packet.payload)? {
+            if let Some(message) = decode_ed2k_string(
+                &packet.payload,
+                server_string_encoding(session.server_flags),
+            )? {
                 let decoded = decode_server_message(&message);
                 for line in &decoded.lines {
                     match line.kind {
@@ -518,12 +525,21 @@ pub(super) struct DecodedServerIdent {
 }
 
 pub(super) fn decode_server_ident_snapshot(payload: &[u8]) -> DecodedServerIdent {
-    decode_server_ident_details(payload).unwrap_or_else(|error| DecodedServerIdent {
-        name: None,
-        description: None,
-        offer_files_capability: OfferFilesCapabilityAdvertisement::Invalid(format!(
-            "malformed OP_SERVERIDENT: {error:#}"
-        )),
+    decode_server_ident_snapshot_with_encoding(payload, Ed2kStringEncoding::Utf8)
+}
+
+fn decode_server_ident_snapshot_with_encoding(
+    payload: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> DecodedServerIdent {
+    decode_server_ident_details_with_encoding(payload, encoding).unwrap_or_else(|error| {
+        DecodedServerIdent {
+            name: None,
+            description: None,
+            offer_files_capability: OfferFilesCapabilityAdvertisement::Invalid(format!(
+                "malformed OP_SERVERIDENT: {error:#}"
+            )),
+        }
     })
 }
 
@@ -554,6 +570,13 @@ fn set_capability_value(
 }
 
 pub(super) fn decode_server_ident_details(payload: &[u8]) -> Result<DecodedServerIdent> {
+    decode_server_ident_details_with_encoding(payload, Ed2kStringEncoding::Utf8)
+}
+
+fn decode_server_ident_details_with_encoding(
+    payload: &[u8],
+    encoding: Ed2kStringEncoding,
+) -> Result<DecodedServerIdent> {
     if payload.len() < 26 {
         return Ok(DecodedServerIdent {
             name: None,
@@ -573,7 +596,7 @@ pub(super) fn decode_server_ident_details(payload: &[u8]) -> Result<DecodedServe
     let mut soft_files = None;
     let mut hard_files = None;
     for _ in 0..tag_count {
-        let (tag, rest) = decode_tag_details(cursor)?;
+        let (tag, rest) = decode_tag_details(cursor, encoding)?;
         cursor = rest;
         match &tag.name {
             DecodedTagName::Numeric(ST_SERVERNAME) => {
@@ -650,6 +673,12 @@ pub(super) fn decode_server_ident_details(payload: &[u8]) -> Result<DecodedServe
 pub(super) fn decode_server_ident(payload: &[u8]) -> Result<(Option<String>, Option<String>)> {
     let ident = decode_server_ident_details(payload)?;
     Ok((ident.name, ident.description))
+}
+
+fn server_string_encoding(server_flags: Option<u32>) -> Ed2kStringEncoding {
+    Ed2kStringEncoding::from_unicode_support(
+        server_flags.unwrap_or_default() & SERVER_TCP_FLAG_UNICODE != 0,
+    )
 }
 
 #[cfg(test)]

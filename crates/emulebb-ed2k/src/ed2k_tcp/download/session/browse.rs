@@ -7,11 +7,14 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 
-use crate::ed2k_tcp::{
-    Ed2kTransport, decode_shared_dirs_answer_payload, decode_shared_files_answer_payload,
-    decode_shared_files_dir_answer_payload, decode_shared_files_dir_request_payload,
-    dump_ed2k_tcp_download_meta, encode_empty_shared_files_answer,
-    encode_shared_browse_denied_answer,
+use crate::{
+    ed2k_string::Ed2kStringEncoding,
+    ed2k_tcp::{
+        Ed2kTransport, decode_shared_dirs_answer_payload, decode_shared_files_answer_payload,
+        decode_shared_files_dir_answer_payload, decode_shared_files_dir_request_payload,
+        dump_ed2k_tcp_download_meta, encode_empty_shared_files_answer,
+        encode_shared_browse_denied_answer,
+    },
 };
 
 /// OP_ASKSHAREDFILES: a downloader does not share, so reply with the empty
@@ -52,8 +55,9 @@ pub(super) async fn handle_ask_shared_files_dir(
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<()> {
-    let dir = decode_shared_files_dir_request_payload(payload)?;
+    let dir = decode_shared_files_dir_request_payload(payload, encoding)?;
     dump_ed2k_tcp_download_meta(
         peer_addr,
         Some(transport.mode),
@@ -93,8 +97,9 @@ pub(super) fn handle_ask_shared_dirs_answer(
     transport: &Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<()> {
-    let answer = decode_shared_dirs_answer_payload(payload)?;
+    let answer = decode_shared_dirs_answer_payload(payload, encoding)?;
     dump_ed2k_tcp_download_meta(
         peer_addr,
         Some(transport.mode),
@@ -109,8 +114,9 @@ pub(super) fn handle_ask_shared_files_dir_answer(
     transport: &Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    encoding: Ed2kStringEncoding,
 ) -> Result<()> {
-    let answer = decode_shared_files_dir_answer_payload(payload)?;
+    let answer = decode_shared_files_dir_answer_payload(payload, encoding)?;
     dump_ed2k_tcp_download_meta(
         peer_addr,
         Some(transport.mode),
