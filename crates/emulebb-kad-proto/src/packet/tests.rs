@@ -7,6 +7,28 @@ fn roundtrip(pkt: &KadPacket) -> KadPacket {
     KadPacket::decode(&bytes).expect("decode failed")
 }
 
+fn assert_invalid_counted_vector(
+    bytes: &[u8],
+    expected_count: usize,
+    expected_minimum_element_size: usize,
+    expected_remaining: usize,
+) {
+    let result = KadPacket::decode(bytes);
+    assert!(
+        matches!(
+            &result,
+            Err(ProtoError::InvalidCountedVector {
+                count,
+                minimum_element_size,
+                remaining,
+            }) if *count == expected_count
+                && *minimum_element_size == expected_minimum_element_size
+                && *remaining == expected_remaining
+        ),
+        "unexpected decode result: {result:?}"
+    );
+}
+
 #[test]
 fn test_ping_roundtrip() {
     let pkt = KadPacket::Ping;
@@ -59,6 +81,99 @@ fn test_bootstrap_res_roundtrip() {
     } else {
         panic!("wrong packet type");
     }
+}
+
+#[test]
+fn counted_vector_preflight_rejects_oversized_outer_counts() {
+    let mut bootstrap = vec![OP_KADEMLIAHEADER, opcode::BOOTSTRAP_RES];
+    bootstrap.extend_from_slice(&[0; 16]);
+    bootstrap.extend_from_slice(&4662u16.to_le_bytes());
+    bootstrap.push(9);
+    bootstrap.extend_from_slice(&u16::MAX.to_le_bytes());
+    assert_invalid_counted_vector(&bootstrap, usize::from(u16::MAX), 25, 0);
+
+    let mut search = vec![OP_KADEMLIAHEADER, opcode::SEARCH_RES];
+    search.extend_from_slice(&[0; 32]);
+    search.extend_from_slice(&2u16.to_le_bytes());
+    search.extend_from_slice(&[0; 16]);
+    search.push(0);
+    assert_invalid_counted_vector(&search, 2, 17, 17);
+
+    let mut publish = vec![OP_KADEMLIAHEADER, opcode::PUBLISH_KEY_REQ];
+    publish.extend_from_slice(&[0; 16]);
+    publish.extend_from_slice(&2u16.to_le_bytes());
+    publish.extend_from_slice(&[0; 16]);
+    publish.push(0);
+    assert_invalid_counted_vector(&publish, 2, 17, 17);
+}
+
+#[test]
+fn counted_vector_preflight_rejects_truncated_nested_tag_counts() {
+    let mut hello = vec![OP_KADEMLIAHEADER, opcode::HELLO_REQ];
+    hello.extend_from_slice(&[0; 16]);
+    hello.extend_from_slice(&4662u16.to_le_bytes());
+    hello.push(9);
+    hello.push(u8::MAX);
+    assert_invalid_counted_vector(&hello, usize::from(u8::MAX), 4, 0);
+
+    let mut search = vec![OP_KADEMLIAHEADER, opcode::SEARCH_RES];
+    search.extend_from_slice(&[0; 32]);
+    search.extend_from_slice(&1u16.to_le_bytes());
+    search.extend_from_slice(&[0; 16]);
+    search.push(1);
+    assert_invalid_counted_vector(&search, 1, 4, 0);
+
+    let mut publish = vec![OP_KADEMLIAHEADER, opcode::PUBLISH_KEY_REQ];
+    publish.extend_from_slice(&[0; 16]);
+    publish.extend_from_slice(&1u16.to_le_bytes());
+    publish.extend_from_slice(&[0; 16]);
+    publish.push(u8::MAX);
+    assert_invalid_counted_vector(&publish, usize::from(u8::MAX), 4, 0);
+}
+
+#[test]
+fn counted_vector_preflight_accepts_exact_minimum_boundaries() {
+    let mut bootstrap = vec![OP_KADEMLIAHEADER, opcode::BOOTSTRAP_RES];
+    bootstrap.extend_from_slice(&[0; 16]);
+    bootstrap.extend_from_slice(&4662u16.to_le_bytes());
+    bootstrap.push(9);
+    bootstrap.extend_from_slice(&1u16.to_le_bytes());
+    bootstrap.extend_from_slice(&[0; 25]);
+    assert!(matches!(
+        KadPacket::decode(&bootstrap),
+        Ok(KadPacket::BootstrapRes(BootstrapRes { contacts, .. })) if contacts.len() == 1
+    ));
+
+    let mut hello = vec![OP_KADEMLIAHEADER, opcode::HELLO_REQ];
+    hello.extend_from_slice(&[0; 16]);
+    hello.extend_from_slice(&4662u16.to_le_bytes());
+    hello.push(9);
+    hello.push(1);
+    hello.extend_from_slice(&[0x09, 0x00, 0x00, 0x2A]);
+    assert!(matches!(
+        KadPacket::decode(&hello),
+        Ok(KadPacket::HelloReq(HelloReq { tags, .. })) if tags.len() == 1
+    ));
+
+    let mut search = vec![OP_KADEMLIAHEADER, opcode::SEARCH_RES];
+    search.extend_from_slice(&[0; 32]);
+    search.extend_from_slice(&1u16.to_le_bytes());
+    search.extend_from_slice(&[0; 16]);
+    search.push(0);
+    assert!(matches!(
+        KadPacket::decode(&search),
+        Ok(KadPacket::SearchRes(SearchRes { results, .. })) if results.len() == 1
+    ));
+
+    let mut publish = vec![OP_KADEMLIAHEADER, opcode::PUBLISH_KEY_REQ];
+    publish.extend_from_slice(&[0; 16]);
+    publish.extend_from_slice(&1u16.to_le_bytes());
+    publish.extend_from_slice(&[0; 16]);
+    publish.push(0);
+    assert!(matches!(
+        KadPacket::decode(&publish),
+        Ok(KadPacket::PublishKeyReq(PublishKeyReq { entries, .. })) if entries.len() == 1
+    ));
 }
 
 #[test]

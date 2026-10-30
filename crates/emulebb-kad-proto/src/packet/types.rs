@@ -1,8 +1,59 @@
-use binrw::{BinRead, BinWrite, binrw};
+use std::io::{Read, Seek, SeekFrom};
 
+use binrw::{BinRead, BinResult, BinWrite, binrw};
+
+use crate::error::ProtoError;
 use crate::hash::Ed2kHash;
 use crate::node_id::NodeId;
 use crate::tag::Tag;
+
+const CONTACT_ENTRY_MIN_PACKET_SIZE: usize = 25;
+pub(super) const TAG_MIN_PACKET_SIZE: usize = 4;
+const SEARCH_RESULT_ENTRY_MIN_PACKET_SIZE: usize = 17;
+const PUBLISH_ENTRY_MIN_PACKET_SIZE: usize = 17;
+
+pub(super) fn ensure_counted_vector_fits<R: Read + Seek>(
+    reader: &mut R,
+    count: usize,
+    minimum_element_size: usize,
+) -> Result<(), ProtoError> {
+    let position = reader.stream_position()?;
+    let end = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(position))?;
+
+    let remaining = usize::try_from(end.saturating_sub(position)).unwrap_or(usize::MAX);
+    let minimum_required = count
+        .checked_mul(minimum_element_size)
+        .unwrap_or(usize::MAX);
+    if minimum_required > remaining {
+        return Err(ProtoError::InvalidCountedVector {
+            count,
+            minimum_element_size,
+            remaining,
+        });
+    }
+
+    Ok(())
+}
+
+#[binrw::parser(reader, endian)]
+fn read_counted_vector<T>(count: usize, minimum_element_size: usize) -> BinResult<Vec<T>>
+where
+    for<'a> T: BinRead<Args<'a> = ()>,
+{
+    if let Err(error) = ensure_counted_vector_fits(reader, count, minimum_element_size) {
+        return Err(binrw::Error::Custom {
+            pos: reader.stream_position().unwrap_or(0),
+            err: Box::new(error),
+        });
+    }
+
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(T::read_options(reader, endian, ())?);
+    }
+    Ok(values)
+}
 
 // ── ContactEntry ──────────────────────────────────────────────────────────────
 
@@ -49,7 +100,10 @@ pub struct BootstrapRes {
     #[br(temp)]
     #[bw(calc = u16::try_from(contacts.len()).expect("contact count exceeds u16"))]
     count: u16,
-    #[br(count = count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(count as usize, CONTACT_ENTRY_MIN_PACKET_SIZE)
+    )]
     pub contacts: Vec<ContactEntry>,
 }
 
@@ -75,7 +129,10 @@ pub struct HelloReq {
     #[br(temp)]
     #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
-    #[br(count = tag_count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(tag_count as usize, TAG_MIN_PACKET_SIZE)
+    )]
     pub tags: Vec<Tag>,
 }
 
@@ -92,7 +149,10 @@ pub struct HelloRes {
     #[br(temp)]
     #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
-    #[br(count = tag_count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(tag_count as usize, TAG_MIN_PACKET_SIZE)
+    )]
     pub tags: Vec<Tag>,
 }
 
@@ -109,7 +169,10 @@ pub struct HelloResAck {
     #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
     /// Reserved tag list. eMule currently sends an empty list here.
-    #[br(count = tag_count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(tag_count as usize, TAG_MIN_PACKET_SIZE)
+    )]
     pub tags: Vec<Tag>,
 }
 
@@ -140,7 +203,10 @@ pub struct Res {
     #[br(temp)]
     #[bw(calc = u8::try_from(contacts.len()).expect("contact count exceeds u8"))]
     count: u8,
-    #[br(count = count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(count as usize, CONTACT_ENTRY_MIN_PACKET_SIZE)
+    )]
     pub contacts: Vec<ContactEntry>,
 }
 
@@ -226,7 +292,10 @@ pub struct SearchResultEntry {
     #[br(temp)]
     #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
-    #[br(count = tag_count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(tag_count as usize, TAG_MIN_PACKET_SIZE)
+    )]
     pub tags: Vec<Tag>,
 }
 
@@ -252,7 +321,10 @@ pub struct SearchRes {
     #[br(temp)]
     #[bw(calc = u16::try_from(results.len()).expect("result count exceeds u16"))]
     count: u16,
-    #[br(count = count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(count as usize, SEARCH_RESULT_ENTRY_MIN_PACKET_SIZE)
+    )]
     pub results: Vec<SearchResultEntry>,
 }
 
@@ -274,7 +346,10 @@ pub struct PublishEntry {
     #[br(temp)]
     #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
-    #[br(count = tag_count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(tag_count as usize, TAG_MIN_PACKET_SIZE)
+    )]
     pub tags: Vec<Tag>,
 }
 
@@ -288,7 +363,10 @@ pub struct PublishKeyReq {
     #[br(temp)]
     #[bw(calc = u16::try_from(entries.len()).expect("entry count exceeds u16"))]
     count: u16,
-    #[br(count = count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(count as usize, PUBLISH_ENTRY_MIN_PACKET_SIZE)
+    )]
     pub entries: Vec<PublishEntry>,
 }
 
@@ -309,7 +387,10 @@ pub struct PublishSourceReq {
     #[br(temp)]
     #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
-    #[br(count = tag_count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(tag_count as usize, TAG_MIN_PACKET_SIZE)
+    )]
     pub tags: Vec<Tag>,
 }
 
@@ -330,7 +411,10 @@ pub struct PublishNotesReq {
     #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
     /// Note payload tags such as filename, filesize, rating, and description.
-    #[br(count = tag_count)]
+    #[br(
+        parse_with = read_counted_vector,
+        args(tag_count as usize, TAG_MIN_PACKET_SIZE)
+    )]
     pub tags: Vec<Tag>,
 }
 

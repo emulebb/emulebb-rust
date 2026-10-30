@@ -9,7 +9,10 @@ use crate::tag::{StringDecodeMode, Tag};
 use super::types::{
     FindBuddyRes, LegacyPublishRes, LegacySearchKind, LegacySearchReq, LegacySearchRes, PublishRes,
     PublishSourceReq, SearchKeyReq, SearchRes, SearchResultEntry, SearchSourceReq,
+    TAG_MIN_PACKET_SIZE, ensure_counted_vector_fits,
 };
+
+const SEARCH_RESULT_ENTRY_MIN_PACKET_SIZE: usize = 17;
 
 fn read_kad_search_entry_id(cursor: &mut Cursor<&[u8]>) -> Result<Ed2kHash, ProtoError> {
     let entry_id = BinReaderExt::read_le::<NodeId>(cursor)?;
@@ -56,11 +59,13 @@ fn read_search_result_entries(
     cursor: &mut Cursor<&[u8]>,
     count: u16,
 ) -> Result<Vec<SearchResultEntry>, ProtoError> {
+    ensure_counted_vector_fits(cursor, count as usize, SEARCH_RESULT_ENTRY_MIN_PACKET_SIZE)?;
     let mut results = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
         let entry_id = read_kad_search_entry_id(cursor)?;
         let tag_count = BinReaderExt::read_le::<u8>(cursor)?;
+        ensure_counted_vector_fits(cursor, tag_count as usize, TAG_MIN_PACKET_SIZE)?;
         let mut tags = Vec::with_capacity(tag_count as usize);
         for _ in 0..tag_count {
             tags.push(Tag::read_with_mode(
