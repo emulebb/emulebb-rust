@@ -231,8 +231,10 @@ fn default_profile_bootstrap_is_loopback_authenticated_and_seeds_network_ports()
         Some("127.0.0.1:4711".parse().unwrap())
     );
     assert_eq!(bootstrap.rest.api_key.len(), MIN_REST_API_KEY_BYTES);
-    let mut profile = DaemonProfile::default();
-    profile.rest = bootstrap.rest;
+    let profile = DaemonProfile {
+        rest: bootstrap.rest,
+        ..Default::default()
+    };
     profile.validate_rest_api_key().unwrap();
     #[cfg(unix)]
     {
