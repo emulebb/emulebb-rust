@@ -193,6 +193,8 @@ pub struct TraversalResult {
     pub routing_seed_count: usize,
     /// Contacts that answered at least one phase-1 lookup request.
     pub responding_contact_count: usize,
+    /// Cost and unique-contact yield of stock-shaped FIND_VALUE_MORE reasks.
+    pub more_results: MoreResultsStats,
     /// K closest nodes that responded.
     pub closest: Vec<TraversalContact>,
     /// Raw SEARCH_RES entries collected for non-streaming callers.
@@ -210,6 +212,13 @@ pub struct TraversalResult {
     pub terminal_reason: KadSearchTerminalReason,
     /// Total wall-clock duration of both traversal phases.
     pub elapsed: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MoreResultsStats {
+    pub requested: usize,
+    pub responded: usize,
+    pub yielded_contacts: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -275,6 +284,7 @@ struct LookupPhaseResult {
     responded: Vec<TraversalContact>,
     closest: Vec<TraversalContact>,
     last_lookup_response_at: Option<Instant>,
+    more_results: MoreResultsStats,
 }
 
 /// eMule checks stalled searches once per second.
@@ -324,6 +334,7 @@ pub async fn run_traversal(
         responded,
         closest,
         last_lookup_response_at,
+        more_results,
     } = run_lookup_phase(
         rpc,
         initial_candidates,
@@ -377,6 +388,7 @@ pub async fn run_traversal(
     TraversalResult {
         routing_seed_count,
         responding_contact_count: responded.len(),
+        more_results,
         closest,
         search_entries: search_phase.search_entries,
         phase2_dispatch: search_phase.dispatch,
@@ -439,6 +451,7 @@ async fn run_lookup_phase(
     // Distinct responders already sent the wider FIND_VALUE_MORE request. The
     // set both prevents duplicate reasks and authenticates their larger RES.
     let mut more_asked = HashSet::<NodeId>::new();
+    let mut more_results = MoreResultsStats::default();
     let more_reask_limit = config.more_results.reask_limit();
 
     loop {
@@ -454,8 +467,7 @@ async fn run_lookup_phase(
         if more_asked.is_empty()
             && let Some(target_id) =
                 select_reask_more_target(&candidates, config.req_count, &more_asked)
-        {
-            spawn_lookup_query_by_id(
+            && spawn_lookup_query_by_id(
                 rpc,
                 &mut join_set,
                 &candidates,
@@ -463,8 +475,10 @@ async fn run_lookup_phase(
                 &config,
                 KADEMLIA_FIND_VALUE_MORE,
                 remaining,
-            );
+            )
+        {
             more_asked.insert(target_id);
+            more_results.requested += 1;
         }
         // Public value searches have no interactive "more" button, so exhaust
         // the same bounded action automatically once the ordinary lookup has
@@ -480,7 +494,7 @@ async fn run_lookup_phase(
                 &more_asked,
                 available_slots.min(remaining_reasks),
             ) {
-                spawn_lookup_query_by_id(
+                if spawn_lookup_query_by_id(
                     rpc,
                     &mut join_set,
                     &candidates,
@@ -488,8 +502,10 @@ async fn run_lookup_phase(
                     &config,
                     KADEMLIA_FIND_VALUE_MORE,
                     remaining,
-                );
-                more_asked.insert(target_id);
+                ) {
+                    more_asked.insert(target_id);
+                    more_results.requested += 1;
+                }
             }
         }
         if join_set.is_empty() {
@@ -507,6 +523,7 @@ async fn run_lookup_phase(
             &config,
             contact_id,
             &more_asked,
+            &mut more_results,
             query_result,
         ) {
             last_lookup_response_at = Some(Instant::now());
@@ -522,7 +539,12 @@ async fn run_lookup_phase(
     }
 
     join_set.abort_all();
-    build_lookup_phase_result(candidates, config.closest_limit, last_lookup_response_at)
+    build_lookup_phase_result(
+        candidates,
+        config.closest_limit,
+        last_lookup_response_at,
+        more_results,
+    )
 }
 
 /// The closest responded contact to re-ask for MORE close nodes, when a value
@@ -644,7 +666,7 @@ fn spawn_lookup_query_by_id(
     config: &LookupPhaseConfig<'_>,
     req_count: u8,
     remaining: Duration,
-) {
+) -> bool {
     if let Some(candidate) = candidates
         .iter()
         .find(|candidate| candidate.contact.id == contact_id)
@@ -657,6 +679,9 @@ fn spawn_lookup_query_by_id(
             req_count,
             remaining,
         );
+        true
+    } else {
+        false
     }
 }
 
@@ -717,6 +742,7 @@ fn handle_lookup_response(
     config: &LookupPhaseConfig<'_>,
     contact_id: NodeId,
     more_asked: &HashSet<NodeId>,
+    more_results: &mut MoreResultsStats,
     query_result: Result<KadPacket, emulebb_kad_net::NetError>,
 ) -> bool {
     let candidate_idx = candidates
@@ -734,7 +760,7 @@ fn handle_lookup_response(
         }
         Ok(KadPacket::Res(response)) => {
             set_candidate_state(candidates, candidate_idx, CandidateState::Responded);
-            insert_response_contacts(
+            let yielded_contacts = insert_response_contacts(
                 candidates,
                 seen,
                 config,
@@ -743,6 +769,10 @@ fn handle_lookup_response(
                 more_asked,
                 response,
             );
+            if more_asked.contains(&contact_id) {
+                more_results.responded += 1;
+                more_results.yielded_contacts += yielded_contacts;
+            }
             true
         }
         Ok(other) => {
@@ -777,7 +807,7 @@ fn insert_response_contacts(
     candidate_idx: Option<usize>,
     more_asked: &HashSet<NodeId>,
     response: emulebb_kad_proto::packet::Res,
-) {
+) -> usize {
     let responder_addr = candidate_idx
         .and_then(|index| {
             candidates
@@ -804,8 +834,9 @@ fn insert_response_contacts(
             "dropping RES from {} because it exceeds requested contact count",
             contact_id
         );
-        return;
+        return 0;
     };
+    let mut yielded_contacts = 0;
     for entry in sanitized {
         // Oracle AddUnfiltered (KademliaUDPListener.cpp:849): feed every good RES
         // contact to the routing table as it arrives, independent of whether it
@@ -813,8 +844,14 @@ fn insert_response_contacts(
         if let Some(sink) = config.res_contact_sink {
             sink(&entry);
         }
-        insert_response_contact(candidates, seen, config.target, entry);
+        yielded_contacts += usize::from(insert_response_contact(
+            candidates,
+            seen,
+            config.target,
+            entry,
+        ));
     }
+    yielded_contacts
 }
 
 fn insert_response_contact(
@@ -822,9 +859,9 @@ fn insert_response_contact(
     seen: &mut HashSet<NodeId>,
     target: NodeId,
     entry: ContactEntry,
-) {
+) -> bool {
     if seen.contains(&entry.node_id) || entry.ip == 0 || entry.udp_port == 0 {
-        return;
+        return false;
     }
     seen.insert(entry.node_id);
     let distance = target.distance(&entry.node_id);
@@ -840,6 +877,7 @@ fn insert_response_contact(
     };
     let position = candidates.partition_point(|existing| existing.distance < distance);
     candidates.insert(position, candidate);
+    true
 }
 
 fn lookup_phase_done(
@@ -883,6 +921,7 @@ fn build_lookup_phase_result(
     candidates: Vec<TraversalCandidate>,
     closest_limit: usize,
     last_lookup_response_at: Option<Instant>,
+    more_results: MoreResultsStats,
 ) -> LookupPhaseResult {
     let responded = candidates
         .iter()
@@ -890,15 +929,20 @@ fn build_lookup_phase_result(
         .map(|candidate| candidate.contact.clone())
         .collect::<Vec<_>>();
     let closest: Vec<TraversalContact> = responded.iter().take(closest_limit).cloned().collect();
-    log_lookup_phase_summary(&candidates, closest.len());
+    log_lookup_phase_summary(&candidates, closest.len(), more_results);
     LookupPhaseResult {
         responded,
         closest,
         last_lookup_response_at,
+        more_results,
     }
 }
 
-fn log_lookup_phase_summary(candidates: &[TraversalCandidate], closest_count: usize) {
+fn log_lookup_phase_summary(
+    candidates: &[TraversalCandidate],
+    closest_count: usize,
+    more_results: MoreResultsStats,
+) {
     let responded_count = candidates
         .iter()
         .filter(|candidate| candidate.state == CandidateState::Responded)
@@ -908,11 +952,14 @@ fn log_lookup_phase_summary(candidates: &[TraversalCandidate], closest_count: us
         .filter(|candidate| candidate.state == CandidateState::Failed)
         .count();
     debug!(
-        "traversal phase1 done: {} responded, {} failed, {} total candidates, {} in closest set",
+        "traversal phase1 done: {} responded, {} failed, {} total candidates, {} in closest set; widening requested={}, responded={}, yielded_contacts={}",
         responded_count,
         failed_count,
         candidates.len(),
-        closest_count
+        closest_count,
+        more_results.requested,
+        more_results.responded,
+        more_results.yielded_contacts,
     );
 }
 
