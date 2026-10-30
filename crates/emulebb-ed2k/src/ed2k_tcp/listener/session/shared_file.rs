@@ -1,4 +1,8 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
@@ -21,6 +25,36 @@ use super::super::super::codec::{
     encode_multipacket_answer, encode_multipacket_ext2_answer, encode_request_filename_answer,
     source_exchange_entry_count,
 };
+
+const SOURCE_EXCHANGE_RARE_FILE_MAX_SOURCES: usize = 50;
+const SOURCE_EXCHANGE_RARE_REASK_INTERVAL: Duration = Duration::from_secs(40 * 60);
+const SOURCE_EXCHANGE_COMMON_REASK_INTERVAL: Duration = Duration::from_secs(160 * 60);
+const SOURCE_EXCHANGE_CONNECTION_LATENCY: Duration = Duration::from_millis(22_050);
+
+#[derive(Debug, Default)]
+pub(in crate::ed2k_tcp) struct SourceExchangeResponseThrottle {
+    last_request_at: Option<Instant>,
+}
+
+impl SourceExchangeResponseThrottle {
+    fn should_serve(&mut self, file_is_complete: bool, source_count: usize, now: Instant) -> bool {
+        let interval = if !file_is_complete && source_count <= SOURCE_EXCHANGE_RARE_FILE_MAX_SOURCES
+        {
+            SOURCE_EXCHANGE_RARE_REASK_INTERVAL
+        } else {
+            SOURCE_EXCHANGE_COMMON_REASK_INTERVAL
+        };
+        let allowed = self.last_request_at.is_none_or(|last_request_at| {
+            now.saturating_duration_since(last_request_at)
+                .saturating_add(SOURCE_EXCHANGE_CONNECTION_LATENCY)
+                > interval
+        });
+        if allowed {
+            self.last_request_at = Some(now);
+        }
+        allowed
+    }
+}
 
 /// Requester-side availability retained for the life of an upload connection.
 /// Stock keeps this on the upload-client object and consults it when choosing
@@ -48,6 +82,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     payload: &[u8],
     string_encoding: Ed2kStringEncoding,
     requester_file_state: &mut Option<RequesterFileState>,
+    source_exchange_throttle: &mut SourceExchangeResponseThrottle,
 ) -> Result<Option<Ed2kHash>> {
     let (requested_identifier, mut remaining) = Ed2kFileIdentifier::decode(payload)?;
     let requested = requested_identifier.file_hash;
@@ -101,6 +136,16 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
                 let requested_version = remaining[0];
                 remaining = &remaining[3..];
                 if requested_version == 0 {
+                    continue;
+                }
+                if !source_exchange_request_allowed(
+                    transfer_runtime,
+                    &shared,
+                    source_exchange_throttle,
+                    Instant::now(),
+                )
+                .await?
+                {
                     continue;
                 }
                 let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
@@ -158,6 +203,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     peer_supports_file_identifiers: bool,
     string_encoding: Ed2kStringEncoding,
     requester_file_state: &mut Option<RequesterFileState>,
+    source_exchange_throttle: &mut SourceExchangeResponseThrottle,
 ) -> Result<Option<Ed2kHash>> {
     if payload.len() < 16 {
         anyhow::bail!("short OP_MULTIPACKET payload {}", payload.len());
@@ -218,6 +264,8 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
                     sub_opcode,
                     remaining,
                     requester_file_state.as_ref(),
+                    &shared,
+                    source_exchange_throttle,
                 )
                 .await?;
             }
@@ -420,6 +468,7 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
     opcode: u8,
     payload: &[u8],
     requester_file_state: Option<&RequesterFileState>,
+    source_exchange_throttle: &mut SourceExchangeResponseThrottle,
 ) -> Result<Option<Ed2kHash>> {
     let (requested, requested_version) = decode_request_sources_payload(opcode, payload)?;
     // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
@@ -432,7 +481,17 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
     if requested_version == 0 {
         return Ok(Some(requested));
     }
-    if transfer_runtime.local_entry(&requested).await?.is_some() {
+    if let Some(shared) = transfer_runtime.local_entry(&requested).await? {
+        if !source_exchange_request_allowed(
+            transfer_runtime,
+            &shared,
+            source_exchange_throttle,
+            Instant::now(),
+        )
+        .await?
+        {
+            return Ok(Some(requested));
+        }
         let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
         let sources = source_exchange_peers(
             transfer_runtime,
@@ -461,6 +520,8 @@ async fn answer_source_request_subpacket<'a>(
     opcode: u8,
     remaining: &'a [u8],
     requester_file_state: Option<&RequesterFileState>,
+    shared: &Ed2kSharedEntry,
+    source_exchange_throttle: &mut SourceExchangeResponseThrottle,
 ) -> Result<&'a [u8]> {
     // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
     // omission): inside a multipacket we answer the OP_REQUESTSOURCES2 sub-op only.
@@ -475,6 +536,16 @@ async fn answer_source_request_subpacket<'a>(
     let requested_version = remaining[0];
     let remaining = &remaining[3..];
     if requested_version == 0 {
+        return Ok(remaining);
+    }
+    if !source_exchange_request_allowed(
+        transfer_runtime,
+        shared,
+        source_exchange_throttle,
+        Instant::now(),
+    )
+    .await?
+    {
         return Ok(remaining);
     }
     let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
@@ -494,6 +565,39 @@ async fn answer_source_request_subpacket<'a>(
         .await
         .with_context(|| format!("failed to send source exchange reply to {peer_addr}"))?;
     Ok(remaining)
+}
+
+async fn source_exchange_request_allowed(
+    transfer_runtime: &Ed2kTransferRuntime,
+    shared: &Ed2kSharedEntry,
+    source_exchange_throttle: &mut SourceExchangeResponseThrottle,
+    now: Instant,
+) -> Result<bool> {
+    let source_count = if shared.verified_complete {
+        0
+    } else {
+        source_exchange_source_count(transfer_runtime, &shared.file_hash).await?
+    };
+    Ok(source_exchange_throttle.should_serve(shared.verified_complete, source_count, now))
+}
+
+async fn source_exchange_source_count(
+    transfer_runtime: &Ed2kTransferRuntime,
+    file_hash: &str,
+) -> Result<usize> {
+    let manifest = transfer_runtime.manifest(file_hash).await?;
+    let mut endpoints = manifest
+        .sources
+        .iter()
+        .map(|source| (source.ip.clone(), source.tcp_port))
+        .collect::<HashSet<_>>();
+    endpoints.extend(
+        transfer_runtime
+            .live_download_sources(file_hash)
+            .into_iter()
+            .map(|source| (source.endpoint.ip().to_string(), source.endpoint.port())),
+    );
+    Ok(endpoints.len())
 }
 
 /// Build the OP_ANSWERSOURCES(2) source list for a shared file, excluding the
@@ -693,6 +797,51 @@ async fn send_nofile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_exchange_throttle_matches_stock_rare_partfile_cadence() {
+        let started_at = Instant::now();
+        let mut throttle = SourceExchangeResponseThrottle::default();
+
+        assert!(throttle.should_serve(false, SOURCE_EXCHANGE_RARE_FILE_MAX_SOURCES, started_at));
+        let strict_boundary =
+            started_at + SOURCE_EXCHANGE_RARE_REASK_INTERVAL - SOURCE_EXCHANGE_CONNECTION_LATENCY;
+        assert!(!throttle.should_serve(
+            false,
+            SOURCE_EXCHANGE_RARE_FILE_MAX_SOURCES,
+            strict_boundary
+        ));
+        assert!(throttle.should_serve(
+            false,
+            SOURCE_EXCHANGE_RARE_FILE_MAX_SOURCES,
+            strict_boundary + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn source_exchange_throttle_uses_stock_common_cadence_for_common_or_complete_files() {
+        for (file_is_complete, source_count) in [
+            (false, SOURCE_EXCHANGE_RARE_FILE_MAX_SOURCES + 1),
+            (true, 0),
+        ] {
+            let started_at = Instant::now();
+            let mut throttle = SourceExchangeResponseThrottle::default();
+            assert!(throttle.should_serve(file_is_complete, source_count, started_at));
+            assert!(!throttle.should_serve(
+                file_is_complete,
+                source_count,
+                started_at + SOURCE_EXCHANGE_RARE_REASK_INTERVAL
+            ));
+            let strict_boundary = started_at + SOURCE_EXCHANGE_COMMON_REASK_INTERVAL
+                - SOURCE_EXCHANGE_CONNECTION_LATENCY;
+            assert!(!throttle.should_serve(file_is_complete, source_count, strict_boundary));
+            assert!(throttle.should_serve(
+                file_is_complete,
+                source_count,
+                strict_boundary + Duration::from_millis(1)
+            ));
+        }
+    }
 
     #[test]
     fn low_id_sources_are_filtered() {
