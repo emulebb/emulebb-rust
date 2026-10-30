@@ -13,6 +13,70 @@ use tracing::debug;
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{WSACleanup, WSADATA, WSAStartup};
 
+mod upnp_urls {
+    use super::sys;
+
+    type ReleaseUpnpUrls = unsafe extern "C" fn(*mut sys::UPNPUrls);
+
+    pub(super) struct UpnpUrlsOutput {
+        raw: sys::UPNPUrls,
+    }
+
+    impl UpnpUrlsOutput {
+        pub(super) fn empty() -> Self {
+            Self {
+                // SAFETY: MiniUPnPc defines UPNPUrls as a plain C aggregate whose
+                // zero representation is its required output initialization state.
+                raw: unsafe { std::mem::zeroed() },
+            }
+        }
+
+        pub(super) fn as_mut_ptr(&mut self) -> *mut sys::UPNPUrls {
+            &mut self.raw
+        }
+
+        pub(super) unsafe fn assume_initialized(self) -> OwnedUpnpUrls {
+            OwnedUpnpUrls::with_release(self.raw, sys::FreeUPNPUrls)
+        }
+    }
+
+    pub(super) struct OwnedUpnpUrls {
+        raw: sys::UPNPUrls,
+        release: ReleaseUpnpUrls,
+    }
+
+    impl OwnedUpnpUrls {
+        fn with_release(raw: sys::UPNPUrls, release: ReleaseUpnpUrls) -> Self {
+            Self { raw, release }
+        }
+
+        pub(super) fn raw(&self) -> &sys::UPNPUrls {
+            &self.raw
+        }
+
+        pub(super) fn raw_mut(&mut self) -> &mut sys::UPNPUrls {
+            &mut self.raw
+        }
+
+        #[cfg(test)]
+        pub(super) fn with_test_release(raw: sys::UPNPUrls, release: ReleaseUpnpUrls) -> Self {
+            Self::with_release(raw, release)
+        }
+    }
+
+    impl Drop for OwnedUpnpUrls {
+        fn drop(&mut self) {
+            // SAFETY: construction is restricted to initialized MiniUPnPc URL
+            // outputs, and this owner invokes the matching release exactly once.
+            unsafe {
+                (self.release)(&mut self.raw);
+            }
+        }
+    }
+}
+
+use upnp_urls::{OwnedUpnpUrls, UpnpUrlsOutput};
+
 const DEFAULT_TTL: u8 = 2;
 const DEFAULT_DEVICE_TYPES: [&str; 6] = [
     "urn:schemas-upnp-org:device:InternetGatewayDevice:2",
@@ -120,7 +184,7 @@ pub struct GatewaySummary {
 
 pub struct Gateway {
     summary: GatewaySummary,
-    urls: sys::UPNPUrls,
+    urls: OwnedUpnpUrls,
     data: sys::IGDdatas,
 }
 
@@ -201,16 +265,6 @@ impl std::fmt::Debug for Gateway {
     }
 }
 
-impl Drop for Gateway {
-    fn drop(&mut self) {
-        // SAFETY: `urls` is owned by this Gateway and was initialized by
-        // MiniUPnPc; this is its single matching release call.
-        unsafe {
-            sys::FreeUPNPUrls(&mut self.urls);
-        }
-    }
-}
-
 impl Gateway {
     pub fn summary(&self) -> &GatewaySummary {
         &self.summary
@@ -246,7 +300,7 @@ impl Gateway {
 
     pub fn fetch_external_ip(&self) -> Result<Option<String>> {
         let _winsock = WinsockGuard::init()?;
-        external_ip_from_raw(&self.urls, &self.data)
+        external_ip_from_raw(self.urls.raw(), &self.data)
     }
 
     /// Adds (or replaces) an IGD port mapping, mirroring eMuleBB MFC's
@@ -477,7 +531,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<(DiscoveryResult, Option<G
 pub fn gateway_from_url(root_description_url: &str) -> Result<Option<Gateway>> {
     let _winsock = WinsockGuard::init()?;
     let root_description_url = c_string(root_description_url, "root_description_url")?;
-    let mut urls = zeroed_urls();
+    let mut urls = UpnpUrlsOutput::empty();
     let mut data = zeroed_data();
     let mut local_ip = [0 as c_char; LANADDR_CAPACITY];
 
@@ -486,7 +540,7 @@ pub fn gateway_from_url(root_description_url: &str) -> Result<Option<Gateway>> {
     let status = unsafe {
         sys::UPNP_GetIGDFromUrl(
             root_description_url.as_ptr(),
-            &mut urls,
+            urls.as_mut_ptr(),
             &mut data,
             local_ip.as_mut_ptr(),
             local_ip.len() as c_int,
@@ -496,9 +550,12 @@ pub fn gateway_from_url(root_description_url: &str) -> Result<Option<Gateway>> {
         return Ok(None);
     }
 
+    // SAFETY: MiniUPnPc documents every nonzero UPNP_GetIGDFromUrl result as
+    // having initialized UPNPUrls via GetUPNPUrls.
+    let mut urls = unsafe { urls.assume_initialized() };
     // SAFETY: `urls` and `data` were initialized by UPNP_GetIGDFromUrl above.
-    let connected = unsafe { sys::UPNPIGD_IsConnected(&mut urls, &mut data) == 1 };
-    let external_ip = external_ip_from_raw(&urls, &data)?;
+    let connected = unsafe { sys::UPNPIGD_IsConnected(urls.raw_mut(), &mut data) == 1 };
+    let external_ip = external_ip_from_raw(urls.raw(), &data)?;
     let gateway_status = match external_ip.as_deref().and_then(parse_ip_addr) {
         Some(IpAddr::V4(ip)) if ip.is_private() || ip.is_link_local() => GatewayStatus::PrivateIp,
         Some(_) if connected => GatewayStatus::Connected,
@@ -520,7 +577,7 @@ fn build_gateway_from_devlist(devlist: *mut sys::UPNPDev) -> Result<Option<Gatew
         return Ok(None);
     }
 
-    let mut urls = zeroed_urls();
+    let mut urls = UpnpUrlsOutput::empty();
     let mut data = zeroed_data();
     let mut local_ip = [0 as c_char; LANADDR_CAPACITY];
     let mut external_ip = [0 as c_char; WANADDR_CAPACITY];
@@ -529,7 +586,7 @@ fn build_gateway_from_devlist(devlist: *mut sys::UPNPDev) -> Result<Option<Gatew
     let status = unsafe {
         sys::UPNP_GetValidIGD(
             devlist,
-            &mut urls,
+            urls.as_mut_ptr(),
             &mut data,
             local_ip.as_mut_ptr(),
             local_ip.len() as c_int,
@@ -538,17 +595,15 @@ fn build_gateway_from_devlist(devlist: *mut sys::UPNPDev) -> Result<Option<Gatew
         )
     };
 
-    let gateway_status = match status {
-        sys::UPNP_CONNECTED_IGD => GatewayStatus::Connected,
-        sys::UPNP_PRIVATEIP_IGD => GatewayStatus::PrivateIp,
-        sys::UPNP_DISCONNECTED_IGD => GatewayStatus::Disconnected,
-        sys::UPNP_UNKNOWN_DEVICE => GatewayStatus::UnknownDevice,
-        sys::UPNP_NO_IGD => return Ok(None),
-        other => bail!("miniupnpc returned unexpected IGD status {other}"),
-    };
+    if status == sys::UPNP_NO_IGD {
+        return Ok(None);
+    }
 
-    Ok(Some(build_gateway(
-        gateway_status,
+    // SAFETY: MiniUPnPc documents every nonzero UPNP_GetValidIGD result as
+    // having initialized UPNPUrls and requiring FreeUPNPUrls.
+    let urls = unsafe { urls.assume_initialized() };
+    Ok(Some(build_gateway_from_initialized_devlist(
+        status,
         urls,
         data,
         buffer_to_string(&local_ip),
@@ -556,16 +611,34 @@ fn build_gateway_from_devlist(devlist: *mut sys::UPNPDev) -> Result<Option<Gatew
     )?))
 }
 
-fn build_gateway(
-    status: GatewayStatus,
-    urls: sys::UPNPUrls,
+fn build_gateway_from_initialized_devlist(
+    status: c_int,
+    urls: OwnedUpnpUrls,
     data: sys::IGDdatas,
     local_ip: Option<String>,
     external_ip: Option<String>,
 ) -> Result<Gateway> {
-    let root_description_url = pointer_to_string(urls.rootdescURL)
+    let gateway_status = match status {
+        sys::UPNP_CONNECTED_IGD => GatewayStatus::Connected,
+        sys::UPNP_PRIVATEIP_IGD => GatewayStatus::PrivateIp,
+        sys::UPNP_DISCONNECTED_IGD => GatewayStatus::Disconnected,
+        sys::UPNP_UNKNOWN_DEVICE => GatewayStatus::UnknownDevice,
+        other => bail!("miniupnpc returned unexpected IGD status {other}"),
+    };
+
+    build_gateway(gateway_status, urls, data, local_ip, external_ip)
+}
+
+fn build_gateway(
+    status: GatewayStatus,
+    urls: OwnedUpnpUrls,
+    data: sys::IGDdatas,
+    local_ip: Option<String>,
+    external_ip: Option<String>,
+) -> Result<Gateway> {
+    let root_description_url = pointer_to_string(urls.raw().rootdescURL)
         .ok_or_else(|| anyhow!("miniupnpc did not provide rootdescURL"))?;
-    let control_url = pointer_to_string(urls.controlURL)
+    let control_url = pointer_to_string(urls.raw().controlURL)
         .ok_or_else(|| anyhow!("miniupnpc did not provide controlURL"))?;
     let service_type = service_type_from_data(&data)
         .ok_or_else(|| anyhow!("miniupnpc did not provide a usable service type"))?;
@@ -757,12 +830,6 @@ fn upnp_error_string(status: c_int) -> String {
     pointer_to_string(text).unwrap_or_else(|| format!("unknown miniupnpc error {status}"))
 }
 
-fn zeroed_urls() -> sys::UPNPUrls {
-    // SAFETY: MiniUPnPc defines UPNPUrls as a plain C aggregate whose null/zero
-    // representation is its required empty initialization state.
-    unsafe { std::mem::zeroed() }
-}
-
 fn zeroed_data() -> sys::IGDdatas {
     // SAFETY: IGDdatas is a plain C character-buffer aggregate and all-zero is
     // the required empty state before MiniUPnPc fills it.
@@ -832,10 +899,83 @@ impl Drop for UpnpDevList {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AddPortMappingError, DeviceSearchTarget, GatewayStatus, buffer_to_string,
-        default_search_targets, host_from_url,
+    use std::{
+        ffi::CString,
+        os::raw::c_char,
+        ptr,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
+
+    use super::{
+        AddPortMappingError, DeviceSearchTarget, GatewayStatus, OwnedUpnpUrls, buffer_to_string,
+        build_gateway, build_gateway_from_initialized_devlist, default_search_targets,
+        host_from_url, sys, zeroed_data,
+    };
+
+    static URL_RELEASE_TEST: Mutex<()> = Mutex::new(());
+    static URL_RELEASE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn release_test_urls(urls: *mut sys::UPNPUrls) {
+        URL_RELEASE_CALLS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: tests pass a unique live UPNPUrls allocation to this release
+        // function exactly as the production owner passes MiniUPnPc storage.
+        let urls = unsafe { &mut *urls };
+        release_test_url(&mut urls.controlURL);
+        release_test_url(&mut urls.ipcondescURL);
+        release_test_url(&mut urls.controlURL_CIF);
+        release_test_url(&mut urls.controlURL_6FC);
+        release_test_url(&mut urls.rootdescURL);
+    }
+
+    fn release_test_url(url: &mut *mut c_char) {
+        if url.is_null() {
+            return;
+        }
+        // SAFETY: test URL pointers are created exclusively by CString::into_raw
+        // and this fake MiniUPnPc release function consumes each pointer once.
+        unsafe {
+            drop(CString::from_raw(*url));
+        }
+        *url = ptr::null_mut();
+    }
+
+    fn test_urls(root_description_url: Option<&str>, control_url: Option<&str>) -> OwnedUpnpUrls {
+        // SAFETY: UPNPUrls is a plain C pointer aggregate and zero is its empty state.
+        let mut urls = unsafe { std::mem::zeroed::<sys::UPNPUrls>() };
+        urls.rootdescURL = root_description_url
+            .map(|value| CString::new(value).unwrap().into_raw())
+            .unwrap_or(ptr::null_mut());
+        urls.controlURL = control_url
+            .map(|value| CString::new(value).unwrap().into_raw())
+            .unwrap_or(ptr::null_mut());
+        OwnedUpnpUrls::with_test_release(urls, release_test_urls)
+    }
+
+    fn test_data(service_type: Option<&str>) -> sys::IGDdatas {
+        let mut data = zeroed_data();
+        if let Some(service_type) = service_type {
+            for (destination, source) in data
+                .first
+                .servicetype
+                .iter_mut()
+                .zip(service_type.as_bytes())
+            {
+                *destination = *source as c_char;
+            }
+        }
+        data
+    }
+
+    fn reset_url_release_calls() {
+        URL_RELEASE_CALLS.store(0, Ordering::SeqCst);
+    }
+
+    fn url_release_calls() -> usize {
+        URL_RELEASE_CALLS.load(Ordering::SeqCst)
+    }
 
     #[test]
     fn add_port_mapping_error_decodes_known_igd_codes() {
@@ -890,5 +1030,87 @@ mod tests {
     #[test]
     fn gateway_status_debug_is_stable() {
         assert_eq!(format!("{:?}", GatewayStatus::Connected), "Connected");
+    }
+
+    #[test]
+    fn successful_gateway_keeps_urls_owned_until_drop() {
+        let _guard = URL_RELEASE_TEST.lock().unwrap();
+        reset_url_release_calls();
+
+        let gateway = build_gateway(
+            GatewayStatus::Connected,
+            test_urls(
+                Some("http://192.0.2.1/root.xml"),
+                Some("http://192.0.2.1/control"),
+            ),
+            test_data(Some("urn:schemas-upnp-org:service:WANIPConnection:1")),
+            Some("192.0.2.2".to_string()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(url_release_calls(), 0);
+        drop(gateway);
+        assert_eq!(url_release_calls(), 1);
+    }
+
+    #[test]
+    fn partial_gateway_urls_are_released_on_validation_error() {
+        let _guard = URL_RELEASE_TEST.lock().unwrap();
+        reset_url_release_calls();
+
+        let error = build_gateway(
+            GatewayStatus::Connected,
+            test_urls(Some("http://192.0.2.1/root.xml"), None),
+            test_data(Some("urn:schemas-upnp-org:service:WANIPConnection:1")),
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("controlURL"));
+        assert_eq!(url_release_calls(), 1);
+    }
+
+    #[test]
+    fn unusable_gateway_metadata_releases_urls_on_constructor_error() {
+        let _guard = URL_RELEASE_TEST.lock().unwrap();
+        reset_url_release_calls();
+
+        let error = build_gateway(
+            GatewayStatus::Connected,
+            test_urls(
+                Some("http://192.0.2.1/root.xml"),
+                Some("http://192.0.2.1/control"),
+            ),
+            test_data(None),
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("service type"));
+        assert_eq!(url_release_calls(), 1);
+    }
+
+    #[test]
+    fn unexpected_discovery_status_releases_initialized_urls() {
+        let _guard = URL_RELEASE_TEST.lock().unwrap();
+        reset_url_release_calls();
+
+        let error = build_gateway_from_initialized_devlist(
+            99,
+            test_urls(
+                Some("http://192.0.2.1/root.xml"),
+                Some("http://192.0.2.1/control"),
+            ),
+            test_data(Some("urn:schemas-upnp-org:service:WANIPConnection:1")),
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unexpected IGD status 99"));
+        assert_eq!(url_release_calls(), 1);
     }
 }
