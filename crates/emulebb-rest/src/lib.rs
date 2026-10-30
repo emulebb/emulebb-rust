@@ -10,6 +10,7 @@ mod diagnostic_bundle;
 mod dto;
 mod envelope;
 mod handlers;
+mod request_body_policy;
 mod responses;
 mod route_body_metadata;
 mod route_metadata;
@@ -44,6 +45,9 @@ pub struct RestState {
     api_key: Arc<String>,
     shutdown: Option<watch::Sender<bool>>,
 }
+#[cfg(test)]
+#[path = "tests/request_body_limit.rs"]
+mod request_body_limit_tests;
 #[cfg(test)]
 #[path = "tests/support.rs"]
 mod rest_test_support;

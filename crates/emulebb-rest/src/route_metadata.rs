@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use axum::{
-    body::{Body, HttpBody, to_bytes},
+    body::{Body, HttpBody},
     http::{Request, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -16,6 +16,7 @@ use percent_encoding::percent_decode_str;
 
 use crate::{
     envelope::{api_error, out_of_range_response},
+    request_body_policy::BufferedApiRequestBody,
     route_body_metadata::validate_json_body_fields,
 };
 
@@ -117,20 +118,13 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
         .and_then(|value| value.to_str().ok())
         .is_some_and(is_json_content_type);
 
-    let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, usize::MAX).await {
-        Ok(body) => body,
-        Err(error) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_ARGUMENT",
-                format!("invalid request body: {error}"),
-            )
-            .into_response();
-        }
-    };
+    let body = request
+        .extensions()
+        .get::<BufferedApiRequestBody>()
+        .expect("API request body policy must run before route metadata validation")
+        .as_bytes();
 
-    if !is_ascii_whitespace_only(&body) {
+    if !is_ascii_whitespace_only(body) {
         if is_delete {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -147,12 +141,11 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             )
             .into_response();
         }
-        if let Err(response) = validate_json_body_fields(&method, &path, &body) {
+        if let Err(response) = validate_json_body_fields(&method, &path, body) {
             return *response;
         }
     }
 
-    let request = Request::from_parts(parts, Body::from(body));
     next.run(request).await
 }
 
