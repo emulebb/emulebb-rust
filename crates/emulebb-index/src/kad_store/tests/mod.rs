@@ -1877,10 +1877,10 @@ fn notes_global_capacity_rejects_new_publish_without_eviction() {
         Tag::new_short(tag_name::DESCRIPTION, TagValue::String("note".into())),
     ];
 
-    for index in 0..2 {
+    for (index, target) in targets.iter().copied().take(2).enumerate() {
         assert_eq!(
             store.record_notes_publish(
-                targets[index],
+                target,
                 numbered_node_id(index),
                 numbered_ipv4(index),
                 &tags,
