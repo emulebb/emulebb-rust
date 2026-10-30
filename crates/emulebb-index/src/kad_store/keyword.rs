@@ -10,8 +10,6 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
 
-use emulebb_kad_proto::matches_restrictive_keyword_payload;
-
 use super::entry_store::{DedupEntry, TimedEntry};
 use super::size_tags::{
     stock_first_filename, stock_first_keyword_source_file_size, stock_stored_publish_tags,
@@ -265,19 +263,6 @@ impl DedupEntry for StoredKeywordPublish {
     fn dedup_key(&self) -> &str {
         &self.dedup_key
     }
-}
-
-pub(super) fn keyword_entry_matches_restrictive_payload(
-    entry: &StoredKeywordPublish,
-    restrictive_payload: Option<&[u8]>,
-) -> bool {
-    let Some(payload) = restrictive_payload else {
-        return true;
-    };
-    let Some(filename) = stock_first_filename(&entry.tags) else {
-        return false;
-    };
-    matches_restrictive_keyword_payload(&filename, &entry.tags, payload)
 }
 
 pub(super) fn keyword_result_tags(

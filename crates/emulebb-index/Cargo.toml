@@ -18,3 +18,4 @@ emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 rusqlite.workspace = true
 serde.workspace = true
+tracing.workspace = true

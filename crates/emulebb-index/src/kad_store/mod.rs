@@ -20,24 +20,28 @@ use crate::{
 mod entry_store;
 mod keyword;
 mod notes;
+mod restrictive_search;
 mod size_tags;
 mod source;
 
 use entry_store::{purge_expired, upsert_entry};
 use keyword::{
     KeywordPublishTracker, STOCK_MAX_KEYWORD_ENTRIES, StoredKeywordPublish,
-    has_stock_keyword_filename, keyword_dedup_key, keyword_entry_matches_restrictive_payload,
-    keyword_result_tags, stock_aich_publish_hash, stock_keyword_file_size,
-    stock_keyword_first_filename, stock_keyword_publish_decision,
+    has_stock_keyword_filename, keyword_dedup_key, keyword_result_tags, stock_aich_publish_hash,
+    stock_keyword_file_size, stock_keyword_first_filename, stock_keyword_publish_decision,
     stock_stored_keyword_publish_tags,
 };
 use notes::{
     StoredNotesPublish, has_stock_note_tags, notes_dedup_key, notes_result_tags,
     stock_notes_publish_load, upsert_notes_entry,
 };
+use restrictive_search::{
+    DEFAULT_RESTRICTIVE_SEARCH_LIMITS, RestrictiveSearch, RestrictiveSearchBudget,
+    RestrictiveSearchLimits, RestrictiveSearchStopReason,
+};
 use size_tags::{
-    search_response, stock_notes_file_size_matches_request, stock_source_file_size_matches_request,
-    stock_stored_publish_tags,
+    search_response, stock_first_filename, stock_notes_file_size_matches_request,
+    stock_source_file_size_matches_request, stock_stored_publish_tags,
 };
 use source::{
     StoredSourcePublish, is_stock_source_publish, source_dedup_key, source_entry_id,
@@ -302,12 +306,43 @@ impl KadLocalStore {
         limit: usize,
         now: DateTime<Utc>,
     ) -> Option<SearchRes> {
+        self.keyword_search_response_with_limits(
+            sender_id,
+            request,
+            limit,
+            now,
+            DEFAULT_RESTRICTIVE_SEARCH_LIMITS,
+        )
+    }
+
+    fn keyword_search_response_with_limits(
+        &mut self,
+        sender_id: NodeId,
+        request: &SearchKeyReq,
+        limit: usize,
+        now: DateTime<Utc>,
+        restrictive_limits: RestrictiveSearchLimits,
+    ) -> Option<SearchRes> {
         if !self.config.enabled || limit == 0 {
             return None;
         }
 
-        let restrictive_payload = ((request.start_position & 0x8000) != 0)
-            .then_some(request.restrictive_payload.as_slice());
+        let restrictive_search = if (request.start_position & 0x8000) != 0 {
+            match RestrictiveSearch::parse(&request.restrictive_payload, restrictive_limits) {
+                Ok(search) => Some(search),
+                Err(reason) => {
+                    tracing::debug!(
+                        ?sender_id,
+                        target = ?request.target,
+                        reason = reason.as_str(),
+                        "dropping Kad restrictive keyword search request"
+                    );
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         purge_expired(&mut self.keyword_entries, self.config.keyword_ttl, now);
         self.keyword_tracker
             .prune_expired(self.config.keyword_ttl, now);
@@ -315,18 +350,80 @@ impl KadLocalStore {
         self.reconcile_keyword_tracker();
         let offset = usize::from(request.start_position & 0x7FFF);
         let tracker = &self.keyword_tracker;
-        let results = self
-            .keyword_entries
-            .iter()
-            .filter(|entry| entry.target == request.target)
-            .filter(|entry| keyword_entry_matches_restrictive_payload(entry, restrictive_payload))
-            .skip(offset)
-            .take(limit)
-            .map(|entry| SearchResultEntry {
+        let Some(restrictive_search) = restrictive_search else {
+            let results = self
+                .keyword_entries
+                .iter()
+                .filter(|entry| entry.target == request.target)
+                .skip(offset)
+                .take(limit)
+                .map(|entry| SearchResultEntry {
+                    entry_id: entry.file_hash,
+                    tags: keyword_result_tags(entry, tracker),
+                })
+                .collect::<Vec<_>>();
+            return search_response(sender_id, request.target, results);
+        };
+
+        let mut budget =
+            RestrictiveSearchBudget::new(restrictive_limits, restrictive_search.parsed_ast_nodes());
+        let result_limit = budget.result_limit(limit);
+        let mut matched_offset = offset;
+        let mut results = Vec::with_capacity(result_limit);
+        let mut stop_reason = None;
+
+        for entry in &self.keyword_entries {
+            if let Err(reason) = budget.examine_candidate() {
+                stop_reason = Some(reason);
+                break;
+            }
+            if entry.target != request.target {
+                continue;
+            }
+            let Some(filename) = stock_first_filename(&entry.tags) else {
+                continue;
+            };
+            match restrictive_search.matches(&filename, &entry.tags, &mut budget) {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(reason) => {
+                    stop_reason = Some(reason);
+                    break;
+                }
+            }
+            if matched_offset != 0 {
+                matched_offset -= 1;
+                continue;
+            }
+            if results.len() >= result_limit {
+                if limit > result_limit {
+                    stop_reason = Some(RestrictiveSearchStopReason::ResultsEmitted);
+                }
+                break;
+            }
+            if let Err(reason) = budget.emit_result() {
+                stop_reason = Some(reason);
+                break;
+            }
+            results.push(SearchResultEntry {
                 entry_id: entry.file_hash,
                 tags: keyword_result_tags(entry, tracker),
-            })
-            .collect::<Vec<_>>();
+            });
+        }
+
+        if let Some(reason) = stop_reason {
+            let work = budget.work();
+            tracing::debug!(
+                ?sender_id,
+                target = ?request.target,
+                reason = reason.as_str(),
+                parsed_ast_nodes = work.parsed_ast_nodes,
+                compared_tag_values = work.compared_tag_values,
+                candidate_entries = work.candidate_entries,
+                results_emitted = work.results_emitted,
+                "stopped Kad restrictive keyword search at request-wide work budget"
+            );
+        }
         search_response(sender_id, request.target, results)
     }
 

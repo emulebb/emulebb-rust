@@ -693,6 +693,7 @@ dependencies = [
  "emulebb-metadata",
  "rusqlite",
  "serde",
+ "tracing",
 ]
 
 [[package]]

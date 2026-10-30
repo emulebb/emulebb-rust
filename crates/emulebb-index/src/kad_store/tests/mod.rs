@@ -1,6 +1,10 @@
 mod helpers;
 
-use super::{KadLocalStore, KadLocalStoreConfig, source_entry_id};
+use super::{
+    KadLocalStore, KadLocalStoreConfig,
+    restrictive_search::{DEFAULT_RESTRICTIVE_SEARCH_LIMITS, RestrictiveSearchLimits},
+    source_entry_id,
+};
 use chrono::{DateTime, TimeZone, Utc};
 use emulebb_kad_proto::{
     Ed2kHash, NodeId, PublishEntry, SearchKeyReq, SearchNotesReq, SearchSourceReq, Tag, TagName,
@@ -2051,6 +2055,135 @@ fn invalid_restrictive_keyword_payload_does_not_emit_local_results() {
         ts(2),
     );
     assert!(response.is_none());
+}
+
+#[test]
+fn restrictive_keyword_search_stops_at_request_wide_candidate_budget() {
+    let mut store = KadLocalStore::new(KadLocalStoreConfig {
+        keyword_capacity: 4,
+        ..config()
+    });
+    let target = NodeId::from_bytes([1; 16]);
+    store.record_keyword_publish_batch(
+        target,
+        &keyword_entries_with_names(&["linux one", "linux two", "linux three"]),
+        publisher_ip(),
+        ts(1),
+    );
+    let limits = RestrictiveSearchLimits {
+        candidate_entries: 2,
+        ..DEFAULT_RESTRICTIVE_SEARCH_LIMITS
+    };
+
+    let response = store
+        .keyword_search_response_with_limits(
+            NodeId::from_bytes([9; 16]),
+            &SearchKeyReq {
+                target,
+                start_position: 0x8000,
+                restrictive_payload: restrictive_string_payload("linux"),
+            },
+            10,
+            ts(2),
+            limits,
+        )
+        .expect("bounded partial response");
+
+    assert_eq!(response.results.len(), 2);
+}
+
+#[test]
+fn restrictive_keyword_search_stops_at_request_wide_tag_value_budget() {
+    let mut store = KadLocalStore::new(KadLocalStoreConfig {
+        keyword_capacity: 3,
+        ..config()
+    });
+    let target = NodeId::from_bytes([1; 16]);
+    let entries = [1_u8, 2].map(|seed| PublishEntry {
+        hash: Ed2kHash::from_bytes([seed; 16]),
+        tags: vec![
+            Tag::filename(format!("video {seed}.mkv")),
+            Tag::filesize(123),
+            Tag::new_short(0xF1, TagValue::String("video".into())),
+        ],
+    });
+    store.record_keyword_publish_batch(target, &entries, publisher_ip(), ts(1));
+    let limits = RestrictiveSearchLimits {
+        compared_tag_values: 4,
+        ..DEFAULT_RESTRICTIVE_SEARCH_LIMITS
+    };
+
+    let response = store
+        .keyword_search_response_with_limits(
+            NodeId::from_bytes([9; 16]),
+            &SearchKeyReq {
+                target,
+                start_position: 0x8000,
+                restrictive_payload: restrictive_meta_string_payload("video", 0xF1),
+            },
+            10,
+            ts(2),
+            limits,
+        )
+        .expect("first result emitted before shared budget is exhausted");
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].entry_id, Ed2kHash::from_bytes([1; 16]));
+}
+
+#[test]
+fn restrictive_keyword_search_caps_results_independently_of_caller_limit() {
+    let mut store = KadLocalStore::new(KadLocalStoreConfig {
+        keyword_capacity: 4,
+        ..config()
+    });
+    let target = NodeId::from_bytes([1; 16]);
+    store.record_keyword_publish_batch(
+        target,
+        &keyword_entries_with_names(&["linux one", "linux two", "linux three"]),
+        publisher_ip(),
+        ts(1),
+    );
+    let limits = RestrictiveSearchLimits {
+        results_emitted: 2,
+        ..DEFAULT_RESTRICTIVE_SEARCH_LIMITS
+    };
+
+    let response = store
+        .keyword_search_response_with_limits(
+            NodeId::from_bytes([9; 16]),
+            &SearchKeyReq {
+                target,
+                start_position: 0x8000,
+                restrictive_payload: restrictive_string_payload("linux"),
+            },
+            10,
+            ts(2),
+            limits,
+        )
+        .expect("bounded response");
+
+    assert_eq!(response.results.len(), 2);
+}
+
+fn keyword_entries_with_names(names: &[&str]) -> Vec<PublishEntry> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| PublishEntry {
+            hash: Ed2kHash::from_bytes([(index + 1) as u8; 16]),
+            tags: vec![Tag::filename(*name), Tag::filesize(123)],
+        })
+        .collect()
+}
+
+fn restrictive_meta_string_payload(value: &str, name: u8) -> Vec<u8> {
+    let mut payload = vec![0x02];
+    payload.extend(u16::try_from(value.len()).unwrap().to_le_bytes());
+    payload.extend(value.as_bytes());
+    payload.extend(1_u16.to_le_bytes());
+    payload.push(name);
+    payload
 }
 
 #[test]
