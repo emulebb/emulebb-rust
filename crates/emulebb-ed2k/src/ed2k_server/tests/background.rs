@@ -1118,7 +1118,7 @@ async fn background_offer_files_v1_waits_for_server_ident_before_first_batch() {
 }
 
 #[tokio::test]
-async fn background_offer_files_v1_timeout_reconnects_before_legacy_publish() {
+async fn background_offer_files_v1_timeout_publishes_legacy_on_same_connection() {
     let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
     let endpoint = listener.local_addr().unwrap();
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
@@ -1143,52 +1143,19 @@ async fn background_offer_files_v1_timeout_reconnects_before_legacy_publish() {
             .await
             .unwrap();
 
-        let mut unexpected_offer = [0u8; 1];
-        let advertised_read = tokio::time::timeout(
-            Duration::from_secs(3),
-            advertised_stream.read(&mut unexpected_offer),
-        )
-        .await
-        .expect("ambiguous v1 connection should close after the negotiation timeout")
-        .unwrap();
-        assert_eq!(
-            advertised_read, 0,
-            "ambiguous v1 connection must close before any offer-files bytes are sent"
-        );
-
-        let (mut fallback_stream, _) =
-            tokio::time::timeout(Duration::from_secs(1), listener.accept())
-                .await
-                .expect("client should reconnect without offerfiles_v")
-                .unwrap();
-        let fallback_login = read_login_request_payload(&mut fallback_stream).await;
-        assert_eq!(
-            u32::from_le_bytes(fallback_login[22..26].try_into().unwrap()),
-            4
-        );
-        assert!(
-            !fallback_login
-                .windows("offerfiles_v".len())
-                .any(|window| window == b"offerfiles_v")
-        );
-
-        fallback_stream
-            .write_all(&encode_packet(OP_IDCHANGE, &high_id.to_le_bytes(), false).unwrap())
-            .await
-            .unwrap();
         let (opcode, payload) = tokio::time::timeout(
-            Duration::from_secs(1),
-            read_client_frame(&mut fallback_stream),
+            Duration::from_secs(6),
+            read_client_frame(&mut advertised_stream),
         )
         .await
-        .expect("legacy offer should be sent only on the fallback connection");
+        .expect("legacy offer should be sent on the advertised connection");
         assert_eq!(opcode, OP_OFFERFILES);
         assert_eq!(u32::from_le_bytes(payload[..4].try_into().unwrap()), 1);
         fallback_offer_sent.send(()).unwrap();
         fallback_state_release.await.unwrap();
     });
 
-    let context = background_test_context(Arc::clone(&state), Duration::from_secs(4));
+    let context = background_test_context(Arc::clone(&state), Duration::from_secs(7));
     context
         .shared_catalog
         .write()
@@ -1216,12 +1183,12 @@ async fn background_offer_files_v1_timeout_reconnects_before_legacy_publish() {
         assert_eq!(snapshot.offer_files_pending_entries, 0);
         assert_eq!(
             snapshot.offer_files_fallback_reason.as_deref(),
-            Some("automatic fallback after OP_SERVERIDENT capability timeout")
+            Some("OP_SERVERIDENT capability timeout")
         );
         fallback_state_asserted.send(()).unwrap();
     };
 
-    let (session_result, server_result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (session_result, server_result, ()) = tokio::time::timeout(Duration::from_secs(8), async {
         tokio::join!(session, server_task, observe_fallback_state)
     })
     .await

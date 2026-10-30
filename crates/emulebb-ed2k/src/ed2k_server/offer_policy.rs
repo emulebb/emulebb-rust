@@ -3,7 +3,8 @@ use std::time::Duration;
 pub(super) const OFFER_FILES_CAPABILITY_VERSION: u32 = 1;
 pub(super) const OFFER_FILES_LOCAL_BATCH_MAX: u32 = 200;
 pub(super) const OFFER_FILES_LOCAL_RECORDS_PER_SECOND: u32 = 400;
-pub(super) const OFFER_FILES_NEGOTIATION_WAIT: Duration = Duration::from_secs(2);
+pub(super) const OFFER_FILES_MIN_INTERVAL_MS: u32 = 500;
+pub(super) const OFFER_FILES_NEGOTIATION_WAIT: Duration = Duration::from_secs(5);
 pub(super) const OFFER_FILES_LEGACY_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,7 +40,7 @@ impl OfferFilesPolicy {
         }
         Ok(Self {
             batch_max,
-            min_interval_ms,
+            min_interval_ms: min_interval_ms.max(OFFER_FILES_MIN_INTERVAL_MS),
             soft_files,
             hard_files,
         })
@@ -89,7 +90,8 @@ mod tests {
         assert_eq!(policy.effective_batch_max(200), 150);
         assert_eq!(policy.effective_batch_max(350), 0);
         assert_eq!(policy.next_batch_delay(200), Duration::from_millis(500));
-        assert_eq!(policy.next_batch_delay(100), Duration::from_millis(250));
+        assert_eq!(policy.min_interval_ms, OFFER_FILES_MIN_INTERVAL_MS);
+        assert_eq!(policy.next_batch_delay(100), Duration::from_millis(500));
     }
 
     #[test]

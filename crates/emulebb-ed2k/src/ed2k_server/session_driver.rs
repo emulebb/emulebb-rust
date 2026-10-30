@@ -421,41 +421,6 @@ pub(super) async fn run_one_server_session(
                 if session.offer_files_negotiation_timeout_due() {
                     session.request_offer_files_negotiation_fallback().await;
                 }
-                if let Some(reason) = session.offer_files_fallback_reconnect_reason() {
-                    let reason = reason.to_string();
-                    info!(
-                        "reconnecting ED2K publishing session without offerfiles_v endpoint={} trace_id={} reason={}",
-                        session.endpoint,
-                        session.trace_id,
-                        reason,
-                    );
-                    dump_ed2k_server_loop_meta(
-                        &server.base_endpoint().to_string(),
-                        "offer_files_capability_fallback",
-                        format!(
-                            "reconnecting without offerfiles_v after ambiguous negotiation: {reason}"
-                        ),
-                    );
-                    drop(session);
-                    clear_server_connection_state(&context.state).await;
-                    reachability_writer.clear_server_public_ip();
-                    let fallback_mode = OfferFilesHandshakeMode::Legacy {
-                        reason: format!("automatic fallback after {reason}"),
-                    };
-                    session = tokio::select! {
-                        result = connect_server_transport(
-                            server,
-                            context,
-                            observed_external_ip.as_deref(),
-                            &fallback_mode,
-                        ) => result?,
-                        () = context.session_cancel.cancelled() => {
-                            clear_server_connection_state(&context.state).await;
-                            return Ok(ServerSessionExit::ContinueOrder);
-                        }
-                    };
-                    continue;
-                }
                 if let Some(stats) = send_due_offer_files_advertisement(
                     &mut session,
                     &context.shared_catalog,
