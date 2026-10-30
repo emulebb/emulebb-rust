@@ -280,6 +280,7 @@ async fn replaced_share_source_is_withdrawn_before_upload() {
         .await
         .unwrap();
     let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
+    let invalidations = runtime.shared_source_invalidation_signal();
     assert_eq!(runtime.shared_catalog_count().await, 1);
 
     fs::rename(&source_path, &original_path).unwrap();
@@ -299,6 +300,28 @@ async fn replaced_share_source_is_withdrawn_before_upload() {
     assert_eq!(runtime.shared_catalog_count().await, 0);
     assert_eq!(fs::read(&source_path).unwrap(), foreign_payload);
     assert_eq!(fs::read(&original_path).unwrap(), trusted_payload);
+
+    let invalidation = invalidations
+        .try_recv()
+        .expect("withdrawal must queue targeted reconciliation");
+    assert_eq!(invalidation.invalidation().file_hash, summary.file_hash);
+    assert_eq!(
+        invalidation.invalidation().source_path,
+        crate::long_path::long_path(&source_path),
+    );
+
+    assert!(
+        runtime
+            .read_verified_range(&hash, 0, trusted_payload.len() as u64)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        invalidations.try_recv().is_none(),
+        "repeated peer reads must coalesce behind the withdrawn path"
+    );
+    invalidation.acknowledge();
 }
 
 #[cfg(windows)]

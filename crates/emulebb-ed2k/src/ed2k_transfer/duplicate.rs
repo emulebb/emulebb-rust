@@ -246,6 +246,12 @@ impl Ed2kTransferRuntime {
         }
         Ok(None)
     }
+
+    /// Whether another persisted source still provides the verified bytes for
+    /// this hash after one source path was invalidated or reassigned.
+    pub async fn has_present_shared_source(&self, file_hash: &str) -> Result<bool> {
+        Ok(self.first_present_shared_source(file_hash).await?.is_some())
+    }
 }
 
 async fn push_current_file_if_present(

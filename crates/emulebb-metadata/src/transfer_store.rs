@@ -782,6 +782,45 @@ impl super::MetadataStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Withdraw one exact persisted shared-source identity after upload-time
+    /// verification proves that the path no longer names those bytes.
+    ///
+    /// Matching the stored fingerprint makes repeated peer requests a no-op and
+    /// prevents them from amplifying one local mismatch into repeated re-hash
+    /// work. The source row remains available for targeted reconciliation to
+    /// replace atomically when the path becomes stable again.
+    pub fn invalidate_shared_file_source(
+        &self,
+        file_hash: &str,
+        source_path: &Path,
+        expected_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        let Some(path_id) = local_path_id(&conn, source_path)? else {
+            return Ok(false);
+        };
+        let changed = conn.execute(
+            r#"
+            UPDATE shared_file_sources
+            SET source_fingerprint = NULL,
+                updated_at_ms = ?4
+            WHERE known_file_id = (
+                    SELECT id FROM known_files WHERE ed2k_hash = ?1
+                  )
+              AND path_id = ?2
+              AND source_fingerprint = ?3
+            "#,
+            params![
+                hash,
+                path_id,
+                expected_fingerprint.storage_bytes(),
+                unix_ms(),
+            ],
+        )?;
+        Ok(changed != 0)
+    }
+
     /// Move one share-in-place source to a new filesystem path without
     /// rewriting its hashsets or transfer children.
     ///
