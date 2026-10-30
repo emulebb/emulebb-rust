@@ -11,8 +11,8 @@ use crate::ed2k_server::Ed2kFoundSource;
 use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job};
 
 use super::super::{
-    Ed2kHelloIdentity, Ed2kSecureIdent, Ed2kTransport, dump_ed2k_tcp_download_meta,
-    encode_hello_request,
+    Ed2kHelloIdentity, Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher, Ed2kSecureIdent,
+    Ed2kTransport, dump_ed2k_tcp_download_meta, encode_hello_request,
 };
 use super::session::{
     DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
@@ -160,7 +160,7 @@ pub async fn download_files_from_peer(
         )
     });
     async {
-        let mut transport = Ed2kTransport::connect_outgoing(
+        let transport = Ed2kTransport::connect_outgoing(
             "native_download",
             bind_ip,
             peer_addr,
@@ -170,6 +170,11 @@ pub async fn download_files_from_peer(
             timeout,
         )
         .await?;
+        let mut transport = Ed2kPeerDispatcher::new(
+            transport,
+            peer_addr,
+            Ed2kPeerConnectionOrigin::OutboundEstablished,
+        );
         let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
         dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "connect_ready", || {
             format!("file_hash={first_file_hash_hex}")
@@ -209,7 +214,7 @@ pub async fn download_files_from_peer(
                 );
             }
             let session_result = drive_download_session(DownloadSessionOptions {
-                transport: &mut transport,
+                dispatcher: &mut transport,
                 peer_addr,
                 hello_identity,
                 secure_ident: secure_ident.as_ref(),

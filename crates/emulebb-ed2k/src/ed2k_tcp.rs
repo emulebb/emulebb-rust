@@ -47,6 +47,7 @@ mod hello_miscoptions;
 mod identity;
 mod listener;
 mod obfuscation;
+mod peer_dispatcher;
 mod transport;
 mod upload_promote;
 pub(in crate::ed2k_tcp) use codec::{
@@ -150,6 +151,7 @@ use obfuscation::{
     decode_incoming_obfuscation_header, derive_obfuscation_key,
     encode_incoming_obfuscation_response,
 };
+pub(in crate::ed2k_tcp) use peer_dispatcher::{Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher};
 pub use transport::EmuleTcpPacket;
 pub(in crate::ed2k_tcp) use transport::{Ed2kTransport, Ed2kTransportMode};
 

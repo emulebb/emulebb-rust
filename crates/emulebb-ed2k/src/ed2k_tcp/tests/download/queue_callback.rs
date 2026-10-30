@@ -1,4 +1,5 @@
 use super::*;
+use crate::ed2k_tcp::{Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher};
 
 #[tokio::test]
 async fn callback_session_with_completed_hello_starts_upload_flow() {
@@ -62,19 +63,23 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
     });
 
     let (stream, remote_addr) = listener.accept().await.unwrap();
-    let mut transport = Ed2kTransport::from_parts(
-        stream,
-        VecDeque::new(),
-        None,
-        None,
-        Ed2kTransportMode::Plaintext,
+    let mut transport = Ed2kPeerDispatcher::new(
+        Ed2kTransport::from_parts(
+            stream,
+            VecDeque::new(),
+            None,
+            None,
+            Ed2kTransportMode::Plaintext,
+        ),
+        remote_addr,
+        Ed2kPeerConnectionOrigin::InboundAccepted,
     );
     let secure_ident = Arc::new(
         Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
     );
 
     let result = drive_download_session(DownloadSessionOptions {
-        transport: &mut transport,
+        dispatcher: &mut transport,
         peer_addr: remote_addr,
         hello_identity: Ed2kHelloIdentity {
             user_hash: [0x11; 16],

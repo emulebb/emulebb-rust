@@ -48,20 +48,20 @@ use super::super::hello::{
 };
 use super::super::identity::{Ed2kPeerSecureIdentState, begin_secure_ident_probe};
 use super::super::{
-    ED2K_CONNECTION_IDLE_TIMEOUT, Ed2kHelloIdentity, Ed2kSecureIdent, Ed2kTransport,
-    FirewallCheckUdpRequest, OP_AICHANSWER, OP_AICHFILEHASHREQ, OP_AICHREQUEST,
-    OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS, OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES,
-    OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_ASKSHAREDFILESDIRANS, OP_BUDDYPING,
-    OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT,
-    OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER,
-    OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FWCHECKUDPREQ, OP_HASHSETREQUEST,
-    OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE,
-    OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_OUTOFPARTREQS, OP_PEERCACHE_ACK,
-    OP_PEERCACHE_ANSWER, OP_PEERCACHE_QUERY, OP_PORTTEST, OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER,
-    OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING, OP_REASKCALLBACKTCP,
-    OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64, OP_REQUESTPREVIEW, OP_REQUESTSOURCES,
-    OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID, OP_SIGNATURE, OP_STARTUPLOADREQ,
-    apply_server_state, handle_aich_recovery_answer,
+    ED2K_CONNECTION_IDLE_TIMEOUT, Ed2kHelloIdentity, Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher,
+    Ed2kSecureIdent, Ed2kTransport, FirewallCheckUdpRequest, OP_AICHANSWER, OP_AICHFILEHASHREQ,
+    OP_AICHREQUEST, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS, OP_ASKSHAREDDIRSANS,
+    OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_ASKSHAREDFILESDIRANS,
+    OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID,
+    OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_EDONKEYPROT, OP_EMULEINFO,
+    OP_EMULEINFOANSWER, OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FWCHECKUDPREQ,
+    OP_HASHSETREQUEST, OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK,
+    OP_MESSAGE, OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_OUTOFPARTREQS,
+    OP_PEERCACHE_ACK, OP_PEERCACHE_ANSWER, OP_PEERCACHE_QUERY, OP_PORTTEST, OP_PREVIEWANSWER,
+    OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING,
+    OP_REASKCALLBACKTCP, OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64,
+    OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID,
+    OP_SIGNATURE, OP_STARTUPLOADREQ, apply_server_state, handle_aich_recovery_answer,
 };
 
 mod browse;
@@ -189,7 +189,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     let response_identity =
         enrich_hello_identity(response_identity, server_state, kad_firewall).await;
     let mut outbound_expected_user_hash = None;
-    let (mut transport, mut pending_promoted_grant, mut session_phase) = match source {
+    let (transport, mut pending_promoted_grant, mut session_phase, connection_origin) = match source
+    {
         Ed2kSessionSource::Inbound(stream) => {
             let local_addr = stream.local_addr().with_context(|| {
                 format!("failed to resolve local eD2k listener address for {peer_addr}")
@@ -222,7 +223,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     anyhow::bail!("timed out waiting for initial eD2k peer bytes");
                 }
             };
-            (transport, None, PeerSessionPhase::AwaitingInboundHello)
+            (
+                transport,
+                None,
+                PeerSessionPhase::AwaitingInboundHello,
+                Ed2kPeerConnectionOrigin::InboundAccepted,
+            )
         }
         Ed2kSessionSource::CallbackUpload {
             transport,
@@ -235,7 +241,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 || "adopting outbound callback transport".to_string(),
             );
             outbound_expected_user_hash = expected_user_hash;
-            (*transport, None, PeerSessionPhase::AwaitingOutboundHello)
+            (
+                *transport,
+                None,
+                PeerSessionPhase::AwaitingOutboundHello,
+                Ed2kPeerConnectionOrigin::OutboundEstablished,
+            )
         }
         // A slot grant for a disconnected waiter arrives on a connection WE
         // dialed (master AddUpNextClient US_CONNECTING connect-out); the
@@ -249,9 +260,11 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 *transport,
                 Some(*grant),
                 PeerSessionPhase::AwaitingOutboundHello,
+                Ed2kPeerConnectionOrigin::OutboundEstablished,
             )
         }
     };
+    let mut transport = Ed2kPeerDispatcher::new(transport, peer_addr, connection_origin);
     let _peer_connection_guard = transfer_runtime.register_peer_connection(peer_addr.ip());
     if let Err(error) = transport.stream.set_nodelay(true) {
         if let Some(grant) = pending_promoted_grant.take() {
@@ -650,7 +663,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             download.file_hash, hello_profile.identity.client_id
                         );
                         let outcome = drive_download_session(DownloadSessionOptions {
-                            transport: &mut transport,
+                            dispatcher: &mut transport,
                             peer_addr,
                             hello_identity: response_identity,
                             secure_ident: secure_ident.as_ref(),
