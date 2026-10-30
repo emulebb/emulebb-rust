@@ -73,12 +73,27 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
                 .uri("/api/v1/diagnostics/bundles")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"confirmCapture":false}"#))
+                .body(Body::from(r#"{"confirmCapture":false,"maxBytes":4194304}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+
+    let invalid_budget = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/diagnostics/bundles")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"confirmCapture":true,"maxBytes":65535}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_budget.status(), StatusCode::BAD_REQUEST);
 
     let accepted = app
         .oneshot(
@@ -87,22 +102,38 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
                 .uri("/api/v1/diagnostics/bundles")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"confirmCapture":true}"#))
+                .body(Body::from(r#"{"confirmCapture":true,"maxBytes":4194304}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(accepted.status(), StatusCode::OK);
-    let body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert!(value["data"].get("fullMemory").is_none());
-    assert!(value["data"].get("fullMemoryIncluded").is_none());
-    assert!(value["data"].get("path").is_none());
-    assert!(value["data"].get("byteCount").is_none());
-    assert_eq!(value["data"]["schema"], "emulebb.diagnostic-bundle.v5");
-    assert_eq!(value["data"]["summary"]["artifactFileCount"], 0);
     assert_eq!(
-        value["data"]["summary"]["missingArtifactFamilies"]
+        accepted.headers().get("content-type").unwrap(),
+        "application/json"
+    );
+    let content_length = accepted
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(content_length, body.len());
+    assert!(body.len() <= 4_194_304);
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert!(value.get("fullMemory").is_none());
+    assert!(value.get("fullMemoryIncluded").is_none());
+    assert!(value.get("path").is_none());
+    assert!(value.get("byteCount").is_none());
+    assert_eq!(value["schema"], "emulebb.diagnostic-bundle.v6");
+    assert_eq!(value["budget"]["maxBytes"], 4_194_304);
+    assert_eq!(value["budget"]["encodedBytes"], body.len());
+    assert_eq!(value["summary"]["artifactFileCount"], 0);
+    assert_eq!(
+        value["summary"]["missingArtifactFamilies"]
             .as_array()
             .unwrap()
             .len(),
@@ -110,18 +141,14 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     );
     assert!(!runtime_dir.join("diagnostics").exists());
 
-    let bundle = &value["data"];
-    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v5");
+    let bundle = &value;
+    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v6");
     assert!(bundle.get("memory").is_none());
     assert_eq!(bundle["settingsProvenance"]["apiKeyIncluded"], true);
     assert_eq!(bundle["settingsProvenance"]["sensitiveValues"], "exact");
     assert_eq!(bundle["settingsProvenance"]["apiKey"], "secret");
     assert!(bundle["status"].is_object());
-    assert!(bundle["runtimeDiagnostics"].is_object());
-    assert_eq!(
-        bundle["runtimeDiagnostics"]["diagnosticWriter"]["enabled"],
-        false
-    );
+    assert!(bundle.get("runtimeDiagnostics").is_none());
     assert_eq!(
         bundle["status"]["runtimeDiagnostics"]["diagnosticWriter"]["enabled"],
         false
@@ -133,7 +160,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
             .is_empty()
     );
     assert!(bundle["settings"].is_object());
-    assert!(bundle["recentLogs"].is_array());
+    assert!(bundle["recentLogs"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["servers"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["sharedFiles"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["searches"]["items"].is_array());

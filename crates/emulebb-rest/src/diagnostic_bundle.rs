@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fmt::Write as _,
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
@@ -7,7 +7,7 @@ use std::{
     time::SystemTime,
 };
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::Utc;
 use emulebb_core::Search;
 use serde_json::{Value, json};
@@ -21,7 +21,9 @@ use crate::{
     },
 };
 
-pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v5";
+pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v6";
+pub(crate) const MIN_DIAGNOSTIC_BUNDLE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_DIAGNOSTIC_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 
 const MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_LOG_RECORDS: usize = 200;
@@ -83,9 +85,17 @@ struct TailRead {
     lines: Vec<Vec<u8>>,
 }
 
-pub(crate) async fn capture(state: &RestState) -> Result<Value> {
+pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u8>> {
+    if !(MIN_DIAGNOSTIC_BUNDLE_BYTES..=MAX_DIAGNOSTIC_BUNDLE_BYTES).contains(&max_bytes) {
+        bail!(
+            "maxBytes must be in the range {MIN_DIAGNOSTIC_BUNDLE_BYTES}..={MAX_DIAGNOSTIC_BUNDLE_BYTES}"
+        );
+    }
     let status = status_response(state).await;
-    let runtime_diagnostics = runtime_diagnostics_response(state).await;
+    let runtime_diagnostics = match status.get("runtimeDiagnostics") {
+        Some(runtime_diagnostics) => runtime_diagnostics.clone(),
+        None => runtime_diagnostics_response(state).await,
+    };
     let unified_run = unified_run_selection(&runtime_diagnostics);
     let writer_issues = diagnostic_writer_issues(&runtime_diagnostics);
     let writer_issue_count = writer_issues.len() as u64;
@@ -108,7 +118,6 @@ pub(crate) async fn capture(state: &RestState) -> Result<Value> {
         "capturedAt": Utc::now(),
         "app": app_info_response(state.core.app_info()),
         "status": status,
-        "runtimeDiagnostics": runtime_diagnostics,
         "settings": settings,
         "settingsProvenance": {
             "source": "profileState",
@@ -116,7 +125,7 @@ pub(crate) async fn capture(state: &RestState) -> Result<Value> {
             "sensitiveValues": "exact",
             "apiKey": state.api_key.as_str(),
         },
-        "recentLogs": logs,
+        "recentLogs": bounded_tail_collection(&logs, MAX_LOG_RECORDS, Value::clone),
         "operationalSnapshots": operational_snapshots,
         "diagnosticHealth": {
             "writerIssues": writer_issues,
@@ -145,9 +154,15 @@ pub(crate) async fn capture(state: &RestState) -> Result<Value> {
             "missingArtifactFamilies": artifacts.missing_families,
             "issueCount": artifacts.issue_count.saturating_add(writer_issue_count),
         },
+        "budget": {
+            "maxBytes": max_bytes,
+            "encodedBytes": 0,
+            "truncated": false,
+            "truncatedSections": [],
+        },
     });
 
-    Ok(payload)
+    encode_bounded_bundle(payload, max_bytes)
 }
 
 async fn operational_snapshots(state: &RestState) -> Value {
@@ -206,6 +221,7 @@ fn bounded_tail_collection<T>(items: &[T], limit: usize, render: impl Fn(&T) -> 
         "total": items.len(),
         "included": retained.len(),
         "omittedBeforeLimit": omitted_before_limit,
+        "omittedForBudget": 0,
         "limit": limit,
         "items": retained.iter().map(render).collect::<Vec<_>>(),
     })
@@ -223,6 +239,7 @@ fn bounded_prefix_collection<T>(
         "total": total,
         "included": retained.len(),
         "omittedAfterLimit": total.saturating_sub(retained.len()),
+        "omittedForBudget": 0,
         "limit": limit,
         "items": retained.iter().map(render).collect::<Vec<_>>(),
     })
@@ -238,6 +255,7 @@ fn search_snapshot(search: &Search) -> Value {
         "total": search.results.len(),
         "included": retained.len(),
         "omittedAfterLimit": search.results.len().saturating_sub(retained.len()),
+        "omittedForBudget": 0,
         "limit": MAX_SEARCH_RESULTS_PER_SNAPSHOT,
         "items": search_results_response(retained, true),
     });
@@ -585,6 +603,7 @@ fn summarize_artifacts(
             .count(),
         "recordsIncluded": records.len(),
         "recordsOmittedBeforeLimit": records_omitted_before_limit,
+        "recordsOmittedForBudget": 0,
         "parseErrorCount": parse_error_count,
         "unknownSchemaCount": unknown_schema_count,
         "sequence": sequence,
@@ -597,6 +616,154 @@ fn summarize_artifacts(
     }
 
     Ok((summary, issue_count))
+}
+
+fn encode_bounded_bundle(mut payload: Value, max_bytes: usize) -> Result<Vec<u8>> {
+    const SECTIONS: &[&str] = &[
+        "operationalSnapshots.searches.results",
+        "operationalSnapshots.uploadQueue",
+        "operationalSnapshots.uploads",
+        "operationalSnapshots.transfers",
+        "operationalSnapshots.sharedFiles",
+        "operationalSnapshots.servers",
+        "operationalSnapshots.searches",
+        "recentLogs",
+        "diagnosticArtifacts.records",
+    ];
+
+    let mut next_section = 0_usize;
+    let mut truncated_sections = BTreeSet::new();
+    loop {
+        payload["budget"]["truncated"] = Value::Bool(!truncated_sections.is_empty());
+        payload["budget"]["truncatedSections"] = json!(truncated_sections);
+        let encoded = stabilize_encoded_size(&mut payload)?;
+        if encoded.len() <= max_bytes {
+            return Ok(encoded);
+        }
+
+        let mut shrunk = false;
+        for offset in 0..SECTIONS.len() {
+            let index = (next_section + offset) % SECTIONS.len();
+            if shrink_budget_section(&mut payload, SECTIONS[index]) {
+                truncated_sections.insert(SECTIONS[index].to_string());
+                next_section = (index + 1) % SECTIONS.len();
+                shrunk = true;
+                break;
+            }
+        }
+        if !shrunk {
+            bail!(
+                "mandatory diagnostic bundle core requires {} bytes, exceeding requested {max_bytes}-byte max",
+                encoded.len()
+            );
+        }
+    }
+}
+
+fn stabilize_encoded_size(payload: &mut Value) -> Result<Vec<u8>> {
+    loop {
+        let encoded = serde_json::to_vec(payload)?;
+        let reported = payload["budget"]["encodedBytes"].as_u64().unwrap_or(0) as usize;
+        if reported == encoded.len() {
+            return Ok(encoded);
+        }
+        payload["budget"]["encodedBytes"] = Value::from(encoded.len() as u64);
+    }
+}
+
+fn shrink_budget_section(payload: &mut Value, section: &str) -> bool {
+    match section {
+        "operationalSnapshots.searches.results" => {
+            let Some(searches) =
+                value_at_path_mut(payload, &["operationalSnapshots", "searches", "items"])
+                    .and_then(Value::as_array_mut)
+            else {
+                return false;
+            };
+            let mut shrunk = false;
+            for search in searches {
+                shrunk |= shrink_collection(&mut search["results"], false);
+            }
+            shrunk
+        }
+        "operationalSnapshots.uploadQueue" => {
+            shrink_path_collection(payload, &["operationalSnapshots", "uploadQueue"], false)
+        }
+        "operationalSnapshots.uploads" => {
+            shrink_path_collection(payload, &["operationalSnapshots", "uploads"], false)
+        }
+        "operationalSnapshots.transfers" => {
+            shrink_path_collection(payload, &["operationalSnapshots", "transfers"], true)
+        }
+        "operationalSnapshots.sharedFiles" => {
+            shrink_path_collection(payload, &["operationalSnapshots", "sharedFiles"], false)
+        }
+        "operationalSnapshots.servers" => {
+            shrink_path_collection(payload, &["operationalSnapshots", "servers"], false)
+        }
+        "operationalSnapshots.searches" => {
+            shrink_path_collection(payload, &["operationalSnapshots", "searches"], true)
+        }
+        "recentLogs" => shrink_path_collection(payload, &["recentLogs"], true),
+        "diagnosticArtifacts.records" => shrink_artifact_records(payload),
+        _ => false,
+    }
+}
+
+fn value_at_path_mut<'a>(value: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
+    let mut current = value;
+    for component in path {
+        current = current.get_mut(*component)?;
+    }
+    Some(current)
+}
+
+fn shrink_path_collection(payload: &mut Value, path: &[&str], keep_tail: bool) -> bool {
+    value_at_path_mut(payload, path)
+        .is_some_and(|collection| shrink_collection(collection, keep_tail))
+}
+
+fn shrink_collection(collection: &mut Value, keep_tail: bool) -> bool {
+    let Some(items) = collection.get_mut("items").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    if items.is_empty() {
+        return false;
+    }
+    let removed = items.len().div_ceil(2);
+    if keep_tail {
+        items.drain(..removed);
+    } else {
+        items.truncate(items.len().saturating_sub(removed));
+    }
+    collection["included"] = Value::from(items.len() as u64);
+    let omitted = collection["omittedForBudget"].as_u64().unwrap_or(0);
+    collection["omittedForBudget"] = Value::from(omitted.saturating_add(removed as u64));
+    true
+}
+
+fn shrink_artifact_records(payload: &mut Value) -> bool {
+    let Some(families) = value_at_path_mut(payload, &["diagnosticArtifacts", "families"])
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut shrunk = false;
+    for family in families {
+        let Some(records) = family.get_mut("records").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        if records.is_empty() {
+            continue;
+        }
+        let removed = records.len().div_ceil(2);
+        records.drain(..removed);
+        family["recordsIncluded"] = Value::from(records.len() as u64);
+        let omitted = family["recordsOmittedForBudget"].as_u64().unwrap_or(0);
+        family["recordsOmittedForBudget"] = Value::from(omitted.saturating_add(removed as u64));
+        shrunk = true;
+    }
+    shrunk
 }
 
 fn read_artifact_tail(
@@ -683,6 +850,118 @@ fn encode_hex(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_collection() -> Value {
+        json!({
+            "total": 0,
+            "included": 0,
+            "omittedAfterLimit": 0,
+            "omittedForBudget": 0,
+            "limit": 0,
+            "items": [],
+        })
+    }
+
+    fn oversized_budget_fixture() -> Value {
+        let search_results = (0..64)
+            .map(|index| json!({"index": index, "name": "x".repeat(4_096)}))
+            .collect::<Vec<_>>();
+        let recent_logs = (0..32)
+            .map(|index| json!({"index": index, "message": "y".repeat(4_096)}))
+            .collect::<Vec<_>>();
+        json!({
+            "schema": DIAGNOSTIC_BUNDLE_SCHEMA,
+            "status": {},
+            "settings": {},
+            "recentLogs": {
+                "total": recent_logs.len(),
+                "included": recent_logs.len(),
+                "omittedBeforeLimit": 0,
+                "omittedForBudget": 0,
+                "limit": recent_logs.len(),
+                "items": recent_logs,
+            },
+            "operationalSnapshots": {
+                "servers": empty_collection(),
+                "sharedFiles": empty_collection(),
+                "searches": {
+                    "total": 1,
+                    "included": 1,
+                    "omittedBeforeLimit": 0,
+                    "omittedForBudget": 0,
+                    "limit": 1,
+                    "items": [{
+                        "results": {
+                            "total": search_results.len(),
+                            "included": search_results.len(),
+                            "omittedAfterLimit": 0,
+                            "omittedForBudget": 0,
+                            "limit": search_results.len(),
+                            "items": search_results,
+                        }
+                    }],
+                },
+                "transfers": empty_collection(),
+                "uploads": empty_collection(),
+                "uploadQueue": empty_collection(),
+            },
+            "diagnosticArtifacts": {"families": []},
+            "budget": {
+                "maxBytes": MIN_DIAGNOSTIC_BUNDLE_BYTES,
+                "encodedBytes": 0,
+                "truncated": false,
+                "truncatedSections": [],
+            },
+        })
+    }
+
+    #[test]
+    fn byte_budget_is_exact_and_reports_deterministic_omissions() {
+        let encoded =
+            encode_bounded_bundle(oversized_budget_fixture(), MIN_DIAGNOSTIC_BUNDLE_BYTES).unwrap();
+        let bundle: Value = serde_json::from_slice(&encoded).unwrap();
+
+        assert!(encoded.len() <= MIN_DIAGNOSTIC_BUNDLE_BYTES);
+        assert_eq!(bundle["budget"]["encodedBytes"], encoded.len());
+        assert_eq!(bundle["budget"]["maxBytes"], MIN_DIAGNOSTIC_BUNDLE_BYTES);
+        assert_eq!(bundle["budget"]["truncated"], true);
+        assert!(
+            bundle["budget"]["truncatedSections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|section| section == "operationalSnapshots.searches.results")
+        );
+    }
+
+    #[test]
+    fn collection_budget_omissions_are_counted_exactly() {
+        let mut collection = json!({
+            "included": 4,
+            "omittedForBudget": 0,
+            "items": ["zero", "one", "two", "three"],
+        });
+
+        assert!(shrink_collection(&mut collection, false));
+
+        assert_eq!(collection["included"], 2);
+        assert_eq!(collection["omittedForBudget"], 2);
+        assert_eq!(collection["items"], json!(["zero", "one"]));
+    }
+
+    #[test]
+    fn mandatory_core_over_budget_is_rejected_instead_of_silently_truncated() {
+        let mut payload = oversized_budget_fixture();
+        payload["settings"] = json!({"unboundedMandatoryValue": "z".repeat(128 * 1024)});
+
+        let error = encode_bounded_bundle(payload, MIN_DIAGNOSTIC_BUNDLE_BYTES).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("mandatory diagnostic bundle core")
+        );
+    }
 
     #[test]
     fn malformed_lines_are_preserved_as_exact_hex() {
