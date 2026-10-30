@@ -22,9 +22,7 @@ pub(super) fn ensure_counted_vector_fits<R: Read + Seek>(
     reader.seek(SeekFrom::Start(position))?;
 
     let remaining = usize::try_from(end.saturating_sub(position)).unwrap_or(usize::MAX);
-    let minimum_required = count
-        .checked_mul(minimum_element_size)
-        .unwrap_or(usize::MAX);
+    let minimum_required = count.saturating_mul(minimum_element_size);
     if minimum_required > remaining {
         return Err(ProtoError::InvalidCountedVector {
             count,
