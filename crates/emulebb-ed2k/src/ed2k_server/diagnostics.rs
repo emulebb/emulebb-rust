@@ -235,6 +235,7 @@ pub(super) fn dump_ed2k_server_loop_meta(
 #[cfg(not(feature = "packet-diagnostics"))]
 pub(super) fn dump_ed2k_server_transport_fallback(
     _endpoint: &str,
+    _trace_id: u64,
     _from_transport_mode: &'static str,
     _to_transport_mode: &'static str,
     _error: &str,
@@ -316,12 +317,14 @@ pub(super) fn dump_ed2k_server_loop_meta(
 #[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_ed2k_server_transport_fallback(
     endpoint: &str,
+    trace_id: u64,
     from_transport_mode: &'static str,
     to_transport_mode: &'static str,
     error: &str,
 ) {
     let (family, event, severity, keys, body) = ed2k_server_transport_fallback_parts(
         endpoint,
+        trace_id,
         from_transport_mode,
         to_transport_mode,
         error,
@@ -332,6 +335,7 @@ pub(super) fn dump_ed2k_server_transport_fallback(
 #[cfg(any(feature = "packet-diagnostics", test))]
 fn ed2k_server_transport_fallback_parts(
     endpoint: &str,
+    trace_id: u64,
     from_transport_mode: &'static str,
     to_transport_mode: &'static str,
     error: &str,
@@ -343,6 +347,7 @@ fn ed2k_server_transport_fallback_parts(
         json!({
             "peer": endpoint,
             "flow": "server",
+            "traceId": trace_id,
         }),
         json!({
             "flow": "server",
@@ -351,6 +356,7 @@ fn ed2k_server_transport_fallback_parts(
             "fromTransportMode": from_transport_mode,
             "toTransportMode": to_transport_mode,
             "error": error,
+            "traceId": trace_id,
         }),
     )
 }
@@ -740,6 +746,7 @@ mod tests {
     fn server_transport_fallback_is_structured_for_cross_client_evidence() {
         let (family, event, severity, keys, body) = ed2k_server_transport_fallback_parts(
             "198.51.100.4:4661",
+            17,
             "obfuscated",
             "plaintext",
             "server closed crypt negotiation",
@@ -750,11 +757,13 @@ mod tests {
         assert_eq!(severity, "warning");
         assert_eq!(keys["peer"], "198.51.100.4:4661");
         assert_eq!(keys["flow"], "server");
+        assert_eq!(keys["traceId"], 17);
         assert_eq!(body["phase"], "connection");
         assert_eq!(body["outcome"], "retrying");
         assert_eq!(body["fromTransportMode"], "obfuscated");
         assert_eq!(body["toTransportMode"], "plaintext");
         assert_eq!(body["error"], "server closed crypt negotiation");
+        assert_eq!(body["traceId"], 17);
     }
 
     #[test]

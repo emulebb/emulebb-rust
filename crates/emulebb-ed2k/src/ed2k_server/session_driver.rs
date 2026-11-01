@@ -42,6 +42,12 @@ pub(super) enum ServerSessionExit {
     IntentionalShutdown,
 }
 
+#[derive(Debug)]
+struct ServerTransportAttemptError {
+    trace_id: u64,
+    error: anyhow::Error,
+}
+
 #[derive(Clone, Debug)]
 enum OfferFilesHandshakeMode {
     AdvertiseV1,
@@ -80,20 +86,23 @@ async fn connect_server_transport(
                 // same-mode loop when their ordinary endpoint is plaintext.
                 dump_ed2k_server_transport_fallback(
                     &base_endpoint,
+                    error.trace_id,
                     mode.label(),
                     ServerTransportMode::Plaintext.label(),
-                    &error.to_string(),
+                    &error.error.to_string(),
                 );
                 warn!(
-                    "ED2K server {} transport={} failed: {error}; retrying plaintext endpoint={}",
+                    "ED2K server {} transport={} failed: {}; retrying plaintext endpoint={}",
                     server.base_endpoint(),
                     mode.label(),
+                    error.error,
                     server.base_endpoint()
                 );
             }
         },
     )
-    .await?;
+    .await
+    .map_err(|failure| failure.error)?;
     Ok(session)
 }
 
@@ -103,12 +112,13 @@ async fn connect_server_transport_attempt(
     observed_external_ip: Option<&str>,
     mode: ServerTransportMode,
     offer_files_mode: &OfferFilesHandshakeMode,
-) -> Result<ServerSession> {
+) -> std::result::Result<ServerSession, ServerTransportAttemptError> {
     // Stock eMule's CONSERVTIMEOUT covers the whole pending connection attempt,
     // including connect, crypt negotiation, and CS_WAITFORLOGIN. A transport
     // fallback is a fresh attempt and therefore receives a fresh budget.
     let pending_login_deadline = std::time::Instant::now() + context.connect_timeout;
     let use_server_obfuscation = mode.is_obfuscated();
+    let trace_id = ServerSession::next_trace_id();
     let mut login_identity =
         login_identity_for_server_transport(context.hello_identity, use_server_obfuscation);
     login_identity.client_id = context
@@ -121,15 +131,17 @@ async fn connect_server_transport_attempt(
     login_identity.tcp_port = ports.tcp;
     login_identity.udp_port = ports.udp;
     let transport_endpoint = server.transport_endpoint(use_server_obfuscation);
-    let mut session = ServerSession::connect_until(
+    let mut session = ServerSession::connect_until_with_trace_id(
         context.bind_ip,
         transport_endpoint,
         Arc::clone(&context.state),
         "background",
         mode.label(),
         pending_login_deadline,
+        trace_id,
     )
-    .await?;
+    .await
+    .map_err(|error| ServerTransportAttemptError { trace_id, error })?;
     session.server_soft_files = server.entry.soft_files;
     session.server_hard_files = server.entry.hard_files;
     let offer_files_v1_enabled = offer_files_mode.advertises_v1();
@@ -192,7 +204,7 @@ async fn connect_server_transport_attempt(
     };
     if let Err(error) = login_result {
         session.fail_connection(&error.to_string());
-        return Err(error);
+        return Err(ServerTransportAttemptError { trace_id, error });
     }
     session.set_phase(
         ServerSessionPhase::AwaitingIdChange,
