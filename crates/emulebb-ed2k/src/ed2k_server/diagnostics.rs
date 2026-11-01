@@ -225,6 +225,17 @@ impl Drop for Ed2kServerSendAttempt {
 pub(super) fn dump_ed2k_server_meta(_session: &ServerSession, _note: impl Into<String>) {}
 
 #[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_server_status_applied(_session: &ServerSession, _users: u32, _files: u32) {}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_server_ident_applied(
+    _session: &ServerSession,
+    _name: Option<&str>,
+    _description: Option<&str>,
+) {
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
 pub(super) fn dump_ed2k_server_loop_meta(
     _endpoint: &str,
     _phase: &'static str,
@@ -276,6 +287,139 @@ pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<Str
         note: Some(note.into()),
     };
     emit_ed2k_server_diag_event(&record);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) fn dump_ed2k_server_status_applied(session: &ServerSession, users: u32, files: u32) {
+    let (keys, body) = ed2k_server_status_applied_parts(
+        &session.endpoint.to_string(),
+        session.trace_id,
+        session.trace_role,
+        session.phase.as_str(),
+        session.send_cipher.is_some(),
+        users,
+        files,
+    );
+    crate::diag_event::emit("ed2k_tcp", "server_status_applied", "info", keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn ed2k_server_status_applied_parts(
+    endpoint: &str,
+    trace_id: u64,
+    role: &str,
+    phase: &str,
+    obfuscated: bool,
+    users: u32,
+    files: u32,
+) -> (Value, Value) {
+    server_tcp_metadata_applied_parts(
+        endpoint,
+        trace_id,
+        role,
+        phase,
+        obfuscated,
+        OP_SERVERSTATUS,
+        "OP_SERVERSTATUS",
+        json!({
+            "users": users,
+            "files": files,
+        }),
+    )
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) fn dump_ed2k_server_ident_applied(
+    session: &ServerSession,
+    name: Option<&str>,
+    description: Option<&str>,
+) {
+    let (keys, body) = ed2k_server_ident_applied_parts(
+        &session.endpoint.to_string(),
+        session.trace_id,
+        session.trace_role,
+        session.phase.as_str(),
+        session.send_cipher.is_some(),
+        name,
+        description,
+    );
+    crate::diag_event::emit("ed2k_tcp", "server_ident_applied", "info", keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn ed2k_server_ident_applied_parts(
+    endpoint: &str,
+    trace_id: u64,
+    role: &str,
+    phase: &str,
+    obfuscated: bool,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> (Value, Value) {
+    server_tcp_metadata_applied_parts(
+        endpoint,
+        trace_id,
+        role,
+        phase,
+        obfuscated,
+        OP_SERVERIDENT,
+        "OP_SERVERIDENT",
+        json!({
+            "name": name,
+            "description": description,
+        }),
+    )
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic correlation and decoded metadata fields"
+)]
+fn server_tcp_metadata_applied_parts(
+    endpoint: &str,
+    trace_id: u64,
+    role: &str,
+    phase: &str,
+    obfuscated: bool,
+    opcode: u8,
+    opcode_name: &str,
+    fields: Value,
+) -> (Value, Value) {
+    let transport_mode = if obfuscated {
+        "obfuscated"
+    } else {
+        "plaintext"
+    };
+    let trace_key = format!("server:{role}:{trace_id}:{endpoint}");
+    let state_id = format!("server.{role}.{phase}");
+    let mut body = fields.as_object().cloned().unwrap_or_default();
+    body.extend(Map::from_iter([
+        ("direction".to_string(), json!("meta")),
+        ("outcome".to_string(), json!("applied")),
+        ("protocolMarker".to_string(), json!(OP_EDONKEYPROT_MARKER)),
+        ("protocolName".to_string(), json!("ed2k")),
+        ("opcode".to_string(), json!(opcode)),
+        ("opcodeName".to_string(), json!(opcode_name)),
+        ("obfuscated".to_string(), json!(obfuscated)),
+        ("transportMode".to_string(), json!(transport_mode)),
+        ("flow".to_string(), json!("server")),
+        ("phase".to_string(), json!(phase)),
+        ("role".to_string(), json!(role)),
+        ("traceId".to_string(), json!(trace_id)),
+        ("traceKey".to_string(), json!(trace_key)),
+        ("stateId".to_string(), json!(state_id)),
+        ("stateLabel".to_string(), json!(phase)),
+    ]));
+    (
+        json!({
+            "peer": endpoint,
+            "traceId": trace_id,
+            "protocolMarker": OP_EDONKEYPROT_MARKER,
+            "opcode": opcode,
+        }),
+        Value::Object(body),
+    )
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -737,10 +881,54 @@ mod tests {
         Ed2kServerDumpRecord, Ed2kServerSendContext, Ed2kServerSendOutcome, OP_CALLBACKREQUEST,
         OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ,
         OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_PACKEDPROT,
-        OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, ed2k_server_diag_event_parts,
-        ed2k_server_send_outcome_parts, ed2k_server_transport_fallback_parts, exact_packet_hex,
-        server_opcode_name, server_protocol_name,
+        OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT,
+        OP_SERVERSTATUS, ed2k_server_diag_event_parts, ed2k_server_ident_applied_parts,
+        ed2k_server_send_outcome_parts, ed2k_server_status_applied_parts,
+        ed2k_server_transport_fallback_parts, exact_packet_hex, server_opcode_name,
+        server_protocol_name,
     };
+
+    #[test]
+    fn server_status_applied_event_is_causally_correlated() {
+        let (keys, body) = ed2k_server_status_applied_parts(
+            "127.0.0.1:4661",
+            7,
+            "background",
+            "connected",
+            true,
+            3,
+            2,
+        );
+
+        assert_eq!(keys["peer"], "127.0.0.1:4661");
+        assert_eq!(keys["traceId"], 7);
+        assert_eq!(keys["opcode"], OP_SERVERSTATUS);
+        assert_eq!(body["outcome"], "applied");
+        assert_eq!(body["transportMode"], "obfuscated");
+        assert_eq!(body["users"], 3);
+        assert_eq!(body["files"], 2);
+        assert_eq!(body["traceKey"], "server:background:7:127.0.0.1:4661");
+    }
+
+    #[test]
+    fn server_ident_applied_event_preserves_decoded_metadata() {
+        let (keys, body) = ed2k_server_ident_applied_parts(
+            "127.0.0.1:4661",
+            8,
+            "background",
+            "connected",
+            false,
+            Some("deterministic-server"),
+            Some("deterministic-description"),
+        );
+
+        assert_eq!(keys["opcode"], OP_SERVERIDENT);
+        assert_eq!(body["outcome"], "applied");
+        assert_eq!(body["transportMode"], "plaintext");
+        assert_eq!(body["name"], "deterministic-server");
+        assert_eq!(body["description"], "deterministic-description");
+        assert_eq!(body["traceId"], 8);
+    }
 
     #[test]
     fn server_transport_fallback_is_structured_for_cross_client_evidence() {

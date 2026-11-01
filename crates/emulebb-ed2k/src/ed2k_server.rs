@@ -67,8 +67,8 @@ pub use background::{
     search_source_via_background_session,
 };
 use diagnostics::{
-    dump_ed2k_server_loop_meta, dump_ed2k_server_meta, dump_ed2k_server_packet,
-    dump_ed2k_server_transport_fallback,
+    dump_ed2k_server_ident_applied, dump_ed2k_server_loop_meta, dump_ed2k_server_meta,
+    dump_ed2k_server_packet, dump_ed2k_server_status_applied, dump_ed2k_server_transport_fallback,
 };
 use flags::{format_connect_options, format_server_flags, is_low_id};
 use legacy_udp::{encode_global_callback_request, encode_server_list_request};
