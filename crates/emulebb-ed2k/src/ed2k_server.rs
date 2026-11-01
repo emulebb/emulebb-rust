@@ -61,15 +61,37 @@ use background::{
 pub use background::{
     Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundKeywordSearchOutcome,
     Ed2kBackgroundSearchInterrupted, Ed2kServerSearchHandle, Ed2kServerSearchInbox,
-    Ed2kServerSourceBatchTarget, new_ed2k_server_search_channel,
+    Ed2kServerSourceBatchTarget, Ed2kServerSourceSearchResult, new_ed2k_server_search_channel,
     publish_shared_catalog_via_background_session, request_callback_via_background_session,
     search_keyword_via_background_session, search_source_batch_via_background_session,
     search_source_via_background_session,
 };
 use diagnostics::{
     dump_ed2k_server_ident_applied, dump_ed2k_server_loop_meta, dump_ed2k_server_meta,
-    dump_ed2k_server_packet, dump_ed2k_server_status_applied, dump_ed2k_server_transport_fallback,
+    dump_ed2k_server_packet, dump_ed2k_server_source_result_applied,
+    dump_ed2k_server_status_applied, dump_ed2k_server_transport_fallback,
 };
+
+/// Records that one causally identified connected-server source reply was
+/// applied to core's live per-file source registry.
+pub fn emit_server_source_result_applied(
+    result: &Ed2kServerSourceSearchResult,
+    file_hash: emulebb_kad_proto::Ed2kHash,
+    wire_source_count: usize,
+    source_count_before: usize,
+    source_count_after: usize,
+) {
+    dump_ed2k_server_source_result_applied(
+        &result.server_endpoint.to_string(),
+        result.trace_id,
+        result.transport_mode,
+        result.response_opcode,
+        file_hash,
+        wire_source_count,
+        source_count_before,
+        source_count_after,
+    );
+}
 use flags::{format_connect_options, format_server_flags, is_low_id};
 use legacy_udp::{encode_global_callback_request, encode_server_list_request};
 pub use loop_runtime::run_ed2k_server_loop;

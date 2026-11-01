@@ -430,7 +430,16 @@ async fn background_source_batch_search_channel_round_trips_results_by_hash() {
                         },
                     ]
                 );
-                let _ = response.send(Ok(HashMap::from([(file_hash_b, vec![expected_for_task])])));
+                let _ = response.send(Ok(HashMap::from([(
+                    file_hash_b,
+                    Ed2kServerSourceSearchResult {
+                        server_endpoint: SocketAddr::from(([127, 0, 0, 1], 4661)),
+                        trace_id: 7,
+                        transport_mode: "plaintext",
+                        response_opcode: OP_FOUNDSOURCES,
+                        sources: vec![expected_for_task],
+                    },
+                )])));
             }
             other => panic!("unexpected background request: {other:?}"),
         }
@@ -454,7 +463,10 @@ async fn background_source_batch_search_channel_round_trips_results_by_hash() {
     .await
     .unwrap();
 
-    assert_eq!(results.get(&file_hash_b), Some(&vec![expected]));
+    let result = results.get(&file_hash_b).unwrap();
+    assert_eq!(result.trace_id, 7);
+    assert_eq!(result.response_opcode, OP_FOUNDSOURCES);
+    assert_eq!(result.sources, vec![expected]);
     responder.await.unwrap();
 }
 
@@ -1852,7 +1864,11 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
         ServerSessionExit::IntentionalShutdown
     );
     assert_eq!(results.len(), 2);
-    assert_eq!(results.get(&file_hash_a), Some(&Vec::new()));
-    assert_eq!(results.get(&file_hash_b), Some(&Vec::new()));
+    let result_a = results.get(&file_hash_a).unwrap();
+    let result_b = results.get(&file_hash_b).unwrap();
+    assert!(result_a.sources.is_empty());
+    assert!(result_b.sources.is_empty());
+    assert_eq!(result_a.trace_id, result_b.trace_id);
+    assert_eq!(result_a.server_endpoint, result_b.server_endpoint);
     server_task.abort();
 }
