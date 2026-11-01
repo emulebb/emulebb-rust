@@ -37,6 +37,7 @@ struct ClientUdpDiagnosticRecord<'a> {
     outcome: ClientUdpDumpOutcome,
     send_attempt_id: Option<u64>,
     role: Option<&'static str>,
+    file_hash: Option<emulebb_kad_proto::Ed2kHash>,
     remote_addr: String,
     transport_mode: &'a str,
     obfuscated: Option<bool>,
@@ -104,6 +105,7 @@ pub(super) fn dump_client_udp_send_attempt(
         outcome: ClientUdpDumpOutcome::Attempted,
         send_attempt_id: Some(attempt_id),
         role: Some(role.as_str()),
+        file_hash: datagram.file_hash,
         remote_addr: remote_addr.to_string(),
         transport_mode: if datagram.obfuscated {
             "obfuscated"
@@ -171,6 +173,7 @@ pub(super) fn dump_client_udp_recv(
         outcome,
         send_attempt_id: None,
         role: None,
+        file_hash: None,
         remote_addr: remote_addr.to_string(),
         transport_mode,
         obfuscated: match transport_mode {
@@ -326,6 +329,9 @@ fn client_udp_diag_event_parts(
     }
     if let Some(opcode) = record.opcode {
         keys.insert("opcode".to_string(), json!(opcode));
+    }
+    if let Some(file_hash) = record.file_hash {
+        keys.insert("fileHash".to_string(), json!(file_hash.to_string()));
     }
 
     let mut body = Map::new();
@@ -536,6 +542,7 @@ mod tests {
             outcome: ClientUdpDumpOutcome::Attempted,
             send_attempt_id: Some(7),
             role: Some("reask_request"),
+            file_hash: Some(Ed2kHash::from_bytes([0xAB; 16])),
             remote_addr: "198.51.100.2:4672".to_string(),
             transport_mode: "obfuscated",
             obfuscated: Some(true),
@@ -558,6 +565,7 @@ mod tests {
         assert_eq!(keys["peer"], "198.51.100.2:4672");
         assert_eq!(keys["protocolMarker"], 0xC5);
         assert_eq!(keys["opcode"], OP_REASKFILEPING);
+        assert_eq!(keys["fileHash"], "abababababababababababababababab");
         assert_eq!(body["direction"], "send");
         assert_eq!(keys["sendAttemptId"], 7);
         assert_eq!(body["outcome"], "attempted");
@@ -591,6 +599,7 @@ mod tests {
             outcome: ClientUdpDumpOutcome::Dropped,
             send_attempt_id: None,
             role: None,
+            file_hash: None,
             remote_addr: "198.51.100.2:4672".to_string(),
             transport_mode: "unknown",
             obfuscated: None,
@@ -627,6 +636,7 @@ mod tests {
             opcode: OP_DIRECTCALLBACKREQ,
             payload: vec![0x01, 0x02],
             obfuscated: false,
+            file_hash: None,
         };
         let (severity, keys, body) = client_udp_send_outcome_parts(
             "198.51.100.2:4672".parse().unwrap(),
