@@ -17,7 +17,8 @@ use super::{
     OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
     OP_SERVERSTATUS, SERVER_TCP_FLAG_UNICODE, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME,
     ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32, decode_ed2k_string,
-    decode_search_result_page, decode_server_list, encode_search_request, format_connect_options,
+    decode_search_result_page, decode_server_list, dump_ed2k_server_ident_applied,
+    dump_ed2k_server_status_applied, encode_search_request, format_connect_options,
     format_server_flags, ipv4_from_client_id, is_low_id, log_search_result_page,
     send_connected_server_startup, wait_for_offer_files_settle,
 };
@@ -195,6 +196,7 @@ pub(super) async fn handle_server_packet(
                     guard.server_users = Some(users);
                     guard.server_files = Some(files);
                 }
+                dump_ed2k_server_status_applied(session, users, files);
                 debug!(
                     "ED2K server status from {}: users={} files={}",
                     session.endpoint, users, files
@@ -221,6 +223,11 @@ pub(super) async fn handle_server_packet(
                         guard.server_description = Some(description.clone());
                     }
                 }
+                dump_ed2k_server_ident_applied(
+                    session,
+                    ident.name.as_deref(),
+                    ident.description.as_deref(),
+                );
                 session
                     .observe_offer_files_capability(ident.offer_files_capability.clone())
                     .await;
