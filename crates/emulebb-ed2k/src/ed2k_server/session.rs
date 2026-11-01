@@ -224,7 +224,32 @@ impl ServerSession {
         transport_mode: &'static str,
         pending_login_deadline: Instant,
     ) -> Result<Self> {
-        let trace_id = NEXT_SERVER_SESSION_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+        let trace_id = Self::next_trace_id();
+        Self::connect_until_with_trace_id(
+            bind_ip,
+            endpoint,
+            state,
+            trace_role,
+            transport_mode,
+            pending_login_deadline,
+            trace_id,
+        )
+        .await
+    }
+
+    pub(super) fn next_trace_id() -> u64 {
+        NEXT_SERVER_SESSION_TRACE_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(super) async fn connect_until_with_trace_id(
+        bind_ip: Ipv4Addr,
+        endpoint: SocketAddr,
+        state: Arc<RwLock<Ed2kServerState>>,
+        trace_role: &'static str,
+        transport_mode: &'static str,
+        pending_login_deadline: Instant,
+        trace_id: u64,
+    ) -> Result<Self> {
         emit_server_connection_state(
             endpoint,
             trace_id,
