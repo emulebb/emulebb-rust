@@ -36,6 +36,32 @@ const SERVER_CRYPT_PING_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 const SERVER_METADATA_PACING: Duration = Duration::from_secs(1);
 const SERVER_CONNECTION_WAIT_POLL: Duration = Duration::from_millis(100);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerDescriptionPollKey {
+    session_generation: u64,
+    server_endpoints: Vec<String>,
+    obfuscation_enabled: bool,
+    add_servers_from_server: bool,
+}
+
+impl ServerDescriptionPollKey {
+    fn new(
+        plan: &Ed2kServerConnectPlan,
+        session_generation: u64,
+        configured_servers: &[super::server_entry::ConfiguredServerEntry],
+    ) -> Self {
+        Self {
+            session_generation,
+            server_endpoints: configured_servers
+                .iter()
+                .map(|server| server.base_endpoint_text().to_ascii_lowercase())
+                .collect(),
+            obfuscation_enabled: plan.config().obfuscation_enabled,
+            add_servers_from_server: plan.config().add_servers_from_server,
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "long-lived poll task receives its owned runtime dependencies explicitly"
@@ -73,7 +99,21 @@ pub(super) async fn poll_server_descriptions(
             }
             continue;
         }
-        let poll_key = (plan.clone(), state_snapshot.session_generation);
+        let configured_servers = match configured_server_entries(plan.config()) {
+            Ok(servers) => servers,
+            Err(error) => {
+                warn!("server description poll skipped invalid live plan: {error}");
+                if !wait_for_poll_trigger(&mut server_connect_plan, &task_cancel).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        let poll_key = ServerDescriptionPollKey::new(
+            &plan,
+            state_snapshot.session_generation,
+            &configured_servers,
+        );
         if last_polled.as_ref() == Some(&poll_key) {
             if !wait_for_poll_trigger(&mut server_connect_plan, &task_cancel).await {
                 return;
@@ -81,13 +121,6 @@ pub(super) async fn poll_server_descriptions(
             continue;
         }
         last_polled = Some(poll_key);
-        let configured_servers = match configured_server_entries(plan.config()) {
-            Ok(servers) => servers,
-            Err(error) => {
-                warn!("server description poll skipped invalid live plan: {error}");
-                continue;
-            }
-        };
 
         for configured in configured_servers {
             match observe_plan(&server_connect_plan) {
@@ -426,7 +459,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::Ed2kRuntimeConfig,
+        config::{Ed2kRuntimeConfig, Ed2kServerEntry},
         ed2k_server::{
             Ed2kServerConnectMode, Ed2kServerConnectPlan, Ed2kServerDescriptionResponseFormat,
             Ed2kServerUdpTransport, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
@@ -597,6 +630,108 @@ mod tests {
         }
 
         added_responder.await.unwrap();
+        task_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), poller)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn learned_metadata_plan_replacement_does_not_repoll_same_session() {
+        let (base_port, server, _crypt) = bind_plain_and_crypt_ports().await;
+        let endpoint = format!("127.0.0.1:{base_port}");
+        let (plan_sender, plan_receiver) = watch::channel(automatic_plan(Some(endpoint.clone())));
+        let state = Arc::new(RwLock::new(Ed2kServerState {
+            endpoint: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 1))),
+            connected: true,
+            session_generation: 7,
+            ..Ed2kServerState::default()
+        }));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_enabled = Arc::new(AtomicBool::new(true));
+        let (events, mut inbox) = ed2k_server_list_event_channel();
+        let task_cancel = CancellationToken::new();
+        let poller = tokio::spawn(poll_server_descriptions(
+            Ipv4Addr::LOCALHOST,
+            plan_receiver,
+            Arc::clone(&state),
+            crate::reachability::ReachabilityRuntimeAuthority::new().reader(),
+            Arc::clone(&shutdown),
+            Arc::clone(&server_enabled),
+            Some(events),
+            task_cancel.clone(),
+        ));
+
+        let mut buffer = [0u8; 256];
+        let (status_len, client) =
+            tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(status_len, 6);
+        assert_eq!(buffer[..2], [OP_EDONKEYPROT, OP_GLOBSERVSTATREQ]);
+        let challenge = u32::from_le_bytes(buffer[2..6].try_into().unwrap());
+        let mut status = challenge.to_le_bytes().to_vec();
+        status.extend_from_slice(&123u32.to_le_bytes());
+        status.extend_from_slice(&456u32.to_le_bytes());
+        status.extend_from_slice(&[0u8; 12]);
+        server
+            .send_to(&framed(OP_GLOBSERVSTATRES, &status), client)
+            .await
+            .unwrap();
+
+        let (description_len, client) =
+            tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(description_len, 6);
+        assert_eq!(buffer[..2], [OP_EDONKEYPROT, OP_SERVER_DESC_REQ]);
+        let mut description = 6u16.to_le_bytes().to_vec();
+        description.extend_from_slice(b"Server");
+        description.extend_from_slice(&11u16.to_le_bytes());
+        description.extend_from_slice(b"Description");
+        server
+            .send_to(&framed(OP_SERVER_DESC_RES, &description), client)
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), inbox.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), inbox.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let updated_config = Ed2kRuntimeConfig {
+            obfuscation_enabled: false,
+            server_endpoints: vec![endpoint],
+            server_entries: vec![Ed2kServerEntry {
+                host: Ipv4Addr::LOCALHOST.to_string(),
+                port: base_port,
+                name: Some("Server".to_string()),
+                description: Some("Description".to_string()),
+                soft_files: 5000,
+                hard_files: 200_000,
+                ..Ed2kServerEntry::default()
+            }],
+            ..Ed2kRuntimeConfig::default()
+        };
+        plan_sender.send_replace(Ed2kServerConnectPlan::new(
+            updated_config,
+            Ed2kServerConnectMode::Automatic,
+        ));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), server.recv_from(&mut buffer))
+                .await
+                .is_err(),
+            "learned metadata must not schedule an immediate duplicate poll"
+        );
+
         task_cancel.cancel();
         tokio::time::timeout(Duration::from_secs(1), poller)
             .await
