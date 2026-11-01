@@ -634,7 +634,11 @@ pub(crate) async fn collect_kad_ed2k_metadata(
             return None;
         }
     };
-    crate::diag_kad_event::lookup_started(None, crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD);
+    crate::diag_kad_event::lookup_started(
+        None,
+        crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
+        None,
+    );
     let sleep = tokio::time::sleep(timeout);
     tokio::pin!(sleep);
     let mut learned = LearnedEd2kMetadata::default();
@@ -714,6 +718,7 @@ pub(crate) async fn collect_kad_ed2k_sources(
             crate::diag_kad_event::lookup_started(
                 None,
                 crate::diag_kad_event::KAD_SEARCH_KIND_FILE,
+                None,
             );
             lookup_started = true;
         }
