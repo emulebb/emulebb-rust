@@ -32,7 +32,7 @@ type BackgroundKeywordSearchResponse =
 type BackgroundSourceSearchResponse =
     std::result::Result<Vec<Ed2kFoundSource>, BackgroundSearchFailure>;
 type BackgroundSourceBatchSearchResponse =
-    std::result::Result<HashMap<Ed2kHash, Vec<Ed2kFoundSource>>, BackgroundSearchFailure>;
+    std::result::Result<HashMap<Ed2kHash, Ed2kServerSourceSearchResult>, BackgroundSearchFailure>;
 type BackgroundCallbackRequestResponse = std::result::Result<(), BackgroundSearchFailure>;
 type BackgroundPublishResponse =
     std::result::Result<OfferFilesPublishStats, BackgroundSearchFailure>;
@@ -162,6 +162,18 @@ pub struct Ed2kServerSourceBatchTarget {
     pub file_size: u64,
 }
 
+/// One decoded connected-server source reply plus the immutable session
+/// provenance needed to prove where the sources came from after core applies
+/// them to its live source registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ed2kServerSourceSearchResult {
+    pub server_endpoint: SocketAddr,
+    pub trace_id: u64,
+    pub transport_mode: &'static str,
+    pub response_opcode: u8,
+    pub sources: Vec<Ed2kFoundSource>,
+}
+
 #[derive(Debug)]
 pub(super) enum BackgroundServerSearchRequest {
     Keyword {
@@ -230,7 +242,7 @@ pub(super) enum PendingBackgroundServerSearch {
     SourceBatch {
         pending_hashes: HashSet<Ed2kHash>,
         deadline: TokioInstant,
-        results_by_hash: HashMap<Ed2kHash, Vec<Ed2kFoundSource>>,
+        results_by_hash: HashMap<Ed2kHash, Ed2kServerSourceSearchResult>,
         response: oneshot::Sender<BackgroundSourceBatchSearchResponse>,
     },
 }
@@ -336,7 +348,7 @@ pub async fn search_source_batch_via_background_session(
     targets: &[Ed2kServerSourceBatchTarget],
     timeout: Duration,
     cancel: &CancellationToken,
-) -> Result<HashMap<Ed2kHash, Vec<Ed2kFoundSource>>> {
+) -> Result<HashMap<Ed2kHash, Ed2kServerSourceSearchResult>> {
     if targets.is_empty() {
         return Ok(HashMap::new());
     }

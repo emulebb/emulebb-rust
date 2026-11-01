@@ -16,14 +16,15 @@ use super::udp_runtime::{
 };
 use super::{
     BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
-    Ed2kBackgroundKeywordSearchOutcome, Ed2kServerFailure, Ed2kServerSearchInbox, Ed2kServerState,
-    OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT,
-    OP_SEARCHRESULT, PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession,
-    ServerSessionPhase, ServerSessionRole, ServerTransportMode, annotate_found_sources_server,
-    decode_found_sources, decode_search_result_page, dump_ed2k_server_transport_fallback,
-    encode_login_request, fail_background_search_request, fail_pending_background_search,
-    format_connect_options, handle_background_udp_packet, handle_server_packet,
-    log_search_result_page, login_identity_for_server_transport, run_server_transport_attempts,
+    Ed2kBackgroundKeywordSearchOutcome, Ed2kServerFailure, Ed2kServerSearchInbox,
+    Ed2kServerSourceSearchResult, Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU,
+    OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT,
+    PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession, ServerSessionPhase,
+    ServerSessionRole, ServerTransportMode, annotate_found_sources_server, decode_found_sources,
+    decode_search_result_page, dump_ed2k_server_transport_fallback, encode_login_request,
+    fail_background_search_request, fail_pending_background_search, format_connect_options,
+    handle_background_udp_packet, handle_server_packet, log_search_result_page,
+    login_identity_for_server_transport, run_server_transport_attempts,
     send_due_offer_files_advertisement, server_transport_attempts, server_udp_endpoint,
     start_background_server_search, validate_found_sources,
 };
@@ -829,7 +830,16 @@ pub(super) async fn run_one_server_session(
                                 continue;
                             }
                             pending_hashes.remove(&response_hash);
-                            results_by_hash.insert(response_hash, results);
+                            results_by_hash.insert(
+                                response_hash,
+                                Ed2kServerSourceSearchResult {
+                                    server_endpoint: session.endpoint,
+                                    trace_id: session.trace_id,
+                                    transport_mode: session.transport_mode,
+                                    response_opcode: packet.opcode,
+                                    sources: results,
+                                },
+                            );
                             if pending_hashes.is_empty() {
                                 session.set_phase(
                                     ServerSessionPhase::Completed,

@@ -236,6 +236,23 @@ pub(super) fn dump_ed2k_server_ident_applied(
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic correlation fields"
+)]
+pub(super) fn dump_ed2k_server_source_result_applied(
+    _endpoint: &str,
+    _trace_id: u64,
+    _transport_mode: &'static str,
+    _response_opcode: u8,
+    _file_hash: emulebb_kad_proto::Ed2kHash,
+    _wire_source_count: usize,
+    _source_count_before: usize,
+    _source_count_after: usize,
+) {
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
 pub(super) fn dump_ed2k_server_loop_meta(
     _endpoint: &str,
     _phase: &'static str,
@@ -419,6 +436,83 @@ fn server_tcp_metadata_applied_parts(
             "opcode": opcode,
         }),
         Value::Object(body),
+    )
+}
+
+#[cfg(feature = "packet-diagnostics")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic correlation fields"
+)]
+pub(super) fn dump_ed2k_server_source_result_applied(
+    endpoint: &str,
+    trace_id: u64,
+    transport_mode: &'static str,
+    response_opcode: u8,
+    file_hash: emulebb_kad_proto::Ed2kHash,
+    wire_source_count: usize,
+    source_count_before: usize,
+    source_count_after: usize,
+) {
+    let (keys, body) = ed2k_server_source_result_applied_parts(
+        endpoint,
+        trace_id,
+        transport_mode,
+        response_opcode,
+        file_hash,
+        wire_source_count,
+        source_count_before,
+        source_count_after,
+    );
+    crate::diag_event::emit("ed2k_tcp", "source_result_applied", "info", keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic correlation fields"
+)]
+fn ed2k_server_source_result_applied_parts(
+    endpoint: &str,
+    trace_id: u64,
+    transport_mode: &'static str,
+    response_opcode: u8,
+    file_hash: emulebb_kad_proto::Ed2kHash,
+    wire_source_count: usize,
+    source_count_before: usize,
+    source_count_after: usize,
+) -> (Value, Value) {
+    let obfuscated = response_opcode == OP_FOUNDSOURCES_OBFU;
+    let opcode_name = if obfuscated {
+        "OP_FOUNDSOURCES_OBFU"
+    } else {
+        "OP_FOUNDSOURCES"
+    };
+    (
+        json!({
+            "peer": endpoint,
+            "fileHash": file_hash.to_string(),
+            "opcode": response_opcode,
+            "protocolMarker": OP_EDONKEYPROT_MARKER,
+            "traceId": trace_id,
+        }),
+        json!({
+            "flow": "server",
+            "phase": "source_search",
+            "direction": "recv",
+            "protocolMarker": OP_EDONKEYPROT_MARKER,
+            "opcode": response_opcode,
+            "opcodeName": opcode_name,
+            "traceId": trace_id,
+            "transportMode": transport_mode,
+            "obfuscated": obfuscated,
+            "stateId": "server.source.result_applied",
+            "milestone": "result_applied",
+            "wireSourceCount": wire_source_count,
+            "sourceCountBefore": source_count_before,
+            "sourceCountAfter": source_count_after,
+            "outcome": "applied",
+        }),
     )
 }
 
@@ -890,15 +984,16 @@ fn server_opcode_name(opcode: u8) -> &'static str {
 mod tests {
     use super::{
         Ed2kServerDumpRecord, Ed2kServerSendContext, Ed2kServerSendOutcome, OP_CALLBACKREQUEST,
-        OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ,
-        OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ,
-        OP_GLOBSERVSTATRES, OP_PACKEDPROT, OP_SERVER_DESC_RES, OP_SERVER_LIST_REQ,
-        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT, OP_SERVERSTATUS,
-        ed2k_server_diag_event_parts, ed2k_server_ident_applied_parts,
-        ed2k_server_send_outcome_parts, ed2k_server_status_applied_parts,
-        ed2k_server_transport_fallback_parts, exact_packet_hex, server_opcode_name,
-        server_protocol_name,
+        OP_EDONKEYPROT_MARKER, OP_FOUNDSOURCES, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES,
+        OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES,
+        OP_GLOBSERVSTATREQ, OP_GLOBSERVSTATRES, OP_PACKEDPROT, OP_SERVER_DESC_RES,
+        OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT,
+        OP_SERVERSTATUS, ed2k_server_diag_event_parts, ed2k_server_ident_applied_parts,
+        ed2k_server_send_outcome_parts, ed2k_server_source_result_applied_parts,
+        ed2k_server_status_applied_parts, ed2k_server_transport_fallback_parts, exact_packet_hex,
+        server_opcode_name, server_protocol_name,
     };
+    use emulebb_kad_proto::Ed2kHash;
 
     #[test]
     fn server_status_applied_event_is_causally_correlated() {
@@ -940,6 +1035,32 @@ mod tests {
         assert_eq!(body["name"], "deterministic-server");
         assert_eq!(body["description"], "deterministic-description");
         assert_eq!(body["traceId"], 8);
+    }
+
+    #[test]
+    fn server_source_result_applied_event_preserves_causal_registry_counts() {
+        let file_hash = Ed2kHash::from_bytes([0x22; 16]);
+        let (keys, body) = ed2k_server_source_result_applied_parts(
+            "127.0.0.1:4661",
+            9,
+            "plaintext",
+            OP_FOUNDSOURCES,
+            file_hash,
+            1,
+            0,
+            1,
+        );
+
+        assert_eq!(keys["peer"], "127.0.0.1:4661");
+        assert_eq!(keys["fileHash"], file_hash.to_string());
+        assert_eq!(keys["traceId"], 9);
+        assert_eq!(keys["opcode"], OP_FOUNDSOURCES);
+        assert_eq!(body["stateId"], "server.source.result_applied");
+        assert_eq!(body["milestone"], "result_applied");
+        assert_eq!(body["wireSourceCount"], 1);
+        assert_eq!(body["sourceCountBefore"], 0);
+        assert_eq!(body["sourceCountAfter"], 1);
+        assert_eq!(body["outcome"], "applied");
     }
 
     #[test]

@@ -31,7 +31,7 @@ use emulebb_ed2k::{
         Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpCallbackRequestOptions,
         Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
         SearchCriteria, ed2k_server_control_channel, ed2k_server_list_event_channel,
-        new_ed2k_server_search_channel, parse_server_met,
+        emit_server_source_result_applied, new_ed2k_server_search_channel, parse_server_met,
         publish_shared_catalog_via_background_session, request_callback_via_background_session,
         request_callback_via_udp_server, run_ed2k_server_loop, search_keyword_udp_servers,
         search_keyword_via_background_session, search_source_batch_via_background_session,
@@ -2290,11 +2290,14 @@ impl EmulebbCore {
         &self,
         transfer: &Transfer,
         sources: &[Ed2kFoundSource],
-    ) {
+    ) -> (usize, usize) {
         let mut state = self.state.lock().await;
         let file_priority = download_priority_score(&transfer.priority);
         let needed_parts = transfer.parts_total.saturating_sub(transfer.parts_obtained);
         let now = Instant::now();
+        let source_count_before = state
+            .download_source_registry
+            .candidate_count_for_file(now, &transfer.hash);
         for source in sources {
             // Admission gate (oracle DownloadQueue.cpp:1420/:1530 CheckAndAdd*
             // paths): a dead-listed (source, file) pair is not re-admitted to
@@ -2317,6 +2320,10 @@ impl EmulebbCore {
                 },
             );
         }
+        let source_count_after = state
+            .download_source_registry
+            .candidate_count_for_file(now, &transfer.hash);
+        (source_count_before, source_count_after)
     }
 
     /// Build the ordered other-file plans a leased peer may visit on the same
@@ -2716,7 +2723,9 @@ impl EmulebbCore {
                 .await
                 {
                     Ok(results_by_hash) => {
-                        for (result_hash, mut results) in results_by_hash {
+                        for (result_hash, mut result) in results_by_hash {
+                            let wire_source_count = result.sources.len();
+                            let mut results = std::mem::take(&mut result.sources);
                             if !network.ip_filter.is_empty() {
                                 results.retain(|source| !network.ip_filter.is_filtered(source.ip));
                             }
@@ -2724,14 +2733,28 @@ impl EmulebbCore {
                             results.retain(|source| {
                                 !ban_store.is_banned(Some(source.ip), source.user_hash.as_ref())
                             });
+                            if let Some(batch_transfer) = claimed_batch.transfers.get(&result_hash)
+                            {
+                                // WHY: apply the decoded TCP result at its causal
+                                // boundary so the diagnostic counts cannot absorb
+                                // later UDP/Kad supplements. The caller's aggregate
+                                // registration remains an idempotent refresh.
+                                let (source_count_before, source_count_after) = self
+                                    .register_download_source_candidates(batch_transfer, &results)
+                                    .await;
+                                emit_server_source_result_applied(
+                                    &result,
+                                    result_hash,
+                                    wire_source_count,
+                                    source_count_before,
+                                    source_count_after,
+                                );
+                                if result_hash != file_hash {
+                                    self.remember_ed2k_sources(result_hash, &results).await?;
+                                }
+                            }
                             if result_hash == file_hash {
                                 merge_download_sources(&mut sources, results);
-                            } else if let Some(batch_transfer) =
-                                claimed_batch.transfers.get(&result_hash)
-                            {
-                                self.register_download_source_candidates(batch_transfer, &results)
-                                    .await;
-                                self.remember_ed2k_sources(result_hash, &results).await?;
                             }
                         }
                     }
