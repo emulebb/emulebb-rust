@@ -20,7 +20,7 @@ use super::{
     OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT,
     OP_SEARCHRESULT, PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession,
     ServerSessionPhase, ServerSessionRole, ServerTransportMode, annotate_found_sources_server,
-    decode_found_sources, decode_search_result_page, dump_ed2k_server_loop_meta,
+    decode_found_sources, decode_search_result_page, dump_ed2k_server_transport_fallback,
     encode_login_request, fail_background_search_request, fail_pending_background_search,
     format_connect_options, handle_background_udp_packet, handle_server_packet,
     log_search_result_page, login_identity_for_server_transport, run_server_transport_attempts,
@@ -78,14 +78,11 @@ async fn connect_server_transport(
                 // WHY: metadata-poor servers are probed with obfuscation first,
                 // but the transport decision must not become an infinite
                 // same-mode loop when their ordinary endpoint is plaintext.
-                dump_ed2k_server_loop_meta(
+                dump_ed2k_server_transport_fallback(
                     &base_endpoint,
-                    "transport_fallback",
-                    format!(
-                        "server transport failed mode={} detail={error}; retrying mode=plaintext endpoint={}",
-                        mode.label(),
-                        server.base_endpoint()
-                    ),
+                    mode.label(),
+                    ServerTransportMode::Plaintext.label(),
+                    &error.to_string(),
                 );
                 warn!(
                     "ED2K server {} transport={} failed: {error}; retrying plaintext endpoint={}",

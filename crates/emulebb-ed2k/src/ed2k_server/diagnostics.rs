@@ -232,6 +232,15 @@ pub(super) fn dump_ed2k_server_loop_meta(
 ) {
 }
 
+#[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_server_transport_fallback(
+    _endpoint: &str,
+    _from_transport_mode: &'static str,
+    _to_transport_mode: &'static str,
+    _error: &str,
+) {
+}
+
 #[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<String>) {
     let record = Ed2kServerDumpRecord {
@@ -302,6 +311,48 @@ pub(super) fn dump_ed2k_server_loop_meta(
         note: Some(note.into()),
     };
     emit_ed2k_server_diag_event(&record);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) fn dump_ed2k_server_transport_fallback(
+    endpoint: &str,
+    from_transport_mode: &'static str,
+    to_transport_mode: &'static str,
+    error: &str,
+) {
+    let (family, event, severity, keys, body) = ed2k_server_transport_fallback_parts(
+        endpoint,
+        from_transport_mode,
+        to_transport_mode,
+        error,
+    );
+    crate::diag_event::emit(family, event, severity, keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn ed2k_server_transport_fallback_parts(
+    endpoint: &str,
+    from_transport_mode: &'static str,
+    to_transport_mode: &'static str,
+    error: &str,
+) -> (&'static str, &'static str, &'static str, Value, Value) {
+    (
+        "ed2k_tcp",
+        "transport_fallback",
+        "warning",
+        json!({
+            "peer": endpoint,
+            "flow": "server",
+        }),
+        json!({
+            "flow": "server",
+            "phase": "connection",
+            "outcome": "retrying",
+            "fromTransportMode": from_transport_mode,
+            "toTransportMode": to_transport_mode,
+            "error": error,
+        }),
+    )
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
@@ -681,8 +732,30 @@ mod tests {
         OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ,
         OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_PACKEDPROT,
         OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, ed2k_server_diag_event_parts,
-        ed2k_server_send_outcome_parts, exact_packet_hex, server_opcode_name, server_protocol_name,
+        ed2k_server_send_outcome_parts, ed2k_server_transport_fallback_parts, exact_packet_hex,
+        server_opcode_name, server_protocol_name,
     };
+
+    #[test]
+    fn server_transport_fallback_is_structured_for_cross_client_evidence() {
+        let (family, event, severity, keys, body) = ed2k_server_transport_fallback_parts(
+            "198.51.100.4:4661",
+            "obfuscated",
+            "plaintext",
+            "server closed crypt negotiation",
+        );
+
+        assert_eq!(family, "ed2k_tcp");
+        assert_eq!(event, "transport_fallback");
+        assert_eq!(severity, "warning");
+        assert_eq!(keys["peer"], "198.51.100.4:4661");
+        assert_eq!(keys["flow"], "server");
+        assert_eq!(body["phase"], "connection");
+        assert_eq!(body["outcome"], "retrying");
+        assert_eq!(body["fromTransportMode"], "obfuscated");
+        assert_eq!(body["toTransportMode"], "plaintext");
+        assert_eq!(body["error"], "server closed crypt negotiation");
+    }
 
     #[test]
     fn server_tcp_send_outcome_preserves_attempt_correlation_and_terminal_state() {
