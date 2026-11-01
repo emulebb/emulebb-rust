@@ -447,21 +447,29 @@ fn lookup_parts(
     search_id: Option<&str>,
     search_kind: &'static str,
     result_count: u32,
+    target_hex: Option<&str>,
 ) -> (Value, Value) {
     let keys = search_id.map_or_else(|| json!({}), |search_id| json!({ "searchId": search_id }));
-    let body = json!({
+    let mut body = json!({
         "milestone": milestone,
         "action": "search",
         "searchKind": search_kind,
         "resultCount": result_count,
     });
+    if let Some(target_hex) = target_hex {
+        body["targetHex"] = json!(target_hex);
+    }
     (keys, body)
 }
 
 /// Emits the start of one Kad lookup. `searchId` correlates public searches;
 /// internal metadata and source lookups omit it rather than inventing an ID.
-pub(crate) fn lookup_started(search_id: Option<&str>, search_kind: &'static str) {
-    let (keys, body) = lookup_parts("lookup_started", search_id, search_kind, 0);
+pub(crate) fn lookup_started(
+    search_id: Option<&str>,
+    search_kind: &'static str,
+    target_hex: Option<&str>,
+) {
+    let (keys, body) = lookup_parts("lookup_started", search_id, search_kind, 0, target_hex);
     emit(FAMILY, "lookup", "info", keys, body);
 }
 
@@ -471,7 +479,13 @@ pub(crate) fn lookup_complete(
     search_kind: &'static str,
     result_count: u32,
 ) {
-    let (keys, mut body) = lookup_parts("lookup_complete", search_id, search_kind, result_count);
+    let (keys, mut body) = lookup_parts(
+        "lookup_complete",
+        search_id,
+        search_kind,
+        result_count,
+        None,
+    );
     body["outcome"] = json!("completed");
     emit(FAMILY, "lookup", "info", keys, body);
 }
@@ -483,7 +497,7 @@ pub(crate) fn lookup_not_dispatched(
     search_kind: &'static str,
     reason: &'static str,
 ) {
-    let (keys, mut body) = lookup_parts("lookup_not_dispatched", search_id, search_kind, 0);
+    let (keys, mut body) = lookup_parts("lookup_not_dispatched", search_id, search_kind, 0, None);
     body["outcome"] = json!("not-dispatched");
     body["reason"] = json!(reason);
     emit(FAMILY, "lookup", "low", keys, body);
@@ -495,6 +509,7 @@ pub(crate) fn lookup_not_dispatched(
 pub(crate) fn lookup_finished(
     search_id: Option<&str>,
     search_kind: &'static str,
+    target_hex: Option<&str>,
     completion: KadSearchCompletion,
 ) {
     let dispatched = completion.search_packet_dispatched();
@@ -512,6 +527,7 @@ pub(crate) fn lookup_finished(
         search_id,
         search_kind,
         completion.accepted_result_count as u32,
+        target_hex,
     );
     body["outcome"] = json!(outcome);
     body["reason"] = json!(completion.terminal_reason.reason());
@@ -605,7 +621,13 @@ mod tests {
 
     #[test]
     fn lookup_lifecycle_correlates_public_searches() {
-        let (keys, body) = lookup_parts("lookup_complete", Some("42"), KAD_SEARCH_KIND_KEYWORD, 7);
+        let (keys, body) = lookup_parts(
+            "lookup_complete",
+            Some("42"),
+            KAD_SEARCH_KIND_KEYWORD,
+            7,
+            Some("00112233445566778899aabbccddeeff"),
+        );
         assert_eq!(keys, json!({ "searchId": "42" }));
         assert_eq!(
             body,
@@ -614,13 +636,14 @@ mod tests {
                 "action": "search",
                 "searchKind": KAD_SEARCH_KIND_KEYWORD,
                 "resultCount": 7,
+                "targetHex": "00112233445566778899aabbccddeeff",
             })
         );
     }
 
     #[test]
     fn lookup_lifecycle_omits_unknown_search_id() {
-        let (keys, _) = lookup_parts("lookup_started", None, KAD_SEARCH_KIND_FILE, 0);
+        let (keys, _) = lookup_parts("lookup_started", None, KAD_SEARCH_KIND_FILE, 0, None);
         assert_eq!(keys, json!({}));
     }
 
@@ -662,7 +685,7 @@ mod tests {
             "192.0.2.77:4662".parse().unwrap(),
             "abc123",
         );
-        lookup_started(None, KAD_SEARCH_KIND_FILE);
+        lookup_started(None, KAD_SEARCH_KIND_FILE, None);
         lookup_complete(None, KAD_SEARCH_KIND_FILE, 7);
         lookup_not_dispatched(
             Some("search-1"),

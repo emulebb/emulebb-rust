@@ -52,6 +52,7 @@ pub(crate) async fn search_kad_keywords(
     }
 
     let search_request = kad_public_search_request(request)?;
+    let target_hex = search_request.target.to_string();
     let restrictive_payload = search_request.restrictive_payload.clone();
     let mut stream = match dht
         .search_keyword_request_with_cancel_and_class(
@@ -76,6 +77,7 @@ pub(crate) async fn search_kad_keywords(
     crate::diag_kad_event::lookup_started(
         Some(search_id),
         crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
+        Some(&target_hex),
     );
     let mut results = Vec::<SearchResult>::new();
     let mut result_indexes = HashMap::<String, usize>::new();
@@ -111,6 +113,7 @@ pub(crate) async fn search_kad_keywords(
     crate::diag_kad_event::lookup_finished(
         Some(search_id),
         crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
+        Some(&target_hex),
         completion,
     );
     if !completion.search_packet_dispatched()
