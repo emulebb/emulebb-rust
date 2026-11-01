@@ -30,6 +30,10 @@ pub(crate) struct ClientUdpDatagram {
     pub opcode: u8,
     pub payload: Vec<u8>,
     pub obfuscated: bool,
+    /// Logical transfer identity for file-owned request packets. This is kept
+    /// outside the wire bytes so diagnostics never need to infer it by
+    /// decoding an obfuscated datagram at the socket boundary.
+    pub file_hash: Option<Ed2kHash>,
 }
 
 /// One scheduled downloader reask send. `source_endpoint` identifies the peer
@@ -73,6 +77,7 @@ fn frame_packet(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> Client
         opcode,
         payload: body.to_vec(),
         obfuscated: target.obfuscate,
+        file_hash: None,
     }
 }
 
@@ -122,7 +127,9 @@ pub(crate) fn build_reask_file_ping_packet(
         complete_source_count,
         our_udp_version,
     );
-    frame_packet(OP_REASKFILEPING, &body, target)
+    let mut datagram = frame_packet(OP_REASKFILEPING, &body, target);
+    datagram.file_hash = Some(*file_hash);
+    datagram
 }
 
 /// Build an `OP_REASKACK` datagram (uploader -> downloader). `peer_udp_version`
@@ -212,6 +219,7 @@ pub(crate) fn build_reask_callback_udp_packet(
         opcode: OP_REASKCALLBACKUDP,
         payload: body,
         obfuscated: false,
+        file_hash: Some(*file_hash),
     }
 }
 
@@ -256,9 +264,9 @@ mod tests {
     fn file_ping_round_trips_plaintext_and_obfuscated() {
         let parts = [true, false, true, true];
         for target in [plaintext_target(), obfuscated_target()] {
-            let datagram =
-                build_reask_file_ping_datagram(&file_hash(), Some(&parts), 5, 4, &target);
-            let msg = parse_inbound_reask_datagram(&datagram, OUR_IP, &DEST_HASH, 4).unwrap();
+            let packet = build_reask_file_ping_packet(&file_hash(), Some(&parts), 5, 4, &target);
+            assert_eq!(packet.file_hash, Some(file_hash()));
+            let msg = parse_inbound_reask_datagram(&packet.bytes, OUR_IP, &DEST_HASH, 4).unwrap();
             match msg {
                 InboundReaskMessage::FilePing(ping) => {
                     assert_eq!(ping.file_hash, file_hash());
@@ -297,12 +305,13 @@ mod tests {
     #[test]
     fn callback_udp_is_always_plaintext() {
         let buddy = Ed2kHash::from_bytes([0x55; 16]);
-        let datagram = build_reask_callback_udp_datagram(&buddy, &file_hash(), None, 2, 4);
+        let packet = build_reask_callback_udp_packet(&buddy, &file_hash(), None, 2, 4);
+        assert_eq!(packet.file_hash, Some(file_hash()));
         // Always plaintext: starts with the OP_EMULEPROT marker (never obfuscated).
-        assert_eq!(datagram[0], OP_EMULEPROT);
-        assert_eq!(datagram[1], OP_REASKCALLBACKUDP);
+        assert_eq!(packet.bytes[0], OP_EMULEPROT);
+        assert_eq!(packet.bytes[1], OP_REASKCALLBACKUDP);
         // The buddy (receiver) parses it without any key (plaintext path).
-        let msg = parse_inbound_reask_datagram(&datagram, OUR_IP, &[0u8; 16], 4).unwrap();
+        let msg = parse_inbound_reask_datagram(&packet.bytes, OUR_IP, &[0u8; 16], 4).unwrap();
         match msg {
             InboundReaskMessage::CallbackUdp(cb) => {
                 assert_eq!(cb.buddy_id, buddy);
