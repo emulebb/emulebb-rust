@@ -175,7 +175,7 @@ impl Ed2kServerSendAttempt {
             opcode: capture.opcode,
             attempted_len: capture.raw.len(),
         };
-        dump_ed2k_server_udp_packet_with_attempt(server, remote_addr, capture, Some(attempt_id));
+        dump_ed2k_server_udp_packet_with_attempt(server, remote_addr, 0, capture, Some(attempt_id));
         Self {
             context,
             completed: false,
@@ -523,6 +523,7 @@ pub(super) fn dump_ed2k_server_udp_packet(
     _transport_mode: &'static str,
     _opcode: u8,
     _payload: &[u8],
+    _trace_id: u64,
 ) {
 }
 
@@ -530,15 +531,17 @@ pub(super) fn dump_ed2k_server_udp_packet(
 pub(super) fn dump_ed2k_server_udp_packet(
     server: Option<&ResolvedServerEntry>,
     remote_addr: SocketAddr,
+    trace_id: u64,
     capture: Ed2kServerPacketCapture<'_>,
 ) {
-    dump_ed2k_server_udp_packet_with_attempt(server, remote_addr, capture, None);
+    dump_ed2k_server_udp_packet_with_attempt(server, remote_addr, trace_id, capture, None);
 }
 
 #[cfg(feature = "packet-diagnostics")]
 fn dump_ed2k_server_udp_packet_with_attempt(
     server: Option<&ResolvedServerEntry>,
     remote_addr: SocketAddr,
+    trace_id: u64,
     capture: Ed2kServerPacketCapture<'_>,
     send_attempt_id: Option<u64>,
 ) {
@@ -550,9 +553,14 @@ fn dump_ed2k_server_udp_packet_with_attempt(
     let base_endpoint = server
         .map(ResolvedServerEntry::base_endpoint)
         .unwrap_or(remote_addr);
+    let trace_key = if trace_id == 0 {
+        format!("server:udp:{base_endpoint}")
+    } else {
+        format!("server:udp:{trace_id}:{remote_addr}")
+    };
     let record = Ed2kServerDumpRecord {
-        trace_id: 0,
-        trace_key: format!("server:udp:{base_endpoint}"),
+        trace_id,
+        trace_key,
         state_id: format!("server.udp.{direction}"),
         state_label: "udp",
         role: "udp",
@@ -692,6 +700,9 @@ fn ed2k_server_diag_event_parts(
 
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(record.remote_addr));
+    if record.role == "udp" && record.trace_id > 0 {
+        keys.insert("traceId".to_string(), json!(record.trace_id));
+    }
     if let Some(send_attempt_id) = record.send_attempt_id {
         keys.insert("sendAttemptId".to_string(), json!(send_attempt_id));
     }
@@ -880,9 +891,10 @@ mod tests {
     use super::{
         Ed2kServerDumpRecord, Ed2kServerSendContext, Ed2kServerSendOutcome, OP_CALLBACKREQUEST,
         OP_EDONKEYPROT_MARKER, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ,
-        OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_PACKEDPROT,
-        OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT,
-        OP_SERVERSTATUS, ed2k_server_diag_event_parts, ed2k_server_ident_applied_parts,
+        OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ,
+        OP_GLOBSERVSTATRES, OP_PACKEDPROT, OP_SERVER_DESC_RES, OP_SERVER_LIST_REQ,
+        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT, OP_SERVERSTATUS,
+        ed2k_server_diag_event_parts, ed2k_server_ident_applied_parts,
         ed2k_server_send_outcome_parts, ed2k_server_status_applied_parts,
         ed2k_server_transport_fallback_parts, exact_packet_hex, server_opcode_name,
         server_protocol_name,
@@ -1024,6 +1036,7 @@ mod tests {
         assert_eq!(family, "ed2k_server_udp");
         assert_eq!(severity, "warning");
         assert_eq!(keys["peer"], "198.51.100.2:4665");
+        assert!(keys.get("traceId").is_none());
         assert_eq!(keys["sendAttemptId"], 43);
         assert_eq!(body["outcome"], "send_failed");
         assert_eq!(body["traceKey"], "server:udp:198.51.100.2:4661");
@@ -1093,16 +1106,16 @@ mod tests {
     }
 
     #[test]
-    fn server_udp_common_event_uses_a_distinct_family() {
+    fn server_udp_reply_packet_preserves_positive_correlation() {
         let record = Ed2kServerDumpRecord {
-            trace_id: 0,
-            trace_key: "server:udp:198.51.100.2:4661".to_string(),
-            state_id: "server.udp.send".to_string(),
+            trace_id: 41,
+            trace_key: "server:udp:41:198.51.100.2:4665".to_string(),
+            state_id: "server.udp.recv".to_string(),
             state_label: "udp",
             role: "udp",
             flow: "server",
             phase: "udp",
-            direction: "send",
+            direction: "recv",
             outcome: "accepted",
             send_attempt_id: None,
             remote_addr: "198.51.100.2:4665".to_string(),
@@ -1110,8 +1123,8 @@ mod tests {
             obfuscated: Some(true),
             protocol: Some("ed2k"),
             protocol_marker: Some(OP_EDONKEYPROT_MARKER),
-            opcode: Some(OP_GLOBSEARCHREQ),
-            opcode_name: Some(server_opcode_name(OP_GLOBSEARCHREQ)),
+            opcode: Some(OP_GLOBSERVSTATRES),
+            opcode_name: Some(server_opcode_name(OP_GLOBSERVSTATRES)),
             raw_len: Some(4),
             raw_hex: Some("1234abcd".to_string()),
             clear_frame_len: Some(4),
@@ -1122,11 +1135,16 @@ mod tests {
             note: None,
         };
 
-        let (family, event, severity, _, body) = ed2k_server_diag_event_parts(&record);
+        let (family, event, severity, keys, body) = ed2k_server_diag_event_parts(&record);
         assert_eq!(family, "ed2k_server_udp");
         assert_eq!(event, "packet");
         assert_eq!(severity, "info");
+        assert_eq!(keys["peer"], "198.51.100.2:4665");
+        assert_eq!(keys["opcode"], OP_GLOBSERVSTATRES);
         assert_eq!(body["obfuscated"], true);
+        assert_eq!(body["traceId"], 41);
+        assert_eq!(body["traceKey"], "server:udp:41:198.51.100.2:4665");
+        assert_eq!(body["opcodeName"], "OP_GLOBSERVSTATRES");
     }
 
     #[test]
@@ -1221,8 +1239,10 @@ mod tests {
             "OP_GLOBFOUNDSOURCES"
         );
         assert_eq!(server_opcode_name(OP_GLOBCALLBACKREQ), "OP_GLOBCALLBACKREQ");
+        assert_eq!(server_opcode_name(OP_GLOBSERVSTATRES), "OP_GLOBSERVSTATRES");
         assert_eq!(server_opcode_name(OP_SERVER_LIST_REQ), "OP_SERVER_LIST_REQ");
         assert_eq!(server_opcode_name(OP_SERVER_LIST_RES), "OP_SERVER_LIST_RES");
+        assert_eq!(server_opcode_name(OP_SERVER_DESC_RES), "OP_SERVER_DESC_RES");
         assert_eq!(
             server_opcode_name(OP_SERVER_LIST_REQ2),
             "OP_SERVER_LIST_REQ2"

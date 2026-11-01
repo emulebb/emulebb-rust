@@ -108,6 +108,7 @@ mod category_runtime;
 mod core_settings;
 mod core_state;
 mod delivery;
+mod diag_ed2k_server_udp;
 mod diag_kad_event;
 mod diag_sched;
 mod direct_download_runtime;

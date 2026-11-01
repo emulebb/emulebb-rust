@@ -1,4 +1,7 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::{Context, Result, anyhow};
 use rand::RngExt;
@@ -9,14 +12,34 @@ use emulebb_kad_proto::Ed2kHash;
 #[cfg(feature = "packet-diagnostics")]
 use super::diagnostics::{Ed2kServerPacketCapture, Ed2kServerSendAttempt};
 use super::{
-    Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
-    ResolvedServerEntry, ServerUdpPacket, decode_server_udp_datagram,
-    decode_server_udp_datagram_with_key, diagnostics::dump_ed2k_server_udp_packet,
-    encode_server_list_request, encode_server_udp_crypt_ping, encode_server_udp_datagram,
-    encode_udp_search_request, encode_udp_source_request_batch, legacy_udp::ServerListRequest,
+    Ed2kServerUdpEvidence, Ed2kServerUdpTransport, Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT,
+    OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ, ResolvedServerEntry, ServerUdpPacket,
+    decode_server_udp_datagram, decode_server_udp_datagram_with_key,
+    diagnostics::dump_ed2k_server_udp_packet, encode_server_list_request,
+    encode_server_udp_crypt_ping, encode_server_udp_datagram, encode_udp_search_request,
+    encode_udp_source_request_batch, legacy_udp::ServerListRequest,
     server_description::server_description_challenge, server_status::server_status_challenge,
     server_udp_crypt_ping_endpoint,
 };
+
+fn next_server_udp_receive_trace_id() -> u64 {
+    static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
+    loop {
+        let trace_id = NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+        if trace_id > 0 {
+            return trace_id;
+        }
+    }
+}
+
+fn received_udp_evidence(from: SocketAddr, transport_mode: &str) -> Ed2kServerUdpEvidence {
+    let transport = if transport_mode == "plaintext" {
+        Ed2kServerUdpTransport::Plaintext
+    } else {
+        Ed2kServerUdpTransport::Obfuscated
+    };
+    Ed2kServerUdpEvidence::new(next_server_udp_receive_trace_id(), transport, from)
+}
 
 pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
     let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
@@ -76,7 +99,7 @@ pub(super) async fn send_server_udp_packet(
         )
     };
     #[cfg(not(feature = "packet-diagnostics"))]
-    dump_ed2k_server_udp_packet(server, "tx", endpoint, transport_mode, opcode, payload);
+    dump_ed2k_server_udp_packet(server, "tx", endpoint, transport_mode, opcode, payload, 0);
     let send_result = socket.send_to(&packet, endpoint).await.with_context(|| {
         format!(
             "failed to send ED2K server UDP opcode=0x{opcode:02X} to {}",
@@ -259,6 +282,7 @@ pub(super) async fn read_server_udp_packet_with_key(
         dump_ed2k_server_udp_packet(
             Some(server),
             from,
+            0,
             Ed2kServerPacketCapture {
                 direction: "rx",
                 transport_mode,
@@ -281,6 +305,7 @@ pub(super) async fn read_server_udp_packet_with_key(
         dump_ed2k_server_udp_packet(
             Some(server),
             from,
+            0,
             Ed2kServerPacketCapture {
                 direction: "rx",
                 transport_mode,
@@ -300,10 +325,12 @@ pub(super) async fn read_server_udp_packet_with_key(
     }
     let opcode = packet[1];
     let payload = packet[2..].to_vec();
+    let evidence = received_udp_evidence(from, transport_mode);
     #[cfg(feature = "packet-diagnostics")]
     dump_ed2k_server_udp_packet(
         Some(server),
         from,
+        evidence.trace_id(),
         Ed2kServerPacketCapture {
             direction: "rx",
             transport_mode,
@@ -318,11 +345,19 @@ pub(super) async fn read_server_udp_packet_with_key(
         },
     );
     #[cfg(not(feature = "packet-diagnostics"))]
-    dump_ed2k_server_udp_packet(server, "rx", from, transport_mode, opcode, &payload);
+    dump_ed2k_server_udp_packet(
+        server,
+        "rx",
+        from,
+        transport_mode,
+        opcode,
+        &payload,
+        evidence.trace_id(),
+    );
     Ok(Some(ServerUdpPacket {
         opcode,
         payload,
-        from,
+        evidence,
     }))
 }
 
@@ -361,10 +396,12 @@ pub(super) async fn read_server_udp_packet_from_any(
         }
         let opcode = packet[1];
         let payload = packet[2..].to_vec();
+        let evidence = received_udp_evidence(from, transport_mode);
         #[cfg(feature = "packet-diagnostics")]
         dump_ed2k_server_udp_packet(
             Some(server),
             from,
+            evidence.trace_id(),
             Ed2kServerPacketCapture {
                 direction: "rx",
                 transport_mode,
@@ -379,13 +416,21 @@ pub(super) async fn read_server_udp_packet_from_any(
             },
         );
         #[cfg(not(feature = "packet-diagnostics"))]
-        dump_ed2k_server_udp_packet(server, "rx", from, transport_mode, opcode, &payload);
+        dump_ed2k_server_udp_packet(
+            server,
+            "rx",
+            from,
+            transport_mode,
+            opcode,
+            &payload,
+            evidence.trace_id(),
+        );
         return Ok(Some((
             server.clone(),
             ServerUdpPacket {
                 opcode,
                 payload,
-                from,
+                evidence,
             },
         )));
     }
@@ -393,6 +438,7 @@ pub(super) async fn read_server_udp_packet_from_any(
     dump_ed2k_server_udp_packet(
         None,
         from,
+        0,
         Ed2kServerPacketCapture {
             direction: "rx",
             transport_mode,
@@ -432,9 +478,10 @@ mod tests {
     use tokio::{net::UdpSocket, time::timeout};
 
     use super::super::{
-        ConfiguredServerEntry, OP_EDONKEYPROT, OP_SERVER_DESC_REQ, ResolvedServerEntry,
+        ConfiguredServerEntry, Ed2kServerUdpTransport, OP_EDONKEYPROT, OP_SERVER_DESC_REQ,
+        OP_SERVER_DESC_RES, ResolvedServerEntry,
     };
-    use super::{send_server_udp_packet, udp_response_candidate_servers};
+    use super::{read_server_udp_packet, send_server_udp_packet, udp_response_candidate_servers};
 
     fn resolved(ip: Ipv4Addr, port: u16) -> ResolvedServerEntry {
         ResolvedServerEntry {
@@ -501,5 +548,43 @@ mod tests {
             &datagram[..len],
             &[OP_EDONKEYPROT, OP_SERVER_DESC_REQ, 0xAA, 0xBB]
         );
+    }
+
+    #[tokio::test]
+    async fn accepted_udp_reply_carries_positive_wire_evidence() {
+        let server_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let server_peer = server_socket.local_addr().unwrap();
+        let server = resolved(
+            Ipv4Addr::LOCALHOST,
+            server_peer.port().checked_sub(4).unwrap(),
+        );
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let client_endpoint = client.local_addr().unwrap();
+
+        server_socket
+            .send_to(
+                &[OP_EDONKEYPROT, OP_SERVER_DESC_RES, 0xAA, 0xBB],
+                client_endpoint,
+            )
+            .await
+            .unwrap();
+        let packet = timeout(
+            Duration::from_secs(1),
+            read_server_udp_packet(&client, &server),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(packet.opcode, OP_SERVER_DESC_RES);
+        assert_eq!(packet.payload, [0xAA, 0xBB]);
+        assert!(packet.evidence.trace_id() > 0);
+        assert_eq!(
+            packet.evidence.transport(),
+            Ed2kServerUdpTransport::Plaintext
+        );
+        assert!(!packet.evidence.transport().obfuscated());
+        assert_eq!(packet.evidence.peer(), server_peer);
     }
 }

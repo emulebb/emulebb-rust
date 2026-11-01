@@ -309,6 +309,7 @@ pub(super) async fn handle_server_packet(
                     if let Some(sender) = context.server_list_events.as_ref() {
                         let _ = sender.send(Ed2kServerListEvent::MetadataUpdated {
                             endpoint: session.endpoint.to_string(),
+                            udp_evidence: None,
                             name: None,
                             description: None,
                             dynamic_host: decoded.dynamic_host,

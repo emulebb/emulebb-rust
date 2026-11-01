@@ -12,7 +12,7 @@ use std::net::Ipv4Addr;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use super::Ed2kServerFailure;
+use super::{Ed2kServerFailure, Ed2kServerUdpDescriptionEvidence, Ed2kServerUdpStatusEvidence};
 
 /// Maximum servers accepted from a single `OP_SERVERLIST` body. eMule itself
 /// imposes no fixed cap beyond the `count <= (size - 1) / 6` structural bound it
@@ -40,6 +40,9 @@ pub enum Ed2kServerListEvent {
     /// server's `OP_SERVERMESSAGE` metadata lines.
     MetadataUpdated {
         endpoint: String,
+        /// Present only when this mutation originated from an accepted UDP
+        /// `OP_SERVER_DESC_RES`; TCP metadata must leave it `None`.
+        udp_evidence: Option<Ed2kServerUdpDescriptionEvidence>,
         name: Option<String>,
         description: Option<String>,
         dynamic_host: Option<String>,
@@ -50,6 +53,9 @@ pub enum Ed2kServerListEvent {
     /// bound to the public client ID observed when the reply was accepted.
     StatusUpdated {
         endpoint: String,
+        /// Present only when this mutation originated from an accepted UDP
+        /// `OP_GLOBSERVSTATRES`.
+        udp_evidence: Option<Ed2kServerUdpStatusEvidence>,
         users: u32,
         files: u32,
         max_users: u32,

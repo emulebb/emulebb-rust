@@ -19,9 +19,9 @@ use crate::reachability::ExternalReachability;
 
 use super::{
     Ed2kServerConnectPlan, Ed2kServerListEvent, Ed2kServerListEventSender, Ed2kServerState,
-    OP_GLOBSERVSTATRES, OP_SERVER_DESC_RES, OP_SERVER_LIST_RES, ResolvedServerEntry,
-    configured_server_entries, decode_server_list, ed2k_server_list_event_channel,
-    resolve_server_entry,
+    Ed2kServerUdpDescriptionEvidence, Ed2kServerUdpStatusEvidence, OP_GLOBSERVSTATRES,
+    OP_SERVER_DESC_RES, OP_SERVER_LIST_RES, ResolvedServerEntry, configured_server_entries,
+    decode_server_list, ed2k_server_list_event_channel, resolve_server_entry,
     server_description::decode_server_description_response,
     server_status::decode_server_status_response,
     udp_runtime::{
@@ -329,6 +329,10 @@ async fn poll_one_server_with_timeouts(
     server.entry.obfuscation_port_udp = status.obfuscation_port_udp;
     let _ = events.send(Ed2kServerListEvent::StatusUpdated {
         endpoint: server.entry.base_endpoint_text(),
+        udp_evidence: Some(Ed2kServerUdpStatusEvidence::new(
+            status_packet.evidence,
+            status.challenge,
+        )),
         users: status.users,
         files: status.files,
         max_users: status.max_users,
@@ -373,6 +377,11 @@ async fn poll_one_server_with_timeouts(
     };
     let _ = events.send(Ed2kServerListEvent::MetadataUpdated {
         endpoint: server.entry.base_endpoint_text(),
+        udp_evidence: Some(Ed2kServerUdpDescriptionEvidence::new(
+            description_packet.evidence,
+            metadata.challenge,
+            metadata.response_format,
+        )),
         name: metadata.name,
         description: metadata.description,
         dynamic_host: metadata.dynamic_host,
@@ -394,7 +403,7 @@ async fn receive_opcode(
             if let Some(packet) =
                 read_server_udp_packet_with_key(socket, server, decryption_key).await?
                 && packet.opcode == expected_opcode
-                && packet.from.ip() == std::net::IpAddr::V4(server.ip)
+                && packet.evidence.peer().ip() == std::net::IpAddr::V4(server.ip)
             {
                 return Ok(packet);
             }
@@ -419,9 +428,9 @@ mod tests {
     use crate::{
         config::Ed2kRuntimeConfig,
         ed2k_server::{
-            Ed2kServerConnectMode, Ed2kServerConnectPlan, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ,
-            OP_SERVER_DESC_REQ, server_entry::ConfiguredServerEntry,
-            server_events::ed2k_server_list_event_channel,
+            Ed2kServerConnectMode, Ed2kServerConnectPlan, Ed2kServerDescriptionResponseFormat,
+            Ed2kServerUdpTransport, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
+            server_entry::ConfiguredServerEntry, server_events::ed2k_server_list_event_channel,
         },
     };
 
@@ -461,6 +470,7 @@ mod tests {
     async fn live_plan_replacement_discards_stale_events_and_polls_added_server() {
         let (removed_port, removed, _removed_crypt) = bind_plain_and_crypt_ports().await;
         let (added_port, added, _added_crypt) = bind_plain_and_crypt_ports().await;
+        let added_udp_peer = added.local_addr().unwrap();
         let (plan_sender, plan_receiver) =
             watch::channel(automatic_plan(Some(format!("127.0.0.1:{removed_port}"))));
         let state = Arc::new(RwLock::new(Ed2kServerState {
@@ -534,24 +544,57 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            status,
-            Ed2kServerListEvent::StatusUpdated { endpoint, .. } if endpoint == added_endpoint
-        ));
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), inbox.recv())
-                .await
-                .unwrap()
-                .unwrap(),
-            Ed2kServerListEvent::MetadataUpdated {
-                endpoint: added_endpoint,
-                name: Some("Server".to_string()),
-                description: Some("Added".to_string()),
-                dynamic_host: None,
-                version: None,
-                auxiliary_ports: Vec::new(),
+        match status {
+            Ed2kServerListEvent::StatusUpdated {
+                endpoint,
+                udp_evidence: Some(evidence),
+                ..
+            } => {
+                assert_eq!(endpoint, added_endpoint);
+                assert_eq!(evidence.challenge() & 0xFFFF_0000, 0x55AA_0000);
+                assert!(evidence.receive().trace_id() > 0);
+                assert_eq!(
+                    evidence.receive().transport(),
+                    Ed2kServerUdpTransport::Plaintext
+                );
+                assert_eq!(evidence.receive().peer(), added_udp_peer);
             }
-        );
+            other => panic!("unexpected status event: {other:?}"),
+        }
+        let metadata = tokio::time::timeout(Duration::from_secs(1), inbox.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match metadata {
+            Ed2kServerListEvent::MetadataUpdated {
+                endpoint,
+                udp_evidence: Some(evidence),
+                name,
+                description,
+                dynamic_host,
+                version,
+                auxiliary_ports,
+            } => {
+                assert_eq!(endpoint, added_endpoint);
+                assert_eq!(evidence.challenge(), 0);
+                assert_eq!(
+                    evidence.response_format(),
+                    Ed2kServerDescriptionResponseFormat::Legacy
+                );
+                assert!(evidence.receive().trace_id() > 0);
+                assert_eq!(
+                    evidence.receive().transport(),
+                    Ed2kServerUdpTransport::Plaintext
+                );
+                assert_eq!(evidence.receive().peer(), added_udp_peer);
+                assert_eq!(name.as_deref(), Some("Server"));
+                assert_eq!(description.as_deref(), Some("Added"));
+                assert_eq!(dynamic_host, None);
+                assert_eq!(version, None);
+                assert!(auxiliary_ports.is_empty());
+            }
+            other => panic!("unexpected metadata event: {other:?}"),
+        }
 
         added_responder.await.unwrap();
         task_cancel.cancel();
@@ -564,6 +607,7 @@ mod tests {
     #[tokio::test]
     async fn crypt_ping_timeout_falls_back_and_persists_status_before_description() {
         let (base_port, plain, crypt) = bind_plain_and_crypt_ports().await;
+        let plain_udp_peer = plain.local_addr().unwrap();
         let configured =
             ConfiguredServerEntry::from_endpoint_text(&format!("127.0.0.1:{base_port}")).unwrap();
         let mut server = ResolvedServerEntry {
@@ -630,6 +674,7 @@ mod tests {
         match status {
             Ed2kServerListEvent::StatusUpdated {
                 endpoint,
+                udp_evidence: Some(evidence),
                 users,
                 files,
                 max_users,
@@ -644,6 +689,13 @@ mod tests {
                     endpoint,
                     SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)).to_string()
                 );
+                assert_eq!(evidence.challenge() & 0xFFFF_0000, 0x55AA_0000);
+                assert!(evidence.receive().trace_id() > 0);
+                assert_eq!(
+                    evidence.receive().transport(),
+                    Ed2kServerUdpTransport::Plaintext
+                );
+                assert_eq!(evidence.receive().peer(), plain_udp_peer);
                 assert_eq!(users, 1234);
                 assert_eq!(files, 5678);
                 assert_eq!(max_users, 6000);
@@ -655,17 +707,39 @@ mod tests {
             }
             other => panic!("unexpected first metadata event: {other:?}"),
         }
-        assert_eq!(
-            inbox.try_recv().unwrap(),
+        match inbox.try_recv().unwrap() {
             Ed2kServerListEvent::MetadataUpdated {
-                endpoint: SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)).to_string(),
-                name: Some("Server".to_string()),
-                description: Some("Description".to_string()),
-                dynamic_host: None,
-                version: None,
-                auxiliary_ports: Vec::new(),
+                endpoint,
+                udp_evidence: Some(evidence),
+                name,
+                description,
+                dynamic_host,
+                version,
+                auxiliary_ports,
+            } => {
+                assert_eq!(
+                    endpoint,
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)).to_string()
+                );
+                assert_eq!(evidence.challenge(), 0);
+                assert_eq!(
+                    evidence.response_format(),
+                    Ed2kServerDescriptionResponseFormat::Legacy
+                );
+                assert!(evidence.receive().trace_id() > 0);
+                assert_eq!(
+                    evidence.receive().transport(),
+                    Ed2kServerUdpTransport::Plaintext
+                );
+                assert_eq!(evidence.receive().peer(), plain_udp_peer);
+                assert_eq!(name.as_deref(), Some("Server"));
+                assert_eq!(description.as_deref(), Some("Description"));
+                assert_eq!(dynamic_host, None);
+                assert_eq!(version, None);
+                assert!(auxiliary_ports.is_empty());
             }
-        );
+            other => panic!("unexpected metadata event: {other:?}"),
+        }
     }
 
     #[tokio::test]
