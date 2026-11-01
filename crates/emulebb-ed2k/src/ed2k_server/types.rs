@@ -343,7 +343,149 @@ pub(super) struct CallbackRequest {
 pub(super) struct ServerUdpPacket {
     pub(super) opcode: u8,
     pub(super) payload: Vec<u8>,
-    pub(super) from: SocketAddr,
+    pub(super) evidence: Ed2kServerUdpEvidence,
+}
+
+/// Actual wire transport used by one accepted ED2K server UDP reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ed2kServerUdpTransport {
+    Plaintext,
+    Obfuscated,
+}
+
+impl Ed2kServerUdpTransport {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plaintext => "plaintext",
+            Self::Obfuscated => "obfuscated",
+        }
+    }
+
+    #[must_use]
+    pub const fn obfuscated(self) -> bool {
+        matches!(self, Self::Obfuscated)
+    }
+}
+
+/// Causal evidence carried from an accepted server UDP reply to the
+/// authoritative server-store mutation that applies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ed2kServerUdpEvidence {
+    trace_id: u64,
+    transport: Ed2kServerUdpTransport,
+    peer: SocketAddr,
+}
+
+impl Ed2kServerUdpEvidence {
+    #[must_use]
+    pub fn new(trace_id: u64, transport: Ed2kServerUdpTransport, peer: SocketAddr) -> Self {
+        assert!(
+            trace_id > 0,
+            "server UDP receive trace IDs must be positive"
+        );
+        Self {
+            trace_id,
+            transport,
+            peer,
+        }
+    }
+
+    #[must_use]
+    pub const fn trace_id(self) -> u64 {
+        self.trace_id
+    }
+
+    #[must_use]
+    pub const fn transport(self) -> Ed2kServerUdpTransport {
+        self.transport
+    }
+
+    #[must_use]
+    pub const fn peer(self) -> SocketAddr {
+        self.peer
+    }
+}
+
+/// Wire shape used by an accepted `OP_SERVER_DESC_RES` body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ed2kServerDescriptionResponseFormat {
+    Tagged,
+    Legacy,
+}
+
+impl Ed2kServerDescriptionResponseFormat {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tagged => "tagged",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+/// Validated receive evidence for one applied `OP_GLOBSERVSTATRES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ed2kServerUdpStatusEvidence {
+    receive: Ed2kServerUdpEvidence,
+    challenge: u32,
+}
+
+impl Ed2kServerUdpStatusEvidence {
+    #[must_use]
+    pub const fn new(receive: Ed2kServerUdpEvidence, challenge: u32) -> Self {
+        Self { receive, challenge }
+    }
+
+    #[must_use]
+    pub const fn receive(self) -> Ed2kServerUdpEvidence {
+        self.receive
+    }
+
+    #[must_use]
+    pub const fn challenge(self) -> u32 {
+        self.challenge
+    }
+}
+
+/// Validated receive evidence for one applied `OP_SERVER_DESC_RES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ed2kServerUdpDescriptionEvidence {
+    receive: Ed2kServerUdpEvidence,
+    challenge: u32,
+    response_format: Ed2kServerDescriptionResponseFormat,
+}
+
+impl Ed2kServerUdpDescriptionEvidence {
+    #[must_use]
+    pub const fn new(
+        receive: Ed2kServerUdpEvidence,
+        challenge: u32,
+        response_format: Ed2kServerDescriptionResponseFormat,
+    ) -> Self {
+        Self {
+            receive,
+            challenge,
+            response_format,
+        }
+    }
+
+    #[must_use]
+    pub const fn receive(self) -> Ed2kServerUdpEvidence {
+        self.receive
+    }
+
+    /// Echoed challenge for tagged responses; zero for the legacy format,
+    /// which carries no challenge field on the wire.
+    #[must_use]
+    pub const fn challenge(self) -> u32 {
+        self.challenge
+    }
+
+    #[must_use]
+    pub const fn response_format(self) -> Ed2kServerDescriptionResponseFormat {
+        self.response_format
+    }
 }
 
 /// One decoded ED2K server search result entry.

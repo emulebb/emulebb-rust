@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use crate::ed2k_string::Ed2kStringEncoding;
 
 use super::{
-    ST_AUXPORTSLIST, ST_DESCRIPTION, ST_DYNIP, ST_SERVERNAME, ST_VERSION,
+    Ed2kServerDescriptionResponseFormat, ST_AUXPORTSLIST, ST_DESCRIPTION, ST_DYNIP, ST_SERVERNAME,
+    ST_VERSION,
     tag_codec::{DecodedTagValue, decode_tag_value},
 };
 
@@ -13,6 +14,8 @@ const INVALID_SERVER_DESCRIPTION_LENGTH: u16 = 0xF0FF;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ServerDescription {
+    pub(super) challenge: u32,
+    pub(super) response_format: Ed2kServerDescriptionResponseFormat,
     pub(super) name: Option<String>,
     pub(super) description: Option<String>,
     pub(super) dynamic_host: Option<String>,
@@ -67,6 +70,8 @@ pub(super) fn decode_server_description_response(
             }
         }
         return Ok(Some(ServerDescription {
+            challenge,
+            response_format: Ed2kServerDescriptionResponseFormat::Tagged,
             name,
             description,
             dynamic_host,
@@ -79,6 +84,8 @@ pub(super) fn decode_server_description_response(
     let (description, _) =
         decode_legacy_string(rest).context("invalid legacy server description")?;
     Ok(Some(ServerDescription {
+        challenge: 0,
+        response_format: Ed2kServerDescriptionResponseFormat::Legacy,
         name: Some(name),
         description: Some(description),
         dynamic_host: None,
@@ -171,6 +178,11 @@ mod tests {
         let decoded = decode_server_description_response(&payload, challenge)
             .unwrap()
             .expect("matching challenge");
+        assert_eq!(decoded.challenge, challenge);
+        assert_eq!(
+            decoded.response_format,
+            Ed2kServerDescriptionResponseFormat::Tagged
+        );
         assert_eq!(decoded.name.as_deref(), Some("Example Server"));
         assert_eq!(decoded.description.as_deref(), Some("Example Description"));
         assert_eq!(decoded.dynamic_host.as_deref(), Some("server.example.test"));
@@ -194,6 +206,11 @@ mod tests {
         let decoded = decode_server_description_response(&payload, 0)
             .unwrap()
             .expect("legacy response");
+        assert_eq!(decoded.challenge, 0);
+        assert_eq!(
+            decoded.response_format,
+            Ed2kServerDescriptionResponseFormat::Legacy
+        );
         assert_eq!(decoded.name.as_deref(), Some("Server"));
         assert_eq!(decoded.description.as_deref(), Some("Description"));
         assert_eq!(decoded.dynamic_host, None);

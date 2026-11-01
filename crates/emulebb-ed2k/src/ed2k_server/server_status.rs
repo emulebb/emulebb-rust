@@ -54,6 +54,7 @@ pub(super) fn server_status_challenge() -> u32 {
 /// outstanding request challenge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ServerStatusResponse {
+    pub(super) challenge: u32,
     pub(super) users: u32,
     pub(super) files: u32,
     pub(super) max_users: u32,
@@ -133,6 +134,7 @@ pub(super) fn decode_server_status_response(
         obfuscation_port_udp = server_port.checked_add(12).unwrap_or_default();
     }
     Some(ServerStatusResponse {
+        challenge,
         users,
         files,
         max_users,
@@ -173,6 +175,7 @@ mod tests {
         let payload = body(challenge, 5000, 90000, &[]);
         let decoded =
             decode_server_status_response(&payload, challenge, 4661).expect("matching challenge");
+        assert_eq!(decoded.challenge, challenge);
         assert_eq!(decoded.users, 5000);
         assert_eq!(decoded.files, 90000);
         assert_eq!(decoded.max_users, 0);

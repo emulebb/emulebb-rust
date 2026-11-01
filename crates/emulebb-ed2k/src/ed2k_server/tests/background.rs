@@ -7,6 +7,14 @@ use crate::ed2k_server::{
     background::{BackgroundServerSearchContext, start_background_server_search},
 };
 
+fn test_server_udp_packet(opcode: u8, payload: Vec<u8>, peer: SocketAddr) -> ServerUdpPacket {
+    ServerUdpPacket {
+        opcode,
+        payload,
+        evidence: Ed2kServerUdpEvidence::new(1, Ed2kServerUdpTransport::Plaintext, peer),
+    }
+}
+
 struct BackgroundTestContext {
     session: ServerSessionContext,
     reachability_authority: ReachabilityRuntimeAuthority,
@@ -526,11 +534,11 @@ async fn background_udp_source_search_preserves_responding_server() {
 
     handle_background_udp_packet(
         &mut server,
-        &ServerUdpPacket {
-            opcode: OP_GLOBFOUNDSOURCES,
+        &test_server_udp_packet(
+            OP_GLOBFOUNDSOURCES,
             payload,
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
-        },
+            SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
+        ),
         &mut pending,
         &state,
         &mut None,
@@ -563,11 +571,11 @@ fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
 
     handle_background_udp_packet(
         &mut server,
-        &ServerUdpPacket {
-            opcode: OP_GLOBSEARCHRES,
-            payload: vec![1, 0, 0],
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
-        },
+        &test_server_udp_packet(
+            OP_GLOBSEARCHRES,
+            vec![1, 0, 0],
+            SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
+        ),
         &mut pending,
         &state,
         &mut None,
@@ -608,11 +616,11 @@ fn background_udp_source_search_keeps_pending_after_malformed_reply() {
 
     handle_background_udp_packet(
         &mut server,
-        &ServerUdpPacket {
-            opcode: OP_GLOBFOUNDSOURCES,
-            payload: vec![1, 0, 0],
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
-        },
+        &test_server_udp_packet(
+            OP_GLOBFOUNDSOURCES,
+            vec![1, 0, 0],
+            SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
+        ),
         &mut pending,
         &state,
         &mut None,
@@ -677,11 +685,11 @@ fn server_status_matching_challenge_records_users_files_and_udp_flags() {
 
     handle_background_udp_packet(
         &mut server,
-        &ServerUdpPacket {
-            opcode: OP_GLOBSERVSTATRES,
-            payload: server_status_payload(challenge, 4242, 99000, Some(0x0000_0331)),
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
-        },
+        &test_server_udp_packet(
+            OP_GLOBSERVSTATRES,
+            server_status_payload(challenge, 4242, 99000, Some(0x0000_0331)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
+        ),
         &mut pending,
         &state,
         &mut outstanding,
@@ -707,21 +715,22 @@ fn server_status_mismatched_challenge_is_discarded() {
     let mut outstanding = Some(0x55AA_0001);
     let mut pending = None;
     let response_port = server.entry.port;
+    let (events, mut event_inbox) = ed2k_server_list_event_channel();
 
     handle_background_udp_packet(
         &mut server,
-        &ServerUdpPacket {
-            opcode: OP_GLOBSERVSTATRES,
+        &test_server_udp_packet(
+            OP_GLOBSERVSTATRES,
             // Echoes a different challenge than the one we issued.
-            payload: server_status_payload(0x55AA_0002, 5, 6, None),
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
-        },
+            server_status_payload(0x55AA_0002, 5, 6, None),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
+        ),
         &mut pending,
         &state,
         &mut outstanding,
         None,
         0,
-        None,
+        Some(&events),
     )
     .unwrap();
 
@@ -730,6 +739,10 @@ fn server_status_mismatched_challenge_is_discarded() {
     assert_eq!(guard.server_files, None);
     // The outstanding challenge stays armed until the right reply arrives.
     assert_eq!(outstanding, Some(0x55AA_0001));
+    assert!(
+        event_inbox.try_recv().is_err(),
+        "a rejected status reply must not reach the authoritative mutation consumer"
+    );
 }
 
 #[test]
@@ -747,11 +760,11 @@ fn server_status_refreshes_key_binding_ports_and_persistence_event() {
 
     handle_background_udp_packet(
         &mut server,
-        &ServerUdpPacket {
-            opcode: OP_GLOBSERVSTATRES,
-            payload: extended_server_status_payload(challenge, udp_flags, udp_key),
-            from: SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
-        },
+        &test_server_udp_packet(
+            OP_GLOBSERVSTATRES,
+            extended_server_status_payload(challenge, udp_flags, udp_key),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
+        ),
         &mut pending,
         &state,
         &mut outstanding,
@@ -779,6 +792,14 @@ fn server_status_refreshes_key_binding_ports_and_persistence_event() {
         event_inbox.try_recv().unwrap(),
         Ed2kServerListEvent::StatusUpdated {
             endpoint: server.base_endpoint().to_string(),
+            udp_evidence: Some(Ed2kServerUdpStatusEvidence::new(
+                Ed2kServerUdpEvidence::new(
+                    1,
+                    Ed2kServerUdpTransport::Plaintext,
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, response_port)),
+                ),
+                challenge,
+            )),
             users: 4242,
             files: 99000,
             max_users: 5000,

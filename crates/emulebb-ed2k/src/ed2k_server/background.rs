@@ -16,13 +16,14 @@ use tracing::{debug, warn};
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    Ed2kFoundSource, Ed2kSearchFile, Ed2kServerState, OP_CALLBACKREQUEST, OP_GLOBFOUNDSOURCES,
-    OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES, OP_SEARCHREQUEST, OfferFilesPublishStats,
-    ResolvedServerEntry, SERVER_TCP_FLAG_LARGEFILES, SearchCriteria, ServerSession,
-    ServerSessionPhase, ServerUdpPacket, decode_udp_found_source_sets,
-    decode_udp_search_result_pages, encode_search_request_with_criteria, encode_source_request,
-    is_low_id, merge_found_sources, send_due_offer_files_advertisement, source_request_opcode,
-    validate_found_sources, wait_for_offer_files_settle,
+    Ed2kFoundSource, Ed2kSearchFile, Ed2kServerState, Ed2kServerUdpStatusEvidence,
+    OP_CALLBACKREQUEST, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES,
+    OP_SEARCHREQUEST, OfferFilesPublishStats, ResolvedServerEntry, SERVER_TCP_FLAG_LARGEFILES,
+    SearchCriteria, ServerSession, ServerSessionPhase, ServerUdpPacket,
+    decode_udp_found_source_sets, decode_udp_search_result_pages,
+    encode_search_request_with_criteria, encode_source_request, is_low_id, merge_found_sources,
+    send_due_offer_files_advertisement, source_request_opcode, validate_found_sources,
+    wait_for_offer_files_settle,
 };
 use crate::ed2k_transfer::Ed2kSharedCatalog;
 
@@ -491,7 +492,7 @@ pub(super) fn handle_background_udp_packet(
     status_ping_ms: u32,
     server_list_events: Option<&super::Ed2kServerListEventSender>,
 ) -> Result<()> {
-    if packet.from.ip() != IpAddr::V4(server.ip) {
+    if packet.evidence.peer().ip() != IpAddr::V4(server.ip) {
         return Ok(());
     }
     match packet.opcode {
@@ -644,6 +645,10 @@ pub(super) fn handle_background_udp_packet(
             if let Some(sender) = server_list_events {
                 let _ = sender.send(super::Ed2kServerListEvent::StatusUpdated {
                     endpoint: server.base_endpoint().to_string(),
+                    udp_evidence: Some(Ed2kServerUdpStatusEvidence::new(
+                        packet.evidence,
+                        status.challenge,
+                    )),
                     users: status.users,
                     files: status.files,
                     max_users: status.max_users,
@@ -660,7 +665,7 @@ pub(super) fn handle_background_udp_packet(
             }
             tracing::debug!(
                 "ED2K server UDP status from {} users={} files={} udp_flags=0x{:08X} udp_key_present={} udp_key_ip=0x{:08X} obf_tcp={} obf_udp={}",
-                packet.from,
+                packet.evidence.peer(),
                 status.users,
                 status.files,
                 status.udp_flags,

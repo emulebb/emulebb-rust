@@ -191,7 +191,7 @@ pub async fn search_source_udp_servers(
                 .await
             {
                 Ok(Ok(Some(packet))) => {
-                    if packet.from.ip() != IpAddr::V4(resolved_server.ip) {
+                    if packet.evidence.peer().ip() != IpAddr::V4(resolved_server.ip) {
                         continue;
                     }
                     if packet.opcode != OP_GLOBFOUNDSOURCES {

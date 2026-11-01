@@ -304,13 +304,9 @@ impl EmulebbCore {
         dynamic_host: Option<String>,
         version: Option<String>,
         auxiliary_ports: Vec<u16>,
-    ) {
-        let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
-            return;
-        };
-        let Some(mut server) = self.server(&stored_endpoint).await else {
-            return;
-        };
+    ) -> Option<String> {
+        let stored_endpoint = self.resolve_server_event_endpoint(endpoint).await?;
+        let mut server = self.server(&stored_endpoint).await?;
         if let Some(name) = name {
             server.name = name;
         }
@@ -333,15 +329,21 @@ impl EmulebbCore {
             .disabled_servers
             .contains(&stored_endpoint);
         server.enabled = enabled;
-        let _ = profile_state::persist_server(&self.metadata_store, &server, enabled);
+        if let Err(error) = profile_state::persist_server(&self.metadata_store, &server, enabled) {
+            tracing::warn!(
+                "failed to persist ED2K server UDP description for {stored_endpoint}: {error}"
+            );
+            return None;
+        }
         self.state
             .lock()
             .await
             .servers
-            .insert(stored_endpoint, server);
+            .insert(stored_endpoint.clone(), server);
         if let Err(error) = self.refresh_ed2k_server_connect_plan().await {
             tracing::warn!("failed to refresh ED2K server plan after metadata update: {error}");
         }
+        Some(stored_endpoint)
     }
 
     #[expect(
@@ -363,13 +365,9 @@ impl EmulebbCore {
         udp_key_ip: u32,
         obfuscation_port_tcp: u16,
         obfuscation_port_udp: u16,
-    ) {
-        let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
-            return;
-        };
-        let Some(mut server) = self.server(&stored_endpoint).await else {
-            return;
-        };
+    ) -> Option<String> {
+        let stored_endpoint = self.resolve_server_event_endpoint(endpoint).await?;
+        let mut server = self.server(&stored_endpoint).await?;
         server.users = u64::from(users);
         server.files = u64::from(files);
         server.max_users = u64::from(max_users);
@@ -393,16 +391,17 @@ impl EmulebbCore {
             tracing::warn!(
                 "failed to persist ED2K server UDP status for {stored_endpoint}: {error}"
             );
-            return;
+            return None;
         }
         self.state
             .lock()
             .await
             .servers
-            .insert(stored_endpoint, server);
+            .insert(stored_endpoint.clone(), server);
         if let Err(error) = self.refresh_ed2k_server_connect_plan().await {
             tracing::warn!("failed to refresh ED2K server plan after status update: {error}");
         }
+        Some(stored_endpoint)
     }
 
     /// Endpoints whose consecutive-failure count is at or over the dead-server

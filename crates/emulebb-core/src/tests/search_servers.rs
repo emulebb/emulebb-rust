@@ -889,15 +889,19 @@ async fn udp_server_description_metadata_updates_the_persisted_server() {
     .await
     .unwrap();
 
-    core.note_ed2k_server_metadata(
-        "192.0.2.44:4661",
-        Some("New Name".to_string()),
-        Some("New Description".to_string()),
-        Some("dyn.example".to_string()),
-        Some("17.06".to_string()),
-        vec![4662, 4663],
-    )
-    .await;
+    assert_eq!(
+        core.note_ed2k_server_metadata(
+            "192.0.2.44:4661",
+            Some("New Name".to_string()),
+            Some("New Description".to_string()),
+            Some("dyn.example".to_string()),
+            Some("17.06".to_string()),
+            vec![4662, 4663],
+        )
+        .await
+        .as_deref(),
+        Some("192.0.2.44:4661")
+    );
 
     let server = core.server("192.0.2.44:4661").await.expect("server");
     assert_eq!(server.name, "New Name");
@@ -905,6 +909,29 @@ async fn udp_server_description_metadata_updates_the_persisted_server() {
     assert_eq!(server.dyn_ip, "dyn.example");
     assert_eq!(server.version, "17.06");
     assert_eq!(server.auxiliary_ports, vec![4662, 4663]);
+}
+
+#[tokio::test]
+async fn udp_server_metadata_reports_failure_for_an_unknown_endpoint() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+
+    assert!(
+        core.note_ed2k_server_metadata(
+            "192.0.2.99:4661",
+            Some("Unknown".to_string()),
+            Some("Not applied".to_string()),
+            None,
+            None,
+            Vec::new(),
+        )
+        .await
+        .is_none()
+    );
+    assert!(
+        core.note_ed2k_server_status("192.0.2.99:4661", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -930,22 +957,26 @@ async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
     .unwrap();
     let key_ip = Ipv4Addr::new(198, 51, 100, 7);
     let key_ip_client_id = u32::from_le_bytes(key_ip.octets());
-    core.note_ed2k_server_status(
-        "192.0.2.45:4661",
-        12_345,
-        67_890,
-        15_000,
-        456,
-        37,
-        111,
-        222,
-        0x30,
-        0x1122_3344,
-        key_ip_client_id,
-        4711,
-        4723,
-    )
-    .await;
+    assert_eq!(
+        core.note_ed2k_server_status(
+            "192.0.2.45:4661",
+            12_345,
+            67_890,
+            15_000,
+            456,
+            37,
+            111,
+            222,
+            0x30,
+            0x1122_3344,
+            key_ip_client_id,
+            4711,
+            4723,
+        )
+        .await
+        .as_deref(),
+        Some("192.0.2.45:4661")
+    );
 
     let reloaded = EmulebbCore::new(
         "test",
@@ -1267,10 +1298,14 @@ async fn server_status_metadata_refreshes_the_live_plan_in_place() {
     )
     .await;
 
-    core.note_ed2k_server_status(
-        endpoint, 12_345, 67_890, 20_000, 500, 42, 100_000, 120_000, 0x30, 0, 0, 4711, 4723,
-    )
-    .await;
+    assert_eq!(
+        core.note_ed2k_server_status(
+            endpoint, 12_345, 67_890, 20_000, 500, 42, 100_000, 120_000, 0x30, 0, 0, 4711, 4723,
+        )
+        .await
+        .as_deref(),
+        Some(endpoint)
+    );
 
     let updated = wait_for_server_plan_update(&mut plan_rx).await;
     let entry = updated

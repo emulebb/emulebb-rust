@@ -418,24 +418,38 @@ pub(crate) async fn run_ed2k_server_list_events(
             }
             Ed2kServerListEvent::MetadataUpdated {
                 endpoint,
+                udp_evidence,
                 name,
                 description,
                 dynamic_host,
                 version,
                 auxiliary_ports,
             } => {
-                core.note_ed2k_server_metadata(
-                    &endpoint,
-                    name,
-                    description,
-                    dynamic_host,
-                    version,
-                    auxiliary_ports,
-                )
-                .await;
+                let applied_endpoint = core
+                    .note_ed2k_server_metadata(
+                        &endpoint,
+                        name.clone(),
+                        description.clone(),
+                        dynamic_host.clone(),
+                        version.clone(),
+                        auxiliary_ports.clone(),
+                    )
+                    .await;
+                if let (Some(applied_endpoint), Some(evidence)) = (applied_endpoint, udp_evidence) {
+                    crate::diag_ed2k_server_udp::server_description_applied(
+                        evidence,
+                        &applied_endpoint,
+                        name.as_deref(),
+                        description.as_deref(),
+                        dynamic_host.as_deref(),
+                        version.as_deref(),
+                        &auxiliary_ports,
+                    );
+                }
             }
             Ed2kServerListEvent::StatusUpdated {
                 endpoint,
+                udp_evidence,
                 users,
                 files,
                 max_users,
@@ -449,22 +463,41 @@ pub(crate) async fn run_ed2k_server_list_events(
                 obfuscation_port_tcp,
                 obfuscation_port_udp,
             } => {
-                core.note_ed2k_server_status(
-                    &endpoint,
-                    users,
-                    files,
-                    max_users,
-                    low_id_users,
-                    ping_ms,
-                    soft_files,
-                    hard_files,
-                    udp_flags,
-                    udp_key,
-                    udp_key_ip,
-                    obfuscation_port_tcp,
-                    obfuscation_port_udp,
-                )
-                .await;
+                let applied_endpoint = core
+                    .note_ed2k_server_status(
+                        &endpoint,
+                        users,
+                        files,
+                        max_users,
+                        low_id_users,
+                        ping_ms,
+                        soft_files,
+                        hard_files,
+                        udp_flags,
+                        udp_key,
+                        udp_key_ip,
+                        obfuscation_port_tcp,
+                        obfuscation_port_udp,
+                    )
+                    .await;
+                if let (Some(applied_endpoint), Some(evidence)) = (applied_endpoint, udp_evidence) {
+                    crate::diag_ed2k_server_udp::server_status_applied(
+                        evidence,
+                        &applied_endpoint,
+                        users,
+                        files,
+                        max_users,
+                        low_id_users,
+                        ping_ms,
+                        soft_files,
+                        hard_files,
+                        udp_flags,
+                        udp_key,
+                        udp_key_ip,
+                        obfuscation_port_tcp,
+                        obfuscation_port_udp,
+                    );
+                }
             }
         }
     }
