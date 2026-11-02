@@ -645,6 +645,7 @@ async fn enrich_hello_identity_sets_direct_udp_callback_for_low_id_with_verified
         },
         &server_state,
         &kad_firewall,
+        KadHelloIdentityState::default(),
     )
     .await;
 
@@ -676,6 +677,7 @@ async fn enrich_hello_identity_keeps_server_endpoint_zero_until_connected() {
         },
         &server_state,
         &kad_firewall,
+        KadHelloIdentityState::default(),
     )
     .await;
 
@@ -709,11 +711,107 @@ async fn enrich_hello_identity_keeps_direct_udp_callback_off_for_high_id() {
         },
         &server_state,
         &kad_firewall,
+        KadHelloIdentityState::default(),
     )
     .await;
 
     assert!(!identity.direct_udp_callback);
     assert_eq!(identity.client_id, 0x521B_5895);
+}
+
+#[tokio::test]
+async fn kad_open_identity_precedes_the_connected_server_assignment() {
+    let server_endpoint = SocketAddr::from((Ipv4Addr::new(185, 237, 185, 226), 31031));
+    let server_state = Arc::new(RwLock::new(Ed2kServerState {
+        endpoint: Some(server_endpoint),
+        client_id: Some(6),
+        connected: true,
+        ..Ed2kServerState::default()
+    }));
+    let mut firewall = KadFirewallState::default();
+    firewall.tcp_firewalled_verdict = Some(false);
+    let kad_firewall = Arc::new(Mutex::new(firewall));
+    let base = Ed2kHelloIdentity {
+        user_hash: [0xA5; 16],
+        client_id: 0,
+        tcp_port: 41001,
+        udp_port: 41000,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(true),
+        direct_udp_callback: false,
+    };
+
+    let unknown_kad_ip = enrich_hello_identity(
+        base,
+        &server_state,
+        &kad_firewall,
+        KadHelloIdentityState {
+            connected: true,
+            public_ip: None,
+        },
+    )
+    .await;
+    assert_eq!(unknown_kad_ip.client_id, 0);
+    assert_eq!(
+        unknown_kad_ip.server_ip,
+        u32::from_le_bytes([185, 237, 185, 226])
+    );
+    assert_eq!(unknown_kad_ip.server_port, server_endpoint.port());
+
+    let public_ip = Ipv4Addr::new(198, 51, 100, 7);
+    let known_kad_ip = enrich_hello_identity(
+        base,
+        &server_state,
+        &kad_firewall,
+        KadHelloIdentityState {
+            connected: true,
+            public_ip: Some(public_ip),
+        },
+    )
+    .await;
+    assert_eq!(
+        known_kad_ip.client_id,
+        u32::from_le_bytes(public_ip.octets())
+    );
+}
+
+#[tokio::test]
+async fn kad_firewalled_identity_uses_the_server_then_the_stock_sentinel() {
+    let server_state = Arc::new(RwLock::new(Ed2kServerState {
+        client_id: Some(6),
+        connected: true,
+        ..Ed2kServerState::default()
+    }));
+    let mut firewall = KadFirewallState::default();
+    firewall.tcp_firewalled_verdict = Some(true);
+    let kad_firewall = Arc::new(Mutex::new(firewall));
+    let base = Ed2kHelloIdentity {
+        user_hash: [0x5A; 16],
+        client_id: 0,
+        tcp_port: 41001,
+        udp_port: 41000,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(true),
+        direct_udp_callback: false,
+    };
+    let kad_identity = KadHelloIdentityState {
+        connected: true,
+        public_ip: None,
+    };
+
+    let server_backed =
+        enrich_hello_identity(base, &server_state, &kad_firewall, kad_identity).await;
+    assert_eq!(server_backed.client_id, 6);
+
+    {
+        let mut state = server_state.write().await;
+        state.connected = false;
+        state.client_id = None;
+    }
+    let kad_only = enrich_hello_identity(base, &server_state, &kad_firewall, kad_identity).await;
+    assert_eq!(kad_only.client_id, 1);
 }
 
 #[test]

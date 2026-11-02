@@ -12,7 +12,12 @@
 //! features or retired extensions. Unsupported opcodes are handled according to
 //! stock tolerance rules instead of being used to broaden product scope.
 
-use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use tokio::sync::{Mutex, RwLock};
@@ -498,6 +503,17 @@ pub struct Ed2kHelloIdentity {
     pub direct_udp_callback: bool,
 }
 
+/// Kad facts which participate in stock `CemuleApp::GetID()` selection for an
+/// eD2k peer HELLO. Kad connection liveness is intentionally distinct from DHT
+/// bootstrap completion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KadHelloIdentityState {
+    /// Whether Kad observed a packet inside its twenty-minute contact window.
+    pub connected: bool,
+    /// Public IPv4 currently bound to Kad's UDP-key identity, when known.
+    pub public_ip: Option<Ipv4Addr>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Ed2kFileIdentifier {
     file_hash: Ed2kHash,
@@ -726,18 +742,38 @@ pub(crate) fn apply_server_state(
     identity
 }
 
-/// Apply the current ED2K server and Kad firewall runtime state to an
-/// outbound or listener hello identity.
+fn resolve_hello_client_id(
+    state: &Ed2kServerState,
+    kad: KadHelloIdentityState,
+    kad_tcp_firewalled: Option<bool>,
+) -> u32 {
+    let kad_tcp_firewalled = kad_tcp_firewalled.unwrap_or(true);
+    if kad.connected && !kad_tcp_firewalled {
+        return kad
+            .public_ip
+            .map_or(0, |public_ip| u32::from_le_bytes(public_ip.octets()));
+    }
+    if state.connected {
+        return state.client_id.unwrap_or(0);
+    }
+    u32::from(kad.connected && kad_tcp_firewalled)
+}
+
+/// Apply stock peer-identity precedence plus current server/Kad runtime state
+/// to an outbound or listener HELLO identity.
 pub async fn enrich_hello_identity(
     identity: Ed2kHelloIdentity,
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    kad_identity: KadHelloIdentityState,
 ) -> Ed2kHelloIdentity {
-    let mut identity = {
+    let (mut identity, server_state) = {
         let state = server_state.read().await;
-        apply_server_state(identity, &state)
+        (apply_server_state(identity, &state), state.clone())
     };
     let firewall = kad_firewall.lock().await;
+    identity.client_id =
+        resolve_hello_client_id(&server_state, kad_identity, firewall.tcp_firewalled());
     identity.direct_udp_callback = identity.client_id != 0
         && identity.client_id < 0x0100_0000
         && firewall.udp_verified

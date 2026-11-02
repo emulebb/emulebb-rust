@@ -28,8 +28,8 @@ use tokio::{
 use emulebb_ed2k::ed2k_server::Ed2kServerState;
 use emulebb_ed2k::{
     ed2k_tcp::{
-        Ed2kHelloIdentity, FirewallCheckUdpRequest, emule_connect_options, enrich_hello_identity,
-        request_udp_firewall_check,
+        Ed2kHelloIdentity, FirewallCheckUdpRequest, KadHelloIdentityState, emule_connect_options,
+        enrich_hello_identity, request_udp_firewall_check,
     },
     kad_firewall::{KadFirewallState, UdpFirewallCheckSummary},
     reachability::{ExternalReachability, RuntimeReachabilityWriter},
@@ -193,6 +193,7 @@ async fn run_kad_udp_firewall_check_round(
         .local_addr()
         .context("failed to read eD2k listener address for UDP firewall check")?;
     let hello_identity = kad_udp_firewall_check_hello_identity(
+        dht,
         listener_addr,
         internal_udp_port,
         server_state,
@@ -259,6 +260,7 @@ async fn run_kad_udp_firewall_check_round(
 /// Build the eD2k hello identity announced to firewall-check helpers, reusing the
 /// shared firewall/IP enrichment so the hello flags match our current verdict.
 async fn kad_udp_firewall_check_hello_identity(
+    dht: &DhtNode,
     listener_addr: SocketAddr,
     internal_udp_port: u16,
     server_state: &Arc<RwLock<Ed2kServerState>>,
@@ -275,7 +277,16 @@ async fn kad_udp_firewall_check_hello_identity(
         connect_options: emule_connect_options(network.ed2k.obfuscation_enabled),
         direct_udp_callback: false,
     };
-    enrich_hello_identity(identity, server_state, kad_firewall).await
+    enrich_hello_identity(
+        identity,
+        server_state,
+        kad_firewall,
+        KadHelloIdentityState {
+            connected: dht.has_had_contact(),
+            public_ip: dht.public_ip_for_udp_keys(),
+        },
+    )
+    .await
 }
 
 /// Apply a finalized UDP firewall-check verdict: log it and, on an open result

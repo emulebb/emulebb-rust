@@ -19,7 +19,8 @@ use chrono::Utc;
 use emulebb_ed2k::{
     ed2k_server::Ed2kServerState,
     ed2k_tcp::{
-        Ed2kHelloIdentity, emule_connect_options, enrich_hello_identity, send_kad_firewall_tcp_ack,
+        Ed2kHelloIdentity, KadHelloIdentityState, emule_connect_options, enrich_hello_identity,
+        send_kad_firewall_tcp_ack,
     },
     kad_firewall::KadFirewallState,
     reachability::ExternalReachability,
@@ -416,7 +417,16 @@ async fn kad_firewall_ack_hello_identity(
         connect_options: emule_connect_options(network.ed2k.obfuscation_enabled),
         direct_udp_callback: false,
     };
-    Ok(enrich_hello_identity(identity, server_state, kad_firewall).await)
+    Ok(enrich_hello_identity(
+        identity,
+        server_state,
+        kad_firewall,
+        KadHelloIdentityState {
+            connected: dht.has_had_contact(),
+            public_ip: dht.public_ip_for_udp_keys(),
+        },
+    )
+    .await)
 }
 
 #[expect(

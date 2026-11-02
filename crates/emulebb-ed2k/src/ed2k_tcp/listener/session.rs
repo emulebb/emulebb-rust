@@ -49,19 +49,19 @@ use super::super::hello::{
 use super::super::identity::{Ed2kPeerSecureIdentState, begin_secure_ident_probe};
 use super::super::{
     ED2K_CONNECTION_IDLE_TIMEOUT, Ed2kHelloIdentity, Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher,
-    Ed2kSecureIdent, Ed2kTransport, FirewallCheckUdpRequest, OP_AICHANSWER, OP_AICHFILEHASHREQ,
-    OP_AICHREQUEST, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS, OP_ASKSHAREDDIRSANS,
-    OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_ASKSHAREDFILESDIRANS,
-    OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID,
-    OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_EDONKEYPROT, OP_EMULEINFO,
-    OP_EMULEINFOANSWER, OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FWCHECKUDPREQ,
-    OP_HASHSETREQUEST, OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK,
-    OP_MESSAGE, OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_OUTOFPARTREQS,
-    OP_PEERCACHE_ACK, OP_PEERCACHE_ANSWER, OP_PEERCACHE_QUERY, OP_PORTTEST, OP_PREVIEWANSWER,
-    OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING,
-    OP_REASKCALLBACKTCP, OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64,
+    Ed2kSecureIdent, Ed2kTransport, FirewallCheckUdpRequest, KadHelloIdentityState, OP_AICHANSWER,
+    OP_AICHFILEHASHREQ, OP_AICHREQUEST, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
+    OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR,
+    OP_ASKSHAREDFILESDIRANS, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER,
+    OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_EDONKEYPROT,
+    OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC,
+    OP_FWCHECKUDPREQ, OP_HASHSETREQUEST, OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER,
+    OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE, OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2,
+    OP_OUTOFPARTREQS, OP_PEERCACHE_ACK, OP_PEERCACHE_ANSWER, OP_PEERCACHE_QUERY, OP_PORTTEST,
+    OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK,
+    OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64,
     OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID,
-    OP_SIGNATURE, OP_STARTUPLOADREQ, apply_server_state, handle_aich_recovery_answer,
+    OP_SIGNATURE, OP_STARTUPLOADREQ, enrich_hello_identity, handle_aich_recovery_answer,
 };
 
 mod browse;
@@ -186,8 +186,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         tcp_port: ports.tcp,
         ..hello_identity
     };
-    let response_identity =
-        enrich_hello_identity(response_identity, server_state, kad_firewall).await;
+    let response_identity = enrich_hello_identity(
+        response_identity,
+        server_state,
+        kad_firewall,
+        KadHelloIdentityState {
+            connected: dht.has_had_contact(),
+            public_ip: dht.public_ip_for_udp_keys(),
+        },
+    )
+    .await;
     let mut outbound_expected_user_hash = None;
     let (transport, mut pending_promoted_grant, mut session_phase, connection_origin) = match source
     {
@@ -1749,23 +1757,6 @@ pub(crate) async fn reply_with_firewall_udp(
         .with_context(|| format!("failed to send KADEMLIA2_FIREWALLUDP to {target}"))?;
     }
     Ok(())
-}
-
-async fn enrich_hello_identity(
-    identity: Ed2kHelloIdentity,
-    server_state: &Arc<RwLock<Ed2kServerState>>,
-    kad_firewall: &Arc<Mutex<KadFirewallState>>,
-) -> Ed2kHelloIdentity {
-    let mut identity = {
-        let state = server_state.read().await;
-        apply_server_state(identity, &state)
-    };
-    let firewall = kad_firewall.lock().await;
-    identity.direct_udp_callback = identity.client_id != 0
-        && identity.client_id < 0x0100_0000
-        && firewall.udp_verified
-        && firewall.udp_open;
-    identity
 }
 
 /// Build the firewalled-LowID callback admission context (master
