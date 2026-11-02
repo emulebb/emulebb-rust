@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 use super::Ed2kTransferRuntime;
 
 const DOWNLOAD_ACTIVITY_STALE_AFTER: Duration = Duration::from_secs(30);
+/// Retain source protocol knowledge through the stock per-source reask cadence.
+/// Activity/rate views still expire after 30 seconds, but part availability must
+/// survive long enough to build the next 29-minute UDP reask accurately.
+const DOWNLOAD_SOURCE_PROTOCOL_STALE_AFTER: Duration = Duration::from_secs(40 * 60);
 /// A source counts as actively transferring when it delivered payload within
 /// this window. Shorter than the live-source window so "transferring" reflects
 /// genuinely active peers, not merely recently-seen ones.
@@ -240,7 +244,25 @@ impl Ed2kTransferRuntime {
         connect_options: Option<u8>,
         bitmap: Vec<bool>,
     ) -> bool {
-        let now = Instant::now();
+        self.note_download_source_part_bitmap_at(
+            file_hash,
+            peer,
+            user_hash,
+            connect_options,
+            bitmap,
+            Instant::now(),
+        )
+    }
+
+    pub(crate) fn note_download_source_part_bitmap_at(
+        &self,
+        file_hash: &str,
+        peer: SocketAddr,
+        user_hash: Option<[u8; 16]>,
+        connect_options: Option<u8>,
+        bitmap: Vec<bool>,
+        now: Instant,
+    ) -> bool {
         let Ok(mut sources) = self.download_sources.lock() else {
             return false;
         };
@@ -269,6 +291,41 @@ impl Ed2kTransferRuntime {
         entry.last_seen_at = now;
         entry.part_bitmap = Some(bitmap);
         true
+    }
+
+    /// Count sources whose retained protocol status advertises every file part.
+    /// This deliberately outlives the 30-second activity view: stock includes
+    /// queued, TCP-detached sources in the complete-source count carried by the
+    /// next client-UDP reask.
+    pub(crate) fn known_complete_source_count(&self, file_hash: &str, total_parts: usize) -> u16 {
+        self.known_complete_source_count_at(file_hash, total_parts, Instant::now())
+    }
+
+    pub(crate) fn known_complete_source_count_at(
+        &self,
+        file_hash: &str,
+        total_parts: usize,
+        now: Instant,
+    ) -> u16 {
+        if total_parts == 0 {
+            return 0;
+        }
+        let Ok(sources) = self.download_sources.lock() else {
+            return 0;
+        };
+        let Some(peers) = sources.get(file_hash) else {
+            return 0;
+        };
+        peers
+            .values()
+            .filter(|peer| !is_protocol_stale(peer.last_seen_at, now))
+            .filter(|peer| {
+                peer.part_bitmap.as_ref().is_some_and(|bitmap| {
+                    bitmap.len() == total_parts && bitmap.iter().all(|present| *present)
+                })
+            })
+            .count()
+            .min(usize::from(u16::MAX)) as u16
     }
 
     /// Record our queue position at a peer (OP_QUEUERANK / OP_QUEUERANKING) so the
@@ -372,7 +429,7 @@ impl Ed2kTransferRuntime {
         };
         peers
             .values()
-            .filter(|peer| !is_stale(peer.last_seen_at, now))
+            .filter(|peer| !is_activity_stale(peer.last_seen_at, now))
             .map(|peer| Ed2kLiveSource {
                 endpoint: peer.endpoint,
                 user_hash: peer.user_hash,
@@ -428,7 +485,7 @@ impl Ed2kTransferRuntime {
             return counts;
         };
         for peer in peers.values() {
-            if is_stale(peer.last_seen_at, now) {
+            if is_activity_stale(peer.last_seen_at, now) {
                 continue;
             }
             let Some(bitmap) = peer.part_bitmap.as_ref() else {
@@ -512,16 +569,19 @@ impl Ed2kTransferRuntime {
     }
 }
 
-fn is_stale(last_seen_at: Instant, now: Instant) -> bool {
+fn is_activity_stale(last_seen_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(last_seen_at) > DOWNLOAD_ACTIVITY_STALE_AFTER
 }
 
-/// Drop per-source entries last seen beyond the staleness window, keeping the
-/// inner per-peer map bounded to the live set. Called opportunistically from the
-/// `note_*` write paths so a long-running transfer does not accumulate one entry
-/// per endpoint ever observed.
+fn is_protocol_stale(last_seen_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_seen_at) > DOWNLOAD_SOURCE_PROTOCOL_STALE_AFTER
+}
+
+/// Drop per-source entries beyond the protocol-knowledge window. Activity views
+/// independently hide entries after 30 seconds, while this longer bound keeps
+/// file status available for the next stock-cadence UDP reask.
 fn evict_stale_sources(peers: &mut HashMap<String, Ed2kSourceActivity>, now: Instant) {
-    peers.retain(|_, peer| !is_stale(peer.last_seen_at, now));
+    peers.retain(|_, peer| !is_protocol_stale(peer.last_seen_at, now));
 }
 
 fn is_transferring(peer: &Ed2kSourceActivity, now: Instant) -> bool {

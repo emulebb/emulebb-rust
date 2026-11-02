@@ -130,14 +130,9 @@ impl Ed2kTransferRuntime {
                     .iter()
                     .map(|piece| piece.state == Ed2kTransferState::Verified)
                     .collect();
-                // Complete-source hint: live sources advertising every part
+                // Complete-source hint: retained source status advertising every part
                 // (eMule `m_nCompleteSourcesCount`). Optional, gated on udp_version > 2.
-                let complete_source_count = self
-                    .live_download_sources(&hex)
-                    .iter()
-                    .filter(|source| source.available_parts as usize == total_parts)
-                    .count()
-                    .min(u16::MAX as usize) as u16;
+                let complete_source_count = self.known_complete_source_count(&hex, total_parts);
                 TransferReaskInfo {
                     part_status: Some(part_status),
                     complete_source_count,

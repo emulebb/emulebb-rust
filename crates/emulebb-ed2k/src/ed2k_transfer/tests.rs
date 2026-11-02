@@ -115,10 +115,10 @@ async fn record_upload_file_churn_flags_same_file_repeat() {
 }
 
 #[tokio::test]
-async fn stale_download_sources_are_evicted_on_next_write() {
-    // A long-running transfer must not accumulate one inner-map entry per
-    // endpoint ever observed: a later write opportunistically drops entries
-    // older than the staleness window (30s), leaving only the live peer.
+async fn source_protocol_state_outlives_activity_and_is_eventually_evicted() {
+    // Activity views expire after 30 seconds, but the underlying protocol state
+    // must survive until the next stock-cadence UDP reask. A later write evicts
+    // it only after the bounded 40-minute source-knowledge window.
     let root = unique_test_dir("ed2k-transfer-source-eviction");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let now = Instant::now();
@@ -140,8 +140,8 @@ async fn stale_download_sources_are_evicted_on_next_write() {
         assert_eq!(sources.get(file_hash).map(|peers| peers.len()), Some(1));
     }
 
-    // A write well past the staleness window for a different peer must evict the
-    // now-stale entry, leaving only the fresh peer.
+    // A write past the activity window retains the old protocol entry while the
+    // live view exposes only the fresh peer.
     let later = now + Duration::from_secs(31);
     runtime.note_download_source_bytes_at(
         file_hash,
@@ -154,16 +154,85 @@ async fn stale_download_sources_are_evicted_on_next_write() {
     {
         let sources = runtime.download_sources.lock().unwrap();
         let peers = sources.get(file_hash).expect("file entry present");
-        assert_eq!(peers.len(), 1, "stale peer should have been evicted");
+        assert_eq!(
+            peers.len(),
+            2,
+            "protocol state must survive activity expiry"
+        );
         assert!(
             peers.contains_key(&fresh_peer.to_string()),
             "fresh peer retained"
         );
         assert!(
-            !peers.contains_key(&stale_peer.to_string()),
-            "stale peer dropped"
+            peers.contains_key(&stale_peer.to_string()),
+            "inactive peer protocol state retained"
         );
     }
+    let live = runtime.live_download_sources_at(file_hash, later);
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].endpoint, fresh_peer);
+
+    let newest_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 3), 4662));
+    let after_protocol_expiry = now + Duration::from_secs(40 * 60 + 1);
+    runtime.note_download_source_bytes_at(
+        file_hash,
+        newest_peer,
+        Some([0x03; 16]),
+        None,
+        4_096,
+        after_protocol_expiry,
+    );
+    let sources = runtime.download_sources.lock().unwrap();
+    let peers = sources.get(file_hash).expect("file entry present");
+    assert!(!peers.contains_key(&stale_peer.to_string()));
+    assert!(peers.contains_key(&fresh_peer.to_string()));
+    assert!(peers.contains_key(&newest_peer.to_string()));
+}
+
+#[test]
+fn complete_source_protocol_count_survives_until_the_stock_reask_window() {
+    let root = unique_test_dir("ed2k-transfer-complete-source-retention");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let now = Instant::now();
+    let file_hash = "10112233445566778899aabbccddeeff";
+    let complete_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 4), 4662));
+    let partial_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 4662));
+
+    assert!(runtime.note_download_source_part_bitmap_at(
+        file_hash,
+        complete_peer,
+        Some([0x04; 16]),
+        None,
+        vec![true, true],
+        now,
+    ));
+    assert!(runtime.note_download_source_part_bitmap_at(
+        file_hash,
+        partial_peer,
+        Some([0x05; 16]),
+        None,
+        vec![true, false],
+        now,
+    ));
+
+    let next_reask = now + Duration::from_secs(29 * 60);
+    assert!(
+        runtime
+            .live_download_sources_at(file_hash, next_reask)
+            .is_empty()
+    );
+    assert_eq!(
+        runtime.known_complete_source_count_at(file_hash, 2, next_reask),
+        1
+    );
+    assert_eq!(
+        runtime.known_complete_source_count_at(
+            file_hash,
+            2,
+            now + Duration::from_secs(40 * 60 + 1)
+        ),
+        0
+    );
 }
 
 #[tokio::test]
