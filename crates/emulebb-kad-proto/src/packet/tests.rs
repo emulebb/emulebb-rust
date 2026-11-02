@@ -1002,15 +1002,27 @@ fn firewall_udp_uses_stock_min_size_and_ignores_trailing_bytes() {
 
 #[test]
 fn test_find_buddy_req_roundtrip() {
+    let client_hash = Ed2kHash::from_bytes([
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10,
+    ]);
     let pkt = KadPacket::FindBuddyReq(FindBuddyReq {
         buddy_id: NodeId::from_bytes([0x21; 16]),
-        client_hash: Ed2kHash::from_bytes([0x42; 16]),
+        client_hash,
         tcp_port: 4662,
     });
+    let encoded = pkt.encode().unwrap();
+    assert_eq!(
+        &encoded[18..34],
+        &[
+            0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05, 0x0C, 0x0B, 0x0A, 0x09, 0x10, 0x0F,
+            0x0E, 0x0D,
+        ]
+    );
     let pkt2 = roundtrip(&pkt);
     if let KadPacket::FindBuddyReq(req) = pkt2 {
         assert_eq!(req.buddy_id, NodeId::from_bytes([0x21; 16]));
-        assert_eq!(req.client_hash, Ed2kHash::from_bytes([0x42; 16]));
+        assert_eq!(req.client_hash, client_hash);
         assert_eq!(req.tcp_port, 4662);
     } else {
         panic!("wrong type");
@@ -1019,16 +1031,28 @@ fn test_find_buddy_req_roundtrip() {
 
 #[test]
 fn test_find_buddy_res_roundtrip_without_connect_options() {
+    let client_hash = Ed2kHash::from_bytes([
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        0x00,
+    ]);
     let pkt = KadPacket::FindBuddyRes(FindBuddyRes {
         buddy_id: NodeId::from_bytes([0x31; 16]),
-        client_hash: Ed2kHash::from_bytes([0x52; 16]),
+        client_hash,
         tcp_port: 4662,
         connect_options: None,
     });
+    let encoded = pkt.encode().unwrap();
+    assert_eq!(
+        &encoded[18..34],
+        &[
+            0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0xCC, 0xBB, 0xAA, 0x99, 0x00, 0xFF,
+            0xEE, 0xDD,
+        ]
+    );
     let pkt2 = roundtrip(&pkt);
     if let KadPacket::FindBuddyRes(res) = pkt2 {
         assert_eq!(res.buddy_id, NodeId::from_bytes([0x31; 16]));
-        assert_eq!(res.client_hash, Ed2kHash::from_bytes([0x52; 16]));
+        assert_eq!(res.client_hash, client_hash);
         assert_eq!(res.tcp_port, 4662);
         assert_eq!(res.connect_options, None);
     } else {
@@ -1057,15 +1081,27 @@ fn test_find_buddy_res_roundtrip_with_connect_options() {
 
 #[test]
 fn test_callback_req_roundtrip() {
+    let file_hash = Ed2kHash::from_bytes([
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0,
+        0x01,
+    ]);
     let pkt = KadPacket::CallbackReq(CallbackReq {
         buddy_id: NodeId::from_bytes([0x51; 16]),
-        file_hash: Ed2kHash::from_bytes([0x72; 16]),
+        file_hash,
         tcp_port: 4662,
     });
+    let encoded = pkt.encode().unwrap();
+    assert_eq!(
+        &encoded[18..34],
+        &[
+            0x40, 0x30, 0x20, 0x10, 0x80, 0x70, 0x60, 0x50, 0xC0, 0xB0, 0xA0, 0x90, 0x01, 0xF0,
+            0xE0, 0xD0,
+        ]
+    );
     let pkt2 = roundtrip(&pkt);
     if let KadPacket::CallbackReq(req) = pkt2 {
         assert_eq!(req.buddy_id, NodeId::from_bytes([0x51; 16]));
-        assert_eq!(req.file_hash, Ed2kHash::from_bytes([0x72; 16]));
+        assert_eq!(req.file_hash, file_hash);
         assert_eq!(req.tcp_port, 4662);
     } else {
         panic!("wrong type");

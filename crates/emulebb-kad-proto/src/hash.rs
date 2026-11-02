@@ -5,7 +5,11 @@ use binrw::{BinRead, BinWrite};
 
 use crate::error::ProtoError;
 
-/// A 128-bit eMule Ed2k file hash (MD4-based).
+/// A 128-bit eMule eD2K hash in canonical MD4 byte order.
+///
+/// Kad packets serialize hash-valued `CUInt128` fields in eMule's native
+/// four-little-endian-words layout. Use the explicit conversion methods below
+/// at that wire boundary; application code always keeps canonical hash bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BinRead, BinWrite)]
 #[brw(little)]
 pub struct Ed2kHash(pub [u8; 16]);
@@ -17,6 +21,32 @@ impl Ed2kHash {
     pub fn from_bytes(b: [u8; 16]) -> Self {
         Ed2kHash(b)
     }
+
+    /// Decode an eMule `CUInt128` hash field from Kad wire order.
+    #[must_use]
+    pub fn from_kad_uint128_wire_bytes(wire: [u8; 16]) -> Self {
+        Self(swap_u32_byte_order(wire))
+    }
+
+    /// Encode this canonical hash as an eMule `CUInt128` Kad wire field.
+    #[must_use]
+    pub fn to_kad_uint128_wire_bytes(self) -> [u8; 16] {
+        swap_u32_byte_order(self.0)
+    }
+}
+
+fn swap_u32_byte_order(bytes: [u8; 16]) -> [u8; 16] {
+    let mut swapped = [0u8; 16];
+    for chunk in 0..4 {
+        let start = chunk * 4;
+        swapped[start..start + 4].copy_from_slice(&[
+            bytes[start + 3],
+            bytes[start + 2],
+            bytes[start + 1],
+            bytes[start],
+        ]);
+    }
+    swapped
 }
 
 impl fmt::Display for Ed2kHash {
@@ -117,6 +147,21 @@ mod tests {
         buf.set_position(0);
         let h2 = Ed2kHash::read_le(&mut buf).unwrap();
         assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn test_kad_uint128_wire_conversion_matches_stock_word_order() {
+        let canonical = Ed2kHash::from_bytes([
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ]);
+        let wire = [
+            0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05, 0x0c, 0x0b, 0x0a, 0x09, 0x10, 0x0f,
+            0x0e, 0x0d,
+        ];
+
+        assert_eq!(canonical.to_kad_uint128_wire_bytes(), wire);
+        assert_eq!(Ed2kHash::from_kad_uint128_wire_bytes(wire), canonical);
     }
 
     #[test]

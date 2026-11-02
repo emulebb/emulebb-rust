@@ -491,8 +491,7 @@ pub struct FirewallUdp {
 /// `buddy_id` is the Kad search target used to find a relay node, while
 /// `client_hash` is the requester's eD2k client hash used for later TCP
 /// callback routing.
-#[derive(BinRead, BinWrite, Debug, Clone, PartialEq)]
-#[brw(little)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FindBuddyReq {
     pub buddy_id: NodeId,
     pub client_hash: Ed2kHash,
@@ -517,8 +516,7 @@ pub struct FindBuddyRes {
 /// `buddy_id` is the buddy-search target originally used by the remote low-ID
 /// client, while `file_hash` identifies the shared file that motivated the
 /// callback in the common source-search flow.
-#[derive(BinRead, BinWrite, Debug, Clone, PartialEq)]
-#[brw(little)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CallbackReq {
     pub buddy_id: NodeId,
     pub file_hash: Ed2kHash,
