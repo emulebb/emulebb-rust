@@ -50,43 +50,64 @@ pub(crate) fn detach_kad_buddy_sources_for_reask(
         .iter()
         .filter(|source| source.has_kad_buddy_reask_target())
     {
-        let (Some(buddy_id), Some(buddy_endpoint)) = (source.buddy_id, source.buddy_endpoint)
-        else {
-            continue;
-        };
-        if !requested_callback_sources.insert(source_key(source)) {
-            continue;
-        }
-        // The source UDP-answers from its own eD2k UDP endpoint after the buddy
-        // relays our callback, so the reask pending gate keys on it. Fall back to
-        // the TCP port only if the Kad result carried no UDP port.
-        let endpoint = (source.ip, source.source_udp_port.unwrap_or(source.tcp_port));
-        let registered = reask_handle.register_kad_buddy_source(ReaskDetachArgs {
+        register_kad_buddy_source_for_reask(
+            reask_handle,
             file_hash,
-            endpoint,
-            // Core's lease key port (source_endpoint_key). A buddy source holds
-            // no direct-download lease, but its release events must still be
-            // addressed consistently by the TCP key.
-            tcp_port: source.tcp_port,
-            udp_version: ED2K_DEFAULT_UDP_VERSION,
-            // Kad buddy sources have no direct TCP file request to timestamp, so
-            // the first buddy-relayed UDP reask is due immediately.
-            initial_reask_delay: Duration::ZERO,
-            user_hash: source.user_hash,
-            should_crypt: source.obfuscation_options.is_some(),
-            low_id: true,
-            buddy_endpoint: Some(buddy_endpoint),
-            buddy_id: Some(buddy_id),
-        });
-        tracing::debug!(
-            "ED2K Kad buddy source detached onto UDP reask file_hash={} source={}:{} buddy={}:{} registered={registered}",
-            file_hash,
-            endpoint.0,
-            endpoint.1,
-            buddy_endpoint.0,
-            buddy_endpoint.1,
+            source,
+            ED2K_DEFAULT_UDP_VERSION,
+            requested_callback_sources,
         );
     }
+}
+
+/// Register one already-discovered Kad buddy source through the same eligibility,
+/// deduplication, and command-channel path used by the production source loop.
+/// The diagnostics fixture supplies the observed UDP version explicitly because
+/// a synthetic local source has no preceding hello from which to learn it.
+pub(crate) fn register_kad_buddy_source_for_reask(
+    reask_handle: &ReaskSourceHandle,
+    file_hash: Ed2kHash,
+    source: &Ed2kFoundSource,
+    source_udp_version: u8,
+    requested_callback_sources: &mut RequestedCallbackSources,
+) -> bool {
+    let (Some(buddy_id), Some(buddy_endpoint)) = (source.buddy_id, source.buddy_endpoint) else {
+        return false;
+    };
+    if !source.has_kad_buddy_reask_target()
+        || !requested_callback_sources.insert(source_key(source))
+    {
+        return false;
+    }
+    // The source UDP-answers from its own eD2k UDP endpoint after the buddy
+    // relays our callback, so the reask pending gate keys on it. Fall back to
+    // the TCP port only if the Kad result carried no UDP port.
+    let endpoint = (source.ip, source.source_udp_port.unwrap_or(source.tcp_port));
+    let registered = reask_handle.register_kad_buddy_source(ReaskDetachArgs {
+        file_hash,
+        endpoint,
+        // Core's lease key port (source_endpoint_key). A buddy source holds no
+        // direct-download lease, but release events still use the TCP key.
+        tcp_port: source.tcp_port,
+        udp_version: source_udp_version,
+        // Kad buddy sources have no direct TCP file request to timestamp, so the
+        // first buddy-relayed UDP reask is due immediately.
+        initial_reask_delay: Duration::ZERO,
+        user_hash: source.user_hash,
+        should_crypt: source.obfuscation_options.is_some(),
+        low_id: true,
+        buddy_endpoint: Some(buddy_endpoint),
+        buddy_id: Some(buddy_id),
+    });
+    tracing::debug!(
+        "ED2K Kad buddy source detached onto UDP reask file_hash={} source={}:{} buddy={}:{} registered={registered}",
+        file_hash,
+        endpoint.0,
+        endpoint.1,
+        buddy_endpoint.0,
+        buddy_endpoint.1,
+    );
+    registered
 }
 
 #[cfg(test)]

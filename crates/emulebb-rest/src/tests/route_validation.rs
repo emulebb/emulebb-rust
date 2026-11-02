@@ -1,5 +1,23 @@
 use crate::rest_test_support::*;
 
+#[cfg(not(feature = "packet-diagnostics"))]
+#[tokio::test]
+async fn diagnostics_protocol_fixture_route_is_absent_without_the_feature() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn write_routes_use_canonical_json_error_envelope() {
     let cases = [

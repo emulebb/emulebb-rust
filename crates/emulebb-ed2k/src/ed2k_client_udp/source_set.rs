@@ -117,6 +117,8 @@ impl ReaskSourceSet {
                 source_endpoint: (ip, udp_port),
                 destination,
                 datagram,
+                #[cfg(feature = "packet-diagnostics")]
+                diagnostic_identity: source.diagnostic_identity(),
             });
         }
         out
@@ -135,6 +137,11 @@ impl ReaskSourceSet {
         let file_hash = source.file_hash;
         self.pending.mark_sent(ip, udp_port, file_hash, now);
         true
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    pub(crate) fn is_pending(&self, ip: Ipv4Addr, udp_port: u16) -> bool {
+        self.pending.is_pending(ip, udp_port)
     }
 
     /// Apply a *received* reply (`Ack`/`QueueFull`/`FileNotFound`) to the source,

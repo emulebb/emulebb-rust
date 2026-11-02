@@ -112,6 +112,8 @@ mod delivery;
 mod diag_ed2k_server_udp;
 mod diag_kad_event;
 mod diag_sched;
+#[cfg(feature = "packet-diagnostics")]
+mod diagnostic_protocol_fixture;
 mod direct_download_runtime;
 mod disk_guard;
 mod download_duplicate;
@@ -175,6 +177,10 @@ use core_settings::{
     ed2k_upload_queue_policy_from_core_settings, initial_ed2k_upload_queue_policy,
 };
 pub(crate) use core_state::{CoreState, KadAichSearchVotes};
+#[cfg(feature = "packet-diagnostics")]
+pub use diagnostic_protocol_fixture::{
+    QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError, QueuedLowIdSourceFixtureErrorKind,
+};
 use direct_download_runtime::{parse_server_endpoint, run_ed2k_direct_downloads};
 pub use download_duplicate::{
     DownloadConflictError, DownloadConflictEvidence, DownloadConflictKind, KnownFilePolicy,

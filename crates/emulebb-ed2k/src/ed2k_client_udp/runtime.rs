@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 use emulebb_kad_dht::{DhtNode, ForeignDatagramHandler};
 use emulebb_kad_proto::Ed2kHash;
 use tokio::sync::mpsc;
+#[cfg(feature = "packet-diagnostics")]
+use tokio::sync::oneshot;
 use tracing::{debug, trace};
 
 use super::dispatch::{
@@ -67,6 +69,11 @@ pub enum ReaskCommand {
         dest: SocketAddr,
         forwarded_reask: Vec<u8>,
     },
+    /// Diagnostics-only ordered wake. The control plane first enqueues the normal
+    /// `Register` command, then this command on the same channel. FIFO processing
+    /// guarantees the existing production tick observes the registered source.
+    #[cfg(feature = "packet-diagnostics")]
+    DiagnosticWakeTick { completed: oneshot::Sender<()> },
 }
 
 /// Receiver end of the detach-command channel, owned by the reask loop.
@@ -123,6 +130,25 @@ impl ReaskSourceHandle {
     /// (the source stays a server-callback candidate). Returns whether it was sent.
     pub fn register_kad_buddy_source(&self, args: ReaskDetachArgs) -> bool {
         self.0.try_send(ReaskCommand::Register(args)).is_ok()
+    }
+
+    /// Run the real production reask tick promptly after an ordered diagnostics
+    /// registration. This does not construct or send a packet itself.
+    #[cfg(feature = "packet-diagnostics")]
+    pub async fn diagnostic_wake_tick(&self) -> Result<(), &'static str> {
+        const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+        tokio::time::timeout(CONTROL_TIMEOUT, async {
+            let (completed, completion) = oneshot::channel();
+            self.0
+                .send(ReaskCommand::DiagnosticWakeTick { completed })
+                .await
+                .map_err(|_| "reask command channel is closed")?;
+            completion
+                .await
+                .map_err(|_| "reask loop ended before the diagnostics tick completed")
+        })
+        .await
+        .map_err(|_| "timed out waiting for the diagnostics reask tick")?
     }
 
     /// Drop a source from reask state by endpoint. Best-effort.
@@ -323,6 +349,11 @@ pub async fn run_ed2k_udp_reask_loop(
                         udp_version,
                     )
                     .await,
+                    #[cfg(feature = "packet-diagnostics")]
+                    ReaskCommand::DiagnosticWakeTick { completed } => {
+                        drive_reask_tick(&mut service, &dht, &transfer_runtime, &events).await;
+                        let _ = completed.send(());
+                    }
                     other => apply_reask_command(&mut service, &events, other),
                 }
             }
@@ -506,9 +537,23 @@ async fn handle_inbound_datagram(
                 file_hash,
                 endpoint,
                 lease_endpoint,
+                #[cfg(feature = "packet-diagnostics")]
+                diagnostic_identity,
+                #[cfg(feature = "packet-diagnostics")]
+                request_pending_after,
+                #[cfg(feature = "packet-diagnostics")]
+                remote_queue_full_after,
                 action,
             } => {
                 trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
+                #[cfg(feature = "packet-diagnostics")]
+                super::sched_diag::udp_reask_reply_applied(
+                    file_hash,
+                    diagnostic_identity,
+                    action,
+                    request_pending_after,
+                    remote_queue_full_after,
+                );
                 // A re-engageable rank means we hand the source back to TCP first.
                 if matches!(action, ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD)
                 {
@@ -761,11 +806,15 @@ fn apply_reask_command(
                 source = source.with_obfuscation(hash, should_crypt);
             }
             source = source.with_buddy(low_id, buddy_endpoint, buddy_id);
+            #[cfg(feature = "packet-diagnostics")]
+            let diagnostic_identity = source.diagnostic_identity();
             trace!(
                 "ed2k udp reask: detaching source {}:{} for {} onto UDP reask",
                 endpoint.0, endpoint.1, file_hash
             );
             service.register_source(file_hash, source);
+            #[cfg(feature = "packet-diagnostics")]
+            super::sched_diag::udp_reask_source_registered(file_hash, diagnostic_identity);
         }
         ReaskCommand::Remove { endpoint } => {
             // Only release the lease if this endpoint was a detached source we held;
@@ -785,6 +834,8 @@ fn apply_reask_command(
         }
         // Handled inline in the loop (needs async I/O); never routed here.
         ReaskCommand::AnswerCallbackTcp { .. } => {}
+        #[cfg(feature = "packet-diagnostics")]
+        ReaskCommand::DiagnosticWakeTick { .. } => {}
     }
 }
 
@@ -850,13 +901,16 @@ async fn drive_reask_tick(
     for send in out.send {
         let source_endpoint = send.source_endpoint;
         let addr = send.destination;
-        let datagram = send.datagram;
-        let role = if datagram.opcode == super::codec::OP_REASKCALLBACKUDP {
+        let role = if send.datagram.opcode == super::codec::OP_REASKCALLBACKUDP {
             ClientUdpSendRole::BuddyRelayRequest
         } else {
             ClientUdpSendRole::ReaskRequest
         };
-        let result = send_client_udp_datagram(dht, addr, role, &datagram).await;
+        #[cfg(feature = "packet-diagnostics")]
+        super::sched_diag::udp_reask_schedule_decision(&send);
+        #[cfg(feature = "packet-diagnostics")]
+        super::sched_diag::udp_reask_decision(&send);
+        let result = send_client_udp_datagram(dht, addr, role, &send.datagram).await;
         match settle_reask_send(service, source_endpoint, result, Instant::now()) {
             Ok(marked) => {
                 debug_assert!(marked, "scheduled reask source disappeared during send");
@@ -869,23 +923,27 @@ async fn drive_reask_tick(
                 }
                 trace!(
                     "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
-                    datagram.bytes.len(),
-                    hex_preview(&datagram.bytes),
+                    send.datagram.bytes.len(),
+                    hex_preview(&send.datagram.bytes),
                 );
-                // `reask_sent` (uniform-diagnostics-v2 schema §3.5): a UDP source
-                // reask actually went out on the wire to `addr`.
-                crate::diag_event::emit(
-                    "sched",
-                    "reask_sent",
-                    "info",
-                    serde_json::json!({ "peer": addr.to_string() }),
-                    udp_reask_sent_body(),
+                if marked {
+                    // `reask_sent` (uniform-diagnostics-v2 schema §3.5): a UDP
+                    // source reask actually went out and opened its reply gate.
+                    crate::diag_event::emit(
+                        "sched",
+                        "reask_sent",
+                        "info",
+                        serde_json::json!({ "peer": addr.to_string() }),
+                        udp_reask_sent_body(),
+                    );
+                }
+            }
+            Err(err) => {
+                trace!(
+                    "ed2k udp reask: send to {addr} for source {:?} failed: {err}",
+                    source_endpoint
                 );
             }
-            Err(err) => trace!(
-                "ed2k udp reask: send to {addr} for source {:?} failed: {err}",
-                source_endpoint
-            ),
         }
     }
     for (addr, action) in out.timed_out {

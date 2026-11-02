@@ -213,6 +213,23 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const URL_IMPORT: &[&str] = &["url"];
     const KAD_BOOTSTRAP: &[&str] = &["address", "port"];
     const EMPTY: &[&str] = &[];
+    #[cfg(feature = "packet-diagnostics")]
+    const QUEUED_LOWID_SOURCE_FIXTURE: &[&str] = &[
+        "fileHash",
+        "sourceIp",
+        "sourceTcpPort",
+        "sourceUdpPort",
+        "sourceUserHash",
+        "sourceUdpVersion",
+        "buddyIp",
+        "buddyUdpPort",
+        "buddyId",
+    ];
+
+    #[cfg(feature = "packet-diagnostics")]
+    if method == "POST" && path == "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources" {
+        return Some(QUEUED_LOWID_SOURCE_FIXTURE);
+    }
 
     if method == "POST" && path == "/api/v1/transfers" {
         return Some(TRANSFER_ADD);

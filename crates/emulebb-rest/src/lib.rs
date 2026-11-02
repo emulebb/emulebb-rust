@@ -6,6 +6,9 @@ use tokio::sync::watch;
 mod log_buffer;
 pub use log_buffer::record_log;
 
+#[cfg(feature = "packet-diagnostics")]
+mod protocol_fixtures;
+
 mod diagnostic_bundle;
 mod dto;
 mod envelope;
@@ -45,6 +48,9 @@ pub struct RestState {
     api_key: Arc<String>,
     shutdown: Option<watch::Sender<bool>>,
 }
+#[cfg(all(test, feature = "packet-diagnostics"))]
+#[path = "tests/protocol_fixtures.rs"]
+mod protocol_fixture_tests;
 #[cfg(test)]
 #[path = "tests/request_body_limit.rs"]
 mod request_body_limit_tests;

@@ -524,6 +524,11 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const UPLOAD_QUEUE: &[&str] = &["offset", "limit", "includeScoreBreakdown"];
 
+    #[cfg(feature = "packet-diagnostics")]
+    if method == "POST" && path == "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources" {
+        return Some(NONE);
+    }
+
     match (method, path) {
         ("GET", "/api/v1/app")
         | ("GET", "/api/v1/capabilities")

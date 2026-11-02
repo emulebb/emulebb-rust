@@ -35,6 +35,8 @@ pub(crate) mod outbound;
 pub(crate) mod reciprocity;
 pub(crate) mod registry;
 pub(crate) mod runtime;
+#[cfg(feature = "packet-diagnostics")]
+mod sched_diag;
 pub(crate) mod service;
 pub(crate) mod source_set;
 pub(crate) mod state;
@@ -63,6 +65,8 @@ pub use runtime::{
 };
 pub(crate) use service::{ReaskInboundOutcome, ReaskService, ReaskTickOutput, TransferReaskInfo};
 pub(crate) use source_set::ReaskSourceSet;
+#[cfg(feature = "packet-diagnostics")]
+pub(crate) use state::ReaskDiagnosticIdentity;
 pub(crate) use state::{
     FILE_REASK_TIME, MIN_REQUEST_TIME, ReaskAction, ReaskReply, ReaskSource, UDP_MAX_QUEUE_TIME,
     apply_reask_reply, reask_interval, should_fall_back_to_tcp, udp_reask_eligible,

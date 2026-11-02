@@ -23,6 +23,19 @@ fn peer_lease_v4() -> (Ipv4Addr, u16) {
     (Ipv4Addr::new(198, 51, 100, 7), 4662)
 }
 
+#[cfg(feature = "packet-diagnostics")]
+fn diagnostic_identity() -> ReaskDiagnosticIdentity {
+    ReaskDiagnosticIdentity {
+        peer_endpoint: peer_lease_v4(),
+        peer_hash: Some(PEER_HASH),
+        source_udp_endpoint: peer_v4(),
+        source_udp_version: 4,
+        low_id: false,
+        buddy_endpoint: None,
+        buddy_id: None,
+    }
+}
+
 fn service() -> (ReaskService, ReachabilityRuntimeLease) {
     let authority = ReachabilityRuntimeAuthority::new();
     let public_ip = authority.reader();
@@ -120,6 +133,12 @@ fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
             file_hash: file_hash(),
             endpoint: peer_v4(),
             lease_endpoint: peer_lease_v4(),
+            #[cfg(feature = "packet-diagnostics")]
+            diagnostic_identity: diagnostic_identity(),
+            #[cfg(feature = "packet-diagnostics")]
+            request_pending_after: false,
+            #[cfg(feature = "packet-diagnostics")]
+            remote_queue_full_after: false,
             action: ReaskAction::UpdatedRank(12),
         }
     );
@@ -225,6 +244,12 @@ fn file_not_found_drops_source_and_clears_routing() {
             file_hash: file_hash(),
             endpoint: peer_v4(),
             lease_endpoint: peer_lease_v4(),
+            #[cfg(feature = "packet-diagnostics")]
+            diagnostic_identity: diagnostic_identity(),
+            #[cfg(feature = "packet-diagnostics")]
+            request_pending_after: false,
+            #[cfg(feature = "packet-diagnostics")]
+            remote_queue_full_after: false,
             action: ReaskAction::DropSource,
         }
     );

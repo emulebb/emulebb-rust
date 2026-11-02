@@ -438,3 +438,40 @@ fn detach_handle_register_is_received_as_a_command() {
         other => panic!("expected Register, got {other:?}"),
     }
 }
+
+#[cfg(feature = "packet-diagnostics")]
+#[tokio::test]
+async fn diagnostic_wake_is_ordered_after_normal_registration() {
+    let (handle, mut rx) = reask_command_channel();
+    let file_hash = Ed2kHash::from_bytes([0xCD; 16]);
+    assert!(handle.register_kad_buddy_source(ReaskDetachArgs {
+        file_hash,
+        endpoint: (Ipv4Addr::new(10, 0, 0, 1), 5000),
+        tcp_port: 4662,
+        udp_version: 4,
+        initial_reask_delay: Duration::ZERO,
+        user_hash: Some([0x66; 16]),
+        should_crypt: false,
+        low_id: true,
+        buddy_endpoint: Some((Ipv4Addr::new(203, 0, 113, 9), 5000)),
+        buddy_id: Some([0x77; 16]),
+    }));
+
+    let wake = tokio::spawn(async move { handle.diagnostic_wake_tick().await });
+
+    match rx.recv().await.expect("the queued registration") {
+        ReaskCommand::Register(args) => {
+            assert_eq!(args.file_hash, file_hash);
+            assert_eq!(args.endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));
+        }
+        other => panic!("expected Register before the wake, got {other:?}"),
+    }
+    match rx.recv().await.expect("the queued diagnostics wake") {
+        ReaskCommand::DiagnosticWakeTick { completed } => {
+            completed.send(()).expect("wake completion receiver");
+        }
+        other => panic!("expected DiagnosticWakeTick after Register, got {other:?}"),
+    }
+
+    assert_eq!(wake.await.expect("wake task"), Ok(()));
+}
