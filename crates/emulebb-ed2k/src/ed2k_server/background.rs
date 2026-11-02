@@ -587,8 +587,23 @@ pub(super) fn handle_background_udp_packet(
                     return Ok(());
                 }
             };
-            for results in source_sets {
-                let results = super::annotate_found_sources_server(results, server.base_endpoint());
+            for result in source_sets {
+                if result.file_hash != file_hash {
+                    warn!(
+                        "discarding mismatched ED2K background UDP source-search response requested_hash={} response_hash={} endpoint={}",
+                        file_hash,
+                        result.file_hash,
+                        server.base_endpoint()
+                    );
+                    *pending_background_search = Some(Source {
+                        file_hash,
+                        deadline,
+                        response,
+                    });
+                    return Ok(());
+                }
+                let results =
+                    super::annotate_found_sources_server(result.sources, server.base_endpoint());
                 if let Err(error) = validate_found_sources(&results, file_hash) {
                     warn!(
                         "discarding mismatched ED2K background UDP source-search response file_hash={} endpoint={}: {error}",

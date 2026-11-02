@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(feature = "packet-diagnostics", test))]
 use serde_json::{Map, Value, json};
 
+use super::{Ed2kServerUdpEvidence, ResolvedServerEntry, ServerSession};
 #[cfg(any(feature = "packet-diagnostics", test))]
 use super::{
     OP_CALLBACK_FAIL, OP_CALLBACKREQUEST, OP_CALLBACKREQUESTED, OP_FOUNDSOURCES,
@@ -19,7 +20,6 @@ use super::{
     OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
     OP_SERVERSTATUS,
 };
-use super::{ResolvedServerEntry, ServerSession};
 
 /// eD2k server protocol marker (OP_EDONKEYPROT) — server packets ride the eD2k
 /// protocol byte unless the server advertised packed payload support.
@@ -253,6 +253,24 @@ pub(super) fn dump_ed2k_server_source_result_applied(
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic correlation fields"
+)]
+pub(super) fn dump_ed2k_server_udp_source_result_applied(
+    _peer: &str,
+    _server_endpoint: &str,
+    _evidence: Ed2kServerUdpEvidence,
+    _request_opcode: u8,
+    _response_opcode: u8,
+    _file_hash: emulebb_kad_proto::Ed2kHash,
+    _wire_source_count: usize,
+    _source_count_before: usize,
+    _source_count_after: usize,
+) {
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
 pub(super) fn dump_ed2k_server_loop_meta(
     _endpoint: &str,
     _phase: &'static str,
@@ -454,10 +472,18 @@ pub(super) fn dump_ed2k_server_source_result_applied(
     source_count_before: usize,
     source_count_after: usize,
 ) {
+    let request_opcode = if response_opcode == OP_FOUNDSOURCES_OBFU {
+        OP_GETSOURCES_OBFU
+    } else {
+        OP_GETSOURCES
+    };
     let (keys, body) = ed2k_server_source_result_applied_parts(
+        endpoint,
         endpoint,
         trace_id,
         transport_mode,
+        transport_mode == "obfuscated",
+        request_opcode,
         response_opcode,
         file_hash,
         wire_source_count,
@@ -467,33 +493,82 @@ pub(super) fn dump_ed2k_server_source_result_applied(
     crate::diag_event::emit("ed2k_tcp", "source_result_applied", "info", keys, body);
 }
 
+#[cfg(feature = "packet-diagnostics")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat diagnostic correlation fields"
+)]
+pub(super) fn dump_ed2k_server_udp_source_result_applied(
+    peer: &str,
+    server_endpoint: &str,
+    evidence: Ed2kServerUdpEvidence,
+    request_opcode: u8,
+    response_opcode: u8,
+    file_hash: emulebb_kad_proto::Ed2kHash,
+    wire_source_count: usize,
+    source_count_before: usize,
+    source_count_after: usize,
+) {
+    let (keys, body) = ed2k_server_source_result_applied_parts(
+        peer,
+        server_endpoint,
+        evidence.trace_id(),
+        evidence.transport().as_str(),
+        evidence.transport().obfuscated(),
+        request_opcode,
+        response_opcode,
+        file_hash,
+        wire_source_count,
+        source_count_before,
+        source_count_after,
+    );
+    crate::diag_event::emit(
+        "ed2k_server_udp",
+        "source_result_applied",
+        "info",
+        keys,
+        body,
+    );
+}
+
 #[cfg(any(feature = "packet-diagnostics", test))]
 #[expect(
     clippy::too_many_arguments,
     reason = "flat diagnostic correlation fields"
 )]
 fn ed2k_server_source_result_applied_parts(
-    endpoint: &str,
+    peer: &str,
+    server_endpoint: &str,
     trace_id: u64,
     transport_mode: &'static str,
+    obfuscated: bool,
+    request_opcode: u8,
     response_opcode: u8,
     file_hash: emulebb_kad_proto::Ed2kHash,
     wire_source_count: usize,
     source_count_before: usize,
     source_count_after: usize,
 ) -> (Value, Value) {
-    let obfuscated = response_opcode == OP_FOUNDSOURCES_OBFU;
-    let opcode_name = if obfuscated {
+    let opcode_name = if response_opcode == OP_FOUNDSOURCES_OBFU {
         "OP_FOUNDSOURCES_OBFU"
+    } else if response_opcode == OP_GLOBFOUNDSOURCES {
+        "OP_GLOBFOUNDSOURCES"
     } else {
         "OP_FOUNDSOURCES"
     };
+    let request_opcode_name = match request_opcode {
+        OP_GETSOURCES_OBFU => "OP_GETSOURCES_OBFU",
+        OP_GLOBGETSOURCES => "OP_GLOBGETSOURCES",
+        OP_GLOBGETSOURCES2 => "OP_GLOBGETSOURCES2",
+        _ => "OP_GETSOURCES",
+    };
     (
         json!({
-            "peer": endpoint,
+            "peer": peer,
             "fileHash": file_hash.to_string(),
             "opcode": response_opcode,
             "protocolMarker": OP_EDONKEYPROT_MARKER,
+            "requestOpcode": request_opcode,
             "traceId": trace_id,
         }),
         json!({
@@ -503,9 +578,12 @@ fn ed2k_server_source_result_applied_parts(
             "protocolMarker": OP_EDONKEYPROT_MARKER,
             "opcode": response_opcode,
             "opcodeName": opcode_name,
+            "requestOpcode": request_opcode,
+            "requestOpcodeName": request_opcode_name,
             "traceId": trace_id,
             "transportMode": transport_mode,
             "obfuscated": obfuscated,
+            "serverEndpoint": server_endpoint,
             "stateId": "server.source.result_applied",
             "milestone": "result_applied",
             "wireSourceCount": wire_source_count,
@@ -984,14 +1062,15 @@ fn server_opcode_name(opcode: u8) -> &'static str {
 mod tests {
     use super::{
         Ed2kServerDumpRecord, Ed2kServerSendContext, Ed2kServerSendOutcome, OP_CALLBACKREQUEST,
-        OP_EDONKEYPROT_MARKER, OP_FOUNDSOURCES, OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES,
-        OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES,
-        OP_GLOBSERVSTATREQ, OP_GLOBSERVSTATRES, OP_PACKEDPROT, OP_SERVER_DESC_RES,
-        OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT,
-        OP_SERVERSTATUS, ed2k_server_diag_event_parts, ed2k_server_ident_applied_parts,
-        ed2k_server_send_outcome_parts, ed2k_server_source_result_applied_parts,
-        ed2k_server_status_applied_parts, ed2k_server_transport_fallback_parts, exact_packet_hex,
-        server_opcode_name, server_protocol_name,
+        OP_EDONKEYPROT_MARKER, OP_FOUNDSOURCES, OP_GETSOURCES, OP_GLOBCALLBACKREQ,
+        OP_GLOBFOUNDSOURCES, OP_GLOBGETSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2,
+        OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_GLOBSERVSTATRES, OP_PACKEDPROT,
+        OP_SERVER_DESC_RES, OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES,
+        OP_SERVERIDENT, OP_SERVERSTATUS, ed2k_server_diag_event_parts,
+        ed2k_server_ident_applied_parts, ed2k_server_send_outcome_parts,
+        ed2k_server_source_result_applied_parts, ed2k_server_status_applied_parts,
+        ed2k_server_transport_fallback_parts, exact_packet_hex, server_opcode_name,
+        server_protocol_name,
     };
     use emulebb_kad_proto::Ed2kHash;
 
@@ -1042,8 +1121,11 @@ mod tests {
         let file_hash = Ed2kHash::from_bytes([0x22; 16]);
         let (keys, body) = ed2k_server_source_result_applied_parts(
             "127.0.0.1:4661",
+            "127.0.0.1:4661",
             9,
             "plaintext",
+            false,
+            OP_GETSOURCES,
             OP_FOUNDSOURCES,
             file_hash,
             1,
@@ -1055,12 +1137,44 @@ mod tests {
         assert_eq!(keys["fileHash"], file_hash.to_string());
         assert_eq!(keys["traceId"], 9);
         assert_eq!(keys["opcode"], OP_FOUNDSOURCES);
+        assert_eq!(body["requestOpcode"], OP_GETSOURCES);
+        assert_eq!(body["requestOpcodeName"], "OP_GETSOURCES");
+        assert_eq!(body["serverEndpoint"], "127.0.0.1:4661");
         assert_eq!(body["stateId"], "server.source.result_applied");
         assert_eq!(body["milestone"], "result_applied");
         assert_eq!(body["wireSourceCount"], 1);
         assert_eq!(body["sourceCountBefore"], 0);
         assert_eq!(body["sourceCountAfter"], 1);
         assert_eq!(body["outcome"], "applied");
+    }
+
+    #[test]
+    fn server_udp_source_result_applied_event_preserves_v1_request_and_receive_trace() {
+        let file_hash = Ed2kHash::from_bytes([0x23; 16]);
+        let (keys, body) = ed2k_server_source_result_applied_parts(
+            "127.0.0.1:4665",
+            "127.0.0.1:4661",
+            10,
+            "plaintext",
+            false,
+            OP_GLOBGETSOURCES,
+            OP_GLOBFOUNDSOURCES,
+            file_hash,
+            1,
+            0,
+            1,
+        );
+
+        assert_eq!(keys["peer"], "127.0.0.1:4665");
+        assert_eq!(keys["traceId"], 10);
+        assert_eq!(keys["requestOpcode"], OP_GLOBGETSOURCES);
+        assert_eq!(body["opcodeName"], "OP_GLOBFOUNDSOURCES");
+        assert_eq!(body["requestOpcodeName"], "OP_GLOBGETSOURCES");
+        assert_eq!(body["transportMode"], "plaintext");
+        assert_eq!(body["obfuscated"], false);
+        assert_eq!(body["serverEndpoint"], "127.0.0.1:4661");
+        assert_eq!(body["sourceCountBefore"], 0);
+        assert_eq!(body["sourceCountAfter"], 1);
     }
 
     #[test]

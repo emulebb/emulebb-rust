@@ -51,7 +51,7 @@ pub use active_keyword::{
 pub use active_source::{Ed2kSourceSearchOptions, search_source_servers};
 pub use active_source_udp::{
     Ed2kUdpSourceBatchSearchOptions, Ed2kUdpSourceBatchTarget, Ed2kUdpSourceSearchOptions,
-    search_source_udp_server_batches, search_source_udp_servers,
+    Ed2kUdpSourceSearchResult, search_source_udp_server_batches, search_source_udp_servers,
 };
 use background::{
     BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
@@ -70,6 +70,7 @@ use diagnostics::{
     dump_ed2k_server_ident_applied, dump_ed2k_server_loop_meta, dump_ed2k_server_meta,
     dump_ed2k_server_packet, dump_ed2k_server_source_result_applied,
     dump_ed2k_server_status_applied, dump_ed2k_server_transport_fallback,
+    dump_ed2k_server_udp_source_result_applied,
 };
 
 /// Records that one causally identified connected-server source reply was
@@ -85,6 +86,28 @@ pub fn emit_server_source_result_applied(
         &result.server_endpoint.to_string(),
         result.trace_id,
         result.transport_mode,
+        result.response_opcode,
+        file_hash,
+        wire_source_count,
+        source_count_before,
+        source_count_after,
+    );
+}
+
+/// Records that one causally identified global-UDP source reply was applied to
+/// core's live per-file source registry.
+pub fn emit_server_udp_source_result_applied(
+    result: &Ed2kUdpSourceSearchResult,
+    file_hash: emulebb_kad_proto::Ed2kHash,
+    wire_source_count: usize,
+    source_count_before: usize,
+    source_count_after: usize,
+) {
+    dump_ed2k_server_udp_source_result_applied(
+        &result.evidence.peer().to_string(),
+        &result.server_endpoint.to_string(),
+        result.evidence,
+        result.request_opcode,
         result.response_opcode,
         file_hash,
         wire_source_count,

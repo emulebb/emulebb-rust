@@ -31,7 +31,8 @@ use emulebb_ed2k::{
         Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpCallbackRequestOptions,
         Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
         SearchCriteria, ed2k_server_control_channel, ed2k_server_list_event_channel,
-        emit_server_source_result_applied, new_ed2k_server_search_channel, parse_server_met,
+        emit_server_source_result_applied, emit_server_udp_source_result_applied,
+        new_ed2k_server_search_channel, parse_server_met,
         publish_shared_catalog_via_background_session, request_callback_via_background_session,
         request_callback_via_udp_server, run_ed2k_server_loop, search_keyword_udp_servers,
         search_keyword_via_background_session, search_source_batch_via_background_session,
@@ -2810,22 +2811,47 @@ impl EmulebbCore {
                 .await
                 {
                     Ok(results_by_hash) => {
-                        for (result_hash, mut results) in results_by_hash {
-                            if !network.ip_filter.is_empty() {
-                                results.retain(|source| !network.ip_filter.is_filtered(source.ip));
-                            }
-                            let ban_store = self.ed2k_transfers.ban_store();
-                            results.retain(|source| {
-                                !ban_store.is_banned(Some(source.ip), source.user_hash.as_ref())
-                            });
-                            if result_hash == file_hash {
-                                merge_download_sources(&mut sources, results);
-                            } else if let Some(batch_transfer) =
-                                claimed_batch.transfers.get(&result_hash)
-                            {
-                                self.register_download_source_candidates(batch_transfer, &results)
-                                    .await;
-                                self.remember_ed2k_sources(result_hash, &results).await?;
+                        for (result_hash, results) in results_by_hash {
+                            for mut result in results {
+                                let wire_source_count = result.sources.len();
+                                if !network.ip_filter.is_empty() {
+                                    result
+                                        .sources
+                                        .retain(|source| !network.ip_filter.is_filtered(source.ip));
+                                }
+                                let ban_store = self.ed2k_transfers.ban_store();
+                                result.sources.retain(|source| {
+                                    !ban_store.is_banned(Some(source.ip), source.user_hash.as_ref())
+                                });
+                                if let Some(batch_transfer) =
+                                    claimed_batch.transfers.get(&result_hash)
+                                {
+                                    // WHY: retain the accepted UDP packet's receive
+                                    // trace through the exact registry mutation. A
+                                    // later aggregate count could include TCP/Kad
+                                    // supplements and would not prove this reply was
+                                    // causally applied.
+                                    let (source_count_before, source_count_after) = self
+                                        .register_download_source_candidates(
+                                            batch_transfer,
+                                            &result.sources,
+                                        )
+                                        .await;
+                                    emit_server_udp_source_result_applied(
+                                        &result,
+                                        result_hash,
+                                        wire_source_count,
+                                        source_count_before,
+                                        source_count_after,
+                                    );
+                                    if result_hash != file_hash {
+                                        self.remember_ed2k_sources(result_hash, &result.sources)
+                                            .await?;
+                                    }
+                                }
+                                if result_hash == file_hash {
+                                    merge_download_sources(&mut sources, result.sources);
+                                }
                             }
                         }
                     }
