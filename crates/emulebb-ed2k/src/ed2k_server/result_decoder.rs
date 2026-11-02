@@ -84,7 +84,7 @@ pub(super) fn decode_udp_search_result_pages(payload: &[u8]) -> Result<Vec<Searc
     }])
 }
 
-pub(super) fn decode_udp_found_source_sets(payload: &[u8]) -> Result<Vec<Vec<Ed2kFoundSource>>> {
+pub(super) fn decode_udp_found_source_sets(payload: &[u8]) -> Result<Vec<DecodedFoundSources>> {
     if payload.is_empty() {
         return Ok(Vec::new());
     }
@@ -93,17 +93,26 @@ pub(super) fn decode_udp_found_source_sets(payload: &[u8]) -> Result<Vec<Vec<Ed2
     // a marked continuation: stock clients keep that prefix if a later segment
     // is malformed, and bytes without the marker are server-specific trailing
     // data rather than another source-set.
-    let (first, mut cursor) = decode_found_sources_from(payload, false)?;
-    let mut sets = vec![first];
+    let (first_sources, mut cursor) = decode_found_sources_from(payload, false)?;
+    let mut sets = vec![DecodedFoundSources {
+        file_hash: Ed2kHash(payload[..16].try_into().unwrap()),
+        sources: first_sources,
+        trailing_len: cursor.len(),
+    }];
     while udp_chain_matches(cursor, OP_GLOBFOUNDSOURCES) {
         cursor = &cursor[2..];
         if cursor.is_empty() {
             break;
         }
-        let Ok((sources, rest)) = decode_found_sources_from(cursor, false) else {
+        let segment = cursor;
+        let Ok((sources, rest)) = decode_found_sources_from(segment, false) else {
             break;
         };
-        sets.push(sources);
+        sets.push(DecodedFoundSources {
+            file_hash: Ed2kHash(segment[..16].try_into().unwrap()),
+            sources,
+            trailing_len: rest.len(),
+        });
         cursor = rest;
     }
     Ok(sets)
@@ -497,14 +506,16 @@ mod tests {
         marked.extend_from_slice(&second);
         let sets = decode_udp_found_source_sets(&marked).expect("marked chain decodes");
         assert_eq!(sets.len(), 2);
-        assert_eq!(sets[0][0].file_hash, Ed2kHash([0x11; 16]));
-        assert_eq!(sets[1][0].file_hash, Ed2kHash([0x22; 16]));
+        assert_eq!(sets[0].file_hash, Ed2kHash([0x11; 16]));
+        assert_eq!(sets[0].sources[0].file_hash, Ed2kHash([0x11; 16]));
+        assert_eq!(sets[1].file_hash, Ed2kHash([0x22; 16]));
+        assert_eq!(sets[1].sources[0].file_hash, Ed2kHash([0x22; 16]));
 
         let mut unmarked = first;
         unmarked.extend_from_slice(&second);
         let sets = decode_udp_found_source_sets(&unmarked).expect("valid prefix decodes");
         assert_eq!(sets.len(), 1);
-        assert_eq!(sets[0][0].file_hash, Ed2kHash([0x11; 16]));
+        assert_eq!(sets[0].file_hash, Ed2kHash([0x11; 16]));
     }
 
     #[test]
@@ -515,7 +526,19 @@ mod tests {
 
         let sets = decode_udp_found_source_sets(&payload).expect("valid prefix survives");
         assert_eq!(sets.len(), 1);
-        assert_eq!(sets[0][0].file_hash, Ed2kHash([0x33; 16]));
+        assert_eq!(sets[0].file_hash, Ed2kHash([0x33; 16]));
+    }
+
+    #[test]
+    fn udp_found_sources_preserves_zero_count_file_identity() {
+        let mut payload = vec![0x55; 16];
+        payload.push(0);
+
+        let sets = decode_udp_found_source_sets(&payload).expect("zero-source reply decodes");
+
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].file_hash, Ed2kHash([0x55; 16]));
+        assert!(sets[0].sources.is_empty());
     }
 
     #[test]

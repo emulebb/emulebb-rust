@@ -13,11 +13,11 @@ use crate::config::Ed2kRuntimeConfig;
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    Ed2kFoundSource, OP_GLOBFOUNDSOURCES, annotate_found_sources_server, bind_server_udp_socket,
-    configured_server_entries, decode_udp_found_source_sets, merge_found_sources,
-    read_server_udp_packet, read_server_udp_packet_from_any, resolve_server_entry,
-    retain_live_servers, send_udp_source_search, send_udp_source_search_batch,
-    validate_found_sources,
+    Ed2kFoundSource, Ed2kServerUdpEvidence, OP_GLOBFOUNDSOURCES, annotate_found_sources_server,
+    bind_server_udp_socket, configured_server_entries, decode_udp_found_source_sets,
+    merge_found_sources, read_server_udp_packet, read_server_udp_packet_from_any,
+    resolve_server_entry, retain_live_servers, send_udp_source_search,
+    send_udp_source_search_batch, validate_found_sources,
 };
 
 /// Inputs for an ED2K server UDP source search.
@@ -73,6 +73,25 @@ pub struct Ed2kUdpSourceBatchSearchOptions<'a> {
     pub timeout: Duration,
     /// Cancellation signal for the owning search/download job.
     pub cancel: &'a CancellationToken,
+}
+
+/// One causally identified file result decoded from an ED2K server UDP source reply.
+///
+/// Keep receive provenance attached until core applies `sources` to its authoritative
+/// per-file registry. Flattening these results into one source vector loses which
+/// accepted packet caused each state mutation and makes parity claims non-auditable.
+#[derive(Clone, Debug)]
+pub struct Ed2kUdpSourceSearchResult {
+    /// Configured server base endpoint (TCP port); source records use this endpoint too.
+    pub server_endpoint: SocketAddr,
+    /// Exact accepted UDP receive packet that carried this result.
+    pub evidence: Ed2kServerUdpEvidence,
+    /// Request opcode selected from the target server's advertised UDP capabilities.
+    pub request_opcode: u8,
+    /// Accepted reply opcode (`OP_GLOBFOUNDSOURCES`).
+    pub response_opcode: u8,
+    /// Validated sources for one file hash in the reply.
+    pub sources: Vec<Ed2kFoundSource>,
 }
 
 /// Executes ED2K server UDP source searches for one file hash and size.
@@ -210,9 +229,20 @@ pub async fn search_source_udp_servers(
                             break;
                         }
                     };
-                    for results in source_sets {
-                        let results =
-                            annotate_found_sources_server(results, resolved_server.base_endpoint());
+                    for result in source_sets {
+                        if result.file_hash != file_hash {
+                            warn!(
+                                "discarding mismatched ED2K UDP source-search response requested_hash={} response_hash={} endpoint={}",
+                                file_hash,
+                                result.file_hash,
+                                resolved_server.base_endpoint()
+                            );
+                            continue;
+                        }
+                        let results = annotate_found_sources_server(
+                            result.sources,
+                            resolved_server.base_endpoint(),
+                        );
                         if let Err(error) = validate_found_sources(&results, file_hash) {
                             warn!(
                                 "discarding mismatched ED2K UDP source-search response file_hash={} endpoint={}: {error}",
@@ -268,9 +298,10 @@ const UDP_SOURCE_SERVER_WALK_INTERVAL: Duration = Duration::from_secs(1);
 async fn drain_source_udp_responses(
     socket: &tokio::net::UdpSocket,
     queried_servers: &[super::ResolvedServerEntry],
+    request_opcodes: &HashMap<SocketAddr, u8>,
     deadline: TokioInstant,
     requested_hashes: &HashSet<Ed2kHash>,
-    results_by_hash: &mut HashMap<Ed2kHash, Vec<Ed2kFoundSource>>,
+    results_by_hash: &mut HashMap<Ed2kHash, Vec<Ed2kUdpSourceSearchResult>>,
     cancel: &CancellationToken,
 ) -> Option<anyhow::Error> {
     if queried_servers.is_empty() {
@@ -291,6 +322,13 @@ async fn drain_source_udp_responses(
                 if packet.opcode != OP_GLOBFOUNDSOURCES {
                     continue;
                 }
+                let server_endpoint = response_server.base_endpoint();
+                let Some(&request_opcode) = request_opcodes.get(&server_endpoint) else {
+                    warn!(
+                        "discarding ED2K UDP source response without a matching sent request endpoint={server_endpoint}"
+                    );
+                    continue;
+                };
                 let source_sets = match decode_udp_found_source_sets(&packet.payload) {
                     Ok(source_sets) => source_sets,
                     Err(error) => {
@@ -301,10 +339,8 @@ async fn drain_source_udp_responses(
                         continue;
                     }
                 };
-                for results in source_sets {
-                    let Some(file_hash) = results.first().map(|source| source.file_hash) else {
-                        continue;
-                    };
+                for result in source_sets {
+                    let file_hash = result.file_hash;
                     if !requested_hashes.contains(&file_hash) {
                         warn!(
                             "discarding unrequested ED2K UDP source batch-search response file_hash={} endpoint={}",
@@ -313,8 +349,10 @@ async fn drain_source_udp_responses(
                         );
                         continue;
                     }
-                    let results =
-                        annotate_found_sources_server(results, response_server.base_endpoint());
+                    let results = annotate_found_sources_server(
+                        result.sources,
+                        response_server.base_endpoint(),
+                    );
                     if let Err(error) = validate_found_sources(&results, file_hash) {
                         warn!(
                             "discarding mismatched ED2K UDP source batch-search response file_hash={} endpoint={}: {error}",
@@ -323,7 +361,16 @@ async fn drain_source_udp_responses(
                         );
                         continue;
                     }
-                    merge_found_sources(results_by_hash.entry(file_hash).or_default(), results);
+                    results_by_hash
+                        .entry(file_hash)
+                        .or_default()
+                        .push(Ed2kUdpSourceSearchResult {
+                            server_endpoint,
+                            evidence: packet.evidence,
+                            request_opcode,
+                            response_opcode: packet.opcode,
+                            sources: results,
+                        });
                 }
             }
             Ok(Ok(None)) => continue,
@@ -346,7 +393,7 @@ async fn drain_source_udp_responses(
 )]
 pub async fn search_source_udp_server_batches(
     options: Ed2kUdpSourceBatchSearchOptions<'_>,
-) -> Result<HashMap<Ed2kHash, Vec<Ed2kFoundSource>>> {
+) -> Result<HashMap<Ed2kHash, Vec<Ed2kUdpSourceSearchResult>>> {
     let Ed2kUdpSourceBatchSearchOptions {
         bind_ip,
         config,
@@ -399,10 +446,11 @@ pub async fn search_source_udp_server_batches(
         })
         .collect::<Vec<_>>();
     let socket = bind_server_udp_socket(bind_ip).await?;
-    let mut results_by_hash: HashMap<Ed2kHash, Vec<Ed2kFoundSource>> = HashMap::new();
+    let mut results_by_hash: HashMap<Ed2kHash, Vec<Ed2kUdpSourceSearchResult>> = HashMap::new();
     let mut last_error = None;
     let per_server_timeout = timeout.max(Duration::from_secs(5));
     let mut queried_servers = Vec::new();
+    let mut request_opcodes = HashMap::new();
 
     // Oracle `CDownloadQueue::SendNextUDPPacket`: trickle one server's batched request
     // per interval instead of fanning out to every configured server at once. After each
@@ -445,16 +493,19 @@ pub async fn search_source_udp_server_batches(
             resolved_server.entry.display_name(),
             targets.len()
         );
-        if let Err(error) =
-            send_udp_source_search_batch(&socket, &resolved_server, &request_targets).await
-        {
-            warn!(
-                "failed to send ED2K UDP source batch search endpoint={}: {error}",
-                resolved_server.base_endpoint()
-            );
-            last_error = Some(error);
-            continue;
-        }
+        let request_opcode =
+            match send_udp_source_search_batch(&socket, &resolved_server, &request_targets).await {
+                Ok(request_opcode) => request_opcode,
+                Err(error) => {
+                    warn!(
+                        "failed to send ED2K UDP source batch search endpoint={}: {error}",
+                        resolved_server.base_endpoint()
+                    );
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+        request_opcodes.insert(resolved_server.base_endpoint(), request_opcode);
         queried_servers.push(resolved_server);
         // Pace before the next server, draining any replies that arrive meanwhile so no
         // early-server response is lost while we wait out the per-server interval.
@@ -462,6 +513,7 @@ pub async fn search_source_udp_server_batches(
         if let Some(error) = drain_source_udp_responses(
             &socket,
             &queried_servers,
+            &request_opcodes,
             pacing_deadline,
             &requested_hashes,
             &mut results_by_hash,
@@ -486,6 +538,7 @@ pub async fn search_source_udp_server_batches(
     if let Some(error) = drain_source_udp_responses(
         &socket,
         &queried_servers,
+        &request_opcodes,
         deadline,
         &requested_hashes,
         &mut results_by_hash,
