@@ -811,19 +811,9 @@ fn kad_local_store_defaults_follow_index_defaults() {
 #[test]
 fn kad_passive_replay_uses_one_default_off_switch_and_fixed_queue_policy() {
     let temp = tempfile::tempdir().unwrap();
-    let profile = DaemonProfile {
-        profile_dir: temp.path().to_path_buf(),
-        kad: KadSettings {
-            listen_port: Some(41002),
-            passive_replay_enabled: true,
-            ..KadSettings::default()
-        },
-        ed2k: Ed2kRuntimeConfig {
-            listen_port: Some(41001),
-            ..Ed2kRuntimeConfig::default()
-        },
-        ..DaemonProfile::default()
-    };
+    let mut profile =
+        profile_with_ed2k_network(temp.path().to_path_buf(), Some(Ipv4Addr::LOCALHOST));
+    profile.kad.passive_replay_enabled = true;
     let config = profile
         .ed2k_network_config(&metadata_store(&profile))
         .unwrap()
