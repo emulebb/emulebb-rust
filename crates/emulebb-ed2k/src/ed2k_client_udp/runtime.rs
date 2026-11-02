@@ -25,9 +25,9 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_dht::{DhtNode, ForeignDatagramHandler};
 use emulebb_kad_proto::Ed2kHash;
-use tokio::sync::mpsc;
 #[cfg(feature = "packet-diagnostics")]
 use tokio::sync::oneshot;
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, trace};
 
 use super::dispatch::{
@@ -40,10 +40,92 @@ use super::service::{
 use super::state::{ReaskAction, ReaskSource};
 use super::transport::{ClientUdpSendRole, send_client_udp_datagram};
 use crate::buddy_socket::{BuddySocketRegistry, OutboundBuddyToken};
+use crate::ed2k_server::Ed2kServerState;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 use crate::ipfilter::IpFilter;
+use crate::kad_firewall::KadFirewallState;
 use crate::port_test::PortTestRegistry;
 use crate::reachability::ExternalReachability;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TcpFirewallAuthority {
+    ServerHighId,
+    KadOpen,
+    ServerLowId,
+    KadFirewalled,
+    NoOpenAuthority,
+}
+
+impl TcpFirewallAuthority {
+    #[cfg(feature = "packet-diagnostics")]
+    const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::ServerHighId => "server_high_id",
+            Self::KadOpen => "kad_open",
+            Self::ServerLowId => "server_low_id",
+            Self::KadFirewalled => "kad_firewalled",
+            Self::NoOpenAuthority => "no_open_authority",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TcpFirewallVerdict {
+    firewalled: bool,
+    authority: TcpFirewallAuthority,
+    server_connected: bool,
+    server_firewalled: Option<bool>,
+    kad_connected: bool,
+    kad_firewalled: Option<bool>,
+}
+
+fn resolve_tcp_firewall_verdict(
+    server_connected: bool,
+    server_firewalled: Option<bool>,
+    kad_connected: bool,
+    kad_firewalled: Option<bool>,
+) -> TcpFirewallVerdict {
+    let server_open = server_connected && server_firewalled == Some(false);
+    let kad_open = kad_connected && kad_firewalled == Some(false);
+    let authority = if server_open {
+        TcpFirewallAuthority::ServerHighId
+    } else if kad_open {
+        TcpFirewallAuthority::KadOpen
+    } else if server_connected && server_firewalled == Some(true) {
+        TcpFirewallAuthority::ServerLowId
+    } else if kad_connected && kad_firewalled == Some(true) {
+        TcpFirewallAuthority::KadFirewalled
+    } else {
+        TcpFirewallAuthority::NoOpenAuthority
+    };
+    TcpFirewallVerdict {
+        firewalled: !(server_open || kad_open),
+        authority,
+        server_connected,
+        server_firewalled,
+        kad_connected,
+        kad_firewalled,
+    }
+}
+
+async fn current_tcp_firewall_verdict(
+    dht: &DhtNode,
+    server_state: &RwLock<Ed2kServerState>,
+    kad_firewall: &Mutex<KadFirewallState>,
+) -> TcpFirewallVerdict {
+    let (server_connected, server_firewalled) = {
+        let server = server_state.read().await;
+        (server.connected, server.tcp_firewalled())
+    };
+    let kad_connected = dht.is_bootstrapped();
+    let kad_firewalled = kad_firewall.lock().await.tcp_firewalled();
+    resolve_tcp_firewall_verdict(
+        server_connected,
+        server_firewalled,
+        kad_connected,
+        kad_firewalled,
+    )
+}
 
 /// A command from a download session to the reask loop: detach a just-queued
 /// source onto UDP reask, or drop one that no longer needs reasking. Public so
@@ -291,6 +373,8 @@ pub async fn run_ed2k_udp_reask_loop(
     user_hash: [u8; 16],
     udp_version: u8,
     public_ip: ExternalReachability,
+    server_state: Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
     ip_filter: IpFilter,
     buddy_registry: BuddySocketRegistry,
     port_test_registry: PortTestRegistry,
@@ -351,14 +435,32 @@ pub async fn run_ed2k_udp_reask_loop(
                     .await,
                     #[cfg(feature = "packet-diagnostics")]
                     ReaskCommand::DiagnosticWakeTick { completed } => {
-                        drive_reask_tick(&mut service, &dht, &transfer_runtime, &events).await;
+                        let firewall =
+                            current_tcp_firewall_verdict(&dht, &server_state, &kad_firewall).await;
+                        drive_reask_tick(
+                            &mut service,
+                            &dht,
+                            &transfer_runtime,
+                            &events,
+                            firewall,
+                        )
+                        .await;
                         let _ = completed.send(());
                     }
                     other => apply_reask_command(&mut service, &events, other),
                 }
             }
             _ = ticker.tick(), if reask_enabled => {
-                drive_reask_tick(&mut service, &dht, &transfer_runtime, &events).await;
+                let firewall =
+                    current_tcp_firewall_verdict(&dht, &server_state, &kad_firewall).await;
+                drive_reask_tick(
+                    &mut service,
+                    &dht,
+                    &transfer_runtime,
+                    &events,
+                    firewall,
+                )
+                .await;
             }
         }
     }
@@ -521,6 +623,8 @@ async fn handle_inbound_datagram(
         data.len(),
         hex_preview(data)
     );
+    #[cfg(feature = "packet-diagnostics")]
+    let mut reply_applied_diagnostic = None;
     let (diagnostic_outcome, diagnostic_note) = if !reask_enabled {
         handle_reask_disabled_datagram(
             events,
@@ -547,13 +651,15 @@ async fn handle_inbound_datagram(
             } => {
                 trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
                 #[cfg(feature = "packet-diagnostics")]
-                super::sched_diag::udp_reask_reply_applied(
-                    file_hash,
-                    diagnostic_identity,
-                    action,
-                    request_pending_after,
-                    remote_queue_full_after,
-                );
+                {
+                    reply_applied_diagnostic = Some((
+                        file_hash,
+                        diagnostic_identity,
+                        action,
+                        request_pending_after,
+                        remote_queue_full_after,
+                    ));
+                }
                 // A re-engageable rank means we hand the source back to TCP first.
                 if matches!(action, ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD)
                 {
@@ -661,6 +767,23 @@ async fn handle_inbound_datagram(
         diagnostic_outcome,
         diagnostic_note,
     );
+    #[cfg(feature = "packet-diagnostics")]
+    if let Some((
+        file_hash,
+        diagnostic_identity,
+        action,
+        request_pending_after,
+        remote_queue_full_after,
+    )) = reply_applied_diagnostic
+    {
+        super::sched_diag::udp_reask_reply_applied(
+            file_hash,
+            diagnostic_identity,
+            action,
+            request_pending_after,
+            remote_queue_full_after,
+        );
+    }
 }
 
 fn handle_reask_disabled_datagram(
@@ -856,6 +979,7 @@ async fn drive_reask_tick(
     dht: &DhtNode,
     transfer_runtime: &Ed2kTransferRuntime,
     events: &ReaskEventSender,
+    firewall: TcpFirewallVerdict,
 ) {
     // Pre-fetch each file's reask info so the sync `tick` closure can look it up.
     let mut info_by_file: std::collections::HashMap<Ed2kHash, TransferReaskInfo> =
@@ -899,52 +1023,7 @@ async fn drive_reask_tick(
         },
     );
     for send in out.send {
-        let source_endpoint = send.source_endpoint;
-        let addr = send.destination;
-        let role = if send.datagram.opcode == super::codec::OP_REASKCALLBACKUDP {
-            ClientUdpSendRole::BuddyRelayRequest
-        } else {
-            ClientUdpSendRole::ReaskRequest
-        };
-        #[cfg(feature = "packet-diagnostics")]
-        super::sched_diag::udp_reask_schedule_decision(&send);
-        #[cfg(feature = "packet-diagnostics")]
-        super::sched_diag::udp_reask_decision(&send);
-        let result = send_client_udp_datagram(dht, addr, role, &send.datagram).await;
-        match settle_reask_send(service, source_endpoint, result, Instant::now()) {
-            Ok(marked) => {
-                debug_assert!(marked, "scheduled reask source disappeared during send");
-                if !marked {
-                    debug!(
-                        ?source_endpoint,
-                        destination = %addr,
-                        "ed2k udp reask: successful send could not open source reply gate"
-                    );
-                }
-                trace!(
-                    "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
-                    send.datagram.bytes.len(),
-                    hex_preview(&send.datagram.bytes),
-                );
-                if marked {
-                    // `reask_sent` (uniform-diagnostics-v2 schema §3.5): a UDP
-                    // source reask actually went out and opened its reply gate.
-                    crate::diag_event::emit(
-                        "sched",
-                        "reask_sent",
-                        "info",
-                        serde_json::json!({ "peer": addr.to_string() }),
-                        udp_reask_sent_body(),
-                    );
-                }
-            }
-            Err(err) => {
-                trace!(
-                    "ed2k udp reask: send to {addr} for source {:?} failed: {err}",
-                    source_endpoint
-                );
-            }
-        }
+        dispatch_scheduled_reask(service, dht, send, firewall).await;
     }
     for (addr, action) in out.timed_out {
         trace!("ed2k udp reask: reask to {addr} timed out: {action:?}");
@@ -959,6 +1038,84 @@ async fn drive_reask_tick(
                     endpoint: lease_endpoint,
                 });
             }
+        }
+    }
+}
+
+async fn dispatch_scheduled_reask(
+    service: &mut ReaskService,
+    dht: &DhtNode,
+    send: super::outbound::ReaskSend,
+    firewall: TcpFirewallVerdict,
+) {
+    let source_endpoint = send.source_endpoint;
+    let addr = send.destination;
+    let role = if send.datagram.opcode == super::codec::OP_REASKCALLBACKUDP {
+        ClientUdpSendRole::BuddyRelayRequest
+    } else {
+        ClientUdpSendRole::ReaskRequest
+    };
+    #[cfg(feature = "packet-diagnostics")]
+    super::sched_diag::udp_reask_schedule_decision(&send);
+    if firewall.firewalled {
+        #[cfg(feature = "packet-diagnostics")]
+        super::sched_diag::udp_reask_decision_local_firewalled(
+            &send,
+            super::sched_diag::UdpReaskFirewallDiagnostic {
+                authority: firewall.authority.diagnostic_name(),
+                server_connected: firewall.server_connected,
+                server_firewalled: firewall.server_firewalled,
+                kad_connected: firewall.kad_connected,
+                kad_firewalled: firewall.kad_firewalled,
+            },
+        );
+        trace!(
+            ?source_endpoint,
+            destination = %addr,
+            authority = ?firewall.authority,
+            server_connected = firewall.server_connected,
+            server_firewalled = ?firewall.server_firewalled,
+            kad_connected = firewall.kad_connected,
+            kad_firewalled = ?firewall.kad_firewalled,
+            "ed2k udp reask: skipping scheduled send because the local client is firewalled"
+        );
+        return;
+    }
+    #[cfg(feature = "packet-diagnostics")]
+    super::sched_diag::udp_reask_decision(&send);
+    let result = send_client_udp_datagram(dht, addr, role, &send.datagram).await;
+    match settle_reask_send(service, source_endpoint, result, Instant::now()) {
+        Ok(marked) => {
+            debug_assert!(marked, "scheduled reask source disappeared during send");
+            if !marked {
+                debug!(
+                    ?source_endpoint,
+                    destination = %addr,
+                    "ed2k udp reask: successful send could not open source reply gate"
+                );
+            }
+            trace!(
+                "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
+                send.datagram.bytes.len(),
+                hex_preview(&send.datagram.bytes),
+            );
+            if marked {
+                // `reask_sent` (uniform-diagnostics-v2 schema §3.5): a UDP
+                // source reask actually went out and opened its reply gate.
+                crate::diag_event::emit(
+                    "sched",
+                    "reask_sent",
+                    "info",
+                    serde_json::json!({ "peer": addr.to_string() }),
+                    udp_reask_sent_body(),
+                );
+            }
+        }
+        Err(err) => {
+            trace!(
+                "ed2k udp reask: send to {addr} for source {:?} failed: {err}",
+                source_endpoint
+            );
         }
     }
 }

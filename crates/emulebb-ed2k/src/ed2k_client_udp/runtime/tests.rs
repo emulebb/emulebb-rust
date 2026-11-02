@@ -11,6 +11,234 @@ fn service() -> (ReaskService, ReachabilityRuntimeLease) {
     (ReaskService::new([0x10; 16], 4, public_ip), lease)
 }
 
+async fn unbootstrapped_dht(node_byte: u8) -> DhtNode {
+    use emulebb_kad_dht::DhtConfig;
+    use emulebb_kad_proto::NodeId;
+
+    DhtNode::new(DhtConfig {
+        bind_addr: Some(SocketAddr::from((crate::test_bind_ip(), 0))),
+        node_id: NodeId::from_bytes([node_byte; 16]),
+        udp_key: 0x1020_3040,
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap()
+}
+
+#[test]
+fn tcp_firewall_resolution_matches_mfc_connected_authority_or() {
+    let low_id_server_with_open_kad =
+        resolve_tcp_firewall_verdict(true, Some(true), true, Some(false));
+    assert_eq!(
+        low_id_server_with_open_kad,
+        TcpFirewallVerdict {
+            firewalled: false,
+            authority: TcpFirewallAuthority::KadOpen,
+            server_connected: true,
+            server_firewalled: Some(true),
+            kad_connected: true,
+            kad_firewalled: Some(false),
+        }
+    );
+
+    let high_id_server_with_firewalled_kad =
+        resolve_tcp_firewall_verdict(true, Some(false), true, Some(true));
+    assert_eq!(
+        high_id_server_with_firewalled_kad,
+        TcpFirewallVerdict {
+            firewalled: false,
+            authority: TcpFirewallAuthority::ServerHighId,
+            server_connected: true,
+            server_firewalled: Some(false),
+            kad_connected: true,
+            kad_firewalled: Some(true),
+        }
+    );
+
+    let stale_disconnected_high_id = resolve_tcp_firewall_verdict(false, Some(false), false, None);
+    assert_eq!(
+        stale_disconnected_high_id,
+        TcpFirewallVerdict {
+            firewalled: true,
+            authority: TcpFirewallAuthority::NoOpenAuthority,
+            server_connected: false,
+            server_firewalled: Some(false),
+            kad_connected: false,
+            kad_firewalled: None,
+        }
+    );
+
+    assert_eq!(
+        resolve_tcp_firewall_verdict(false, None, false, None),
+        TcpFirewallVerdict {
+            firewalled: true,
+            authority: TcpFirewallAuthority::NoOpenAuthority,
+            server_connected: false,
+            server_firewalled: None,
+            kad_connected: false,
+            kad_firewalled: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn bound_listener_without_a_connected_authority_remains_firewalled() {
+    let _listener = tokio::net::TcpListener::bind((crate::test_bind_ip(), 0))
+        .await
+        .unwrap();
+    let dht = unbootstrapped_dht(0x41).await;
+    let server_state = RwLock::new(Ed2kServerState::default());
+    let kad_firewall = Mutex::new(KadFirewallState::default());
+
+    assert_eq!(
+        current_tcp_firewall_verdict(&dht, &server_state, &kad_firewall).await,
+        TcpFirewallVerdict {
+            firewalled: true,
+            authority: TcpFirewallAuthority::NoOpenAuthority,
+            server_connected: false,
+            server_firewalled: None,
+            kad_connected: false,
+            kad_firewalled: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn tcp_firewall_verdict_tracks_live_server_transitions() {
+    let dht = unbootstrapped_dht(0x42).await;
+    let server_state = RwLock::new(Ed2kServerState::default());
+    let kad_firewall = Mutex::new(KadFirewallState::default());
+
+    {
+        let mut server = server_state.write().await;
+        server.client_id = Some(u32::from(Ipv4Addr::new(198, 51, 100, 7)));
+        server.connected = false;
+    }
+    assert!(
+        current_tcp_firewall_verdict(&dht, &server_state, &kad_firewall)
+            .await
+            .firewalled,
+        "a disconnected HighID is stale and cannot prove reachability"
+    );
+
+    {
+        let mut server = server_state.write().await;
+        server.connected = true;
+        server.client_id = Some(0x0000_1234);
+    }
+    assert_eq!(
+        current_tcp_firewall_verdict(&dht, &server_state, &kad_firewall)
+            .await
+            .authority,
+        TcpFirewallAuthority::ServerLowId
+    );
+
+    server_state.write().await.client_id = Some(u32::from(Ipv4Addr::new(198, 51, 100, 7)));
+    assert_eq!(
+        current_tcp_firewall_verdict(&dht, &server_state, &kad_firewall)
+            .await
+            .authority,
+        TcpFirewallAuthority::ServerHighId
+    );
+
+    server_state.write().await.connected = false;
+    let disconnected = current_tcp_firewall_verdict(&dht, &server_state, &kad_firewall).await;
+    assert!(disconnected.firewalled);
+    assert_eq!(
+        disconnected.authority,
+        TcpFirewallAuthority::NoOpenAuthority
+    );
+}
+
+#[tokio::test]
+async fn local_firewall_gate_blocks_buddy_reask_until_reachability_opens() {
+    use emulebb_kad_dht::DhtConfig;
+    use emulebb_kad_proto::NodeId;
+    use tokio::net::UdpSocket;
+
+    let bind_ip = crate::test_bind_ip();
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some(SocketAddr::from((bind_ip, 0))),
+        node_id: NodeId::from_bytes([0x31; 16]),
+        udp_key: 0x5566_7788,
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    let receiver = UdpSocket::bind((bind_ip, 0)).await.unwrap();
+    let buddy_addr = receiver.local_addr().unwrap();
+    let SocketAddr::V4(buddy_addr) = buddy_addr else {
+        panic!("test receiver must be IPv4");
+    };
+    let now = Instant::now();
+    let file_hash = Ed2kHash::from_bytes([0xBC; 16]);
+    let source_endpoint = (Ipv4Addr::new(198, 51, 100, 50), 4672);
+    let (mut svc, _reachability) = service();
+    svc.register_source(
+        file_hash,
+        ReaskSource::new(source_endpoint, file_hash, 4, now).with_buddy(
+            true,
+            Some((*buddy_addr.ip(), buddy_addr.port())),
+            Some([0x99; 16]),
+        ),
+    );
+
+    let mut scheduled = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert_eq!(scheduled.send.len(), 1);
+    dispatch_scheduled_reask(
+        &mut svc,
+        &dht,
+        scheduled.send.remove(0),
+        resolve_tcp_firewall_verdict(true, Some(true), false, None),
+    )
+    .await;
+
+    let mut datagram = [0u8; 64];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), receiver.recv_from(&mut datagram))
+            .await
+            .is_err(),
+        "a firewalled requester must not send OP_REASKCALLBACKUDP"
+    );
+
+    let mut rescheduled = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert_eq!(
+        rescheduled.send.len(),
+        1,
+        "the skipped source must stay due for a later live-state reevaluation"
+    );
+    dispatch_scheduled_reask(
+        &mut svc,
+        &dht,
+        rescheduled.send.remove(0),
+        resolve_tcp_firewall_verdict(true, Some(false), false, None),
+    )
+    .await;
+
+    let (received, _) =
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut datagram))
+            .await
+            .expect("an open requester should send the relayed reask")
+            .unwrap();
+    assert_eq!(
+        &datagram[..2],
+        &[0xC5, super::super::codec::OP_REASKCALLBACKUDP]
+    );
+    assert!(received > 2);
+
+    let pending = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert!(pending.send.is_empty());
+}
+
 #[tokio::test]
 async fn replaced_buddy_answer_command_sends_no_udp_response() {
     use emulebb_kad_dht::DhtConfig;
