@@ -145,6 +145,14 @@ fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
             request_pending_after: false,
             #[cfg(feature = "packet-diagnostics")]
             remote_queue_full_after: false,
+            #[cfg(feature = "packet-diagnostics")]
+            udp_total_after: 1,
+            #[cfg(feature = "packet-diagnostics")]
+            udp_failed_after: 0,
+            #[cfg(feature = "packet-diagnostics")]
+            next_reask_scheduled: true,
+            #[cfg(feature = "packet-diagnostics")]
+            source_retained_after: true,
             action: ReaskAction::UpdatedRank(12),
         }
     );
@@ -315,6 +323,14 @@ fn file_not_found_drops_source_and_clears_routing() {
             request_pending_after: false,
             #[cfg(feature = "packet-diagnostics")]
             remote_queue_full_after: false,
+            #[cfg(feature = "packet-diagnostics")]
+            udp_total_after: 0,
+            #[cfg(feature = "packet-diagnostics")]
+            udp_failed_after: 0,
+            #[cfg(feature = "packet-diagnostics")]
+            next_reask_scheduled: false,
+            #[cfg(feature = "packet-diagnostics")]
+            source_retained_after: false,
             action: ReaskAction::DropSource,
         }
     );

@@ -744,6 +744,14 @@ async fn handle_inbound_datagram(
                 request_pending_after,
                 #[cfg(feature = "packet-diagnostics")]
                 remote_queue_full_after,
+                #[cfg(feature = "packet-diagnostics")]
+                udp_total_after,
+                #[cfg(feature = "packet-diagnostics")]
+                udp_failed_after,
+                #[cfg(feature = "packet-diagnostics")]
+                next_reask_scheduled,
+                #[cfg(feature = "packet-diagnostics")]
+                source_retained_after,
                 action,
             } => {
                 trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
@@ -815,14 +823,16 @@ async fn handle_inbound_datagram(
                             no_needed_parts_after,
                         }
                     });
-                    reply_applied_diagnostic = Some((
-                        file_hash,
-                        diagnostic_identity,
-                        action,
+                    let state = super::sched_diag::UdpReaskReplyStateDiagnostic {
                         request_pending_after,
                         remote_queue_full_after,
-                        application,
-                    ));
+                        udp_total_after,
+                        udp_failed_after,
+                        next_reask_scheduled,
+                        source_retained_after,
+                    };
+                    reply_applied_diagnostic =
+                        Some((file_hash, diagnostic_identity, action, state, application));
                 }
                 // A re-engageable rank means we hand the source back to TCP first.
                 if matches!(action, ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD)
@@ -939,21 +949,14 @@ async fn handle_inbound_datagram(
         diagnostic_note,
     );
     #[cfg(feature = "packet-diagnostics")]
-    if let Some((
-        file_hash,
-        diagnostic_identity,
-        action,
-        request_pending_after,
-        remote_queue_full_after,
-        application,
-    )) = reply_applied_diagnostic
+    if let Some((file_hash, diagnostic_identity, action, state, application)) =
+        reply_applied_diagnostic
     {
         super::sched_diag::udp_reask_reply_applied(
             file_hash,
             diagnostic_identity,
             action,
-            request_pending_after,
-            remote_queue_full_after,
+            state,
             application,
         );
     }
