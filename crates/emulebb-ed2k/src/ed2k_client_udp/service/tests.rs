@@ -30,6 +30,7 @@ fn diagnostic_identity() -> ReaskDiagnosticIdentity {
         peer_hash: Some(PEER_HASH),
         source_udp_endpoint: peer_v4(),
         source_udp_version: 4,
+        should_crypt: true,
         low_id: false,
         buddy_endpoint: None,
         buddy_id: None,
