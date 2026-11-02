@@ -852,6 +852,16 @@ async fn handle_inbound_datagram(
                 }
             }
             ReaskInboundOutcome::AnswerNeeded { ping, from } => {
+                // Record the accepted request before any reply attempt. The
+                // packet event is the causal receive boundary; emitting it after
+                // the async send inverted request/ACK order in converged traces.
+                super::dump::dump_client_udp_recv(
+                    from,
+                    &our_user_hash,
+                    data,
+                    ClientUdpDumpOutcome::Accepted,
+                    Some("answer_needed".to_string()),
+                );
                 // Answer the peer's OP_REASKFILEPING from upload-queue/catalog state.
                 match transfer_runtime
                     .reask_reciprocity_reply(&ping, from, our_public_ip)
@@ -874,10 +884,7 @@ async fn handle_inbound_datagram(
                         trace!("ed2k udp reask: inbound reask from {from} answered with silence")
                     }
                 }
-                (
-                    ClientUdpDumpOutcome::Accepted,
-                    Some("answer_needed".to_string()),
-                )
+                return;
             }
             ReaskInboundOutcome::BuddyRelay { callback, from } => {
                 // The relay forwards the post-buddy-id tail verbatim (oracle
