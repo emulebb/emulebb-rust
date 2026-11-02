@@ -96,6 +96,22 @@ pub(super) struct UdpReaskFirewallDiagnostic {
     pub kad_firewalled: Option<bool>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct UdpReaskReplyApplicationDiagnostic {
+    pub queue_rank_applied: bool,
+    pub part_status_included: bool,
+    pub wire_part_count: Option<usize>,
+    pub part_status_after: Option<Vec<bool>>,
+    pub no_needed_parts_after: Option<bool>,
+}
+
+fn part_status_bits(parts: &[bool]) -> String {
+    parts
+        .iter()
+        .map(|available| if *available { '1' } else { '0' })
+        .collect()
+}
+
 pub(super) fn udp_reask_decision_local_firewalled(
     send: &ReaskSend,
     firewall: UdpReaskFirewallDiagnostic,
@@ -136,6 +152,7 @@ pub(super) fn udp_reask_reply_applied(
     action: ReaskAction,
     request_pending_after: bool,
     remote_queue_full_after: bool,
+    application: Option<UdpReaskReplyApplicationDiagnostic>,
 ) {
     let (keys, body) = udp_reask_reply_applied_parts(
         file_hash,
@@ -143,6 +160,7 @@ pub(super) fn udp_reask_reply_applied(
         action,
         request_pending_after,
         remote_queue_full_after,
+        application,
     );
     crate::diag_event::emit(FAMILY, "udp_reask_reply_applied", "info", keys, body);
 }
@@ -153,6 +171,7 @@ fn udp_reask_reply_applied_parts(
     action: ReaskAction,
     request_pending_after: bool,
     remote_queue_full_after: bool,
+    application: Option<UdpReaskReplyApplicationDiagnostic>,
 ) -> (Value, Value) {
     let (reply_opcode, queue_rank) = match action {
         ReaskAction::UpdatedRank(rank) => (OP_REASKACK, Some(rank)),
@@ -175,6 +194,79 @@ fn udp_reask_reply_applied_parts(
     body.insert(
         "remoteQueueFullAfter".to_string(),
         json!(remote_queue_full_after),
+    );
+    body.insert(
+        "sourceUdpEndpoint".to_string(),
+        json!(endpoint(identity.source_udp_endpoint)),
+    );
+    body.insert(
+        "sourceUdpVersion".to_string(),
+        json!(identity.source_udp_version),
+    );
+    body.insert(
+        "queueRankApplied".to_string(),
+        json!(
+            application
+                .as_ref()
+                .is_some_and(|status| status.queue_rank_applied)
+        ),
+    );
+    body.insert(
+        "partStatusIncluded".to_string(),
+        json!(
+            application
+                .as_ref()
+                .is_some_and(|status| status.part_status_included)
+        ),
+    );
+    body.insert(
+        "wirePartCount".to_string(),
+        json!(
+            application
+                .as_ref()
+                .and_then(|status| status.wire_part_count)
+        ),
+    );
+    body.insert(
+        "partStatusApplied".to_string(),
+        json!(
+            application
+                .as_ref()
+                .is_some_and(|status| status.part_status_after.is_some())
+        ),
+    );
+    body.insert(
+        "partCountAfter".to_string(),
+        json!(
+            application
+                .as_ref()
+                .and_then(|status| status.part_status_after.as_ref().map(Vec::len))
+        ),
+    );
+    body.insert(
+        "availablePartsAfter".to_string(),
+        json!(application.as_ref().and_then(|status| {
+            status
+                .part_status_after
+                .as_ref()
+                .map(|parts| parts.iter().filter(|available| **available).count())
+        })),
+    );
+    body.insert(
+        "partStatusBitsAfter".to_string(),
+        json!(
+            application
+                .as_ref()
+                .and_then(|status| status.part_status_after.as_deref().map(part_status_bits))
+        ),
+    );
+    body.insert(
+        "noNeededPartsAfter".to_string(),
+        json!(
+            application
+                .as_ref()
+                .and_then(|status| status.no_needed_parts_after)
+        ),
     );
     (source_keys(file_hash, identity), Value::Object(body))
 }
@@ -304,6 +396,13 @@ mod tests {
             ReaskAction::UpdatedRank(47),
             false,
             false,
+            Some(UdpReaskReplyApplicationDiagnostic {
+                queue_rank_applied: true,
+                part_status_included: true,
+                wire_part_count: Some(3),
+                part_status_after: Some(vec![true, false, true]),
+                no_needed_parts_after: Some(false),
+            }),
         );
 
         assert_eq!(keys["peer"], "192.0.2.20:4662");
@@ -316,6 +415,16 @@ mod tests {
                 "queueRank": 47,
                 "requestPendingAfter": false,
                 "remoteQueueFullAfter": false,
+                "sourceUdpEndpoint": "192.0.2.20:4672",
+                "sourceUdpVersion": 4,
+                "queueRankApplied": true,
+                "partStatusIncluded": true,
+                "wirePartCount": 3,
+                "partStatusApplied": true,
+                "partCountAfter": 3,
+                "availablePartsAfter": 2,
+                "partStatusBitsAfter": "101",
+                "noNeededPartsAfter": false,
             })
         );
     }

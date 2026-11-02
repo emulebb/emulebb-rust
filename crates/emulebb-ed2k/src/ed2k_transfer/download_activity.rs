@@ -231,6 +231,7 @@ impl Ed2kTransferRuntime {
     }
 
     /// Record the peer's advertised per-part availability (OP_FILESTATUS).
+    /// Returns whether the live-source registry accepted the update.
     pub(crate) fn note_download_source_part_bitmap(
         &self,
         file_hash: &str,
@@ -238,10 +239,10 @@ impl Ed2kTransferRuntime {
         user_hash: Option<[u8; 16]>,
         connect_options: Option<u8>,
         bitmap: Vec<bool>,
-    ) {
+    ) -> bool {
         let now = Instant::now();
         let Ok(mut sources) = self.download_sources.lock() else {
-            return;
+            return false;
         };
         let peers = sources.entry(file_hash.to_string()).or_default();
         evict_stale_sources(peers, now);
@@ -267,20 +268,22 @@ impl Ed2kTransferRuntime {
         }
         entry.last_seen_at = now;
         entry.part_bitmap = Some(bitmap);
+        true
     }
 
     /// Record our queue position at a peer (OP_QUEUERANK / OP_QUEUERANKING) so the
     /// REST source list can show it. The session entry usually already exists from
     /// a payload/status frame; create a minimal one if the ranking arrives first.
+    /// Returns whether the live-source registry accepted the update.
     pub(crate) fn note_download_source_queue_rank(
         &self,
         file_hash: &str,
         peer: SocketAddr,
         rank: u32,
-    ) {
+    ) -> bool {
         let now = Instant::now();
         let Ok(mut sources) = self.download_sources.lock() else {
-            return;
+            return false;
         };
         let peers = sources.entry(file_hash.to_string()).or_default();
         evict_stale_sources(peers, now);
@@ -299,6 +302,7 @@ impl Ed2kTransferRuntime {
             });
         entry.last_seen_at = now;
         entry.queue_rank = Some(rank);
+        true
     }
 
     /// Record the peer's software string (from the HELLO CT_EMULE_VERSION tag) so
