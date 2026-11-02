@@ -339,30 +339,39 @@ impl DownloadSourceRegistry {
         targets
     }
 
-    /// Find the SINGLE candidate source for `file_hash` owned by a peer at
-    /// `ip`. Used by the UDP reask FNF path to recover the full source identity
-    /// for dead-listing: the reask loop only holds the peer's UDP endpoint,
-    /// while candidates are keyed by TCP endpoint, so the IP is the only shared
-    /// key. Returns `None` when no candidate matches or when several distinct
-    /// peers at that IP serve the file (ambiguous — dead-listing the wrong
-    /// client behind a shared NAT would be worse than skipping).
-    pub(crate) fn sole_candidate_source_by_ip(
+    /// Resolve the exact candidate that detached onto UDP reask. The TCP lease
+    /// endpoint is authoritative; the learned user hash disambiguates stale or
+    /// duplicate identities that reused that endpoint. When the registry has
+    /// only one endpoint match, it remains usable even if its server-discovered
+    /// row predates learning the peer hash during hello.
+    pub(crate) fn sole_candidate_source_by_endpoint(
         &self,
-        ip: Ipv4Addr,
+        endpoint: (Ipv4Addr, u16),
+        user_hash: Option<[u8; 16]>,
         file_hash: &str,
     ) -> Option<Ed2kFoundSource> {
-        let mut found: Option<Ed2kFoundSource> = None;
-        for candidates in self.peers.values() {
-            for candidate in candidates {
-                if candidate.file_hash == file_hash && candidate.source.ip == ip {
-                    if found.is_some() {
-                        return None;
-                    }
-                    found = Some(candidate.source.clone());
-                }
+        let matches = self
+            .peers
+            .values()
+            .flat_map(|candidates| candidates.iter())
+            .filter(|candidate| {
+                candidate.file_hash == file_hash
+                    && (candidate.source.ip, candidate.source.tcp_port) == endpoint
+            })
+            .collect::<Vec<_>>();
+        if let Some(user_hash) = user_hash {
+            let hash_matches = matches
+                .iter()
+                .filter(|candidate| candidate.source.user_hash == Some(user_hash))
+                .collect::<Vec<_>>();
+            if hash_matches.len() == 1 {
+                return Some(hash_matches[0].source.clone());
+            }
+            if hash_matches.len() > 1 {
+                return None;
             }
         }
-        found
+        (matches.len() == 1).then(|| matches[0].source.clone())
     }
 
     /// Remove this peer's candidate for `file_hash` (a genuine source removal:

@@ -41,6 +41,11 @@ pub(crate) enum ReaskInboundOutcome {
         /// ([`ReaskSource::lease_endpoint`]); any `SourceReleased` the caller
         /// emits for this reply must carry this, not the UDP `endpoint`.
         lease_endpoint: (Ipv4Addr, u16),
+        /// The source hash captured before applying the reply. `DropSource`
+        /// removes the source from the reask set, so core cannot recover this
+        /// identity afterward. Together with `lease_endpoint`, this lets core
+        /// resolve the exact candidate instead of guessing by IP.
+        source_user_hash: Option<[u8; 16]>,
         /// Present only for `OP_REASKACK`; distinguishes legacy ACKs, complete
         /// sources, and version-4 availability bitmaps without erasing the wire
         /// representation before the runtime applies it.
@@ -407,6 +412,7 @@ impl ReaskService {
         let lease_endpoint = set
             .get(ip, port)
             .map_or((ip, port), |source| source.lease_endpoint);
+        let source_user_hash = set.get(ip, port).and_then(|source| source.user_hash);
         #[cfg(feature = "packet-diagnostics")]
         let diagnostic_identity = set.get(ip, port).map_or(
             ReaskDiagnosticIdentity {
@@ -449,6 +455,7 @@ impl ReaskService {
                     file_hash,
                     endpoint: (ip, port),
                     lease_endpoint,
+                    source_user_hash,
                     ack_part_status,
                     request_part_status,
                     #[cfg(feature = "packet-diagnostics")]

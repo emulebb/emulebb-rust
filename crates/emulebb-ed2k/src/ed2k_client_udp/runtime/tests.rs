@@ -461,13 +461,12 @@ fn remove_command_for_unknown_endpoint_releases_no_lease() {
 #[test]
 fn reengage_releases_lease_before_signalling_source_ready() {
     let file_hash = Ed2kHash::from_bytes([0x33; 16]);
-    let endpoint = (Ipv4Addr::new(198, 51, 100, 9), 4672);
     let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 9), 4662);
     let events = routed_reply_events(
         ReaskAction::UpdatedRank(REENGAGE_RANK_THRESHOLD),
         file_hash,
-        endpoint,
         lease_endpoint,
+        None,
     );
     assert_eq!(events.len(), 2);
     match &events[0] {
@@ -488,8 +487,8 @@ fn deep_rank_keeps_source_and_releases_no_lease() {
     let events = routed_reply_events(
         ReaskAction::UpdatedRank(REENGAGE_RANK_THRESHOLD + 1),
         Ed2kHash::from_bytes([0x44; 16]),
-        (Ipv4Addr::new(198, 51, 100, 10), 4672),
         (Ipv4Addr::new(198, 51, 100, 10), 4662),
+        None,
     );
     assert!(
         events.is_empty(),
@@ -501,21 +500,27 @@ fn deep_rank_keeps_source_and_releases_no_lease() {
 fn dropped_source_is_dead_listed_then_releases_its_lease() {
     // UDP FNF (oracle UDPReaskFNF, DownloadClient.cpp:1774-1795): the source is
     // dead-listed BEFORE its lease is released, so the 45-minute block gates
-    // re-acquisition the moment the endpoint becomes free again. SourceDead
-    // carries the UDP endpoint (core resolves by IP); SourceReleased carries
-    // the TCP lease key core's sets match against (RUST-PAR-017 DL-11).
-    let endpoint = (Ipv4Addr::new(198, 51, 100, 11), 4672);
+    // re-acquisition the moment the endpoint becomes free again. Both events
+    // carry the TCP lease key; SourceDead also carries the learned hash.
     let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 11), 4662);
+    let source_user_hash = [0x56; 16];
     let hash = Ed2kHash::from_bytes([0x55; 16]);
-    let events = routed_reply_events(ReaskAction::DropSource, hash, endpoint, lease_endpoint);
+    let events = routed_reply_events(
+        ReaskAction::DropSource,
+        hash,
+        lease_endpoint,
+        Some(source_user_hash),
+    );
     assert_eq!(events.len(), 2);
     match &events[0] {
         ReaskEvent::SourceDead {
             file_hash,
-            endpoint: dead,
+            source_tcp_endpoint,
+            source_user_hash: dead_user_hash,
         } => {
             assert_eq!(*file_hash, hash);
-            assert_eq!(*dead, endpoint);
+            assert_eq!(*source_tcp_endpoint, lease_endpoint);
+            assert_eq!(*dead_user_hash, Some(source_user_hash));
         }
         other => panic!("expected SourceDead, got {other:?}"),
     }

@@ -247,13 +247,10 @@ async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmissio
 }
 
 #[tokio::test]
-async fn udp_fnf_dead_lists_the_sole_registered_source_by_ip() {
-    // UDP reask FNF (oracle UDPReaskFNF): the loop only knows the peer's UDP
-    // endpoint, so core recovers the full identity from the registry by
-    // (ip, file), dead-lists it, and drops the candidate — after which the
-    // admission gate refuses re-registration. With TWO distinct peers at the
-    // same IP serving the file the resolution is ambiguous and nothing is
-    // dead-listed (better than blocking the wrong client behind a NAT).
+async fn udp_fnf_dead_lists_the_exact_registered_source() {
+    // UDP reask FNF (oracle UDPReaskFNF): the loop carries the exact TCP lease
+    // endpoint, so core dead-lists and drops that candidate even when another
+    // peer behind the same IP serves the file.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let file = Ed2kHash::from_bytes([0x76; 16]).to_string();
     let peer_ip = Ipv4Addr::new(192, 0, 2, 33);
@@ -273,7 +270,8 @@ async fn udp_fnf_dead_lists_the_sole_registered_source_by_ip() {
         );
     }
 
-    core.dead_list_udp_fnf_source(&file, peer_ip).await;
+    core.dead_list_udp_fnf_source(&file, (peer_ip, 41012), None)
+        .await;
     {
         let now = Instant::now();
         let state = core.state.lock().await;
@@ -298,22 +296,22 @@ async fn udp_fnf_dead_lists_the_sole_registered_source_by_ip() {
         "a UDP-FNF dead-listed source must not be re-admitted"
     );
 
-    // Ambiguity guard: two distinct peers at one IP -> no dead-listing.
-    let ambiguous_file = Ed2kHash::from_bytes([0x77; 16]).to_string();
-    let ambiguous_ip = Ipv4Addr::new(192, 0, 2, 34);
+    // Two distinct peers at one IP are disambiguated by the TCP lease endpoint.
+    let shared_ip_file = Ed2kHash::from_bytes([0x77; 16]).to_string();
+    let shared_ip = Ipv4Addr::new(192, 0, 2, 34);
     {
         let mut state = core.state.lock().await;
         for tcp_port in [41013u16, 41014] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
                 DownloadSourceCandidate {
-                    file_hash: ambiguous_file.clone(),
+                    file_hash: shared_ip_file.clone(),
                     file_priority: 5,
                     needed_parts: 4,
                     rare_parts: 0,
                     source: direct_test_source(
                         Ed2kHash::from_bytes([0x77; 16]),
-                        ambiguous_ip,
+                        shared_ip,
                         tcp_port,
                     ),
                     last_seen: Instant::now(),
@@ -321,16 +319,54 @@ async fn udp_fnf_dead_lists_the_sole_registered_source_by_ip() {
             );
         }
     }
-    core.dead_list_udp_fnf_source(&ambiguous_file, ambiguous_ip)
+    core.dead_list_udp_fnf_source(&shared_ip_file, (shared_ip, 41013), None)
         .await;
     assert_eq!(
         core.state
             .lock()
             .await
             .download_source_registry
-            .candidate_count_for_file(Instant::now(), &ambiguous_file),
-        2,
-        "an ambiguous IP match must not dead-list either candidate"
+            .candidate_count_for_file(Instant::now(), &shared_ip_file),
+        1,
+        "only the exact TCP endpoint must be dead-listed"
+    );
+
+    // Reused endpoint identities are disambiguated by the hash learned in hello.
+    let reused_file = Ed2kHash::from_bytes([0x78; 16]).to_string();
+    let reused_endpoint = (Ipv4Addr::new(192, 0, 2, 35), 41015);
+    let selected_hash = [0x81; 16];
+    {
+        let mut state = core.state.lock().await;
+        for user_hash in [selected_hash, [0x82; 16]] {
+            let mut candidate_source = direct_test_source(
+                Ed2kHash::from_bytes([0x78; 16]),
+                reused_endpoint.0,
+                reused_endpoint.1,
+            );
+            candidate_source.user_hash = Some(user_hash);
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
+                    file_hash: reused_file.clone(),
+                    file_priority: 5,
+                    needed_parts: 4,
+                    rare_parts: 0,
+                    source: candidate_source,
+                    last_seen: Instant::now(),
+                },
+            );
+        }
+    }
+    core.dead_list_udp_fnf_source(&reused_file, reused_endpoint, Some(selected_hash))
+        .await;
+    assert_eq!(
+        core.state
+            .lock()
+            .await
+            .download_source_registry
+            .candidate_count_for_file(Instant::now(), &reused_file),
+        1,
+        "the learned user hash must select only its reused-endpoint identity"
     );
 }
 
