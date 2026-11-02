@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 
 use emulebb_ed2k::diag_event::emit;
 use emulebb_kad_dht::{KadRoutingSummaryCounts, KadSearchCompletion, PublishAttemptStats};
+use emulebb_kad_proto::NodeId;
 use serde_json::{Value, json};
 
 const FAMILY: &str = "kad_event";
@@ -39,7 +40,7 @@ pub(crate) enum KadBuddyRequestDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KadBuddyRequestState {
-    pub(crate) buddy_id: [u8; 16],
+    pub(crate) buddy_id: NodeId,
     pub(crate) client_hash: [u8; 16],
     pub(crate) tcp_firewalled: bool,
     pub(crate) udp_verified: bool,
@@ -446,7 +447,7 @@ fn buddy_request_parts(
         "action": action,
         "outcome": outcome,
         "reason": reason,
-        "buddyId": hex::encode(state.buddy_id),
+        "buddyId": state.buddy_id.to_string(),
         "clientHash": hex::encode(state.client_hash),
         "tcpFirewalled": state.tcp_firewalled,
         "udpVerified": state.udp_verified,
@@ -461,7 +462,7 @@ fn buddy_request_parts(
 fn buddy_callback_parts(
     decision: KadBuddyCallbackDecision,
     requester: SocketAddr,
-    buddy_id: [u8; 16],
+    buddy_id: NodeId,
     file_hash: &str,
     requester_tcp_port: u16,
     buddy_tcp_endpoint: Option<SocketAddr>,
@@ -476,7 +477,7 @@ fn buddy_callback_parts(
         "action": action,
         "outcome": outcome,
         "reason": reason,
-        "buddyId": hex::encode(buddy_id),
+        "buddyId": buddy_id.to_string(),
         "fileHash": file_hash,
         "requesterIp": requester.ip().to_string(),
         "requesterUdpPort": requester.port(),
@@ -491,7 +492,7 @@ fn buddy_callback_parts(
 pub(crate) fn buddy_callback(
     decision: KadBuddyCallbackDecision,
     requester: SocketAddr,
-    buddy_id: [u8; 16],
+    buddy_id: NodeId,
     file_hash: &str,
     requester_tcp_port: u16,
     buddy_tcp_endpoint: Option<SocketAddr>,
@@ -766,7 +767,7 @@ mod tests {
             KadBuddyRequestDecision::Accepted,
             "1.2.3.4:4672".parse().unwrap(),
             KadBuddyRequestState {
-                buddy_id: [0x11; 16],
+                buddy_id: NodeId::from_bytes([0x11; 16]),
                 client_hash: [0x22; 16],
                 tcp_firewalled: false,
                 udp_verified: true,
@@ -840,7 +841,10 @@ mod tests {
     fn buddy_request_diagnostics_preserve_terminal_decision_and_state() {
         let peer = "198.51.100.7:4672".parse().unwrap();
         let state = KadBuddyRequestState {
-            buddy_id: [0x11; 16],
+            buddy_id: NodeId::from_bytes([
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+                0xff, 0x00,
+            ]),
             client_hash: [0x22; 16],
             tcp_firewalled: true,
             udp_verified: false,
@@ -868,7 +872,7 @@ mod tests {
                 "action": "refuse",
                 "outcome": "refused",
                 "reason": "self_firewalled",
-                "buddyId": "11111111111111111111111111111111",
+                "buddyId": "4433221188776655ccbbaa9900ffeedd",
                 "clientHash": "22222222222222222222222222222222",
                 "tcpFirewalled": true,
                 "udpVerified": false,
@@ -887,7 +891,10 @@ mod tests {
         let (severity, keys, body) = buddy_callback_parts(
             KadBuddyCallbackDecision::Relayed,
             requester,
-            [0x33; 16],
+            NodeId::from_bytes([
+                0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0,
+                0xf0, 0x00,
+            ]),
             "00112233445566778899aabbccddeeff",
             5662,
             Some(buddy_tcp_endpoint),
@@ -908,7 +915,7 @@ mod tests {
                 "action": "relay",
                 "outcome": "relayed",
                 "reason": "eligible",
-                "buddyId": "33333333333333333333333333333333",
+                "buddyId": "4030201080706050c0b0a09000f0e0d0",
                 "fileHash": "00112233445566778899aabbccddeeff",
                 "requesterIp": "198.51.100.8",
                 "requesterUdpPort": 4672,
