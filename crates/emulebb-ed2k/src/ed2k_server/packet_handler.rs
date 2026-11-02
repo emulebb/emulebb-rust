@@ -17,10 +17,10 @@ use super::{
     OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
     OP_SERVERSTATUS, SERVER_TCP_FLAG_UNICODE, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME,
     ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32, decode_ed2k_string,
-    decode_search_result_page, decode_server_list, dump_ed2k_server_ident_applied,
-    dump_ed2k_server_status_applied, encode_search_request, format_connect_options,
-    format_server_flags, ipv4_from_client_id, is_low_id, log_search_result_page,
-    send_connected_server_startup, wait_for_offer_files_settle,
+    decode_search_result_page, decode_server_list, dump_ed2k_server_callback_applied,
+    dump_ed2k_server_ident_applied, dump_ed2k_server_status_applied, encode_search_request,
+    format_connect_options, format_server_flags, ipv4_from_client_id, is_low_id,
+    log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
 };
 
 pub(super) fn log_uncorrelated_server_reject(endpoint: SocketAddr, payload_len: usize) {
@@ -349,6 +349,8 @@ pub(super) async fn handle_server_packet(
                         "ED2K callback peer dispatch failed peer={}: {error}",
                         callback.peer_addr
                     );
+                } else {
+                    dump_ed2k_server_callback_applied(session, callback, packet.payload.len());
                 }
             }
         }

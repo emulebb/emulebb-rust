@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(feature = "packet-diagnostics", test))]
 use serde_json::{Map, Value, json};
 
-use super::{Ed2kServerUdpEvidence, ResolvedServerEntry, ServerSession};
+use super::{Ed2kServerUdpEvidence, ResolvedServerEntry, ServerSession, types::CallbackRequest};
 #[cfg(any(feature = "packet-diagnostics", test))]
 use super::{
     OP_CALLBACK_FAIL, OP_CALLBACKREQUEST, OP_CALLBACKREQUESTED, OP_FOUNDSOURCES,
@@ -236,6 +236,14 @@ pub(super) fn dump_ed2k_server_ident_applied(
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_server_callback_applied(
+    _session: &ServerSession,
+    _callback: CallbackRequest,
+    _payload_len: usize,
+) {
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
 #[expect(
     clippy::too_many_arguments,
     reason = "flat diagnostic correlation fields"
@@ -336,6 +344,72 @@ pub(super) fn dump_ed2k_server_status_applied(session: &ServerSession, users: u3
         files,
     );
     crate::diag_event::emit("ed2k_tcp", "server_status_applied", "info", keys, body);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) fn dump_ed2k_server_callback_applied(
+    session: &ServerSession,
+    callback: CallbackRequest,
+    payload_len: usize,
+) {
+    let (keys, body) = ed2k_server_callback_applied_parts(
+        &session.endpoint.to_string(),
+        session.trace_id,
+        session.trace_role,
+        session.phase.as_str(),
+        session.send_cipher.is_some(),
+        callback,
+        payload_len,
+    );
+    crate::diag_event::emit("ed2k_tcp", "callback_request_applied", "info", keys, body);
+}
+
+#[cfg(any(feature = "packet-diagnostics", test))]
+fn ed2k_server_callback_applied_parts(
+    endpoint: &str,
+    trace_id: u64,
+    role: &str,
+    phase: &str,
+    obfuscated: bool,
+    callback: CallbackRequest,
+    payload_len: usize,
+) -> (Value, Value) {
+    let transport_mode = if obfuscated {
+        "obfuscated"
+    } else {
+        "plaintext"
+    };
+    let trace_key = format!("server:{role}:{trace_id}:{endpoint}");
+    let user_hash = callback.user_hash.map(hex::encode);
+    (
+        json!({
+            "peer": endpoint,
+            "opcode": OP_CALLBACKREQUESTED,
+            "protocolMarker": OP_EDONKEYPROT_MARKER,
+            "traceId": trace_id,
+        }),
+        json!({
+            "flow": "server",
+            "phase": phase,
+            "direction": "recv",
+            "protocolMarker": OP_EDONKEYPROT_MARKER,
+            "opcode": OP_CALLBACKREQUESTED,
+            "opcodeName": "OP_CALLBACKREQUESTED",
+            "traceId": trace_id,
+            "traceKey": trace_key,
+            "transportMode": transport_mode,
+            "obfuscated": obfuscated,
+            "serverEndpoint": endpoint,
+            "callbackEndpoint": callback.peer_addr.to_string(),
+            "connectOptions": callback.connect_options,
+            "userHash": user_hash,
+            "payloadLen": payload_len,
+            "stateId": "server.callback.request_applied",
+            "milestone": "callback_dispatch",
+            "dispatchAccepted": true,
+            "outcome": "applied",
+        }),
+    )
 }
 
 #[cfg(any(feature = "packet-diagnostics", test))]
@@ -1062,17 +1136,50 @@ fn server_opcode_name(opcode: u8) -> &'static str {
 mod tests {
     use super::{
         Ed2kServerDumpRecord, Ed2kServerSendContext, Ed2kServerSendOutcome, OP_CALLBACKREQUEST,
-        OP_EDONKEYPROT_MARKER, OP_FOUNDSOURCES, OP_GETSOURCES, OP_GLOBCALLBACKREQ,
-        OP_GLOBFOUNDSOURCES, OP_GLOBGETSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2,
-        OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_GLOBSERVSTATRES, OP_PACKEDPROT,
-        OP_SERVER_DESC_RES, OP_SERVER_LIST_REQ, OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES,
-        OP_SERVERIDENT, OP_SERVERSTATUS, ed2k_server_diag_event_parts,
+        OP_CALLBACKREQUESTED, OP_EDONKEYPROT_MARKER, OP_FOUNDSOURCES, OP_GETSOURCES,
+        OP_GLOBCALLBACKREQ, OP_GLOBFOUNDSOURCES, OP_GLOBGETSOURCES, OP_GLOBSEARCHREQ,
+        OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ,
+        OP_GLOBSERVSTATRES, OP_PACKEDPROT, OP_SERVER_DESC_RES, OP_SERVER_LIST_REQ,
+        OP_SERVER_LIST_REQ2, OP_SERVER_LIST_RES, OP_SERVERIDENT, OP_SERVERSTATUS,
+        ed2k_server_callback_applied_parts, ed2k_server_diag_event_parts,
         ed2k_server_ident_applied_parts, ed2k_server_send_outcome_parts,
         ed2k_server_source_result_applied_parts, ed2k_server_status_applied_parts,
         ed2k_server_transport_fallback_parts, exact_packet_hex, server_opcode_name,
         server_protocol_name,
     };
+    use crate::ed2k_server::types::CallbackRequest;
     use emulebb_kad_proto::Ed2kHash;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn server_callback_applied_event_preserves_reply_and_dispatch_state() {
+        let callback = CallbackRequest {
+            peer_addr: "198.18.240.2:4662".parse::<SocketAddr>().unwrap(),
+            connect_options: Some(1),
+            user_hash: Some([0xAB; 16]),
+        };
+        let (keys, body) = ed2k_server_callback_applied_parts(
+            "127.0.0.1:4661",
+            12,
+            "background",
+            "connected",
+            true,
+            callback,
+            23,
+        );
+
+        assert_eq!(keys["peer"], "127.0.0.1:4661");
+        assert_eq!(keys["traceId"], 12);
+        assert_eq!(keys["opcode"], OP_CALLBACKREQUESTED);
+        assert_eq!(body["callbackEndpoint"], "198.18.240.2:4662");
+        assert_eq!(body["connectOptions"], 1);
+        assert_eq!(body["userHash"], "abababababababababababababababab");
+        assert_eq!(body["payloadLen"], 23);
+        assert_eq!(body["dispatchAccepted"], true);
+        assert_eq!(body["stateId"], "server.callback.request_applied");
+        assert_eq!(body["outcome"], "applied");
+        assert_eq!(body["traceKey"], "server:background:12:127.0.0.1:4661");
+    }
 
     #[test]
     fn server_status_applied_event_is_causally_correlated() {
