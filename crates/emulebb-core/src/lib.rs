@@ -6829,7 +6829,7 @@ async fn handle_kad_find_buddy_req(
         .context("failed to read eD2K listener address while handling Kad FINDBUDDY_REQ")?
         .port();
     let diagnostic_state = diag_kad_event::KadBuddyRequestState {
-        buddy_id: req.buddy_id.0,
+        buddy_id: req.buddy_id,
         client_hash: req.client_hash.0,
         tcp_firewalled,
         udp_verified,
@@ -7141,7 +7141,7 @@ async fn handle_kad_callback_req(
                 diag_kad_event::buddy_callback(
                     diag_kad_event::KadBuddyCallbackDecision::NoMatchingBuddy,
                     from,
-                    req.buddy_id.0,
+                    req.buddy_id,
                     &req.file_hash.to_string(),
                     req.tcp_port,
                     None,
@@ -7160,7 +7160,7 @@ async fn handle_kad_callback_req(
         diag_kad_event::buddy_callback(
             diag_kad_event::KadBuddyCallbackDecision::NonIpv4Requester,
             from,
-            req.buddy_id.0,
+            req.buddy_id,
             &req.file_hash.to_string(),
             req.tcp_port,
             Some(buddy_tcp_addr),
@@ -7175,7 +7175,7 @@ async fn handle_kad_callback_req(
         diag_kad_event::buddy_callback(
             diag_kad_event::KadBuddyCallbackDecision::Relayed,
             from,
-            req.buddy_id.0,
+            req.buddy_id,
             &req.file_hash.to_string(),
             req.tcp_port,
             Some(buddy_tcp_addr),
@@ -7190,7 +7190,7 @@ async fn handle_kad_callback_req(
         diag_kad_event::buddy_callback(
             diag_kad_event::KadBuddyCallbackDecision::HeldSocketUnavailable,
             from,
-            req.buddy_id.0,
+            req.buddy_id,
             &req.file_hash.to_string(),
             req.tcp_port,
             Some(buddy_tcp_addr),
