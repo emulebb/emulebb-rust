@@ -117,6 +117,7 @@ impl ReaskSourceSet {
                 source_endpoint: (ip, udp_port),
                 destination,
                 datagram,
+                request_part_status: our_part_status.map(<[bool]>::to_vec),
                 #[cfg(feature = "packet-diagnostics")]
                 diagnostic_identity: source.diagnostic_identity(),
             });
@@ -127,7 +128,13 @@ impl ReaskSourceSet {
     /// Mark that a reask was just sent to `endpoint` (opens the pending-reply
     /// gate). The source reschedules when the reply or timeout lands. Returns
     /// false for an unknown endpoint or an already-pending source.
-    pub(crate) fn mark_reasked(&mut self, ip: Ipv4Addr, udp_port: u16, now: Instant) -> bool {
+    pub(crate) fn mark_reasked(
+        &mut self,
+        ip: Ipv4Addr,
+        udp_port: u16,
+        request_part_status: Option<Vec<bool>>,
+        now: Instant,
+    ) -> bool {
         if self.pending.is_pending(ip, udp_port) {
             return false;
         }
@@ -135,13 +142,24 @@ impl ReaskSourceSet {
             return false;
         };
         let file_hash = source.file_hash;
-        self.pending.mark_sent(ip, udp_port, file_hash, now);
+        self.pending
+            .mark_sent(ip, udp_port, file_hash, request_part_status, now);
         true
     }
 
     #[cfg(feature = "packet-diagnostics")]
     pub(crate) fn is_pending(&self, ip: Ipv4Addr, udp_port: u16) -> bool {
         self.pending.is_pending(ip, udp_port)
+    }
+
+    pub(crate) fn pending_request_part_status(
+        &self,
+        ip: Ipv4Addr,
+        udp_port: u16,
+    ) -> Option<Option<&[bool]>> {
+        self.pending
+            .get(ip, udp_port)
+            .map(|pending| pending.request_part_status.as_deref())
     }
 
     /// Apply a *received* reply (`Ack`/`QueueFull`/`FileNotFound`) to the source,
@@ -210,6 +228,24 @@ impl ReaskSourceSet {
         true
     }
 
+    /// Set the source's current usefulness verdict from a version-4 reask ACK.
+    /// A later bitmap can make a former NNP source useful again, so this is a
+    /// true setter rather than the one-way TCP-session marker above.
+    pub(crate) fn set_no_needed_parts(
+        &mut self,
+        ip: Ipv4Addr,
+        udp_port: u16,
+        no_needed_parts: bool,
+        now: Instant,
+    ) -> bool {
+        let Some(source) = self.sources.get_mut(&(ip, udp_port)) else {
+            return false;
+        };
+        source.no_needed_parts = no_needed_parts;
+        source.schedule_next(now);
+        true
+    }
+
     /// Explicitly drop a source (e.g. the transfer no longer needs it). Returns
     /// the removed source so the caller can address its release event to the
     /// lease key core holds ([`ReaskSource::lease_endpoint`]).
@@ -261,7 +297,7 @@ mod tests {
         // A freshly inserted source reasks immediately.
         assert_eq!(set.due(now), vec![(a, pa)]);
         // Once a reask is outstanding it is no longer "due" (one in-flight reask).
-        set.mark_reasked(a, pa, now);
+        set.mark_reasked(a, pa, None, now);
         assert!(set.due(now).is_empty());
     }
 
@@ -276,7 +312,7 @@ mod tests {
                 .is_none()
         );
         // After a reask is outstanding, the ack is accepted.
-        set.mark_reasked(a, pa, now);
+        set.mark_reasked(a, pa, None, now);
         assert_eq!(
             set.apply_reply(a, pa, ReaskReply::Ack { rank: 5 }, now),
             Some(ReaskAction::UpdatedRank(5))
@@ -291,7 +327,7 @@ mod tests {
         let now = Instant::now();
         let mut set = ReaskSourceSet::new();
         let (a, pa) = source(&mut set, 3, now);
-        set.mark_reasked(a, pa, now);
+        set.mark_reasked(a, pa, None, now);
         assert_eq!(
             set.apply_reply(a, pa, ReaskReply::FileNotFound, now),
             Some(ReaskAction::DropSource)
@@ -305,7 +341,7 @@ mod tests {
         let now = Instant::now();
         let mut set = ReaskSourceSet::new();
         let (a, pa) = source(&mut set, 4, now);
-        set.mark_reasked(a, pa, now);
+        set.mark_reasked(a, pa, None, now);
         assert_eq!(
             set.apply_reply(a, pa, ReaskReply::QueueFull, now),
             Some(ReaskAction::QueueFull)
@@ -327,7 +363,7 @@ mod tests {
         let mut last_action = None;
         for i in 0..4 {
             let sent_at = now + Duration::from_secs(i * 60);
-            set.mark_reasked(a, pa, sent_at);
+            set.mark_reasked(a, pa, None, sent_at);
             let drained = set.drain_timeouts(sent_at + timeout + Duration::from_secs(1), timeout);
             assert_eq!(drained.len(), 1);
             last_action = Some(drained[0].1);
@@ -399,8 +435,8 @@ mod tests {
 
         // Merely building work does not claim delivery or open the reply gate.
         assert_eq!(set.due(now), vec![endpoint]);
-        assert!(set.mark_reasked(endpoint.0, endpoint.1, now));
-        assert!(!set.mark_reasked(endpoint.0, endpoint.1, now));
+        assert!(set.mark_reasked(endpoint.0, endpoint.1, None, now));
+        assert!(!set.mark_reasked(endpoint.0, endpoint.1, None, now));
         assert!(set.due(now).is_empty());
 
         // A TCP-fallback source produces no datagram.
@@ -470,7 +506,7 @@ mod tests {
         // The pending gate is keyed on the SOURCE endpoint (the source answers),
         // but building the buddy-targeted work alone does not open it.
         assert_eq!(set.due(now), vec![source_endpoint]);
-        assert!(set.mark_reasked(source_endpoint.0, source_endpoint.1, now));
+        assert!(set.mark_reasked(source_endpoint.0, source_endpoint.1, None, now));
         assert!(set.due(now).is_empty());
 
         // A LowID source missing the buddy id (hello-only buddy) cannot originate
@@ -512,6 +548,23 @@ mod tests {
     }
 
     #[test]
+    fn ack_usefulness_can_clear_a_previous_no_needed_parts_verdict() {
+        use super::super::state::FILE_REASK_TIME;
+
+        let now = Instant::now();
+        let mut set = ReaskSourceSet::new();
+        let (ip, port) = source(&mut set, 10, now);
+
+        assert!(set.set_no_needed_parts(ip, port, true, now));
+        assert!(set.get(ip, port).unwrap().no_needed_parts);
+        assert!(set.due(now + FILE_REASK_TIME).is_empty());
+
+        assert!(set.set_no_needed_parts(ip, port, false, now));
+        assert!(!set.get(ip, port).unwrap().no_needed_parts);
+        assert_eq!(set.due(now + FILE_REASK_TIME), vec![(ip, port)]);
+    }
+
+    #[test]
     fn multiple_sources_are_tracked_independently() {
         let now = Instant::now();
         let mut set = ReaskSourceSet::new();
@@ -519,7 +572,7 @@ mod tests {
         let (b, pb) = source(&mut set, 7, now);
         assert_eq!(set.len(), 2);
         // Reask only A; B stays due, A does not.
-        set.mark_reasked(a, pa, now);
+        set.mark_reasked(a, pa, None, now);
         let due = set.due(now);
         assert!(due.contains(&(b, pb)));
         assert!(!due.contains(&(a, pa)));

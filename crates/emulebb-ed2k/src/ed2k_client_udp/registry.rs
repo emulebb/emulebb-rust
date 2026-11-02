@@ -11,6 +11,9 @@ use emulebb_kad_proto::Ed2kHash;
 pub(crate) struct PendingReask {
     pub file_hash: Ed2kHash,
     pub sent_at: Instant,
+    /// Our part-status snapshot from the exact request. It supplies both the
+    /// expected V4 ACK part count and the local side of the usefulness verdict.
+    pub request_part_status: Option<Vec<bool>>,
 }
 
 /// Anti-spoof correlation gate for client-UDP reask replies (eMuleBB
@@ -36,6 +39,7 @@ impl ReaskPendingRegistry {
         ip: Ipv4Addr,
         udp_port: u16,
         file_hash: Ed2kHash,
+        request_part_status: Option<Vec<bool>>,
         now: Instant,
     ) {
         self.pending.insert(
@@ -43,12 +47,17 @@ impl ReaskPendingRegistry {
             PendingReask {
                 file_hash,
                 sent_at: now,
+                request_part_status,
             },
         );
     }
 
     pub(crate) fn is_pending(&self, ip: Ipv4Addr, udp_port: u16) -> bool {
         self.pending.contains_key(&(ip, udp_port))
+    }
+
+    pub(crate) fn get(&self, ip: Ipv4Addr, udp_port: u16) -> Option<&PendingReask> {
+        self.pending.get(&(ip, udp_port))
     }
 
     /// Accepts and clears the pending reask for a reply from `(ip, udp_port)`.
@@ -104,10 +113,11 @@ mod tests {
         // Unsolicited reply (no pending reask) -> dropped.
         assert!(registry.take_reply(ip, 4672).is_none());
         // After marking a reask outstanding, the matching reply is accepted once.
-        registry.mark_sent(ip, 4672, hash(), now);
+        registry.mark_sent(ip, 4672, hash(), Some(vec![true, false, true]), now);
         assert!(registry.is_pending(ip, 4672));
         let accepted = registry.take_reply(ip, 4672).expect("pending reply");
         assert_eq!(accepted.file_hash, hash());
+        assert_eq!(accepted.request_part_status, Some(vec![true, false, true]));
         // A second reply for the same endpoint is now unsolicited.
         assert!(registry.take_reply(ip, 4672).is_none());
         assert_eq!(registry.len(), 0);
@@ -118,7 +128,7 @@ mod tests {
         let mut registry = ReaskPendingRegistry::new();
         let ip = Ipv4Addr::new(203, 0, 113, 8);
         let start = Instant::now();
-        registry.mark_sent(ip, 5000, hash(), start);
+        registry.mark_sent(ip, 5000, hash(), None, start);
         // Not yet timed out.
         assert!(
             registry

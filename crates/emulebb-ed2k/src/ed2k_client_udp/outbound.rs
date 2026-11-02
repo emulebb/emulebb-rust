@@ -46,6 +46,10 @@ pub(crate) struct ReaskSend {
     pub source_endpoint: (Ipv4Addr, u16),
     pub destination: SocketAddr,
     pub datagram: ClientUdpDatagram,
+    /// Part-status snapshot used to build this request. Stored with the pending
+    /// gate only after the socket accepts the send, so ACK validation and state
+    /// application are causal to these exact request bytes.
+    pub request_part_status: Option<Vec<bool>>,
     #[cfg(feature = "packet-diagnostics")]
     pub diagnostic_identity: ReaskDiagnosticIdentity,
 }

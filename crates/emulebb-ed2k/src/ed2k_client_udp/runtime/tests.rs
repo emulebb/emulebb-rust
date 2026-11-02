@@ -26,6 +26,25 @@ async fn unbootstrapped_dht(node_byte: u8) -> DhtNode {
 }
 
 #[test]
+fn v4_ack_status_resolves_complete_and_bitmap_source_availability() {
+    let ours = [true, false, true];
+
+    let complete =
+        resolved_reask_ack_bitmap(&ReaskAckPartStatus::CompleteSource, Some(ours.len())).unwrap();
+    assert_eq!(complete, vec![true, true, true]);
+    assert!(!reask_source_has_no_needed_parts(&ours, &complete));
+
+    let unavailable = ReaskAckPartStatus::Bitmap(vec![true, false, true]);
+    let unavailable = resolved_reask_ack_bitmap(&unavailable, Some(ours.len())).unwrap();
+    assert!(reask_source_has_no_needed_parts(&ours, &unavailable));
+
+    assert_eq!(
+        resolved_reask_ack_bitmap(&ReaskAckPartStatus::NotIncluded, Some(ours.len())),
+        None
+    );
+}
+
+#[test]
 fn tcp_firewall_resolution_matches_mfc_connected_authority_or() {
     let low_id_server_with_open_kad =
         resolve_tcp_firewall_verdict(true, Some(true), true, Some(false));
@@ -393,6 +412,7 @@ fn reask_send_settlement_opens_pending_only_on_success() {
         settle_reask_send(
             &mut svc,
             failed.send[0].source_endpoint,
+            failed.send[0].request_part_status.clone(),
             Err::<(), _>("local send failed"),
             now,
         ),
@@ -410,6 +430,7 @@ fn reask_send_settlement_opens_pending_only_on_success() {
         settle_reask_send(
             &mut svc,
             retry.send[0].source_endpoint,
+            retry.send[0].request_part_status.clone(),
             Ok::<(), &str>(()),
             retry_at,
         ),

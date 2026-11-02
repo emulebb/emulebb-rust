@@ -211,6 +211,7 @@ mod tests {
                 0,
                 4,
             ),
+            request_part_status: None,
             diagnostic_identity: identity(),
         }
     }

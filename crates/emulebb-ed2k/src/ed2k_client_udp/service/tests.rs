@@ -89,7 +89,7 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
     let decoded = decode_reask_callback_udp(&datagram.payload).unwrap();
     assert_eq!(decoded.buddy_id.0, buddy_id);
     assert_eq!(decoded.file_hash, file_hash());
-    assert!(svc.mark_reask_sent(send.source_endpoint, now));
+    assert!(svc.mark_reask_sent(send.source_endpoint, send.request_part_status.clone(), now));
     let next = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
         part_status: None,
         complete_source_count: 0,
@@ -125,7 +125,11 @@ fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
         svc.handle_inbound(&ack, peer_addr(), now),
         ReaskInboundOutcome::Ignored(ReaskIgnoredReason::UnsolicitedReply)
     );
-    assert!(svc.mark_reask_sent(out.send[0].source_endpoint, now));
+    assert!(svc.mark_reask_sent(
+        out.send[0].source_endpoint,
+        out.send[0].request_part_status.clone(),
+        now
+    ));
     let outcome = svc.handle_inbound(&ack, peer_addr(), now);
     assert_eq!(
         outcome,
@@ -133,6 +137,8 @@ fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
             file_hash: file_hash(),
             endpoint: peer_v4(),
             lease_endpoint: peer_lease_v4(),
+            ack_part_status: Some(ReaskAckPartStatus::CompleteSource),
+            request_part_status: Some(vec![true, false]),
             #[cfg(feature = "packet-diagnostics")]
             diagnostic_identity: diagnostic_identity(),
             #[cfg(feature = "packet-diagnostics")]
@@ -142,6 +148,59 @@ fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
             action: ReaskAction::UpdatedRank(12),
         }
     );
+}
+
+#[test]
+fn v4_ack_rejects_a_nonzero_part_count_mismatch_without_consuming_pending() {
+    let now = Instant::now();
+    let (mut svc, _reachability) = service();
+    register(&mut svc, now);
+    let out = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
+        part_status: Some(vec![false, false]),
+        complete_source_count: 0,
+    });
+    assert!(svc.mark_reask_sent(
+        out.send[0].source_endpoint,
+        out.send[0].request_part_status.clone(),
+        now
+    ));
+
+    let wrong = build_reask_ack_datagram(
+        Some(&[true, false, true]),
+        12,
+        4,
+        &OutboundReaskTarget {
+            dest_user_hash: OUR_HASH,
+            our_public_ip: peer_v4().0.octets(),
+            obfuscate: true,
+        },
+    );
+    assert!(matches!(
+        svc.handle_inbound(&wrong, peer_addr(), now),
+        ReaskInboundOutcome::Ignored(ReaskIgnoredReason::Parse(
+            InboundReaskParseError::Malformed { .. }
+        ))
+    ));
+
+    let valid = build_reask_ack_datagram(
+        Some(&[true, false]),
+        12,
+        4,
+        &OutboundReaskTarget {
+            dest_user_hash: OUR_HASH,
+            our_public_ip: peer_v4().0.octets(),
+            obfuscate: true,
+        },
+    );
+    assert!(matches!(
+        svc.handle_inbound(&valid, peer_addr(), now),
+        ReaskInboundOutcome::RoutedReply {
+            ack_part_status: Some(ReaskAckPartStatus::Bitmap(parts)),
+            request_part_status: Some(request_parts),
+            action: ReaskAction::UpdatedRank(12),
+            ..
+        } if parts == vec![true, false] && request_parts == vec![false, false]
+    ));
 }
 
 #[test]
@@ -235,7 +294,11 @@ fn file_not_found_drops_source_and_clears_routing() {
         part_status: None,
         complete_source_count: 0,
     });
-    assert!(svc.mark_reask_sent(out.send[0].source_endpoint, now));
+    assert!(svc.mark_reask_sent(
+        out.send[0].source_endpoint,
+        out.send[0].request_part_status.clone(),
+        now
+    ));
     let fnf = vec![0xC5u8, 0x92];
     let outcome = svc.handle_inbound(&fnf, peer_addr(), now);
     assert_eq!(
@@ -244,6 +307,8 @@ fn file_not_found_drops_source_and_clears_routing() {
             file_hash: file_hash(),
             endpoint: peer_v4(),
             lease_endpoint: peer_lease_v4(),
+            ack_part_status: None,
+            request_part_status: None,
             #[cfg(feature = "packet-diagnostics")]
             diagnostic_identity: diagnostic_identity(),
             #[cfg(feature = "packet-diagnostics")]
@@ -356,7 +421,11 @@ fn timed_out_reask_surfaces_in_tick_output() {
         part_status: None,
         complete_source_count: 0,
     });
-    assert!(svc.mark_reask_sent(sent.send[0].source_endpoint, now));
+    assert!(svc.mark_reask_sent(
+        sent.send[0].source_endpoint,
+        sent.send[0].request_part_status.clone(),
+        now
+    ));
     let later = now + timeout + Duration::from_secs(1);
     let out = svc.tick(later, timeout, |_| TransferReaskInfo {
         part_status: None,

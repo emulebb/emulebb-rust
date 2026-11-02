@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::Ed2kHash;
 
+use super::codec::ReaskAckPartStatus;
 use super::dispatch::{
     InboundReaskMessage, InboundReaskParseError, classify_inbound_reask_datagram,
 };
@@ -40,6 +41,13 @@ pub(crate) enum ReaskInboundOutcome {
         /// ([`ReaskSource::lease_endpoint`]); any `SourceReleased` the caller
         /// emits for this reply must carry this, not the UDP `endpoint`.
         lease_endpoint: (Ipv4Addr, u16),
+        /// Present only for `OP_REASKACK`; distinguishes legacy ACKs, complete
+        /// sources, and version-4 availability bitmaps without erasing the wire
+        /// representation before the runtime applies it.
+        ack_part_status: Option<ReaskAckPartStatus>,
+        /// Our part-status snapshot from the exact request this reply consumed.
+        /// The runtime compares the ACK against this, not mutable current state.
+        request_part_status: Option<Vec<bool>>,
         #[cfg(feature = "packet-diagnostics")]
         diagnostic_identity: ReaskDiagnosticIdentity,
         #[cfg(feature = "packet-diagnostics")]
@@ -234,20 +242,44 @@ impl ReaskService {
             .is_some_and(|set| set.mark_no_needed_parts(ip, udp_port, now))
     }
 
+    /// Apply the latest version-4 ACK usefulness verdict to a detached source.
+    /// Unlike the TCP-only marker above, an ACK may move a source in either
+    /// direction as its advertised availability changes.
+    pub(crate) fn set_no_needed_parts(
+        &mut self,
+        ip: Ipv4Addr,
+        udp_port: u16,
+        no_needed_parts: bool,
+        now: Instant,
+    ) -> bool {
+        let Some(file_hash) = self.endpoint_index.get(&(ip, udp_port)) else {
+            return false;
+        };
+        self.per_file
+            .get_mut(file_hash)
+            .is_some_and(|set| set.set_no_needed_parts(ip, udp_port, no_needed_parts, now))
+    }
+
     /// Confirm that a scheduled reask reached the local UDP socket. Only this
     /// transition opens the pending-reply gate; failed or cancelled sends leave
     /// the source due and cannot later be counted as remote timeouts.
     pub(crate) fn mark_reask_sent(
         &mut self,
         source_endpoint: (Ipv4Addr, u16),
+        request_part_status: Option<Vec<bool>>,
         now: Instant,
     ) -> bool {
         let Some(file_hash) = self.endpoint_index.get(&source_endpoint).copied() else {
             return false;
         };
-        self.per_file
-            .get_mut(&file_hash)
-            .is_some_and(|set| set.mark_reasked(source_endpoint.0, source_endpoint.1, now))
+        self.per_file.get_mut(&file_hash).is_some_and(|set| {
+            set.mark_reasked(
+                source_endpoint.0,
+                source_endpoint.1,
+                request_part_status,
+                now,
+            )
+        })
     }
 
     /// Route an inbound datagram. Downloader replies are applied to the matching
@@ -276,15 +308,18 @@ impl ReaskService {
             }
         };
 
-        let reply = match msg {
+        let (reply, ack_part_status) = match msg {
             InboundReaskMessage::FilePing(ping) => {
                 return ReaskInboundOutcome::AnswerNeeded { ping, from };
             }
-            InboundReaskMessage::Ack(ack) => ReaskReply::Ack {
-                rank: ack.queue_position,
-            },
-            InboundReaskMessage::QueueFull => ReaskReply::QueueFull,
-            InboundReaskMessage::FileNotFound => ReaskReply::FileNotFound,
+            InboundReaskMessage::Ack(ack) => (
+                ReaskReply::Ack {
+                    rank: ack.queue_position,
+                },
+                Some(ack.part_status),
+            ),
+            InboundReaskMessage::QueueFull => (ReaskReply::QueueFull, None),
+            InboundReaskMessage::FileNotFound => (ReaskReply::FileNotFound, None),
             // Buddy relay (we are the source's buddy): hand the decoded request +
             // requester endpoint back so the caller can match the buddy-id against
             // its served inbound buddy and relay it over the held buddy socket.
@@ -309,6 +344,27 @@ impl ReaskService {
         let Some(set) = self.per_file.get_mut(&file_hash) else {
             return ReaskInboundOutcome::Ignored(ReaskIgnoredReason::MissingSourceSet);
         };
+        // Correlate validation to the exact successfully sent request. Reading
+        // current transfer state here could race a manifest update after send.
+        let Some(request_part_status) = set.pending_request_part_status(ip, port) else {
+            return ReaskInboundOutcome::Ignored(ReaskIgnoredReason::UnsolicitedReply);
+        };
+        let request_part_status = request_part_status.map(<[bool]>::to_vec);
+        if let Some(part_status) = ack_part_status.as_ref()
+            && let (Some(expected), Some(actual)) = (
+                request_part_status.as_deref().map(<[bool]>::len),
+                part_status.wire_part_count(),
+            )
+            && actual != 0
+            && actual != expected
+        {
+            return ReaskInboundOutcome::Ignored(ReaskIgnoredReason::Parse(
+                InboundReaskParseError::Malformed {
+                    opcode: Some(super::codec::OP_REASKACK),
+                    detail: format!("OP_REASKACK part_count {actual} expected {expected}"),
+                },
+            ));
+        }
         // Capture the lease key BEFORE applying the reply: `DropSource` removes
         // the source from the set, taking its TCP lease endpoint with it.
         let lease_endpoint = set
@@ -342,6 +398,8 @@ impl ReaskService {
                     file_hash,
                     endpoint: (ip, port),
                     lease_endpoint,
+                    ack_part_status,
+                    request_part_status,
                     #[cfg(feature = "packet-diagnostics")]
                     diagnostic_identity,
                     #[cfg(feature = "packet-diagnostics")]
