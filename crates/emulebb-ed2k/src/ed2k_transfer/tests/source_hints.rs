@@ -102,6 +102,51 @@ async fn remembered_source_late_user_hash_upgrades_endpoint_hint() {
 }
 
 #[tokio::test]
+async fn protocol_drop_removes_only_the_exact_remembered_source() {
+    let root = unique_test_dir("ed2k-transfer-source-protocol-drop");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let file_hash = Ed2kHash::from_bytes([0x6A; 16]);
+    let job = new_transfer_job(file_hash, "source-protocol-drop.bin".to_string(), 1024);
+    runtime.ensure_job(&job).await.unwrap();
+
+    for (tcp_port, user_hash) in [(4662, [0x51; 16]), (4663, [0x52; 16])] {
+        runtime
+            .remember_source(
+                &job.file_hash,
+                Ed2kSourceHint {
+                    ip: "198.51.100.44".to_string(),
+                    tcp_port,
+                    user_hash: Some(hex::encode(user_hash)),
+                    connect_options: None,
+                    file_comment: String::new(),
+                    file_rating: 0,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        runtime
+            .remove_source_identity(
+                &job.file_hash,
+                "198.51.100.44".parse().unwrap(),
+                4662,
+                Some([0x51; 16]),
+            )
+            .await
+            .unwrap()
+    );
+    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.sources.len(), 1);
+    assert_eq!(manifest.sources[0].tcp_port, 4663);
+    assert_eq!(
+        manifest.sources[0].user_hash.as_deref(),
+        Some(hex::encode([0x52; 16]).as_str())
+    );
+}
+
+#[tokio::test]
 async fn remembered_source_roundtrips_every_crypt_bit_combination() {
     let root = unique_test_dir("ed2k-transfer-source-connect-options");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
