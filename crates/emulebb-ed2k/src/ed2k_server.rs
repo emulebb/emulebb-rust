@@ -67,8 +67,8 @@ pub use background::{
     search_source_via_background_session,
 };
 use diagnostics::{
-    dump_ed2k_server_ident_applied, dump_ed2k_server_loop_meta, dump_ed2k_server_meta,
-    dump_ed2k_server_packet, dump_ed2k_server_source_result_applied,
+    dump_ed2k_server_callback_applied, dump_ed2k_server_ident_applied, dump_ed2k_server_loop_meta,
+    dump_ed2k_server_meta, dump_ed2k_server_packet, dump_ed2k_server_source_result_applied,
     dump_ed2k_server_status_applied, dump_ed2k_server_transport_fallback,
     dump_ed2k_server_udp_source_result_applied,
 };
