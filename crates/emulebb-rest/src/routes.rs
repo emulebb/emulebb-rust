@@ -23,7 +23,9 @@ use tokio::sync::watch;
 use crate::envelope::api_error;
 use crate::handlers::*;
 #[cfg(feature = "packet-diagnostics")]
-use crate::protocol_fixtures::create_queued_lowid_source_fixture;
+use crate::protocol_fixtures::{
+    create_queued_lowid_source_fixture, prepare_buddy_relay_eligibility_fixture,
+};
 use crate::request_body_policy::enforce_api_request_body_limit;
 use crate::responses::CONTRACT_VERSION;
 use crate::route_metadata::validate_route_metadata;
@@ -299,10 +301,15 @@ pub fn router_with_shutdown(
 
 #[cfg(feature = "packet-diagnostics")]
 fn protocol_fixture_router() -> Router<RestState> {
-    Router::new().route(
-        "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources",
-        post(create_queued_lowid_source_fixture),
-    )
+    Router::new()
+        .route(
+            "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources",
+            post(create_queued_lowid_source_fixture),
+        )
+        .route(
+            "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility",
+            post(prepare_buddy_relay_eligibility_fixture),
+        )
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]

@@ -7,12 +7,39 @@ use std::collections::HashSet;
 use std::fmt;
 use std::net::Ipv4Addr;
 
+use chrono::Utc;
 use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
 use emulebb_kad_proto::Ed2kHash;
 use serde_json::json;
 
 use crate::EmulebbCore;
 use crate::ed2k_buddy_reask::register_kad_buddy_source_for_reask;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuddyRelayEligibilityFixtureState {
+    pub tcp_firewalled: bool,
+    pub udp_verified: bool,
+    pub udp_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuddyRelayEligibilityFixtureErrorKind {
+    Ed2kRuntimeNotRunning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuddyRelayEligibilityFixtureError {
+    pub kind: BuddyRelayEligibilityFixtureErrorKind,
+    message: String,
+}
+
+impl fmt::Display for BuddyRelayEligibilityFixtureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BuddyRelayEligibilityFixtureError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedLowIdSourceFixture {
@@ -76,6 +103,50 @@ impl fmt::Display for QueuedLowIdSourceFixtureError {
 impl std::error::Error for QueuedLowIdSourceFixtureError {}
 
 impl EmulebbCore {
+    /// Prepare only the local reachability prerequisite for the production Kad
+    /// buddy-relay path. All buddy and callback packets still travel through the
+    /// ordinary production state machine and sockets.
+    #[cfg(feature = "packet-diagnostics")]
+    pub async fn prepare_buddy_relay_eligibility_fixture(
+        &self,
+    ) -> Result<BuddyRelayEligibilityFixtureState, BuddyRelayEligibilityFixtureError> {
+        let kad_firewall = self
+            .ed2k_runtime
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| std::sync::Arc::clone(&runtime.kad_firewall))
+            .ok_or_else(|| BuddyRelayEligibilityFixtureError {
+                kind: BuddyRelayEligibilityFixtureErrorKind::Ed2kRuntimeNotRunning,
+                message: "eD2K/Kad runtime is not running".to_string(),
+            })?;
+        let mut firewall = kad_firewall.lock().await;
+        firewall.prepare_buddy_relay_fixture(Utc::now());
+        let state = BuddyRelayEligibilityFixtureState {
+            tcp_firewalled: firewall.tcp_firewalled().unwrap_or(true),
+            udp_verified: firewall.udp_verified,
+            udp_open: firewall.udp_open,
+        };
+        drop(firewall);
+
+        emulebb_ed2k::diag_event::emit(
+            "kad_event",
+            "buddy_fixture",
+            "info",
+            json!({}),
+            json!({
+                "milestone": "buddy_relay_eligibility_prepared",
+                "action": "prepare",
+                "outcome": "eligible",
+                "reason": "diagnostic_test_control",
+                "tcpFirewalled": state.tcp_firewalled,
+                "udpVerified": state.udp_verified,
+                "udpOpen": state.udp_open,
+            }),
+        );
+        Ok(state)
+    }
+
     /// Register one queued LowID source against an existing active transfer and
     /// promptly run the ordinary production UDP-reask tick.
     pub async fn register_queued_lowid_source_fixture(

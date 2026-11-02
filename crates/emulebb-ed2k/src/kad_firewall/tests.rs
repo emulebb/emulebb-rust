@@ -505,3 +505,26 @@ fn tcp_recheck_reports_last_state_while_in_flight() {
     assert!(state.tcp_recheck_in_progress());
     assert_eq!(state.tcp_firewalled(), Some(false));
 }
+
+#[cfg(feature = "packet-diagnostics")]
+#[test]
+fn buddy_relay_fixture_prepares_only_reachability_state() {
+    let mut state = KadFirewallState::default();
+    let prepared_at = Utc.with_ymd_and_hms(2026, 11, 2, 12, 0, 0).unwrap();
+    state.begin_tcp_recheck(prepared_at - chrono::Duration::seconds(1));
+    state.begin_udp_check(
+        ["203.0.113.20".parse().unwrap()],
+        [41000],
+        prepared_at - chrono::Duration::seconds(1),
+    );
+
+    state.prepare_buddy_relay_fixture(prepared_at);
+
+    assert_eq!(state.tcp_firewalled(), Some(false));
+    assert!(!state.tcp_recheck_in_progress());
+    assert!(state.udp_verified);
+    assert!(state.udp_open);
+    assert_eq!(state.last_udp_check_succeeded_at, Some(prepared_at));
+    assert_eq!(state.last_tcp_check_completed_at, Some(prepared_at));
+    assert!(state.last_error.is_none());
+}

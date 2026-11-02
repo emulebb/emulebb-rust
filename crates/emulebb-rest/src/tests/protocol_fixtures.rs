@@ -1,6 +1,8 @@
 use crate::rest_test_support::*;
 
 const ROUTE: &str = "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources";
+const BUDDY_RELAY_ELIGIBILITY_ROUTE: &str =
+    "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility";
 
 fn valid_body() -> Value {
     json!({
@@ -31,6 +33,43 @@ async fn queued_lowid_fixture_route_requires_api_key() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn buddy_relay_eligibility_fixture_requires_api_key() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(BUDDY_RELAY_ELIGIBILITY_ROUTE)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn buddy_relay_eligibility_fixture_requires_a_running_runtime() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(BUDDY_RELAY_ELIGIBILITY_ROUTE)
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "FIXTURE_PRECONDITION_FAILED");
+    assert_eq!(value["error"]["message"], "eD2K/Kad runtime is not running");
 }
 
 #[tokio::test]
