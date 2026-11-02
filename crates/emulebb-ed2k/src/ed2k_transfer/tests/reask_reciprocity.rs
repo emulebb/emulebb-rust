@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use emulebb_kad_proto::Ed2kHash;
 
-use crate::ed2k_client_udp::codec::{OP_FILENOTFOUND, OP_REASKACK, ReaskFilePing};
+use crate::ed2k_client_udp::codec::{OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, ReaskFilePing};
 use crate::ed2k_client_udp::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 use crate::ed2k_transfer::{Ed2kSharedEntry, Ed2kTransferRuntime, Ed2kUploadPeerIdentity};
 use crate::paths::unique_test_dir;
@@ -415,5 +415,95 @@ async fn reciprocity_is_silent_for_an_unknown_sender_with_room() {
             .reask_reciprocity_reply(&ping, from, OUR_PUBLIC_IP)
             .await
             .is_none()
+    );
+}
+
+#[cfg(feature = "packet-diagnostics")]
+#[tokio::test]
+async fn diagnostic_queue_pressure_is_exact_one_shot_and_uses_stock_queue_full_frame() {
+    let root = unique_test_dir("ed2k-reask-reciprocity-queue-pressure");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0xD1; 16]);
+    runtime
+        .shared_catalog()
+        .write()
+        .await
+        .push(shared_entry(&file_hash));
+
+    let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 50)), 4672);
+    let receipt = runtime
+        .arm_diagnostic_client_udp_queue_pressure(file_hash, source)
+        .await
+        .unwrap();
+    assert_eq!(receipt.actual_waiting_user_count, 0);
+    assert_eq!(
+        receipt.effective_waiting_user_count + 50,
+        receipt.queue_size + 1
+    );
+
+    let ping = ReaskFilePing {
+        file_hash,
+        part_status: None,
+        complete_source_count: None,
+    };
+    let wrong_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 51)), 4672);
+    assert!(
+        runtime
+            .reask_reciprocity_reply(&ping, wrong_source, OUR_PUBLIC_IP)
+            .await
+            .is_none()
+    );
+
+    let reply = runtime
+        .reask_reciprocity_reply(&ping, source, OUR_PUBLIC_IP)
+        .await
+        .expect("the exact armed source receives queue-full");
+    assert_eq!(reply.opcode, OP_QUEUEFULL);
+    assert_eq!(reply.bytes, [0xC5, OP_QUEUEFULL]);
+    assert!(matches!(
+        parse_inbound_reask_datagram(&reply.bytes, OUR_PUBLIC_IP, &[0u8; 16], PEER_UDP_VERSION),
+        Some(InboundReaskMessage::QueueFull)
+    ));
+
+    assert!(
+        runtime
+            .reask_reciprocity_reply(&ping, source, OUR_PUBLIC_IP)
+            .await
+            .is_none(),
+        "the queue-pressure prerequisite is one-shot"
+    );
+}
+
+#[cfg(feature = "packet-diagnostics")]
+#[tokio::test]
+async fn diagnostic_queue_pressure_rejects_a_sender_still_in_the_waiting_queue() {
+    use crate::ed2k_transfer::DiagnosticClientUdpQueuePressureErrorKind;
+
+    let root = unique_test_dir("ed2k-reask-reciprocity-queue-pressure-queued");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0xD2; 16]);
+    runtime
+        .shared_catalog()
+        .write()
+        .await
+        .push(shared_entry(&file_hash));
+    let (_granted, _) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
+        .await;
+    let peer_udp_port = 4672;
+    let (_waiting, _) = runtime
+        .begin_upload_session(reasking_peer(peer_udp_port), &file_hash)
+        .await;
+
+    let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), peer_udp_port);
+    let error = runtime
+        .arm_diagnostic_client_udp_queue_pressure(file_hash, source)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        DiagnosticClientUdpQueuePressureErrorKind::SenderStillQueued
     );
 }

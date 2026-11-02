@@ -5,6 +5,8 @@ const BUDDY_RELAY_ELIGIBILITY_ROUTE: &str =
     "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility";
 const QUEUED_SOURCE_REASK_CONTROL_ROUTE: &str =
     "/api/v1/diagnostics/protocol-controls/queued-source-reasks";
+const CLIENT_UDP_QUEUE_PRESSURE_ROUTE: &str =
+    "/api/v1/diagnostics/protocol-fixtures/client-udp-queue-pressure";
 
 fn valid_body() -> Value {
     json!({
@@ -28,6 +30,14 @@ fn valid_control_body() -> Value {
         "sourceUdpPort": 4672,
         "sourceUserHash": "11223344556677889900aabbccddeeff",
         "sourceUdpVersion": 4
+    })
+}
+
+fn valid_queue_pressure_body() -> Value {
+    json!({
+        "fileHash": "00112233445566778899aabbccddeeff",
+        "sourceIp": "192.0.2.20",
+        "sourceUdpPort": 4672
     })
 }
 
@@ -57,6 +67,23 @@ async fn queued_source_reask_control_requires_api_key() {
                 .uri(QUEUED_SOURCE_REASK_CONTROL_ROUTE)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(valid_control_body().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn client_udp_queue_pressure_fixture_requires_api_key() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(CLIENT_UDP_QUEUE_PRESSURE_ROUTE)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(valid_queue_pressure_body().to_string()))
                 .unwrap(),
         )
         .await
@@ -189,4 +216,41 @@ async fn queued_source_reask_control_reaches_core_preconditions() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["error"]["code"], "NOT_FOUND");
     assert_eq!(value["error"]["message"], "transfer does not exist");
+}
+
+#[tokio::test]
+async fn client_udp_queue_pressure_fixture_rejects_unknown_fields() {
+    let mut body = valid_queue_pressure_body();
+    body["packetHex"] = json!("c593");
+
+    assert_invalid_json_response(
+        test_router(),
+        "POST",
+        CLIENT_UDP_QUEUE_PRESSURE_ROUTE,
+        body.to_string(),
+        "unknown JSON field: packetHex",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn client_udp_queue_pressure_fixture_requires_a_running_runtime() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(CLIENT_UDP_QUEUE_PRESSURE_ROUTE)
+                .header("X-API-Key", "secret")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(valid_queue_pressure_body().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "FIXTURE_PRECONDITION_FAILED");
+    assert_eq!(value["error"]["message"], "eD2K runtime is not running");
 }

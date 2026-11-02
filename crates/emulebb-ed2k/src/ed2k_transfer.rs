@@ -116,6 +116,11 @@ pub(crate) use model::{
 };
 pub use outbound_admission::{Ed2kSourceConnectionAdmission, Ed2kSourceConnectionPermit};
 pub(crate) use piece_store::Ed2kVerifiedRangeReader;
+#[cfg(feature = "packet-diagnostics")]
+pub use reask_reciprocity::{
+    DiagnosticClientUdpQueuePressureError, DiagnosticClientUdpQueuePressureErrorKind,
+    DiagnosticClientUdpQueuePressureReceipt,
+};
 use source_exchange::SourceExchangeState;
 use upload_queue::Ed2kUploadQueueState;
 pub(crate) use upload_queue::is_low_id_client_id;
@@ -343,6 +348,9 @@ pub struct Ed2kTransferRuntime {
     /// ledger (secure-ident wipe, absolute totals seed) — see `credit_ledger`.
     credit_flush_gate: Arc<parking_lot::Mutex<()>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
+    #[cfg(feature = "packet-diagnostics")]
+    client_udp_queue_pressure:
+        Arc<StdMutex<reask_reciprocity::DiagnosticClientUdpQueuePressureState>>,
     /// Shared cross-transfer download-rate limiter (token bucket). One per
     /// runtime, consulted by every download task before it consumes a received
     /// block so the aggregate inbound payload respects the global cap (eMule
@@ -744,6 +752,10 @@ impl Ed2kTransferRuntime {
             )),
             credit_flush_gate: Arc::new(parking_lot::Mutex::new(())),
             upload_queue: Arc::new(Mutex::new(upload_queue_state)),
+            #[cfg(feature = "packet-diagnostics")]
+            client_udp_queue_pressure: Arc::new(StdMutex::new(
+                reask_reciprocity::DiagnosticClientUdpQueuePressureState::default(),
+            )),
             download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
                 download_limit_bytes_per_sec,
             ))),

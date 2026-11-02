@@ -180,7 +180,9 @@ pub(crate) use core_state::{CoreState, KadAichSearchVotes};
 #[cfg(feature = "packet-diagnostics")]
 pub use diagnostic_protocol_fixture::{
     BuddyRelayEligibilityFixtureError, BuddyRelayEligibilityFixtureErrorKind,
-    BuddyRelayEligibilityFixtureState, QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError,
+    BuddyRelayEligibilityFixtureState, ClientUdpQueuePressureFixture,
+    ClientUdpQueuePressureFixtureError, ClientUdpQueuePressureFixtureErrorKind,
+    ClientUdpQueuePressureFixtureState, QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError,
     QueuedLowIdSourceFixtureErrorKind, QueuedSourceReaskControl, QueuedSourceReaskControlError,
     QueuedSourceReaskControlErrorKind,
 };
