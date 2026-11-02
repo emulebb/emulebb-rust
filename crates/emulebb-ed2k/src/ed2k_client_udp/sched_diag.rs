@@ -105,6 +105,16 @@ pub(super) struct UdpReaskReplyApplicationDiagnostic {
     pub no_needed_parts_after: Option<bool>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct UdpReaskReplyStateDiagnostic {
+    pub request_pending_after: bool,
+    pub remote_queue_full_after: bool,
+    pub udp_total_after: u32,
+    pub udp_failed_after: u32,
+    pub next_reask_scheduled: bool,
+    pub source_retained_after: bool,
+}
+
 fn part_status_bits(parts: &[bool]) -> String {
     parts
         .iter()
@@ -150,18 +160,11 @@ pub(super) fn udp_reask_reply_applied(
     file_hash: Ed2kHash,
     identity: ReaskDiagnosticIdentity,
     action: ReaskAction,
-    request_pending_after: bool,
-    remote_queue_full_after: bool,
+    state: UdpReaskReplyStateDiagnostic,
     application: Option<UdpReaskReplyApplicationDiagnostic>,
 ) {
-    let (keys, body) = udp_reask_reply_applied_parts(
-        file_hash,
-        identity,
-        action,
-        request_pending_after,
-        remote_queue_full_after,
-        application,
-    );
+    let (keys, body) =
+        udp_reask_reply_applied_parts(file_hash, identity, action, state, application);
     crate::diag_event::emit(FAMILY, "udp_reask_reply_applied", "info", keys, body);
 }
 
@@ -169,13 +172,12 @@ fn udp_reask_reply_applied_parts(
     file_hash: Ed2kHash,
     identity: ReaskDiagnosticIdentity,
     action: ReaskAction,
-    request_pending_after: bool,
-    remote_queue_full_after: bool,
+    state: UdpReaskReplyStateDiagnostic,
     application: Option<UdpReaskReplyApplicationDiagnostic>,
 ) -> (Value, Value) {
     let (reply_opcode, queue_rank) = match action {
         ReaskAction::UpdatedRank(rank) => (OP_REASKACK, Some(rank)),
-        ReaskAction::QueueFull => (OP_QUEUEFULL, None),
+        ReaskAction::QueueFull => (OP_QUEUEFULL, Some(0)),
         ReaskAction::DropSource => (OP_FILENOTFOUND, None),
         ReaskAction::RetryTcp | ReaskAction::RetryUdp => {
             unreachable!("timeouts are not parsed replies")
@@ -189,11 +191,11 @@ fn udp_reask_reply_applied_parts(
     }
     body.insert(
         "requestPendingAfter".to_string(),
-        json!(request_pending_after),
+        json!(state.request_pending_after),
     );
     body.insert(
         "remoteQueueFullAfter".to_string(),
-        json!(remote_queue_full_after),
+        json!(state.remote_queue_full_after),
     );
     body.insert(
         "sourceUdpEndpoint".to_string(),
@@ -206,9 +208,10 @@ fn udp_reask_reply_applied_parts(
     body.insert(
         "queueRankApplied".to_string(),
         json!(
-            application
-                .as_ref()
-                .is_some_and(|status| status.queue_rank_applied)
+            matches!(action, ReaskAction::QueueFull)
+                || application
+                    .as_ref()
+                    .is_some_and(|status| status.queue_rank_applied)
         ),
     );
     body.insert(
@@ -268,6 +271,18 @@ fn udp_reask_reply_applied_parts(
                 .and_then(|status| status.no_needed_parts_after)
         ),
     );
+    if matches!(action, ReaskAction::QueueFull) {
+        body.insert("udpTotalAfter".to_string(), json!(state.udp_total_after));
+        body.insert("udpFailedAfter".to_string(), json!(state.udp_failed_after));
+        body.insert(
+            "nextReaskScheduled".to_string(),
+            json!(state.next_reask_scheduled),
+        );
+        body.insert(
+            "sourceRetainedAfter".to_string(),
+            json!(state.source_retained_after),
+        );
+    }
     (source_keys(file_hash, identity), Value::Object(body))
 }
 
@@ -394,8 +409,14 @@ mod tests {
             file_hash(),
             identity(),
             ReaskAction::UpdatedRank(47),
-            false,
-            false,
+            UdpReaskReplyStateDiagnostic {
+                request_pending_after: false,
+                remote_queue_full_after: false,
+                udp_total_after: 1,
+                udp_failed_after: 0,
+                next_reask_scheduled: true,
+                source_retained_after: true,
+            },
             Some(UdpReaskReplyApplicationDiagnostic {
                 queue_rank_applied: true,
                 part_status_included: true,
@@ -425,6 +446,50 @@ mod tests {
                 "availablePartsAfter": 2,
                 "partStatusBitsAfter": "101",
                 "noNeededPartsAfter": false,
+            })
+        );
+    }
+
+    #[test]
+    fn queue_full_application_exposes_rank_zero_and_reply_health() {
+        let (keys, body) = udp_reask_reply_applied_parts(
+            file_hash(),
+            identity(),
+            ReaskAction::QueueFull,
+            UdpReaskReplyStateDiagnostic {
+                request_pending_after: false,
+                remote_queue_full_after: true,
+                udp_total_after: 2,
+                udp_failed_after: 0,
+                next_reask_scheduled: true,
+                source_retained_after: true,
+            },
+            None,
+        );
+
+        assert_eq!(keys["peer"], "192.0.2.20:4662");
+        assert_eq!(
+            body,
+            json!({
+                "outcome": "applied",
+                "replyOpcode": 147,
+                "queueRank": 0,
+                "requestPendingAfter": false,
+                "remoteQueueFullAfter": true,
+                "sourceUdpEndpoint": "192.0.2.20:4672",
+                "sourceUdpVersion": 4,
+                "queueRankApplied": true,
+                "partStatusIncluded": false,
+                "wirePartCount": null,
+                "partStatusApplied": false,
+                "partCountAfter": null,
+                "availablePartsAfter": null,
+                "partStatusBitsAfter": null,
+                "noNeededPartsAfter": null,
+                "udpTotalAfter": 2,
+                "udpFailedAfter": 0,
+                "nextReaskScheduled": true,
+                "sourceRetainedAfter": true,
             })
         );
     }

@@ -54,6 +54,14 @@ pub(crate) enum ReaskInboundOutcome {
         request_pending_after: bool,
         #[cfg(feature = "packet-diagnostics")]
         remote_queue_full_after: bool,
+        #[cfg(feature = "packet-diagnostics")]
+        udp_total_after: u32,
+        #[cfg(feature = "packet-diagnostics")]
+        udp_failed_after: u32,
+        #[cfg(feature = "packet-diagnostics")]
+        next_reask_scheduled: bool,
+        #[cfg(feature = "packet-diagnostics")]
+        source_retained_after: bool,
         action: ReaskAction,
     },
     /// An inbound `OP_REASKFILEPING` from a peer queued on us — the caller answers
@@ -423,6 +431,20 @@ impl ReaskService {
                 let remote_queue_full_after = set
                     .get(ip, port)
                     .is_some_and(|source| source.remote_queue_full);
+                #[cfg(feature = "packet-diagnostics")]
+                let (
+                    udp_total_after,
+                    udp_failed_after,
+                    next_reask_scheduled,
+                    source_retained_after,
+                ) = set.get(ip, port).map_or((0, 0, false, false), |source| {
+                    (
+                        source.udp_total,
+                        source.udp_failed,
+                        !source.is_due(now),
+                        true,
+                    )
+                });
                 ReaskInboundOutcome::RoutedReply {
                     file_hash,
                     endpoint: (ip, port),
@@ -435,6 +457,14 @@ impl ReaskService {
                     request_pending_after,
                     #[cfg(feature = "packet-diagnostics")]
                     remote_queue_full_after,
+                    #[cfg(feature = "packet-diagnostics")]
+                    udp_total_after,
+                    #[cfg(feature = "packet-diagnostics")]
+                    udp_failed_after,
+                    #[cfg(feature = "packet-diagnostics")]
+                    next_reask_scheduled,
+                    #[cfg(feature = "packet-diagnostics")]
+                    source_retained_after,
                     action,
                 }
             }
