@@ -1582,9 +1582,10 @@ fn upload_peer_identity_from_hello(
             remote_hello.tcp_port
         },
         udp_port: (remote_hello.udp_port != 0).then_some(remote_hello.udp_port),
-        // udp_version is learned later from OP_EMULEINFO; should_crypt + ident_verified
-        // are set by the caller (live transport mode / verified secure-ident signature).
-        udp_version: 0,
+        // Modern mule HELLO packets advertise the UDP protocol version in
+        // CT_EMULE_MISCOPTIONS1. OP_EMULEINFO may repeat or supply it for older
+        // peers, but it is not guaranteed to follow every HELLO exchange.
+        udp_version: profile.misc_options1.udp_version,
         should_crypt: false,
         user_hash: Some(remote_hello.user_hash),
         client_id: Some(remote_hello.client_id),
@@ -1692,7 +1693,11 @@ pub(in crate::ed2k_tcp) fn apply_peer_hello_profile(
     // HELLO has no representation for several locally-derived or later-learned
     // uploader properties. Keep those across a re-hello and, in particular,
     // across the HELLOANSWER received by a promoted outbound upload session.
-    state.upload_identity.udp_version = previous_identity.udp_version;
+    // A modern mule HELLO does carry UDP version; retain a later OP_EMULEINFO
+    // value only when the new HELLO did not advertise one.
+    if state.upload_identity.udp_version == 0 {
+        state.upload_identity.udp_version = previous_identity.udp_version;
+    }
     state.upload_identity.friend_slot = previous_identity.friend_slot;
     state.upload_identity.ident_verified = previous_identity.ident_verified;
     state.upload_identity.ident_bad_guy = previous_identity.ident_bad_guy;
@@ -1800,7 +1805,11 @@ pub(in crate::ed2k_tcp) async fn upload_firewall_context(
 
 #[cfg(test)]
 mod tests {
-    use super::{BUDDY_PINGPONG_MIN_INTERVAL, allow_buddy_pingpong_at, upload_firewall_context};
+    use super::{
+        BUDDY_PINGPONG_MIN_INTERVAL, Ed2kHelloIdentity, allow_buddy_pingpong_at,
+        decode_hello_profile, encode_hello_request, upload_firewall_context,
+        upload_peer_identity_from_hello,
+    };
     use crate::{ed2k_server::Ed2kServerState, kad_firewall::KadFirewallState};
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -1808,6 +1817,28 @@ mod tests {
         time::{Duration, Instant},
     };
     use tokio::sync::{Mutex, RwLock};
+
+    #[test]
+    fn upload_identity_uses_udp_version_advertised_by_mule_hello() {
+        let peer_addr = SocketAddr::from((Ipv4Addr::new(198, 51, 100, 21), 41001));
+        let packet = encode_hello_request(Ed2kHelloIdentity {
+            user_hash: [0x21; 16],
+            client_id: u32::from_le_bytes([198, 51, 100, 21]),
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: u32::from_le_bytes([203, 0, 113, 10]),
+            server_port: 4661,
+            connect_options: 0,
+            direct_udp_callback: false,
+        });
+        let profile = decode_hello_profile(&packet[6..]).expect("decode generated mule hello");
+
+        assert_eq!(profile.misc_options1.udp_version, 4);
+        assert_eq!(
+            upload_peer_identity_from_hello(peer_addr, &profile).udp_version,
+            4
+        );
+    }
 
     #[test]
     fn buddy_pingpong_gate_is_thirteen_minutes_and_pongs_every_other_ping() {
