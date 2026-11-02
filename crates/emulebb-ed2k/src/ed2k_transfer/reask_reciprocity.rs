@@ -128,7 +128,7 @@ impl DiagnosticClientUdpQueuePressureState {
         now: Instant,
     ) -> Option<DiagnosticClientUdpQueuePressureReceipt> {
         let armed = self.armed?;
-        if now > armed.expires_at {
+        if now >= armed.expires_at {
             self.armed = None;
             return None;
         }
@@ -389,7 +389,7 @@ mod diagnostic_queue_pressure_tests {
                 file_hash,
                 source,
                 2_000,
-                now + DIAGNOSTIC_QUEUE_PRESSURE_TTL + Duration::from_millis(1),
+                now + DIAGNOSTIC_QUEUE_PRESSURE_TTL,
             ),
             None
         );
