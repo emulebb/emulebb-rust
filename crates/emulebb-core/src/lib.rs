@@ -4257,7 +4257,7 @@ async fn kad_publish_gate_input(
     runtime: &KadPublishLoopRuntime,
 ) -> kad_publish_schedule::KadPublishGateInput {
     let kad_connected = runtime.dht.is_bootstrapped();
-    let tcp_firewalled = current_tcp_firewalled(
+    let tcp_firewalled = current_ed2k_tcp_firewalled(
         &runtime.ed2k_listener,
         &runtime.server_state,
         &runtime.kad_firewall,
@@ -5995,7 +5995,7 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
 
 /// Evaluate the current "do we need a buddy?" inputs from live state.
 async fn current_buddy_need(runtime: &KadBuddyRuntime) -> BuddyNeedInput {
-    let tcp_firewalled = current_tcp_firewalled(
+    let tcp_firewalled = current_kad_tcp_firewalled(
         &runtime.ed2k_listener,
         &runtime.server_state,
         &runtime.kad_firewall,
@@ -6042,25 +6042,52 @@ async fn run_kad_buddy_search(runtime: &KadBuddyRuntime) -> Result<()> {
     Ok(())
 }
 
-/// The current TCP-firewalled (LowID) verdict, in oracle priority order:
-/// the eD2k server's authoritative LowID flag first, then the Kad TCP firewall
-/// recheck verdict (so a pure-Kad node with no server still detects it), then a
-/// last-resort "listener port is unusable" fallback.
-pub(crate) async fn current_tcp_firewalled(
+/// Resolves TCP reachability for an eD2K operation, where the connected
+/// server's HighID/LowID assignment is authoritative.
+fn resolve_ed2k_tcp_firewalled(
+    server_verdict: Option<bool>,
+    kad_verdict: Option<bool>,
+    listener_unusable: bool,
+) -> bool {
+    server_verdict.or(kad_verdict).unwrap_or(listener_unusable)
+}
+
+/// Resolves TCP reachability for a Kad operation, where Kad's own firewall
+/// recheck is authoritative independently of an eD2K server assignment.
+pub(crate) fn resolve_kad_tcp_firewalled(
+    kad_verdict: Option<bool>,
+    server_verdict: Option<bool>,
+    listener_unusable: bool,
+) -> bool {
+    kad_verdict.or(server_verdict).unwrap_or(listener_unusable)
+}
+
+async fn current_ed2k_tcp_firewalled(
     ed2k_listener: &TcpListener,
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
 ) -> bool {
-    if let Some(tcp_firewalled) = server_state.read().await.tcp_firewalled() {
-        return tcp_firewalled;
-    }
-    if let Some(tcp_firewalled) = kad_firewall.lock().await.tcp_firewalled() {
-        return tcp_firewalled;
-    }
-    ed2k_listener
+    let server_verdict = server_state.read().await.tcp_firewalled();
+    let kad_verdict = kad_firewall.lock().await.tcp_firewalled();
+    let listener_unusable = ed2k_listener
         .local_addr()
         .map(|addr| addr.port() == 0)
-        .unwrap_or(true)
+        .unwrap_or(true);
+    resolve_ed2k_tcp_firewalled(server_verdict, kad_verdict, listener_unusable)
+}
+
+async fn current_kad_tcp_firewalled(
+    ed2k_listener: &TcpListener,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+) -> bool {
+    let kad_verdict = kad_firewall.lock().await.tcp_firewalled();
+    let server_verdict = server_state.read().await.tcp_firewalled();
+    let listener_unusable = ed2k_listener
+        .local_addr()
+        .map(|addr| addr.port() == 0)
+        .unwrap_or(true);
+    resolve_kad_tcp_firewalled(kad_verdict, server_verdict, listener_unusable)
 }
 
 /// Kad version at/above which a contact supports the receiver-key three-way
@@ -6790,7 +6817,8 @@ async fn handle_kad_find_buddy_req(
     // We cannot relay for others while firewalled ourselves (oracle refuses with
     // GetFirewalled() || IsFirewalledUDP(true) || !IsVerified()). IsFirewalledUDP
     // is "verified AND not open"; an unverified UDP status is also a refusal.
-    let tcp_firewalled = current_tcp_firewalled(ed2k_listener, server_state, kad_firewall).await;
+    let tcp_firewalled =
+        current_kad_tcp_firewalled(ed2k_listener, server_state, kad_firewall).await;
     let (udp_verified, udp_open) = {
         let firewall = kad_firewall.lock().await;
         (firewall.udp_verified, firewall.udp_open)

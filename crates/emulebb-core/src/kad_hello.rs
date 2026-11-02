@@ -173,7 +173,7 @@ pub(crate) async fn build_kad_hello_request(
         .context("failed to read eD2K listener address while building Kad HELLO request")?
         .port();
     let firewall = kad_firewall.lock().await;
-    let tcp_firewalled = resolve_tcp_firewalled_with_firewall(
+    let tcp_firewalled = resolve_kad_tcp_firewalled_with_firewall(
         ed2k_listener,
         server_state,
         firewall.tcp_firewalled(),
@@ -200,25 +200,19 @@ pub(crate) async fn build_kad_hello_request(
     })
 }
 
-/// Resolve the TCP-firewalled verdict when the Kad firewall verdict has already
-/// been read from a held [`KadFirewallState`] guard, avoiding a re-lock (the
-/// tokio mutex is not reentrant). Same priority as [`current_tcp_firewalled`]:
-/// server first, then the supplied Kad verdict, then the listener fallback.
-pub(crate) async fn resolve_tcp_firewalled_with_firewall(
+/// Resolve Kad TCP reachability while its firewall guard is held. Kad's own
+/// recheck is authoritative; an eD2K server assignment is only a fallback.
+pub(crate) async fn resolve_kad_tcp_firewalled_with_firewall(
     ed2k_listener: &TcpListener,
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_verdict: Option<bool>,
 ) -> bool {
-    if let Some(tcp_firewalled) = server_state.read().await.tcp_firewalled() {
-        return tcp_firewalled;
-    }
-    if let Some(tcp_firewalled) = kad_verdict {
-        return tcp_firewalled;
-    }
-    ed2k_listener
+    let server_verdict = server_state.read().await.tcp_firewalled();
+    let listener_unusable = ed2k_listener
         .local_addr()
         .map(|addr| addr.port() == 0)
-        .unwrap_or(true)
+        .unwrap_or(true);
+    crate::resolve_kad_tcp_firewalled(kad_verdict, server_verdict, listener_unusable)
 }
 
 pub(crate) async fn build_kad_hello_response(
@@ -235,7 +229,7 @@ pub(crate) async fn build_kad_hello_response(
         .context("failed to read eD2K listener address while building Kad HELLO response")?
         .port();
     let firewall = kad_firewall.lock().await;
-    let tcp_firewalled = resolve_tcp_firewalled_with_firewall(
+    let tcp_firewalled = resolve_kad_tcp_firewalled_with_firewall(
         ed2k_listener,
         server_state,
         firewall.tcp_firewalled(),

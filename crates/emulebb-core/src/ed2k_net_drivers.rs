@@ -39,7 +39,7 @@ use emulebb_kad_dht::DhtNode;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::{Ed2kNetworkConfig, EmulebbCore, current_tcp_firewalled};
+use crate::{Ed2kNetworkConfig, EmulebbCore, current_ed2k_tcp_firewalled};
 
 /// Shared runtime state the reask re-engage consumer needs to act on an inbound
 /// `OP_DIRECTCALLBACKREQ` (FIX 1): the firewalled-verdict inputs (oracle
@@ -364,7 +364,7 @@ async fn handle_direct_callback_req(
     // non-firewalled node never advertised direct UDP callback, so a request to
     // it is stale/spurious (oracle gates on IsFirewalled()).
     let firewalled =
-        current_tcp_firewalled(&ctx.ed2k_listener, &ctx.server_state, &ctx.kad_firewall).await;
+        current_ed2k_tcp_firewalled(&ctx.ed2k_listener, &ctx.server_state, &ctx.kad_firewall).await;
     if !firewalled {
         tracing::debug!(
             "ignoring OP_DIRECTCALLBACKREQ from {requester_ip}:{tcp_port}: not firewalled (we do \
