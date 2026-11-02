@@ -101,6 +101,14 @@ fn test_server_control_handle() -> Ed2kServerControlHandle {
     ed2k_server_control_channel(true).0
 }
 
+#[test]
+fn tcp_reachability_keeps_ed2k_and_kad_authority_distinct() {
+    assert!(resolve_ed2k_tcp_firewalled(Some(true), Some(false), false));
+    assert!(!resolve_kad_tcp_firewalled(Some(false), Some(true), true));
+    assert!(resolve_kad_tcp_firewalled(None, Some(true), false));
+    assert!(!resolve_kad_tcp_firewalled(None, None, false));
+}
+
 #[tokio::test(start_paused = true)]
 async fn outgoing_buddy_link_completion_wakes_one_reconnect_attempt() {
     let now = chrono::Utc::now();
