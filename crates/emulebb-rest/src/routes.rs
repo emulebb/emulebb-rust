@@ -22,6 +22,8 @@ use tokio::sync::watch;
 
 use crate::envelope::api_error;
 use crate::handlers::*;
+#[cfg(feature = "packet-diagnostics")]
+use crate::protocol_fixtures::create_queued_lowid_source_fixture;
 use crate::request_body_policy::enforce_api_request_body_limit;
 use crate::responses::CONTRACT_VERSION;
 use crate::route_metadata::validate_route_metadata;
@@ -278,6 +280,7 @@ pub fn router_with_shutdown(
         )
         .route("/api/v1/logs", get(logs))
         .route("/api/v1/logs/operations/clear", post(clear_logs))
+        .merge(protocol_fixture_router())
         .route("/api/v1", any(fallback))
         .route("/api/v1/{*path}", any(fallback))
         .layer(middleware::map_response(rewrite_method_not_allowed))
@@ -292,6 +295,19 @@ pub fn router_with_shutdown(
 
     mount_webui(api_router.merge(health_router), config.web_root_dir)
         .layer(middleware::map_response(add_security_headers))
+}
+
+#[cfg(feature = "packet-diagnostics")]
+fn protocol_fixture_router() -> Router<RestState> {
+    Router::new().route(
+        "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources",
+        post(create_queued_lowid_source_fixture),
+    )
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+fn protocol_fixture_router() -> Router<RestState> {
+    Router::new()
 }
 
 async fn health(State(state): State<RestState>) -> StatusCode {

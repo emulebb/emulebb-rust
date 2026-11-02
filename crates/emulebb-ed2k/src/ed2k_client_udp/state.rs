@@ -7,6 +7,21 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::Ed2kHash;
 
+/// Source-owned identity carried alongside UDP routing state solely for
+/// converged packet diagnostics. The UDP endpoint remains the runtime key;
+/// `peer_endpoint` is the source's logical TCP identity used by sched evidence.
+#[cfg(feature = "packet-diagnostics")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReaskDiagnosticIdentity {
+    pub peer_endpoint: (Ipv4Addr, u16),
+    pub peer_hash: Option<[u8; 16]>,
+    pub source_udp_endpoint: (Ipv4Addr, u16),
+    pub source_udp_version: u8,
+    pub low_id: bool,
+    pub buddy_endpoint: Option<(Ipv4Addr, u16)>,
+    pub buddy_id: Option<[u8; 16]>,
+}
+
 /// Nominal per-source reask interval (`FILEREASKTIME`, eMuleBB opcodes.h).
 pub(crate) const FILE_REASK_TIME: Duration = Duration::from_secs(29 * 60);
 /// Minimum spacing between reasks to one source (`MIN_REQUESTTIME`).
@@ -134,6 +149,19 @@ impl ReaskSource {
             return None;
         }
         Some((self.buddy_endpoint?, self.buddy_id?))
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    pub(crate) const fn diagnostic_identity(&self) -> ReaskDiagnosticIdentity {
+        ReaskDiagnosticIdentity {
+            peer_endpoint: self.lease_endpoint,
+            peer_hash: self.user_hash,
+            source_udp_endpoint: self.endpoint,
+            source_udp_version: self.udp_version,
+            low_id: self.low_id,
+            buddy_endpoint: self.buddy_endpoint,
+            buddy_id: self.buddy_id,
+        }
     }
 
     pub(crate) fn is_due(&self, now: Instant) -> bool {

@@ -10,6 +10,10 @@ description = "eMuleBB-compatible REST API for emulebb-rust"
 [lints]
 workspace = true
 
+[features]
+# Internal protocol-fixture controls exist only in the diagnostics daemon.
+packet-diagnostics = ["emulebb-core/packet-diagnostics"]
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true

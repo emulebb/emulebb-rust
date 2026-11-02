@@ -21,6 +21,8 @@ use super::dispatch::{
 };
 use super::outbound::ReaskSend;
 use super::source_set::ReaskSourceSet;
+#[cfg(feature = "packet-diagnostics")]
+use super::state::ReaskDiagnosticIdentity;
 use super::state::{ReaskAction, ReaskReply, ReaskSource};
 use crate::reachability::ExternalReachability;
 
@@ -38,6 +40,12 @@ pub(crate) enum ReaskInboundOutcome {
         /// ([`ReaskSource::lease_endpoint`]); any `SourceReleased` the caller
         /// emits for this reply must carry this, not the UDP `endpoint`.
         lease_endpoint: (Ipv4Addr, u16),
+        #[cfg(feature = "packet-diagnostics")]
+        diagnostic_identity: ReaskDiagnosticIdentity,
+        #[cfg(feature = "packet-diagnostics")]
+        request_pending_after: bool,
+        #[cfg(feature = "packet-diagnostics")]
+        remote_queue_full_after: bool,
         action: ReaskAction,
     },
     /// An inbound `OP_REASKFILEPING` from a peer queued on us — the caller answers
@@ -306,15 +314,40 @@ impl ReaskService {
         let lease_endpoint = set
             .get(ip, port)
             .map_or((ip, port), |source| source.lease_endpoint);
+        #[cfg(feature = "packet-diagnostics")]
+        let diagnostic_identity = set.get(ip, port).map_or(
+            ReaskDiagnosticIdentity {
+                peer_endpoint: (ip, port),
+                peer_hash: None,
+                source_udp_endpoint: (ip, port),
+                source_udp_version: 0,
+                low_id: false,
+                buddy_endpoint: None,
+                buddy_id: None,
+            },
+            ReaskSource::diagnostic_identity,
+        );
         match set.apply_reply(ip, port, reply, now) {
             Some(action) => {
                 if matches!(action, ReaskAction::DropSource) {
                     self.endpoint_index.remove(&(ip, port));
                 }
+                #[cfg(feature = "packet-diagnostics")]
+                let request_pending_after = set.is_pending(ip, port);
+                #[cfg(feature = "packet-diagnostics")]
+                let remote_queue_full_after = set
+                    .get(ip, port)
+                    .is_some_and(|source| source.remote_queue_full);
                 ReaskInboundOutcome::RoutedReply {
                     file_hash,
                     endpoint: (ip, port),
                     lease_endpoint,
+                    #[cfg(feature = "packet-diagnostics")]
+                    diagnostic_identity,
+                    #[cfg(feature = "packet-diagnostics")]
+                    request_pending_after,
+                    #[cfg(feature = "packet-diagnostics")]
+                    remote_queue_full_after,
                     action,
                 }
             }

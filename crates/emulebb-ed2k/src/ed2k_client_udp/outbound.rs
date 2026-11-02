@@ -15,6 +15,8 @@ use super::codec::{
     OP_REASKFILEPING, encode_direct_callback_req, encode_reask_ack, encode_reask_callback_udp,
     encode_reask_file_ping,
 };
+#[cfg(feature = "packet-diagnostics")]
+use super::state::ReaskDiagnosticIdentity;
 use crate::ed2k_client_udp_obfuscation::obfuscate_client_udp;
 
 /// The eD2k protocol marker that prefixes client UDP packets (`OP_EMULEPROT`).
@@ -44,6 +46,8 @@ pub(crate) struct ReaskSend {
     pub source_endpoint: (Ipv4Addr, u16),
     pub destination: SocketAddr,
     pub datagram: ClientUdpDatagram,
+    #[cfg(feature = "packet-diagnostics")]
+    pub diagnostic_identity: ReaskDiagnosticIdentity,
 }
 
 /// Where to send and whether to obfuscate. eMule obfuscates client UDP toward a
