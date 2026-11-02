@@ -19,9 +19,9 @@ use std::fmt;
 
 use super::codec::{
     DirectCallbackReq, OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_PORTTEST, OP_QUEUEFULL,
-    OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING, ReaskAck, ReaskCallbackUdp, ReaskFilePing,
-    decode_direct_callback_req, decode_reask_ack, decode_reask_callback_udp,
-    decode_reask_file_ping,
+    OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING, ReaskAck, ReaskAckPartStatus,
+    ReaskCallbackUdp, ReaskFilePing, decode_direct_callback_req, decode_reask_ack,
+    decode_reask_callback_udp, decode_reask_file_ping,
 };
 use crate::ed2k_client_udp_obfuscation::deobfuscate_client_udp;
 
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(
             msg,
             InboundReaskMessage::Ack(ReaskAck {
-                part_status: None,
+                part_status: ReaskAckPartStatus::CompleteSource,
                 queue_position: 9
             })
         );

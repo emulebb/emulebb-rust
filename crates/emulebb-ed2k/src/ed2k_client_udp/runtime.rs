@@ -30,6 +30,7 @@ use tokio::sync::oneshot;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, trace};
 
+use super::codec::ReaskAckPartStatus;
 use super::dispatch::{
     InboundReaskMessage, InboundReaskParseError, classify_inbound_reask_datagram,
 };
@@ -544,6 +545,27 @@ fn routed_reply_events(
     }
 }
 
+/// Resolve the ACK's wire representation into the source bitmap used by the
+/// live transfer registry. Stock encodes a complete source as part-count zero;
+/// legacy ACKs carry no status and must leave the previous bitmap untouched.
+fn resolved_reask_ack_bitmap(
+    part_status: &ReaskAckPartStatus,
+    expected_part_count: Option<usize>,
+) -> Option<Vec<bool>> {
+    match part_status {
+        ReaskAckPartStatus::NotIncluded => None,
+        ReaskAckPartStatus::CompleteSource => expected_part_count.map(|count| vec![true; count]),
+        ReaskAckPartStatus::Bitmap(parts) => Some(parts.clone()),
+    }
+}
+
+fn reask_source_has_no_needed_parts(ours: &[bool], source: &[bool]) -> bool {
+    !source
+        .iter()
+        .zip(ours)
+        .any(|(source_has_part, we_have_part)| *source_has_part && !*we_have_part)
+}
+
 /// Whether an inbound reask datagram's source IP is filtered/banned and must be
 /// dropped (IPv4-only; a non-V4 sender is dropped as a non-client too). Pure so
 /// the IP-filter enforcement is unit-testable without socket I/O.
@@ -635,12 +657,15 @@ async fn handle_inbound_datagram(
             from,
         )
     } else {
-        let outcome = service.handle_inbound(data, from, Instant::now());
+        let received_at = Instant::now();
+        let outcome = service.handle_inbound(data, from, received_at);
         match outcome {
             ReaskInboundOutcome::RoutedReply {
                 file_hash,
                 endpoint,
                 lease_endpoint,
+                ack_part_status,
+                request_part_status,
                 #[cfg(feature = "packet-diagnostics")]
                 diagnostic_identity,
                 #[cfg(feature = "packet-diagnostics")]
@@ -650,6 +675,36 @@ async fn handle_inbound_datagram(
                 action,
             } => {
                 trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
+                if let ReaskAction::UpdatedRank(rank) = action {
+                    let peer = SocketAddr::new(lease_endpoint.0.into(), lease_endpoint.1);
+                    transfer_runtime.note_download_source_queue_rank(
+                        &file_hash.to_string(),
+                        peer,
+                        u32::from(rank),
+                    );
+                    if let Some(part_status) = ack_part_status.as_ref()
+                        && let Some(source_bitmap) = resolved_reask_ack_bitmap(
+                            part_status,
+                            request_part_status.as_ref().map(Vec::len),
+                        )
+                    {
+                        transfer_runtime.note_download_source_part_bitmap(
+                            &file_hash.to_string(),
+                            peer,
+                            None,
+                            None,
+                            source_bitmap.clone(),
+                        );
+                        if let Some(our_bitmap) = request_part_status.as_deref() {
+                            service.set_no_needed_parts(
+                                endpoint.0,
+                                endpoint.1,
+                                reask_source_has_no_needed_parts(our_bitmap, &source_bitmap),
+                                received_at,
+                            );
+                        }
+                    }
+                }
                 #[cfg(feature = "packet-diagnostics")]
                 {
                     reply_applied_diagnostic = Some((
@@ -965,10 +1020,11 @@ fn apply_reask_command(
 fn settle_reask_send<E>(
     service: &mut ReaskService,
     source_endpoint: (Ipv4Addr, u16),
+    request_part_status: Option<Vec<bool>>,
     result: Result<(), E>,
     sent_at: Instant,
 ) -> Result<bool, E> {
-    result.map(|()| service.mark_reask_sent(source_endpoint, sent_at))
+    result.map(|()| service.mark_reask_sent(source_endpoint, request_part_status, sent_at))
 }
 
 /// Drive one reask tick: send due reask pings and account timed-out reasks.
@@ -1084,7 +1140,13 @@ async fn dispatch_scheduled_reask(
     #[cfg(feature = "packet-diagnostics")]
     super::sched_diag::udp_reask_decision(&send);
     let result = send_client_udp_datagram(dht, addr, role, &send.datagram).await;
-    match settle_reask_send(service, source_endpoint, result, Instant::now()) {
+    match settle_reask_send(
+        service,
+        source_endpoint,
+        send.request_part_status,
+        result,
+        Instant::now(),
+    ) {
         Ok(marked) => {
             debug_assert!(marked, "scheduled reask source disappeared during send");
             if !marked {

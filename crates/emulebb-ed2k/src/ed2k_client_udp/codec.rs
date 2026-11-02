@@ -50,11 +50,32 @@ pub(crate) struct ReaskFilePing {
     pub complete_source_count: Option<u16>,
 }
 
+/// Version-gated source availability carried by `OP_REASKACK`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReaskAckPartStatus {
+    /// UDP versions 1-3 do not carry a part-status field.
+    NotIncluded,
+    /// A zero part count is stock's complete-source representation.
+    CompleteSource,
+    /// Per-part source availability from a version-4 ACK.
+    Bitmap(Vec<bool>),
+}
+
+impl ReaskAckPartStatus {
+    pub(crate) const fn wire_part_count(&self) -> Option<usize> {
+        match self {
+            Self::NotIncluded => None,
+            Self::CompleteSource => Some(0),
+            Self::Bitmap(parts) => Some(parts.len()),
+        }
+    }
+}
+
 /// Decoded `OP_REASKACK` reply (downloader side).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReaskAck {
-    /// Uploader's part availability, when advertised (peer udp_version > 3).
-    pub part_status: Option<Vec<bool>>,
+    /// Uploader's version-gated part availability.
+    pub part_status: ReaskAckPartStatus,
     /// Our position in the uploader's queue.
     pub queue_position: u16,
 }
@@ -242,12 +263,16 @@ pub(crate) fn encode_reask_ack(
 /// (the source gated the leading partstatus on it).
 pub(crate) fn decode_reask_ack(body: &[u8], our_udp_version: u8) -> Result<ReaskAck> {
     let mut rest = body;
-    let mut part_status = None;
-    if our_udp_version > 3 {
+    let part_status = if our_udp_version > 3 {
         let (bitmap, tail) = decode_part_status(rest)?;
-        part_status = bitmap;
         rest = tail;
-    }
+        bitmap.map_or(
+            ReaskAckPartStatus::CompleteSource,
+            ReaskAckPartStatus::Bitmap,
+        )
+    } else {
+        ReaskAckPartStatus::NotIncluded
+    };
     if rest.len() < 2 {
         bail!("short OP_REASKACK queue position");
     }
@@ -400,7 +425,10 @@ mod tests {
         let parts = [false, true, true, false, true];
         let body = encode_reask_ack(Some(&parts), 42, 4);
         let decoded = decode_reask_ack(&body, 4).unwrap();
-        assert_eq!(decoded.part_status.unwrap(), parts);
+        assert_eq!(
+            decoded.part_status,
+            ReaskAckPartStatus::Bitmap(parts.to_vec())
+        );
         assert_eq!(decoded.queue_position, 42);
     }
 
@@ -409,8 +437,17 @@ mod tests {
         let body = encode_reask_ack(Some(&[true]), 5, 3);
         assert_eq!(body, 5u16.to_le_bytes());
         let decoded = decode_reask_ack(&body, 3).unwrap();
-        assert!(decoded.part_status.is_none());
+        assert_eq!(decoded.part_status, ReaskAckPartStatus::NotIncluded);
         assert_eq!(decoded.queue_position, 5);
+    }
+
+    #[test]
+    fn reask_ack_v4_zero_part_count_is_complete_source() {
+        let body = encode_reask_ack(None, 7, 4);
+        let decoded = decode_reask_ack(&body, 4).unwrap();
+        assert_eq!(decoded.part_status, ReaskAckPartStatus::CompleteSource);
+        assert_eq!(decoded.part_status.wire_part_count(), Some(0));
+        assert_eq!(decoded.queue_position, 7);
     }
 
     #[test]
