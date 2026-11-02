@@ -213,13 +213,9 @@ async fn send_direct_kad_callback(
 ///   `WriteUInt128(GetBuddyID())`, which serializes the `CUInt128`'s raw storage
 ///   (populated by `md4cpy` from the hex string), i.e. the exact `FT_BUDDYHASH`
 ///   bytes. So we pass the 16 buddy bytes straight into `NodeId`.
-/// - `file_hash` is written by the oracle as `WriteUInt128(CUInt128(GetFileHash()))`.
-///   The `CUInt128(const byte*)` constructor is `SetValueBE`, which byte-reverses
-///   each 32-bit chunk of the big-endian MD4, so the value on the wire is the
-///   file's Kad-identity form — exactly `NodeId::from_be_bytes(md4)`. The
-///   firewalled receiver runs `ToByteArray` (`ListenSocket.cpp` `OP_CALLBACK`) to
-///   invert it back to the raw MD4 before `GetFileByID`. We therefore convert the
-///   raw MD4 to its Kad-identity layout here so the packet matches stock eMule.
+/// - `file_hash` remains in canonical MD4 order here. The Kad packet codec owns
+///   the stock `CUInt128` per-word conversion at the wire boundary; callers do
+///   not carry wire-ordered hashes through application state.
 /// - `tcp_port` is our advertised external eD2k TCP port (the address the source
 ///   connects back to). The oracle uses `thePrefs.GetPort()`; behind NAT/UPnP the
 ///   externally reachable port is what the source must dial, so we pass the
@@ -230,12 +226,9 @@ pub(crate) fn build_kad_callback_req(
     file_hash: Ed2kHash,
     our_tcp_port: u16,
 ) -> CallbackReq {
-    // Raw MD4 -> Kad-identity (per-chunk big-endian) layout, matching the oracle
-    // CUInt128(GetFileHash()) SetValueBE serialization on the wire.
-    let kad_file_id = NodeId::from_be_bytes(file_hash.0);
     CallbackReq {
         buddy_id: NodeId::from_bytes(buddy_id),
-        file_hash: Ed2kHash::from_bytes(kad_file_id.0),
+        file_hash,
         tcp_port: our_tcp_port,
     }
 }

@@ -46,7 +46,7 @@ pub(in crate::ed2k_tcp) fn encode_kad_callback_relay(
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(16 + 16 + 4 + 2);
     payload.extend_from_slice(&check);
-    payload.extend_from_slice(&file_hash.0);
+    payload.extend_from_slice(&file_hash.to_kad_uint128_wire_bytes());
     // Oracle host-order uIP serialized little-endian on the wire.
     let host_order_ip = u32::from_be_bytes(requester_ip.octets());
     payload.extend_from_slice(&host_order_ip.to_le_bytes());
@@ -134,7 +134,10 @@ mod tests {
 
         let mut expected = Vec::new();
         expected.extend_from_slice(&check);
-        expected.extend_from_slice(&file_hash.0);
+        expected.extend_from_slice(&[
+            0x40, 0x30, 0x20, 0x10, 0x80, 0x70, 0x60, 0x50, 0xC0, 0xB0, 0xA0, 0x90, 0x01, 0xF0,
+            0xE0, 0xD0,
+        ]);
         // uIP host-order value for 1.2.3.4 is 0x01020304; WriteUInt32 emits it
         // little-endian: [0x04, 0x03, 0x02, 0x01].
         expected.extend_from_slice(&[0x04, 0x03, 0x02, 0x01]);

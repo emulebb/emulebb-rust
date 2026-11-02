@@ -7,23 +7,20 @@ use crate::node_id::NodeId;
 use crate::tag::{StringDecodeMode, Tag};
 
 use super::types::{
-    FindBuddyRes, LegacyPublishRes, LegacySearchKind, LegacySearchReq, LegacySearchRes, PublishRes,
-    PublishSourceReq, SearchKeyReq, SearchRes, SearchResultEntry, SearchSourceReq,
-    TAG_MIN_PACKET_SIZE, ensure_counted_vector_fits,
+    CallbackReq, FindBuddyReq, FindBuddyRes, LegacyPublishRes, LegacySearchKind, LegacySearchReq,
+    LegacySearchRes, PublishRes, PublishSourceReq, SearchKeyReq, SearchRes, SearchResultEntry,
+    SearchSourceReq, TAG_MIN_PACKET_SIZE, ensure_counted_vector_fits,
 };
 
 const SEARCH_RESULT_ENTRY_MIN_PACKET_SIZE: usize = 17;
 
-fn read_kad_search_entry_id(cursor: &mut Cursor<&[u8]>) -> Result<Ed2kHash, ProtoError> {
-    let entry_id = BinReaderExt::read_le::<NodeId>(cursor)?;
-    Ok(Ed2kHash::from_bytes(entry_id.to_be_bytes()))
+fn read_kad_uint128_hash(cursor: &mut Cursor<&[u8]>) -> Result<Ed2kHash, ProtoError> {
+    let wire = BinReaderExt::read_le::<NodeId>(cursor)?;
+    Ok(Ed2kHash::from_kad_uint128_wire_bytes(wire.0))
 }
 
-fn write_kad_search_entry_id(
-    cursor: &mut Cursor<Vec<u8>>,
-    entry_id: &Ed2kHash,
-) -> Result<(), ProtoError> {
-    cursor.write_le(&NodeId::from_be_bytes(entry_id.0))?;
+fn write_kad_uint128_hash(cursor: &mut Cursor<Vec<u8>>, hash: &Ed2kHash) -> Result<(), ProtoError> {
+    cursor.write_le(&NodeId::from_bytes(hash.to_kad_uint128_wire_bytes()))?;
     Ok(())
 }
 
@@ -63,7 +60,7 @@ fn read_search_result_entries(
     let mut results = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
-        let entry_id = read_kad_search_entry_id(cursor)?;
+        let entry_id = read_kad_uint128_hash(cursor)?;
         let tag_count = BinReaderExt::read_le::<u8>(cursor)?;
         ensure_counted_vector_fits(cursor, tag_count as usize, TAG_MIN_PACKET_SIZE)?;
         let mut tags = Vec::with_capacity(tag_count as usize);
@@ -88,7 +85,7 @@ pub(super) fn write_search_res(
     cursor.write_le(&packet.target)?;
     cursor.write_le(&wire_count_u16("SearchRes.results", packet.results.len())?)?;
     for result in &packet.results {
-        write_kad_search_entry_id(cursor, &result.entry_id)?;
+        write_kad_uint128_hash(cursor, &result.entry_id)?;
         cursor.write_le(&wire_count_u8("SearchResultEntry.tags", result.tags.len())?)?;
         for tag in &result.tags {
             cursor.write_le(tag)?;
@@ -107,7 +104,7 @@ pub(super) fn write_legacy_search_res(
         packet.results.len(),
     )?)?;
     for result in &packet.results {
-        write_kad_search_entry_id(cursor, &result.entry_id)?;
+        write_kad_uint128_hash(cursor, &result.entry_id)?;
         cursor.write_le(&wire_count_u8("SearchResultEntry.tags", result.tags.len())?)?;
         for tag in &result.tags {
             cursor.write_le(tag)?;
@@ -116,9 +113,27 @@ pub(super) fn write_legacy_search_res(
     Ok(())
 }
 
+pub(super) fn read_find_buddy_req(cursor: &mut Cursor<&[u8]>) -> Result<FindBuddyReq, ProtoError> {
+    Ok(FindBuddyReq {
+        buddy_id: BinReaderExt::read_le::<NodeId>(cursor)?,
+        client_hash: read_kad_uint128_hash(cursor)?,
+        tcp_port: BinReaderExt::read_le::<u16>(cursor)?,
+    })
+}
+
+pub(super) fn write_find_buddy_req(
+    cursor: &mut Cursor<Vec<u8>>,
+    packet: &FindBuddyReq,
+) -> Result<(), ProtoError> {
+    cursor.write_le(&packet.buddy_id)?;
+    write_kad_uint128_hash(cursor, &packet.client_hash)?;
+    cursor.write_le(&packet.tcp_port)?;
+    Ok(())
+}
+
 pub(super) fn read_find_buddy_res(cursor: &mut Cursor<&[u8]>) -> Result<FindBuddyRes, ProtoError> {
     let buddy_id = BinReaderExt::read_le::<NodeId>(cursor)?;
-    let client_hash = BinReaderExt::read_le::<Ed2kHash>(cursor)?;
+    let client_hash = read_kad_uint128_hash(cursor)?;
     let tcp_port = BinReaderExt::read_le::<u16>(cursor)?;
     let connect_options = if cursor.position() < cursor.get_ref().len() as u64 {
         Some(BinReaderExt::read_le::<u8>(cursor)?)
@@ -139,11 +154,29 @@ pub(super) fn write_find_buddy_res(
     packet: &FindBuddyRes,
 ) -> Result<(), ProtoError> {
     cursor.write_le(&packet.buddy_id)?;
-    cursor.write_le(&packet.client_hash)?;
+    write_kad_uint128_hash(cursor, &packet.client_hash)?;
     cursor.write_le(&packet.tcp_port)?;
     if let Some(connect_options) = packet.connect_options {
         cursor.write_le(&connect_options)?;
     }
+    Ok(())
+}
+
+pub(super) fn read_callback_req(cursor: &mut Cursor<&[u8]>) -> Result<CallbackReq, ProtoError> {
+    Ok(CallbackReq {
+        buddy_id: BinReaderExt::read_le::<NodeId>(cursor)?,
+        file_hash: read_kad_uint128_hash(cursor)?,
+        tcp_port: BinReaderExt::read_le::<u16>(cursor)?,
+    })
+}
+
+pub(super) fn write_callback_req(
+    cursor: &mut Cursor<Vec<u8>>,
+    packet: &CallbackReq,
+) -> Result<(), ProtoError> {
+    cursor.write_le(&packet.buddy_id)?;
+    write_kad_uint128_hash(cursor, &packet.file_hash)?;
+    cursor.write_le(&packet.tcp_port)?;
     Ok(())
 }
 
