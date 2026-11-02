@@ -205,6 +205,35 @@ impl ReaskService {
         self.per_file.entry(file_hash).or_default().insert(source);
     }
 
+    #[cfg(feature = "packet-diagnostics")]
+    pub(crate) fn diagnostic_arm_direct_source(
+        &mut self,
+        file_hash: Ed2kHash,
+        endpoint: (Ipv4Addr, u16),
+        lease_endpoint: (Ipv4Addr, u16),
+        user_hash: [u8; 16],
+        udp_version: u8,
+        now: Instant,
+    ) -> bool {
+        if self.endpoint_index.get(&endpoint) != Some(&file_hash) {
+            return false;
+        }
+        self.per_file.get_mut(&file_hash).is_some_and(|set| {
+            set.diagnostic_arm_direct_source(endpoint, lease_endpoint, user_hash, udp_version, now)
+        })
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    pub(crate) fn per_file_source_pending(
+        &self,
+        file_hash: Ed2kHash,
+        endpoint: (Ipv4Addr, u16),
+    ) -> bool {
+        self.per_file
+            .get(&file_hash)
+            .is_some_and(|set| set.is_pending(endpoint.0, endpoint.1))
+    }
+
     /// Drop a source (e.g. the transfer completed or no longer needs it).
     /// Returns the source's lease endpoint (its TCP endpoint, the key core
     /// leased it under) when a source was actually present and removed, so the

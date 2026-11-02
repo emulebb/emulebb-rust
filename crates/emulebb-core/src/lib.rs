@@ -181,7 +181,8 @@ pub(crate) use core_state::{CoreState, KadAichSearchVotes};
 pub use diagnostic_protocol_fixture::{
     BuddyRelayEligibilityFixtureError, BuddyRelayEligibilityFixtureErrorKind,
     BuddyRelayEligibilityFixtureState, QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError,
-    QueuedLowIdSourceFixtureErrorKind,
+    QueuedLowIdSourceFixtureErrorKind, QueuedSourceReaskControl, QueuedSourceReaskControlError,
+    QueuedSourceReaskControlErrorKind,
 };
 use direct_download_runtime::{parse_server_endpoint, run_ed2k_direct_downloads};
 pub use download_duplicate::{

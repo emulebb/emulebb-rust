@@ -58,6 +58,8 @@ pub(crate) use outbound::{
 };
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
+#[cfg(feature = "packet-diagnostics")]
+pub use runtime::DiagnosticQueuedSourceReask;
 pub use runtime::{
     ReaskCommand, ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent, ReaskEventReceiver,
     ReaskEventSender, ReaskSourceHandle, reask_command_channel, reask_event_channel,

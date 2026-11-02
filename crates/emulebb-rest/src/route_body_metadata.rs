@@ -225,6 +225,15 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         "buddyUdpPort",
         "buddyId",
     ];
+    #[cfg(feature = "packet-diagnostics")]
+    const QUEUED_SOURCE_REASK_CONTROL: &[&str] = &[
+        "fileHash",
+        "sourceIp",
+        "sourceTcpPort",
+        "sourceUdpPort",
+        "sourceUserHash",
+        "sourceUdpVersion",
+    ];
 
     #[cfg(feature = "packet-diagnostics")]
     if method == "POST" && path == "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources" {
@@ -233,6 +242,10 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     #[cfg(feature = "packet-diagnostics")]
     if method == "POST" && path == "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility" {
         return Some(EMPTY);
+    }
+    #[cfg(feature = "packet-diagnostics")]
+    if method == "POST" && path == "/api/v1/diagnostics/protocol-controls/queued-source-reasks" {
+        return Some(QUEUED_SOURCE_REASK_CONTROL);
     }
 
     if method == "POST" && path == "/api/v1/transfers" {

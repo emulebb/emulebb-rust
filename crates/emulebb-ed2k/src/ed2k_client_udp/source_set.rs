@@ -39,6 +39,33 @@ impl ReaskSourceSet {
         self.sources.insert(source.endpoint, source);
     }
 
+    #[cfg(feature = "packet-diagnostics")]
+    pub(crate) fn diagnostic_arm_direct_source(
+        &mut self,
+        endpoint: (Ipv4Addr, u16),
+        lease_endpoint: (Ipv4Addr, u16),
+        user_hash: [u8; 16],
+        udp_version: u8,
+        now: Instant,
+    ) -> bool {
+        if self.pending.is_pending(endpoint.0, endpoint.1) {
+            return false;
+        }
+        let Some(source) = self.sources.get_mut(&endpoint) else {
+            return false;
+        };
+        if source.lease_endpoint != lease_endpoint
+            || source.user_hash != Some(user_hash)
+            || source.udp_version != udp_version
+            || source.low_id
+            || source.fallback_tcp_only
+        {
+            return false;
+        }
+        source.next_reask = now;
+        true
+    }
+
     /// Endpoints whose next reask is due *and* have no reply outstanding — the
     /// ticker reasks exactly these (one in-flight reask per source).
     pub(crate) fn due(&self, now: Instant) -> Vec<(Ipv4Addr, u16)> {
@@ -299,6 +326,28 @@ mod tests {
         // Once a reask is outstanding it is no longer "due" (one in-flight reask).
         set.mark_reasked(a, pa, None, now);
         assert!(set.due(now).is_empty());
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    #[test]
+    fn diagnostic_arm_requires_the_exact_direct_source_identity() {
+        let now = Instant::now();
+        let endpoint = (ip(9), 4672);
+        let lease_endpoint = (endpoint.0, 4662);
+        let user_hash = [0x55; 16];
+        let source = ReaskSource::new(endpoint, hash(), 4, now)
+            .with_lease_endpoint(lease_endpoint)
+            .with_obfuscation(user_hash, false);
+        let mut set = ReaskSourceSet::new();
+        set.insert(source);
+
+        assert!(
+            !set.diagnostic_arm_direct_source(endpoint, (endpoint.0, 4663), user_hash, 4, now,)
+        );
+        assert!(set.diagnostic_arm_direct_source(endpoint, lease_endpoint, user_hash, 4, now,));
+        assert_eq!(set.due(now), vec![endpoint]);
+        set.mark_reasked(endpoint.0, endpoint.1, None, now);
+        assert!(!set.diagnostic_arm_direct_source(endpoint, lease_endpoint, user_hash, 4, now,));
     }
 
     #[test]

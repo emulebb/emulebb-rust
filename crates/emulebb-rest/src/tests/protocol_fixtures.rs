@@ -3,6 +3,8 @@ use crate::rest_test_support::*;
 const ROUTE: &str = "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources";
 const BUDDY_RELAY_ELIGIBILITY_ROUTE: &str =
     "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility";
+const QUEUED_SOURCE_REASK_CONTROL_ROUTE: &str =
+    "/api/v1/diagnostics/protocol-controls/queued-source-reasks";
 
 fn valid_body() -> Value {
     json!({
@@ -18,6 +20,17 @@ fn valid_body() -> Value {
     })
 }
 
+fn valid_control_body() -> Value {
+    json!({
+        "fileHash": "00112233445566778899aabbccddeeff",
+        "sourceIp": "192.0.2.20",
+        "sourceTcpPort": 4662,
+        "sourceUdpPort": 4672,
+        "sourceUserHash": "11223344556677889900aabbccddeeff",
+        "sourceUdpVersion": 4
+    })
+}
+
 #[tokio::test]
 async fn queued_lowid_fixture_route_requires_api_key() {
     let response = test_router()
@@ -27,6 +40,23 @@ async fn queued_lowid_fixture_route_requires_api_key() {
                 .uri(ROUTE)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(valid_body().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn queued_source_reask_control_requires_api_key() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(QUEUED_SOURCE_REASK_CONTROL_ROUTE)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(valid_control_body().to_string()))
                 .unwrap(),
         )
         .await
@@ -112,6 +142,43 @@ async fn queued_lowid_fixture_route_reaches_core_preconditions() {
                 .header("X-API-Key", "secret")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(valid_body().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "NOT_FOUND");
+    assert_eq!(value["error"]["message"], "transfer does not exist");
+}
+
+#[tokio::test]
+async fn queued_source_reask_control_rejects_unknown_fields() {
+    let mut body = valid_control_body();
+    body["packetHex"] = json!("c590");
+
+    assert_invalid_json_response(
+        test_router(),
+        "POST",
+        QUEUED_SOURCE_REASK_CONTROL_ROUTE,
+        body.to_string(),
+        "unknown JSON field: packetHex",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn queued_source_reask_control_reaches_core_preconditions() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(QUEUED_SOURCE_REASK_CONTROL_ROUTE)
+                .header("X-API-Key", "secret")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(valid_control_body().to_string()))
                 .unwrap(),
         )
         .await

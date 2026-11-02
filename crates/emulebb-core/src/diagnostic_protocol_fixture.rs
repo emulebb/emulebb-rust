@@ -8,6 +8,7 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 use chrono::Utc;
+use emulebb_ed2k::DiagnosticQueuedSourceReask;
 use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
 use emulebb_kad_proto::Ed2kHash;
 use serde_json::json;
@@ -53,6 +54,40 @@ pub struct QueuedLowIdSourceFixture {
     pub buddy_udp_port: u16,
     pub buddy_id: [u8; 16],
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedSourceReaskControl {
+    pub file_hash: [u8; 16],
+    pub source_ip: Ipv4Addr,
+    pub source_tcp_port: u16,
+    pub source_udp_port: u16,
+    pub source_user_hash: [u8; 16],
+    pub source_udp_version: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuedSourceReaskControlErrorKind {
+    TransferNotFound,
+    TransferNotActive,
+    Ed2kRuntimeNotRunning,
+    Ed2kNotConnected,
+    UdpReaskDisabled,
+    WakeFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedSourceReaskControlError {
+    pub kind: QueuedSourceReaskControlErrorKind,
+    message: String,
+}
+
+impl fmt::Display for QueuedSourceReaskControlError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for QueuedSourceReaskControlError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueuedLowIdSourceFixtureErrorKind {
@@ -232,6 +267,87 @@ impl EmulebbCore {
         })?;
         Ok(())
     }
+
+    /// Wake one exact, already-registered direct queued source through the
+    /// ordinary production scheduler and transport.
+    pub async fn wake_queued_source_reask(
+        &self,
+        control: &QueuedSourceReaskControl,
+    ) -> Result<(), QueuedSourceReaskControlError> {
+        let file_hash = Ed2kHash::from_bytes(control.file_hash);
+        let file_hash_hex = file_hash.to_string();
+        let transfer = self
+            .transfers()
+            .await
+            .into_iter()
+            .find(|transfer| transfer.hash == file_hash_hex)
+            .ok_or_else(|| {
+                queued_source_control_error(
+                    QueuedSourceReaskControlErrorKind::TransferNotFound,
+                    "transfer does not exist",
+                )
+            })?;
+        if !super::should_retry_download_attempt_state(&transfer.state) {
+            return Err(queued_source_control_error(
+                QueuedSourceReaskControlErrorKind::TransferNotActive,
+                format!("transfer is not active (state={})", transfer.state),
+            ));
+        }
+
+        let server_state = self
+            .ed2k_runtime
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| std::sync::Arc::clone(&runtime.server_state))
+            .ok_or_else(|| {
+                queued_source_control_error(
+                    QueuedSourceReaskControlErrorKind::Ed2kRuntimeNotRunning,
+                    "eD2K runtime is not running",
+                )
+            })?;
+        if !server_state.read().await.connected {
+            return Err(queued_source_control_error(
+                QueuedSourceReaskControlErrorKind::Ed2kNotConnected,
+                "eD2K runtime is not connected",
+            ));
+        }
+
+        let reask_handle = self
+            .ed2k_reask_handle
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                queued_source_control_error(
+                    QueuedSourceReaskControlErrorKind::UdpReaskDisabled,
+                    "UDP reask is not enabled",
+                )
+            })?;
+        reask_handle
+            .diagnostic_wake_direct_source(DiagnosticQueuedSourceReask {
+                file_hash,
+                source_ip: control.source_ip,
+                source_tcp_port: control.source_tcp_port,
+                source_udp_port: control.source_udp_port,
+                source_user_hash: control.source_user_hash,
+                source_udp_version: control.source_udp_version,
+            })
+            .await
+            .map_err(|error| {
+                queued_source_control_error(QueuedSourceReaskControlErrorKind::WakeFailed, error)
+            })
+    }
+}
+
+fn queued_source_control_error(
+    kind: QueuedSourceReaskControlErrorKind,
+    message: impl Into<String>,
+) -> QueuedSourceReaskControlError {
+    QueuedSourceReaskControlError {
+        kind,
+        message: message.into(),
+    }
 }
 
 fn fixture_source(fixture: &QueuedLowIdSourceFixture) -> Ed2kFoundSource {
@@ -300,6 +416,17 @@ mod tests {
         }
     }
 
+    fn control() -> QueuedSourceReaskControl {
+        QueuedSourceReaskControl {
+            file_hash: [0x11; 16],
+            source_ip: Ipv4Addr::new(192, 0, 2, 20),
+            source_tcp_port: 4662,
+            source_udp_port: 4672,
+            source_user_hash: [0x22; 16],
+            source_udp_version: 4,
+        }
+    }
+
     #[test]
     fn fixture_source_is_an_exact_non_persisted_kad_buddy_source() {
         let fixture = fixture();
@@ -328,6 +455,18 @@ mod tests {
         assert_eq!(
             error.kind,
             QueuedLowIdSourceFixtureErrorKind::TransferNotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn source_reask_control_requires_an_existing_transfer_before_runtime_state() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+
+        let error = core.wake_queued_source_reask(&control()).await.unwrap_err();
+
+        assert_eq!(
+            error.kind,
+            QueuedSourceReaskControlErrorKind::TransferNotFound
         );
     }
 }
