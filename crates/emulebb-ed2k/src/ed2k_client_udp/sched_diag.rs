@@ -87,6 +87,49 @@ fn udp_reask_decision_parts(send: &ReaskSend) -> (Value, Value) {
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct UdpReaskFirewallDiagnostic {
+    pub authority: &'static str,
+    pub server_connected: bool,
+    pub server_firewalled: Option<bool>,
+    pub kad_connected: bool,
+    pub kad_firewalled: Option<bool>,
+}
+
+pub(super) fn udp_reask_decision_local_firewalled(
+    send: &ReaskSend,
+    firewall: UdpReaskFirewallDiagnostic,
+) {
+    let (keys, body) = udp_reask_decision_local_firewalled_parts(send, firewall);
+    crate::diag_event::emit(FAMILY, "udp_reask_decision", "info", keys, body);
+}
+
+fn udp_reask_decision_local_firewalled_parts(
+    send: &ReaskSend,
+    firewall: UdpReaskFirewallDiagnostic,
+) -> (Value, Value) {
+    let file_hash = send
+        .datagram
+        .file_hash
+        .expect("scheduled reask datagrams are file-owned");
+    let callback = send.datagram.opcode == OP_REASKCALLBACKUDP;
+    (
+        source_keys(file_hash, send.diagnostic_identity),
+        json!({
+            "outcome": "skipped",
+            "transportEligible": false,
+            "reason": "local_firewalled",
+            "path": if callback { "callback" } else { "direct" },
+            "localFirewalled": true,
+            "firewallAuthority": firewall.authority,
+            "serverConnected": firewall.server_connected,
+            "serverFirewalled": firewall.server_firewalled,
+            "kadConnected": firewall.kad_connected,
+            "kadTcpFirewalled": firewall.kad_firewalled,
+        }),
+    )
+}
+
 pub(super) fn udp_reask_reply_applied(
     file_hash: Ed2kHash,
     identity: ReaskDiagnosticIdentity,
@@ -215,6 +258,39 @@ mod tests {
                 "transportEligible": true,
                 "reason": "callback_reask_sent",
                 "path": "callback",
+            })
+        );
+    }
+
+    #[test]
+    fn local_firewall_skip_matches_the_oracle_decision_contract() {
+        let send = callback_send();
+        let (keys, body) = udp_reask_decision_local_firewalled_parts(
+            &send,
+            UdpReaskFirewallDiagnostic {
+                authority: "server_low_id",
+                server_connected: true,
+                server_firewalled: Some(true),
+                kad_connected: false,
+                kad_firewalled: None,
+            },
+        );
+
+        assert_eq!(keys["peer"], "192.0.2.20:4662");
+        assert_eq!(keys["peerHash"], "33".repeat(16));
+        assert_eq!(
+            body,
+            json!({
+                "outcome": "skipped",
+                "transportEligible": false,
+                "reason": "local_firewalled",
+                "path": "callback",
+                "localFirewalled": true,
+                "firewallAuthority": "server_low_id",
+                "serverConnected": true,
+                "serverFirewalled": true,
+                "kadConnected": false,
+                "kadTcpFirewalled": null,
             })
         );
     }

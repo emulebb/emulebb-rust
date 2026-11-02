@@ -699,6 +699,8 @@ impl EmulebbCore {
                 reask_user_hash,
                 4,
                 ed2k_public_ip.clone(),
+                Arc::clone(&server_state),
+                Arc::clone(&kad_firewall),
                 network.ip_filter.clone(),
                 buddy_registry.clone(),
                 port_test_registry,
