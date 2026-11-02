@@ -1,6 +1,6 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, net::Ipv4Addr, path::Path};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -710,6 +710,37 @@ impl Ed2kTransferRuntime {
         manifest.sources.retain(|source| {
             source.user_hash.as_deref() != Some(client_id)
                 && format!("{}:{}", source.ip, source.tcp_port) != client_id
+        });
+        if manifest.sources.len() == before {
+            return Ok(false);
+        }
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(true)
+    }
+
+    /// Remove the exact remembered source relation after a protocol-level drop.
+    /// Runtime source identity carries both the TCP endpoint and, once hello has
+    /// completed, the user hash; either may be absent from an older persisted
+    /// hint, so matching accepts either exact identity while remaining scoped to
+    /// one transfer manifest.
+    pub async fn remove_source_identity(
+        &self,
+        file_hash: &str,
+        source_ip: Ipv4Addr,
+        source_tcp_port: u16,
+        source_user_hash: Option<[u8; 16]>,
+    ) -> Result<bool> {
+        let _guard = self.lock_manifest(file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let source_ip = source_ip.to_string();
+        let source_user_hash = source_user_hash.map(hex::encode);
+        let before = manifest.sources.len();
+        manifest.sources.retain(|source| {
+            let endpoint_matches = source.ip == source_ip && source.tcp_port == source_tcp_port;
+            let hash_matches = source_user_hash
+                .as_ref()
+                .is_some_and(|user_hash| source.user_hash.as_ref() == Some(user_hash));
+            !endpoint_matches && !hash_matches
         });
         if manifest.sources.len() == before {
             return Ok(false);

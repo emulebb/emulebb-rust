@@ -2249,6 +2249,10 @@ impl EmulebbCore {
             }
             swap_targets
         };
+        for source in sources {
+            self.remove_persisted_download_source(file_hash, source)
+                .await;
+        }
         let swapped = swap_targets.len();
         for target in swap_targets {
             self.queue_ed2k_download_attempt(target);
@@ -2269,7 +2273,7 @@ impl EmulebbCore {
         source_tcp_endpoint: (Ipv4Addr, u16),
         source_user_hash: Option<[u8; 16]>,
     ) -> bool {
-        let swap_target = {
+        let (swap_target, source) = {
             let mut state = self.state.lock().await;
             let now = Instant::now();
             let Some(source) = state
@@ -2297,13 +2301,30 @@ impl EmulebbCore {
             let endpoint = source_endpoint_key(&source);
             state.active_download_peer_endpoints.remove(&endpoint);
             state.download_source_registry.release_endpoint(endpoint);
-            wanted_a4af_swap_target(&state, &source, file_hash)
+            (wanted_a4af_swap_target(&state, &source, file_hash), source)
         };
+        self.remove_persisted_download_source(file_hash, &source)
+            .await;
         if let Some(target) = swap_target {
             self.queue_ed2k_download_attempt(target);
             true
         } else {
             false
+        }
+    }
+
+    async fn remove_persisted_download_source(&self, file_hash: &str, source: &Ed2kFoundSource) {
+        if let Err(error) = self
+            .ed2k_transfers
+            .remove_source_identity(file_hash, source.ip, source.tcp_port, source.user_hash)
+            .await
+        {
+            tracing::warn!(
+                file_hash,
+                source_ip = %source.ip,
+                source_tcp_port = source.tcp_port,
+                "failed to remove dead-listed source from persisted transfer state: {error:#}"
+            );
         }
     }
 
