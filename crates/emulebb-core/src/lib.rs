@@ -2259,17 +2259,26 @@ impl EmulebbCore {
     /// Dead-list a source that UDP-answered `OP_FILENOTFOUND` on the reask loop
     /// (oracle `CUpDownClient::UDPReaskFNF`, `DownloadClient.cpp:1774-1795`:
     /// `AddDeadSource` + swap-or-`RemoveSource`), unifying the UDP FNF drop with
-    /// the TCP FNF dead list. The reask loop only knows the peer's UDP endpoint,
-    /// so the full oracle identity is recovered from the registry by (ip, file);
-    /// an already-forgotten or ambiguous source is left un-listed (it is already
-    /// out of the reask loop, and without identity there is nothing to gate).
-    async fn dead_list_udp_fnf_source(&self, file_hash: &str, peer_ip: Ipv4Addr) -> bool {
+    /// the TCP FNF dead list. The reask loop carries the source's TCP lease
+    /// endpoint and learned user hash, so the full oracle identity is recovered
+    /// without conflating peers behind one IP. An already-forgotten or ambiguous
+    /// source is left unlisted.
+    async fn dead_list_udp_fnf_source(
+        &self,
+        file_hash: &str,
+        source_tcp_endpoint: (Ipv4Addr, u16),
+        source_user_hash: Option<[u8; 16]>,
+    ) -> bool {
         let swap_target = {
             let mut state = self.state.lock().await;
             let now = Instant::now();
             let Some(source) = state
                 .download_source_registry
-                .sole_candidate_source_by_ip(peer_ip, file_hash)
+                .sole_candidate_source_by_endpoint(
+                    source_tcp_endpoint,
+                    source_user_hash,
+                    file_hash,
+                )
             else {
                 return false;
             };

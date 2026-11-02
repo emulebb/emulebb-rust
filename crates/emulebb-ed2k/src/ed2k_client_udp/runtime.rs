@@ -327,11 +327,12 @@ pub enum ReaskEvent {
     /// `CUpDownClient::UDPReaskFNF`, `DownloadClient.cpp:1774-1795`): besides the
     /// `SourceReleased` that follows, core dead-lists the (source, file) pair for
     /// the oracle 45-minute block, exactly like the TCP `OP_FILEREQANSNOFIL` path.
-    /// `endpoint` is the peer's UDP endpoint (the only key the loop holds); core
-    /// resolves the full source identity from its registry by (ip, file).
+    /// The loop carries the exact TCP lease endpoint and the user hash captured
+    /// before `DropSource` removes its reask state, so core never guesses by IP.
     SourceDead {
         file_hash: Ed2kHash,
-        endpoint: (Ipv4Addr, u16),
+        source_tcp_endpoint: (Ipv4Addr, u16),
+        source_user_hash: Option<[u8; 16]>,
     },
     /// A queued source for `file_hash` reported a queue rank at/under the re-engage
     /// threshold: a slot is imminent, so core reconnects over TCP now. The loop has
@@ -584,8 +585,8 @@ async fn process_answer_callback_tcp(
 fn routed_reply_events(
     action: ReaskAction,
     file_hash: Ed2kHash,
-    endpoint: (Ipv4Addr, u16),
     lease_endpoint: (Ipv4Addr, u16),
+    source_user_hash: Option<[u8; 16]>,
 ) -> Vec<ReaskEvent> {
     match action {
         // Slot imminent: release the lease, then ask core to reconnect over TCP.
@@ -600,13 +601,14 @@ fn routed_reply_events(
         // Uploader no longer has the file (OP_FILENOTFOUND): dead-list it first
         // (oracle UDPReaskFNF AddDeadSource, DownloadClient.cpp:1781), then free
         // its lease. Order matters: the dead-list gate must be in place before
-        // the released source becomes re-acquirable. SourceDead keeps the UDP
-        // endpoint (core's FNF resolver keys on the IP only); the release again
-        // carries the TCP lease key.
+        // the released source becomes re-acquirable. Both events carry the TCP
+        // lease key; the dead event also carries the learned hash, avoiding an
+        // ambiguous IP-only lookup in core.
         ReaskAction::DropSource => vec![
             ReaskEvent::SourceDead {
                 file_hash,
-                endpoint,
+                source_tcp_endpoint: lease_endpoint,
+                source_user_hash,
             },
             ReaskEvent::SourceReleased {
                 endpoint: lease_endpoint,
@@ -736,6 +738,7 @@ async fn handle_inbound_datagram(
                 file_hash,
                 endpoint,
                 lease_endpoint,
+                source_user_hash,
                 ack_part_status,
                 request_part_status,
                 #[cfg(feature = "packet-diagnostics")]
@@ -841,7 +844,9 @@ async fn handle_inbound_datagram(
                 }
                 // Emit loop->core events (lease release ordered before any re-engage).
                 let mut delivered = true;
-                for event in routed_reply_events(action, file_hash, endpoint, lease_endpoint) {
+                for event in
+                    routed_reply_events(action, file_hash, lease_endpoint, source_user_hash)
+                {
                     if let ReaskEvent::SourceReady { file_hash } = &event {
                         trace!("ed2k udp reask: re-engage SourceReady for {file_hash}");
                     }

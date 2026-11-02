@@ -137,6 +137,7 @@ fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
             file_hash: file_hash(),
             endpoint: peer_v4(),
             lease_endpoint: peer_lease_v4(),
+            source_user_hash: Some(PEER_HASH),
             ack_part_status: Some(ReaskAckPartStatus::CompleteSource),
             request_part_status: Some(vec![true, false]),
             #[cfg(feature = "packet-diagnostics")]
@@ -315,6 +316,7 @@ fn file_not_found_drops_source_and_clears_routing() {
             file_hash: file_hash(),
             endpoint: peer_v4(),
             lease_endpoint: peer_lease_v4(),
+            source_user_hash: Some(PEER_HASH),
             ack_part_status: None,
             request_part_status: None,
             #[cfg(feature = "packet-diagnostics")]
