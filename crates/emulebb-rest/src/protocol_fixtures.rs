@@ -16,6 +16,7 @@ use axum::{
 use emulebb_core::{
     BuddyRelayEligibilityFixtureError, BuddyRelayEligibilityFixtureErrorKind,
     QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError, QueuedLowIdSourceFixtureErrorKind,
+    QueuedSourceReaskControl, QueuedSourceReaskControlError, QueuedSourceReaskControlErrorKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,17 @@ struct QueuedLowIdSourceFixtureRequest {
     buddy_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QueuedSourceReaskControlRequest {
+    file_hash: String,
+    source_ip: Ipv4Addr,
+    source_tcp_port: u16,
+    source_udp_port: u16,
+    source_user_hash: String,
+    source_udp_version: u8,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QueuedLowIdSourceFixtureResponse {
@@ -52,6 +64,18 @@ struct QueuedLowIdSourceFixtureResponse {
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct QueuedSourceReaskControlResponse {
+    accepted: bool,
+    file_hash: String,
+    source_endpoint: String,
+    source_tcp_port: u16,
+    source_user_hash: String,
+    source_udp_version: u8,
+    state: &'static str,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct BuddyRelayEligibilityFixtureResponse {
     prepared: bool,
     tcp_firewalled: bool,
@@ -63,6 +87,11 @@ struct BuddyRelayEligibilityFixtureResponse {
 struct ValidatedFixture {
     core: QueuedLowIdSourceFixture,
     response: QueuedLowIdSourceFixtureResponse,
+}
+
+struct ValidatedControl {
+    core: QueuedSourceReaskControl,
+    response: QueuedSourceReaskControlResponse,
 }
 
 pub(crate) async fn create_queued_lowid_source_fixture(
@@ -86,6 +115,26 @@ pub(crate) async fn create_queued_lowid_source_fixture(
     {
         Ok(()) => fixture_success_response(fixture.response),
         Err(error) => fixture_error_response(error),
+    }
+}
+
+pub(crate) async fn wake_queued_source_reask(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> Response {
+    let request = match parse_required_json_body::<QueuedSourceReaskControlRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    let control = match validate_control(request) {
+        Ok(control) => control,
+        Err(message) => {
+            return api_error(StatusCode::BAD_REQUEST, "INVALID_ARGUMENT", message).into_response();
+        }
+    };
+    match state.core.wake_queued_source_reask(&control.core).await {
+        Ok(()) => Json(control.response).into_response(),
+        Err(error) => control_error_response(error),
     }
 }
 
@@ -153,6 +202,41 @@ fn validate_fixture(request: QueuedLowIdSourceFixtureRequest) -> Result<Validate
     })
 }
 
+fn validate_control(request: QueuedSourceReaskControlRequest) -> Result<ValidatedControl, String> {
+    let file_hash = parse_lower_hex_16("fileHash", &request.file_hash)?;
+    let source_user_hash = parse_lower_hex_16("sourceUserHash", &request.source_user_hash)?;
+    if request.source_tcp_port == 0 {
+        return Err("sourceTcpPort must be in the range 1..65535".to_string());
+    }
+    if request.source_udp_port == 0 {
+        return Err("sourceUdpPort must be in the range 1..65535".to_string());
+    }
+    if !(1..=4).contains(&request.source_udp_version) {
+        return Err("sourceUdpVersion must be in the range 1..4".to_string());
+    }
+
+    let response = QueuedSourceReaskControlResponse {
+        accepted: true,
+        file_hash: request.file_hash.clone(),
+        source_endpoint: format!("{}:{}", request.source_ip, request.source_udp_port),
+        source_tcp_port: request.source_tcp_port,
+        source_user_hash: request.source_user_hash.clone(),
+        source_udp_version: request.source_udp_version,
+        state: "queued-source-reask-pending",
+    };
+    Ok(ValidatedControl {
+        core: QueuedSourceReaskControl {
+            file_hash,
+            source_ip: request.source_ip,
+            source_tcp_port: request.source_tcp_port,
+            source_udp_port: request.source_udp_port,
+            source_user_hash,
+            source_udp_version: request.source_udp_version,
+        },
+        response,
+    })
+}
+
 fn parse_lower_hex_16(field: &str, value: &str) -> Result<[u8; 16], String> {
     if value.len() != 32
         || !value
@@ -198,6 +282,22 @@ fn fixture_error_response(error: QueuedLowIdSourceFixtureError) -> Response {
     api_error(status, code, error.to_string()).into_response()
 }
 
+fn control_error_response(error: QueuedSourceReaskControlError) -> Response {
+    let (status, code) = match error.kind {
+        QueuedSourceReaskControlErrorKind::TransferNotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
+        QueuedSourceReaskControlErrorKind::TransferNotActive
+        | QueuedSourceReaskControlErrorKind::Ed2kRuntimeNotRunning
+        | QueuedSourceReaskControlErrorKind::Ed2kNotConnected
+        | QueuedSourceReaskControlErrorKind::UdpReaskDisabled => {
+            (StatusCode::CONFLICT, "CONTROL_PRECONDITION_FAILED")
+        }
+        QueuedSourceReaskControlErrorKind::WakeFailed => {
+            (StatusCode::SERVICE_UNAVAILABLE, "CONTROL_UNAVAILABLE")
+        }
+    };
+    api_error(status, code, error.to_string()).into_response()
+}
+
 fn buddy_relay_fixture_error_response(error: BuddyRelayEligibilityFixtureError) -> Response {
     let (status, code) = match error.kind {
         BuddyRelayEligibilityFixtureErrorKind::Ed2kRuntimeNotRunning => {
@@ -226,6 +326,17 @@ mod tests {
         }
     }
 
+    fn control_request() -> QueuedSourceReaskControlRequest {
+        QueuedSourceReaskControlRequest {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            source_ip: Ipv4Addr::new(192, 0, 2, 20),
+            source_tcp_port: 4662,
+            source_udp_port: 4672,
+            source_user_hash: "11223344556677889900aabbccddeeff".to_string(),
+            source_udp_version: 4,
+        }
+    }
+
     #[test]
     fn success_response_has_the_exact_normalized_contract() {
         let fixture = validate_fixture(request()).unwrap();
@@ -242,6 +353,24 @@ mod tests {
                 "buddyEndpoint": "198.51.100.30:5000",
                 "buddyId": "ffeeddccbbaa00998877665544332211",
                 "state": "queued-lowid-source"
+            })
+        );
+    }
+
+    #[test]
+    fn control_response_has_the_exact_normalized_contract() {
+        let control = validate_control(control_request()).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(control.response).unwrap(),
+            json!({
+                "accepted": true,
+                "fileHash": "00112233445566778899aabbccddeeff",
+                "sourceEndpoint": "192.0.2.20:4672",
+                "sourceTcpPort": 4662,
+                "sourceUserHash": "11223344556677889900aabbccddeeff",
+                "sourceUdpVersion": 4,
+                "state": "queued-source-reask-pending"
             })
         );
     }
@@ -281,6 +410,17 @@ mod tests {
 
         assert_eq!(
             validate_fixture(request).err().unwrap(),
+            "sourceUdpVersion must be in the range 1..4"
+        );
+    }
+
+    #[test]
+    fn control_udp_version_is_bounded_to_supported_wire_versions() {
+        let mut request = control_request();
+        request.source_udp_version = 5;
+
+        assert_eq!(
+            validate_control(request).err().unwrap(),
             "sourceUdpVersion must be in the range 1..4"
         );
     }

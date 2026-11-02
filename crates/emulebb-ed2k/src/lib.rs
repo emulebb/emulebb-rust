@@ -7,6 +7,8 @@ mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;
 mod ed2k_string;
 mod file_name;
+#[cfg(feature = "packet-diagnostics")]
+pub use ed2k_client_udp::DiagnosticQueuedSourceReask;
 pub use ed2k_client_udp::{
     DirectCallbackArgs, DirectCallbackDispatchOutcome, DirectCallbackSender, ReaskCommand,
     ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent, ReaskEventReceiver, ReaskEventSender,

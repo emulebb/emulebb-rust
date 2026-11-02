@@ -157,6 +157,11 @@ pub enum ReaskCommand {
     /// guarantees the existing production tick observes the registered source.
     #[cfg(feature = "packet-diagnostics")]
     DiagnosticWakeTick { completed: oneshot::Sender<()> },
+    #[cfg(feature = "packet-diagnostics")]
+    DiagnosticWakeDirectSource {
+        source: DiagnosticQueuedSourceReask,
+        completed: oneshot::Sender<Result<(), &'static str>>,
+    },
 }
 
 /// Receiver end of the detach-command channel, owned by the reask loop.
@@ -191,6 +196,17 @@ pub struct ReaskDetachArgs {
     pub buddy_endpoint: Option<(Ipv4Addr, u16)>,
     /// Source's buddy id (`GetBuddyID`), only known via Kad source-finding.
     pub buddy_id: Option<[u8; 16]>,
+}
+
+#[cfg(feature = "packet-diagnostics")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiagnosticQueuedSourceReask {
+    pub file_hash: Ed2kHash,
+    pub source_ip: Ipv4Addr,
+    pub source_tcp_port: u16,
+    pub source_udp_port: u16,
+    pub source_user_hash: [u8; 16],
+    pub source_udp_version: u8,
 }
 
 /// Cloneable sender handle a download session uses to detach a queued source.
@@ -232,6 +248,26 @@ impl ReaskSourceHandle {
         })
         .await
         .map_err(|_| "timed out waiting for the diagnostics reask tick")?
+    }
+
+    #[cfg(feature = "packet-diagnostics")]
+    pub async fn diagnostic_wake_direct_source(
+        &self,
+        source: DiagnosticQueuedSourceReask,
+    ) -> Result<(), &'static str> {
+        const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+        tokio::time::timeout(CONTROL_TIMEOUT, async {
+            let (completed, completion) = oneshot::channel();
+            self.0
+                .send(ReaskCommand::DiagnosticWakeDirectSource { source, completed })
+                .await
+                .map_err(|_| "reask command channel is closed")?;
+            completion
+                .await
+                .map_err(|_| "reask loop ended before the diagnostics source wake completed")?
+        })
+        .await
+        .map_err(|_| "timed out waiting for the diagnostics source reask")?
     }
 
     /// Drop a source from reask state by endpoint. Best-effort.
@@ -447,6 +483,42 @@ pub async fn run_ed2k_udp_reask_loop(
                         )
                         .await;
                         let _ = completed.send(());
+                    }
+                    #[cfg(feature = "packet-diagnostics")]
+                    ReaskCommand::DiagnosticWakeDirectSource { source, completed } => {
+                        let endpoint = (source.source_ip, source.source_udp_port);
+                        let armed = service.diagnostic_arm_direct_source(
+                            source.file_hash,
+                            endpoint,
+                            (source.source_ip, source.source_tcp_port),
+                            source.source_user_hash,
+                            source.source_udp_version,
+                            Instant::now(),
+                        );
+                        if !armed {
+                            let _ = completed.send(Err(
+                                "queued direct source identity was not registered or was not eligible",
+                            ));
+                            continue;
+                        }
+                        let firewall =
+                            current_tcp_firewall_verdict(&dht, &server_state, &kad_firewall).await;
+                        drive_reask_tick(
+                            &mut service,
+                            &dht,
+                            &transfer_runtime,
+                            &events,
+                            firewall,
+                        )
+                        .await;
+                        let result = if service
+                            .per_file_source_pending(source.file_hash, endpoint)
+                        {
+                            Ok(())
+                        } else {
+                            Err("production UDP reask tick did not open the pending reply gate")
+                        };
+                        let _ = completed.send(result);
                     }
                     other => apply_reask_command(&mut service, &events, other),
                 }
@@ -1053,6 +1125,8 @@ fn apply_reask_command(
         ReaskCommand::AnswerCallbackTcp { .. } => {}
         #[cfg(feature = "packet-diagnostics")]
         ReaskCommand::DiagnosticWakeTick { .. } => {}
+        #[cfg(feature = "packet-diagnostics")]
+        ReaskCommand::DiagnosticWakeDirectSource { .. } => {}
     }
 }
 

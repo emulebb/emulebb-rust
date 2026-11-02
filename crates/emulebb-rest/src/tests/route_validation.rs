@@ -6,6 +6,7 @@ async fn diagnostics_protocol_fixture_route_is_absent_without_the_feature() {
     for route in [
         "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources",
         "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility",
+        "/api/v1/diagnostics/protocol-controls/queued-source-reasks",
     ] {
         let response = test_router()
             .oneshot(
