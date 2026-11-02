@@ -6,7 +6,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use emulebb_kad_proto::Ed2kHash;
 
-use crate::ed2k_client_udp::codec::{OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, ReaskFilePing};
+#[cfg(feature = "packet-diagnostics")]
+use crate::ed2k_client_udp::codec::OP_QUEUEFULL;
+use crate::ed2k_client_udp::codec::{OP_FILENOTFOUND, OP_REASKACK, ReaskFilePing};
 use crate::ed2k_client_udp::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 use crate::ed2k_transfer::{Ed2kSharedEntry, Ed2kTransferRuntime, Ed2kUploadPeerIdentity};
 use crate::paths::unique_test_dir;
