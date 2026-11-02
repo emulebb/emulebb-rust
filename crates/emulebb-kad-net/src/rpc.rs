@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, oneshot};
 
 struct PendingEntry {
@@ -43,6 +43,10 @@ struct PendingEntry {
     tx: oneshot::Sender<KadPacket>,
     created_at: std::time::Instant,
 }
+
+/// Stock Kad considers itself connected for twenty minutes after any decoded
+/// Kad packet reaches its enabled receive path (`KADEMLIADISCONNECTDELAY`).
+const KAD_CONTACT_LIVENESS: Duration = Duration::from_secs(20 * 60);
 
 /// Unsolicited Kad packet plus the transport metadata the oracle uses for
 /// HELLO verification and reply shaping.
@@ -80,6 +84,10 @@ struct RpcInner {
     /// client-UDP packets share it, but decoded Kad traffic is ignored and Kad
     /// sends are rejected while this is false.
     kad_enabled: AtomicBool,
+    /// Most recent decoded Kad packet observed while the Kad runtime was
+    /// enabled. This is the stock `CPrefs::m_tLastContact` connection signal;
+    /// it is deliberately independent from routing-table bootstrap state.
+    last_contact_at: Mutex<Option<Instant>>,
     global_rate_limiter: RateLimiter,
     interactive_rate_limiter: RateLimiter,
     harvest_rate_limiter: RateLimiter,
@@ -122,6 +130,7 @@ impl RpcManager {
             obfuscation,
             foreign_datagram_handler: OnceLock::new(),
             kad_enabled: AtomicBool::new(true),
+            last_contact_at: Mutex::new(None),
             global_rate_limiter: RateLimiter::new(config.max_outbound_pps),
             interactive_rate_limiter: RateLimiter::new(
                 config
@@ -177,6 +186,7 @@ impl RpcManager {
             // Wake in-flight request futures immediately instead of leaving
             // them blocked until their network timeout expires.
             self.inner.pending.lock().clear();
+            self.inner.last_contact_at.lock().take();
         }
     }
 
@@ -184,6 +194,18 @@ impl RpcManager {
     #[must_use]
     pub fn kad_enabled(&self) -> bool {
         self.inner.kad_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Whether the enabled Kad runtime has observed a decoded packet within the
+    /// stock twenty-minute connection window.
+    #[must_use]
+    pub fn has_had_contact(&self) -> bool {
+        self.kad_enabled()
+            && self
+                .inner
+                .last_contact_at
+                .lock()
+                .is_some_and(|last_contact| last_contact.elapsed() < KAD_CONTACT_LIVENESS)
     }
 
     /// Send an already-framed datagram on the shared UDP socket. For eD2k client

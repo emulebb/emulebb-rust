@@ -120,6 +120,12 @@ impl RpcManager {
                             continue;
                         }
 
+                        // WHY: stock updates Kad connection liveness before its
+                        // flood/request tracker dispatch. Bootstrap completion is
+                        // a different state and cannot substitute for this signal
+                        // when eD2k peer identity is selected after Kad traffic.
+                        *inner.last_contact_at.lock() = Some(std::time::Instant::now());
+
                         let response_opcode = packet.opcode();
                         let inbound = inspect_inbound_packet(&packet);
 
