@@ -675,44 +675,81 @@ async fn handle_inbound_datagram(
                 action,
             } => {
                 trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
+                #[cfg(feature = "packet-diagnostics")]
+                let mut part_status_after = None;
+                #[cfg(feature = "packet-diagnostics")]
+                let mut no_needed_parts_after = None;
+                #[cfg(feature = "packet-diagnostics")]
+                let mut queue_rank_applied = false;
                 if let ReaskAction::UpdatedRank(rank) = action {
                     let peer = SocketAddr::new(lease_endpoint.0.into(), lease_endpoint.1);
-                    transfer_runtime.note_download_source_queue_rank(
+                    let _queue_rank_applied = transfer_runtime.note_download_source_queue_rank(
                         &file_hash.to_string(),
                         peer,
                         u32::from(rank),
                     );
+                    #[cfg(feature = "packet-diagnostics")]
+                    {
+                        queue_rank_applied = _queue_rank_applied;
+                    }
                     if let Some(part_status) = ack_part_status.as_ref()
                         && let Some(source_bitmap) = resolved_reask_ack_bitmap(
                             part_status,
                             request_part_status.as_ref().map(Vec::len),
                         )
                     {
-                        transfer_runtime.note_download_source_part_bitmap(
-                            &file_hash.to_string(),
-                            peer,
-                            None,
-                            None,
-                            source_bitmap.clone(),
-                        );
-                        if let Some(our_bitmap) = request_part_status.as_deref() {
-                            service.set_no_needed_parts(
+                        let no_needed_parts = request_part_status.as_deref().map(|our_bitmap| {
+                            reask_source_has_no_needed_parts(our_bitmap, &source_bitmap)
+                        });
+                        #[cfg(feature = "packet-diagnostics")]
+                        let diagnostic_source_bitmap = source_bitmap.clone();
+                        let part_status_applied = transfer_runtime
+                            .note_download_source_part_bitmap(
+                                &file_hash.to_string(),
+                                peer,
+                                None,
+                                None,
+                                source_bitmap,
+                            );
+                        if part_status_applied && let Some(no_needed_parts) = no_needed_parts {
+                            let _no_needed_parts_applied = service.set_no_needed_parts(
                                 endpoint.0,
                                 endpoint.1,
-                                reask_source_has_no_needed_parts(our_bitmap, &source_bitmap),
+                                no_needed_parts,
                                 received_at,
                             );
+                            #[cfg(feature = "packet-diagnostics")]
+                            if _no_needed_parts_applied {
+                                no_needed_parts_after = Some(no_needed_parts);
+                            }
+                        }
+                        #[cfg(feature = "packet-diagnostics")]
+                        if part_status_applied {
+                            part_status_after = Some(diagnostic_source_bitmap);
                         }
                     }
                 }
                 #[cfg(feature = "packet-diagnostics")]
                 {
+                    let application = ack_part_status.as_ref().map(|part_status| {
+                        super::sched_diag::UdpReaskReplyApplicationDiagnostic {
+                            queue_rank_applied,
+                            part_status_included: !matches!(
+                                part_status,
+                                ReaskAckPartStatus::NotIncluded
+                            ),
+                            wire_part_count: part_status.wire_part_count(),
+                            part_status_after,
+                            no_needed_parts_after,
+                        }
+                    });
                     reply_applied_diagnostic = Some((
                         file_hash,
                         diagnostic_identity,
                         action,
                         request_pending_after,
                         remote_queue_full_after,
+                        application,
                     ));
                 }
                 // A re-engageable rank means we hand the source back to TCP first.
@@ -829,6 +866,7 @@ async fn handle_inbound_datagram(
         action,
         request_pending_after,
         remote_queue_full_after,
+        application,
     )) = reply_applied_diagnostic
     {
         super::sched_diag::udp_reask_reply_applied(
@@ -837,6 +875,7 @@ async fn handle_inbound_datagram(
             action,
             request_pending_after,
             remote_queue_full_after,
+            application,
         );
     }
 }
