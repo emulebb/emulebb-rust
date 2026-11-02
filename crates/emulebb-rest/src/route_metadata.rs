@@ -525,7 +525,13 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const UPLOAD_QUEUE: &[&str] = &["offset", "limit", "includeScoreBreakdown"];
 
     #[cfg(feature = "packet-diagnostics")]
-    if method == "POST" && path == "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources" {
+    if method == "POST"
+        && matches!(
+            path,
+            "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources"
+                | "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility"
+        )
+    {
         return Some(NONE);
     }
 

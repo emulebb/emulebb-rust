@@ -179,7 +179,9 @@ use core_settings::{
 pub(crate) use core_state::{CoreState, KadAichSearchVotes};
 #[cfg(feature = "packet-diagnostics")]
 pub use diagnostic_protocol_fixture::{
-    QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError, QueuedLowIdSourceFixtureErrorKind,
+    BuddyRelayEligibilityFixtureError, BuddyRelayEligibilityFixtureErrorKind,
+    BuddyRelayEligibilityFixtureState, QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError,
+    QueuedLowIdSourceFixtureErrorKind,
 };
 use direct_download_runtime::{parse_server_endpoint, run_ed2k_direct_downloads};
 pub use download_duplicate::{

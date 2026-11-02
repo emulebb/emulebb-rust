@@ -230,6 +230,10 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     if method == "POST" && path == "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources" {
         return Some(QUEUED_LOWID_SOURCE_FIXTURE);
     }
+    #[cfg(feature = "packet-diagnostics")]
+    if method == "POST" && path == "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility" {
+        return Some(EMPTY);
+    }
 
     if method == "POST" && path == "/api/v1/transfers" {
         return Some(TRANSFER_ADD);

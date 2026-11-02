@@ -577,6 +577,32 @@ impl KadFirewallState {
         true
     }
 
+    /// Establish the exact reachable posture required to exercise the inbound
+    /// Kad buddy-relay state machine in an isolated diagnostics campaign.
+    ///
+    /// This does not create a buddy, inject a packet, or bypass any callback
+    /// handler. The harness must still drive the real FINDBUDDY request, held
+    /// TCP buddy session, CALLBACK request, and OP_CALLBACK relay on wire.
+    #[cfg(feature = "packet-diagnostics")]
+    pub fn prepare_buddy_relay_fixture(&mut self, prepared_at: DateTime<Utc>) {
+        self.udp_open = true;
+        self.udp_verified = true;
+        self.udp_verified_at = Some(prepared_at);
+        self.udp_inconclusive_rounds = 0;
+        self.last_udp_check_succeeded_at = Some(prepared_at);
+        self.last_udp_check_failed_at = None;
+        self.active_round = None;
+
+        self.tcp_firewalled_verdict = Some(false);
+        self.tcp_recheck_active = false;
+        self.active_tcp_round = None;
+        self.tcp_firewall_check_ips.clear();
+        self.tcp_open_acks = 0;
+        self.tcp_firewall_last_state = false;
+        self.last_tcp_check_completed_at = Some(prepared_at);
+        self.last_error = None;
+    }
+
     fn finalize_udp_round(
         &mut self,
         open: bool,

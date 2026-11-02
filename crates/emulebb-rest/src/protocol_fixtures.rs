@@ -1,9 +1,8 @@
 //! Authenticated diagnostics-only protocol fixture routes.
 //!
-//! `POST /api/v1/diagnostics/protocol-fixtures/queued-lowid-sources` is compiled
-//! only into the packet-diagnostics daemon. It admits one exact synthetic Kad
-//! buddy source to an existing transfer, then wakes the real UDP-reask tick. It
-//! is not part of the normal product API and exposes no generic packet injector.
+//! These routes are compiled only into the packet-diagnostics daemon. They
+//! establish narrow state-machine prerequisites; they do not inject packets or
+//! bypass production protocol handlers.
 
 use std::net::Ipv4Addr;
 
@@ -15,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use emulebb_core::{
+    BuddyRelayEligibilityFixtureError, BuddyRelayEligibilityFixtureErrorKind,
     QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError, QueuedLowIdSourceFixtureErrorKind,
 };
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,16 @@ struct QueuedLowIdSourceFixtureResponse {
     state: &'static str,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuddyRelayEligibilityFixtureResponse {
+    prepared: bool,
+    tcp_firewalled: bool,
+    udp_verified: bool,
+    udp_open: bool,
+    state: &'static str,
+}
+
 struct ValidatedFixture {
     core: QueuedLowIdSourceFixture,
     response: QueuedLowIdSourceFixtureResponse,
@@ -76,6 +86,22 @@ pub(crate) async fn create_queued_lowid_source_fixture(
     {
         Ok(()) => fixture_success_response(fixture.response),
         Err(error) => fixture_error_response(error),
+    }
+}
+
+pub(crate) async fn prepare_buddy_relay_eligibility_fixture(
+    State(state): State<RestState>,
+) -> Response {
+    match state.core.prepare_buddy_relay_eligibility_fixture().await {
+        Ok(fixture) => Json(BuddyRelayEligibilityFixtureResponse {
+            prepared: true,
+            tcp_firewalled: fixture.tcp_firewalled,
+            udp_verified: fixture.udp_verified,
+            udp_open: fixture.udp_open,
+            state: "buddy-relay-eligible",
+        })
+        .into_response(),
+        Err(error) => buddy_relay_fixture_error_response(error),
     }
 }
 
@@ -167,6 +193,15 @@ fn fixture_error_response(error: QueuedLowIdSourceFixtureError) -> Response {
         QueuedLowIdSourceFixtureErrorKind::RegistrationRejected
         | QueuedLowIdSourceFixtureErrorKind::WakeFailed => {
             (StatusCode::SERVICE_UNAVAILABLE, "FIXTURE_UNAVAILABLE")
+        }
+    };
+    api_error(status, code, error.to_string()).into_response()
+}
+
+fn buddy_relay_fixture_error_response(error: BuddyRelayEligibilityFixtureError) -> Response {
+    let (status, code) = match error.kind {
+        BuddyRelayEligibilityFixtureErrorKind::Ed2kRuntimeNotRunning => {
+            (StatusCode::CONFLICT, "FIXTURE_PRECONDITION_FAILED")
         }
     };
     api_error(status, code, error.to_string()).into_response()
