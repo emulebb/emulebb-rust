@@ -420,6 +420,7 @@ impl ReaskService {
                 peer_hash: None,
                 source_udp_endpoint: (ip, port),
                 source_udp_version: 0,
+                should_crypt: false,
                 low_id: false,
                 buddy_endpoint: None,
                 buddy_id: None,
