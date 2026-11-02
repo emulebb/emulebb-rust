@@ -904,6 +904,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         &returned_file_name,
                     )
                     .await?;
+                    record_filename_answer_availability(
+                        transfer_runtime,
+                        file_hash_hex,
+                        peer_addr,
+                        &mut session_state,
+                        manifest.pieces.len(),
+                    );
                     request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
                     session_state.startup_file_response_received = true;
                 }
@@ -1043,6 +1050,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             returned_file_name,
                         )
                         .await?;
+                        record_filename_answer_availability(
+                            transfer_runtime,
+                            file_hash_hex,
+                            peer_addr,
+                            &mut session_state,
+                            manifest.pieces.len(),
+                        );
                     }
                     request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
                     if let Some(bitmap) = session_state.peer_part_bitmap.as_deref()
@@ -1124,6 +1138,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             returned_file_name,
                         )
                         .await?;
+                        record_filename_answer_availability(
+                            transfer_runtime,
+                            file_hash_hex,
+                            peer_addr,
+                            &mut session_state,
+                            manifest.pieces.len(),
+                        );
                     }
                     reconcile_download_manifest_metadata(
                         transfer_runtime,
@@ -1685,6 +1706,40 @@ fn record_source_part_availability(
     bitmap
 }
 
+/// Stock does not request OP_FILESTATUS for files which fit in one ED2K part.
+/// In that case OP_REQFILENAMEANSWER itself proves the remote source shares the
+/// complete file (MFC `ProcessFileInfo`), so retain an all-available bitmap for
+/// part selection and the later client-UDP complete-source count.
+fn record_filename_answer_availability(
+    transfer_runtime: &Ed2kTransferRuntime,
+    file_hash_hex: &str,
+    peer_addr: SocketAddr,
+    session_state: &mut DownloadSessionState,
+    manifest_part_count: usize,
+) {
+    let Some(bitmap) = inferred_filename_answer_availability(
+        manifest_part_count,
+        session_state.peer_part_bitmap.as_deref(),
+    ) else {
+        return;
+    };
+    transfer_runtime.note_download_source_part_bitmap(
+        file_hash_hex,
+        peer_addr,
+        session_state.peer_user_hash,
+        session_state.peer_connect_options,
+        bitmap.clone(),
+    );
+    session_state.peer_part_bitmap = Some(bitmap);
+}
+
+fn inferred_filename_answer_availability(
+    manifest_part_count: usize,
+    explicit_part_status: Option<&[bool]>,
+) -> Option<Vec<bool>> {
+    (manifest_part_count == 1 && explicit_part_status.is_none()).then(|| vec![true])
+}
+
 /// Whether the connected peer advertises at least one part we still need.
 ///
 /// A part is "needed" while it is not yet `Verified` (Missing/Requested/Written).
@@ -1730,7 +1785,8 @@ fn advertised_aich_root_conflicts(
 #[cfg(test)]
 mod tests {
     use super::{
-        Ed2kResumeManifest, Ed2kTransferState, initial_aich_recovery_parts, peer_holds_needed_part,
+        Ed2kResumeManifest, Ed2kTransferState, inferred_filename_answer_availability,
+        initial_aich_recovery_parts, peer_holds_needed_part,
     };
     use crate::ed2k_transfer::{Ed2kPieceState, Ed2kTransferJob};
 
@@ -1786,6 +1842,23 @@ mod tests {
             manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);
         let peer_bitmap = [true];
         assert!(!peer_holds_needed_part(&manifest, &peer_bitmap));
+    }
+
+    #[test]
+    fn filename_answer_proves_a_single_part_source_is_complete() {
+        assert_eq!(
+            inferred_filename_answer_availability(1, None),
+            Some(vec![true])
+        );
+    }
+
+    #[test]
+    fn filename_answer_does_not_replace_explicit_or_multipart_status() {
+        assert_eq!(inferred_filename_answer_availability(2, None), None);
+        assert_eq!(
+            inferred_filename_answer_availability(1, Some(&[false])),
+            None
+        );
     }
 
     #[test]
