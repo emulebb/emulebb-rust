@@ -39,12 +39,65 @@ pub(crate) enum KadBuddyRequestDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KadBuddyRequestState {
+    pub(crate) buddy_id: [u8; 16],
+    pub(crate) client_hash: [u8; 16],
     pub(crate) tcp_firewalled: bool,
     pub(crate) udp_verified: bool,
     pub(crate) udp_open: bool,
     pub(crate) requester_has_udp_key: bool,
     pub(crate) requester_tcp_port: u16,
     pub(crate) local_tcp_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KadBuddyCallbackDecision {
+    Relayed,
+    NoMatchingBuddy,
+    NonIpv4Requester,
+    HeldSocketUnavailable,
+}
+
+impl KadBuddyCallbackDecision {
+    fn diagnostic_fields(
+        self,
+    ) -> (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ) {
+        match self {
+            Self::Relayed => (
+                "buddy_callback_relayed",
+                "relay",
+                "relayed",
+                "eligible",
+                "info",
+            ),
+            Self::NoMatchingBuddy => (
+                "buddy_callback_dropped",
+                "drop",
+                "dropped",
+                "no_matching_buddy",
+                "low",
+            ),
+            Self::NonIpv4Requester => (
+                "buddy_callback_dropped",
+                "drop",
+                "dropped",
+                "non_ipv4_requester",
+                "low",
+            ),
+            Self::HeldSocketUnavailable => (
+                "buddy_callback_dropped",
+                "drop",
+                "dropped",
+                "held_socket_unavailable",
+                "low",
+            ),
+        }
+    }
 }
 
 impl KadBuddyRequestDecision {
@@ -384,12 +437,17 @@ fn buddy_request_parts(
     state: KadBuddyRequestState,
 ) -> (&'static str, Value, Value) {
     let (milestone, action, outcome, reason, severity) = decision.diagnostic_fields();
-    let keys = json!({ "peer": peer.to_string() });
+    let keys = json!({
+        "peer": peer.to_string(),
+        "peerHash": hex::encode(state.client_hash),
+    });
     let body = json!({
         "milestone": milestone,
         "action": action,
         "outcome": outcome,
         "reason": reason,
+        "buddyId": hex::encode(state.buddy_id),
+        "clientHash": hex::encode(state.client_hash),
         "tcpFirewalled": state.tcp_firewalled,
         "udpVerified": state.udp_verified,
         "udpOpen": state.udp_open,
@@ -398,6 +456,55 @@ fn buddy_request_parts(
         "localTcpPort": state.local_tcp_port,
     });
     (severity, keys, body)
+}
+
+fn buddy_callback_parts(
+    decision: KadBuddyCallbackDecision,
+    requester: SocketAddr,
+    buddy_id: [u8; 16],
+    file_hash: &str,
+    requester_tcp_port: u16,
+    buddy_tcp_endpoint: Option<SocketAddr>,
+) -> (&'static str, Value, Value) {
+    let (milestone, action, outcome, reason, severity) = decision.diagnostic_fields();
+    let keys = json!({
+        "peer": requester.to_string(),
+        "fileHash": file_hash,
+    });
+    let mut body = json!({
+        "milestone": milestone,
+        "action": action,
+        "outcome": outcome,
+        "reason": reason,
+        "buddyId": hex::encode(buddy_id),
+        "fileHash": file_hash,
+        "requesterIp": requester.ip().to_string(),
+        "requesterUdpPort": requester.port(),
+        "requesterTcpPort": requester_tcp_port,
+    });
+    if let Some(endpoint) = buddy_tcp_endpoint {
+        body["buddyTcpEndpoint"] = json!(endpoint.to_string());
+    }
+    (severity, keys, body)
+}
+
+pub(crate) fn buddy_callback(
+    decision: KadBuddyCallbackDecision,
+    requester: SocketAddr,
+    buddy_id: [u8; 16],
+    file_hash: &str,
+    requester_tcp_port: u16,
+    buddy_tcp_endpoint: Option<SocketAddr>,
+) {
+    let (severity, keys, body) = buddy_callback_parts(
+        decision,
+        requester,
+        buddy_id,
+        file_hash,
+        requester_tcp_port,
+        buddy_tcp_endpoint,
+    );
+    emit(FAMILY, "buddy_callback", severity, keys, body);
 }
 
 pub(crate) fn buddy_request(
@@ -659,6 +766,8 @@ mod tests {
             KadBuddyRequestDecision::Accepted,
             "1.2.3.4:4672".parse().unwrap(),
             KadBuddyRequestState {
+                buddy_id: [0x11; 16],
+                client_hash: [0x22; 16],
                 tcp_firewalled: false,
                 udp_verified: true,
                 udp_open: true,
@@ -731,6 +840,8 @@ mod tests {
     fn buddy_request_diagnostics_preserve_terminal_decision_and_state() {
         let peer = "198.51.100.7:4672".parse().unwrap();
         let state = KadBuddyRequestState {
+            buddy_id: [0x11; 16],
+            client_hash: [0x22; 16],
             tcp_firewalled: true,
             udp_verified: false,
             udp_open: false,
@@ -743,7 +854,13 @@ mod tests {
             buddy_request_parts(KadBuddyRequestDecision::SelfFirewalled, peer, state);
 
         assert_eq!(severity, "low");
-        assert_eq!(keys, json!({ "peer": "198.51.100.7:4672" }));
+        assert_eq!(
+            keys,
+            json!({
+                "peer": "198.51.100.7:4672",
+                "peerHash": "22222222222222222222222222222222",
+            })
+        );
         assert_eq!(
             body,
             json!({
@@ -751,12 +868,52 @@ mod tests {
                 "action": "refuse",
                 "outcome": "refused",
                 "reason": "self_firewalled",
+                "buddyId": "11111111111111111111111111111111",
+                "clientHash": "22222222222222222222222222222222",
                 "tcpFirewalled": true,
                 "udpVerified": false,
                 "udpOpen": false,
                 "requesterHasUdpKey": true,
                 "requesterTcpPort": 4662,
                 "localTcpPort": 4663,
+            })
+        );
+    }
+
+    #[test]
+    fn buddy_callback_diagnostics_join_request_to_held_socket() {
+        let requester = "198.51.100.8:4672".parse().unwrap();
+        let buddy_tcp_endpoint = "192.0.2.20:4662".parse().unwrap();
+        let (severity, keys, body) = buddy_callback_parts(
+            KadBuddyCallbackDecision::Relayed,
+            requester,
+            [0x33; 16],
+            "00112233445566778899aabbccddeeff",
+            5662,
+            Some(buddy_tcp_endpoint),
+        );
+
+        assert_eq!(severity, "info");
+        assert_eq!(
+            keys,
+            json!({
+                "peer": "198.51.100.8:4672",
+                "fileHash": "00112233445566778899aabbccddeeff",
+            })
+        );
+        assert_eq!(
+            body,
+            json!({
+                "milestone": "buddy_callback_relayed",
+                "action": "relay",
+                "outcome": "relayed",
+                "reason": "eligible",
+                "buddyId": "33333333333333333333333333333333",
+                "fileHash": "00112233445566778899aabbccddeeff",
+                "requesterIp": "198.51.100.8",
+                "requesterUdpPort": 4672,
+                "requesterTcpPort": 5662,
+                "buddyTcpEndpoint": "192.0.2.20:4662",
             })
         );
     }
