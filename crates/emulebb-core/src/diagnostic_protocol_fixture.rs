@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use chrono::Utc;
 use emulebb_ed2k::DiagnosticQueuedSourceReask;
@@ -15,6 +15,47 @@ use serde_json::json;
 
 use crate::EmulebbCore;
 use crate::ed2k_buddy_reask::register_kad_buddy_source_for_reask;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientUdpQueuePressureFixture {
+    pub file_hash: [u8; 16],
+    pub source_ip: Ipv4Addr,
+    pub source_udp_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientUdpQueuePressureFixtureState {
+    pub fixture_id: u64,
+    pub file_hash: [u8; 16],
+    pub source_ip: Ipv4Addr,
+    pub source_udp_port: u16,
+    pub actual_waiting_user_count: u32,
+    pub effective_waiting_user_count: u32,
+    pub queue_size: u32,
+    pub expires_after_millis: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientUdpQueuePressureFixtureErrorKind {
+    Ed2kRuntimeNotRunning,
+    FileNotShared,
+    SenderStillQueued,
+    SenderAmbiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientUdpQueuePressureFixtureError {
+    pub kind: ClientUdpQueuePressureFixtureErrorKind,
+    message: String,
+}
+
+impl fmt::Display for ClientUdpQueuePressureFixtureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ClientUdpQueuePressureFixtureError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuddyRelayEligibilityFixtureState {
@@ -138,6 +179,56 @@ impl fmt::Display for QueuedLowIdSourceFixtureError {
 impl std::error::Error for QueuedLowIdSourceFixtureError {}
 
 impl EmulebbCore {
+    /// Arm the responder-side prerequisite for one exact client-UDP queue-full
+    /// transition. Packet receive, decision, encoding, transport, and requester
+    /// application all remain on their ordinary production paths.
+    pub async fn prepare_client_udp_queue_pressure_fixture(
+        &self,
+        fixture: &ClientUdpQueuePressureFixture,
+    ) -> Result<ClientUdpQueuePressureFixtureState, ClientUdpQueuePressureFixtureError> {
+        if self.ed2k_runtime.lock().await.is_none() {
+            return Err(client_udp_queue_pressure_error(
+                ClientUdpQueuePressureFixtureErrorKind::Ed2kRuntimeNotRunning,
+                "eD2K runtime is not running",
+            ));
+        }
+
+        let file_hash = Ed2kHash::from_bytes(fixture.file_hash);
+        let source_endpoint =
+            SocketAddr::new(IpAddr::V4(fixture.source_ip), fixture.source_udp_port);
+        let receipt = self
+            .ed2k_transfers
+            .arm_diagnostic_client_udp_queue_pressure(file_hash, source_endpoint)
+            .await
+            .map_err(|error| {
+                use emulebb_ed2k::ed2k_transfer::DiagnosticClientUdpQueuePressureErrorKind as Ed2kKind;
+
+                let kind = match error.kind {
+                    Ed2kKind::FileNotShared => {
+                        ClientUdpQueuePressureFixtureErrorKind::FileNotShared
+                    }
+                    Ed2kKind::SenderStillQueued => {
+                        ClientUdpQueuePressureFixtureErrorKind::SenderStillQueued
+                    }
+                    Ed2kKind::SenderAmbiguous => {
+                        ClientUdpQueuePressureFixtureErrorKind::SenderAmbiguous
+                    }
+                };
+                client_udp_queue_pressure_error(kind, error.to_string())
+            })?;
+
+        Ok(ClientUdpQueuePressureFixtureState {
+            fixture_id: receipt.fixture_id,
+            file_hash: fixture.file_hash,
+            source_ip: fixture.source_ip,
+            source_udp_port: fixture.source_udp_port,
+            actual_waiting_user_count: receipt.actual_waiting_user_count,
+            effective_waiting_user_count: receipt.effective_waiting_user_count,
+            queue_size: receipt.queue_size,
+            expires_after_millis: receipt.expires_after_millis,
+        })
+    }
+
     /// Prepare only the local reachability prerequisite for the production Kad
     /// buddy-relay path. All buddy and callback packets still travel through the
     /// ordinary production state machine and sockets.
@@ -345,6 +436,16 @@ fn queued_source_control_error(
     message: impl Into<String>,
 ) -> QueuedSourceReaskControlError {
     QueuedSourceReaskControlError {
+        kind,
+        message: message.into(),
+    }
+}
+
+fn client_udp_queue_pressure_error(
+    kind: ClientUdpQueuePressureFixtureErrorKind,
+    message: impl Into<String>,
+) -> ClientUdpQueuePressureFixtureError {
+    ClientUdpQueuePressureFixtureError {
         kind,
         message: message.into(),
     }

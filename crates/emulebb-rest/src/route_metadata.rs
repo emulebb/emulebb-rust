@@ -530,6 +530,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
             path,
             "/api/v1/diagnostics/protocol-fixtures/queued-lowid-sources"
                 | "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility"
+                | "/api/v1/diagnostics/protocol-fixtures/client-udp-queue-pressure"
                 | "/api/v1/diagnostics/protocol-controls/queued-source-reasks"
         )
     {

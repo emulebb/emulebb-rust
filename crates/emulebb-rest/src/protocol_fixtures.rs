@@ -15,8 +15,10 @@ use axum::{
 };
 use emulebb_core::{
     BuddyRelayEligibilityFixtureError, BuddyRelayEligibilityFixtureErrorKind,
-    QueuedLowIdSourceFixture, QueuedLowIdSourceFixtureError, QueuedLowIdSourceFixtureErrorKind,
-    QueuedSourceReaskControl, QueuedSourceReaskControlError, QueuedSourceReaskControlErrorKind,
+    ClientUdpQueuePressureFixture, ClientUdpQueuePressureFixtureError,
+    ClientUdpQueuePressureFixtureErrorKind, QueuedLowIdSourceFixture,
+    QueuedLowIdSourceFixtureError, QueuedLowIdSourceFixtureErrorKind, QueuedSourceReaskControl,
+    QueuedSourceReaskControlError, QueuedSourceReaskControlErrorKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +50,14 @@ struct QueuedSourceReaskControlRequest {
     source_udp_version: u8,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClientUdpQueuePressureFixtureRequest {
+    file_hash: String,
+    source_ip: Ipv4Addr,
+    source_udp_port: u16,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QueuedLowIdSourceFixtureResponse {
@@ -71,6 +81,20 @@ struct QueuedSourceReaskControlResponse {
     source_tcp_port: u16,
     source_user_hash: String,
     source_udp_version: u8,
+    state: &'static str,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientUdpQueuePressureFixtureResponse {
+    accepted: bool,
+    fixture_id: u64,
+    file_hash: String,
+    source_endpoint: String,
+    actual_waiting_user_count: u32,
+    effective_waiting_user_count: u32,
+    queue_size: u32,
+    expires_after_millis: u64,
     state: &'static str,
 }
 
@@ -135,6 +159,54 @@ pub(crate) async fn wake_queued_source_reask(
     match state.core.wake_queued_source_reask(&control.core).await {
         Ok(()) => Json(control.response).into_response(),
         Err(error) => control_error_response(error),
+    }
+}
+
+pub(crate) async fn prepare_client_udp_queue_pressure_fixture(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> Response {
+    let request = match parse_required_json_body::<ClientUdpQueuePressureFixtureRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    let file_hash = match parse_lower_hex_16("fileHash", &request.file_hash) {
+        Ok(file_hash) => file_hash,
+        Err(message) => {
+            return api_error(StatusCode::BAD_REQUEST, "INVALID_ARGUMENT", message).into_response();
+        }
+    };
+    if request.source_udp_port == 0 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "sourceUdpPort must be in the range 1..65535",
+        )
+        .into_response();
+    }
+    let fixture = ClientUdpQueuePressureFixture {
+        file_hash,
+        source_ip: request.source_ip,
+        source_udp_port: request.source_udp_port,
+    };
+    match state
+        .core
+        .prepare_client_udp_queue_pressure_fixture(&fixture)
+        .await
+    {
+        Ok(receipt) => Json(ClientUdpQueuePressureFixtureResponse {
+            accepted: true,
+            fixture_id: receipt.fixture_id,
+            file_hash: request.file_hash,
+            source_endpoint: format!("{}:{}", receipt.source_ip, receipt.source_udp_port),
+            actual_waiting_user_count: receipt.actual_waiting_user_count,
+            effective_waiting_user_count: receipt.effective_waiting_user_count,
+            queue_size: receipt.queue_size,
+            expires_after_millis: receipt.expires_after_millis,
+            state: "client-udp-queue-pressure-armed",
+        })
+        .into_response(),
+        Err(error) => client_udp_queue_pressure_fixture_error_response(error),
     }
 }
 
@@ -293,6 +365,22 @@ fn control_error_response(error: QueuedSourceReaskControlError) -> Response {
         }
         QueuedSourceReaskControlErrorKind::WakeFailed => {
             (StatusCode::SERVICE_UNAVAILABLE, "CONTROL_UNAVAILABLE")
+        }
+    };
+    api_error(status, code, error.to_string()).into_response()
+}
+
+fn client_udp_queue_pressure_fixture_error_response(
+    error: ClientUdpQueuePressureFixtureError,
+) -> Response {
+    let (status, code) = match error.kind {
+        ClientUdpQueuePressureFixtureErrorKind::FileNotShared => {
+            (StatusCode::NOT_FOUND, "NOT_FOUND")
+        }
+        ClientUdpQueuePressureFixtureErrorKind::Ed2kRuntimeNotRunning
+        | ClientUdpQueuePressureFixtureErrorKind::SenderStillQueued
+        | ClientUdpQueuePressureFixtureErrorKind::SenderAmbiguous => {
+            (StatusCode::CONFLICT, "FIXTURE_PRECONDITION_FAILED")
         }
     };
     api_error(status, code, error.to_string()).into_response()

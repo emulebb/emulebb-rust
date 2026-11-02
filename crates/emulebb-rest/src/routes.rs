@@ -25,7 +25,7 @@ use crate::handlers::*;
 #[cfg(feature = "packet-diagnostics")]
 use crate::protocol_fixtures::{
     create_queued_lowid_source_fixture, prepare_buddy_relay_eligibility_fixture,
-    wake_queued_source_reask,
+    prepare_client_udp_queue_pressure_fixture, wake_queued_source_reask,
 };
 use crate::request_body_policy::enforce_api_request_body_limit;
 use crate::responses::CONTRACT_VERSION;
@@ -310,6 +310,10 @@ fn protocol_fixture_router() -> Router<RestState> {
         .route(
             "/api/v1/diagnostics/protocol-fixtures/buddy-relay-eligibility",
             post(prepare_buddy_relay_eligibility_fixture),
+        )
+        .route(
+            "/api/v1/diagnostics/protocol-fixtures/client-udp-queue-pressure",
+            post(prepare_client_udp_queue_pressure_fixture),
         )
         .route(
             "/api/v1/diagnostics/protocol-controls/queued-source-reasks",
