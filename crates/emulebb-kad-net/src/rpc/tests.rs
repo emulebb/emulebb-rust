@@ -35,3 +35,19 @@ fn make_rpc_with_shared_transport(
 ) -> RpcManager {
     RpcManager::new(transport, obfuscation, RpcConfig::default())
 }
+
+#[test]
+fn kad_contact_liveness_expires_and_is_cleared_when_stopped() {
+    let rpc = make_rpc(RpcConfig::default());
+    *rpc.inner.last_contact_at.lock() =
+        Some(std::time::Instant::now() - KAD_CONTACT_LIVENESS + Duration::from_secs(1));
+    assert!(rpc.has_had_contact());
+
+    *rpc.inner.last_contact_at.lock() = Some(std::time::Instant::now() - KAD_CONTACT_LIVENESS);
+    assert!(!rpc.has_had_contact());
+
+    *rpc.inner.last_contact_at.lock() = Some(std::time::Instant::now());
+    rpc.set_kad_enabled(false);
+    assert!(!rpc.has_had_contact());
+    assert!(rpc.inner.last_contact_at.lock().is_none());
+}

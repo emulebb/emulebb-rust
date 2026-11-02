@@ -32,6 +32,7 @@ async fn test_unsolicited_request_broadcast() {
     assert!(!received.was_obfuscated);
     assert_eq!(received.sender_verify_key, None);
     assert!(!received.receiver_verify_key_valid);
+    assert!(rpc.has_had_contact());
 }
 
 #[tokio::test]
@@ -61,6 +62,16 @@ async fn test_unencrypted_packet_from_source_port_53_is_dropped() {
         .send((encoded.clone(), dns_port_addr))
         .await
         .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), subscriber.recv())
+            .await
+            .is_err(),
+        "the source-port-53 packet must not be delivered"
+    );
+    assert!(
+        !rpc.has_had_contact(),
+        "a packet rejected before Kad decode must not establish contact"
+    );
     inject_tx.send((encoded, normal_addr)).await.unwrap();
 
     let received = tokio::time::timeout(Duration::from_secs(2), subscriber.recv())
@@ -72,6 +83,7 @@ async fn test_unencrypted_packet_from_source_port_53_is_dropped() {
         "the source-port-53 packet must be dropped before broadcast"
     );
     assert!(matches!(received.packet, KadPacket::HelloReq(_)));
+    assert!(rpc.has_had_contact());
 }
 
 #[tokio::test]

@@ -228,6 +228,13 @@ impl DhtNode {
         self.inner.rpc.kad_enabled()
     }
 
+    /// Whether Kad has observed a decoded packet within the stock twenty-minute
+    /// connection window. This is intentionally distinct from bootstrap state.
+    #[must_use]
+    pub fn has_had_contact(&self) -> bool {
+        self.inner.rpc.has_had_contact()
+    }
+
     /// Our node ID.
     pub fn own_id(&self) -> NodeId {
         self.inner.own_id
