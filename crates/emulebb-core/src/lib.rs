@@ -6801,6 +6801,8 @@ async fn handle_kad_find_buddy_req(
         .context("failed to read eD2K listener address while handling Kad FINDBUDDY_REQ")?
         .port();
     let diagnostic_state = diag_kad_event::KadBuddyRequestState {
+        buddy_id: req.buddy_id.0,
+        client_hash: req.client_hash.0,
         tcp_firewalled,
         udp_verified,
         udp_open,
@@ -7108,6 +7110,14 @@ async fn handle_kad_callback_req(
         match state.callback_relay_target(req.buddy_id) {
             Some(buddy) => buddy.tcp_addr,
             None => {
+                diag_kad_event::buddy_callback(
+                    diag_kad_event::KadBuddyCallbackDecision::NoMatchingBuddy,
+                    from,
+                    req.buddy_id.0,
+                    &req.file_hash.to_string(),
+                    req.tcp_port,
+                    None,
+                );
                 tracing::debug!(
                     "dropping Kad CALLBACK_REQ from {from}: no buddied client matches buddy_id"
                 );
@@ -7119,6 +7129,14 @@ async fn handle_kad_callback_req(
     // The callback requester's IP is the UDP source of this request; we are
     // IPv4-only.
     let IpAddr::V4(requester_ip) = from.ip() else {
+        diag_kad_event::buddy_callback(
+            diag_kad_event::KadBuddyCallbackDecision::NonIpv4Requester,
+            from,
+            req.buddy_id.0,
+            &req.file_hash.to_string(),
+            req.tcp_port,
+            Some(buddy_tcp_addr),
+        );
         tracing::debug!("dropping Kad CALLBACK_REQ from {from}: non-IPv4 requester");
         return;
     };
@@ -7126,6 +7144,14 @@ async fn handle_kad_callback_req(
     let frame =
         encode_kad_callback_relay_frame(req.buddy_id.0, &req.file_hash, requester_ip, req.tcp_port);
     if buddy_registry.relay_to_inbound(req.buddy_id, frame) {
+        diag_kad_event::buddy_callback(
+            diag_kad_event::KadBuddyCallbackDecision::Relayed,
+            from,
+            req.buddy_id.0,
+            &req.file_hash.to_string(),
+            req.tcp_port,
+            Some(buddy_tcp_addr),
+        );
         tracing::debug!(
             "relayed Kad OP_CALLBACK to buddied client {buddy_tcp_addr} for requester \
              {requester_ip}:{} (file_hash={})",
@@ -7133,6 +7159,14 @@ async fn handle_kad_callback_req(
             req.file_hash
         );
     } else {
+        diag_kad_event::buddy_callback(
+            diag_kad_event::KadBuddyCallbackDecision::HeldSocketUnavailable,
+            from,
+            req.buddy_id.0,
+            &req.file_hash.to_string(),
+            req.tcp_port,
+            Some(buddy_tcp_addr),
+        );
         tracing::debug!(
             "Kad CALLBACK_REQ from {from} matched buddy {buddy_tcp_addr} but no held buddy socket \
              is attached yet; dropping (buddy will reconnect)"

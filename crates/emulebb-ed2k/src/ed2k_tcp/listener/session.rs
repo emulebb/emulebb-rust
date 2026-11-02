@@ -535,6 +535,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 {
                     let (relay_tx, relay_rx) = mpsc::unbounded_channel();
                     if buddy_registry.attach_inbound(buddy_id, relay_tx) {
+                        crate::diag_event::kad_buddy_socket_attached(
+                            peer_addr,
+                            hello_profile.identity.user_hash,
+                            buddy_id,
+                            hello_profile.identity.tcp_port,
+                        );
                         info!(
                             "holding inbound Kad buddy session for {peer_addr} \
                                      (buddy_id={buddy_id})"
