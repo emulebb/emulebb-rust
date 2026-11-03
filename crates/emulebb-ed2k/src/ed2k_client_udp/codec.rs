@@ -421,6 +421,16 @@ mod tests {
     }
 
     #[test]
+    fn reask_file_ping_v1_is_hash_only() {
+        let body = encode_reask_file_ping(&hash(), Some(&[true]), 9, 1);
+        assert_eq!(body, hash().0);
+        let decoded = decode_reask_file_ping(&body, 1).unwrap();
+        assert_eq!(decoded.file_hash, hash());
+        assert!(decoded.part_status.is_none());
+        assert!(decoded.complete_source_count.is_none());
+    }
+
+    #[test]
     fn reask_ack_v4_round_trip() {
         let parts = [false, true, true, false, true];
         let body = encode_reask_ack(Some(&parts), 42, 4);
@@ -437,6 +447,15 @@ mod tests {
         let body = encode_reask_ack(Some(&[true]), 5, 2);
         assert_eq!(body, 5u16.to_le_bytes());
         let decoded = decode_reask_ack(&body, 2).unwrap();
+        assert_eq!(decoded.part_status, ReaskAckPartStatus::NotIncluded);
+        assert_eq!(decoded.queue_position, 5);
+    }
+
+    #[test]
+    fn reask_ack_v1_is_position_only() {
+        let body = encode_reask_ack(Some(&[true]), 5, 1);
+        assert_eq!(body, 5u16.to_le_bytes());
+        let decoded = decode_reask_ack(&body, 1).unwrap();
         assert_eq!(decoded.part_status, ReaskAckPartStatus::NotIncluded);
         assert_eq!(decoded.queue_position, 5);
     }
