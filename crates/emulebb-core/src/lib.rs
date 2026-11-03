@@ -24,6 +24,7 @@ use emulebb_ed2k::{
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
     built_in_port_mapping_providers,
     config::Ed2kRuntimeConfig,
+    configure_local_client_udp_version,
     ed2k_server::{
         Ed2kBackgroundCallbackDispatchOutcome, Ed2kBackgroundKeywordSearchOutcome,
         Ed2kBackgroundSearchInterrupted, Ed2kFoundSource, Ed2kServerConnectMode,
