@@ -55,6 +55,7 @@ impl DownloadConnectionState {
             peer_client_software: profile.client_software.clone().unwrap_or_default(),
             peer_connect_options: Some(profile.connect_options),
             peer_udp_port: profile.identity.udp_port,
+            peer_udp_version: profile.misc_options1.udp_version,
             peer_low_id: profile.identity.client_id < 0x0100_0000,
             peer_buddy_endpoint: profile.buddy.map(|buddy| (buddy.ip, buddy.udp_port)),
             ..Self::default()
@@ -104,10 +105,10 @@ pub(super) struct DownloadSessionState {
     pub(super) peer_user_hash: Option<[u8; 16]>,
     pub(super) peer_client_software: String,
     pub(super) peer_connect_options: Option<u8>,
-    /// Peer's advertised eD2k UDP port (from OP_EMULEINFO ET_UDPPORT), 0 if none.
+    /// Peer's advertised eD2k UDP port (hello or OP_EMULEINFO), 0 if none.
     /// Used to detach a queued source onto UDP reask.
     pub(super) peer_udp_port: u16,
-    /// Peer's advertised eD2k UDP version (OP_EMULEINFO ET_UDPVER), 0 if unknown.
+    /// Peer's advertised eD2k UDP version (hello or OP_EMULEINFO), 0 if unknown.
     pub(super) peer_udp_version: u8,
     /// Whether the connected source is a firewalled LowID client (oracle
     /// `HasLowID()`: client_id below the HighID floor). Set from the hello identity.
@@ -249,6 +250,19 @@ impl DownloadSessionState {
         }
     }
 
+    /// Retain the direct client-UDP capability carried by the peer's hello.
+    pub(super) fn capture_peer_udp_capability(
+        &mut self,
+        profile: &super::super::super::hello::DecodedHelloProfile,
+    ) {
+        if profile.identity.udp_port != 0 {
+            self.peer_udp_port = profile.identity.udp_port;
+        }
+        if profile.misc_options1.udp_version != 0 {
+            self.peer_udp_version = profile.misc_options1.udp_version;
+        }
+    }
+
     /// The peer user hash to attribute download credit to. Returns `Some` when
     /// the eMule `CClientCredits::AddDownloaded` gate permits accrual
     /// (ClientCredits.cpp:83-91): the peer's secure identity is verified
@@ -265,5 +279,36 @@ impl DownloadSessionState {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ed2k_tcp::{Ed2kHelloIdentity, decode_hello_profile, encode_hello_request};
+
+    #[test]
+    fn inbound_hello_retains_client_udp_capability() {
+        let packet = encode_hello_request(Ed2kHelloIdentity {
+            user_hash: [0x31; 16],
+            client_id: u32::from_le_bytes([198, 51, 100, 31]),
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: u32::from_le_bytes([203, 0, 113, 10]),
+            server_port: 4661,
+            connect_options: 0,
+            direct_udp_callback: false,
+        });
+        let mut profile = decode_hello_profile(&packet[6..]).expect("decode generated hello");
+        profile.misc_options1.udp_version = 3;
+
+        let state = DownloadConnectionState::from_inbound_hello(
+            &profile,
+            &Ed2kPeerSecureIdentState::default(),
+            false,
+        );
+
+        assert_eq!(state.peer_udp_port, 41000);
+        assert_eq!(state.peer_udp_version, 3);
     }
 }

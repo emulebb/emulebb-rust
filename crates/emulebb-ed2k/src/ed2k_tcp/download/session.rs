@@ -75,9 +75,8 @@ fn apply_emule_info_profile(
         profile.udp_port,
         profile.udp_version,
     );
-    // udp_port is normally learned from the hello (CT_EMULE_UDPPORTS); only let
-    // OP_EMULEINFO fill it when the hello did not. udp_version is an OP_EMULEINFO
-    // field (ET_UDPVER), so always take it from here.
+    // The hello normally carries both values. Let OP_EMULEINFO fill a missing
+    // port and confirm or refine a non-zero UDP version when the peer sends it.
     if profile.udp_port != 0 {
         session_state.peer_udp_port = profile.udp_port;
     }
@@ -566,9 +565,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     )
                     .await?;
                     session_state.peer_connect_options = Some(hello_profile.connect_options);
-                    if hello_profile.identity.udp_port != 0 {
-                        session_state.peer_udp_port = hello_profile.identity.udp_port;
-                    }
+                    session_state.capture_peer_udp_capability(&hello_profile);
                     session_state.capture_peer_buddy(&hello_profile);
                     session_state.remote_supports_aich = hello_profile.supports_aich;
                     session_state.remote_supports_secure_ident = hello_profile.supports_secure_ident;
@@ -637,11 +634,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     )
                     .await?;
                     session_state.peer_connect_options = Some(hello_profile.connect_options);
-                    // The peer's eD2k UDP port rides in the hello (CT_EMULE_UDPPORTS);
-                    // capture it for UDP-reask detach (udp_version comes from OP_EMULEINFO).
-                    if hello_profile.identity.udp_port != 0 {
-                        session_state.peer_udp_port = hello_profile.identity.udp_port;
-                    }
+                    session_state.capture_peer_udp_capability(&hello_profile);
                     session_state.capture_peer_buddy(&hello_profile);
                     session_state.remote_supports_aich = hello_profile.supports_aich;
                     session_state.remote_supports_secure_ident = hello_profile.supports_secure_ident;
