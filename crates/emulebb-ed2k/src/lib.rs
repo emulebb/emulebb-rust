@@ -1,5 +1,6 @@
 pub mod ban_store;
 pub mod buddy_socket;
+mod client_udp_version;
 pub mod config;
 pub mod diag_event;
 pub mod disk_space;
@@ -7,6 +8,9 @@ mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;
 mod ed2k_string;
 mod file_name;
+pub use client_udp_version::{
+    CURRENT_CLIENT_UDP_VERSION, configure_local_client_udp_version, local_client_udp_version,
+};
 #[cfg(feature = "packet-diagnostics")]
 pub use ed2k_client_udp::DiagnosticQueuedSourceReask;
 pub use ed2k_client_udp::{

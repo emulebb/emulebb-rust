@@ -317,6 +317,10 @@ impl EmulebbCore {
             return Ok(status);
         }
 
+        let client_udp_version = configure_local_client_udp_version()
+            .context("failed to configure the local eD2K client-UDP version")?;
+        tracing::info!(client_udp_version, "configured eD2K client-UDP capability");
+
         self.ed2k_download_tasks
             .stop_and_drain(self.ed2k_transfers.checkpoint_dirty_download_progress())
             .await;
@@ -681,9 +685,9 @@ impl EmulebbCore {
             Arc::clone(&shutdown),
         )));
         {
-            // udp_version 4 matches our advertised hello ET_UDPVER. The client
-            // UDP ingress always runs for OP_PORTTEST; source-reask commands and
-            // ticks remain gated by `enable_udp_reask`.
+            // The client-UDP ingress uses the same process capability advertised
+            // in peer hello. Source-reask commands and ticks remain gated by
+            // `enable_udp_reask`.
             let (reask_handle, reask_commands) = reask_command_channel();
             if enable_udp_reask {
                 *self.ed2k_reask_handle.lock().unwrap() = Some(reask_handle);
@@ -697,7 +701,7 @@ impl EmulebbCore {
                 reask_commands,
                 reask_events_tx,
                 reask_user_hash,
-                4,
+                client_udp_version,
                 ed2k_public_ip.clone(),
                 Arc::clone(&server_state),
                 Arc::clone(&kad_firewall),

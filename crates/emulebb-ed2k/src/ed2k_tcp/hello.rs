@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::ed2k_string::Ed2kStringEncoding;
+use crate::{client_udp_version::local_client_udp_version, ed2k_string::Ed2kStringEncoding};
 
 use super::hello_buddy::hello_buddy_snapshot;
 use super::hello_miscoptions::{
@@ -78,7 +78,7 @@ fn push_ed2k_string_tag(payload: &mut Vec<u8>, name: u8, value: &str) {
 pub(super) fn emule_misc_options1() -> u32 {
     let supports_aich = 1u32;
     let supports_unicode = 1u32;
-    let udp_version = 4u32;
+    let udp_version = u32::from(local_client_udp_version());
     let data_compression_version = 1u32;
     let secure_ident_version = EMULE_SECURE_IDENT_VERSION;
     // Runtime source exchange is SX2-only; avoid advertising deprecated SX1.
