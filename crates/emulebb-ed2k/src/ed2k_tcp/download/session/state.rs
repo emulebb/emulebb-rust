@@ -58,7 +58,6 @@ impl DownloadConnectionState {
             peer_udp_version: profile.misc_options1.udp_version,
             peer_low_id: profile.identity.client_id < 0x0100_0000,
             peer_buddy_endpoint: profile.buddy.map(|buddy| (buddy.ip, buddy.udp_port)),
-            ..Self::default()
         }
     }
 }
