@@ -402,8 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn reask_file_ping_v2_has_count_but_no_partstatus() {
-        // udp_version 3: > 2 (count present) but not > 3 (no partstatus).
+    fn reask_file_ping_v3_has_count_but_no_partstatus() {
         let body = encode_reask_file_ping(&hash(), Some(&[true]), 2, 3);
         assert_eq!(body.len(), 16 + 2); // hash + u16 count only
         let decoded = decode_reask_file_ping(&body, 3).unwrap();
@@ -412,10 +411,11 @@ mod tests {
     }
 
     #[test]
-    fn reask_file_ping_v1_is_hash_only() {
+    fn reask_file_ping_v2_is_hash_only() {
         let body = encode_reask_file_ping(&hash(), Some(&[true]), 9, 2);
-        assert_eq!(body.len(), 16);
+        assert_eq!(body, hash().0);
         let decoded = decode_reask_file_ping(&body, 2).unwrap();
+        assert_eq!(decoded.file_hash, hash());
         assert!(decoded.part_status.is_none());
         assert!(decoded.complete_source_count.is_none());
     }
@@ -433,10 +433,10 @@ mod tests {
     }
 
     #[test]
-    fn reask_ack_low_version_is_position_only() {
-        let body = encode_reask_ack(Some(&[true]), 5, 3);
+    fn reask_ack_v2_is_position_only() {
+        let body = encode_reask_ack(Some(&[true]), 5, 2);
         assert_eq!(body, 5u16.to_le_bytes());
-        let decoded = decode_reask_ack(&body, 3).unwrap();
+        let decoded = decode_reask_ack(&body, 2).unwrap();
         assert_eq!(decoded.part_status, ReaskAckPartStatus::NotIncluded);
         assert_eq!(decoded.queue_position, 5);
     }
