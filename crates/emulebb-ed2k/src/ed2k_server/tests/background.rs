@@ -1318,6 +1318,13 @@ async fn zero_id_stays_connecting_until_the_pending_attempt_times_out() {
     assert!(!state.connecting);
     assert!(!state.connected);
     assert_eq!(state.client_id, None);
+    assert_eq!(
+        context
+            .last_client_id
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "a zero ID on a fresh runtime must leave successful-ID history empty"
+    );
     server_task.abort();
 }
 
