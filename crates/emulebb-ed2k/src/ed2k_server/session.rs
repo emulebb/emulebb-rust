@@ -67,6 +67,16 @@ pub(super) enum ServerSessionPhase {
     Completed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProbeSearchState {
+    /// No probe request has claimed the server's untagged search-result stream.
+    NotStarted,
+    /// The probe owns incoming `OP_SEARCHRESULT` pages until a final page.
+    Active,
+    /// The final page was observed; later search results are uncorrelated.
+    Completed,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum OfferFilesPacingMode {
     AwaitingCapability,
@@ -106,7 +116,7 @@ pub(super) struct ServerSession {
     /// non-zero `OP_IDCHANGE` accepts the login.
     pub(super) pending_login_deadline: Option<Instant>,
     pub(super) login_accepted: bool,
-    pub(super) probe_search_sent: bool,
+    pub(super) probe_search_state: ProbeSearchState,
     pub(super) offer_files_sent: bool,
     pub(super) offer_files_sent_at: Option<Instant>,
     pub(super) offer_files_catalog_fingerprint: Option<u64>,
@@ -356,7 +366,7 @@ impl ServerSession {
             send_cipher: None,
             pending_login_deadline: Some(pending_login_deadline),
             login_accepted: false,
-            probe_search_sent: false,
+            probe_search_state: ProbeSearchState::NotStarted,
             offer_files_sent: false,
             offer_files_sent_at: None,
             offer_files_catalog_fingerprint: None,
@@ -397,7 +407,7 @@ impl ServerSession {
             send_cipher: None,
             pending_login_deadline: None,
             login_accepted: false,
-            probe_search_sent: false,
+            probe_search_state: ProbeSearchState::NotStarted,
             offer_files_sent: false,
             offer_files_sent_at: None,
             offer_files_catalog_fingerprint: None,

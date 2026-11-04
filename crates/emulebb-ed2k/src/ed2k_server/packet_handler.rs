@@ -15,12 +15,13 @@ use super::types::{CallbackRequest, ServerSessionContext};
 use super::{
     Ed2kPacket, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE, OP_QUERY_MORE_RESULT,
     OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
-    OP_SERVERSTATUS, SERVER_TCP_FLAG_UNICODE, ST_DESCRIPTION, ST_HARDFILES, ST_SERVERNAME,
-    ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32, decode_ed2k_string,
-    decode_search_result_page, decode_server_list, dump_ed2k_server_callback_applied,
-    dump_ed2k_server_ident_applied, dump_ed2k_server_status_applied, encode_search_request,
-    format_connect_options, format_server_flags, ipv4_from_client_id, is_low_id,
-    log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
+    OP_SERVERSTATUS, ProbeSearchState, SERVER_TCP_FLAG_UNICODE, ST_DESCRIPTION, ST_HARDFILES,
+    ST_SERVERNAME, ST_SOFTFILES, ServerSession, ServerSessionPhase, TAGTYPE_UINT32,
+    decode_ed2k_string, decode_search_result_page, decode_server_list,
+    dump_ed2k_server_callback_applied, dump_ed2k_server_ident_applied,
+    dump_ed2k_server_status_applied, encode_search_request, format_connect_options,
+    format_server_flags, ipv4_from_client_id, is_low_id, log_search_result_page,
+    send_connected_server_startup, wait_for_offer_files_settle,
 };
 
 pub(super) fn log_uncorrelated_server_reject(endpoint: SocketAddr, payload_len: usize) {
@@ -161,11 +162,20 @@ pub(super) async fn handle_server_packet(
             }
         }
         OP_SEARCHRESULT => {
+            if session.probe_search_state != ProbeSearchState::Active {
+                debug!(
+                    endpoint = %session.endpoint,
+                    probe_state = ?session.probe_search_state,
+                    payload_len = packet.payload.len(),
+                    "ignoring uncorrelated ED2K OP_SEARCHRESULT"
+                );
+                return Ok(());
+            }
             let page = match decode_search_result_page(&packet.payload) {
                 Ok(page) => page,
                 Err(error) => {
                     warn!(
-                        "ignoring malformed uncorrelated ED2K OP_SEARCHRESULT from {} payload_len={}: {error}",
+                        "ignoring malformed ED2K probe OP_SEARCHRESULT from {} payload_len={}: {error}",
                         session.endpoint,
                         packet.payload.len()
                     );
@@ -179,7 +189,8 @@ pub(super) async fn handle_server_packet(
                     "probe search reported more results; requesting another page",
                 );
                 session.send_packet(OP_QUERY_MORE_RESULT, &[]).await?;
-            } else if session.probe_search_sent {
+            } else {
+                session.probe_search_state = ProbeSearchState::Completed;
                 session.set_phase(
                     ServerSessionPhase::Completed,
                     "probe search completed without additional pages",
@@ -483,7 +494,7 @@ async fn maybe_send_probe_search(
     session: &mut ServerSession,
     context: &ServerSessionContext,
 ) -> Result<()> {
-    if !session.login_accepted || session.probe_search_sent {
+    if !session.login_accepted || session.probe_search_state != ProbeSearchState::NotStarted {
         return Ok(());
     }
     let Some(term) = context.probe_search_term.as_deref() else {
@@ -501,7 +512,7 @@ async fn maybe_send_probe_search(
     session
         .send_packet(OP_SEARCHREQUEST, &search_payload)
         .await?;
-    session.probe_search_sent = true;
+    session.probe_search_state = ProbeSearchState::Active;
     debug!(endpoint = %session.endpoint, "sent ED2K server search probe");
     Ok(())
 }

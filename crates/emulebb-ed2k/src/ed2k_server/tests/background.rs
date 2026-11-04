@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant as TokioInstant};
 
 use crate::ed2k_server::{
-    Ed2kServerSearchInbox, OP_CALLBACKREQUEST,
+    Ed2kServerSearchInbox, OP_CALLBACKREQUEST, OP_SERVERLIST, ProbeSearchState,
     background::{BackgroundServerSearchContext, start_background_server_search},
 };
 
@@ -1657,6 +1657,115 @@ async fn malformed_uncorrelated_search_result_is_packet_local() {
     let state = session.state.read().await;
     assert_eq!(state.server_users, Some(123));
     assert_eq!(state.server_files, Some(456));
+}
+
+fn empty_search_result_page(more_results_available: bool) -> Vec<u8> {
+    let mut payload = 0u32.to_le_bytes().to_vec();
+    payload.push(u8::from(more_results_available));
+    payload
+}
+
+#[tokio::test]
+async fn uncorrelated_search_result_cannot_advance_server_paging() {
+    let (mut session, mut peer) = connected_background_test_session().await;
+    let context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
+    session.phase = ServerSessionPhase::TimedOut;
+
+    handle_test_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_SEARCHRESULT,
+            payload: empty_search_result_page(true),
+        },
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(session.probe_search_state, ProbeSearchState::NotStarted);
+    assert_eq!(session.phase, ServerSessionPhase::TimedOut);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), read_client_frame(&mut peer))
+            .await
+            .is_err(),
+        "a late or unsolicited result must not emit OP_QUERY_MORE_RESULT"
+    );
+}
+
+#[tokio::test]
+async fn active_probe_pages_until_final_result_then_rejects_late_pages() {
+    let (mut session, mut peer) = connected_background_test_session().await;
+    let mut context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
+    context.session.probe_search_term = Some("probe ownership".to_string());
+    session.login_accepted = true;
+
+    handle_test_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_SERVERLIST,
+            payload: Vec::new(),
+        },
+        &context,
+        true,
+    )
+    .await
+    .unwrap();
+    let (opcode, _payload) = read_client_frame(&mut peer).await;
+    assert_eq!(opcode, OP_SEARCHREQUEST);
+    assert_eq!(session.probe_search_state, ProbeSearchState::Active);
+    assert_eq!(session.phase, ServerSessionPhase::SearchActive);
+
+    handle_test_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_SEARCHRESULT,
+            payload: empty_search_result_page(true),
+        },
+        &context,
+        true,
+    )
+    .await
+    .unwrap();
+    let (opcode, payload) = read_client_frame(&mut peer).await;
+    assert_eq!(opcode, OP_QUERY_MORE_RESULT);
+    assert!(payload.is_empty());
+    assert_eq!(session.probe_search_state, ProbeSearchState::Active);
+    assert_eq!(session.phase, ServerSessionPhase::AwaitingMore);
+
+    handle_test_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_SEARCHRESULT,
+            payload: empty_search_result_page(false),
+        },
+        &context,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(session.probe_search_state, ProbeSearchState::Completed);
+    assert_eq!(session.phase, ServerSessionPhase::Completed);
+
+    handle_test_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_SEARCHRESULT,
+            payload: empty_search_result_page(true),
+        },
+        &context,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(session.probe_search_state, ProbeSearchState::Completed);
+    assert_eq!(session.phase, ServerSessionPhase::Completed);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), read_client_frame(&mut peer))
+            .await
+            .is_err(),
+        "a late page must not restart a completed probe"
+    );
 }
 
 #[tokio::test]
