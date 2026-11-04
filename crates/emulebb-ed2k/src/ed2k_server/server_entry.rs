@@ -25,28 +25,34 @@ pub(super) struct ConfiguredServerEntry {
     pub(super) static_server: bool,
 }
 
-/// eMule offer-batch cap from a server's file limits: use the soft limit,
-/// falling back to 200 when it is unknown (0) or exceeds 200, and stay below a
-/// known hard limit.
-pub(super) fn server_offer_file_limit(soft_files: u32, hard_files: u32) -> usize {
-    let soft_limit = if soft_files == 0 || soft_files > 200 {
-        200
+/// Stock's protocol ceiling for records in one legacy `OP_OFFERFILES` packet.
+pub(super) const fn server_offer_file_packet_limit() -> usize {
+    200
+}
+
+/// Connection-scoped distinct-file budget from a server's advertised limits.
+///
+/// Stock falls back to one 200-record offer when `ST_SOFTFILES` is unknown.
+/// A known soft limit is cumulative rather than a per-packet cap, while the
+/// server's hard limit remains an exclusive safety boundary.
+pub(super) fn server_offer_file_candidate_limit(soft_files: u32, hard_files: u32) -> usize {
+    let soft_limit = if soft_files == 0 {
+        server_offer_file_packet_limit()
     } else {
-        soft_files as usize
+        usize::try_from(soft_files).unwrap_or(usize::MAX)
     };
     if hard_files == 0 {
         soft_limit
     } else {
-        soft_limit.min(hard_files.saturating_sub(1) as usize)
+        soft_limit.min(usize::try_from(hard_files.saturating_sub(1)).unwrap_or(usize::MAX))
     }
 }
 
 impl ConfiguredServerEntry {
-    /// eMule offer-batch cap for this server: the server's soft file limit,
-    /// falling back to 200 when unknown (0) or above 200, and clamped below a
-    /// known hard limit (matches aMule's offer clamp).
-    pub(super) fn offer_file_limit(&self) -> usize {
-        server_offer_file_limit(self.soft_files, self.hard_files)
+    /// eMule connection-scoped distinct-file publication budget for this
+    /// server, including the unknown-soft fallback and hard-limit clamp.
+    pub(super) fn offer_file_candidate_limit(&self) -> usize {
+        server_offer_file_candidate_limit(self.soft_files, self.hard_files)
     }
 
     pub(super) fn from_endpoint_text(endpoint_text: &str) -> Result<Self> {
