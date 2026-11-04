@@ -25,34 +25,40 @@ pub(super) struct ConfiguredServerEntry {
     pub(super) static_server: bool,
 }
 
-/// Stock's protocol ceiling for records in one legacy `OP_OFFERFILES` packet.
-pub(super) const fn server_offer_file_packet_limit() -> usize {
-    200
+/// Portable record ceiling for one legacy `OP_OFFERFILES` packet.
+///
+/// Stock caps a legacy packet at 200 records. Lugdunum rejects a plain packet
+/// whose declared count is greater than or equal to `ST_HARDFILES`, so a client
+/// must remain strictly below a known hard boundary for both plain and packed
+/// transports.
+pub(super) fn server_offer_file_packet_limit(hard_files: u32) -> usize {
+    let stock_limit = 200;
+    if hard_files == 0 {
+        stock_limit
+    } else {
+        stock_limit.min(usize::try_from(hard_files.saturating_sub(1)).unwrap_or(usize::MAX))
+    }
 }
 
 /// Connection-scoped distinct-file budget from a server's advertised limits.
 ///
 /// Stock falls back to one 200-record offer when `ST_SOFTFILES` is unknown.
-/// A known soft limit is cumulative rather than a per-packet cap, while the
-/// server's hard limit remains an exclusive safety boundary.
-pub(super) fn server_offer_file_candidate_limit(soft_files: u32, hard_files: u32) -> usize {
-    let soft_limit = if soft_files == 0 {
-        server_offer_file_packet_limit()
+/// A known soft limit is cumulative rather than a per-packet cap. The hard
+/// limit is deliberately absent here because it constrains each packet, not
+/// the number of distinct files offered over the connection.
+pub(super) fn server_offer_file_candidate_limit(soft_files: u32) -> usize {
+    if soft_files == 0 {
+        server_offer_file_packet_limit(0)
     } else {
         usize::try_from(soft_files).unwrap_or(usize::MAX)
-    };
-    if hard_files == 0 {
-        soft_limit
-    } else {
-        soft_limit.min(usize::try_from(hard_files.saturating_sub(1)).unwrap_or(usize::MAX))
     }
 }
 
 impl ConfiguredServerEntry {
     /// eMule connection-scoped distinct-file publication budget for this
-    /// server, including the unknown-soft fallback and hard-limit clamp.
+    /// server, including the unknown-soft fallback.
     pub(super) fn offer_file_candidate_limit(&self) -> usize {
-        server_offer_file_candidate_limit(self.soft_files, self.hard_files)
+        server_offer_file_candidate_limit(self.soft_files)
     }
 
     pub(super) fn from_endpoint_text(endpoint_text: &str) -> Result<Self> {

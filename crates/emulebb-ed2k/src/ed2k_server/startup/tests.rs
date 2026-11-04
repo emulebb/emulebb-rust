@@ -333,21 +333,26 @@ fn offer_files_preserves_unicode_filename_tag() {
 }
 
 #[test]
-fn server_offer_file_candidate_limit_is_connection_scoped() {
+fn server_offer_file_limits_keep_packet_and_connection_budgets_independent() {
     use super::super::server_entry::{
         server_offer_file_candidate_limit, server_offer_file_packet_limit,
     };
 
     // Unknown soft limits retain stock's one-packet fallback. Advertised soft
-    // limits remain cumulative even above the 200-record packet ceiling, and a
-    // known hard limit is still exclusive.
-    assert_eq!(server_offer_file_packet_limit(), 200);
-    assert_eq!(server_offer_file_candidate_limit(0, 0), 200);
-    assert_eq!(server_offer_file_candidate_limit(50, 0), 50);
-    assert_eq!(server_offer_file_candidate_limit(200, 0), 200);
-    assert_eq!(server_offer_file_candidate_limit(500, 0), 500);
-    assert_eq!(server_offer_file_candidate_limit(500, 3), 2);
-    assert_eq!(server_offer_file_candidate_limit(50, 1), 0);
+    // limits remain cumulative even above the 200-record packet ceiling.
+    assert_eq!(server_offer_file_candidate_limit(0), 200);
+    assert_eq!(server_offer_file_candidate_limit(50), 50);
+    assert_eq!(server_offer_file_candidate_limit(200), 200);
+    assert_eq!(server_offer_file_candidate_limit(350), 350);
+    assert_eq!(server_offer_file_candidate_limit(1_000), 1_000);
+
+    // The hard limit is an exclusive packet boundary and never clamps the
+    // connection-scoped candidate budget above.
+    assert_eq!(server_offer_file_packet_limit(0), 200);
+    assert_eq!(server_offer_file_packet_limit(5_000), 200);
+    assert_eq!(server_offer_file_packet_limit(200), 199);
+    assert_eq!(server_offer_file_packet_limit(150), 149);
+    assert_eq!(server_offer_file_packet_limit(1), 0);
 }
 
 #[test]
@@ -694,7 +699,7 @@ async fn legacy_soft_budget_sends_200_then_150_and_resets_for_a_new_epoch() {
     let mut session = super::ServerSession::from_stream_for_test(server_stream, peer_addr);
     session.configure_offer_files_capability(false);
     session.server_soft_files = 350;
-    session.server_hard_files = 1_000;
+    session.server_hard_files = 5_000;
     let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
         (0..1_000).map(shared_entry).collect(),
     )));
@@ -754,6 +759,90 @@ async fn legacy_soft_budget_sends_200_then_150_and_resets_for_a_new_epoch() {
             .unwrap();
     assert_eq!(reconnected_first.entries_sent, 200);
     assert_eq!(session.offer_files_distinct_published_hashes.len(), 200);
+}
+
+#[tokio::test]
+async fn legacy_hard_limit_caps_each_packet_without_clamping_the_soft_budget() {
+    use std::sync::Arc;
+
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        sync::RwLock,
+    };
+
+    use crate::ed2k_transfer::IndexedSharedCatalog;
+
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer_task = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (server_stream, peer_addr) = listener.accept().await.unwrap();
+    let _peer = peer_task.await.unwrap();
+    let mut session = super::ServerSession::from_stream_for_test(server_stream, peer_addr);
+    session.configure_offer_files_capability(false);
+    session.server_soft_files = 1_000;
+    session.server_hard_files = 150;
+    let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
+        (0..300).map(shared_entry).collect(),
+    )));
+
+    assert_eq!(session.offer_files_batch_limit(), 149);
+    assert_eq!(session.offer_files_new_candidate_limit(), 1_000);
+
+    for (expected_entries, expected_distinct, expected_remaining) in
+        [(149, 149, 851), (149, 298, 702), (2, 300, 700)]
+    {
+        let batch = send_offer_files_advertisement(
+            &mut session,
+            &shared_catalog,
+            crate::test_bind_ip(),
+            4662,
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch.entries_sent, expected_entries);
+        assert_eq!(
+            session.offer_files_distinct_published_hashes.len(),
+            expected_distinct
+        );
+        assert_eq!(
+            session.offer_files_new_candidate_limit(),
+            expected_remaining
+        );
+    }
+}
+
+#[tokio::test]
+async fn exclusive_hard_limit_of_one_sends_no_offer_packet() {
+    use std::sync::Arc;
+
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        sync::RwLock,
+    };
+
+    use crate::ed2k_transfer::IndexedSharedCatalog;
+
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer_task = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (server_stream, peer_addr) = listener.accept().await.unwrap();
+    let _peer = peer_task.await.unwrap();
+    let mut session = super::ServerSession::from_stream_for_test(server_stream, peer_addr);
+    session.configure_offer_files_capability(false);
+    session.server_soft_files = 350;
+    session.server_hard_files = 1;
+    let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(vec![
+        shared_entry(0),
+    ])));
+
+    let batch =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+
+    assert_eq!(batch.entries_sent, 0);
+    assert_eq!(batch.pending_entries, 1);
+    assert!(!session.offer_files_sent);
 }
 
 #[tokio::test]
