@@ -214,12 +214,18 @@ async fn settings_use_typed_get_and_patch_route() {
     let body = to_bytes(read.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["core"]["uploadLimitKiBps"], 6200);
-    assert_eq!(value["data"]["core"]["reconnect"], true);
+    assert!(value["data"]["core"].get("reconnect").is_none());
+    assert!(value["data"]["core"].get("safeServerConnect").is_none());
+    assert!(value["data"]["core"].get("addServersFromServer").is_none());
     assert_eq!(value["data"]["daemon"]["p2pBindInterface"], Value::Null);
     assert_eq!(value["data"]["ed2k"]["nickname"], "eMule");
     assert_eq!(value["data"]["ed2k"]["obfuscationEnabled"], true);
     assert_eq!(value["data"]["ed2k"]["useServerPriorities"], true);
     assert_eq!(value["data"]["ed2k"]["autoConnectStaticOnly"], false);
+    assert_eq!(value["data"]["ed2k"]["reconnectEnabled"], true);
+    assert_eq!(value["data"]["ed2k"]["safeServerConnect"], false);
+    assert_eq!(value["data"]["ed2k"]["addServersFromServer"], false);
+    assert_eq!(value["data"]["ed2k"]["serverKeepaliveMinutes"], 0);
     assert_eq!(
         value["data"]["ed2k"]["minFreeConfigSpaceBytes"],
         1_073_741_824_u64
@@ -248,7 +254,7 @@ async fn settings_use_typed_get_and_patch_route() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"baseUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false},"daemon":{"p2pBindInterface":"hide.me","ed2kUserHash":"00112233440e66778899aabbccdd6fff"},"ed2k":{"nickname":"Phase B Mule","useServerPriorities":false,"autoConnectStaticOnly":true,"minFreeConfigSpaceBytes":2147483648,"minFreeTransferSpaceBytes":6442450944,"minFreeIncomingSpaceBytes":7516192768},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"8.8.8.0/24 1.1.1.1"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
+                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"baseUploadSlots":4,"queueSize":3000,"networkEd2k":false},"daemon":{"p2pBindInterface":"hide.me","ed2kUserHash":"00112233440e66778899aabbccdd6fff"},"ed2k":{"nickname":"Phase B Mule","reconnectEnabled":false,"safeServerConnect":true,"addServersFromServer":true,"serverKeepaliveMinutes":20,"useServerPriorities":false,"autoConnectStaticOnly":true,"minFreeConfigSpaceBytes":2147483648,"minFreeTransferSpaceBytes":6442450944,"minFreeIncomingSpaceBytes":7516192768},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"8.8.8.0/24 1.1.1.1"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
                 ))
                 .unwrap(),
         )
@@ -261,10 +267,13 @@ async fn settings_use_typed_get_and_patch_route() {
     assert_eq!(value["data"]["core"]["uploadClientDataRate"], 64);
     assert_eq!(value["data"]["core"]["baseUploadSlots"], 4);
     assert_eq!(value["data"]["core"]["queueSize"], 3000);
-    assert_eq!(value["data"]["core"]["reconnect"], false);
     assert_eq!(value["data"]["core"]["networkEd2k"], false);
     assert_eq!(value["data"]["daemon"]["p2pBindInterface"], "hide.me");
     assert_eq!(value["data"]["ed2k"]["nickname"], "Phase B Mule");
+    assert_eq!(value["data"]["ed2k"]["reconnectEnabled"], false);
+    assert_eq!(value["data"]["ed2k"]["safeServerConnect"], true);
+    assert_eq!(value["data"]["ed2k"]["addServersFromServer"], true);
+    assert_eq!(value["data"]["ed2k"]["serverKeepaliveMinutes"], 20);
     assert_eq!(value["data"]["ed2k"]["useServerPriorities"], false);
     assert_eq!(value["data"]["ed2k"]["autoConnectStaticOnly"], true);
     assert_eq!(

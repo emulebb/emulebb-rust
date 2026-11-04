@@ -100,14 +100,12 @@ impl EmulebbCore {
             return;
         }
         // eMule `CServerSocket::ProcessPacket` OP_SERVERLIST adds advertised
-        // servers only when `thePrefs.GetAddServersFromServer()` is set (default
-        // on). Honor the same core setting so an operator can turn auto-add off.
+        // servers only when `thePrefs.GetAddServersFromServer()` is set. The
+        // daemon-resolved eD2K runtime config is the sole owner of that policy.
         if !self
-            .state
-            .lock()
-            .await
-            .core_settings
-            .add_servers_from_server
+            .ed2k_network
+            .as_ref()
+            .is_some_and(|network| network.ed2k.add_servers_from_server)
         {
             return;
         }

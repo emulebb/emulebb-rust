@@ -21,7 +21,6 @@ async fn profile_state_survives_core_restart() {
         let core = open_core(&metadata_path, &transfer_root);
         core.update_core_settings(CoreSettingsUpdate {
             download_limit_ki_bps: Some(2048),
-            reconnect: Some(false),
             network_kademlia: Some(false),
             ..CoreSettingsUpdate::default()
         })
@@ -59,7 +58,6 @@ async fn profile_state_survives_core_restart() {
     let reloaded = open_core(&metadata_path, &transfer_root);
     let core_settings = reloaded.core_settings().await;
     assert_eq!(core_settings.download_limit_ki_bps, 2048);
-    assert!(!core_settings.reconnect);
     assert!(!core_settings.network_kademlia);
 
     let categories = reloaded.categories().await;
@@ -122,6 +120,10 @@ async fn network_and_upload_settings_survive_core_restart() {
             },
             "ed2k": {
                 "listenPort": 11719,
+                "reconnectEnabled": false,
+                "safeServerConnect": true,
+                "addServersFromServer": true,
+                "serverKeepaliveMinutes": 45,
                 "uploadQueue": {
                     "elasticUnderfillSecs": 12,
                     "waitingTimeoutSecs": 1800,
@@ -148,6 +150,10 @@ async fn network_and_upload_settings_survive_core_restart() {
     assert_eq!(settings.core.upload_slot_elastic_percent, 70);
     assert_eq!(settings.core.queue_size, 4000);
     assert_eq!(settings.ed2k.listen_port, Some(11719));
+    assert!(!settings.ed2k.reconnect_enabled);
+    assert!(settings.ed2k.safe_server_connect);
+    assert!(settings.ed2k.add_servers_from_server);
+    assert_eq!(settings.ed2k.server_keepalive_minutes, 45);
     assert_eq!(settings.ed2k.upload_queue.elastic_underfill_secs, 12);
     assert_eq!(settings.ed2k.upload_queue.waiting_timeout_secs, 1800);
     assert_eq!(settings.ed2k.upload_queue.granted_timeout_secs, 7);

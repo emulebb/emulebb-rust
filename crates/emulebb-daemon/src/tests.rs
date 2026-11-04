@@ -426,6 +426,12 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
     put_setting(
         &metadata,
         SECTION_ED2K,
+        "serverKeepaliveMinutes",
+        serde_json::json!(25),
+    );
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
         "publishEmuleRustIdentity",
         serde_json::json!(true),
     );
@@ -519,6 +525,11 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
     assert!(profile.ed2k.server_endpoints.is_empty());
     assert_eq!(profile.ed2k.connect_timeout_secs, 1);
     assert_eq!(profile.ed2k.reconnect_interval_secs, 60);
+    assert_eq!(profile.ed2k.server_keepalive_minutes, 25);
+    assert_eq!(
+        profile.ed2k.keepalive_interval(),
+        Some(std::time::Duration::from_secs(25 * 60))
+    );
     assert!(profile.ed2k.enable_udp_reask);
     assert!(profile.ed2k.publish_emule_rust_identity);
     assert!(profile.nat.enabled);
@@ -578,6 +589,38 @@ fn load_rejects_out_of_range_ed2k_free_space_floor() {
             "minFreeTransferSpaceBytes must be an unsigned number in the range 5368709120..5497558138880"
         )
     );
+}
+
+#[test]
+fn load_rejects_out_of_range_server_keepalive_minutes() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = write_bootstrap_settings(temp.path());
+    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
+        "serverKeepaliveMinutes",
+        serde_json::json!(1_441),
+    );
+
+    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
+    assert!(format!("{error:#}").contains("serverKeepaliveMinutes must be in the range 0..1440"));
+}
+
+#[test]
+fn load_rejects_retired_ed2k_server_setting_keys() {
+    for key in ["keepaliveSecs"] {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_dir = write_bootstrap_settings(temp.path());
+        let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
+        put_setting(&metadata, SECTION_ED2K, key, serde_json::json!(1_200));
+
+        let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!("unknown field `{key}`")),
+            "unexpected error for {key}: {error:#}"
+        );
+    }
 }
 
 #[test]

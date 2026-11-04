@@ -652,10 +652,7 @@ export type CoreSettings = {
   uploadSlotElasticPercent?: number;
   queueSize?: number;
   autoConnect?: boolean;
-  reconnect?: boolean;
   creditSystem?: boolean;
-  safeServerConnect?: boolean;
-  addServersFromServer?: boolean;
   networkKademlia?: boolean;
   networkEd2k?: boolean;
   [key: string]: unknown;
@@ -702,7 +699,7 @@ export type Ed2kSettings = {
   safeServerConnect?: boolean;
   useServerPriorities?: boolean;
   autoConnectStaticOnly?: boolean;
-  keepaliveSecs?: number;
+  serverKeepaliveMinutes?: number;
   sessionRotationSecs?: number;
   maxConcurrentDownloads?: number;
   maxNewConnectionsPerFiveSeconds?: number;

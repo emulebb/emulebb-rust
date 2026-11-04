@@ -212,10 +212,10 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
     ),
     app_setting(
         "ed2k.safeServerConnect",
-        SettingSurfaceClass::NotUserFacing,
+        SettingSurfaceClass::NormalControl,
         true,
         "Servers",
-        "Shadowed by core safe server connection settings.",
+        "Limit automatic server connection attempts to one at a time.",
     ),
     app_setting(
         "ed2k.useServerPriorities",
@@ -232,11 +232,11 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
         "Restrict startup auto-connect to static servers.",
     ),
     app_setting(
-        "ed2k.keepaliveSecs",
+        "ed2k.serverKeepaliveMinutes",
         SettingSurfaceClass::AdvancedControl,
         true,
-        "Network",
-        "eD2K keepalive interval.",
+        "Servers",
+        "Idle server-session keepalive interval in minutes; zero disables it.",
     ),
     app_setting(
         "ed2k.sessionRotationSecs",
@@ -436,10 +436,10 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
     ),
     app_setting(
         "ed2k.addServersFromServer",
-        SettingSurfaceClass::NotUserFacing,
+        SettingSurfaceClass::NormalControl,
         true,
         "Servers",
-        "Shadowed by core advertised-server import settings.",
+        "Request and accept server-list advertisements from connected servers.",
     ),
     app_setting(
         "ed2k.deadServerRetries",
@@ -851,10 +851,7 @@ fn core_setting_path(key: &'static str) -> &'static str {
         "uploadSlotElasticPercent" => "core.uploadSlotElasticPercent",
         "queueSize" => "core.queueSize",
         "autoConnect" => "core.autoConnect",
-        "reconnect" => "core.reconnect",
         "creditSystem" => "core.creditSystem",
-        "safeServerConnect" => "core.safeServerConnect",
-        "addServersFromServer" => "core.addServersFromServer",
         "networkKademlia" => "core.networkKademlia",
         "networkEd2k" => "core.networkEd2k",
         _ => panic!("missing settings surface path for core setting"),
@@ -900,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn shadowed_ed2k_server_toggles_are_not_user_facing() {
+    fn ed2k_server_policy_toggles_are_user_facing() {
         let inventory = app_settings_surface_inventory();
         let class_for = |path: &str| {
             inventory
@@ -912,11 +909,11 @@ mod tests {
 
         assert_eq!(
             class_for("ed2k.safeServerConnect"),
-            SettingSurfaceClass::NotUserFacing
+            SettingSurfaceClass::NormalControl
         );
         assert_eq!(
             class_for("ed2k.addServersFromServer"),
-            SettingSurfaceClass::NotUserFacing
+            SettingSurfaceClass::NormalControl
         );
     }
 
