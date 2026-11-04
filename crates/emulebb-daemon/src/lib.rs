@@ -568,7 +568,7 @@ fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfi
         safe_server_connect: settings.safe_server_connect,
         use_server_priorities: settings.use_server_priorities,
         auto_connect_static_only: settings.auto_connect_static_only,
-        keepalive_secs: settings.keepalive_secs,
+        server_keepalive_minutes: settings.server_keepalive_minutes,
         session_rotation_secs: settings.session_rotation_secs,
         max_concurrent_downloads: settings.max_concurrent_downloads,
         max_new_connections_per_five_seconds: settings.max_new_connections_per_five_seconds,

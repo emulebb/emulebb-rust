@@ -1095,7 +1095,10 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await settingsPanel.getByLabel("eD2K new connections / 5s").fill("0");
   await settingsPanel.getByLabel("eD2K half-open connections").fill("0");
   await settingsPanel.getByLabel("eD2K source cap").fill("0");
-  await settingsPanel.getByLabel("eD2K keepalive seconds").fill("0");
+  await settingsPanel.getByLabel("Server keepalive minutes").fill("1441");
+  await expect(settingsPanel.getByText("Server keepalive minutes must be between 0 and 1440.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await settingsPanel.getByLabel("Server keepalive minutes").fill("0");
   await settingsPanel.getByLabel("Session transfer %").fill("0");
   await settingsPanel.getByLabel("Session time limit seconds").fill("0");
   await expect(save).toBeEnabled();
@@ -1103,7 +1106,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByText("eD2K new connections / 5s must be at least 1.")).toHaveCount(0);
   await expect(settingsPanel.getByText("eD2K half-open connections must be at least 1.")).toHaveCount(0);
   await expect(settingsPanel.getByText("eD2K source cap must be at least 1.")).toHaveCount(0);
-  await expect(settingsPanel.getByText("eD2K keepalive seconds must be at least 1.")).toHaveCount(0);
+  await expect(settingsPanel.getByText("Server keepalive minutes must be between 0 and 1440.")).toHaveCount(0);
   await expect(settingsPanel.getByText("Session transfer % must be between 1 and 100.")).toHaveCount(0);
   await expect(settingsPanel.getByText("Session time limit seconds must be at least 1.")).toHaveCount(0);
   await revert.click();
@@ -1134,6 +1137,10 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await configFloor.fill("2147483648");
   await settingsPanel.getByLabel("Use server priorities").uncheck();
   await settingsPanel.getByLabel("Auto-connect static servers only").check();
+  await settingsPanel.getByLabel("Reconnect after disconnect").uncheck();
+  await settingsPanel.getByLabel("Safe server connect").check();
+  await settingsPanel.getByLabel("Add servers from server").check();
+  await settingsPanel.getByLabel("Server keepalive minutes").fill("20");
   await save.click();
   await expect(page.getByText("Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")).toBeVisible();
   await expect(save).toBeDisabled();
@@ -1146,6 +1153,10 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
     ed2k: {
       nickname: "Phase B Mule",
       minFreeConfigSpaceBytes: 2147483648,
+      reconnectEnabled: false,
+      safeServerConnect: true,
+      addServersFromServer: true,
+      serverKeepaliveMinutes: 20,
       useServerPriorities: false,
       autoConnectStaticOnly: true
     }

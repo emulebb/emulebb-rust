@@ -207,6 +207,35 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
                 .as_str()
                 .is_some_and(|description| description.contains("1 GiB minimum"))
     }));
+    assert!(settings.iter().any(|entry| {
+        entry["path"] == "ed2k.safeServerConnect" && entry["class"] == "normalControl"
+    }));
+    assert!(settings.iter().any(|entry| {
+        entry["path"] == "ed2k.addServersFromServer" && entry["class"] == "normalControl"
+    }));
+    assert!(settings.iter().any(|entry| {
+        entry["path"] == "ed2k.serverKeepaliveMinutes" && entry["class"] == "advancedControl"
+    }));
+    assert!(
+        !settings
+            .iter()
+            .any(|entry| entry["path"] == "core.reconnect")
+    );
+    assert!(
+        !settings
+            .iter()
+            .any(|entry| entry["path"] == "core.safeServerConnect")
+    );
+    assert!(
+        !settings
+            .iter()
+            .any(|entry| entry["path"] == "core.addServersFromServer")
+    );
+    assert!(
+        !settings
+            .iter()
+            .any(|entry| entry["path"] == "ed2k.keepaliveSecs")
+    );
     assert!(!settings.iter().any(|entry| entry["path"] == "rest.apiKey"));
 
     let bootstrap_settings = value["data"]["bootstrapSettings"].as_array().unwrap();

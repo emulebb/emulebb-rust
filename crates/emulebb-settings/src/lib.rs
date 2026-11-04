@@ -42,12 +42,11 @@ pub const FIELD_BASE_UPLOAD_SLOTS: &str = "baseUploadSlots";
 pub const FIELD_UPLOAD_SLOT_ELASTIC_PERCENT: &str = "uploadSlotElasticPercent";
 pub const FIELD_QUEUE_SIZE: &str = "queueSize";
 pub const FIELD_AUTO_CONNECT: &str = "autoConnect";
-pub const FIELD_RECONNECT: &str = "reconnect";
 pub const FIELD_CREDIT_SYSTEM: &str = "creditSystem";
-pub const FIELD_SAFE_SERVER_CONNECT: &str = "safeServerConnect";
-pub const FIELD_ADD_SERVERS_FROM_SERVER: &str = "addServersFromServer";
 pub const FIELD_NETWORK_KADEMLIA: &str = "networkKademlia";
 pub const FIELD_NETWORK_ED2K: &str = "networkEd2k";
+
+pub const MAX_SERVER_KEEPALIVE_MINUTES: u64 = 1_440;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,36 +206,12 @@ pub const CORE_SETTING_SPECS: &[CoreSettingSpec] = &[
         "Connect to eD2K servers automatically on daemon startup.",
     ),
     boolean(
-        FIELD_RECONNECT,
-        "Reconnect",
-        CoreSettingGroup::Server,
-        true,
-        true,
-        "Reconnect after an eD2K server session drops.",
-    ),
-    boolean(
         FIELD_CREDIT_SYSTEM,
         "Credit system",
         CoreSettingGroup::Safety,
         true,
         false,
         "Use peer credit history when scoring upload queue clients.",
-    ),
-    boolean(
-        FIELD_SAFE_SERVER_CONNECT,
-        "Safe server connect",
-        CoreSettingGroup::Server,
-        true,
-        false,
-        "Limit automatic server connection concurrency.",
-    ),
-    boolean(
-        FIELD_ADD_SERVERS_FROM_SERVER,
-        "Add servers from server",
-        CoreSettingGroup::Server,
-        true,
-        false,
-        "Accept servers advertised by the connected eD2K server.",
     ),
     boolean(
         FIELD_NETWORK_KADEMLIA,
@@ -309,7 +284,7 @@ const fn boolean(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoreSettings {
     pub upload_limit_ki_bps: u32,
     pub download_limit_ki_bps: u32,
@@ -321,12 +296,7 @@ pub struct CoreSettings {
     pub upload_slot_elastic_percent: u32,
     pub queue_size: u32,
     pub auto_connect: bool,
-    #[serde(default = "default_reconnect")]
-    pub reconnect: bool,
     pub credit_system: bool,
-    pub safe_server_connect: bool,
-    #[serde(default = "default_add_servers_from_server")]
-    pub add_servers_from_server: bool,
     pub network_kademlia: bool,
     pub network_ed2k: bool,
 }
@@ -355,13 +325,7 @@ pub struct CoreSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_connect: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reconnect: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_system: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub safe_server_connect: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub add_servers_from_server: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_kademlia: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -407,7 +371,7 @@ pub struct Ed2kSettings {
     pub safe_server_connect: bool,
     pub use_server_priorities: bool,
     pub auto_connect_static_only: bool,
-    pub keepalive_secs: u64,
+    pub server_keepalive_minutes: u64,
     pub session_rotation_secs: u64,
     pub max_concurrent_downloads: usize,
     pub max_new_connections_per_five_seconds: usize,
@@ -670,7 +634,7 @@ pub struct Ed2kSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_connect_static_only: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keepalive_secs: Option<u64>,
+    pub server_keepalive_minutes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_rotation_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -903,10 +867,7 @@ pub fn default_core_settings() -> CoreSettings {
         upload_slot_elastic_percent: 80,
         queue_size: 10000,
         auto_connect: true,
-        reconnect: true,
         credit_system: true,
-        safe_server_connect: true,
-        add_servers_from_server: true,
         network_kademlia: true,
         network_ed2k: true,
     }
@@ -938,10 +899,10 @@ impl Default for Ed2kSettings {
             callback_timeout_secs: 45,
             reconnect_interval_secs: 30,
             reconnect_enabled: true,
-            safe_server_connect: true,
+            safe_server_connect: false,
             use_server_priorities: true,
             auto_connect_static_only: false,
-            keepalive_secs: 20 * 60,
+            server_keepalive_minutes: 0,
             session_rotation_secs: 0,
             max_concurrent_downloads: 500,
             max_new_connections_per_five_seconds: 50,
@@ -1198,10 +1159,7 @@ pub fn core_settings_update_is_empty(update: &CoreSettingsUpdate) -> bool {
         && update.upload_slot_elastic_percent.is_none()
         && update.queue_size.is_none()
         && update.auto_connect.is_none()
-        && update.reconnect.is_none()
         && update.credit_system.is_none()
-        && update.safe_server_connect.is_none()
-        && update.add_servers_from_server.is_none()
         && update.network_kademlia.is_none()
         && update.network_ed2k.is_none()
 }
@@ -1242,7 +1200,7 @@ impl Ed2kSettingsUpdate {
             && self.reconnect_interval_secs.is_none()
             && self.reconnect_enabled.is_none()
             && self.safe_server_connect.is_none()
-            && self.keepalive_secs.is_none()
+            && self.server_keepalive_minutes.is_none()
             && self.session_rotation_secs.is_none()
             && self.max_concurrent_downloads.is_none()
             && self.max_new_connections_per_five_seconds.is_none()
@@ -1375,6 +1333,11 @@ fn apply_hostname_lookup_settings_update(
 }
 
 pub fn validate_ed2k_settings(settings: &Ed2kSettings) -> Result<(), CoreSettingValidationError> {
+    if settings.server_keepalive_minutes > MAX_SERVER_KEEPALIVE_MINUTES {
+        return Err(CoreSettingValidationError::new(format!(
+            "serverKeepaliveMinutes must be in the range 0..{MAX_SERVER_KEEPALIVE_MINUTES}"
+        )));
+    }
     validate_free_space_floor(
         "minFreeConfigSpaceBytes",
         settings.min_free_config_space_bytes,
@@ -1470,8 +1433,8 @@ fn apply_ed2k_settings_update_unchecked(settings: &mut Ed2kSettings, update: Ed2
     if let Some(value) = update.auto_connect_static_only {
         settings.auto_connect_static_only = value;
     }
-    if let Some(value) = update.keepalive_secs {
-        settings.keepalive_secs = value;
+    if let Some(value) = update.server_keepalive_minutes {
+        settings.server_keepalive_minutes = value;
     }
     if let Some(value) = update.session_rotation_secs {
         settings.session_rotation_secs = value;
@@ -1746,7 +1709,7 @@ impl From<Ed2kSettings> for Ed2kSettingsUpdate {
             safe_server_connect: Some(settings.safe_server_connect),
             use_server_priorities: Some(settings.use_server_priorities),
             auto_connect_static_only: Some(settings.auto_connect_static_only),
-            keepalive_secs: Some(settings.keepalive_secs),
+            server_keepalive_minutes: Some(settings.server_keepalive_minutes),
             session_rotation_secs: Some(settings.session_rotation_secs),
             max_concurrent_downloads: Some(settings.max_concurrent_downloads),
             max_new_connections_per_five_seconds: Some(
@@ -1913,17 +1876,8 @@ pub fn apply_core_settings_update(
     if let Some(value) = update.auto_connect {
         core_settings.auto_connect = value;
     }
-    if let Some(value) = update.reconnect {
-        core_settings.reconnect = value;
-    }
     if let Some(value) = update.credit_system {
         core_settings.credit_system = value;
-    }
-    if let Some(value) = update.safe_server_connect {
-        core_settings.safe_server_connect = value;
-    }
-    if let Some(value) = update.add_servers_from_server {
-        core_settings.add_servers_from_server = value;
     }
     if let Some(value) = update.network_kademlia {
         core_settings.network_kademlia = value;
@@ -1950,10 +1904,7 @@ pub fn changed_core_settings_update(
             upload_slot_elastic_percent: Some(next.upload_slot_elastic_percent),
             queue_size: Some(next.queue_size),
             auto_connect: Some(next.auto_connect),
-            reconnect: Some(next.reconnect),
             credit_system: Some(next.credit_system),
-            safe_server_connect: Some(next.safe_server_connect),
-            add_servers_from_server: Some(next.add_servers_from_server),
             network_kademlia: Some(next.network_kademlia),
             network_ed2k: Some(next.network_ed2k),
         };
@@ -1978,13 +1929,7 @@ pub fn changed_core_settings_update(
         ),
         queue_size: changed(next.queue_size, baseline.queue_size),
         auto_connect: changed(next.auto_connect, baseline.auto_connect),
-        reconnect: changed(next.reconnect, baseline.reconnect),
         credit_system: changed(next.credit_system, baseline.credit_system),
-        safe_server_connect: changed(next.safe_server_connect, baseline.safe_server_connect),
-        add_servers_from_server: changed(
-            next.add_servers_from_server,
-            baseline.add_servers_from_server,
-        ),
         network_kademlia: changed(next.network_kademlia, baseline.network_kademlia),
         network_ed2k: changed(next.network_ed2k, baseline.network_ed2k),
     }
@@ -2036,14 +1981,6 @@ pub fn derive_base_upload_slots(upload_limit_ki_bps: u32, upload_client_data_rat
         .clamp(1, 64)
 }
 
-fn default_reconnect() -> bool {
-    true
-}
-
-fn default_add_servers_from_server() -> bool {
-    true
-}
-
 fn changed<T: Copy + PartialEq>(next: T, current: T) -> Option<T> {
     (next != current).then_some(next)
 }
@@ -2058,7 +1995,6 @@ mod tests {
 
         assert_eq!(value[FIELD_UPLOAD_LIMIT_KIBPS], 6200);
         assert_eq!(value[FIELD_AUTO_CONNECT], true);
-        assert_eq!(value[FIELD_RECONNECT], true);
         assert_eq!(value.as_object().unwrap().len(), CORE_SETTING_SPECS.len());
     }
 
@@ -2088,6 +2024,62 @@ mod tests {
             MIN_FREE_INCOMING_SPACE_BYTES
         );
         validate_ed2k_settings(&settings).unwrap();
+    }
+
+    #[test]
+    fn ed2k_server_policy_uses_stock_defaults_and_keepalive_minutes_bound() {
+        let settings = Ed2kSettings::default();
+
+        assert!(settings.reconnect_enabled);
+        assert!(!settings.safe_server_connect);
+        assert!(!settings.add_servers_from_server);
+        assert_eq!(settings.server_keepalive_minutes, 0);
+        validate_ed2k_settings(&settings).unwrap();
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["serverKeepaliveMinutes"], 0);
+        assert!(value.get("keepaliveSecs").is_none());
+
+        let mut maximum = settings.clone();
+        apply_ed2k_settings_update(
+            &mut maximum,
+            Ed2kSettingsUpdate {
+                server_keepalive_minutes: Some(MAX_SERVER_KEEPALIVE_MINUTES),
+                ..Ed2kSettingsUpdate::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            maximum.server_keepalive_minutes,
+            MAX_SERVER_KEEPALIVE_MINUTES
+        );
+
+        let mut candidate = settings.clone();
+        let error = apply_ed2k_settings_update(
+            &mut candidate,
+            Ed2kSettingsUpdate {
+                server_keepalive_minutes: Some(MAX_SERVER_KEEPALIVE_MINUTES + 1),
+                ..Ed2kSettingsUpdate::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "serverKeepaliveMinutes must be in the range 0..1440"
+        );
+        assert_eq!(candidate, settings);
+    }
+
+    #[test]
+    fn ed2k_settings_reject_retired_keepalive_seconds_key() {
+        let error = serde_json::from_value::<Ed2kSettings>(serde_json::json!({
+            "keepaliveSecs": 1200
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("unknown field `keepaliveSecs`"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -2208,11 +2200,10 @@ mod tests {
     fn core_settings_roundtrip_as_scalar_rows() {
         let mut core_settings = default_core_settings();
         core_settings.download_limit_ki_bps = 2048;
-        core_settings.reconnect = false;
 
         let rows = core_settings_to_values(&core_settings).unwrap();
         assert_eq!(rows.len(), CORE_SETTING_SPECS.len());
-        assert!(rows.contains(&(FIELD_RECONNECT, "false".to_string())));
+        assert!(rows.contains(&(FIELD_DOWNLOAD_LIMIT_KIBPS, "2048".to_string())));
 
         let decoded = core_settings_from_values(
             rows.iter()
@@ -2240,6 +2231,19 @@ mod tests {
             error.to_string().contains("unknown field `maxUploadSlots`"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn core_settings_reject_retired_ed2k_server_policy_keys() {
+        for key in ["reconnect", "safeServerConnect", "addServersFromServer"] {
+            let error = core_settings_from_values([(key, "true")]).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown field `{key}`")),
+                "unexpected error for {key}: {error}"
+            );
+        }
     }
 
     #[test]

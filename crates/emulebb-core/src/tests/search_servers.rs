@@ -840,39 +840,20 @@ async fn server_update_reenables_disabled_runtime_servers() {
 }
 
 #[tokio::test]
-async fn effective_ed2k_config_honors_reconnect_core_setting() {
+async fn effective_ed2k_config_preserves_ed2k_owned_server_policy() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.update_core_settings(CoreSettingsUpdate {
-        reconnect: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
-    .unwrap();
+    let base = Ed2kRuntimeConfig {
+        reconnect_enabled: false,
+        safe_server_connect: true,
+        add_servers_from_server: true,
+        ..Ed2kRuntimeConfig::default()
+    };
 
-    let config = core
-        .effective_ed2k_config(&Ed2kRuntimeConfig::default())
-        .await
-        .unwrap();
+    let config = core.effective_ed2k_config(&base).await.unwrap();
 
     assert!(!config.reconnect_enabled);
-}
-
-#[tokio::test]
-async fn effective_ed2k_config_honors_safe_server_connect_core_setting() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.update_core_settings(CoreSettingsUpdate {
-        safe_server_connect: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
-    .unwrap();
-
-    let config = core
-        .effective_ed2k_config(&Ed2kRuntimeConfig::default())
-        .await
-        .unwrap();
-
-    assert!(!config.safe_server_connect);
+    assert!(config.safe_server_connect);
+    assert!(config.add_servers_from_server);
 }
 
 #[tokio::test]
@@ -1229,13 +1210,15 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
 }
 
 #[tokio::test]
-async fn core_connection_settings_publish_one_coherent_plan_generation() {
+async fn core_settings_do_not_republish_or_overwrite_ed2k_server_policy() {
     let transfer_root = unique_runtime_dir("emulebb-core-settings-live-plan");
-    let network = test_network_config_with_store(
+    let mut network = test_network_config_with_store(
         &transfer_root,
         KadLocalStoreConfig::default(),
         SnoopQueueConfig::default(),
     );
+    network.ed2k.reconnect_enabled = false;
+    network.ed2k.safe_server_connect = true;
     let core = EmulebbCore::new_with_network(
         "test",
         FileIndex::in_memory().unwrap(),
@@ -1251,22 +1234,21 @@ async fn core_connection_settings_publish_one_coherent_plan_generation() {
     .await;
 
     core.update_core_settings(CoreSettingsUpdate {
-        reconnect: Some(false),
-        safe_server_connect: Some(false),
+        max_connections: Some(321),
         ..CoreSettingsUpdate::default()
     })
     .await
     .unwrap();
 
-    let updated = wait_for_server_plan_update(&mut plan_rx).await;
-    assert!(!updated.config().reconnect_enabled);
-    assert!(!updated.config().safe_server_connect);
     assert!(
         tokio::time::timeout(Duration::from_millis(50), plan_rx.changed())
             .await
             .is_err(),
-        "one settings transaction should publish exactly one coherent plan"
+        "unrelated core settings must not republish the ED2K server plan"
     );
+    let unchanged = plan_rx.borrow().clone();
+    assert!(!unchanged.config().reconnect_enabled);
+    assert!(unchanged.config().safe_server_connect);
 
     let _ = core.disconnect_ed2k().await;
 }
@@ -1491,7 +1473,20 @@ async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
 
 #[tokio::test]
 async fn merge_discovered_servers_adds_new_dedups_existing() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let transfer_root = unique_runtime_dir("emulebb-core-discovered-server-add");
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.ed2k.add_servers_from_server = true;
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
+    .unwrap();
     core.add_server(ServerCreate {
         address: "45.82.80.155".to_string(),
         port: 5687,
@@ -1525,15 +1520,20 @@ async fn merge_discovered_servers_adds_new_dedups_existing() {
 }
 
 #[tokio::test]
-async fn merge_discovered_servers_respects_add_servers_from_server_core_setting() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    // eMule GetAddServersFromServer default is on; turning it off must stop
-    // OP_SERVERLIST auto-add.
-    core.update_core_settings(CoreSettingsUpdate {
-        add_servers_from_server: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
+async fn merge_discovered_servers_respects_ed2k_owned_add_servers_policy() {
+    let transfer_root = unique_runtime_dir("emulebb-core-discovered-server-disabled");
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.ed2k.add_servers_from_server = false;
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
     .unwrap();
     core.merge_discovered_ed2k_servers(vec![(Ipv4Addr::new(203, 0, 113, 9), 4661)])
         .await;

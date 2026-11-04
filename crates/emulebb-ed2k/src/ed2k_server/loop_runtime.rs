@@ -1125,7 +1125,7 @@ mod tests {
             server_connect_timeout_secs: 2,
             reconnect_interval_secs: 60,
             safe_server_connect,
-            keepalive_secs: 0,
+            server_keepalive_minutes: 0,
             ..Ed2kRuntimeConfig::default()
         }
     }

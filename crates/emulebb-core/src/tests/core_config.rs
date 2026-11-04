@@ -187,17 +187,22 @@ async fn default_core_settings_match_the_master() {
     assert_eq!(core_settings.upload_slot_elastic_percent, 80);
     assert_eq!(core_settings.queue_size, 10000);
     assert!(core_settings.auto_connect);
-    assert!(core_settings.reconnect);
 }
 
 #[test]
-fn core_settings_json_without_reconnect_defaults_to_enabled() {
-    let mut value = serde_json::to_value(default_core_settings()).unwrap();
-    value.as_object_mut().unwrap().remove("reconnect");
+fn core_settings_json_rejects_retired_ed2k_server_policy_keys() {
+    for key in ["reconnect", "safeServerConnect", "addServersFromServer"] {
+        let mut value = serde_json::to_value(default_core_settings()).unwrap();
+        value[key] = serde_json::json!(true);
 
-    let core_settings: CoreSettings = serde_json::from_value(value).unwrap();
-
-    assert!(core_settings.reconnect);
+        let error = serde_json::from_value::<CoreSettings>(value).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unknown field `{key}`")),
+            "unexpected error for {key}: {error}"
+        );
+    }
 }
 
 #[tokio::test]

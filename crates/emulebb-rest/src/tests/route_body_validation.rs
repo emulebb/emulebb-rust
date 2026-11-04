@@ -335,10 +335,17 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             r#"{"core":{"queueSize":1999}}"#,
             "queueSize must be an unsigned number in the range 2000..10000",
         ),
-        (r#"{"core":{"reconnect":1}}"#, "reconnect must be a boolean"),
         (
-            r#"{"core":{"addServersFromServer":1}}"#,
-            "addServersFromServer must be a boolean",
+            r#"{"core":{"reconnect":true}}"#,
+            "unknown settings.core field: reconnect",
+        ),
+        (
+            r#"{"core":{"safeServerConnect":true}}"#,
+            "unknown settings.core field: safeServerConnect",
+        ),
+        (
+            r#"{"core":{"addServersFromServer":true}}"#,
+            "unknown settings.core field: addServersFromServer",
         ),
         (
             r#"{"core":{"networkEd2k":"false"}}"#,
@@ -448,6 +455,30 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         (
             r#"{"ed2k":{"listenPort":"4662"}}"#,
             "settings.ed2k.listenPort must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"keepaliveSecs":1200}}"#,
+            "unknown settings.ed2k field: keepaliveSecs",
+        ),
+        (
+            r#"{"ed2k":{"serverKeepaliveMinutes":1441}}"#,
+            "settings.ed2k.serverKeepaliveMinutes must be an unsigned number in the range 0..1440",
+        ),
+        (
+            r#"{"ed2k":{"serverKeepaliveMinutes":"20"}}"#,
+            "settings.ed2k.serverKeepaliveMinutes must be an unsigned number in the range 0..1440",
+        ),
+        (
+            r#"{"ed2k":{"reconnectEnabled":1}}"#,
+            "reconnectEnabled must be a boolean",
+        ),
+        (
+            r#"{"ed2k":{"safeServerConnect":1}}"#,
+            "safeServerConnect must be a boolean",
+        ),
+        (
+            r#"{"ed2k":{"addServersFromServer":1}}"#,
+            "addServersFromServer must be a boolean",
         ),
         (
             r#"{"ed2k":{"maxParallelDownloadPeers":0}}"#,

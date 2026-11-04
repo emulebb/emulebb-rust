@@ -2753,10 +2753,7 @@ type SettingsForm = {
   uploadSlotElasticPercent: string;
   queueSize: string;
   autoConnect: boolean;
-  reconnect: boolean;
   creditSystem: boolean;
-  safeServerConnect: boolean;
-  addServersFromServer: boolean;
   networkKademlia: boolean;
   networkEd2k: boolean;
   incomingDir: string;
@@ -2773,7 +2770,7 @@ type SettingsForm = {
   ed2kServerConnectTimeoutSecs: string;
   ed2kCallbackTimeoutSecs: string;
   ed2kReconnectIntervalSecs: string;
-  ed2kKeepaliveSecs: string;
+  ed2kServerKeepaliveMinutes: string;
   ed2kDeadServerRetries: string;
   ed2kSessionRotationSecs: string;
   ed2kMaxConcurrentDownloads: string;
@@ -2797,6 +2794,8 @@ type SettingsForm = {
   kadListenPort: string;
   obfuscationEnabled: boolean;
   ed2kReconnectEnabled: boolean;
+  ed2kSafeServerConnect: boolean;
+  ed2kAddServersFromServer: boolean;
   useServerPriorities: boolean;
   autoConnectStaticOnly: boolean;
   enableUdpReask: boolean;
@@ -2862,10 +2861,7 @@ const emptySettingsForm: SettingsForm = {
   uploadSlotElasticPercent: "",
   queueSize: "",
   autoConnect: false,
-  reconnect: false,
   creditSystem: false,
-  safeServerConnect: false,
-  addServersFromServer: false,
   networkKademlia: false,
   networkEd2k: false,
   incomingDir: "",
@@ -2882,7 +2878,7 @@ const emptySettingsForm: SettingsForm = {
   ed2kServerConnectTimeoutSecs: "",
   ed2kCallbackTimeoutSecs: "",
   ed2kReconnectIntervalSecs: "",
-  ed2kKeepaliveSecs: "",
+  ed2kServerKeepaliveMinutes: "",
   ed2kDeadServerRetries: "",
   ed2kSessionRotationSecs: "",
   ed2kMaxConcurrentDownloads: "",
@@ -2906,6 +2902,8 @@ const emptySettingsForm: SettingsForm = {
   kadListenPort: "",
   obfuscationEnabled: false,
   ed2kReconnectEnabled: false,
+  ed2kSafeServerConnect: false,
+  ed2kAddServersFromServer: false,
   useServerPriorities: false,
   autoConnectStaticOnly: false,
   enableUdpReask: false,
@@ -3104,7 +3102,6 @@ export function SettingsView(props: {
           "ed2k.listenPort",
           "ed2k.nickname",
           "ed2k.connectTimeoutSecs",
-          "ed2k.keepaliveSecs",
           "ed2k.maxNewConnectionsPerFiveSeconds",
           "ed2k.maxHalfOpenConnections",
           "kad.listenPort",
@@ -3127,7 +3124,6 @@ export function SettingsView(props: {
               {renderField("ed2k.listenPort", "ed2kListenPort", "eD2K listen port")}
               {renderField("ed2k.nickname", "ed2kNickname", "eD2K nickname")}
               {renderField("ed2k.connectTimeoutSecs", "ed2kConnectTimeoutSecs", "eD2K connect timeout seconds")}
-              {renderField("ed2k.keepaliveSecs", "ed2kKeepaliveSecs", "eD2K keepalive seconds")}
               {renderField("ed2k.maxNewConnectionsPerFiveSeconds", "ed2kMaxNewConnectionsPerFiveSeconds", "eD2K new connections / 5s")}
               {renderField("ed2k.maxHalfOpenConnections", "ed2kMaxHalfOpenConnections", "eD2K half-open connections")}
               {renderField("kad.listenPort", "kadListenPort", "Kad listen port")}
@@ -3158,29 +3154,29 @@ export function SettingsView(props: {
         )}
         {sectionVisible([
           "core.autoConnect",
-          "core.reconnect",
-          "core.safeServerConnect",
-          "core.addServersFromServer",
           "ed2k.reconnectEnabled",
+          "ed2k.safeServerConnect",
+          "ed2k.addServersFromServer",
           "ed2k.useServerPriorities",
           "ed2k.autoConnectStaticOnly",
           "ed2k.serverConnectTimeoutSecs",
           "ed2k.callbackTimeoutSecs",
           "ed2k.reconnectIntervalSecs",
+          "ed2k.serverKeepaliveMinutes",
           "ed2k.deadServerRetries"
         ]) && (
           <SettingsControlSection title="Servers">
             <div class="settings-grid">
               {renderToggle("core.autoConnect", "autoConnect", "Auto connect")}
-              {renderToggle("core.reconnect", "reconnect", "Reconnect")}
-              {renderToggle("core.safeServerConnect", "safeServerConnect", "Safe server connect")}
-              {renderToggle("core.addServersFromServer", "addServersFromServer", "Add servers from server")}
-              {renderToggle("ed2k.reconnectEnabled", "ed2kReconnectEnabled", "eD2K reconnect")}
+              {renderToggle("ed2k.reconnectEnabled", "ed2kReconnectEnabled", "Reconnect after disconnect")}
+              {renderToggle("ed2k.safeServerConnect", "ed2kSafeServerConnect", "Safe server connect")}
+              {renderToggle("ed2k.addServersFromServer", "ed2kAddServersFromServer", "Add servers from server")}
               {renderToggle("ed2k.useServerPriorities", "useServerPriorities", "Use server priorities")}
               {renderToggle("ed2k.autoConnectStaticOnly", "autoConnectStaticOnly", "Auto-connect static servers only")}
               {renderField("ed2k.serverConnectTimeoutSecs", "ed2kServerConnectTimeoutSecs", "Server connect timeout seconds")}
               {renderField("ed2k.callbackTimeoutSecs", "ed2kCallbackTimeoutSecs", "Callback timeout seconds")}
               {renderField("ed2k.reconnectIntervalSecs", "ed2kReconnectIntervalSecs", "Reconnect interval seconds")}
+              {renderField("ed2k.serverKeepaliveMinutes", "ed2kServerKeepaliveMinutes", "Server keepalive minutes")}
               {renderField("ed2k.deadServerRetries", "ed2kDeadServerRetries", "Dead server retries")}
             </div>
           </SettingsControlSection>
@@ -3492,7 +3488,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kServerConnectTimeoutSecs", "Server connect timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kCallbackTimeoutSecs", "Callback timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kReconnectIntervalSecs", "Reconnect interval seconds", { min: 1 });
-  validateUnsigned(errors, form, "ed2kKeepaliveSecs", "eD2K keepalive seconds", {});
+  validateUnsigned(errors, form, "ed2kServerKeepaliveMinutes", "Server keepalive minutes", { min: 0, max: 1440 });
   validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", { min: 1, max: 10 });
   validateUnsigned(errors, form, "ed2kSessionRotationSecs", "Session rotation seconds", {});
   validateUnsigned(errors, form, "ed2kMaxConcurrentDownloads", "Concurrent downloads", {});
@@ -3681,10 +3677,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(core, "uploadSlotElasticPercent", parseNumber(form.uploadSlotElasticPercent), parseNumber(baseline.uploadSlotElasticPercent));
   putChanged(core, "queueSize", parseNumber(form.queueSize), parseNumber(baseline.queueSize));
   putChanged(core, "autoConnect", form.autoConnect, baseline.autoConnect);
-  putChanged(core, "reconnect", form.reconnect, baseline.reconnect);
   putChanged(core, "creditSystem", form.creditSystem, baseline.creditSystem);
-  putChanged(core, "safeServerConnect", form.safeServerConnect, baseline.safeServerConnect);
-  putChanged(core, "addServersFromServer", form.addServersFromServer, baseline.addServersFromServer);
   putChanged(core, "networkKademlia", form.networkKademlia, baseline.networkKademlia);
   putChanged(core, "networkEd2k", form.networkEd2k, baseline.networkEd2k);
 
@@ -3718,7 +3711,7 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(ed2k, "serverConnectTimeoutSecs", parseNumber(form.ed2kServerConnectTimeoutSecs), parseNumber(baseline.ed2kServerConnectTimeoutSecs));
   putChanged(ed2k, "callbackTimeoutSecs", parseNumber(form.ed2kCallbackTimeoutSecs), parseNumber(baseline.ed2kCallbackTimeoutSecs));
   putChanged(ed2k, "reconnectIntervalSecs", parseNumber(form.ed2kReconnectIntervalSecs), parseNumber(baseline.ed2kReconnectIntervalSecs));
-  putChanged(ed2k, "keepaliveSecs", parseNumber(form.ed2kKeepaliveSecs), parseNumber(baseline.ed2kKeepaliveSecs));
+  putChanged(ed2k, "serverKeepaliveMinutes", parseNumber(form.ed2kServerKeepaliveMinutes), parseNumber(baseline.ed2kServerKeepaliveMinutes));
   putChanged(ed2k, "sessionRotationSecs", parseNumber(form.ed2kSessionRotationSecs), parseNumber(baseline.ed2kSessionRotationSecs));
   putChanged(ed2k, "maxConcurrentDownloads", parseNumber(form.ed2kMaxConcurrentDownloads), parseNumber(baseline.ed2kMaxConcurrentDownloads));
   putChanged(ed2k, "maxNewConnectionsPerFiveSeconds", parseNumber(form.ed2kMaxNewConnectionsPerFiveSeconds), parseNumber(baseline.ed2kMaxNewConnectionsPerFiveSeconds));
@@ -3734,6 +3727,8 @@ function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): App
   putChanged(ed2k, "minFreeIncomingSpaceBytes", parseNumber(form.ed2kMinFreeIncomingSpaceBytes), parseNumber(baseline.ed2kMinFreeIncomingSpaceBytes));
   putChanged(ed2k, "obfuscationEnabled", form.obfuscationEnabled, baseline.obfuscationEnabled);
   putChanged(ed2k, "reconnectEnabled", form.ed2kReconnectEnabled, baseline.ed2kReconnectEnabled);
+  putChanged(ed2k, "safeServerConnect", form.ed2kSafeServerConnect, baseline.ed2kSafeServerConnect);
+  putChanged(ed2k, "addServersFromServer", form.ed2kAddServersFromServer, baseline.ed2kAddServersFromServer);
   putChanged(ed2k, "useServerPriorities", form.useServerPriorities, baseline.useServerPriorities);
   putChanged(ed2k, "autoConnectStaticOnly", form.autoConnectStaticOnly, baseline.autoConnectStaticOnly);
   putChanged(ed2k, "enableUdpReask", form.enableUdpReask, baseline.enableUdpReask);
@@ -3838,10 +3833,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     uploadSlotElasticPercent: String(numberField(settings.core, "uploadSlotElasticPercent") ?? ""),
     queueSize: String(numberField(settings.core, "queueSize") ?? ""),
     autoConnect: boolField(settings.core, "autoConnect"),
-    reconnect: boolField(settings.core, "reconnect"),
     creditSystem: boolField(settings.core, "creditSystem"),
-    safeServerConnect: boolField(settings.core, "safeServerConnect"),
-    addServersFromServer: boolField(settings.core, "addServersFromServer"),
     networkKademlia: boolField(settings.core, "networkKademlia"),
     networkEd2k: boolField(settings.core, "networkEd2k"),
     incomingDir: stringField(settings.daemon, "incomingDir"),
@@ -3858,7 +3850,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kServerConnectTimeoutSecs: String(numberField(settings.ed2k, "serverConnectTimeoutSecs") ?? ""),
     ed2kCallbackTimeoutSecs: String(numberField(settings.ed2k, "callbackTimeoutSecs") ?? ""),
     ed2kReconnectIntervalSecs: String(numberField(settings.ed2k, "reconnectIntervalSecs") ?? ""),
-    ed2kKeepaliveSecs: String(numberField(settings.ed2k, "keepaliveSecs") ?? ""),
+    ed2kServerKeepaliveMinutes: String(numberField(settings.ed2k, "serverKeepaliveMinutes") ?? ""),
     ed2kDeadServerRetries: String(numberField(settings.ed2k, "deadServerRetries") ?? ""),
     ed2kSessionRotationSecs: String(numberField(settings.ed2k, "sessionRotationSecs") ?? ""),
     ed2kMaxConcurrentDownloads: String(numberField(settings.ed2k, "maxConcurrentDownloads") ?? ""),
@@ -3882,6 +3874,8 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     kadListenPort: String(numberField(settings.kad, "listenPort") ?? ""),
     obfuscationEnabled: boolField(settings.ed2k, "obfuscationEnabled"),
     ed2kReconnectEnabled: boolField(settings.ed2k, "reconnectEnabled"),
+    ed2kSafeServerConnect: boolField(settings.ed2k, "safeServerConnect"),
+    ed2kAddServersFromServer: boolField(settings.ed2k, "addServersFromServer"),
     useServerPriorities: boolField(settings.ed2k, "useServerPriorities"),
     autoConnectStaticOnly: boolField(settings.ed2k, "autoConnectStaticOnly"),
     enableUdpReask: boolField(settings.ed2k, "enableUdpReask"),

@@ -85,8 +85,6 @@ impl EmulebbCore {
     ) -> Result<Ed2kRuntimeConfig> {
         let mut config = base.clone();
         let state = self.state.lock().await;
-        config.reconnect_enabled = state.core_settings.reconnect;
-        config.safe_server_connect = state.core_settings.safe_server_connect;
         config.server_entries.retain(|entry| {
             let endpoint = format!("{}:{}", entry.host, entry.port);
             !state.disabled_servers.contains(&endpoint)

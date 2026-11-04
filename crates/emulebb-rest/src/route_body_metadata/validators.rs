@@ -40,7 +40,7 @@ const ED2K_SETTINGS_FIELDS: &[&str] = &[
     "safeServerConnect",
     "useServerPriorities",
     "autoConnectStaticOnly",
-    "keepaliveSecs",
+    "serverKeepaliveMinutes",
     "sessionRotationSecs",
     "maxConcurrentDownloads",
     "maxNewConnectionsPerFiveSeconds",
@@ -315,6 +315,16 @@ fn validate_ed2k_settings_patch_body_fields(object: &JsonObject) -> Result<(), B
             ));
         }
     }
+    validate_optional_boolean_body_field(object, "reconnectEnabled")?;
+    validate_optional_boolean_body_field(object, "safeServerConnect")?;
+    validate_optional_boolean_body_field(object, "addServersFromServer")?;
+    validate_unsigned_number_range(
+        object,
+        "serverKeepaliveMinutes",
+        "settings.ed2k.serverKeepaliveMinutes",
+        0,
+        1_440,
+    )?;
     validate_unsigned_number_min(
         object,
         "maxParallelDownloadPeers",
