@@ -3,6 +3,7 @@ use crate::obfuscation::ObfuscationLayer;
 use crate::transport::MockTransport;
 use std::sync::Arc;
 
+mod admission;
 mod flood_observability;
 mod foreign_datagram;
 mod obfuscation;

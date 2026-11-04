@@ -55,6 +55,14 @@ async fn unsolicited_flood_does_not_consume_registered_response_budget() {
     }
     wait_for_dropped_search_responses(&rpc, 8).await;
 
+    let rejected_state = rpc
+        .inner
+        .obfuscation
+        .inspect_outbound(endpoint, opcode::PING);
+    assert_eq!(rejected_state.peer_node_id, None);
+    assert_eq!(rejected_state.peer_kad_version, None);
+    assert_eq!(rejected_state.receiver_verify_key, None);
+
     assert!(
         rpc.observability()
             .tracker_buckets
@@ -71,6 +79,14 @@ async fn unsolicited_flood_does_not_consume_registered_response_budget() {
         .expect("broadcast remains open");
     assert_eq!(received.from, endpoint);
     assert!(matches!(received.packet, KadPacket::SearchRes(response) if response.target == target));
+    let accepted_state = rpc
+        .inner
+        .obfuscation
+        .inspect_outbound(endpoint, opcode::PING);
+    assert_eq!(
+        accepted_state.peer_node_id,
+        Some(NodeId::from_bytes([0x44; 16]))
+    );
 
     let search_res_bucket = rpc
         .observability()

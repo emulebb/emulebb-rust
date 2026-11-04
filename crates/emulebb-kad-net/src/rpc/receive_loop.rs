@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use emulebb_kad_proto::KadPacket;
@@ -8,7 +10,7 @@ use super::packet_info::{
     opcode_name, search_response_target, should_learn_sender_verify_key,
     should_log_unsolicited_opcode, tracked_request_opcode_for_response,
 };
-use super::{ReceivedKadPacket, RpcManager};
+use super::{PendingEntry, ReceivedKadPacket, RpcManager};
 use crate::error::NetError;
 use crate::obfuscation::DecryptResult;
 use crate::tracker::{PacketTrackerAction, PacketTrackerBucket, PacketTrackerKey};
@@ -32,11 +34,10 @@ impl RpcManager {
                         debug!("packet from {} was_obfuscated={}", from, was_obfuscated);
 
                         // DNS-confusion hardening (oracle KademliaUDPListener.cpp:250):
-                        // drop an unencrypted Kad datagram whose SOURCE UDP port is 53
-                        // and that carries no sender key. Such a packet is a
-                        // reflected/forged DNS response, never a real Kad message; an
-                        // obfuscated packet (or one proving a key) is exempt.
-                        if from.port() == 53 && !was_obfuscated && sender_verify_key.is_none() {
+                        // drop a Kad datagram whose SOURCE UDP port is 53 unless it
+                        // carries a nonzero sender key. The encrypted envelope may
+                        // contain an explicit zero, which stock still treats as no key.
+                        if should_drop_sender_port_53(from, sender_verify_key) {
                             debug!("kad recv drop reason=sender_port_53 from={from}");
                             dump_kad_udp_packet(
                                 "recv",
@@ -157,37 +158,48 @@ impl RpcManager {
                             continue;
                         }
 
-                        if let Some(peer_id) = inbound.peer_id {
-                            inner.obfuscation.register_peer_identity(from, peer_id);
-                        }
-                        if let Some(kad_version) = inbound.kad_version {
-                            inner.obfuscation.register_peer_version(from, kad_version);
-                        }
-                        if should_learn_sender_verify_key(response_opcode)
-                            && let Some(sender_verify_key) = sender_verify_key
-                        {
-                            inner.obfuscation.register_peer_key(from, sender_verify_key);
-                        }
-
-                        debug!(
-                            "kad recv opcode={} from={} obfuscated={} receiver_key_valid={} sender_verify_key={} bucket={} peer_id={} peer_version={}",
-                            opcode_name(response_opcode),
-                            from,
-                            was_obfuscated,
-                            receiver_verify_key_valid,
-                            sender_verify_key.unwrap_or_default(),
-                            inbound
-                                .tracker_bucket
-                                .map(PacketTrackerBucket::label)
-                                .unwrap_or("-"),
-                            inbound
-                                .peer_id
-                                .map(|peer_id| peer_id.to_string())
-                                .unwrap_or_else(|| "-".to_string()),
-                            inbound
-                                .kad_version
-                                .map_or_else(|| "-".to_string(), |version| version.to_string()),
+                        // Validate response correlation without consuming either
+                        // request tracker. Rejected/spoofed replies must not spend
+                        // the legitimate sender's flood budget or pending request.
+                        let pending_correlation = {
+                            let pending = inner.pending.lock();
+                            find_pending_correlation(&pending, from, response_opcode)
+                        };
+                        let tracked_correlation = tracked_request_opcode_for_response(
+                            &inner.outbound_tracker,
+                            from.ip(),
+                            response_opcode,
+                            false,
                         );
+                        if is_tracked_response_opcode(response_opcode)
+                            && pending_correlation.is_none()
+                            && tracked_correlation.is_none()
+                        {
+                            inner
+                                .observability
+                                .lock()
+                                .record_response_dropped_unrequested(response_opcode);
+                            let mut dump_summary = inbound_dump_summary(
+                                &plain,
+                                Some(response_opcode),
+                                was_obfuscated,
+                                sender_verify_key,
+                                receiver_verify_key_valid,
+                                Some("unrequested_response"),
+                                None,
+                            );
+                            dump_summary.tracker_bucket =
+                                inbound.tracker_bucket.map(PacketTrackerBucket::label);
+                            dump_kad_udp_packet("recv", from, &data, &plain, dump_summary);
+                            debug!(
+                                "kad recv dropping-unrequested-response opcode={} from={} obfuscated={} sender_verify_key={}",
+                                opcode_name(response_opcode),
+                                from,
+                                was_obfuscated,
+                                sender_verify_key.unwrap_or_default(),
+                            );
+                            continue;
+                        }
 
                         // LAN/loopback peers are exempt from the inbound flood
                         // guard: the anti-flood + per-IP ban is a public-network
@@ -325,29 +337,43 @@ impl RpcManager {
                             }
                         }
 
-                        let matched = {
+                        // Admission succeeded. Only now may the packet teach peer
+                        // metadata or consume correlation state.
+                        if let Some(peer_id) = inbound.peer_id {
+                            inner.obfuscation.register_peer_identity(from, peer_id);
+                        }
+                        if let Some(kad_version) = inbound.kad_version {
+                            inner.obfuscation.register_peer_version(from, kad_version);
+                        }
+                        if should_learn_sender_verify_key(response_opcode)
+                            && let Some(sender_verify_key) = sender_verify_key
+                        {
+                            inner.obfuscation.register_peer_key(from, sender_verify_key);
+                        }
+
+                        debug!(
+                            "kad recv opcode={} from={} obfuscated={} receiver_key_valid={} sender_verify_key={} bucket={} peer_id={} peer_version={}",
+                            opcode_name(response_opcode),
+                            from,
+                            was_obfuscated,
+                            receiver_verify_key_valid,
+                            sender_verify_key.unwrap_or_default(),
+                            inbound
+                                .tracker_bucket
+                                .map(PacketTrackerBucket::label)
+                                .unwrap_or("-"),
+                            inbound
+                                .peer_id
+                                .map(|peer_id| peer_id.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                            inbound
+                                .kad_version
+                                .map_or_else(|| "-".to_string(), |version| version.to_string()),
+                        );
+
+                        let matched = pending_correlation.and_then(|correlation| {
                             let mut pending = inner.pending.lock();
-                            let exact_match_id = pending
-                                .iter()
-                                .filter(|(_, e)| {
-                                    e.remote_addr == from && e.expected_opcode == response_opcode
-                                })
-                                .min_by_key(|(_, e)| e.created_at)
-                                .map(|(id, _)| *id);
-
-                            let ip_only_match_id = exact_match_id.or_else(|| {
-                                pending
-                                    .iter()
-                                    .filter(|(_, e)| {
-                                        e.remote_addr.ip() == from.ip()
-                                            && e.expected_opcode == response_opcode
-                                    })
-                                    .min_by_key(|(_, e)| e.created_at)
-                                    .map(|(id, _)| *id)
-                            });
-
-                            if let Some(id) = ip_only_match_id {
-                                let entry = pending.remove(&id).unwrap();
+                            if let Some(entry) = pending.remove(&correlation.id) {
                                 let age_ms = entry.created_at.elapsed().as_millis();
                                 let matched_by_ip_only = entry.remote_addr != from;
                                 debug!(
@@ -359,7 +385,7 @@ impl RpcManager {
                                 {
                                     debug!(
                                         "kad publish pending match pending_id={} request_opcode={} response_opcode={} from={} age_ms={}",
-                                        id,
+                                        correlation.id,
                                         opcode_name(entry.request_opcode),
                                         opcode_name(response_opcode),
                                         from,
@@ -367,29 +393,37 @@ impl RpcManager {
                                     );
                                 }
                                 super::outbound::emit_rpc_terminal(
-                                    id,
+                                    correlation.id,
                                     &entry,
                                     Some(response_opcode),
                                     "response",
                                     None,
                                 );
                                 let _ = entry.tx.send(packet.clone());
-                                Some((id, age_ms, entry.request_opcode, matched_by_ip_only))
+                                Some((
+                                    correlation.id,
+                                    age_ms,
+                                    entry.request_opcode,
+                                    matched_by_ip_only,
+                                ))
                             } else {
                                 None
                             }
-                        };
+                        });
 
                         let tracked_request_opcode = tracked_request_opcode_for_response(
                             &inner.outbound_tracker,
                             from.ip(),
                             response_opcode,
-                        );
+                            true,
+                        )
+                        .or(tracked_correlation);
                         let dump_request_opcode = matched
                             .map(|(_, _, request_opcode, _)| request_opcode)
-                            .or(tracked_request_opcode);
+                            .or(tracked_request_opcode)
+                            .or(pending_correlation.map(|correlation| correlation.request_opcode));
 
-                        let mut dump_summary = KadUdpDumpSummary {
+                        let dump_summary = KadUdpDumpSummary {
                             request_id: matched.map(|(id, _, _, _)| id),
                             protocol: plain.first().copied(),
                             opcode: Some(response_opcode),
@@ -435,24 +469,6 @@ impl RpcManager {
                         }
 
                         if matched.is_none() {
-                            if is_tracked_response_opcode(response_opcode)
-                                && tracked_request_opcode.is_none()
-                            {
-                                inner
-                                    .observability
-                                    .lock()
-                                    .record_response_dropped_unrequested(response_opcode);
-                                dump_summary.drop_reason = Some("unrequested_response");
-                                dump_kad_udp_packet("recv", from, &data, &plain, dump_summary);
-                                debug!(
-                                    "kad recv dropping-unrequested-response opcode={} from={} obfuscated={} sender_verify_key={}",
-                                    opcode_name(response_opcode),
-                                    from,
-                                    was_obfuscated,
-                                    sender_verify_key.unwrap_or_default(),
-                                );
-                                continue;
-                            }
                             if is_tracked_response_opcode(response_opcode) {
                                 inner
                                     .observability
@@ -514,6 +530,39 @@ impl RpcManager {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PendingCorrelation {
+    id: u64,
+    request_opcode: u8,
+}
+
+fn find_pending_correlation(
+    pending: &HashMap<u64, PendingEntry>,
+    from: SocketAddr,
+    response_opcode: u8,
+) -> Option<PendingCorrelation> {
+    let exact = pending
+        .iter()
+        .filter(|(_, entry)| entry.remote_addr == from && entry.expected_opcode == response_opcode)
+        .min_by_key(|(_, entry)| entry.created_at);
+    let matched = exact.or_else(|| {
+        pending
+            .iter()
+            .filter(|(_, entry)| {
+                entry.remote_addr.ip() == from.ip() && entry.expected_opcode == response_opcode
+            })
+            .min_by_key(|(_, entry)| entry.created_at)
+    });
+    matched.map(|(id, entry)| PendingCorrelation {
+        id: *id,
+        request_opcode: entry.request_opcode,
+    })
+}
+
+fn should_drop_sender_port_53(from: SocketAddr, sender_verify_key: Option<u32>) -> bool {
+    from.port() == 53 && sender_verify_key.is_none_or(|key| key == 0)
+}
+
 fn inbound_dump_summary(
     plain: &[u8],
     opcode: Option<u8>,
@@ -568,8 +617,8 @@ fn is_lan_ip(ip: std::net::IpAddr) -> bool {
 
 #[cfg(test)]
 mod lan_exempt_tests {
-    use super::{inbound_dump_summary, is_lan_ip};
-    use std::net::IpAddr;
+    use super::{inbound_dump_summary, is_lan_ip, should_drop_sender_port_53};
+    use std::net::{IpAddr, SocketAddr};
 
     #[test]
     fn loopback_and_private_are_lan_public_is_not() {
@@ -600,5 +649,18 @@ mod lan_exempt_tests {
         assert_eq!(summary.sender_verify_key, Some(123));
         assert_eq!(summary.drop_reason, Some("decode_failed"));
         assert_eq!(summary.detail.as_deref(), Some("exact codec error"));
+    }
+
+    #[test]
+    fn sender_port_53_requires_an_effective_nonzero_key() {
+        let dns_source: SocketAddr = "198.51.100.7:53".parse().unwrap();
+        let normal_source: SocketAddr = "198.51.100.7:4672".parse().unwrap();
+
+        assert!(should_drop_sender_port_53(dns_source, None));
+        // Successful decryption represents an explicit encrypted trailer key as
+        // `Some`; stock treats an explicit zero exactly like an absent key.
+        assert!(should_drop_sender_port_53(dns_source, Some(0)));
+        assert!(!should_drop_sender_port_53(dns_source, Some(1)));
+        assert!(!should_drop_sender_port_53(normal_source, None));
     }
 }
