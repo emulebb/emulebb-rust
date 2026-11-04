@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
+async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opcodes() {
     let root = unique_test_dir("ed2k-hash-only-small-file-download");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x41; 180 * 1024];
@@ -11,12 +11,57 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some(test_bind_addr()),
+        node_id: NodeId::from_bytes([0x4A; 16]),
+        udp_key: 0x1122_3344,
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
+    {
+        let now = chrono::Utc::now();
+        let mut firewall = kad_firewall.lock().await;
+        firewall.begin_tcp_recheck(now);
+        firewall.add_tcp_firewall_check_ip(peer_addr.ip(), now);
+    }
+    let (callback_sessions, mut callback_inbox) = ed2k_callback_session_channel();
+    let established_context = Ed2kEstablishedPeerContext {
+        dht,
+        kad_firewall: Arc::clone(&kad_firewall),
+        callback_sessions,
+        server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+    };
     let peer_public_key = test_peer_secure_ident();
     let payload_for_server = payload.clone();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
         start_plain_download_session(&mut stream, peer_addr, &peer_public_key).await;
+        stream
+            .write_all(&encode_packet(OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK, &[]))
+            .await
+            .unwrap();
+        let mut callback_payload = vec![!0x4A; 16];
+        callback_payload.extend_from_slice(&file_hash.to_kad_uint128_wire_bytes());
+        callback_payload.extend_from_slice(&u32::from_be_bytes([127, 0, 0, 2]).to_le_bytes());
+        callback_payload.extend_from_slice(&4662_u16.to_le_bytes());
+        stream
+            .write_all(&encode_packet(OP_EMULEPROT, OP_CALLBACK, &callback_payload))
+            .await
+            .unwrap();
+        // Unknown established opcodes under a recognized peer protocol are
+        // stock-compatible no-ops; the following startup frames must still be
+        // processed and neither packet is a bad-peer event.
+        stream
+            .write_all(&encode_packet(OP_EDONKEYPROT, 0xF1, &[0x01]))
+            .await
+            .unwrap();
+        stream
+            .write_all(&encode_packet(OP_EMULEPROT, 0xF2, &[0x01]))
+            .await
+            .unwrap();
         answer_startup_metadata_with_expected_size(
             &mut stream,
             &file_hash,
@@ -90,10 +135,23 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
         placeholder_name,
         0,
         Duration::from_secs(3),
+        established_context: Some(established_context),
     )
     .await
     .unwrap();
     assert_eq!(result, Ed2kPeerDownloadOutcome::Completed);
+    assert_eq!(
+        kad_firewall.lock().await.last_helper_ip.clone(),
+        Some(peer_addr.ip().to_string()),
+    );
+    let callback_request = callback_inbox
+        .try_recv_for_test()
+        .expect("active download should dispatch an authorized Kad callback");
+    assert_eq!(
+        callback_request.peer_addr,
+        SocketAddr::from((Ipv4Addr::new(127, 0, 0, 2), 4662)),
+    );
+    assert_eq!(callback_request.origin, Ed2kCallbackSessionOrigin::Kad);
 
     let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
     assert!(manifest.completed);
@@ -302,6 +360,7 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
             current_source_count: 0,
             timeout: Duration::from_secs(3),
             upload_context: None,
+            established_context: None,
             reask_register: None,
         },
         vec![Ed2kPeerDownloadFile {

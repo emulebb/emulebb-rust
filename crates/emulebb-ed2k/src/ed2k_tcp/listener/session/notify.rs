@@ -1,6 +1,6 @@
 //! Listener-session decode-and-log handlers for inbound opcodes that carry no
-//! upload/session-state effect (out-of-part-reqs, client-id change, slot
-//! change, chat message, queue rank, public-IP answer, reask-callback, chat
+//! upload/session-state effect (out-of-part-reqs, slot change, chat message,
+//! queue rank, public-IP answer, reask-callback, chat
 //! captcha req/res, file description, preview request/answer, buddy pong). Each
 //! decodes its payload for the diagnostic packet dump only.
 
@@ -13,10 +13,10 @@ use crate::ed2k_string::Ed2kStringEncoding;
 use super::super::super::Ed2kTransport;
 use super::super::super::codec::{
     decode_chat_captcha_request_payload, decode_chat_captcha_result_payload,
-    decode_client_id_change_payload, decode_client_message_payload,
-    decode_edonkey_queue_rank_payload, decode_emule_queue_ranking_payload,
-    decode_file_description_payload, decode_optional_file_hash_payload,
-    decode_preview_answer_payload, decode_preview_request_payload, decode_public_ip_answer_payload,
+    decode_client_message_payload, decode_edonkey_queue_rank_payload,
+    decode_emule_queue_ranking_payload, decode_file_description_payload,
+    decode_optional_file_hash_payload, decode_preview_answer_payload,
+    decode_preview_request_payload, decode_public_ip_answer_payload,
     decode_reask_callback_tcp_payload,
 };
 use super::super::super::dump::dump_ed2k_tcp_listener_meta;
@@ -29,22 +29,6 @@ pub(super) fn handle_out_of_part_requests(transport: &Ed2kTransport, peer_addr: 
         "out_of_part_requests",
         || ("received=true").into(),
     );
-}
-
-/// OP_CHANGE_CLIENT_ID: the peer's server reassigned its client id.
-pub(super) fn handle_change_client_id(
-    transport: &Ed2kTransport,
-    peer_addr: SocketAddr,
-    payload: &[u8],
-) -> Result<()> {
-    let change = decode_client_id_change_payload(payload)?;
-    dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "change_client_id", || {
-        format!(
-            "new_user_id={} new_server_ip={} trailing_len={}",
-            change.new_user_id, change.new_server_ip, change.trailing_len
-        )
-    });
-    Ok(())
 }
 
 /// OP_CHANGE_SLOT: the peer changed the active transfer slot.

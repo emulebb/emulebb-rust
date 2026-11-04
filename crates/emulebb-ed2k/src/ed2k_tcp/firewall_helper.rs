@@ -476,7 +476,7 @@ pub(crate) async fn kad_callback_is_authorized(
 /// acceptance surfaces cannot diverge.
 pub(crate) async fn complete_authorized_kad_callback(
     dht: &DhtNode,
-    transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    transfer_runtime: &Ed2kTransferRuntime,
     callback_sessions: &super::Ed2kCallbackSessionHandle,
     callback: &KadCallbackRequest,
     source: &str,

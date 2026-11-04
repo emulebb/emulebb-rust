@@ -99,12 +99,12 @@ fn try_detach_queued_source_for_reask(
         "reask detach check for {peer_addr}: peer_udp_port={} peer_udp_version={} (effective={effective_udp_version}) low_id={} eligible={eligible}",
         session_state.peer_udp_port,
         session_state.peer_udp_version,
-        session_state.peer_low_id,
+        session_state.peer_identity.is_low_id(),
     );
     if !eligible {
         return false;
     }
-    if session_state.peer_low_id {
+    if session_state.peer_identity.is_low_id() {
         // WHY: A TCP hello can advertise a LowID peer's buddy endpoint but not
         // its buddy id. MFC only emits LowID UDP reasks when the buddy id is
         // known from Kad source discovery, so TCP-discovered LowID queue sources
@@ -129,7 +129,7 @@ fn try_detach_queued_source_for_reask(
         initial_reask_delay: queued_initial_reask_delay(),
         user_hash: session_state.peer_user_hash,
         should_crypt,
-        low_id: session_state.peer_low_id,
+        low_id: session_state.peer_identity.is_low_id(),
         buddy_endpoint: session_state.peer_buddy_endpoint,
         buddy_id: None,
     });
@@ -141,6 +141,7 @@ mod tests {
     use super::*;
     use crate::ed2k_client_udp::{ReaskCommand, reask_command_channel};
     use crate::ed2k_tcp::download::session::DownloadSessionState;
+    use crate::ed2k_tcp::established_peer::EstablishedPeerIdentity;
     use std::net::Ipv4Addr;
     use tokio::time::Instant;
 
@@ -150,7 +151,10 @@ mod tests {
         state.queued_until = Some(Instant::now());
         state.peer_udp_port = 4672;
         state.peer_udp_version = 4;
-        state.peer_low_id = low_id;
+        state.peer_identity = EstablishedPeerIdentity {
+            client_id: Some(if low_id { 1 } else { 0x0100_0000 }),
+            server_endpoint: None,
+        };
         state.peer_buddy_endpoint = Some((Ipv4Addr::new(198, 51, 100, 10), 5000));
         state
     }

@@ -14,24 +14,28 @@ use crate::{
     },
 };
 
+use super::super::established_peer::{
+    handle_established_kad_callback, record_established_kad_firewall_ack,
+    tolerates_unknown_established_opcode,
+};
 use super::super::{
-    DecodedEmuleInfoProfile, Ed2kFileIdentifier, Ed2kHelloIdentity, Ed2kPeerDispatcher,
-    Ed2kPeerUploadContext, Ed2kSecureIdent, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS,
-    OP_AICHREQUEST, OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
-    OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR,
-    OP_ASKSHAREDFILESDIRANS, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER,
-    OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_COMPRESSEDPART,
-    OP_COMPRESSEDPART_I64, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT,
-    OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FILEREQANSNOFIL, OP_FILESTATUS, OP_HASHSETANSWER,
-    OP_HASHSETANSWER2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE,
-    OP_MULTIPACKETANSWER, OP_MULTIPACKETANSWER_EXT2, OP_OUTOFPARTREQS, OP_PORTTEST,
+    DecodedEmuleInfoProfile, Ed2kEstablishedPeerContext, Ed2kFileIdentifier, Ed2kHelloIdentity,
+    Ed2kPeerDispatcher, Ed2kPeerUploadContext, Ed2kSecureIdent, OP_ACCEPTUPLOADREQ, OP_AICHANSWER,
+    OP_AICHFILEHASHANS, OP_AICHREQUEST, OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS,
+    OP_ASKSHAREDDIRS, OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER,
+    OP_ASKSHAREDFILESDIR, OP_ASKSHAREDFILESDIRANS, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK,
+    OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES,
+    OP_COMPRESSEDPART, OP_COMPRESSEDPART_I64, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER,
+    OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FILEREQANSNOFIL, OP_FILESTATUS,
+    OP_HASHSETANSWER, OP_HASHSETANSWER2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK,
+    OP_MESSAGE, OP_MULTIPACKETANSWER, OP_MULTIPACKETANSWER_EXT2, OP_OUTOFPARTREQS, OP_PORTTEST,
     OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK,
     OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQFILENAMEANSWER, OP_REQUESTPREVIEW,
     OP_SECIDENTSTATE, OP_SENDINGPART, OP_SENDINGPART_I64, OP_SETREQFILEID, OP_SIGNATURE,
     PeerUploadDispatch, PeerUploadFacet, SourceExchangePeer, begin_secure_ident_probe,
     build_hello_responses, decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
     decode_aich_recovery_request_payload, decode_answer_sources_payload,
-    decode_answer_sources2_payload, decode_client_id_change_payload, decode_client_message_payload,
+    decode_answer_sources2_payload, decode_client_message_payload,
     decode_edonkey_queue_rank_payload, decode_emule_info_profile,
     decode_emule_queue_ranking_payload, decode_exact_file_hash_payload,
     decode_file_status_availability, decode_file_status_body_availability, decode_hashset_answer,
@@ -230,6 +234,7 @@ pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
     /// Mutable connection-scoped profile reused across A4AF file sessions.
     /// `None` retains the callback/test compatibility initialization above.
     pub(in crate::ed2k_tcp) connection_state: Option<&'a mut DownloadConnectionState>,
+    pub(in crate::ed2k_tcp) established_context: Option<&'a Ed2kEstablishedPeerContext>,
     pub(in crate::ed2k_tcp) upload_facet: Option<&'a mut PeerUploadFacet>,
     pub(in crate::ed2k_tcp) upload_context: Option<&'a Ed2kPeerUploadContext>,
     /// When set (UDP reask enabled), a queued + UDP-eligible source detaches its TCP
@@ -257,6 +262,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         peer_connect_options,
         reask_register,
         connection_state,
+        established_context,
         mut upload_facet,
         upload_context,
     } = options;
@@ -805,7 +811,32 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     notify::handle_public_ip_answer(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_CALLBACK) => {
-                    notify::handle_kad_callback(transport, peer_addr, &packet.payload)?;
+                    if let Some(context) = established_context {
+                        if let Some(callback) = handle_established_kad_callback(
+                            context,
+                            transfer_runtime,
+                            &packet.payload,
+                            &format!("active {peer_addr}"),
+                        )
+                        .await?
+                        {
+                            dump_ed2k_tcp_download_meta(
+                                peer_addr,
+                                Some(transport.mode),
+                                "kad_callback",
+                                || format!(
+                                    "file_hash={} callback_peer={}:{} buddy_check={} trailing_len={}",
+                                    callback.file_hash,
+                                    callback.peer_ip,
+                                    callback.peer_tcp_port,
+                                    hex::encode(callback.buddy_check),
+                                    callback.trailing_len
+                                ),
+                            );
+                        }
+                    } else {
+                        notify::handle_kad_callback(transport, peer_addr, &packet.payload)?;
+                    }
                 }
                 (OP_EMULEPROT, OP_REASKCALLBACKTCP) => {
                     notify::handle_reask_callback_tcp(transport, peer_addr, &packet.payload)?;
@@ -824,7 +855,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         .with_context(|| format!("failed to send OP_PORTTEST to {peer_addr}"))?;
                 }
                 (OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK) => {
-                    notify::handle_kad_firewall_tcp_ack(transport, peer_addr);
+                    let accepted = if let Some(context) = established_context {
+                        record_established_kad_firewall_ack(context, peer_addr.ip()).await
+                    } else {
+                        false
+                    };
+                    notify::handle_kad_firewall_tcp_ack(transport, peer_addr, accepted);
                 }
                 (OP_EMULEPROT, OP_BUDDYPING) | (OP_EMULEPROT, OP_BUDDYPONG) => {
                     notify::handle_buddy_ping_pong(transport, peer_addr, packet.opcode);
@@ -1344,16 +1380,38 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
                 }
                 (OP_EDONKEYPROT, OP_CHANGE_CLIENT_ID) => {
-                    let change = decode_client_id_change_payload(&packet.payload)?;
+                    let known_server = if let Some(context) = established_context {
+                        context.server_state.read().await.endpoint
+                    } else {
+                        session_state.peer_identity.server_endpoint()
+                    };
+                    let applied = session_state.peer_identity.apply_client_id_change(
+                        peer_addr.ip(),
+                        known_server,
+                        &packet.payload,
+                    )?;
                     dump_ed2k_tcp_download_meta(
                         peer_addr,
                         Some(transport.mode),
                         "change_client_id",
                         || format!(
-                            "new_user_id={} new_server_ip={} trailing_len={}",
-                            change.new_user_id, change.new_server_ip, change.trailing_len
+                            "new_user_id={} new_server_ip={} trailing_len={} accepted={}",
+                            applied.change.new_user_id,
+                            applied.change.new_server_ip,
+                            applied.change.trailing_len,
+                            applied.accepted,
                         ),
                     );
+                    if applied.accepted
+                        && let Some(upload_facet) = upload_facet.as_deref_mut()
+                    {
+                        upload_facet
+                            .apply_established_identity(
+                                transfer_runtime,
+                                session_state.peer_identity,
+                            )
+                            .await;
+                    }
                 }
                 (OP_EDONKEYPROT, OP_CHANGE_SLOT) => {
                     let changed_file = decode_optional_file_hash_payload(&packet.payload);
@@ -1566,7 +1624,19 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         return Ok(outcome);
                     }
                 }
-                _ => {}
+                _ if tolerates_unknown_established_opcode(packet.protocol) => {
+                    tracing::debug!(
+                        "ignoring unsupported established eD2k opcode from {peer_addr}: protocol=0x{:02X} opcode=0x{:02X} payload_len={}",
+                        packet.protocol,
+                        packet.opcode,
+                        packet.payload.len(),
+                    );
+                }
+                _ => anyhow::bail!(
+                    "unsupported eD2k peer protocol=0x{:02X} opcode=0x{:02X} from {peer_addr}",
+                    packet.protocol,
+                    packet.opcode,
+                ),
             }
 
             // A part that just failed MD4 verification needs AICH/ICH recovery

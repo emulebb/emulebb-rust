@@ -343,6 +343,7 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
         current_source_count: 0,
         timeout: Duration::from_secs(1),
         upload_context: None,
+        established_context: None,
         reask_register: Some(reask_handle),
     })
     .await

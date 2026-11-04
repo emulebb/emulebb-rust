@@ -40,12 +40,13 @@ use emulebb_ed2k::{
         search_source_udp_server_batches,
     },
     ed2k_tcp::{
-        Ed2kCallbackSessionHandle, Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadFile,
-        Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport,
-        Ed2kPeerUploadContext, Ed2kSecureIdent, HelloBuddySnapshot, OutboundBuddyLinkOptions,
-        download_files_from_peer, ed2k_callback_session_channel, emule_connect_options,
-        encode_kad_callback_relay_frame, run_ed2k_listener, run_outbound_buddy_link,
-        set_hello_buddy_snapshot, set_publish_rust_identity,
+        Ed2kCallbackSessionHandle, Ed2kEstablishedPeerContext, Ed2kHelloIdentity,
+        Ed2kListenerOptions, Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions,
+        Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport, Ed2kPeerUploadContext, Ed2kSecureIdent,
+        HelloBuddySnapshot, OutboundBuddyLinkOptions, download_files_from_peer,
+        ed2k_callback_session_channel, emule_connect_options, encode_kad_callback_relay_frame,
+        run_ed2k_listener, run_outbound_buddy_link, set_hello_buddy_snapshot,
+        set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackDownload,
@@ -352,6 +353,7 @@ struct Ed2kRuntime {
     /// from `shutdown`, which tears down the complete shared server/Kad stack.
     server_control: Ed2kServerControlHandle,
     dht: DhtNode,
+    callback_sessions: Ed2kCallbackSessionHandle,
     /// Profile-local `nodes.dat` destination for the shutdown routing sample.
     kad_nodes_dat_path: Option<PathBuf>,
     /// Shared Kad firewall verification state, read by `kad_status` to report the
@@ -1687,11 +1689,21 @@ impl EmulebbCore {
             }
 
             if acquired_direct_source_count != 0 {
-                let upload_context = {
+                let (upload_context, established_context) = {
                     let runtime = self.ed2k_runtime.lock().await;
-                    runtime.as_ref().map(|runtime| Ed2kPeerUploadContext {
-                        server_state: Arc::clone(&runtime.server_state),
-                        kad_firewall: Arc::clone(&runtime.kad_firewall),
+                    runtime.as_ref().map_or((None, None), |runtime| {
+                        (
+                            Some(Ed2kPeerUploadContext {
+                                server_state: Arc::clone(&runtime.server_state),
+                                kad_firewall: Arc::clone(&runtime.kad_firewall),
+                            }),
+                            Some(Ed2kEstablishedPeerContext {
+                                dht: runtime.dht.clone(),
+                                kad_firewall: Arc::clone(&runtime.kad_firewall),
+                                callback_sessions: runtime.callback_sessions.clone(),
+                                server_state: Arc::clone(&runtime.server_state),
+                            }),
+                        )
                     })
                 };
                 let source_exchange_source_count = {
@@ -1737,6 +1749,7 @@ impl EmulebbCore {
                         let reask_register = reask_register.clone();
                         let a4af_alternates = Arc::clone(&a4af_alternates);
                         let upload_context = upload_context.clone();
+                        let established_context = established_context.clone();
                         async move {
                             let alternate_files = a4af_alternates
                                 .get(&source_endpoint_key(&source))
@@ -1754,6 +1767,7 @@ impl EmulebbCore {
                                     current_source_count: source_exchange_source_count,
                                     timeout: connect_timeout,
                                     upload_context,
+                                    established_context,
                                     reask_register,
                                 },
                                 alternate_files,

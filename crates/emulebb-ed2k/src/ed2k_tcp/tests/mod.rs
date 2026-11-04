@@ -10,19 +10,20 @@ use super::{
     EMULE_TCP_CRYPT_MAGIC_REQUESTER, EMULE_TCP_CRYPT_MAGIC_SERVER, EMULE_TCP_CRYPT_MAGIC_SYNC,
     EMULE_VERSION_SHORT, ET_COMMENTS, ET_FEATURES, ET_SOURCEEXCHANGE, Ed2kAichHashset,
     Ed2kCallbackSessionHandle, Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest,
-    Ed2kConnectionContext, Ed2kFileIdentifier, Ed2kHashsetRequestOptions, Ed2kHelloIdentity,
-    Ed2kPeerConnectMode, Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
-    Ed2kPeerFileDownloadOutcome, Ed2kPeerSecureIdentState, Ed2kSecureIdent, Ed2kSessionSource,
-    Ed2kTransport, Ed2kTransportMode, EmuleTcpPacket, FirewallCheckUdpRequest, HELLO_NICKNAME,
-    HelloBuddySnapshot, KadHelloIdentityState, OP_ACCEPTUPLOADREQ, OP_AICHANSWER,
-    OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ, OP_AICHREQUEST, OP_ANSWERSOURCES, OP_ANSWERSOURCES2,
-    OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER,
-    OP_ASKSHAREDFILESDIR, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER,
-    OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_COMPRESSEDPART,
-    OP_COMPRESSEDPART_I64, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT,
-    OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FILEREQANSNOFIL, OP_FILESTATUS, OP_FWCHECKUDPREQ,
-    OP_HASHSETANSWER2, OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK,
-    OP_MESSAGE, OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_MULTIPACKETANSWER,
+    Ed2kConnectionContext, Ed2kEstablishedPeerContext, Ed2kFileIdentifier,
+    Ed2kHashsetRequestOptions, Ed2kHelloIdentity, Ed2kPeerConnectMode, Ed2kPeerDownloadFile,
+    Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kPeerFileDownloadOutcome,
+    Ed2kPeerSecureIdentState, Ed2kSecureIdent, Ed2kSessionSource, Ed2kTransport, Ed2kTransportMode,
+    EmuleTcpPacket, FirewallCheckUdpRequest, HELLO_NICKNAME, HelloBuddySnapshot,
+    KadHelloIdentityState, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS,
+    OP_AICHFILEHASHREQ, OP_AICHREQUEST, OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS,
+    OP_ASKSHAREDDIRS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR,
+    OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID,
+    OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_COMPRESSEDPART, OP_COMPRESSEDPART_I64,
+    OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_END_OF_DOWNLOAD,
+    OP_FILEDESC, OP_FILEREQANSNOFIL, OP_FILESTATUS, OP_FWCHECKUDPREQ, OP_HASHSETANSWER2,
+    OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE,
+    OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_MULTIPACKETANSWER,
     OP_MULTIPACKETANSWER_EXT2, OP_OUTOFPARTREQS, OP_PACKEDPROT, OP_PEERCACHE_ACK,
     OP_PEERCACHE_ANSWER, OP_PEERCACHE_QUERY, OP_PORTTEST, OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER,
     OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING, OP_REASKCALLBACKTCP,
@@ -117,7 +118,8 @@ macro_rules! download_file_from_peer_test {
             $transfer_runtime:expr,
             $display_name:expr,
             $file_size:expr,
-            $timeout:expr $(,)?
+            $timeout:expr,
+            established_context: $established_context:expr $(,)?
         ) => {
         download_file_from_peer(Ed2kPeerDownloadOptions {
             bind_ip: $bind_ip,
@@ -130,8 +132,31 @@ macro_rules! download_file_from_peer_test {
             current_source_count: 0,
             timeout: $timeout,
             upload_context: None,
+            established_context: $established_context,
             reask_register: None,
         })
+    };
+    (
+            $bind_ip:expr,
+            $peer:expr,
+            $hello_identity:expr,
+            $secure_ident:expr,
+            $transfer_runtime:expr,
+            $display_name:expr,
+            $file_size:expr,
+            $timeout:expr $(,)?
+        ) => {
+        download_file_from_peer_test!(
+            $bind_ip,
+            $peer,
+            $hello_identity,
+            $secure_ident,
+            $transfer_runtime,
+            $display_name,
+            $file_size,
+            $timeout,
+            established_context: None,
+        )
     };
 }
 
