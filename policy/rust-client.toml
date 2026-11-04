@@ -142,6 +142,7 @@ allowed_ipv6_mentions = [
     "crates/emulebb-kad-net/src/obfuscation/inbound.rs",
     "crates/emulebb-kad-net/src/obfuscation/outbound.rs",
     "crates/emulebb-kad-net/src/obfuscation/tests.rs",
+    "crates/emulebb-kad-net/src/rpc/tests/admission.rs",
     "crates/emulebb-kad-net/src/rpc/tests/obfuscation.rs",
     "crates/emulebb-miniupnpc/src/lib.rs",
     "crates/emulebb-miniupnpc-sys/src/lib.rs",
