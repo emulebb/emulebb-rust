@@ -54,9 +54,8 @@ pub(super) async fn handle_server_packet(
             let id_change = decode_id_change_payload(&packet.payload)?;
             if id_change.client_id == 0 {
                 if context.activation.is_active() {
-                    context
-                        .last_client_id
-                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    // `last_client_id` is successful-login history. A zero ID
+                    // rejects this login attempt but cannot erase that history.
                     reachability_writer.clear_server_public_ip();
                 }
                 {

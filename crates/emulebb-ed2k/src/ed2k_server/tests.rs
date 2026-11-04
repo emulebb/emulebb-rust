@@ -295,6 +295,62 @@ fn id_change_packet(
 }
 
 #[tokio::test]
+async fn zero_id_preserves_last_successful_id_for_the_next_login() {
+    let (mut session, _peer, _events, context, reachability_authority) =
+        connected_id_change_fixture().await;
+    let reachability = active_server_reachability(&reachability_authority);
+    let successful_id = 0x0102_0304;
+    context
+        .last_client_id
+        .store(successful_id, std::sync::atomic::Ordering::Relaxed);
+    reachability
+        .writer
+        .set_server_public_ip(ipv4_from_client_id(successful_id));
+
+    handle_server_packet(
+        &mut session,
+        id_change_packet(0, SERVER_TCP_FLAG_TCPOBFUSCATION, None),
+        &context,
+        &reachability.writer,
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        context
+            .last_client_id
+            .load(std::sync::atomic::Ordering::Relaxed),
+        successful_id
+    );
+    assert!(!context.public_ip.is_known());
+    assert!(!session.login_accepted);
+    assert_eq!(session.assigned_client_id, None);
+    let state = session.state.read().await;
+    assert!(state.connecting);
+    assert!(!state.connected);
+    assert_eq!(state.client_id, None);
+    drop(state);
+
+    let mut next_login_identity =
+        login_identity_for_server_transport(context.hello_identity, false);
+    next_login_identity.client_id = context
+        .last_client_id
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let next_login = encode_login_request(
+        next_login_identity,
+        &context.nickname,
+        ServerSessionRole::Publishing {
+            offer_files_v1_enabled: false,
+        },
+    );
+    assert_eq!(
+        u32::from_le_bytes(next_login[16..20].try_into().unwrap()),
+        successful_id
+    );
+}
+
+#[tokio::test]
 async fn redundant_same_id_idchange_does_not_rerun_connected_startup() {
     let (mut session, mut peer, mut events, context, reachability_authority) =
         connected_id_change_fixture().await;
