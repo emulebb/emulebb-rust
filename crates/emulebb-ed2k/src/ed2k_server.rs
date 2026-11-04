@@ -154,7 +154,7 @@ pub use server_events::{
 };
 pub use server_failure::{Ed2kServerFailure, Ed2kServerFailurePhase, Ed2kServerFailureReason};
 pub use server_met::{ParsedServerMetEntry, parse_server_met};
-use session::{Ed2kPacket, ServerSession, ServerSessionPhase};
+use session::{Ed2kPacket, ProbeSearchState, ServerSession, ServerSessionPhase};
 use session_driver::{clear_server_connection_state, run_one_server_session};
 use source_utils::{
     annotate_found_sources_server, ipv4_from_client_id, merge_found_sources, validate_found_sources,
