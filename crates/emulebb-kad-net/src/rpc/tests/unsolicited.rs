@@ -36,9 +36,10 @@ async fn test_unsolicited_request_broadcast() {
 }
 
 #[tokio::test]
-async fn test_unencrypted_packet_from_source_port_53_is_dropped() {
-    // DNS-confusion hardening (oracle KademliaUDPListener.cpp:250): a plaintext
-    // Kad datagram whose SOURCE UDP port is 53 must be dropped at ingress.
+async fn test_packet_from_source_port_53_without_effective_key_is_dropped() {
+    // DNS-confusion hardening (oracle KademliaUDPListener.cpp:250): a Kad
+    // datagram whose SOURCE UDP port is 53 and has no effective sender key must
+    // be dropped at ingress.
     let transport = MockTransport::new(make_local_addr());
     let inject_tx = transport.injector();
     let rpc = make_rpc_with_transport(transport);
@@ -72,6 +73,13 @@ async fn test_unencrypted_packet_from_source_port_53_is_dropped() {
         !rpc.has_had_contact(),
         "a packet rejected before Kad decode must not establish contact"
     );
+    let rejected_state = rpc
+        .inner
+        .obfuscation
+        .inspect_outbound(dns_port_addr, emulebb_kad_proto::constants::opcode::PING);
+    assert_eq!(rejected_state.peer_node_id, None);
+    assert_eq!(rejected_state.peer_kad_version, None);
+    assert_eq!(rejected_state.receiver_verify_key, None);
     inject_tx.send((encoded, normal_addr)).await.unwrap();
 
     let received = tokio::time::timeout(Duration::from_secs(2), subscriber.recv())
@@ -198,6 +206,13 @@ async fn test_untracked_response_is_dropped() {
         received.is_err(),
         "unexpectedly received untracked response"
     );
+    let rejected_state = rpc
+        .inner
+        .obfuscation
+        .inspect_outbound(peer_addr, emulebb_kad_proto::constants::opcode::PING);
+    assert_eq!(rejected_state.peer_node_id, None);
+    assert_eq!(rejected_state.peer_kad_version, None);
+    assert_eq!(rejected_state.receiver_verify_key, None);
 }
 
 #[tokio::test]

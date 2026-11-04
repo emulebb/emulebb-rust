@@ -296,13 +296,14 @@ pub(super) fn tracked_request_opcode_for_response(
     outbound_tracker: &Mutex<OutboundRequestTracker>,
     ip: IpAddr,
     response_opcode: u8,
+    remove: bool,
 ) -> Option<u8> {
     let mut tracker = outbound_tracker.lock();
     match response_opcode {
-        opcode::BOOTSTRAP_RES => tracker.find_any(ip, &[opcode::BOOTSTRAP_REQ], true),
-        opcode::HELLO_RES => tracker.find_any(ip, &[opcode::HELLO_REQ], true),
-        opcode::HELLO_RES_ACK => tracker.find_any(ip, &[opcode::HELLO_RES], true),
-        opcode::RES => tracker.find_any(ip, &[opcode::REQ], true),
+        opcode::BOOTSTRAP_RES => tracker.find_any(ip, &[opcode::BOOTSTRAP_REQ], remove),
+        opcode::HELLO_RES => tracker.find_any(ip, &[opcode::HELLO_REQ], remove),
+        opcode::HELLO_RES_ACK => tracker.find_any(ip, &[opcode::HELLO_RES], remove),
+        opcode::RES => tracker.find_any(ip, &[opcode::REQ], remove),
         opcode::PUBLISH_RES => {
             let matched = tracker.find_any(
                 ip,
@@ -313,12 +314,16 @@ pub(super) fn tracked_request_opcode_for_response(
                 ],
                 false,
             )?;
-            let _ = tracker.contains(ip, matched, true);
+            if remove {
+                let _ = tracker.contains(ip, matched, true);
+            }
             Some(matched)
         }
         opcode::PUBLISH_RES_LEGACY => {
             let matched = tracker.find_any(ip, &[opcode::PUBLISH_REQ_LEGACY], false)?;
-            let _ = tracker.contains(ip, matched, true);
+            if remove {
+                let _ = tracker.contains(ip, matched, true);
+            }
             Some(matched)
         }
         opcode::SEARCH_NOTES_RES_LEGACY => {
@@ -327,8 +332,8 @@ pub(super) fn tracked_request_opcode_for_response(
         // FIREWALLED_RES / FIREWALLED_ACK_RES are deliberately not out-tracked
         // (the oracle validates them against the firewall-check-IP list instead),
         // so there is never a matching tracked request here.
-        opcode::FINDBUDDY_RES => tracker.find_any(ip, &[opcode::FINDBUDDY_REQ], true),
-        opcode::PONG => tracker.find_any(ip, &[opcode::PING], true),
+        opcode::FINDBUDDY_RES => tracker.find_any(ip, &[opcode::FINDBUDDY_REQ], remove),
+        opcode::PONG => tracker.find_any(ip, &[opcode::PING], remove),
         _ => None,
     }
 }
@@ -337,8 +342,14 @@ pub(super) fn tracked_request_opcode_for_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_publish_opcode, is_tracked_response_opcode, opcode_name};
+    use super::{
+        is_publish_opcode, is_tracked_response_opcode, opcode_name,
+        tracked_request_opcode_for_response,
+    };
+    use crate::tracker::OutboundRequestTracker;
     use emulebb_kad_proto::constants::opcode;
+    use parking_lot::Mutex;
+    use std::time::Duration;
 
     // The unsupported Kad1 packet remains an Unknown protocol value, but
     // diagnostics still identify its oracle-defined opcode by name.
@@ -385,5 +396,25 @@ mod tests {
         assert!(is_publish_opcode(opcode::PUBLISH_RES_LEGACY));
         assert!(is_tracked_response_opcode(opcode::PUBLISH_RES_LEGACY));
         assert!(is_tracked_response_opcode(opcode::SEARCH_NOTES_RES_LEGACY));
+    }
+
+    #[test]
+    fn tracked_response_validation_peeks_before_consuming() {
+        let ip = "198.51.100.7".parse().unwrap();
+        let tracker = Mutex::new(OutboundRequestTracker::new(Duration::from_secs(180)));
+        tracker.lock().record(ip, opcode::HELLO_REQ);
+
+        assert_eq!(
+            tracked_request_opcode_for_response(&tracker, ip, opcode::HELLO_RES, false),
+            Some(opcode::HELLO_REQ)
+        );
+        assert_eq!(
+            tracked_request_opcode_for_response(&tracker, ip, opcode::HELLO_RES, true),
+            Some(opcode::HELLO_REQ)
+        );
+        assert_eq!(
+            tracked_request_opcode_for_response(&tracker, ip, opcode::HELLO_RES, false),
+            None
+        );
     }
 }
