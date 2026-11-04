@@ -333,16 +333,21 @@ fn offer_files_preserves_unicode_filename_tag() {
 }
 
 #[test]
-fn server_offer_file_limit_clamps_like_mfc() {
-    use super::super::server_entry::server_offer_file_limit;
-    // Unknown (0) and above-200 soft limits fall back to 200; an in-range
-    // soft limit is used verbatim, and a known hard limit remains exclusive.
-    assert_eq!(server_offer_file_limit(0, 0), 200);
-    assert_eq!(server_offer_file_limit(50, 0), 50);
-    assert_eq!(server_offer_file_limit(200, 0), 200);
-    assert_eq!(server_offer_file_limit(500, 0), 200);
-    assert_eq!(server_offer_file_limit(500, 3), 2);
-    assert_eq!(server_offer_file_limit(50, 1), 0);
+fn server_offer_file_candidate_limit_is_connection_scoped() {
+    use super::super::server_entry::{
+        server_offer_file_candidate_limit, server_offer_file_packet_limit,
+    };
+
+    // Unknown soft limits retain stock's one-packet fallback. Advertised soft
+    // limits remain cumulative even above the 200-record packet ceiling, and a
+    // known hard limit is still exclusive.
+    assert_eq!(server_offer_file_packet_limit(), 200);
+    assert_eq!(server_offer_file_candidate_limit(0, 0), 200);
+    assert_eq!(server_offer_file_candidate_limit(50, 0), 50);
+    assert_eq!(server_offer_file_candidate_limit(200, 0), 200);
+    assert_eq!(server_offer_file_candidate_limit(500, 0), 500);
+    assert_eq!(server_offer_file_candidate_limit(500, 3), 2);
+    assert_eq!(server_offer_file_candidate_limit(50, 1), 0);
 }
 
 #[test]
@@ -668,6 +673,87 @@ async fn session_catalog_refresh_sends_only_the_new_offer() {
     assert_eq!(second.published_entries, 2);
     assert_eq!(second.pending_entries, 0);
     assert_eq!(session.offer_files_published_hashes.len(), 2);
+}
+
+#[tokio::test]
+async fn legacy_soft_budget_sends_200_then_150_and_resets_for_a_new_epoch() {
+    use std::sync::Arc;
+
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        sync::RwLock,
+    };
+
+    use crate::ed2k_transfer::IndexedSharedCatalog;
+
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer_task = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let (server_stream, peer_addr) = listener.accept().await.unwrap();
+    let _peer = peer_task.await.unwrap();
+    let mut session = super::ServerSession::from_stream_for_test(server_stream, peer_addr);
+    session.configure_offer_files_capability(false);
+    session.server_soft_files = 350;
+    session.server_hard_files = 1_000;
+    let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
+        (0..1_000).map(shared_entry).collect(),
+    )));
+
+    assert_eq!(session.offer_files_batch_limit(), 200);
+    assert_eq!(session.offer_files_new_candidate_limit(), 350);
+
+    let first =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(first.entries_sent, 200);
+    assert_eq!(first.published_entries, 200);
+    assert_eq!(first.pending_entries, 800);
+    assert_eq!(session.offer_files_distinct_published_hashes.len(), 200);
+    assert_eq!(session.offer_files_new_candidate_limit(), 150);
+    session.finish_offer_files_batch(
+        first.entries_sent,
+        first.pending_entries,
+        first.skipped_duplicate_batch,
+    );
+    assert!(session.offer_files_publish_requested);
+
+    let second =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(second.entries_sent, 150);
+    assert_eq!(second.published_entries, 350);
+    assert_eq!(second.pending_entries, 650);
+    assert_eq!(session.offer_files_distinct_published_hashes.len(), 350);
+    assert_eq!(session.offer_files_new_candidate_limit(), 0);
+    session.finish_offer_files_batch(
+        second.entries_sent,
+        second.pending_entries,
+        second.skipped_duplicate_batch,
+    );
+    assert!(!session.offer_files_publish_requested);
+    assert!(session.offer_files_next_publish_at.is_none());
+
+    let exhausted =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(exhausted.entries_sent, 0);
+    assert_eq!(exhausted.pending_entries, 650);
+
+    // The production reconnect path starts a fresh publication epoch after
+    // login acceptance. Previously rejected candidates become eligible again.
+    session.begin_offer_files_publishing().await;
+    assert!(session.offer_files_distinct_published_hashes.is_empty());
+    assert_eq!(session.offer_files_new_candidate_limit(), 350);
+
+    let reconnected_first =
+        send_offer_files_advertisement(&mut session, &shared_catalog, crate::test_bind_ip(), 4662)
+            .await
+            .unwrap();
+    assert_eq!(reconnected_first.entries_sent, 200);
+    assert_eq!(session.offer_files_distinct_published_hashes.len(), 200);
 }
 
 #[tokio::test]

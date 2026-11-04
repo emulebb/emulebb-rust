@@ -125,8 +125,8 @@ pub(super) struct ServerSession {
     pub(super) assigned_client_id: Option<u32>,
     pub(super) server_flags: Option<u32>,
     /// Soft file limit of the connected server (from the resolved entry); 0 when
-    /// unknown. Caps the OP_OFFERFILES batch size together with
-    /// `server_hard_files` (see `server_offer_file_limit`).
+    /// unknown. In legacy mode this is the cumulative distinct-candidate budget
+    /// for the connection, not an `OP_OFFERFILES` packet-size limit.
     pub(super) server_soft_files: u32,
     pub(super) server_hard_files: u32,
     pub(super) server_list_requested: bool,
@@ -670,10 +670,12 @@ impl ServerSession {
     pub(super) fn offer_files_batch_limit(&self) -> usize {
         match self.offer_files_pacing {
             OfferFilesPacingMode::Negotiated(policy) => policy.packet_max(),
-            OfferFilesPacingMode::Legacy { .. } => super::server_entry::server_offer_file_limit(
-                self.server_soft_files,
-                self.server_hard_files,
-            ),
+            OfferFilesPacingMode::Legacy { .. } => {
+                // WHY: `ST_SOFTFILES` is a connection budget; using it as a
+                // per-packet cap lets the legacy pump exceed the advertised
+                // limit across successive packets.
+                super::server_entry::server_offer_file_packet_limit()
+            }
             OfferFilesPacingMode::AwaitingCapability => 0,
         }
     }
@@ -683,7 +685,13 @@ impl ServerSession {
             OfferFilesPacingMode::Negotiated(policy) => {
                 policy.effective_batch_max(self.offer_files_distinct_published_hashes.len())
             }
-            OfferFilesPacingMode::Legacy { .. } => self.offer_files_batch_limit(),
+            OfferFilesPacingMode::Legacy { .. } => {
+                super::server_entry::server_offer_file_candidate_limit(
+                    self.server_soft_files,
+                    self.server_hard_files,
+                )
+                .saturating_sub(self.offer_files_distinct_published_hashes.len())
+            }
             OfferFilesPacingMode::AwaitingCapability => 0,
         }
     }
@@ -717,10 +725,7 @@ impl ServerSession {
         if entries_sent > 0 {
             self.offer_files_last_batch_entries = entries_sent;
         }
-        let has_budgeted_pending = match self.offer_files_pacing {
-            OfferFilesPacingMode::Negotiated(_) => self.has_publishable_offer_files(),
-            _ => true,
-        };
+        let has_budgeted_pending = self.has_publishable_offer_files();
         let continue_pump = pending_entries > 0
             && has_budgeted_pending
             && self.offer_files_batch_limit() > 0
@@ -748,10 +753,7 @@ impl ServerSession {
             OfferFilesPacingMode::AwaitingCapability => ("awaitingCapability", None, None, None),
             OfferFilesPacingMode::Legacy { reason } => (
                 "legacy",
-                Some(super::server_entry::server_offer_file_limit(
-                    self.server_soft_files,
-                    self.server_hard_files,
-                ) as u32),
+                Some(self.offer_files_batch_limit() as u32),
                 Some(OFFER_FILES_LEGACY_MIN_INTERVAL.as_millis() as u32),
                 Some(reason.clone()),
             ),
@@ -1617,23 +1619,6 @@ mod tests {
             session.offer_files_next_publish_at,
             Some(existing_deadline),
             "a re-trigger must preserve a later in-flight pacing deadline"
-        );
-    }
-
-    #[tokio::test]
-    async fn legacy_mode_keeps_large_catalog_rotation_on_the_session_timer() {
-        let (mut session, _peer) = connected_test_session_with_peer().await;
-        session.offer_files_pacing = OfferFilesPacingMode::Legacy {
-            reason: "capability absent".to_string(),
-        };
-        let before = Instant::now();
-
-        session.finish_offer_files_batch(200, 800, false);
-
-        assert!(session.offer_files_publish_requested);
-        assert!(
-            session.offer_files_next_publish_at.unwrap()
-                >= before + OFFER_FILES_LEGACY_MIN_INTERVAL
         );
     }
 
