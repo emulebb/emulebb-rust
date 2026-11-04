@@ -609,18 +609,17 @@ fn load_rejects_out_of_range_server_keepalive_minutes() {
 
 #[test]
 fn load_rejects_retired_ed2k_server_setting_keys() {
-    for key in ["keepaliveSecs"] {
-        let temp = tempfile::tempdir().unwrap();
-        let profile_dir = write_bootstrap_settings(temp.path());
-        let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-        put_setting(&metadata, SECTION_ED2K, key, serde_json::json!(1_200));
+    let key = "keepaliveSecs";
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = write_bootstrap_settings(temp.path());
+    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
+    put_setting(&metadata, SECTION_ED2K, key, serde_json::json!(1_200));
 
-        let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-        assert!(
-            format!("{error:#}").contains(&format!("unknown field `{key}`")),
-            "unexpected error for {key}: {error:#}"
-        );
-    }
+    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!("unknown field `{key}`")),
+        "unexpected error for {key}: {error:#}"
+    );
 }
 
 #[test]
