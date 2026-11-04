@@ -673,8 +673,9 @@ impl ServerSession {
             OfferFilesPacingMode::Legacy { .. } => {
                 // WHY: `ST_SOFTFILES` is a connection budget; using it as a
                 // per-packet cap lets the legacy pump exceed the advertised
-                // limit across successive packets.
-                super::server_entry::server_offer_file_packet_limit()
+                // limit across successive packets. `ST_HARDFILES` is the
+                // independent exclusive boundary for every packet.
+                super::server_entry::server_offer_file_packet_limit(self.server_hard_files)
             }
             OfferFilesPacingMode::AwaitingCapability => 0,
         }
@@ -686,11 +687,8 @@ impl ServerSession {
                 policy.effective_batch_max(self.offer_files_distinct_published_hashes.len())
             }
             OfferFilesPacingMode::Legacy { .. } => {
-                super::server_entry::server_offer_file_candidate_limit(
-                    self.server_soft_files,
-                    self.server_hard_files,
-                )
-                .saturating_sub(self.offer_files_distinct_published_hashes.len())
+                super::server_entry::server_offer_file_candidate_limit(self.server_soft_files)
+                    .saturating_sub(self.offer_files_distinct_published_hashes.len())
             }
             OfferFilesPacingMode::AwaitingCapability => 0,
         }
@@ -1504,6 +1502,88 @@ mod tests {
         let peer = TcpStream::connect(addr).await.unwrap();
         let (stream, peer_addr) = listener.accept().await.unwrap();
         (ServerSession::from_stream_for_test(stream, peer_addr), peer)
+    }
+
+    fn distinct_offer_hash(index: usize) -> [u8; 16] {
+        let mut hash = [0u8; 16];
+        hash[..8].copy_from_slice(&u64::try_from(index).unwrap().to_le_bytes());
+        hash
+    }
+
+    fn set_distinct_offer_count(session: &mut ServerSession, count: usize) {
+        session.offer_files_distinct_published_hashes =
+            (0..count).map(distinct_offer_hash).collect();
+    }
+
+    #[tokio::test]
+    async fn legacy_offer_limits_apply_hard_per_packet_and_soft_per_connection() {
+        let (mut session, _peer) = connected_test_session_with_peer().await;
+        session.configure_offer_files_legacy("test");
+
+        session.server_soft_files = 350;
+        session.server_hard_files = 5_000;
+        assert_eq!(session.offer_files_batch_limit(), 200);
+        assert_eq!(session.offer_files_new_candidate_limit(), 350);
+        set_distinct_offer_count(&mut session, 200);
+        assert_eq!(session.offer_files_new_candidate_limit(), 150);
+
+        session.server_soft_files = 1_000;
+        session.server_hard_files = 150;
+        assert_eq!(session.offer_files_batch_limit(), 149);
+        set_distinct_offer_count(&mut session, 894);
+        assert_eq!(session.offer_files_new_candidate_limit(), 106);
+
+        session.server_soft_files = 0;
+        assert_eq!(session.offer_files_batch_limit(), 149);
+        set_distinct_offer_count(&mut session, 149);
+        assert_eq!(session.offer_files_new_candidate_limit(), 51);
+
+        session.server_soft_files = 350;
+        session.server_hard_files = 0;
+        assert_eq!(session.offer_files_batch_limit(), 200);
+        set_distinct_offer_count(&mut session, 0);
+        assert_eq!(session.offer_files_new_candidate_limit(), 350);
+
+        session.server_hard_files = 1;
+        assert_eq!(session.offer_files_batch_limit(), 0);
+        assert_eq!(session.offer_files_new_candidate_limit(), 350);
+
+        set_distinct_offer_count(&mut session, 350);
+        session.reset_offer_files_publication_epoch();
+        assert_eq!(session.offer_files_new_candidate_limit(), 350);
+    }
+
+    #[tokio::test]
+    async fn legacy_soft_exhaustion_still_allows_a_changed_existing_hash() {
+        let (mut session, _peer) = connected_test_session_with_peer().await;
+        session.configure_offer_files_legacy("test");
+        session.server_soft_files = 1;
+        session.server_hard_files = 150;
+        let existing_hash = distinct_offer_hash(1);
+        session
+            .offer_files_distinct_published_hashes
+            .insert(existing_hash);
+        assert_eq!(session.offer_files_new_candidate_limit(), 0);
+
+        // Catalog reconciliation removes a materially changed hash from the
+        // current-epoch published set but retains it in the distinct set. It is
+        // therefore a refresh, not another soft-budget candidate.
+        session.offer_files_ranked_catalog = vec![(
+            existing_hash,
+            "changed.bin".to_string(),
+            2,
+            0,
+            true,
+            0,
+            Default::default(),
+        )];
+        assert!(session.has_publishable_offer_files());
+
+        session.offer_files_ranked_catalog[0].0 = distinct_offer_hash(2);
+        assert!(
+            !session.has_publishable_offer_files(),
+            "a new hash must remain blocked after the soft budget is exhausted"
+        );
     }
 
     #[tokio::test]
