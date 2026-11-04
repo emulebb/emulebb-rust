@@ -104,6 +104,15 @@ pub struct Ed2kCallbackSessionInbox {
     receiver: mpsc::Receiver<Ed2kCallbackSessionRequest>,
 }
 
+#[cfg(test)]
+impl Ed2kCallbackSessionInbox {
+    pub(in crate::ed2k_tcp) fn try_recv_for_test(
+        &mut self,
+    ) -> Result<Ed2kCallbackSessionRequest, mpsc::error::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
 /// Create the process callback-session command channel.
 #[must_use]
 pub fn ed2k_callback_session_channel() -> (Ed2kCallbackSessionHandle, Ed2kCallbackSessionInbox) {

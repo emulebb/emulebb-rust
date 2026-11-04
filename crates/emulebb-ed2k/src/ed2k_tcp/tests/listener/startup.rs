@@ -276,7 +276,7 @@ async fn stopped_kad_ignores_malformed_callback_without_closing_listener_session
 }
 
 #[tokio::test]
-async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
+async fn listener_established_session_tolerates_unknown_opcodes_and_continues() {
     let payload = b"ubuntu linux upload startup handshake".repeat(512);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
     let file_hash_hex = file_hash.to_string();
@@ -586,6 +586,18 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
             .await
             .unwrap();
     }
+
+    // Stock tolerates unknown opcodes inside recognized peer protocols after
+    // HELLO. A following request/reply proves the listener did not close the
+    // established session, while transport framing validation remains active.
+    stream
+        .write_all(&super::encode_packet(OP_EDONKEYPROT, 0xF1, &[0x01]))
+        .await
+        .unwrap();
+    stream
+        .write_all(&super::encode_packet(OP_EMULEPROT, 0xF2, &[0x02]))
+        .await
+        .unwrap();
 
     stream
         .write_all(&super::encode_packet(OP_EMULEPROT, OP_PUBLICIP_REQ, &[]))

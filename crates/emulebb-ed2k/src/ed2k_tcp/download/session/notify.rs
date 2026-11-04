@@ -114,12 +114,16 @@ pub(super) fn handle_chat_captcha_result(
 }
 
 /// OP_KAD_FWTCPCHECK_ACK: a Kad TCP firewall-check acknowledgement.
-pub(super) fn handle_kad_firewall_tcp_ack(transport: &Ed2kTransport, peer_addr: SocketAddr) {
+pub(super) fn handle_kad_firewall_tcp_ack(
+    transport: &Ed2kTransport,
+    peer_addr: SocketAddr,
+    accepted: bool,
+) {
     dump_ed2k_tcp_download_meta(
         peer_addr,
         Some(transport.mode),
         "kad_firewall_tcp_ack",
-        || ("received=true").into(),
+        || format!("received=true accepted={accepted}"),
     );
 }
 

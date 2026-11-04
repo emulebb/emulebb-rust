@@ -18,6 +18,7 @@ use super::{
     OP_REQUESTPARTS_I64, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SETREQFILEID, OP_STARTUPLOADREQ,
     decode_exact_file_hash_payload, decode_optional_file_hash_payload,
     dump::dump_ed2k_tcp_listener_meta,
+    established_peer::EstablishedPeerIdentity,
     hello::{DecodedEmuleInfoProfile, DecodedHelloProfile},
     listener::session::{
         PeerHelloStateRefs, apply_peer_hello_profile,
@@ -140,6 +141,18 @@ impl PeerUploadFacet {
         if profile.accepts_comments && self.peer_accept_comment_version == 0 {
             self.peer_accept_comment_version = 1;
         }
+        let _ = self
+            .upload_queue
+            .refresh_peer_state(transfer_runtime, &self.peer_upload_identity)
+            .await;
+    }
+
+    pub(in crate::ed2k_tcp) async fn apply_established_identity(
+        &mut self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        identity: EstablishedPeerIdentity,
+    ) {
+        identity.apply_to_upload_identity(&mut self.peer_upload_identity);
         let _ = self
             .upload_queue
             .refresh_peer_state(transfer_runtime, &self.peer_upload_identity)

@@ -1,5 +1,6 @@
 use tokio::time::Instant;
 
+use super::super::super::established_peer::EstablishedPeerIdentity;
 use super::super::super::{
     ED2K_SOURCE_EXCHANGE2_VERSION, Ed2kPeerSecureIdentState, hello::DecodedHelloProfile,
 };
@@ -28,7 +29,7 @@ pub(in crate::ed2k_tcp) struct DownloadConnectionState {
     peer_connect_options: Option<u8>,
     peer_udp_port: u16,
     peer_udp_version: u8,
-    peer_low_id: bool,
+    peer_identity: EstablishedPeerIdentity,
     peer_buddy_endpoint: Option<(std::net::Ipv4Addr, u16)>,
 }
 
@@ -56,7 +57,7 @@ impl DownloadConnectionState {
             peer_connect_options: Some(profile.connect_options),
             peer_udp_port: profile.identity.udp_port,
             peer_udp_version: profile.misc_options1.udp_version,
-            peer_low_id: profile.identity.client_id < 0x0100_0000,
+            peer_identity: EstablishedPeerIdentity::from_hello(profile),
             peer_buddy_endpoint: profile.buddy.map(|buddy| (buddy.ip, buddy.udp_port)),
         }
     }
@@ -109,9 +110,9 @@ pub(super) struct DownloadSessionState {
     pub(super) peer_udp_port: u16,
     /// Peer's advertised eD2k UDP version (hello or OP_EMULEINFO), 0 if unknown.
     pub(super) peer_udp_version: u8,
-    /// Whether the connected source is a firewalled LowID client (oracle
-    /// `HasLowID()`: client_id below the HighID floor). Set from the hello identity.
-    pub(super) peer_low_id: bool,
+    /// Mutable client/server identity established by HELLO and later updated by
+    /// OP_CHANGE_CLIENT_ID for callback and queued-source routing.
+    pub(super) peer_identity: EstablishedPeerIdentity,
     /// The source's Kad buddy endpoint (ip, udp_port) decoded from its hello
     /// `CT_EMULE_BUDDYIP`/`CT_EMULE_BUDDYUDP`; `None` unless it advertised a buddy.
     pub(super) peer_buddy_endpoint: Option<(std::net::Ipv4Addr, u16)>,
@@ -200,7 +201,7 @@ impl DownloadSessionState {
             peer_connect_options: connection_state.peer_connect_options,
             peer_udp_port: connection_state.peer_udp_port,
             peer_udp_version: connection_state.peer_udp_version,
-            peer_low_id: connection_state.peer_low_id,
+            peer_identity: connection_state.peer_identity,
             peer_buddy_endpoint: connection_state.peer_buddy_endpoint,
             peer_part_bitmap: None,
             pending_aich_recovery_parts: Vec::new(),
@@ -228,22 +229,21 @@ impl DownloadSessionState {
             peer_connect_options: self.peer_connect_options,
             peer_udp_port: self.peer_udp_port,
             peer_udp_version: self.peer_udp_version,
-            peer_low_id: self.peer_low_id,
+            peer_identity: self.peer_identity,
             peer_buddy_endpoint: self.peer_buddy_endpoint,
         }
     }
 
-    /// Capture the connected source's firewalled-LowID flag + its Kad buddy
+    /// Capture the connected source's client/server identity and Kad buddy
     /// endpoint from its decoded hello, so a queued LowID source can later be
     /// reasked through its buddy (`OP_REASKCALLBACKUDP`). The buddy *id* is not in
     /// the hello (the oracle only learns it via Kad source-finding), so only the
-    /// endpoint + LowID flag are captured here.
+    /// endpoint and mutable client/server identity are captured here.
     pub(super) fn capture_peer_buddy(
         &mut self,
         profile: &super::super::super::hello::DecodedHelloProfile,
     ) {
-        // Oracle HasLowID(): a client id below the HighID floor (0x01000000).
-        self.peer_low_id = profile.identity.client_id < 0x0100_0000;
+        self.peer_identity = EstablishedPeerIdentity::from_hello(profile);
         if let Some(buddy) = profile.buddy {
             self.peer_buddy_endpoint = Some((buddy.ip, buddy.udp_port));
         }

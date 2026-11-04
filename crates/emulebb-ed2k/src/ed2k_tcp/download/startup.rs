@@ -11,9 +11,9 @@ use crate::ed2k_server::Ed2kFoundSource;
 use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job};
 
 use super::super::{
-    Ed2kHelloIdentity, Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher, Ed2kPeerUploadContext,
-    Ed2kSecureIdent, Ed2kTransport, PeerUploadFacet, dump_ed2k_tcp_download_meta,
-    encode_hello_request,
+    Ed2kEstablishedPeerContext, Ed2kHelloIdentity, Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher,
+    Ed2kPeerUploadContext, Ed2kSecureIdent, Ed2kTransport, PeerUploadFacet,
+    dump_ed2k_tcp_download_meta, encode_hello_request,
 };
 use super::session::{
     DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
@@ -51,6 +51,9 @@ pub struct Ed2kPeerDownloadOptions<'a> {
     /// also receives upload requests. Production callers should always supply
     /// it; protocol tests may omit it when LowID admission is irrelevant.
     pub upload_context: Option<Ed2kPeerUploadContext>,
+    /// Established-session callback, firewall-ACK, and server-route context.
+    /// Production callers supply it; focused protocol tests may omit it.
+    pub established_context: Option<Ed2kEstablishedPeerContext>,
     /// When set (UDP reask enabled), a queued + UDP-eligible source detaches onto
     /// UDP reask via this handle. `None` keeps the legacy TCP-only queued path.
     pub reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
@@ -120,6 +123,7 @@ pub async fn download_files_from_peer(
         current_source_count,
         timeout,
         upload_context,
+        established_context,
         reask_register,
     } = options;
     let first_file_hash = peer.file_hash;
@@ -236,6 +240,7 @@ pub async fn download_files_from_peer(
                 peer_user_hash: peer.user_hash,
                 peer_connect_options: peer.obfuscation_options,
                 connection_state: Some(&mut connection_state),
+                established_context: established_context.as_ref(),
                 upload_facet: Some(&mut upload_facet),
                 upload_context: upload_context.as_ref(),
                 reask_register: reask_register.clone(),

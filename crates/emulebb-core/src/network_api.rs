@@ -803,6 +803,7 @@ impl EmulebbCore {
             server_state,
             server_control,
             dht,
+            callback_sessions,
             kad_nodes_dat_path: network.kad_nodes_dat_path.clone(),
             kad_firewall: Arc::clone(&kad_firewall),
             reachability,
