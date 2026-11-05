@@ -1020,6 +1020,8 @@ impl Ed2kTransferRuntime {
             );
         }
         manifest.transfer_row_removed = true;
+        self.refresh_retired_transfer_catalog_entry(&file_hash)
+            .await?;
         self.finish_transfer_retirement_unlocked(&file_hash).await?;
         Ok(newly_retired.then_some(manifest))
     }

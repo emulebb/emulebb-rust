@@ -386,6 +386,7 @@ impl EmulebbCore {
         });
         self.state.lock().await.transfers.remove(hash);
         self.publish_transfer_removed(hash);
+        self.queue_ed2k_shared_catalog_publish();
         Ok(Some(transfer))
     }
 
@@ -407,6 +408,7 @@ impl EmulebbCore {
             self.state.lock().await.transfers.remove(&hash);
             self.publish_transfer_removed(hash);
         }
+        self.queue_ed2k_shared_catalog_publish();
         Ok(())
     }
 }

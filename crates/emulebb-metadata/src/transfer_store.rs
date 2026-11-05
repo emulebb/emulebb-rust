@@ -601,6 +601,7 @@ impl super::MetadataStore {
             LEFT JOIN local_paths media_paths ON media_paths.id = transfers.delivered_path_id
             WHERE transfers.completed != 0
               AND transfers.delete_requested_at_ms IS NULL
+              AND transfers.removed_at_ms IS NULL
               AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
             ORDER BY known_files.ed2k_hash
             LIMIT ?2

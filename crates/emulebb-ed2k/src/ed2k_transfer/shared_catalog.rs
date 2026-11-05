@@ -13,6 +13,39 @@ use super::{
 };
 
 impl Ed2kTransferRuntime {
+    /// Replace a retired download's offer with its independently admitted
+    /// local share, or withdraw it when no current local source exists.
+    pub(super) async fn refresh_retired_transfer_catalog_entry(
+        &self,
+        file_hash: &str,
+    ) -> anyhow::Result<()> {
+        let metadata = self.metadata.clone();
+        let hash = file_hash.to_string();
+        let local = tokio::task::spawn_blocking(move || {
+            let Some(mut entry) = metadata.active_local_catalog_entry(&hash)? else {
+                return Ok(None);
+            };
+            let Some(source) = super::duplicate::first_present_source(
+                metadata.current_shared_files_by_hash(&hash)?,
+            ) else {
+                return Ok(None);
+            };
+            if let Some(name) = source.path.file_name() {
+                entry.display_name = name.to_string_lossy().into_owned();
+            }
+            super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
+        })
+        .await??;
+        let hash = Ed2kHash::from_str(file_hash)?;
+        self.shared_catalog
+            .write()
+            .await
+            .upsert_verified(hash, local);
+        self.note_shared_catalog_entries_changed();
+        self.notify_shared_publish_demand_changed();
+        Ok(())
+    }
+
     /// Rebuild complete offers after a root scan changes membership. Verified
     /// in-progress download entries and compatibility hints stay in the catalog.
     pub async fn refresh_complete_shared_catalog(&self) -> anyhow::Result<usize> {
