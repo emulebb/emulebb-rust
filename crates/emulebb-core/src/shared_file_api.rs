@@ -297,12 +297,12 @@ impl EmulebbCore {
                 entry.aich_root.as_deref(),
             ),
             aich_root: entry.aich_root.clone().unwrap_or_default(),
-            transfer_dir: self
-                .ed2k_transfers
-                .transfer_dir_path(&entry.file_hash)
-                .display()
-                .to_string(),
-            source_path: entry.source_path.as_deref().map(normal_path_display),
+            path: normal_path_display(
+                entry
+                    .source_path
+                    .as_deref()
+                    .expect("active local share entry must have a path"),
+            ),
             priority: entry.upload_priority.clone(),
             auto_upload_priority: entry.auto_upload_priority,
             all_time_uploaded_bytes: entry.all_time_uploaded_bytes,

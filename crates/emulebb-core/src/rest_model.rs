@@ -1033,9 +1033,7 @@ pub struct LocalShare {
     pub part_count: u32,
     pub ed2k_link: String,
     pub aich_root: String,
-    pub transfer_dir: String,
-    #[serde(default)]
-    pub source_path: Option<String>,
+    pub path: String,
     pub priority: String,
     pub auto_upload_priority: bool,
     pub all_time_uploaded_bytes: u64,

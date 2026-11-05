@@ -137,10 +137,7 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
     let share_b = require_share(&shares, "deep-top-b.bin");
     let nested_share = require_share(&shares, "deep-nested.bin");
     for share in [&share_a, &share_b, &nested_share] {
-        let source_path = share
-            .source_path
-            .as_deref()
-            .expect("share-in-place file must report a source path");
+        let source_path = &share.path;
         assert!(
             !source_path.starts_with(r"\\?\"),
             "shared-file display path must not expose the verbatim prefix"

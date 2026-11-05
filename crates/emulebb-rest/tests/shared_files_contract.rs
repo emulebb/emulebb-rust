@@ -23,6 +23,9 @@ async fn shared_files_use_canonical_route_and_envelope() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
+    core.add_shared_directory_root(&runtime_dir.display().to_string())
+        .await
+        .unwrap();
     let share = core
         .share_local_file(LocalShareCreate {
             path: payload_path.display().to_string(),
@@ -78,6 +81,13 @@ async fn shared_files_use_canonical_route_and_envelope() {
     assert!(value["data"].get("offset").is_none());
     assert_eq!(value["data"]["limit"], 100);
     assert_eq!(value["data"]["items"][0]["hash"], hash);
+    let item = &value["data"]["items"][0];
+    assert_eq!(
+        item["path"],
+        normal_path_display(payload_path.canonicalize().unwrap())
+    );
+    assert!(item.get("sourcePath").is_none());
+    assert!(item.get("transferDir").is_none());
     assert!(value["data"]["nextCursor"].is_null());
 
     let paged_response = app
@@ -207,10 +217,13 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
+    core.add_shared_directory_root(&runtime_dir.display().to_string())
+        .await
+        .unwrap();
     let alpha = core
         .share_local_file(LocalShareCreate {
             path: alpha_path.display().to_string(),
-            name: Some("Catalog Alpha.bin".to_string()),
+            name: None,
         })
         .await
         .unwrap();
@@ -250,7 +263,7 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     assert!(second["data"]["nextCursor"].is_null());
 
     for query in [
-        "q=catalog%20alpha".to_string(),
+        "q=alpha".to_string(),
         "q=alpha%20sample".to_string(),
         format!("q={}", &alpha.hash[..12]),
     ] {

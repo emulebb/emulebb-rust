@@ -699,7 +699,7 @@ fn shared_file_response_with_publication(
     share: &LocalShare,
     publication: Option<emulebb_core::SharedFilePublicationStatus>,
 ) -> SharedFileResponse {
-    let path = managed_shared_file_path(share);
+    let path = normal_path_display(&share.path);
     let published_ed2k = publication
         .as_ref()
         .is_none_or(|status| status.ed2k.state == SharedFilePublishState::Published);
@@ -728,18 +728,6 @@ fn shared_file_response_with_publication(
         publication,
         shared_by_rule: false,
         ed2k_link: share.ed2k_link.clone(),
-    }
-}
-
-pub(crate) fn managed_shared_file_path(share: &LocalShare) -> String {
-    if let Some(source_path) = share.source_path.as_ref().filter(|path| !path.is_empty()) {
-        return normal_path_display(source_path);
-    }
-    let path = FsPath::new(&share.transfer_dir);
-    if path.is_dir() {
-        normal_path_display(path.join("pieces.bin").display().to_string())
-    } else {
-        normal_path_display(&share.transfer_dir)
     }
 }
 
@@ -798,8 +786,7 @@ mod tests {
             ed2k_link: "ed2k://|file|Synthetic.Shared.bin|123|00112233445566778899aabbccddeeff|/"
                 .to_string(),
             aich_root: String::new(),
-            transfer_dir: "transfers".to_string(),
-            source_path: Some(r"\\?\C:\shared\Synthetic.Shared.bin".to_string()),
+            path: r"\\?\C:\shared\Synthetic.Shared.bin".to_string(),
             priority: "normal".to_string(),
             auto_upload_priority: false,
             all_time_uploaded_bytes: 4096,
