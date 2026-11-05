@@ -18,6 +18,9 @@
 //!   that is still being written: we only hash it once its events have settled.
 //! * **Recursive per root.** Each configured root is watched recursively,
 //!   matching the manual full-tree scan.
+//! * **Root availability.** A separate two-second check withdraws complete
+//!   offers when a root disappears and schedules a verified reload when it
+//!   returns, including when the OS watcher drops a mount event.
 //! * **Thread -> channel -> tokio bridge.** The debouncer's event handler is a
 //!   small closure that classifies the settled events into [`MonitorAction`]s
 //!   (the pure decision -- share vs. remove) and forwards them over a bounded
@@ -478,7 +481,7 @@ async fn run_consumer<F, Fut>(
 use emulebb_ed2k::ed2k_transfer::{
     Ed2kSharedSourceInvalidation, Ed2kSharedSourceInvalidationSignal,
 };
-use emulebb_ed2k::long_path::long_path;
+use emulebb_ed2k::long_path::{long_path, normal_path_display};
 
 use crate::EmulebbCore;
 use crate::shared_directories::{
@@ -547,7 +550,6 @@ async fn run_shared_source_reconcile_worker(
         if !policy.debounce.is_zero() {
             tokio::time::sleep(policy.debounce).await;
         }
-
         let attempts = policy.max_attempts.max(1);
         if let Err(error) = run_targeted_rehash_attempts(policy, || {
             reconcile_invalidated_shared_source(&core, &invalidation)
@@ -564,6 +566,102 @@ async fn run_shared_source_reconcile_worker(
         }
         lease.acknowledge();
     }
+}
+
+fn start_shared_root_health_worker(core: &EmulebbCore) {
+    let mut worker = core.shared_root_health_worker.lock().unwrap();
+    if worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
+        return;
+    }
+    if let Some(finished) = worker.take() {
+        finished.abort();
+    }
+    *worker = Some(tokio::spawn(run_shared_root_health_worker(core.clone())));
+}
+
+async fn run_shared_root_health_worker(core: EmulebbCore) {
+    let mut root_availability = crate::shared_directories::effective_shared_directory_roots(&core)
+        .await
+        .into_iter()
+        .map(|root| (PathBuf::from(root.path), root.accessible))
+        .collect::<HashMap<_, _>>();
+    let mut root_check = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        Duration::from_secs(2),
+    );
+    loop {
+        root_check.tick().await;
+        if let Err(error) = reconcile_root_availability(&core, &mut root_availability).await {
+            tracing::warn!(%error, "failed to reconcile shared-root availability");
+        }
+    }
+}
+
+async fn root_availability_snapshot(core: &EmulebbCore) -> anyhow::Result<HashMap<PathBuf, bool>> {
+    let roots = crate::shared_directories::effective_shared_directory_roots(core).await;
+    tokio::task::spawn_blocking(move || {
+        roots
+            .into_iter()
+            .map(|root| {
+                let path = PathBuf::from(root.path);
+                let accessible = long_path(&path).is_dir();
+                (path, accessible)
+            })
+            .collect()
+    })
+    .await
+    .map_err(Into::into)
+}
+
+async fn reconcile_root_availability(
+    core: &EmulebbCore,
+    previous: &mut HashMap<PathBuf, bool>,
+) -> anyhow::Result<()> {
+    let current = root_availability_snapshot(core).await?;
+    let changed = current
+        .iter()
+        .filter(|(path, accessible)| previous.get(*path) != Some(*accessible))
+        .map(|(path, accessible)| (path.clone(), *accessible))
+        .collect::<Vec<_>>();
+    let missing = current
+        .iter()
+        .filter(|(_, accessible)| !**accessible)
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    if changed.is_empty() && missing.is_empty() {
+        return Ok(());
+    }
+    let mut withdrawn = false;
+    for root in &missing {
+        let metadata = core.metadata_store.clone();
+        let root = root.clone();
+        withdrawn |=
+            tokio::task::spawn_blocking(move || metadata.set_shared_root_accessible(&root, false))
+                .await??;
+    }
+    {
+        let mut state = core.state.lock().await;
+        for root in &mut state.shared_directories {
+            if let Some((_, accessible)) = changed
+                .iter()
+                .find(|(path, _)| normal_path_display(path) == root.path)
+            {
+                root.accessible = *accessible;
+                root.shareable = *accessible;
+            }
+        }
+    }
+    if withdrawn {
+        core.ed2k_transfers
+            .refresh_complete_shared_catalog()
+            .await?;
+        core.queue_ed2k_shared_catalog_publish();
+    }
+    if changed.iter().any(|(_, accessible)| *accessible) {
+        core.reload_shared_directories_detached().await?;
+    }
+    *previous = current;
+    Ok(())
 }
 
 async fn run_targeted_rehash_attempts<F, Fut>(
@@ -766,6 +864,7 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
     // Drop any existing monitor before rebuilding the watch set.
     stop_shared_directory_monitor(core);
     start_shared_source_reconcile_worker(core);
+    start_shared_root_health_worker(core);
 
     if let Err(error) = crate::shared_directories::sync_implicit_shared_directory_roots(core).await
     {
@@ -945,6 +1044,9 @@ pub(crate) fn stop_shared_directory_monitor(core: &EmulebbCore) {
         monitor.stop();
     }
     if let Some(worker) = core.shared_source_reconcile_worker.lock().unwrap().take() {
+        worker.abort();
+    }
+    if let Some(worker) = core.shared_root_health_worker.lock().unwrap().take() {
         worker.abort();
     }
 }
@@ -1598,7 +1700,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn monitored_file_is_not_shared_when_exactly_excluded() {
+    async fn unavailable_root_withdraws_and_rejoins_after_reload() {
+        let parent = std::env::temp_dir().join(format!(
+            "emulebb-monitor-root-health-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+        ));
+        let root = parent.join("library");
+        let offline = parent.join("offline");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("Library.bin");
+        std::fs::write(&source, b"verified local payload").unwrap();
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        configure_test_shared_root(&core, &root).await;
+        auto_share_monitored_path(&core, &source).await;
+        let hash = core.shares().await[0].hash.clone();
+        let mut availability = root_availability_snapshot(&core).await.unwrap();
+
+        std::fs::rename(&root, &offline).unwrap();
+        reconcile_root_availability(&core, &mut availability)
+            .await
+            .unwrap();
+        assert!(core.shares().await.is_empty());
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
+        assert!(
+            core.metadata_store
+                .active_local_file_by_hash(&hash)
+                .unwrap()
+                .is_none()
+        );
+        // An in-flight scan may commit an old root snapshot after withdrawal.
+        core.metadata_store
+            .set_shared_root_accessible(&root, true)
+            .unwrap();
+        reconcile_root_availability(&core, &mut availability)
+            .await
+            .unwrap();
+        assert!(
+            core.metadata_store
+                .active_local_file_by_hash(&hash)
+                .unwrap()
+                .is_none()
+        );
+
+        std::fs::rename(&offline, &root).unwrap();
+        reconcile_root_availability(&core, &mut availability)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if core.share(&hash).await.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("reappeared root should rejoin after reload");
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[tokio::test]
+    async fn monitored_file_is_not_shared_when_pattern_ignored() {
         let root = std::env::temp_dir().join(format!(
             "emulebb-monitor-excluded-{}-{}",
             std::process::id(),

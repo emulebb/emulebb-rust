@@ -199,7 +199,7 @@ impl MetadataStore {
         let changed = self.connection()?.execute(
             "UPDATE shared_directory_roots SET accessible = ?3
              WHERE path_id = (SELECT id FROM local_paths WHERE platform = ?1 AND native_path = ?2)
-               AND enabled = 1 AND deleted_at_ms IS NULL",
+               AND enabled = 1 AND deleted_at_ms IS NULL AND accessible != ?3",
             params![
                 NativePath::platform(),
                 native.storage_bytes(),
