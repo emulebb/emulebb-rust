@@ -14,7 +14,7 @@ impl MetadataStore {
     pub fn replace_root_memberships(
         &self,
         root: &Path,
-        paths: &[(PathBuf, NativeFileFingerprint)],
+        paths: &[(PathBuf, PathBuf, NativeFileFingerprint)],
     ) -> Result<()> {
         let native_root = NativePath::from(root);
         let mut conn = self.connection()?;
@@ -35,11 +35,14 @@ impl MetadataStore {
              WHERE root_id = ?1 AND removed_at_ms IS NULL",
             params![root_id, now],
         )?;
-        for (path, current_fingerprint) in paths {
-            let relative = path.strip_prefix(root)?;
+        for (path, relative, current_fingerprint) in paths {
             ensure!(
-                !relative.as_os_str().is_empty(),
-                "shared member is the root itself"
+                !relative.as_os_str().is_empty()
+                    && !relative.is_absolute()
+                    && relative
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_))),
+                "shared member must have a safe relative path"
             );
             let native_path = NativePath::from(path.as_path());
             let cached: (i64, Vec<u8>) = match tx.query_row(
@@ -73,7 +76,7 @@ impl MetadataStore {
                 params![
                     root_id,
                     path_id,
-                    NativePath::from(relative).display_path(),
+                    NativePath::from(relative.as_path()).display_path(),
                     now
                 ],
             )?;
@@ -165,12 +168,21 @@ mod tests {
         store
             .upsert_local_file_instance(&file, hash, &fingerprint)
             .unwrap();
-        let verified_file = (file.clone(), fingerprint.clone());
+        let verified_file = (
+            file.clone(),
+            PathBuf::from("nested/Sample.bin"),
+            fingerprint.clone(),
+        );
+        let nested_file = (
+            file.clone(),
+            PathBuf::from("Sample.bin"),
+            fingerprint.clone(),
+        );
         store
             .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
             .unwrap();
         store
-            .replace_root_memberships(&nested, std::slice::from_ref(&verified_file))
+            .replace_root_memberships(&nested, std::slice::from_ref(&nested_file))
             .unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 1);
         store.set_shared_root_accessible(&root, false).unwrap();
@@ -185,7 +197,10 @@ mod tests {
         let mut changed = fingerprint.clone();
         changed.size_bytes = 33;
         store
-            .replace_root_memberships(&root, &[(file.clone(), changed)])
+            .replace_root_memberships(
+                &root,
+                &[(file.clone(), PathBuf::from("nested/Sample.bin"), changed)],
+            )
             .unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 0);
         store
