@@ -90,14 +90,6 @@ enum VerifiedPayloadAuthority {
     ManagedCompleted {
         expected: Option<NativeFileFingerprint>,
     },
-    ManifestSource {
-        path: PathBuf,
-        expected: Option<NativeFileFingerprint>,
-    },
-    SharedFallback {
-        path: PathBuf,
-        expected: NativeFileFingerprint,
-    },
     LocalInstance {
         path: PathBuf,
         expected: NativeFileFingerprint,
@@ -108,12 +100,8 @@ impl VerifiedPayloadAuthority {
     fn expected_fingerprint(&self) -> Option<&NativeFileFingerprint> {
         match self {
             Self::ManagedIncomplete => None,
-            Self::ManagedCompleted { expected } | Self::ManifestSource { expected, .. } => {
-                expected.as_ref()
-            }
-            Self::SharedFallback { expected, .. } | Self::LocalInstance { expected, .. } => {
-                Some(expected)
-            }
+            Self::ManagedCompleted { expected } => expected.as_ref(),
+            Self::LocalInstance { expected, .. } => Some(expected),
         }
     }
 
@@ -125,8 +113,6 @@ impl VerifiedPayloadAuthority {
         match self {
             Self::ManagedIncomplete => "managed_incomplete",
             Self::ManagedCompleted { .. } => "managed_completed",
-            Self::ManifestSource { .. } => "manifest_source",
-            Self::SharedFallback { .. } => "shared_fallback",
             Self::LocalInstance { .. } => "local_instance",
         }
     }
@@ -858,33 +844,8 @@ impl Ed2kTransferRuntime {
                 let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
                     return Ok(None);
                 };
-                // Share-in-place: serve upload bytes straight from the original
-                // on-disk file (never copied into the piece store). A real download
-                // reads from the internal piece store.
-                match manifest.source_path.as_deref() {
-                    Some(source_path) => {
-                        let metadata = self.metadata.clone();
-                        let path = source_path.to_path_buf();
-                        let governed = tokio::task::spawn_blocking(move || {
-                            metadata.local_file_has_root_membership(&path)
-                        })
-                        .await??;
-                        if governed {
-                            return Ok(None);
-                        }
-                        let payload_path = long_path(source_path);
-                        let authority = VerifiedPayloadAuthority::ManifestSource {
-                            path: payload_path.clone(),
-                            expected: manifest.source_fingerprint.clone(),
-                        };
-                        (
-                            payload_path,
-                            manifest.verified_ranges.clone(),
-                            authority,
-                            None,
-                        )
-                    }
-                    None if !manifest.verified_ranges.is_empty() => {
+                match manifest.verified_ranges.is_empty() {
+                    false => {
                         let (authority, incomplete_authority) = if manifest.completed {
                             (
                                 VerifiedPayloadAuthority::ManagedCompleted {
@@ -905,24 +866,7 @@ impl Ed2kTransferRuntime {
                             incomplete_authority,
                         )
                     }
-                    None => match self.first_present_shared_source(&hash_hex).await? {
-                        Some(source) => {
-                            let path = source.path;
-                            (
-                                path.clone(),
-                                vec![Ed2kSharedRange {
-                                    start: 0,
-                                    end: manifest.file_size,
-                                }],
-                                VerifiedPayloadAuthority::SharedFallback {
-                                    path,
-                                    expected: source.fingerprint,
-                                },
-                                None,
-                            )
-                        }
-                        None => return Ok(None),
-                    },
+                    true => return Ok(None),
                 }
             };
 
@@ -1027,30 +971,11 @@ impl Ed2kTransferRuntime {
     ) -> Result<()> {
         match authority {
             VerifiedPayloadAuthority::ManagedIncomplete => Ok(()),
-            VerifiedPayloadAuthority::ManifestSource { path, expected } => {
-                let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
-                let _manifest_guard = self.lock_manifest(file_hash).await;
-                let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-                if manifest.source_path.as_deref() != Some(path.as_path())
-                    || manifest.source_fingerprint.as_ref() != expected.as_ref()
-                {
-                    return Ok(());
-                }
-                let invalidated = manifest.source_fingerprint.take().is_some();
-                self.store_manifest_unlocked(&manifest).await?;
-                self.upsert_verified_catalog_entry(&manifest).await;
-                if invalidated {
-                    self.queue_shared_source_invalidation(file_hash, path);
-                }
-                Ok(())
-            }
             VerifiedPayloadAuthority::ManagedCompleted { expected } => {
                 let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
                 let _manifest_guard = self.lock_manifest(file_hash).await;
                 let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-                if manifest.source_path.is_some()
-                    || !manifest.completed
-                    || manifest.payload_fingerprint.as_ref() != expected.as_ref()
+                if !manifest.completed || manifest.payload_fingerprint.as_ref() != expected.as_ref()
                 {
                     return Ok(());
                 }
@@ -1060,20 +985,6 @@ impl Ed2kTransferRuntime {
                 self.invalidate_payload_handle(file_hash);
                 self.store_manifest_unlocked(&manifest).await?;
                 self.upsert_verified_catalog_entry(&manifest).await;
-                Ok(())
-            }
-            VerifiedPayloadAuthority::SharedFallback { path, expected } => {
-                let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
-                let _manifest_guard = self.lock_manifest(file_hash).await;
-                let invalidated = self
-                    .metadata
-                    .invalidate_shared_file_source(file_hash, path, expected)?;
-                if self.first_present_shared_source(file_hash).await?.is_none() {
-                    self.remove_verified_catalog_entry(file_hash).await;
-                }
-                if invalidated {
-                    self.queue_shared_source_invalidation(file_hash, path);
-                }
                 Ok(())
             }
             VerifiedPayloadAuthority::LocalInstance { path, .. } => {

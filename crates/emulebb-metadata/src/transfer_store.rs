@@ -10,14 +10,14 @@ use crate::{
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_model::{
-        MetadataImportedKnownFileEntry, MetadataShareInPlaceReloadEntry,
-        MetadataSharedSourceFailure, MetadataTransferCatalogEntry, MetadataTransferCounts,
-        MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
-        MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
-        MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
-        MetadataTransferDirectoryDeletionAuthority, MetadataTransferFileNameObservation,
-        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
-        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferSource,
+        MetadataImportedKnownFileEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
+        MetadataTransferCounts, MetadataTransferDeletionTombstone,
+        MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
+        MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
+        MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
+        MetadataTransferFileNameObservation, MetadataTransferManifest,
+        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
+        MetadataTransferRange, MetadataTransferSource,
     },
 };
 
@@ -59,7 +59,7 @@ impl super::MetadataStore {
             .query_row(
                 r#"
                 SELECT known_files.completed, transfers.final_rehash_pending,
-                       transfers.source_path_id IS NULL, transfers.completed_at_ms
+                       transfers.completed_at_ms
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
@@ -69,8 +69,7 @@ impl super::MetadataStore {
                     Ok((
                         row.get::<_, bool>(0)?,
                         row.get::<_, bool>(1)?,
-                        row.get::<_, bool>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(2)?,
                     ))
                 },
             )
@@ -82,14 +81,12 @@ impl super::MetadataStore {
             .query_row(params![hash], |row| row.get::<_, i64>(0))
             .optional()?;
         let previous_records_completion = previous_completion
-            .map(|(completed, final_rehash_pending, source_path_absent, _)| {
-                completed && !final_rehash_pending && source_path_absent
-            })
+            .map(|(completed, final_rehash_pending, _)| completed && !final_rehash_pending)
             .unwrap_or(false);
         let records_completion = records_download_completion(manifest);
         let completion_transition = records_completion && !previous_records_completion;
         let previous_completed_at_ms =
-            previous_completion.and_then(|(_, _, _, completed_at_ms)| completed_at_ms);
+            previous_completion.and_then(|(_, _, completed_at_ms)| completed_at_ms);
         let completion_timestamp_repair =
             records_completion && previous_records_completion && previous_completed_at_ms.is_none();
         let completion_timestamp_update = completion_transition || completion_timestamp_repair;
@@ -104,7 +101,6 @@ impl super::MetadataStore {
             previous_completed_at_ms
         };
         let delivered_path_id = optional_local_path_id(&tx, manifest.delivered_path.as_deref())?;
-        let source_path_id = optional_local_path_id(&tx, manifest.source_path.as_deref())?;
         let source_fingerprint = manifest
             .source_fingerprint
             .as_ref()
@@ -182,11 +178,10 @@ impl super::MetadataStore {
             INSERT INTO transfers(
                 known_file_id, visible_state, final_rehash_pending, control_state, download_priority,
                 category_id, payload_directory, delivery_state, delivery_ownership,
-                delivered_path_id, source_path_id,
-                source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
+                delivered_path_id, source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
-            VALUES (?1, ?2, ?13, ?3, 'normal', ?4, ?5, ?14, ?16, ?6, ?10, ?11, ?12, ?7, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?12, ?3, 'normal', ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 visible_state = excluded.visible_state,
                 final_rehash_pending = excluded.final_rehash_pending,
@@ -196,12 +191,11 @@ impl super::MetadataStore {
                 delivery_state = excluded.delivery_state,
                 delivery_ownership = excluded.delivery_ownership,
                 delivered_path_id = excluded.delivered_path_id,
-                source_path_id = excluded.source_path_id,
                 source_fingerprint = excluded.source_fingerprint,
                 payload_fingerprint = excluded.payload_fingerprint,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = CASE
-                    WHEN ?15 THEN excluded.completed_at_ms
+                    WHEN ?14 THEN excluded.completed_at_ms
                     ELSE transfers.completed_at_ms
                 END,
                 removed_at_ms = excluded.removed_at_ms
@@ -221,7 +215,6 @@ impl super::MetadataStore {
             } else {
                 None
             },
-            source_path_id,
             source_fingerprint,
             payload_fingerprint,
             bool_to_i64(manifest.final_rehash_pending),
@@ -232,35 +225,6 @@ impl super::MetadataStore {
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
             .query_row(params![known_file_id], |row| row.get(0))?;
-        if let Some(source_path_id) = source_path_id {
-            tx.prepare_cached(
-                r#"
-                INSERT INTO shared_file_sources(
-                    known_file_id, path_id, file_size, source_fingerprint,
-                    created_at_ms, updated_at_ms
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                ON CONFLICT(path_id) DO UPDATE SET
-                    known_file_id = excluded.known_file_id,
-                    file_size = excluded.file_size,
-                    source_fingerprint = excluded.source_fingerprint,
-                    updated_at_ms = excluded.updated_at_ms
-                "#,
-            )?
-            .execute(params![
-                known_file_id,
-                source_path_id,
-                manifest.file_size as i64,
-                manifest
-                    .source_fingerprint
-                    .as_ref()
-                    .map(NativeFileFingerprint::storage_bytes),
-                now,
-            ])?;
-            tx.prepare_cached("DELETE FROM shared_file_scan_failures WHERE path_id = ?1")?
-                .execute(params![source_path_id])?;
-        }
-
         replace_transfer_children(&tx, known_file_id, transfer_id, manifest, now)?;
         record_completed_download(
             &tx,
@@ -313,14 +277,12 @@ impl super::MetadataStore {
                        known_files.comment, known_files.rating,
                        transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                        delivered_paths.platform, delivered_paths.native_path,
-                       source_paths.platform, source_paths.native_path,
                        transfers.source_fingerprint, transfers.payload_fingerprint,
                        transfers.final_rehash_pending, transfers.delivery_state,
                        transfers.delivery_ownership
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
-                LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
                 WHERE known_files.ed2k_hash = ?1
                   AND (
                       (?2 = 0 AND transfers.delete_requested_at_ms IS NULL)
@@ -348,12 +310,11 @@ impl super::MetadataStore {
                     control_state: row.get(15)?,
                     transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
                     delivered_path: optional_path_from_row(row, 17, 18)?,
-                    source_path: optional_path_from_row(row, 19, 20)?,
-                    source_fingerprint: optional_fingerprint_from_row(row, 21)?,
-                    payload_fingerprint: optional_fingerprint_from_row(row, 22)?,
-                    final_rehash_pending: row.get::<_, i64>(23)? != 0,
-                    delivery_state: row.get(24)?,
-                    delivery_ownership: row.get(25)?,
+                    source_fingerprint: optional_fingerprint_from_row(row, 19)?,
+                    payload_fingerprint: optional_fingerprint_from_row(row, 20)?,
+                    final_rehash_pending: row.get::<_, i64>(21)? != 0,
+                    delivery_state: row.get(22)?,
+                    delivery_ownership: row.get(23)?,
                 })
             })
             .optional()?;
@@ -528,10 +489,9 @@ impl super::MetadataStore {
 
     /// Every persisted download whose canonical payload is owned by the
     /// internal transfer root. Includes incomplete, completed, and
-    /// operator-hidden rows; excludes share-in-place files and pending
-    /// destructive deletions.
+    /// operator-hidden rows; excludes pending destructive deletions.
     pub fn managed_download_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
-        self.transfer_manifests_filtered("AND transfers.source_path_id IS NULL")
+        self.transfer_manifests_filtered("")
     }
 
     fn transfer_manifests_filtered(
@@ -554,14 +514,12 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating,
                    transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                    delivered_paths.platform, delivered_paths.native_path,
-                   source_paths.platform, source_paths.native_path,
                    transfers.source_fingerprint, transfers.payload_fingerprint,
                    transfers.final_rehash_pending, transfers.delivery_state,
                    transfers.delivery_ownership
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
-            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
             WHERE transfers.delete_requested_at_ms IS NULL
             {where_clause}
             ORDER BY known_files.ed2k_hash
@@ -588,12 +546,11 @@ impl super::MetadataStore {
                 control_state: row.get(15)?,
                 transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
                 delivered_path: optional_path_from_row(row, 17, 18)?,
-                source_path: optional_path_from_row(row, 19, 20)?,
-                source_fingerprint: optional_fingerprint_from_row(row, 21)?,
-                payload_fingerprint: optional_fingerprint_from_row(row, 22)?,
-                final_rehash_pending: row.get::<_, i64>(23)? != 0,
-                delivery_state: row.get(24)?,
-                delivery_ownership: row.get(25)?,
+                source_fingerprint: optional_fingerprint_from_row(row, 19)?,
+                payload_fingerprint: optional_fingerprint_from_row(row, 20)?,
+                final_rehash_pending: row.get::<_, i64>(21)? != 0,
+                delivery_state: row.get(22)?,
+                delivery_ownership: row.get(23)?,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -648,27 +605,9 @@ impl super::MetadataStore {
                    known_files.media_extractor_version
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            LEFT JOIN local_paths media_paths ON media_paths.id = COALESCE(
-                transfers.source_path_id,
-                (
-                    SELECT shared_file_sources.path_id
-                    FROM shared_file_sources
-                    JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-                    WHERE shared_file_sources.known_file_id = known_files.id
-                    ORDER BY local_paths.display_path, local_paths.native_path
-                    LIMIT 1
-                ),
-                transfers.delivered_path_id
-            )
-            WHERE (
-                    known_files.completed != 0
-                    OR EXISTS (
-                        SELECT 1 FROM shared_file_sources
-                        WHERE shared_file_sources.known_file_id = known_files.id
-                    )
-                  )
+            LEFT JOIN local_paths media_paths ON media_paths.id = transfers.delivered_path_id
+            WHERE known_files.completed != 0
               AND transfers.delete_requested_at_ms IS NULL
-              AND transfers.source_path_id IS NULL
               AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
             ORDER BY known_files.ed2k_hash
             LIMIT ?2
@@ -767,176 +706,6 @@ impl super::MetadataStore {
             ],
         )?;
         Ok(changed != 0)
-    }
-
-    pub fn share_in_place_reload_entries(&self) -> Result<Vec<MetadataShareInPlaceReloadEntry>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT lower(hex(known_files.ed2k_hash)), shared_file_sources.file_size,
-                   local_paths.platform, local_paths.native_path,
-                   shared_file_sources.source_fingerprint
-            FROM shared_file_sources
-            JOIN known_files ON known_files.id = shared_file_sources.known_file_id
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            JOIN local_paths ON local_paths.id = shared_file_sources.path_id
-            WHERE transfers.delete_requested_at_ms IS NULL
-            ORDER BY local_paths.display_path
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(MetadataShareInPlaceReloadEntry {
-                file_hash: row.get(0)?,
-                file_size: row.get::<_, i64>(1)? as u64,
-                source_path: path_from_row(row, 2, 3)?,
-                source_fingerprint: optional_fingerprint_from_row(row, 4)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /// Withdraw one exact persisted shared-source identity after upload-time
-    /// verification proves that the path no longer names those bytes.
-    ///
-    /// Matching the stored fingerprint makes repeated peer requests a no-op and
-    /// prevents them from amplifying one local mismatch into repeated re-hash
-    /// work. The source row remains available for targeted reconciliation to
-    /// replace atomically when the path becomes stable again.
-    pub fn invalidate_shared_file_source(
-        &self,
-        file_hash: &str,
-        source_path: &Path,
-        expected_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let conn = self.connection()?;
-        let Some(path_id) = local_path_id(&conn, source_path)? else {
-            return Ok(false);
-        };
-        let changed = conn.execute(
-            r#"
-            UPDATE shared_file_sources
-            SET source_fingerprint = NULL,
-                updated_at_ms = ?4
-            WHERE known_file_id = (
-                    SELECT id FROM known_files WHERE ed2k_hash = ?1
-                  )
-              AND path_id = ?2
-              AND source_fingerprint = ?3
-            "#,
-            params![
-                hash,
-                path_id,
-                expected_fingerprint.storage_bytes(),
-                unix_ms(),
-            ],
-        )?;
-        Ok(changed != 0)
-    }
-
-    /// Move one share-in-place source to a new filesystem path without
-    /// rewriting its hashsets or transfer children.
-    ///
-    /// A filesystem rename preserves content identity. Routing it through the
-    /// full manifest upsert would needlessly rewrite every child row and, more
-    /// importantly, would leave the old `shared_file_sources` row beside the
-    /// new one. Keep the path move atomic and bounded to the indexed path rows.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the source identity and renamed catalog metadata form one atomic update"
-    )]
-    pub fn relocate_shared_file_source(
-        &self,
-        file_hash: &str,
-        old_source_path: &Path,
-        new_source_path: &Path,
-        file_size: u64,
-        source_fingerprint: Option<&NativeFileFingerprint>,
-        display_name: &str,
-        content_type: &str,
-    ) -> Result<bool> {
-        // WHY: a same-hash rename must replace the old path row instead of using
-        // manifest upsert, which intentionally permits duplicate source paths.
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let source_fingerprint = source_fingerprint.map(NativeFileFingerprint::storage_bytes);
-        let now = unix_ms();
-        let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        let Some(old_path_id) = local_path_id(&tx, old_source_path)? else {
-            return Ok(false);
-        };
-        let new_path_id = upsert_local_path(&tx, new_source_path)?;
-        let Some(known_file_id) = tx
-            .query_row(
-                "SELECT id FROM known_files WHERE ed2k_hash = ?1",
-                params![hash],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-        else {
-            return Ok(false);
-        };
-
-        let changed = tx.execute(
-            r#"
-            UPDATE shared_file_sources
-            SET path_id = ?3,
-                file_size = ?4,
-                source_fingerprint = ?5,
-                updated_at_ms = ?6
-            WHERE known_file_id = ?1 AND path_id = ?2
-            "#,
-            params![
-                known_file_id,
-                old_path_id,
-                new_path_id,
-                file_size as i64,
-                source_fingerprint,
-                now,
-            ],
-        )?;
-        if changed == 0 {
-            return Ok(false);
-        }
-        tx.execute(
-            r#"
-            UPDATE transfers
-            SET source_path_id = ?3,
-                source_fingerprint = ?4,
-                updated_at_ms = ?5
-            WHERE known_file_id = ?1 AND source_path_id = ?2
-            "#,
-            params![
-                known_file_id,
-                old_path_id,
-                new_path_id,
-                source_fingerprint,
-                now,
-            ],
-        )?;
-        tx.execute(
-            r#"
-            UPDATE known_files
-            SET display_name = ?2,
-                content_type = ?3,
-                last_seen_ms = ?4,
-                updated_at_ms = ?4
-            WHERE id = ?1
-              AND EXISTS (
-                  SELECT 1
-                  FROM transfers
-                  WHERE transfers.known_file_id = ?1
-                    AND transfers.source_path_id = ?5
-              )
-            "#,
-            params![known_file_id, display_name, content_type, now, new_path_id],
-        )?;
-        tx.execute(
-            "DELETE FROM shared_file_scan_failures WHERE path_id IN (?1, ?2)",
-            params![old_path_id, new_path_id],
-        )?;
-        tx.commit()?;
-        Ok(true)
     }
 
     pub fn upsert_imported_known_file(&self, entry: &MetadataImportedKnownFileEntry) -> Result<()> {
@@ -1180,10 +949,6 @@ impl super::MetadataStore {
                         WHERE transfer_pieces.transfer_id = transfers.id
                           AND transfer_pieces.state = 'Verified'
                     )
-                    OR EXISTS (
-                        SELECT 1 FROM shared_file_sources
-                        WHERE shared_file_sources.known_file_id = known_files.id
-                    )
                   )
               AND transfers.delete_requested_at_ms IS NULL
               AND transfers.removed_at_ms IS NULL
@@ -1344,7 +1109,6 @@ impl super::MetadataStore {
                   AND known_files.completed != 0
                   AND transfers.final_rehash_pending = 0
                   AND transfers.delivery_state = 'pending'
-                  AND transfers.source_path_id IS NULL
                   AND transfers.delivered_path_id IS NULL
                   AND transfers.removed_at_ms IS NULL
                   AND transfers.delete_requested_at_ms IS NULL
@@ -1454,7 +1218,6 @@ impl super::MetadataStore {
                   AND known_files.completed != 0
                   AND transfers.final_rehash_pending = 0
                   AND transfers.delivery_state = 'pending'
-                  AND transfers.source_path_id IS NULL
                   AND transfers.delivered_path_id IS NULL
                   AND transfers.removed_at_ms IS NULL
                   AND transfers.delete_requested_at_ms IS NULL
@@ -1501,7 +1264,6 @@ impl super::MetadataStore {
                   AND known_files.completed != 0
                   AND transfers.final_rehash_pending = 0
                   AND transfers.delivery_state = 'pending'
-                  AND transfers.source_path_id IS NULL
                   AND transfers.delivered_path_id IS NULL
                   AND transfers.removed_at_ms IS NULL
                   AND transfers.delete_requested_at_ms IS NULL
@@ -1590,7 +1352,6 @@ impl super::MetadataStore {
                   ON delivered_paths.id = transfers.delivered_path_id
                 WHERE known_files.ed2k_hash = ?1
                   AND transfers.delete_requested_at_ms IS NOT NULL
-                  AND transfers.source_path_id IS NULL
                   AND (
                       (
                           transfers.delivery_state = 'delivered'
@@ -1775,7 +1536,6 @@ impl super::MetadataStore {
             WHERE known_file_id = (
                 SELECT id FROM known_files WHERE ed2k_hash = ?1
             )
-              AND (?3 IS NULL OR source_path_id IS NULL)
             "#,
             params![
                 hash,
@@ -1866,7 +1626,6 @@ impl super::MetadataStore {
                 WHERE known_files.ed2k_hash = ?1
                   AND known_files.completed = 1
                   AND transfers.delivery_state = 'delivered'
-                  AND transfers.source_path_id IS NULL
                   AND transfers.removed_at_ms IS NULL
                   AND transfers.delete_requested_at_ms IS NULL
                 "#,
@@ -1933,7 +1692,8 @@ impl super::MetadataStore {
     }
 
     /// Drop the transfer and its piece bookkeeping after owned directory
-    /// cleanup. The known file, verified content and download history survive.
+    /// cleanup. Verified local content and download history survive. A known
+    /// file identity survives while another domain still references it.
     pub fn finalize_transfer_retirement(&self, file_hash: &str) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
@@ -1941,24 +1701,20 @@ impl super::MetadataStore {
         let ids = tx
             .query_row(
                 r#"
-                SELECT transfers.id, known_files.id
+                SELECT known_files.id
                 FROM transfer_retirements
                 JOIN transfers ON transfers.id = transfer_retirements.transfer_id
                 JOIN known_files ON known_files.id = transfers.known_file_id
                 WHERE known_files.ed2k_hash = ?1
                 "#,
                 params![hash],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        let Some((transfer_id, known_file_id)) = ids else {
+        let Some(known_file_id) = ids else {
             return Ok(false);
         };
-        tx.execute("DELETE FROM transfers WHERE id = ?1", params![transfer_id])?;
-        tx.execute(
-            "DELETE FROM known_file_origins WHERE known_file_id = ?1 AND origin = 'transfer'",
-            params![known_file_id],
-        )?;
+        delete_transfer_and_unreferenced_identity(&tx, known_file_id)?;
         tx.commit()?;
         Ok(true)
     }
@@ -1980,10 +1736,9 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
-    /// Return every hash which owns an internal download directory. Share-in-
-    /// place rows serve their source path directly and therefore do not own a
-    /// path beneath the transfer root. Pending deletion rows remain owners
-    /// until their strict filesystem cleanup finalizes the metadata row.
+    /// Return every hash which owns an internal download directory.
+    /// Pending deletion rows remain owners until their strict filesystem
+    /// cleanup finalizes the metadata row.
     pub fn managed_download_transfer_hashes(&self) -> Result<Vec<String>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
@@ -1991,7 +1746,6 @@ impl super::MetadataStore {
             SELECT lower(hex(known_files.ed2k_hash))
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE transfers.source_path_id IS NULL
             ORDER BY known_files.ed2k_hash
             "#,
         )?;
@@ -2010,7 +1764,6 @@ impl super::MetadataStore {
                     FROM known_files
                     JOIN transfers ON transfers.known_file_id = known_files.id
                     WHERE known_files.ed2k_hash = ?1
-                      AND transfers.source_path_id IS NULL
                 )
                 "#,
                 params![hash],
@@ -2041,7 +1794,7 @@ impl super::MetadataStore {
         let Some(known_file_id) = known_file_id else {
             return Ok(false);
         };
-        delete_known_file(&tx, known_file_id)?;
+        delete_transfer_and_unreferenced_identity(&tx, known_file_id)?;
         tx.commit()?;
         Ok(true)
     }
@@ -2052,7 +1805,7 @@ impl super::MetadataStore {
         let tx = conn.transaction()?;
         let known_file_id = tx
             .query_row(
-                "SELECT id FROM known_files WHERE ed2k_hash = ?1",
+                "SELECT known_files.id FROM known_files JOIN transfers ON transfers.known_file_id = known_files.id WHERE known_files.ed2k_hash = ?1",
                 params![hash],
                 |row| row.get::<_, i64>(0),
             )
@@ -2060,7 +1813,7 @@ impl super::MetadataStore {
         let Some(known_file_id) = known_file_id else {
             return Ok(false);
         };
-        delete_known_file(&tx, known_file_id)?;
+        delete_transfer_and_unreferenced_identity(&tx, known_file_id)?;
         tx.commit()?;
         Ok(true)
     }
@@ -2285,19 +2038,29 @@ fn delivery_attempt_from_row(
     })
 }
 
-fn delete_known_file(tx: &rusqlite::Transaction<'_>, known_file_id: i64) -> Result<()> {
+fn delete_transfer_and_unreferenced_identity(
+    tx: &rusqlite::Transaction<'_>,
+    known_file_id: i64,
+) -> Result<()> {
     tx.execute(
-        "DELETE FROM shared_file_scan_failures WHERE path_id IN (
-            SELECT path_id FROM shared_file_sources WHERE known_file_id = ?1
-        )",
+        "DELETE FROM transfers WHERE known_file_id = ?1",
+        params![known_file_id],
+    )?;
+    for table in ["ed2k_part_hashes", "aich_part_hashes", "verified_ranges"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE known_file_id = ?1"),
+            params![known_file_id],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM known_file_origins WHERE known_file_id = ?1 AND origin = 'transfer'",
         params![known_file_id],
     )?;
     tx.execute(
-        "DELETE FROM shared_file_sources WHERE known_file_id = ?1",
-        params![known_file_id],
-    )?;
-    tx.execute(
-        "DELETE FROM known_files WHERE id = ?1",
+        "DELETE FROM known_files WHERE id = ?1
+         AND NOT EXISTS (SELECT 1 FROM known_file_origins WHERE known_file_id = ?1)
+         AND NOT EXISTS (SELECT 1 FROM verified_local_content WHERE known_file_id = ?1)
+         AND NOT EXISTS (SELECT 1 FROM local_file_instances WHERE known_file_id = ?1)",
         params![known_file_id],
     )?;
     Ok(())
@@ -2324,7 +2087,6 @@ struct TransferRow {
     control_state: Option<String>,
     transfer_row_removed: bool,
     delivered_path: Option<std::path::PathBuf>,
-    source_path: Option<std::path::PathBuf>,
     source_fingerprint: Option<NativeFileFingerprint>,
     payload_fingerprint: Option<NativeFileFingerprint>,
     delivery_state: String,
@@ -2513,7 +2275,6 @@ fn manifest_from_row(
         delivery_state: delivery_state_from_sql(&row.delivery_state)?,
         delivery_ownership: delivery_ownership_from_sql(&row.delivery_ownership)?,
         delivered_path: row.delivered_path,
-        source_path: row.source_path,
         source_fingerprint: row.source_fingerprint,
         payload_fingerprint: row.payload_fingerprint,
     })
@@ -2810,39 +2571,33 @@ fn local_path_id(conn: &rusqlite::Connection, path: &Path) -> Result<Option<i64>
 
 fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
     let valid = match (manifest.delivery_state, manifest.delivery_ownership) {
-        (MetadataTransferDeliveryState::NotApplicable, MetadataTransferDeliveryOwnership::None) => {
-            manifest.source_path.is_some() && manifest.delivered_path.is_none()
-        }
         (MetadataTransferDeliveryState::Pending, MetadataTransferDeliveryOwnership::None) => {
-            manifest.source_path.is_none() && manifest.delivered_path.is_none()
+            manifest.delivered_path.is_none()
         }
         (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Owned) => {
-            manifest.source_path.is_none()
-                && manifest.delivered_path.is_some()
+            manifest.delivered_path.is_some()
                 && manifest
                     .source_fingerprint
                     .as_ref()
                     .is_some_and(|fingerprint| fingerprint.size_bytes == manifest.file_size)
         }
         (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Unowned) => {
-            manifest.source_path.is_none() && manifest.delivered_path.is_some()
+            manifest.delivered_path.is_some()
         }
         _ => false,
     };
     if !valid {
         anyhow::bail!(
-            "invalid delivery state {:?}/{:?} for transfer {}: delivered_path={}, source_path={}",
+            "invalid delivery state {:?}/{:?} for transfer {}: delivered_path={}",
             manifest.delivery_state,
             manifest.delivery_ownership,
             manifest.file_hash,
-            manifest.delivered_path.is_some(),
-            manifest.source_path.is_some()
+            manifest.delivered_path.is_some()
         );
     }
     if let Some(fingerprint) = manifest.payload_fingerprint.as_ref() {
         ensure!(
-            manifest.source_path.is_none()
-                && manifest.completed
+            manifest.completed
                 && !manifest.final_rehash_pending
                 && fingerprint.size_bytes == manifest.file_size,
             "invalid canonical payload fingerprint for transfer {}",
@@ -2854,7 +2609,6 @@ fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
 
 fn delivery_state_to_sql(state: MetadataTransferDeliveryState) -> &'static str {
     match state {
-        MetadataTransferDeliveryState::NotApplicable => "not_applicable",
         MetadataTransferDeliveryState::Pending => "pending",
         MetadataTransferDeliveryState::Delivered => "delivered",
     }
@@ -2862,7 +2616,6 @@ fn delivery_state_to_sql(state: MetadataTransferDeliveryState) -> &'static str {
 
 fn delivery_state_from_sql(value: &str) -> Result<MetadataTransferDeliveryState> {
     match value {
-        "not_applicable" => Ok(MetadataTransferDeliveryState::NotApplicable),
         "pending" => Ok(MetadataTransferDeliveryState::Pending),
         "delivered" => Ok(MetadataTransferDeliveryState::Delivered),
         _ => anyhow::bail!("invalid persisted transfer delivery state {value:?}"),

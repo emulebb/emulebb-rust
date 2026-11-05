@@ -49,8 +49,8 @@ pub use search_store::normalized_search_query;
 pub use store::MetadataStore;
 pub use text::normalize_search_text;
 pub use transfer_model::{
-    MetadataImportedKnownFileEntry, MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure,
-    MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferDeletionTombstone,
+    MetadataImportedKnownFileEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
+    MetadataTransferCounts, MetadataTransferDeletionTombstone,
     MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
     MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
     MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,

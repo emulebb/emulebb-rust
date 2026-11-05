@@ -345,21 +345,15 @@ CREATE TABLE transfers (
         CHECK(download_priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'veryhigh')),
     target_path_id INTEGER REFERENCES local_paths(id),
     payload_directory TEXT NOT NULL DEFAULT '',
-    -- Materialization lifecycle for downloads. Share-in-place files never need
-    -- an external delivered copy; downloads remain pending until a verified
-    -- output path is committed.
+    -- Downloads remain pending until a verified output path is committed.
     delivery_state TEXT NOT NULL
-        CHECK(delivery_state IN ('not_applicable', 'pending', 'delivered')),
+        CHECK(delivery_state IN ('pending', 'delivered')),
     delivery_ownership TEXT NOT NULL DEFAULT 'none'
         CHECK(delivery_ownership IN ('none', 'owned', 'unowned')),
     -- Absolute path identity for the completed payload materialized under a
     -- category path or the global incoming dir. NULL until delivery completes.
     delivered_path_id INTEGER REFERENCES local_paths(id),
-    -- Original path identity of a shared, already-complete file seeded in
-    -- place. NON-NULL marks the transfer as share-in-place; NULL is a download.
-    source_path_id INTEGER REFERENCES local_paths(id),
-    -- Versioned native file identity + size + nanosecond timestamps captured at
-    -- ingest or delivery. NULL forces a conservative re-hash on reload.
+    -- Versioned identity of the delivered file. NULL until delivery.
     source_fingerprint BLOB,
     -- Versioned identity baseline for the canonical internal pieces.bin after
     -- successful whole-file verification. NULL forces a startup ED2K rehash.
@@ -388,14 +382,12 @@ CREATE TABLE transfers (
             AND transfer_directory_tombstone_marker_id IS NOT NULL
             AND length(trim(transfer_directory_tombstone_marker_id)) > 0
             AND delete_requested_at_ms IS NOT NULL
-            AND source_path_id IS NULL
         )
     ),
     CHECK(
-        (delivery_state = 'not_applicable' AND delivery_ownership = 'none' AND source_path_id IS NOT NULL AND delivered_path_id IS NULL)
-        OR (delivery_state = 'pending' AND delivery_ownership = 'none' AND source_path_id IS NULL AND delivered_path_id IS NULL)
-        OR (delivery_state = 'delivered' AND delivery_ownership = 'owned' AND source_path_id IS NULL AND delivered_path_id IS NOT NULL AND source_fingerprint IS NOT NULL)
-        OR (delivery_state = 'delivered' AND delivery_ownership = 'unowned' AND source_path_id IS NULL AND delivered_path_id IS NOT NULL)
+        (delivery_state = 'pending' AND delivery_ownership = 'none' AND delivered_path_id IS NULL)
+        OR (delivery_state = 'delivered' AND delivery_ownership = 'owned' AND delivered_path_id IS NOT NULL AND source_fingerprint IS NOT NULL)
+        OR (delivery_state = 'delivered' AND delivery_ownership = 'unowned' AND delivered_path_id IS NOT NULL)
     ),
     UNIQUE(known_file_id)
 );
@@ -459,17 +451,6 @@ WHEN NEW.delivery_state = 'delivered'
 BEGIN
     DELETE FROM delivery_attempts WHERE transfer_id = NEW.id;
 END;
-
-CREATE TABLE shared_file_sources (
-    id INTEGER PRIMARY KEY,
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    path_id INTEGER NOT NULL REFERENCES local_paths(id),
-    file_size INTEGER NOT NULL CHECK(file_size >= 0),
-    source_fingerprint BLOB,
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    UNIQUE(path_id)
-);
 
 CREATE TABLE shared_file_scan_failures (
     id INTEGER PRIMARY KEY,
