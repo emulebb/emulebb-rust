@@ -1,70 +1,58 @@
 use super::*;
 use crate::config::Ed2kRuntimeConfig;
 use emulebb_metadata::{
-    MetadataStore, MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferRange,
+    MetadataSharedDirectoryRoot, MetadataStore, MetadataVerifiedLocalContent,
     NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp,
 };
 
 #[tokio::test]
 async fn progressive_catalog_requires_explicit_initial_hydration() {
     let root = unique_test_dir("progressive-catalog");
-    let metadata = MetadataStore::in_memory().unwrap();
+    let mut metadata = MetadataStore::in_memory().unwrap();
+    metadata
+        .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
+            path: root.to_string_lossy().into_owned(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
     for sequence in 1..=3u128 {
         let file_hash = format!("{sequence:032x}");
+        let file_name = format!("catalog-{sequence}.bin");
+        let path = root.join(&file_name);
+        let fingerprint = NativeFileFingerprint {
+            identity: NativeFileIdentity::WindowsHighResolution {
+                volume_serial_number: 1,
+                file_id: sequence,
+            },
+            size_bytes: sequence as u64,
+            modified: NativeFileTimestamp::new(sequence as i64, 1).unwrap(),
+            changed: Some(NativeFileTimestamp::new(sequence as i64, 2).unwrap()),
+        };
         metadata
-            .upsert_transfer_manifest(&MetadataTransferManifest {
+            .upsert_verified_local_content(&MetadataVerifiedLocalContent {
                 file_hash: file_hash.clone(),
-                display_name: format!("catalog-{sequence}.bin"),
-                display_name_pinned: false,
-                follow_majority_filename: false,
-                file_name_observations: Vec::new(),
+                display_name: file_name.clone(),
                 file_size: sequence as u64,
-                piece_size: 1,
-                completed: true,
-                final_rehash_pending: false,
-                md4_hashset_acquired: true,
-                md4_hashset: Vec::new(),
-                aich_hashset_acquired: false,
-                aich_root: None,
-                aich_hashset: Vec::new(),
-                verified_ranges: vec![MetadataTransferRange {
-                    start: 0,
-                    end: sequence as u64,
-                }],
-                pieces: Vec::new(),
-                sources: Vec::new(),
-                upload_priority: "normal".to_string(),
-                auto_upload_priority: false,
-                comment: String::new(),
-                rating: 0,
-                category_id: 0,
-                control_state: None,
-                transfer_row_removed: false,
-                delivery_state: emulebb_metadata::MetadataTransferDeliveryState::NotApplicable,
-                delivery_ownership: emulebb_metadata::MetadataTransferDeliveryOwnership::None,
-                delivered_path: None,
-                source_path: Some(root.join(format!("catalog-{sequence}.bin"))),
-                source_fingerprint: Some(NativeFileFingerprint {
-                    identity: NativeFileIdentity::WindowsHighResolution {
-                        volume_serial_number: 1,
-                        file_id: sequence,
-                    },
-                    size_bytes: sequence as u64,
-                    modified: NativeFileTimestamp::new(sequence as i64, 1).unwrap(),
-                    changed: None,
-                }),
-                payload_fingerprint: None,
+                part_size: ED2K_PART_SIZE,
+                md4_hashset: vec![file_hash],
+                aich_root: "00".repeat(20),
+                aich_hashset: vec!["00".repeat(20)],
+                path: path.clone(),
+                fingerprint: fingerprint.clone(),
             })
             .unwrap();
-        metadata
-            .update_transfer_media_metadata(
-                &file_hash,
-                &MetadataTransferMediaMetadata {
-                    extractor_version: super::super::transfer_sql::MEDIA_METADATA_EXTRACTOR_VERSION,
-                    ..MetadataTransferMediaMetadata::default()
-                },
-            )
-            .unwrap();
+        assert!(
+            metadata
+                .admit_local_path_to_root(
+                    &root,
+                    &path,
+                    std::path::Path::new(&file_name),
+                    &fingerprint
+                )
+                .unwrap()
+        );
     }
 
     let runtime = Ed2kTransferRuntime::load_or_create_with_metadata_and_config_catalog_mode(

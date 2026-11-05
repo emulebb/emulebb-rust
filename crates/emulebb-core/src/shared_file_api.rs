@@ -33,8 +33,43 @@ impl EmulebbCore {
     }
 
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
-        self.share_native_local_file_with_progress(Path::new(&request.path), request.name, None)
+        let path = Path::new(&request.path);
+        let normalized = long_path(path);
+        let roots = self.state.lock().await.shared_directories.clone();
+        ensure!(
+            roots.iter().any(|root| {
+                root.shareable
+                    && root.accessible
+                    && normalized
+                        .strip_prefix(long_path(Path::new(&root.path)))
+                        .is_ok_and(|relative| !relative.as_os_str().is_empty())
+            }),
+            "local share path is outside accessible shared roots"
+        );
+        let share = self
+            .share_native_local_file_with_progress(path, request.name, None)
+            .await?;
+        let instance = self
+            .metadata_store
+            .local_file_instance(&normalized)?
+            .with_context(|| {
+                format!(
+                    "verified local file missing after ingest: {}",
+                    path.display()
+                )
+            })?;
+        ensure!(
+            crate::shared_dir_monitor::admit_monitored_path(
+                self,
+                &normalized,
+                &instance.verified_fingerprint
+            )
+            .await?,
+            "verified local file was not admitted by its shared root"
+        );
+        self.share(&share.hash)
             .await
+            .context("admitted local share is absent from the active library")
     }
 
     pub(crate) async fn share_native_local_file_with_progress(
@@ -69,23 +104,6 @@ impl EmulebbCore {
                     .await?
             }
         };
-        if self
-            .state
-            .lock()
-            .await
-            .transfers
-            .remove(&summary.file_hash)
-            .is_some()
-        {
-            self.publish_transfer_removed(summary.file_hash.clone());
-        }
-        self.metadata_store
-            .unmark_unshared_file(&summary.file_hash)?;
-        self.state
-            .lock()
-            .await
-            .unshared_hashes
-            .remove(&summary.file_hash);
         self.index.lock().await.upsert_file(
             &IndexedFile {
                 ed2k_hash: summary.file_hash.clone(),

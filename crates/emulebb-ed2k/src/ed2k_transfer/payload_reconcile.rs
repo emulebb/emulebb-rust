@@ -1288,6 +1288,7 @@ mod tests {
             .ingest_local_file(&source, "library.bin")
             .await
             .unwrap();
+        super::super::test_support::admit_local_share(&runtime, &root, &source).await;
 
         let report = runtime.reconcile_managed_download_storage().await.unwrap();
 

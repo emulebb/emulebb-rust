@@ -1,4 +1,5 @@
 use super::*;
+use emulebb_metadata::MetadataImportedKnownFileEntry;
 use std::fs;
 use std::sync::atomic::AtomicU64;
 
@@ -12,6 +13,25 @@ fn scratch_dir(label: &str) -> PathBuf {
     ));
     fs::create_dir_all(&dir).expect("create scratch dir");
     dir
+}
+
+async fn configure_test_root(core: &EmulebbCore, root: &Path) {
+    let path = root.display().to_string();
+    core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
+        path: path.clone(),
+        monitor_owned: false,
+        shareable: true,
+        accessible: true,
+    }];
+    core.metadata_store
+        .clone()
+        .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
+            path,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
 }
 
 fn names(mut files: Vec<ScannedSharedFile>) -> Vec<String> {
@@ -173,6 +193,7 @@ async fn incremental_reload_prunes_persisted_share_absent_from_scan() {
     fs::write(&source, b"payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    configure_test_root(&core, &root).await;
     let shared = core
         .share_local_file(LocalShareCreate {
             path: source.display().to_string(),
@@ -185,6 +206,9 @@ async fn incremental_reload_prunes_persisted_share_absent_from_scan() {
 
     assert_eq!(plan.pruned_hashes, vec![shared.hash.clone()]);
     assert_eq!(plan.stats.pruned_count, 1);
+    core.metadata_store
+        .replace_root_memberships(&root, &[])
+        .unwrap();
     forget_stale_shares(&core, &plan.pruned_hashes, "").await;
     assert!(core.share(&shared.hash).await.is_none());
     assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
@@ -198,45 +222,12 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
     fs::write(&source, b"imported payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
-    let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
-    let file_hash = "00112233445566778899aabbccddeeff".to_string();
-    core.metadata_store
-        .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
-            file_hash: file_hash.clone(),
-            display_name: "Imported.Source.bin".to_string(),
-            display_name_pinned: false,
-            follow_majority_filename: false,
-            file_name_observations: Vec::new(),
-            file_size: size,
-            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
-            completed: true,
-            final_rehash_pending: false,
-            md4_hashset_acquired: true,
-            md4_hashset: Vec::new(),
-            aich_hashset_acquired: false,
-            aich_root: None,
-            aich_hashset: Vec::new(),
-            verified_ranges: vec![emulebb_metadata::MetadataTransferRange {
-                start: 0,
-                end: size,
-            }],
-            pieces: Vec::new(),
-            sources: Vec::new(),
-            upload_priority: "normal".to_string(),
-            auto_upload_priority: false,
-            comment: String::new(),
-            rating: 0,
-            category_id: 0,
-            control_state: None,
-            transfer_row_removed: false,
-            delivery_state: emulebb_metadata::MetadataTransferDeliveryState::NotApplicable,
-            delivery_ownership: emulebb_metadata::MetadataTransferDeliveryOwnership::None,
-            delivered_path: None,
-            source_path: Some(source.clone()),
-            source_fingerprint: fingerprint,
-            payload_fingerprint: None,
-        })
-        .unwrap();
+    let file_hash = core
+        .ed2k_transfers
+        .ingest_local_file(&source, "Imported.Source.bin")
+        .await
+        .unwrap()
+        .file_hash;
     assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
 
     let plan = plan_incremental_reload(&core, vec![scanned_file(&source)])
@@ -260,39 +251,14 @@ async fn incremental_reload_never_reuses_same_size_coarse_timestamp() {
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
     let file_size = fs::metadata(&source).unwrap().len();
     let coarse_fingerprint = synthetic_fingerprint(file_size, 0);
+    let file_hash = core
+        .ed2k_transfers
+        .ingest_local_file(&source, "Coarse.Timestamp.bin")
+        .await
+        .unwrap()
+        .file_hash;
     core.metadata_store
-        .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
-            file_hash: "00112233445566778899aabbccddeeff".to_string(),
-            display_name: "Coarse.Timestamp.bin".to_string(),
-            display_name_pinned: false,
-            follow_majority_filename: false,
-            file_name_observations: Vec::new(),
-            file_size,
-            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
-            completed: true,
-            final_rehash_pending: false,
-            md4_hashset_acquired: true,
-            md4_hashset: Vec::new(),
-            aich_hashset_acquired: false,
-            aich_root: None,
-            aich_hashset: Vec::new(),
-            verified_ranges: Vec::new(),
-            pieces: Vec::new(),
-            sources: Vec::new(),
-            upload_priority: "normal".to_string(),
-            auto_upload_priority: false,
-            comment: String::new(),
-            rating: 0,
-            category_id: 0,
-            control_state: None,
-            transfer_row_removed: false,
-            delivery_state: emulebb_metadata::MetadataTransferDeliveryState::NotApplicable,
-            delivery_ownership: emulebb_metadata::MetadataTransferDeliveryOwnership::None,
-            delivered_path: None,
-            source_path: Some(source.clone()),
-            source_fingerprint: Some(coarse_fingerprint.clone()),
-            payload_fingerprint: None,
-        })
+        .upsert_local_file_instance(&long_path(&source), &file_hash, &coarse_fingerprint)
         .unwrap();
 
     let plan = plan_incremental_reload(
@@ -323,39 +289,14 @@ async fn incremental_reload_reuses_windows_whole_second_timestamp_with_change_ti
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
     let file_size = fs::metadata(&source).unwrap().len();
     let fingerprint = synthetic_windows_fingerprint(file_size);
+    let file_hash = core
+        .ed2k_transfers
+        .ingest_local_file(&source, "Whole.Second.bin")
+        .await
+        .unwrap()
+        .file_hash;
     core.metadata_store
-        .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
-            file_hash: "00112233445566778899aabbccddeeff".to_string(),
-            display_name: "Whole.Second.bin".to_string(),
-            display_name_pinned: false,
-            follow_majority_filename: false,
-            file_name_observations: Vec::new(),
-            file_size,
-            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
-            completed: true,
-            final_rehash_pending: false,
-            md4_hashset_acquired: true,
-            md4_hashset: Vec::new(),
-            aich_hashset_acquired: false,
-            aich_root: None,
-            aich_hashset: Vec::new(),
-            verified_ranges: Vec::new(),
-            pieces: Vec::new(),
-            sources: Vec::new(),
-            upload_priority: "normal".to_string(),
-            auto_upload_priority: false,
-            comment: String::new(),
-            rating: 0,
-            category_id: 0,
-            control_state: None,
-            transfer_row_removed: false,
-            delivery_state: emulebb_metadata::MetadataTransferDeliveryState::NotApplicable,
-            delivery_ownership: emulebb_metadata::MetadataTransferDeliveryOwnership::None,
-            delivered_path: None,
-            source_path: Some(source.clone()),
-            source_fingerprint: Some(fingerprint.clone()),
-            payload_fingerprint: None,
-        })
+        .upsert_local_file_instance(&long_path(&source), &file_hash, &fingerprint)
         .unwrap();
 
     let plan = plan_incremental_reload(
@@ -379,7 +320,7 @@ async fn incremental_reload_reuses_windows_whole_second_timestamp_with_change_ti
 }
 
 #[tokio::test]
-async fn incremental_reload_promotes_unique_pathless_imported_known_file() {
+async fn incremental_reload_hashes_unique_pathless_imported_known_file() {
     let root = scratch_dir("imported-known-pathless");
     let source = root.join("Imported.Known.bin");
     fs::write(&source, b"known payload").unwrap();
@@ -409,26 +350,10 @@ async fn incremental_reload_promotes_unique_pathless_imported_known_file() {
         .await
         .unwrap();
 
-    assert!(plan.to_hash.is_empty());
-    assert_eq!(plan.imported_known_promotions.len(), 1);
-    assert_eq!(plan.stats.planned_hash_count, 0);
-    assert_eq!(plan.stats.reused_count, 1);
-
-    let promoted = promote_imported_known_share(
-        &core,
-        plan.imported_known_promotions.into_iter().next().unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(promoted.hash, imported.file_hash);
-    let share = core.share(&imported.file_hash).await.unwrap();
-    assert_eq!(share.priority, "release");
-    assert_eq!(share.all_time_uploaded_bytes, 1234);
-    assert_eq!(
-        share.source_path.as_deref(),
-        Some(source.display().to_string().as_str())
-    );
-    assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+    assert_eq!(plan.to_hash.len(), 1);
+    assert_eq!(plan.stats.planned_hash_count, 1);
+    assert_eq!(plan.stats.reused_count, 0);
+    assert!(core.share(&imported.file_hash).await.is_none());
     fs::remove_dir_all(&root).ok();
 }
 
@@ -468,7 +393,6 @@ async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() 
         .unwrap();
 
     assert_eq!(plan.to_hash.len(), 1);
-    assert!(plan.imported_known_promotions.is_empty());
     assert_eq!(plan.stats.planned_hash_count, 1);
     assert_eq!(plan.stats.new_count, 1);
     assert_eq!(plan.stats.reused_count, 0);
@@ -571,6 +495,7 @@ async fn incremental_reload_keeps_hash_when_duplicate_source_remains_scanned() {
     fs::write(&missing_source, b"same payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    configure_test_root(&core, &root).await;
     let kept = core
         .share_local_file(LocalShareCreate {
             path: kept_source.display().to_string(),
@@ -815,6 +740,15 @@ async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
         shareable: true,
         accessible: true,
     }];
+    core.metadata_store
+        .clone()
+        .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
+            path: root.display().to_string(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
 
     let bootstrap = bootstrap_initial_publish_catalog(&core)
         .await

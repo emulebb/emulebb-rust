@@ -48,23 +48,33 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut statement = conn.prepare_cached(
             r#"
-            SELECT known_files.display_name, shared_file_sources.file_size,
+            SELECT DISTINCT known_files.display_name, local_file_instances.file_size,
                    local_paths.platform, local_paths.native_path,
-                   shared_file_sources.source_fingerprint
-            FROM shared_file_sources
-            JOIN known_files ON known_files.id = shared_file_sources.known_file_id
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                   local_file_instances.verified_fingerprint
+            FROM local_file_instances
+            JOIN known_files ON known_files.id = local_file_instances.known_file_id
+            JOIN local_paths ON local_paths.id = local_file_instances.path_id
+            JOIN shared_file_memberships ON shared_file_memberships.path_id = local_file_instances.path_id
+            JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
             WHERE known_files.ed2k_hash = ?1
-              AND transfers.delete_requested_at_ms IS NULL
-            ORDER BY local_paths.display_path
+              AND shared_file_memberships.removed_at_ms IS NULL
+              AND shared_directory_roots.enabled = 1
+              AND shared_directory_roots.deleted_at_ms IS NULL
+              AND shared_directory_roots.accessible = 1
+              AND shared_directory_roots.shareable = 1
+            ORDER BY local_paths.native_path
             "#,
         )?;
         let rows = statement.query_map(params![hash], |row| {
+            let path = path_from_row(row, 2, 3)?;
+            let name: String = row.get(0)?;
             Ok(MetadataCurrentSharedFile {
-                display_name: row.get(0)?,
+                display_name: path
+                    .file_name()
+                    .map(|part| part.to_string_lossy().into_owned())
+                    .unwrap_or(name),
                 file_size: row.get::<_, i64>(1)? as u64,
-                source_path: path_from_row(row, 2, 3)?,
+                source_path: path,
                 source_fingerprint: optional_fingerprint_from_row(row, 4)?,
             })
         })?;

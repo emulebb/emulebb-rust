@@ -855,7 +855,9 @@ impl Ed2kTransferRuntime {
                 )
             } else {
                 let _guard = self.lock_manifest(&hash_hex).await;
-                let manifest = self.load_manifest_unlocked(&hash_hex).await?;
+                let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
+                    return Ok(None);
+                };
                 // Share-in-place: serve upload bytes straight from the original
                 // on-disk file (never copied into the piece store). A real download
                 // reads from the internal piece store.
@@ -1091,7 +1093,7 @@ impl Ed2kTransferRuntime {
                     if another.is_none() {
                         self.remove_verified_catalog_entry(file_hash).await;
                     }
-                    self.queue_shared_source_invalidation(file_hash, &path);
+                    self.queue_shared_source_invalidation(file_hash, path);
                 }
                 Ok(())
             }

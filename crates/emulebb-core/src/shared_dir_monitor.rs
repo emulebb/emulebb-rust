@@ -38,6 +38,7 @@
 //! forwarding to the applier, which is the single authority on whether a
 //! Share/Remove actually has an effect.
 
+use emulebb_metadata::NativeFileFingerprint;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -627,8 +628,18 @@ async fn reconcile_invalidated_shared_source(
         .await
     {
         Ok(share) => {
-            let replaced =
-                register_monitor_shared_hash(core, key, &share.hash, source_fingerprint).await;
+            let replaced = register_monitor_shared_hash(
+                core,
+                key.clone(),
+                &share.hash,
+                source_fingerprint.clone(),
+            )
+            .await;
+            if let Some(fingerprint) = source_fingerprint.as_ref()
+                && let Err(error) = admit_monitored_path(core, &key, fingerprint).await
+            {
+                tracing::warn!(path = %key.display(), %error, "failed to admit monitored shared file");
+            }
             let mut stale_hashes = vec![invalidation.file_hash.clone()];
             if let Some(replaced) = replaced
                 && !stale_hashes
@@ -664,6 +675,16 @@ async fn finish_unavailable_invalidated_source(
     invalidation: &Ed2kSharedSourceInvalidation,
     key: &Path,
 ) -> TargetedRehashOutcome {
+    let metadata = core.metadata_store.clone();
+    let path = key.to_path_buf();
+    if let Err(error) =
+        tokio::task::spawn_blocking(move || metadata.withdraw_local_file_path(&path))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result)
+    {
+        return TargetedRehashOutcome::Retry(error);
+    }
     {
         let mut state = core.state.lock().await;
         if state
@@ -695,9 +716,44 @@ async fn stale_hash_is_still_present(core: &EmulebbCore, file_hash: &str) -> any
     {
         return Ok(true);
     }
-    core.ed2k_transfers
-        .has_present_shared_source(file_hash)
-        .await
+    Ok(core
+        .metadata_store
+        .active_local_file_by_hash(file_hash)?
+        .is_some())
+}
+
+pub(crate) async fn admit_monitored_path(
+    core: &EmulebbCore,
+    path: &Path,
+    fingerprint: &NativeFileFingerprint,
+) -> anyhow::Result<bool> {
+    let roots = core.state.lock().await.shared_directories.clone();
+    let mut admitted = false;
+    for root in roots {
+        if !root.shareable || !root.accessible {
+            continue;
+        }
+        let root_path = PathBuf::from(&root.path);
+        let normalized_root = long_path(&root_path);
+        let Ok(relative) = path.strip_prefix(&normalized_root) else {
+            continue;
+        };
+        let metadata = core.metadata_store.clone();
+        let member_path = path.to_path_buf();
+        let relative = relative.to_path_buf();
+        let fingerprint = fingerprint.clone();
+        admitted |= tokio::task::spawn_blocking(move || {
+            metadata.admit_local_path_to_root(&root_path, &member_path, &relative, &fingerprint)
+        })
+        .await??;
+    }
+    if admitted {
+        core.ed2k_transfers
+            .refresh_complete_shared_catalog()
+            .await?;
+        core.queue_ed2k_shared_catalog_publish();
+    }
+    Ok(admitted)
 }
 
 /// (Re)start the live shared-directory auto-pickup monitor for the configured
@@ -804,7 +860,7 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
             return;
         }
     }
-    let (_, file_size, source_fingerprint) =
+    let (_, _file_size, source_fingerprint) =
         emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity_from_metadata(
             &new_key, &metadata,
         );
@@ -813,28 +869,50 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
         .as_ref()
         .zip(source_fingerprint.as_ref())
         .is_some_and(|(stored, current)| stored.safely_matches(current));
-    let persisted_fingerprint = source_fingerprint.clone().filter(|_| identity_unchanged);
-    let Some(display_name) =
-        emulebb_metadata::NativePath::from(new_key.as_path()).display_file_name()
-    else {
-        tracing::warn!(path = %to.display(), "renamed shared file has no valid file name");
+    if !identity_unchanged {
+        auto_unshare_monitored_path(core, from).await;
+        auto_share_monitored_path(core, to).await;
+        return;
+    }
+    let Some(fingerprint) = source_fingerprint.as_ref() else {
         return;
     };
-    let content_type = crate::ed2k_file_type_search_term(&display_name).unwrap_or("unknown");
-    match core
-        .ed2k_transfers
-        .relocate_shared_source(
-            &previous.hash,
-            &old_key,
-            &new_key,
-            file_size,
-            persisted_fingerprint,
-            &display_name,
-            content_type,
-        )
-        .await
-    {
+    let metadata = core.metadata_store.clone();
+    let new_path = new_key.clone();
+    let hash = previous.hash.clone();
+    let cached_fingerprint = fingerprint.clone();
+    let cache_result = tokio::task::spawn_blocking(move || {
+        metadata.upsert_local_file_instance(&new_path, &hash, &cached_fingerprint)
+    })
+    .await;
+    match cache_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(from = %from.display(), to = %to.display(), %error, "failed to cache renamed shared path");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(from = %from.display(), to = %to.display(), %error, "renamed shared path cache task panicked");
+            return;
+        }
+    }
+    match admit_monitored_path(core, &new_key, fingerprint).await {
         Ok(true) => {
+            let metadata = core.metadata_store.clone();
+            let old_path = old_key.clone();
+            match tokio::task::spawn_blocking(move || metadata.withdraw_local_file_path(&old_path))
+                .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(from = %from.display(), %error, "failed to withdraw renamed old path");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(from = %from.display(), %error, "renamed old path withdrawal task panicked");
+                    return;
+                }
+            }
             let mut state = core.state.lock().await;
             state.monitor_shared_hashes.remove(&old_key);
             state.monitor_shared_hashes.insert(
@@ -845,26 +923,13 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
                 },
             );
             drop(state);
-            core.queue_ed2k_shared_catalog_publish();
-            if !identity_unchanged {
-                auto_share_monitored_path(core, to).await;
+            if let Err(error) = core.ed2k_transfers.refresh_complete_shared_catalog().await {
+                tracing::warn!(%error, "failed to refresh catalog after monitored rename");
             }
         }
-        Ok(false) => {
-            tracing::warn!(
-                from = %from.display(),
-                to = %to.display(),
-                "monitored rename source was absent from persisted share metadata",
-            );
-            auto_share_monitored_path(core, to).await;
-        }
+        Ok(false) => auto_unshare_monitored_path(core, from).await,
         Err(error) => {
-            tracing::warn!(
-                from = %from.display(),
-                to = %to.display(),
-                error = %error,
-                "failed to relocate monitored shared file metadata",
-            );
+            tracing::warn!(from = %from.display(), to = %to.display(), %error, "failed to admit renamed shared path")
         }
     }
 }
@@ -931,13 +996,89 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
         // settled identity. A stat is enough; do not re-read the payload.
         return;
     }
+    // WHY: an unpaired destination event is a common Windows rename shape.
+    // Reuse a vanished path's verified native identity before starting a full
+    // MD4/AICH pass, while a still-present hard link remains an independent path.
+    let prior_paths = core
+        .state
+        .lock()
+        .await
+        .monitor_shared_hashes
+        .iter()
+        .filter(|(old_path, entry)| {
+            old_path.as_path() != key.as_path()
+                && entry
+                    .source_fingerprint
+                    .as_ref()
+                    .zip(source_fingerprint.as_ref())
+                    .is_some_and(|(stored, current)| stored.safely_matches(current))
+        })
+        .map(|(old_path, _)| old_path.clone())
+        .collect::<Vec<_>>();
+    for old_path in prior_paths {
+        if tokio::fs::symlink_metadata(&old_path)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+        {
+            continue;
+        }
+        Box::pin(auto_relocate_monitored_path(core, &old_path, &key)).await;
+        if core
+            .metadata_store
+            .local_file_has_root_membership(&key)
+            .unwrap_or(false)
+        {
+            return;
+        }
+    }
     match core
         .share_native_local_file_with_progress(path, None, None)
         .await
     {
         Ok(share) => {
-            let replaced =
-                register_monitor_shared_hash(core, key, &share.hash, source_fingerprint).await;
+            let replaced = register_monitor_shared_hash(
+                core,
+                key.clone(),
+                &share.hash,
+                source_fingerprint.clone(),
+            )
+            .await;
+            let admitted = if let Some(fingerprint) = source_fingerprint.as_ref() {
+                match admit_monitored_path(core, &key, fingerprint).await {
+                    Ok(admitted) => admitted,
+                    Err(error) => {
+                        tracing::warn!(path = %key.display(), %error, "failed to admit monitored shared file");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if admitted {
+                // WHY: Windows can report only a destination Share for a rename.
+                // Retire vanished paths for this hash so the deterministic first
+                // eligible filename cannot keep advertising the old name.
+                let aliases = core
+                    .state
+                    .lock()
+                    .await
+                    .monitor_shared_hashes
+                    .iter()
+                    .filter(|(path, entry)| {
+                        path.as_path() != key.as_path()
+                            && entry.hash.eq_ignore_ascii_case(&share.hash)
+                    })
+                    .map(|(path, _)| path.clone())
+                    .collect::<Vec<_>>();
+                for alias in aliases {
+                    if !tokio::fs::symlink_metadata(&alias)
+                        .await
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                    {
+                        auto_unshare_monitored_path(core, &alias).await;
+                    }
+                }
+            }
             if let Some(replaced) = replaced
                 && !replaced.hash.eq_ignore_ascii_case(&share.hash)
             {
@@ -982,19 +1123,24 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
         return;
     };
     let hash = shared_file.hash;
-    match core.unshare_file(&hash).await {
-        Ok(Some(_)) => {
-            tracing::debug!(path = %path.display(), %hash, "auto-removed monitored file from shared catalog");
+    let key = monitor_shared_key(path);
+    let metadata = core.metadata_store.clone();
+    let withdrawn =
+        tokio::task::spawn_blocking(move || metadata.withdraw_local_file_path(&key)).await;
+    match withdrawn {
+        Ok(Ok(_)) => {
+            if let Err(error) = core.ed2k_transfers.refresh_complete_shared_catalog().await {
+                tracing::warn!(path = %path.display(), %hash, %error, "failed to refresh catalog after monitored removal");
+            } else {
+                core.queue_ed2k_shared_catalog_publish();
+                tracing::debug!(path = %path.display(), %hash, "withdrew monitored shared path");
+            }
         }
-        // Already gone from the catalog (e.g. manually un-shared) -- fine.
-        Ok(None) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(path = %path.display(), %hash, %error, "failed to withdraw monitored path")
+        }
         Err(error) => {
-            tracing::warn!(
-                path = %path.display(),
-                %hash,
-                error = %error,
-                "failed to auto-remove monitored file from shared catalog",
-            );
+            tracing::warn!(path = %path.display(), %hash, %error, "monitored path withdrawal task panicked")
         }
     }
 }
@@ -1002,10 +1148,29 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emulebb_metadata::MetadataSharedDirectoryRoot;
     use notify_debouncer_full::notify::Event;
     use notify_debouncer_full::notify::event::{CreateKind, Flag, RemoveKind};
     use std::sync::Mutex;
     use std::time::Instant;
+
+    async fn configure_test_shared_root(core: &EmulebbCore, root: &Path) {
+        core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
+            path: root.display().to_string(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }];
+        let mut metadata = core.metadata_store.clone();
+        metadata
+            .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
+                path: root.display().to_string(),
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }])
+            .unwrap();
+    }
 
     fn debounced(kind: EventKind, paths: Vec<&str>) -> DebouncedEvent {
         let event = Event {
@@ -1383,12 +1548,7 @@ mod tests {
         let core =
             EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
                 .unwrap();
-        core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
-            path: root.display().to_string(),
-            monitor_owned: false,
-            shareable: true,
-            accessible: true,
-        }];
+        configure_test_shared_root(&core, &root).await;
 
         // The startup reload shares the file and registers its source path.
         let shares = crate::shared_directories::reload_shared_directories(&core)
@@ -1479,6 +1639,7 @@ mod tests {
         let core =
             EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
                 .unwrap();
+        configure_test_shared_root(&core, &root).await;
         auto_share_monitored_path(&core, &source).await;
         let old_hash = core.shares().await[0].hash.clone();
         assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
@@ -1489,13 +1650,13 @@ mod tests {
         assert_ne!(old_hash, new_hash);
         assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
         assert!(core.share(&old_hash).await.is_none());
-        assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
+        assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 2);
 
         // A duplicate settled event for the same native fingerprint must not
         // ingest or create another catalog row.
         auto_share_monitored_path(&core, &source).await;
         assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
-        assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
+        assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 2);
 
         // An ambiguous Share event received after disappearance reconciles as a
         // removal, covering Windows rename/delete notifications.
@@ -1527,6 +1688,7 @@ mod tests {
         let core =
             EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
                 .unwrap();
+        configure_test_shared_root(&core, &root).await;
         auto_share_monitored_path(&core, &source).await;
         let old_hash = core.shares().await[0].hash.clone();
         let old_hash_value = Ed2kHash::from_str(&old_hash).unwrap();
@@ -1593,6 +1755,7 @@ mod tests {
         let core =
             EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
                 .unwrap();
+        configure_test_shared_root(&core, &root).await;
         auto_share_monitored_path(&core, &source).await;
         let old_hash = core.shares().await[0].hash.clone();
         let old_hash_value = Ed2kHash::from_str(&old_hash).unwrap();
@@ -1674,12 +1837,28 @@ mod tests {
         let core =
             EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
                 .unwrap();
+        configure_test_shared_root(&core, &root).await;
         auto_share_monitored_path(&core, &source).await;
         let hash = core.shares().await[0].hash.clone();
         std::fs::rename(&source, &destination).unwrap();
 
         auto_relocate_monitored_path(&core, &source, &destination).await;
 
+        assert!(
+            core.metadata_store
+                .local_file_instance(&monitor_shared_key(&destination))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            core.metadata_store
+                .local_file_has_root_membership(&monitor_shared_key(&destination))
+                .unwrap()
+        );
+        assert_eq!(
+            core.metadata_store.active_shared_content_count().unwrap(),
+            1
+        );
         let shares = core.shares().await;
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].hash, hash);
@@ -1691,9 +1870,9 @@ mod tests {
         assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
         assert_eq!(
             core.metadata_store
-                .table_count("shared_file_sources")
+                .table_count("local_file_instances")
                 .unwrap(),
-            1,
+            2
         );
         let state = core.state.lock().await;
         assert!(

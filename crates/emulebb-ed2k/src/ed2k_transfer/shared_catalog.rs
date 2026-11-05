@@ -13,6 +13,29 @@ use super::{
 };
 
 impl Ed2kTransferRuntime {
+    /// Rebuild complete offers after a root scan changes membership. Verified
+    /// in-progress download entries and compatibility hints stay in the catalog.
+    pub async fn refresh_complete_shared_catalog(&self) -> anyhow::Result<usize> {
+        let metadata = self.metadata.clone();
+        let complete = tokio::task::spawn_blocking(move || {
+            super::transfer_sql::completed_catalog_from_metadata_store(&metadata)
+        })
+        .await??;
+        let count = complete.len();
+        let mut catalog = self.shared_catalog.write().await;
+        let mut retained = catalog
+            .iter()
+            .filter(|entry| entry.compatibility_hint || !entry.verified_complete)
+            .cloned()
+            .collect::<Vec<_>>();
+        retained.extend(complete);
+        catalog.replace_with(dedupe_entries(retained));
+        drop(catalog);
+        self.note_shared_catalog_entries_changed();
+        self.notify_shared_publish_demand_changed();
+        Ok(count)
+    }
+
     /// Borrow the shared catalog used by server-session advertisement and
     /// listener-side upload serving.
     #[must_use]

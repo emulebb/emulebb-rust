@@ -130,7 +130,8 @@ async fn live_monitor_auto_shares_relocates_and_removes_a_dropped_file() {
     let renamed = poll_share_presence(&core, "auto-renamed.bin", true).await;
     assert!(
         renamed,
-        "the live monitor must relocate a renamed file within {CONDITION_TIMEOUT:?}",
+        "the live monitor must relocate a renamed file within {CONDITION_TIMEOUT:?}; shares: {:?}",
+        core.shares().await,
     );
     assert!(
         poll_share_presence(&core, "auto-pickup.bin", false).await,

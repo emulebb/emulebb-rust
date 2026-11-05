@@ -1085,12 +1085,13 @@ async fn delivery_failure_stays_completing_and_clears_after_retry() {
 }
 
 #[tokio::test]
-async fn unshare_file_removes_live_shared_catalog_entry() {
+async fn removing_root_withdraws_live_share_but_preserves_verified_hash() {
     let runtime_dir = unique_runtime_dir("emulebb-core-unshare-shared-catalog");
     let transfer_root = runtime_dir.join("transfers");
     let shared_path = runtime_dir.join("shared.bin");
     fs::write(&shared_path, b"shared catalog removal payload").unwrap();
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+    configure_test_shared_root(&core, &shared_path).await;
 
     let share = core
         .share_local_file(LocalShareCreate {
@@ -1102,11 +1103,20 @@ async fn unshare_file_removes_live_shared_catalog_entry() {
     assert_eq!(core.shares().await.len(), 1);
     assert_eq!(core.shared_catalog_count().await, 1);
 
-    let removed = core.unshare_file(&share.hash).await.unwrap().unwrap();
-
-    assert_eq!(removed.hash, share.hash);
+    core.remove_shared_directory_root(&runtime_dir.display().to_string())
+        .await
+        .unwrap();
+    core.reload_shared_directories().await.unwrap();
     assert!(core.shares().await.is_empty());
     assert_eq!(core.shared_catalog_count().await, 0);
+    assert_eq!(
+        core.metadata_store
+            .local_file_instance(&emulebb_ed2k::long_path::long_path(&shared_path))
+            .unwrap()
+            .unwrap()
+            .file_hash,
+        share.hash
+    );
 }
 
 #[tokio::test]
@@ -1119,6 +1129,7 @@ async fn update_shared_file_priority_and_comment_do_not_queue_redundant_ed2k_reo
     let shared_path = runtime_dir.join("shared-metadata.bin");
     fs::write(&shared_path, b"shared metadata update payload").unwrap();
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+    configure_test_shared_root(&core, &shared_path).await;
 
     let share = core
         .share_local_file(LocalShareCreate {
@@ -1157,6 +1168,7 @@ async fn update_shared_file_rating_queues_ed2k_reoffer() {
     let shared_path = runtime_dir.join("shared-rating.bin");
     fs::write(&shared_path, b"shared rating update payload").unwrap();
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+    configure_test_shared_root(&core, &shared_path).await;
 
     let share = core
         .share_local_file(LocalShareCreate {
@@ -1194,6 +1206,7 @@ async fn update_shared_file_not_published_queues_ed2k_reoffer() {
     let shared_path = runtime_dir.join("shared-suppressed.bin");
     fs::write(&shared_path, b"shared publish suppression payload").unwrap();
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+    configure_test_shared_root(&core, &shared_path).await;
 
     let share = core
         .share_local_file(LocalShareCreate {
@@ -1225,7 +1238,7 @@ async fn update_shared_file_not_published_queues_ed2k_reoffer() {
 }
 
 #[tokio::test]
-async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
+async fn verified_local_share_survives_restart_without_transfer_row() {
     let runtime_dir = unique_runtime_dir("emulebb-core-delete-completed-transfer-row");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -1237,6 +1250,7 @@ async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
         &transfer_root,
     )
     .unwrap();
+    configure_test_shared_root(&core, &payload_path).await;
     let share = core
         .share_local_file(LocalShareCreate {
             path: payload_path.display().to_string(),
@@ -1244,38 +1258,14 @@ async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
         })
         .await
         .unwrap();
-    let transfer_dir = std::path::Path::new(&share.transfer_dir);
-    assert!(!transfer_dir.exists());
+    assert!(
+        core.metadata_store
+            .transfer_manifest_by_hash(&share.hash)
+            .unwrap()
+            .is_none()
+    );
     assert!(core.transfer(&share.hash).await.is_none());
     assert!(core.transfers().await.is_empty());
-
-    core.ed2k_transfers
-        .restore_transfer_row(&share.hash)
-        .await
-        .unwrap();
-    let restored = core
-        .refresh_transfer_from_manifest_default(&share.hash)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(restored.hash, share.hash);
-    assert!(core.transfer(&share.hash).await.is_some());
-
-    let deleted = core
-        .delete_completed_transfer_row(&share.hash)
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(deleted.hash, share.hash);
-    assert!(!transfer_dir.exists());
-    assert!(core.transfer(&share.hash).await.is_none());
-    assert!(
-        core.shares()
-            .await
-            .iter()
-            .any(|entry| entry.hash == share.hash)
-    );
 
     let reloaded = EmulebbCore::new(
         "test",
@@ -1285,9 +1275,20 @@ async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
     .unwrap();
     assert!(reloaded.transfer(&share.hash).await.is_none());
     assert!(reloaded.transfers().await.is_empty());
-    assert!(reloaded.shares().await.iter().any(|entry| {
-        entry.hash == share.hash && !std::path::Path::new(&entry.transfer_dir).exists()
-    }));
+    assert!(
+        reloaded
+            .shares()
+            .await
+            .iter()
+            .any(|entry| entry.hash == share.hash)
+    );
+    assert!(
+        reloaded
+            .metadata_store
+            .transfer_manifest_by_hash(&share.hash)
+            .unwrap()
+            .is_none()
+    );
 
     let restored = reloaded
         .create_transfer(TransferCreate {
@@ -1479,6 +1480,7 @@ async fn shared_files_require_explicit_redownload_and_remain_shared() {
         &transfer_root,
     )
     .unwrap();
+    configure_test_shared_root(&core, &payload_path).await;
     let share = core
         .share_local_file(LocalShareCreate {
             path: payload_path.display().to_string(),

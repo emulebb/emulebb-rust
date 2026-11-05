@@ -289,46 +289,48 @@ impl Ed2kTransferRuntime {
         if let Some(manifest) = self.load_manifest_optional_unlocked(file_hash).await? {
             return Ok(Some(manifest));
         }
-        {
-            let metadata = self.metadata.clone();
-            let owned_hash = file_hash.to_string();
-            let local = tokio::task::spawn_blocking(move || {
-                metadata.active_local_content_by_hash(&owned_hash)
-            })
-            .await
-            .context("ED2K local content load task panicked")??;
-            return Ok(local.map(|content| {
-                let file_hash = Ed2kHash::from_str(&content.file_hash)
-                    .expect("SQLite decoded a validated ED2K hash");
-                let job = new_transfer_job(file_hash, content.display_name, content.file_size);
-                let mut manifest = Ed2kResumeManifest::new(&job);
-                manifest.source_path = Some(content.path);
-                manifest.source_fingerprint = Some(content.fingerprint);
-                manifest.delivery_state = Ed2kDeliveryState::NotApplicable;
-                manifest.transfer_row_removed = true;
-                manifest.completed = true;
-                manifest.md4_hashset_acquired = true;
-                manifest.md4_hashset = content.md4_hashset;
-                manifest.aich_hashset_acquired = true;
-                manifest.aich_root = Some(content.aich_root);
-                manifest.aich_hashset = content.aich_hashset;
-                manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
-                    .map(|piece_index| Ed2kPieceState {
-                        piece_index,
-                        state: Ed2kTransferState::Verified,
-                        bytes_written: expected_piece_length(
-                            manifest.file_size,
-                            manifest.piece_size,
-                            u64::from(piece_index),
-                        ),
-                        block_bitmap: None,
-                        ich_corrupted: false,
-                    })
-                    .collect();
-                rebuild_verified_ranges(&mut manifest);
-                manifest
-            }));
-        }
+        let metadata = self.metadata.clone();
+        let owned_hash = file_hash.to_string();
+        let local =
+            tokio::task::spawn_blocking(move || metadata.active_local_content_by_hash(&owned_hash))
+                .await
+                .context("ED2K local content load task panicked")??;
+        Ok(local.map(|content| {
+            let file_hash = Ed2kHash::from_str(&content.file_hash)
+                .expect("SQLite decoded a validated ED2K hash");
+            let display_name = content
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(content.display_name);
+            let job = new_transfer_job(file_hash, display_name, content.file_size);
+            let mut manifest = Ed2kResumeManifest::new(&job);
+            manifest.source_path = Some(content.path);
+            manifest.source_fingerprint = Some(content.fingerprint);
+            manifest.delivery_state = Ed2kDeliveryState::NotApplicable;
+            manifest.transfer_row_removed = true;
+            manifest.completed = true;
+            manifest.md4_hashset_acquired = true;
+            manifest.md4_hashset = content.md4_hashset;
+            manifest.aich_hashset_acquired = true;
+            manifest.aich_root = Some(content.aich_root);
+            manifest.aich_hashset = content.aich_hashset;
+            manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
+                .map(|piece_index| Ed2kPieceState {
+                    piece_index,
+                    state: Ed2kTransferState::Verified,
+                    bytes_written: expected_piece_length(
+                        manifest.file_size,
+                        manifest.piece_size,
+                        u64::from(piece_index),
+                    ),
+                    block_bitmap: None,
+                    ich_corrupted: false,
+                })
+                .collect();
+            rebuild_verified_ranges(&mut manifest);
+            manifest
+        }))
     }
 
     pub(super) async fn load_manifest_unlocked(

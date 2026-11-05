@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
-use emulebb_index::{IndexedFile, IndexedSharedDirectoryRoot};
-use emulebb_metadata::{MetadataImportedKnownFileEntry, NativeFileFingerprint, NativePath};
+use emulebb_index::IndexedSharedDirectoryRoot;
+use emulebb_metadata::{NativeFileFingerprint, NativePath};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -843,6 +843,30 @@ pub(crate) struct SharedScanResult {
     skipped_intake_count: usize,
 }
 
+async fn admit_scanned_roots(
+    core: &EmulebbCore,
+    root_files: Vec<(PathBuf, Vec<ScannedSharedFile>)>,
+) -> Result<()> {
+    for (root, files) in root_files {
+        let normalized_root = long_path(&root);
+        let members = files
+            .into_iter()
+            .filter_map(|file| {
+                let fingerprint = file.source_fingerprint?;
+                let relative = file.path.strip_prefix(&normalized_root).ok()?.to_path_buf();
+                Some((file.path, relative, fingerprint))
+            })
+            .collect::<Vec<_>>();
+        let metadata = core.metadata_store.clone();
+        tokio::task::spawn_blocking(move || metadata.replace_root_memberships(&root, &members))
+            .await??;
+    }
+    core.ed2k_transfers
+        .refresh_complete_shared_catalog()
+        .await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ScannedSharedFile {
     path: PathBuf,
@@ -964,12 +988,6 @@ struct ReusedReloadShare {
     stale_hashes: Vec<String>,
 }
 
-struct ImportedKnownPromotion {
-    entry: MetadataImportedKnownFileEntry,
-    source_path: PathBuf,
-    source_fingerprint: Option<NativeFileFingerprint>,
-}
-
 struct ReloadPlan {
     /// Files that are new, changed, coarse-timestamped, or lack a fingerprint.
     to_hash: Vec<ReloadHashTarget>,
@@ -977,9 +995,6 @@ struct ReloadPlan {
     /// resolve their `Localshare`s for the reload result so an unchanged file
     /// still appears in the returned set.
     reused_shares: Vec<ReusedReloadShare>,
-    /// Scanned files that match a unique pathless stock ``known.met`` identity
-    /// and can be promoted without reading payload bytes.
-    imported_known_promotions: Vec<ImportedKnownPromotion>,
     /// Persisted share-in-place hashes whose source path is no longer part of
     /// the current filtered scan and must be removed from serving/publishing.
     pruned_hashes: Vec<String>,
@@ -1134,15 +1149,11 @@ async fn plan_incremental_reload_with_pruning(
     files: Vec<ScannedSharedFile>,
     prune_missing_sources: bool,
 ) -> Result<ReloadPlan> {
-    let index = core.ed2k_transfers.share_in_place_reload_index().await?;
+    let index = core.ed2k_transfers.verified_local_reload_index().await?;
     // Completed downloads delivered into a shared dir are reuse-only (never
     // pruned): recognized by delivered path + native fingerprint so an unchanged
     // delivered file is a cache hit instead of a needless whole-payload re-hash.
     let delivered_index = core.ed2k_transfers.delivered_reuse_index().await?;
-    let imported_known_index = core
-        .ed2k_transfers
-        .imported_known_file_identity_index()
-        .await?;
     let failure_entries = load_shared_source_failures(core).await?;
     tokio::task::spawn_blocking(move || {
         let failures = failure_entries
@@ -1159,7 +1170,6 @@ async fn plan_incremental_reload_with_pruning(
         };
         let mut to_hash = Vec::new();
         let mut reused_shares = Vec::new();
-        let mut imported_known_promotions = Vec::new();
         let mut scanned_source_keys = HashSet::with_capacity(files.len());
         for file in files {
             let ScannedSharedFile {
@@ -1250,29 +1260,9 @@ async fn plan_incremental_reload_with_pruning(
                             stale_hashes: Vec::new(),
                         });
                     }
-                    // Stock known.met has no paths. Promote only a
-                    // unique exact eMule identity match; duplicate
-                    // `(name, size, mtime_s)` rows deliberately fall
-                    // through to hashing.
+                    // Imported stock known.met names and timestamps do not
+                    // prove payload identity. Hash every such local path.
                     _ => {
-                        if let (Some(display_name), Some(fingerprint)) = (
-                            path.file_name().and_then(|name| name.to_str()),
-                            fingerprint.as_ref(),
-                        ) {
-                            let modified_s = fingerprint.modified.seconds;
-                            let identity = (display_name.to_string(), size, modified_s);
-                            if let Some(entries) = imported_known_index.get(&identity)
-                                && entries.len() == 1
-                            {
-                                stats.reused_count += 1;
-                                imported_known_promotions.push(ImportedKnownPromotion {
-                                    entry: entries[0].clone(),
-                                    source_path: path,
-                                    source_fingerprint: Some(fingerprint.clone()),
-                                });
-                                continue;
-                            }
-                        }
                         // Brand-new path: hash it, nothing stale to clean up.
                         stats.planned_hash_count += 1;
                         stats.new_count += 1;
@@ -1314,7 +1304,6 @@ async fn plan_incremental_reload_with_pruning(
         ReloadPlan {
             to_hash,
             reused_shares,
-            imported_known_promotions,
             pruned_hashes,
             stats,
         }
@@ -1634,6 +1623,13 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
     });
     // Incremental skip: only (re)hash files whose native fingerprint is not
     // safely reusable; unchanged files keep their persisted shares.
+    for root in &scan.inaccessible_roots {
+        let metadata = core.metadata_store.clone();
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || metadata.set_shared_root_accessible(&root, false))
+            .await??;
+    }
+    let root_files = scan.root_files;
     let mut plan = plan_incremental_reload(core, scan.files).await?;
     plan.stats.skipped_intake_count = scan.skipped_intake_count;
     record_reload_progress(core, |diagnostics| {
@@ -1663,9 +1659,6 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         .await;
         forget_stale_shares(core, &reused.stale_hashes, &reused.file_hash).await;
     }
-    for promotion in plan.imported_known_promotions {
-        shares.push(promote_imported_known_share(core, promotion).await?);
-    }
     forget_stale_shares(core, &plan.pruned_hashes, "").await;
     for target in plan.to_hash {
         let source_path = target.path.clone();
@@ -1679,6 +1672,7 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
     }
+    admit_scanned_roots(core, root_files).await?;
     record_reload_progress(core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.disk_count = 0;
@@ -1713,74 +1707,29 @@ pub(crate) async fn register_monitor_shared_hash(
     )
 }
 
-async fn promote_imported_known_share(
-    core: &EmulebbCore,
-    promotion: ImportedKnownPromotion,
-) -> Result<LocalShare> {
-    let imported_entry = promotion.entry;
-    let source_path = promotion.source_path;
-    let source_fingerprint = promotion.source_fingerprint;
-    let summary = core
-        .ed2k_transfers
-        .promote_imported_known_file(
-            imported_entry.clone(),
-            &source_path,
-            source_fingerprint.clone(),
-        )
-        .await?;
-    core.metadata_store
-        .unmark_unshared_file(&summary.file_hash)?;
-    core.metadata_store
-        .apply_imported_known_file_stats(&summary.file_hash, &imported_entry)?;
-    core.state
-        .lock()
-        .await
-        .unshared_hashes
-        .remove(&summary.file_hash);
-    core.index.lock().await.upsert_file(
-        &IndexedFile {
-            ed2k_hash: summary.file_hash.clone(),
-            name: summary.display_name.clone(),
-            size_bytes: summary.file_size,
-            content_type: crate::ed2k_file_type_search_term(&summary.display_name)
-                .unwrap_or("unknown")
-                .to_string(),
-            availability_score: 1,
-        },
-        emulebb_index::IndexedFileOrigin::LocalShare,
-    )?;
-    register_monitor_shared_hash(core, source_path, &summary.file_hash, source_fingerprint).await;
-    core.queue_ed2k_shared_catalog_publish();
-    core.share(&summary.file_hash).await.with_context(|| {
-        format!(
-            "promoted share {} is missing after import",
-            summary.file_hash
-        )
-    })
-}
-
-/// Drop previous identities for the same share-in-place source path so modified
-/// files do not leave duplicate, unreachable shares. A no-op for the current
-/// hash, which covers timestamp-only changes that hash to the same content.
+/// Refresh offers after a previous path-to-content identity loses its final
+/// active root member. A changed local file must never delete a download job.
 pub(crate) async fn forget_stale_shares(
     core: &EmulebbCore,
     stale_hashes: &[String],
     new_hash: &str,
 ) {
-    for stale_hash in stale_hashes {
-        if stale_hash.eq_ignore_ascii_case(new_hash) {
-            continue;
+    let mut refresh = false;
+    for stale_hash in stale_hashes
+        .iter()
+        .filter(|hash| !hash.eq_ignore_ascii_case(new_hash))
+    {
+        match core.metadata_store.active_local_file_by_hash(stale_hash) {
+            Ok(Some(_)) => {}
+            Ok(None) => refresh = true,
+            Err(error) => tracing::warn!(stale_hash, %error, "failed to check stale shared hash"),
         }
-        match core.ed2k_transfers.delete_transfer_files(stale_hash).await {
-            Ok(true) => core.queue_ed2k_shared_catalog_publish(),
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(
-                    stale_hash,
-                    error = %error,
-                    "failed to remove the stale manifest of a changed shared file",
-                );
-            }
+    }
+    if refresh {
+        if let Err(error) = core.ed2k_transfers.refresh_complete_shared_catalog().await {
+            tracing::warn!(%error, "failed to refresh shared catalog after path identity changed");
+        } else {
+            core.queue_ed2k_shared_catalog_publish();
         }
     }
 }
@@ -1861,7 +1810,7 @@ async fn bootstrap_initial_publish_catalog(
     });
     // A bounded cohort is not authoritative for absence. Never prune persisted
     // sources until the exhaustive scan has seen the complete configured tree.
-    let plan = plan_incremental_reload_with_pruning(core, cohort, false).await?;
+    let plan = plan_incremental_reload_with_pruning(core, cohort.clone(), false).await?;
     let queued = plan.to_hash.len();
     let reused = plan.reused_shares.len();
     record_reload_progress(core, |diagnostics| {
@@ -1881,15 +1830,12 @@ async fn bootstrap_initial_publish_catalog(
         .await;
         forget_stale_shares(core, &reused_share.stale_hashes, &reused_share.file_hash).await;
     }
-    for promotion in plan.imported_known_promotions {
-        if let Err(error) = promote_imported_known_share(core, promotion).await {
-            tracing::warn!(
-                error = %error,
-                "failed to promote initial-publish imported shared file (skipping)",
-            );
+    hash_reload_targets(core, plan.to_hash).await;
+    for file in cohort {
+        if let Some(fingerprint) = file.source_fingerprint.as_ref() {
+            crate::shared_dir_monitor::admit_monitored_path(core, &file.path, fingerprint).await?;
         }
     }
-    hash_reload_targets(core, plan.to_hash).await;
     core.queue_ed2k_shared_catalog_publish();
     let published = core.ed2k_transfers.shared_catalog_count().await;
     tracing::info!(
@@ -2082,31 +2028,10 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         .await;
         forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
     }
-    for promotion in plan.imported_known_promotions {
-        if let Err(error) = promote_imported_known_share(&core, promotion).await {
-            tracing::warn!(
-                error = %error,
-                "failed to promote imported stock known.met shared file (skipping)",
-            );
-        }
-    }
     forget_stale_shares(&core, &plan.pruned_hashes, "").await;
 
     hash_reload_targets(&core, plan.to_hash).await;
-    for (root, files) in root_files {
-        let normalized_root = long_path(&root);
-        let members = files
-            .into_iter()
-            .filter_map(|file| {
-                let fingerprint = file.source_fingerprint?;
-                let relative = file.path.strip_prefix(&normalized_root).ok()?.to_path_buf();
-                Some((file.path, relative, fingerprint))
-            })
-            .collect::<Vec<_>>();
-        let metadata = core.metadata_store.clone();
-        tokio::task::spawn_blocking(move || metadata.replace_root_memberships(&root, &members))
-            .await??;
-    }
+    admit_scanned_roots(&core, root_files).await?;
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.active.clear();

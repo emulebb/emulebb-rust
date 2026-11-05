@@ -628,7 +628,7 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
-                   known_files.size_bytes,
+                   known_files.size_bytes, coalesce(known_files.part_count, 0),
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
@@ -666,6 +666,7 @@ impl super::MetadataStore {
                     )
                   )
               AND transfers.delete_requested_at_ms IS NULL
+              AND transfers.source_path_id IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -680,24 +681,25 @@ impl super::MetadataStore {
                 file_hash: row.get(0)?,
                 display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
-                aich_root: row.get(3)?,
-                upload_priority: row.get(4)?,
-                auto_upload_priority: row.get::<_, i64>(5)? != 0,
-                comment: row.get(6)?,
-                rating: row.get::<_, i64>(7)? as u8,
-                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
-                last_upload_request_ms: row.get(11)?,
-                media_path: optional_path_from_row(row, 12, 13)?,
+                part_count: row.get::<_, i64>(3)? as u32,
+                aich_root: row.get(4)?,
+                upload_priority: row.get(5)?,
+                auto_upload_priority: row.get::<_, i64>(6)? != 0,
+                comment: row.get(7)?,
+                rating: row.get::<_, i64>(8)? as u8,
+                all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(10)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
+                last_upload_request_ms: row.get(12)?,
+                media_path: optional_path_from_row(row, 13, 14)?,
                 media: MetadataTransferMediaMetadata {
-                    artist: row.get(14)?,
-                    album: row.get(15)?,
-                    title: row.get(16)?,
-                    length_seconds: row.get::<_, i64>(17)? as u32,
-                    bitrate_kbps: row.get::<_, i64>(18)? as u32,
-                    codec: row.get(19)?,
-                    extractor_version: row.get::<_, i64>(20)? as u32,
+                    artist: row.get(15)?,
+                    album: row.get(16)?,
+                    title: row.get(17)?,
+                    length_seconds: row.get::<_, i64>(18)? as u32,
+                    bitrate_kbps: row.get::<_, i64>(19)? as u32,
+                    codec: row.get(20)?,
+                    extractor_version: row.get::<_, i64>(21)? as u32,
                 },
             })
         })?;

@@ -326,24 +326,11 @@ fn transfer_manifest_roundtrips_sql_tables() {
         .unwrap();
 
     assert_eq!(restored, manifest);
-    assert_eq!(
-        store.completed_transfer_catalog_entries().unwrap(),
-        vec![MetadataTransferCatalogEntry {
-            file_hash: manifest.file_hash.clone(),
-            display_name: manifest.display_name.clone(),
-            file_size: manifest.file_size,
-            aich_root: manifest.aich_root.clone(),
-            upload_priority: manifest.upload_priority.clone(),
-            auto_upload_priority: manifest.auto_upload_priority,
-            comment: manifest.comment.clone(),
-            rating: manifest.rating,
-            all_time_uploaded_bytes: 0,
-            all_time_upload_requests: 0,
-            all_time_upload_accepts: 0,
-            last_upload_request_ms: 0,
-            media_path: manifest.source_path.clone(),
-            media: MetadataTransferMediaMetadata::default(),
-        }]
+    assert!(
+        store
+            .completed_transfer_catalog_entries()
+            .unwrap()
+            .is_empty()
     );
     assert_eq!(
         store.share_in_place_reload_entries().unwrap(),
@@ -442,15 +429,11 @@ fn transfer_manifest_roundtrips_sql_tables() {
         store.transfer_media_metadata(&manifest.file_hash).unwrap(),
         Some(media.clone())
     );
-    assert_eq!(
+    assert!(
         store
             .completed_transfer_catalog_entries()
             .unwrap()
-            .into_iter()
-            .next()
-            .unwrap()
-            .media,
-        media
+            .is_empty()
     );
     assert_eq!(
         store.completed_transfer_share_entries_page(0, 1).unwrap(),
@@ -661,102 +644,6 @@ fn upload_demand_counters_persist_on_known_files() {
     assert_eq!(catalog[0].all_time_upload_requests, 2);
     assert_eq!(catalog[0].all_time_upload_accepts, 1);
     assert_eq!(catalog[0].last_upload_request_ms, 1_700_000_001_000);
-}
-
-#[test]
-fn share_in_place_reload_entries_remember_duplicate_source_paths() {
-    let store = MetadataStore::in_memory().unwrap();
-    let mut manifest = MetadataTransferManifest {
-        file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        display_name: "Duplicate.Payload.bin".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
-        file_size: 1024,
-        piece_size: 1024,
-        completed: true,
-        final_rehash_pending: false,
-        md4_hashset_acquired: true,
-        md4_hashset: Vec::new(),
-        aich_hashset_acquired: true,
-        aich_root: Some("1111111111111111111111111111111111111111".to_string()),
-        aich_hashset: Vec::new(),
-        verified_ranges: Vec::new(),
-        pieces: vec![MetadataTransferPiece {
-            piece_index: 0,
-            state: "Verified".to_string(),
-            bytes_written: 1024,
-            block_bitmap: None,
-            ich_corrupted: false,
-        }],
-        sources: Vec::new(),
-        upload_priority: "normal".to_string(),
-        auto_upload_priority: true,
-        comment: String::new(),
-        rating: 0,
-        category_id: 0,
-        control_state: None,
-        transfer_row_removed: false,
-        delivery_state: MetadataTransferDeliveryState::NotApplicable,
-        delivery_ownership: MetadataTransferDeliveryOwnership::None,
-        delivered_path: None,
-        source_path: Some("/library/Alpha.bin".into()),
-        source_fingerprint: Some(fingerprint(1024, 0)),
-        payload_fingerprint: None,
-    };
-
-    store.upsert_transfer_manifest(&manifest).unwrap();
-    manifest.source_path = Some("/library/Beta.bin".into());
-    manifest.source_fingerprint = Some(fingerprint(1024, 1));
-    store.upsert_transfer_manifest(&manifest).unwrap();
-    assert!(store.managed_download_transfer_hashes().unwrap().is_empty());
-
-    assert_eq!(
-        store.share_in_place_reload_entries().unwrap(),
-        vec![
-            MetadataShareInPlaceReloadEntry {
-                file_hash: manifest.file_hash.clone(),
-                file_size: manifest.file_size,
-                source_path: "/library/Alpha.bin".into(),
-                source_fingerprint: Some(fingerprint(1024, 0)),
-            },
-            MetadataShareInPlaceReloadEntry {
-                file_hash: manifest.file_hash.clone(),
-                file_size: manifest.file_size,
-                source_path: "/library/Beta.bin".into(),
-                source_fingerprint: Some(fingerprint(1024, 1)),
-            },
-        ]
-    );
-    assert_eq!(store.completed_transfer_publish_entries().unwrap().len(), 1);
-    assert_eq!(store.completed_transfer_share_entries().unwrap().len(), 1);
-    assert_eq!(
-        store
-            .current_shared_files_by_hash(&manifest.file_hash)
-            .unwrap()
-            .len(),
-        2
-    );
-
-    assert!(
-        store
-            .request_transfer_deletion(&manifest.file_hash, None)
-            .unwrap()
-    );
-    assert!(store.share_in_place_reload_entries().unwrap().is_empty());
-    assert!(
-        store
-            .current_shared_files_by_hash(&manifest.file_hash)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        store
-            .completed_transfer_publish_entries()
-            .unwrap()
-            .is_empty()
-    );
-    assert!(store.completed_transfer_share_entries().unwrap().is_empty());
 }
 
 #[test]
@@ -1861,12 +1748,12 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 category_id: 0,
                 control_state: None,
                 transfer_row_removed: false,
-                delivery_state: MetadataTransferDeliveryState::NotApplicable,
+                delivery_state: MetadataTransferDeliveryState::Pending,
                 delivery_ownership: MetadataTransferDeliveryOwnership::None,
                 delivered_path: None,
-                source_path: Some(format!("/library/catalog-{sequence}.bin").into()),
-                source_fingerprint: Some(fingerprint(sequence as u64, sequence as u64)),
-                payload_fingerprint: None,
+                source_path: None,
+                source_fingerprint: None,
+                payload_fingerprint: Some(fingerprint(sequence as u64, sequence as u64)),
             })
             .unwrap();
     }

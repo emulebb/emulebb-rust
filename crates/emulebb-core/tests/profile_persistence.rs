@@ -164,7 +164,7 @@ async fn network_and_upload_settings_survive_core_restart() {
 }
 
 #[tokio::test]
-async fn unshared_file_marker_survives_core_restart() {
+async fn removed_shared_root_survives_core_restart() {
     let runtime_dir = unique_test_dir("unshared-file");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -173,6 +173,9 @@ async fn unshared_file_marker_survives_core_restart() {
 
     let file_hash = {
         let core = open_core(&metadata_path, &transfer_root);
+        core.add_shared_directory_root(&runtime_dir.display().to_string())
+            .await
+            .unwrap();
         let share = core
             .share_local_file(LocalShareCreate {
                 path: source_path.display().to_string(),
@@ -181,7 +184,9 @@ async fn unshared_file_marker_survives_core_restart() {
             .await
             .unwrap();
         let file_hash = share.hash.clone();
-        core.unshare_file(&file_hash).await.unwrap();
+        core.remove_shared_directory_root(&runtime_dir.display().to_string())
+            .await
+            .unwrap();
         file_hash
     };
 
@@ -197,6 +202,9 @@ async fn delete_category_resets_referencing_transfers_to_uncategorized() {
     let payload_path = runtime_dir.join("Shared.Payload.bin");
     fs::write(&payload_path, b"category reset payload").unwrap();
     let core = open_core(&metadata_path, &transfer_root);
+    core.add_shared_directory_root(&runtime_dir.display().to_string())
+        .await
+        .unwrap();
 
     let share = core
         .share_local_file(LocalShareCreate {
