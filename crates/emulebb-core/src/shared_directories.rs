@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::IndexedSharedDirectoryRoot;
-use emulebb_metadata::{NativeFileFingerprint, NativePath};
+use emulebb_metadata::{MetadataSharedDirectoryRoot, NativeFileFingerprint, NativePath};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -248,6 +248,67 @@ pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> Shared
         shareable: accessible,
         accessible,
     }
+}
+
+/// Incoming and category destinations are mandatory recursive share roots.
+/// They are derived from current settings rather than exposed as editable roots.
+pub(crate) async fn implicit_shared_directory_roots(
+    core: &EmulebbCore,
+) -> Vec<SharedDirectoryRoot> {
+    let mut paths = vec![core.incoming_dir.clone()];
+    let state = core.state.lock().await;
+    paths.extend(
+        state
+            .categories
+            .values()
+            .filter_map(|category| category.path.as_ref())
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from),
+    );
+    drop(state);
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let display = normal_path_display(&path);
+            if !seen.insert(display.to_lowercase()) {
+                return None;
+            }
+            Some(refresh_shared_directory_row(&SharedDirectoryRoot {
+                path: display,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }))
+        })
+        .collect()
+}
+
+pub(crate) async fn effective_shared_directory_roots(
+    core: &EmulebbCore,
+) -> Vec<SharedDirectoryRoot> {
+    let mut roots = implicit_shared_directory_roots(core).await;
+    roots.extend(core.state.lock().await.shared_directories.clone());
+    let mut seen = HashSet::new();
+    roots.retain(|root| seen.insert(root.path.to_lowercase()));
+    roots
+}
+
+pub(crate) async fn sync_implicit_shared_directory_roots(core: &EmulebbCore) -> Result<()> {
+    let roots = implicit_shared_directory_roots(core)
+        .await
+        .into_iter()
+        .map(|root| MetadataSharedDirectoryRoot {
+            path: root.path,
+            monitor_owned: false,
+            shareable: root.shareable,
+            accessible: root.accessible,
+        })
+        .collect::<Vec<_>>();
+    let mut metadata = core.metadata_store.clone();
+    tokio::task::spawn_blocking(move || metadata.replace_implicit_shared_directory_roots(&roots))
+        .await??;
+    Ok(())
 }
 
 const MAX_EMULE_FILE_SIZE: u64 = 0x4000000000;
@@ -778,11 +839,12 @@ fn select_initial_publish_cohort(mut candidates: Vec<ScannedSharedFile>) -> Vec<
 }
 
 async fn scan_initial_publish_cohort(core: &EmulebbCore) -> Result<Vec<ScannedSharedFile>> {
-    let roots = core.state.lock().await.shared_directories.clone();
+    sync_implicit_shared_directory_roots(core).await?;
+    let roots = effective_shared_directory_roots(core).await;
     let policy = load_shared_file_exclusion_policy(core)?;
     tokio::task::spawn_blocking(move || -> Result<Vec<ScannedSharedFile>> {
         let mut candidates = Vec::new();
-        for root in roots {
+        for root in roots.into_iter().filter(|root| root.accessible) {
             collect_initial_publish_candidates(Path::new(&root.path), &mut candidates, &policy)
                 .with_context(|| {
                     format!("failed to scan initial publish candidates in {}", root.path)
@@ -917,7 +979,8 @@ pub(crate) fn hashing_count_snapshot(core: &EmulebbCore) -> i64 {
 
 /// Scan the configured shared roots and return the deduped, sorted file list.
 async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
-    let roots = core.state.lock().await.shared_directories.clone();
+    sync_implicit_shared_directory_roots(core).await?;
+    let roots = effective_shared_directory_roots(core).await;
     let policy = load_shared_file_exclusion_policy(core)?;
     // The recursive directory walk is synchronous and may be large, so the helper
     // runs it off the async executor via spawn_blocking to avoid stalling a tokio
