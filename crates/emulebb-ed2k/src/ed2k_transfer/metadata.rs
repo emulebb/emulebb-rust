@@ -37,17 +37,27 @@ enum DeletionCleanupPolicy {
 }
 
 fn merge_publish_entries(
+    metadata: &MetadataStore,
     transfers: Vec<MetadataTransferPublishEntry>,
     local: Vec<MetadataTransferCatalogEntry>,
-) -> Vec<MetadataTransferPublishEntry> {
+) -> Result<Vec<MetadataTransferPublishEntry>> {
     let mut by_hash = transfers
         .into_iter()
         .map(|entry| (entry.file_hash.clone(), entry))
         .collect::<BTreeMap<_, _>>();
     for share in local {
+        let Some(source) = super::duplicate::first_present_source(
+            metadata.current_shared_files_by_hash(&share.file_hash)?,
+        ) else {
+            continue;
+        };
         let entry = MetadataTransferPublishEntry {
             file_hash: share.file_hash,
-            display_name: share.display_name,
+            display_name: source
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(share.display_name),
             file_size: share.file_size,
             aich_root: share.aich_root,
             upload_priority: share.upload_priority,
@@ -64,7 +74,7 @@ fn merge_publish_entries(
         };
         by_hash.insert(entry.file_hash.clone(), entry);
     }
-    by_hash.into_values().collect()
+    Ok(by_hash.into_values().collect())
 }
 
 impl Ed2kTransferRuntime {
@@ -83,10 +93,11 @@ impl Ed2kTransferRuntime {
     pub async fn publish_entries(&self) -> Result<Vec<MetadataTransferPublishEntry>> {
         let metadata = self.metadata.clone();
         tokio::task::spawn_blocking(move || {
-            Ok(merge_publish_entries(
+            merge_publish_entries(
+                &metadata,
                 metadata.completed_transfer_publish_entries()?,
                 metadata.active_local_catalog_page(None, usize::MAX)?,
-            ))
+            )
         })
         .await
         .map_err(anyhow::Error::from)?
@@ -102,7 +113,7 @@ impl Ed2kTransferRuntime {
             let Some(local) = metadata.try_active_local_catalog_page()? else {
                 return Ok(None);
             };
-            Ok(Some(merge_publish_entries(transfers, local)))
+            Ok(Some(merge_publish_entries(&metadata, transfers, local)?))
         })
         .await
         .map_err(anyhow::Error::from)?

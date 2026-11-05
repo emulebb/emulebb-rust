@@ -84,19 +84,16 @@ impl Ed2kTransferRuntime {
 
         let result = async {
             let metadata = self.metadata.clone();
-            let entries = tokio::task::spawn_blocking(move || {
+            let page = tokio::task::spawn_blocking(move || {
                 super::transfer_sql::completed_catalog_page_from_metadata_store(
                     &metadata, None, limit,
                 )
             })
             .await??;
-            let page_len = entries.len();
-            let has_more = page_len == limit;
-            let cursor = has_more
-                .then(|| entries.last().map(|entry| entry.file_hash.clone()))
-                .flatten();
+            let has_more = page.has_more;
+            let cursor = has_more.then_some(page.cursor).flatten();
             let mut hydrated = 0usize;
-            for entry in entries {
+            for entry in page.entries {
                 if self
                     .insert_hydrated_completed_entry_if_current(entry)
                     .await?
@@ -148,7 +145,7 @@ impl Ed2kTransferRuntime {
             loop {
                 let metadata = self.metadata.clone();
                 let page_after = after_hash.clone();
-                let entries = tokio::task::spawn_blocking(move || {
+                let page = tokio::task::spawn_blocking(move || {
                     super::transfer_sql::completed_catalog_page_from_metadata_store(
                         &metadata,
                         page_after.as_deref(),
@@ -156,7 +153,7 @@ impl Ed2kTransferRuntime {
                     )
                 })
                 .await??;
-                if entries.is_empty() {
+                if page.cursor.is_none() {
                     *self
                         .shared_catalog_hydration_cursor
                         .lock()
@@ -164,10 +161,10 @@ impl Ed2kTransferRuntime {
                     break;
                 }
 
-                let page_len = entries.len();
-                let next_after = entries.last().map(|entry| entry.file_hash.clone());
+                let has_more = page.has_more;
+                let next_after = page.cursor;
                 let mut inserted = 0usize;
-                for entry in entries {
+                for entry in page.entries {
                     if self
                         .insert_hydrated_completed_entry_if_current(entry)
                         .await?
@@ -186,7 +183,7 @@ impl Ed2kTransferRuntime {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = after_hash.clone();
 
-                if page_len < HYDRATION_PAGE_SIZE {
+                if !has_more {
                     *self
                         .shared_catalog_hydration_cursor
                         .lock()
@@ -301,7 +298,23 @@ impl Ed2kTransferRuntime {
             .metadata
             .active_local_catalog_entry(&manifest.file_hash)
         {
-            Ok(Some(local)) => {
+            Ok(Some(mut local)) => {
+                let source = match self.first_present_shared_source(&manifest.file_hash).await {
+                    Ok(source) => source,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to validate local share precedence");
+                        return;
+                    }
+                };
+                let Some(source) = source else {
+                    // A stale local path cannot displace verified download parts.
+                    return self
+                        .upsert_partial_catalog_entry(manifest, file_hash, refresh_missing_media)
+                        .await;
+                };
+                if let Some(name) = source.path.file_name() {
+                    local.display_name = name.to_string_lossy().into_owned();
+                }
                 match super::transfer_sql::shared_entry_from_catalog_entry(local) {
                     Ok(entry) => {
                         self.shared_catalog
@@ -320,6 +333,16 @@ impl Ed2kTransferRuntime {
                 return;
             }
         }
+        self.upsert_partial_catalog_entry(manifest, file_hash, refresh_missing_media)
+            .await;
+    }
+
+    async fn upsert_partial_catalog_entry(
+        &self,
+        manifest: &Ed2kResumeManifest,
+        file_hash: Ed2kHash,
+        refresh_missing_media: bool,
+    ) {
         // Build the replacement entry (if any) before taking the write lock so the
         // lock hold covers only the in-place upsert.
         let mut new_entry = manifest_has_servable_payload_authority(manifest)

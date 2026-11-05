@@ -292,6 +292,20 @@ impl Ed2kTransferRuntime {
             tokio::task::spawn_blocking(move || metadata.active_local_content_by_hash(&owned_hash))
                 .await
                 .context("ED2K local content load task panicked")??;
+        // WHY: SQLite remembers verified bytes, but an offline replacement
+        // can leave the selected path stale. Resolve a live sibling path or
+        // fall through to an independently verified download payload.
+        let local = if let Some(mut content) = local {
+            self.first_present_shared_source(file_hash)
+                .await?
+                .map(|source| {
+                    content.path = source.path;
+                    content.fingerprint = source.fingerprint;
+                    content
+                })
+        } else {
+            None
+        };
         let local_manifest = local.map(|content| {
             let file_hash = Ed2kHash::from_str(&content.file_hash)
                 .expect("SQLite decoded a validated ED2K hash");

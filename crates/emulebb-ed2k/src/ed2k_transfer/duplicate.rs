@@ -1,13 +1,37 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use emulebb_metadata::NativeFileFingerprint;
+use emulebb_metadata::{MetadataCurrentSharedFile, NativeFileFingerprint};
 
 use super::{Ed2kResumeManifest, Ed2kTransferJob, Ed2kTransferRuntime};
 
 pub(super) struct PresentSharedSource {
     pub(super) path: PathBuf,
     pub(super) fingerprint: NativeFileFingerprint,
+}
+
+/// Select the first active path whose on-disk identity still matches its hash evidence.
+pub(super) fn first_present_source(
+    shared_files: Vec<MetadataCurrentSharedFile>,
+) -> Option<PresentSharedSource> {
+    for shared_file in shared_files {
+        let Some(expected_fingerprint) = shared_file.source_fingerprint else {
+            continue;
+        };
+        let path = crate::long_path::long_path(&shared_file.source_path);
+        let current_fingerprint = super::ingest::native_file_fingerprint(&path);
+        if expected_fingerprint.size_bytes == shared_file.file_size
+            && current_fingerprint
+                .as_ref()
+                .is_some_and(|current| expected_fingerprint.safely_matches(current))
+        {
+            return Some(PresentSharedSource {
+                path,
+                fingerprint: expected_fingerprint,
+            });
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,33 +245,13 @@ impl Ed2kTransferRuntime {
     ) -> Result<Option<PresentSharedSource>> {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_string();
-        let shared_files =
-            tokio::task::spawn_blocking(move || metadata.current_shared_files_by_hash(&file_hash))
-                .await
-                .context("ED2K shared-source evidence query task panicked")??;
-        for shared_file in shared_files {
-            let Some(expected_fingerprint) = shared_file.source_fingerprint else {
-                continue;
-            };
-            let path = crate::long_path::long_path(&shared_file.source_path);
-            let probe_path = path.clone();
-            let current_fingerprint = tokio::task::spawn_blocking(move || {
-                super::ingest::native_file_fingerprint(&probe_path)
-            })
-            .await
-            .context("ED2K shared-source fingerprint task panicked")?;
-            if expected_fingerprint.size_bytes == shared_file.file_size
-                && current_fingerprint
-                    .as_ref()
-                    .is_some_and(|current| expected_fingerprint.safely_matches(current))
-            {
-                return Ok(Some(PresentSharedSource {
-                    path,
-                    fingerprint: expected_fingerprint,
-                }));
-            }
-        }
-        Ok(None)
+        tokio::task::spawn_blocking(move || {
+            Ok(first_present_source(
+                metadata.current_shared_files_by_hash(&file_hash)?,
+            ))
+        })
+        .await
+        .context("ED2K shared-source evidence query task panicked")?
     }
 
     /// Whether another persisted source still provides the verified bytes for
@@ -619,6 +623,17 @@ mod tests {
         assert!(runtime.manifest(&shared.file_hash).await.unwrap().completed);
 
         fs::write(&shared_path, vec![b'X'; payload.len()]).unwrap();
+        runtime.refresh_complete_shared_catalog().await.unwrap();
+        let catalog = runtime.shared_catalog();
+        assert_eq!(
+            catalog
+                .read()
+                .await
+                .entry_by_hash(&file_hash)
+                .unwrap()
+                .display_name,
+            "redownloaded.bin"
+        );
         assert!(
             runtime
                 .read_verified_range(&file_hash, 0, payload.len() as u64)
