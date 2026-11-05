@@ -19,7 +19,133 @@ pub struct MetadataLocalFileInstance {
     pub verified_fingerprint: NativeFileFingerprint,
 }
 
+/// Hashsets produced by a full, stable read of a local file.
+#[derive(Debug, Clone)]
+pub struct MetadataVerifiedLocalContent {
+    pub file_hash: String,
+    pub display_name: String,
+    pub file_size: u64,
+    pub part_size: u64,
+    pub md4_hashset: Vec<String>,
+    pub aich_root: String,
+    pub aich_hashset: Vec<String>,
+    pub path: PathBuf,
+    pub fingerprint: NativeFileFingerprint,
+}
+
 impl MetadataStore {
+    /// Store verified local content and its path atomically, without a download
+    /// transfer. Existing content-level display metadata remains stable when a
+    /// second path to the same hash is discovered.
+    pub fn upsert_verified_local_content(
+        &self,
+        content: &MetadataVerifiedLocalContent,
+    ) -> Result<()> {
+        ensure!(
+            content.path.is_absolute(),
+            "local file path must be absolute"
+        );
+        ensure!(
+            content.file_size > 0 && content.part_size > 0,
+            "local content geometry is invalid"
+        );
+        ensure!(
+            content.file_size == content.fingerprint.size_bytes,
+            "local content fingerprint size differs"
+        );
+        ensure!(
+            !content.display_name.trim().is_empty(),
+            "local content name is empty"
+        );
+        let hash = decode_fixed_hex(&content.file_hash, 16, "ED2K hash")?;
+        let aich_root = decode_fixed_hex(&content.aich_root, 20, "AICH root")?;
+        let size = i64::try_from(content.file_size)?;
+        let part_size = i64::try_from(content.part_size)?;
+        let part_count = i64::try_from(content.md4_hashset.len())?;
+        let now = unix_ms();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO known_files(
+                ed2k_hash, size_bytes, display_name, part_size, part_count,
+                completed, md4_hashset_acquired, aich_hashset_acquired, aich_root,
+                first_seen_ms, last_seen_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 1, ?6, ?7, ?7, ?7)
+             ON CONFLICT(ed2k_hash) DO UPDATE SET
+                last_seen_ms = excluded.last_seen_ms,
+                updated_at_ms = excluded.updated_at_ms",
+            params![
+                hash,
+                size,
+                content.display_name,
+                part_size,
+                part_count,
+                aich_root,
+                now
+            ],
+        )?;
+        let (known_file_id, stored_size): (i64, i64) = tx.query_row(
+            "SELECT id, size_bytes FROM known_files WHERE ed2k_hash = ?1",
+            params![hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        ensure!(
+            stored_size == size,
+            "ED2K identity has conflicting file size"
+        );
+        tx.execute(
+            "INSERT INTO known_file_origins(
+                known_file_id, origin, size_bytes, first_seen_ms, last_seen_ms
+             ) VALUES (?1, 'local_share', ?2, ?3, ?3)
+             ON CONFLICT(known_file_id, origin) DO UPDATE SET
+                last_seen_ms = excluded.last_seen_ms",
+            params![known_file_id, size, now],
+        )?;
+        tx.execute(
+            "DELETE FROM ed2k_part_hashes WHERE known_file_id = ?1",
+            params![known_file_id],
+        )?;
+        tx.execute(
+            "DELETE FROM aich_part_hashes WHERE known_file_id = ?1",
+            params![known_file_id],
+        )?;
+        for (part_index, part_hash) in content.md4_hashset.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO ed2k_part_hashes(known_file_id, part_index, md4_hash) VALUES (?1, ?2, ?3)",
+                params![known_file_id, i64::try_from(part_index)?, decode_fixed_hex(part_hash, 16, "MD4 part hash")?],
+            )?;
+        }
+        for (part_index, part_hash) in content.aich_hashset.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO aich_part_hashes(known_file_id, part_index, aich_hash) VALUES (?1, ?2, ?3)",
+                params![known_file_id, i64::try_from(part_index)?, decode_fixed_hex(part_hash, 20, "AICH part hash")?],
+            )?;
+        }
+        let path_id = upsert_local_path(&tx, &content.path)?;
+        tx.execute(
+            "INSERT INTO local_file_instances(
+                path_id, known_file_id, file_size, native_identity,
+                verified_fingerprint, verified_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(path_id) DO UPDATE SET
+                known_file_id = excluded.known_file_id,
+                file_size = excluded.file_size,
+                native_identity = excluded.native_identity,
+                verified_fingerprint = excluded.verified_fingerprint,
+                verified_at_ms = excluded.verified_at_ms",
+            params![
+                path_id,
+                known_file_id,
+                size,
+                content.fingerprint.identity.storage_bytes(),
+                content.fingerprint.storage_bytes(),
+                now
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Cache a content identity after the file bytes have been verified.
     /// This record alone never authorizes serving or publication.
     pub fn upsert_local_file_instance(
@@ -348,6 +474,54 @@ mod tests {
                 .reusable_local_file_by_identity(&fingerprint(13))
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn verified_content_writes_hashsets_and_paths_without_download_rows() {
+        let store = MetadataStore::in_memory().unwrap();
+        let first_path = std::env::temp_dir().join("emulebb-local-content-first.bin");
+        let second_path = std::env::temp_dir().join("emulebb-local-content-second.bin");
+        let mut content = MetadataVerifiedLocalContent {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "First.bin".to_string(),
+            file_size: 32,
+            part_size: 32,
+            md4_hashset: vec!["11111111111111111111111111111111".to_string()],
+            aich_root: "2222222222222222222222222222222222222222".to_string(),
+            aich_hashset: vec!["3333333333333333333333333333333333333333".to_string()],
+            path: first_path.clone(),
+            fingerprint: fingerprint(41),
+        };
+        store.upsert_verified_local_content(&content).unwrap();
+        content.path = second_path.clone();
+        content.display_name = "Second.bin".to_string();
+        content.fingerprint = fingerprint(42);
+        store.upsert_verified_local_content(&content).unwrap();
+        let conn = store.connection().unwrap();
+        let (name, transfers, md4, aich, paths): (String, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT known_files.display_name,
+                (SELECT count(*) FROM transfers),
+                (SELECT count(*) FROM ed2k_part_hashes),
+                (SELECT count(*) FROM aich_part_hashes),
+                (SELECT count(*) FROM local_file_instances)
+             FROM known_files WHERE ed2k_hash = ?1",
+                params![decode_fixed_hex(&content.file_hash, 16, "ED2K hash").unwrap()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (name.as_str(), transfers, md4, aich, paths),
+            ("First.bin", 0, 1, 1, 2)
         );
     }
 }
