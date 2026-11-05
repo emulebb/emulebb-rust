@@ -13,6 +13,7 @@ impl EmulebbCore {
     /// Hydrate the first persisted shared-catalog cohort after startup storage
     /// reconciliation and before REST or network publication.
     pub async fn hydrate_initial_shared_catalog(&self) -> Result<usize> {
+        shared_directories::sync_implicit_shared_directory_roots(self).await?;
         let hydrated = self.ed2k_transfers.hydrate_initial_shared_catalog().await?;
         if hydrated > 0 {
             self.queue_ed2k_shared_catalog_publish();
@@ -35,7 +36,8 @@ impl EmulebbCore {
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
         let path = Path::new(&request.path);
         let normalized = long_path(path);
-        let roots = self.state.lock().await.shared_directories.clone();
+        shared_directories::sync_implicit_shared_directory_roots(self).await?;
+        let roots = shared_directories::effective_shared_directory_roots(self).await;
         ensure!(
             roots.iter().any(|root| {
                 root.shareable

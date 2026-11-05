@@ -114,6 +114,62 @@ async fn set_shared_directories_canonicalizes_configured_root() {
 }
 
 #[tokio::test]
+async fn incoming_is_shared_without_an_explicit_root() {
+    let incoming = scratch_dir("implicit-incoming");
+    let path = incoming.join("Sample.bin");
+    fs::write(&path, b"completed local content").unwrap();
+    let core = EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+        .unwrap()
+        .with_incoming_dir(incoming.clone());
+    assert!(core.shared_directories().await.roots.is_empty());
+
+    let shared = core.reload_shared_directories().await.unwrap();
+    assert_eq!(shared.len(), 1);
+    assert!(core.share(&shared[0].hash).await.is_some());
+    assert!(
+        core.metadata_store
+            .shared_directory_roots()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        core.metadata_store
+            .active_local_file_by_hash(&shared[0].hash)
+            .unwrap()
+            .is_some()
+    );
+    fs::remove_dir_all(incoming).ok();
+}
+
+#[tokio::test]
+async fn category_destination_is_shared_and_withdrawn_with_category() {
+    let category_path = scratch_dir("implicit-category");
+    fs::write(category_path.join("Sample.bin"), b"category content").unwrap();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    let category = core
+        .create_category(crate::CategoryCreate {
+            name: "Samples".to_string(),
+            path: crate::NullableStringField::Value(category_path.to_string_lossy().into_owned()),
+            comment: None,
+            color: crate::NullableU32Field::Missing,
+            priority: None,
+        })
+        .await
+        .unwrap();
+    let shared = core.reload_shared_directories().await.unwrap();
+    assert_eq!(shared.len(), 1);
+    let hash = shared[0].hash.clone();
+    assert!(core.share(&hash).await.is_some());
+
+    core.delete_category(category.id).await.unwrap();
+    assert!(core.share(&hash).await.is_none());
+    core.reload_shared_directories().await.unwrap();
+    assert!(core.share(&hash).await.is_none());
+    fs::remove_dir_all(category_path).ok();
+}
+
+#[tokio::test]
 async fn synchronous_and_detached_reloads_share_one_execution_gate() {
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();

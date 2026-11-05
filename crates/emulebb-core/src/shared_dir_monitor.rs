@@ -727,7 +727,7 @@ pub(crate) async fn admit_monitored_path(
     path: &Path,
     fingerprint: &NativeFileFingerprint,
 ) -> anyhow::Result<bool> {
-    let roots = core.state.lock().await.shared_directories.clone();
+    let roots = crate::shared_directories::effective_shared_directory_roots(core).await;
     let mut admitted = false;
     for root in roots {
         if !root.shareable || !root.accessible {
@@ -767,7 +767,12 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
     stop_shared_directory_monitor(core);
     start_shared_source_reconcile_worker(core);
 
-    let roots = core.state.lock().await.shared_directories.clone();
+    if let Err(error) = crate::shared_directories::sync_implicit_shared_directory_roots(core).await
+    {
+        tracing::warn!(%error, "failed to synchronize implicit shared roots");
+        return;
+    }
+    let roots = crate::shared_directories::effective_shared_directory_roots(core).await;
     let roots = roots
         .iter()
         .map(refresh_shared_directory_row)
