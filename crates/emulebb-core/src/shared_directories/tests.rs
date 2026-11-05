@@ -260,14 +260,47 @@ async fn incremental_reload_prunes_persisted_share_absent_from_scan() {
 
     let plan = plan_incremental_reload(&core, Vec::new()).await.unwrap();
 
-    assert_eq!(plan.pruned_hashes, vec![shared.hash.clone()]);
     assert_eq!(plan.stats.pruned_count, 1);
-    core.metadata_store
-        .replace_root_memberships(&root, &[])
-        .unwrap();
-    forget_stale_shares(&core, &plan.pruned_hashes, "").await;
+    fs::remove_file(&source).unwrap();
+    let reloaded = core.reload_shared_directories().await.unwrap();
+    assert!(reloaded.is_empty());
     assert!(core.share(&shared.hash).await.is_none());
     assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
+    assert_eq!(
+        core.metadata_store.active_shared_content_count().unwrap(),
+        0
+    );
+    fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn full_reload_replaces_changed_source_offer_after_membership_commit() {
+    let root = scratch_dir("changed-offer");
+    let source = root.join("Changed.Source.bin");
+    fs::write(&source, b"old payload").unwrap();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    configure_test_root(&core, &root).await;
+    let old = core
+        .share_local_file(LocalShareCreate {
+            path: source.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+
+    fs::write(&source, b"a different, longer payload").unwrap();
+    let reloaded = core.reload_shared_directories().await.unwrap();
+
+    assert_eq!(reloaded.len(), 1);
+    assert_ne!(reloaded[0].hash, old.hash);
+    assert!(core.share(&old.hash).await.is_none());
+    assert!(core.share(&reloaded[0].hash).await.is_some());
+    assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+    assert_eq!(
+        core.metadata_store.active_shared_content_count().unwrap(),
+        1
+    );
     fs::remove_dir_all(&root).ok();
 }
 
@@ -537,7 +570,6 @@ async fn incremental_reload_keeps_hash_when_duplicate_source_remains_scanned() {
 
     assert_eq!(plan.reused_shares.len(), 1);
     assert_eq!(plan.reused_shares[0].file_hash, kept.hash);
-    assert!(plan.pruned_hashes.is_empty());
     assert_eq!(plan.stats.pruned_count, 0);
     fs::remove_dir_all(&root).ok();
 }
