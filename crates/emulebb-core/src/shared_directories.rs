@@ -1767,20 +1767,16 @@ pub(crate) async fn forget_stale_shares(
     stale_hashes: &[String],
     new_hash: &str,
 ) {
-    let mut refresh = false;
     for stale_hash in stale_hashes
         .iter()
         .filter(|hash| !hash.eq_ignore_ascii_case(new_hash))
     {
-        match core.metadata_store.active_local_file_by_hash(stale_hash) {
-            Ok(Some(_)) => {}
-            Ok(None) => refresh = true,
-            Err(error) => tracing::warn!(stale_hash, %error, "failed to check stale shared hash"),
-        }
-    }
-    if refresh {
-        if let Err(error) = core.ed2k_transfers.refresh_complete_shared_catalog().await {
-            tracing::warn!(%error, "failed to refresh shared catalog after path identity changed");
+        if let Err(error) = core
+            .ed2k_transfers
+            .refresh_shared_catalog_entry(stale_hash)
+            .await
+        {
+            tracing::warn!(stale_hash, %error, "failed to refresh shared catalog after path identity changed");
         } else {
             core.queue_ed2k_shared_catalog_publish();
         }
@@ -1886,7 +1882,16 @@ async fn bootstrap_initial_publish_catalog(
     hash_reload_targets(core, plan.to_hash).await;
     for file in cohort {
         if let Some(fingerprint) = file.source_fingerprint.as_ref() {
-            crate::shared_dir_monitor::admit_monitored_path(core, &file.path, fingerprint).await?;
+            let Some(instance) = core.metadata_store.local_file_instance(&file.path)? else {
+                continue;
+            };
+            crate::shared_dir_monitor::admit_monitored_path(
+                core,
+                &file.path,
+                fingerprint,
+                &instance.file_hash,
+            )
+            .await?;
         }
     }
     core.queue_ed2k_shared_catalog_publish();

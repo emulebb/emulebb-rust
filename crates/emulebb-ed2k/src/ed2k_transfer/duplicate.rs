@@ -586,7 +586,10 @@ mod tests {
             .metadata
             .withdraw_local_file_path(&crate::long_path::long_path(&shared_path))
             .unwrap();
-        runtime.refresh_complete_shared_catalog().await.unwrap();
+        runtime
+            .refresh_shared_catalog_entry(&shared.file_hash)
+            .await
+            .unwrap();
         let catalog = runtime.shared_catalog();
         let catalog = catalog.read().await;
         let entry = catalog

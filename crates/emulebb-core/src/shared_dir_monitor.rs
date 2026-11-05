@@ -764,7 +764,7 @@ async fn reconcile_invalidated_shared_source(
             )
             .await;
             if let Some(fingerprint) = source_fingerprint.as_ref()
-                && let Err(error) = admit_monitored_path(core, &key, fingerprint).await
+                && let Err(error) = admit_monitored_path(core, &key, fingerprint, &share.hash).await
             {
                 tracing::warn!(path = %key.display(), %error, "failed to admit monitored shared file");
             }
@@ -854,6 +854,7 @@ pub(crate) async fn admit_monitored_path(
     core: &EmulebbCore,
     path: &Path,
     fingerprint: &NativeFileFingerprint,
+    file_hash: &str,
 ) -> anyhow::Result<bool> {
     let roots = crate::shared_directories::effective_shared_directory_roots(core).await;
     let mut admitted = false;
@@ -877,7 +878,7 @@ pub(crate) async fn admit_monitored_path(
     }
     if admitted {
         core.ed2k_transfers
-            .refresh_complete_shared_catalog()
+            .refresh_shared_catalog_entry(file_hash)
             .await?;
         core.queue_ed2k_shared_catalog_publish();
     }
@@ -1030,7 +1031,7 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
             return;
         }
     }
-    match admit_monitored_path(core, &new_key, fingerprint).await {
+    match admit_monitored_path(core, &new_key, fingerprint, &previous.hash).await {
         Ok(true) => {
             let metadata = core.metadata_store.clone();
             let old_path = old_key.clone();
@@ -1047,6 +1048,7 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
                     return;
                 }
             }
+            let current_hash = previous.hash.clone();
             let mut state = core.state.lock().await;
             state.monitor_shared_hashes.remove(&old_key);
             state.monitor_shared_hashes.insert(
@@ -1057,7 +1059,11 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
                 },
             );
             drop(state);
-            if let Err(error) = core.ed2k_transfers.refresh_complete_shared_catalog().await {
+            if let Err(error) = core
+                .ed2k_transfers
+                .refresh_shared_catalog_entry(&current_hash)
+                .await
+            {
                 tracing::warn!(%error, "failed to refresh catalog after monitored rename");
             }
         }
@@ -1181,7 +1187,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
             )
             .await;
             let admitted = if let Some(fingerprint) = source_fingerprint.as_ref() {
-                match admit_monitored_path(core, &key, fingerprint).await {
+                match admit_monitored_path(core, &key, fingerprint, &share.hash).await {
                     Ok(admitted) => admitted,
                     Err(error) => {
                         tracing::warn!(path = %key.display(), %error, "failed to admit monitored shared file");
@@ -1266,7 +1272,11 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
         tokio::task::spawn_blocking(move || metadata.withdraw_local_file_path(&key)).await;
     match withdrawn {
         Ok(Ok(_)) => {
-            if let Err(error) = core.ed2k_transfers.refresh_complete_shared_catalog().await {
+            if let Err(error) = core
+                .ed2k_transfers
+                .refresh_shared_catalog_entry(&hash)
+                .await
+            {
                 tracing::warn!(path = %path.display(), %hash, %error, "failed to refresh catalog after monitored removal");
             } else {
                 core.queue_ed2k_shared_catalog_publish();
