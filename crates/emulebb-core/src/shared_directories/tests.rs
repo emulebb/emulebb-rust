@@ -631,6 +631,28 @@ fn unreadable_root_is_skipped_without_aborting() {
     assert!(output.is_empty());
 }
 
+#[tokio::test]
+async fn root_scan_keeps_successful_membership_separate_from_offline_root() {
+    let available = scratch_dir("available-root");
+    fs::write(available.join("Sample.bin"), b"sample").unwrap();
+    let offline = available.join("missing-root");
+    let roots = [&available, &offline]
+        .map(|path| SharedDirectoryRoot {
+            path: path.to_string_lossy().into_owned(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        })
+        .to_vec();
+    let scan = scan_shared_directory_roots(roots, SharedFileExclusionPolicy::default())
+        .await
+        .unwrap();
+    assert_eq!(scan.root_files.len(), 1);
+    assert_eq!(scan.root_files[0].1.len(), 1);
+    assert_eq!(scan.inaccessible_roots, vec![offline]);
+    fs::remove_dir_all(available).ok();
+}
+
 #[test]
 fn shared_scan_ignores_mfc_intake_file_names_and_empty_files() {
     let root = scratch_dir("ignored-files");

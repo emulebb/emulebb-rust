@@ -804,17 +804,32 @@ pub(crate) async fn scan_shared_directory_roots(
 ) -> Result<SharedScanResult> {
     tokio::task::spawn_blocking(move || -> Result<SharedScanResult> {
         let mut files = Vec::new();
+        let mut root_files = Vec::new();
+        let mut inaccessible_roots = Vec::new();
         let mut skipped_intake_count = 0;
         for root in roots {
-            skipped_intake_count += collect_shared_directory_files_with_policy(
-                Path::new(&root.path),
-                &mut files,
-                &policy,
-            )
-            .with_context(|| format!("failed to scan shared directory {}", root.path))?;
+            let root_path = PathBuf::from(&root.path);
+            if !std::fs::metadata(long_path(&root_path)).is_ok_and(|metadata| metadata.is_dir()) {
+                inaccessible_roots.push(root_path);
+                continue;
+            }
+            let mut collected = Vec::new();
+            match collect_shared_directory_files_with_policy(&root_path, &mut collected, &policy) {
+                Ok(skipped) => {
+                    skipped_intake_count += skipped;
+                    files.extend(collected.iter().cloned());
+                    root_files.push((root_path, collected));
+                }
+                Err(error) => {
+                    tracing::warn!(root = %root.path, %error, "shared root scan failed");
+                    inaccessible_roots.push(root_path);
+                }
+            }
         }
         Ok(SharedScanResult {
             files,
+            root_files,
+            inaccessible_roots,
             skipped_intake_count,
         })
     })
@@ -823,6 +838,8 @@ pub(crate) async fn scan_shared_directory_roots(
 
 pub(crate) struct SharedScanResult {
     files: Vec<ScannedSharedFile>,
+    root_files: Vec<(PathBuf, Vec<ScannedSharedFile>)>,
+    inaccessible_roots: Vec<PathBuf>,
     skipped_intake_count: usize,
 }
 
@@ -2022,6 +2039,13 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     let scan = scan_shared_files(&core).await?;
     let scanned = scan.files.len();
     let skipped_intake_count = scan.skipped_intake_count;
+    for root in &scan.inaccessible_roots {
+        let metadata = core.metadata_store.clone();
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || metadata.set_shared_root_accessible(&root, false))
+            .await??;
+    }
+    let root_files = scan.root_files;
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "planning".to_string();
         diagnostics.scanned_count = scanned;
@@ -2069,6 +2093,20 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     forget_stale_shares(&core, &plan.pruned_hashes, "").await;
 
     hash_reload_targets(&core, plan.to_hash).await;
+    for (root, files) in root_files {
+        let normalized_root = long_path(&root);
+        let members = files
+            .into_iter()
+            .filter_map(|file| {
+                let fingerprint = file.source_fingerprint?;
+                let relative = file.path.strip_prefix(&normalized_root).ok()?.to_path_buf();
+                Some((file.path, relative, fingerprint))
+            })
+            .collect::<Vec<_>>();
+        let metadata = core.metadata_store.clone();
+        tokio::task::spawn_blocking(move || metadata.replace_root_memberships(&root, &members))
+            .await??;
+    }
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.active.clear();
