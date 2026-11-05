@@ -292,7 +292,9 @@ mod tests {
 
     use super::*;
     use crate::ed2k_transfer::test_support::admit_local_share;
-    use crate::ed2k_transfer::{Ed2kSharedRange, Ed2kTransferState, new_transfer_job};
+    use crate::ed2k_transfer::{
+        ED2K_PART_SIZE, Ed2kSharedRange, Ed2kTransferState, new_transfer_job,
+    };
 
     #[tokio::test]
     async fn classifies_absent_active_and_current_shared_identity() {
@@ -520,6 +522,68 @@ mod tests {
                 .iter()
                 .any(|entry| entry.file_hash == shared.file_hash && entry.verified_complete)
         );
+    }
+
+    #[tokio::test]
+    async fn verified_redownload_piece_keeps_complete_local_catalog_entry() {
+        let root = tempdir().unwrap();
+        let shared_path = root.path().join("complete-local.bin");
+        let payload = vec![0x41; ED2K_PART_SIZE as usize + 32];
+        fs::write(&shared_path, &payload).unwrap();
+        let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let shared = runtime
+            .ingest_local_file(&shared_path, "complete-local.bin")
+            .await
+            .unwrap();
+        admit_local_share(&runtime, root.path(), &shared_path).await;
+        let local = runtime.servable_manifest(&shared.file_hash).await.unwrap();
+        let hashes = local
+            .md4_hashset
+            .iter()
+            .map(|hash| hex::decode(hash).unwrap().try_into().unwrap())
+            .collect();
+
+        runtime
+            .replace_with_download_job(&new_transfer_job(
+                shared.file_hash.parse().unwrap(),
+                "redownload.bin".to_string(),
+                payload.len() as u64,
+            ))
+            .await
+            .unwrap();
+        runtime
+            .store_md4_hashset(&shared.file_hash, hashes)
+            .await
+            .unwrap();
+        runtime
+            .store_piece_data_unfinalized(&shared.file_hash, 0, &payload[..ED2K_PART_SIZE as usize])
+            .await
+            .unwrap();
+
+        let catalog = runtime.shared_catalog();
+        let catalog = catalog.read().await;
+        let entry = catalog
+            .entry_by_hash(&shared.file_hash.parse::<Ed2kHash>().unwrap())
+            .unwrap();
+        assert!(entry.verified_complete);
+        assert_eq!(entry.display_name, "complete-local.bin");
+        assert_eq!(catalog.completed_verified_len(), 1);
+        drop(catalog);
+        assert!(!runtime.manifest(&shared.file_hash).await.unwrap().completed);
+
+        runtime
+            .metadata
+            .withdraw_local_file_path(&crate::long_path::long_path(&shared_path))
+            .unwrap();
+        runtime.refresh_complete_shared_catalog().await.unwrap();
+        let catalog = runtime.shared_catalog();
+        let catalog = catalog.read().await;
+        let entry = catalog
+            .entry_by_hash(&shared.file_hash.parse::<Ed2kHash>().unwrap())
+            .unwrap();
+        assert!(!entry.verified_complete);
+        assert_eq!(entry.display_name, "redownload.bin");
+        assert!(!entry.verified_ranges.is_empty());
     }
 
     #[tokio::test]

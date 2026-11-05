@@ -237,7 +237,9 @@ pub(super) fn completed_catalog_page_from_metadata_store(
     Ok(by_hash.into_values().take(limit).collect())
 }
 
-fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Result<Ed2kSharedEntry> {
+pub(super) fn shared_entry_from_catalog_entry(
+    entry: MetadataTransferCatalogEntry,
+) -> Result<Ed2kSharedEntry> {
     let media = if entry.media.extractor_version == MEDIA_METADATA_EXTRACTOR_VERSION {
         media_from_metadata(entry.media.clone())
     } else {
