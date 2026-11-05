@@ -6,6 +6,7 @@ mod identity_model;
 mod identity_store;
 mod kad_publish_model;
 mod kad_publish_store;
+mod local_file_store;
 mod model;
 mod native_file;
 mod native_path;
@@ -29,6 +30,7 @@ pub use kad_publish_model::{
     MetadataKadOutboundPublishKind, MetadataKadOutboundPublishSchedule, MetadataKadPublishCache,
     MetadataKadSourcePublish,
 };
+pub use local_file_store::MetadataLocalFileInstance;
 pub use model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot};
 pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp};
 pub use native_path::NativePath;
