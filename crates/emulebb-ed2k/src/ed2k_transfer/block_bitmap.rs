@@ -9,9 +9,8 @@
 //!
 //! A part is split into `ceil(part_len / EMBLOCKSIZE)` blocks. The trailing
 //! block may be shorter than `EMBLOCKSIZE`. Presence is a packed little-endian
-//! bit set persisted as a lowercase hex string in the manifest, so an existing
-//! on-disk manifest without the bitmap field still loads: callers derive a
-//! contiguous-prefix bitmap from `bytes_written` in that case.
+//! bit set persisted as a lowercase hex string. A null bitmap is the current
+//! compact representation for a contiguous prefix in `bytes_written`.
 
 use super::ED2K_EMBLOCK_SIZE;
 
@@ -47,9 +46,8 @@ impl PartBlockBitmap {
     }
 
     /// A bitmap with the first `bytes_written` bytes of the part marked present
-    /// as a contiguous prefix of whole blocks. The legacy contiguous fast path
-    /// and resume-manifest backward compatibility both rely on this so an
-    /// existing on-disk manifest without a stored bitmap still loads.
+    /// as a contiguous prefix of whole blocks. This is the compact current
+    /// representation when no non-contiguous blocks need tracking.
     pub(super) fn contiguous_prefix(part_len: u64, bytes_written: u64) -> Self {
         let mut map = Self::empty(part_len);
         let present = bytes_written.min(part_len);
@@ -160,16 +158,18 @@ impl PartBlockBitmap {
         hex::encode(&self.bits)
     }
 
-    /// Decode a persisted hex bitmap for a part of `part_len` bytes. An empty
-    /// string yields an empty bitmap. A wrong-length payload is rejected so the
-    /// caller can fall back to the contiguous-prefix derivation.
+    /// Decode a persisted hex bitmap for a part of `part_len` bytes. Reject
+    /// malformed and noncanonical payloads; empty is valid only for no blocks.
     pub(super) fn from_hex(part_len: u64, hex_str: &str) -> Option<Self> {
-        if hex_str.is_empty() {
-            return Some(Self::empty(part_len));
-        }
         let bits = hex::decode(hex_str).ok()?;
         let block_count = Self::block_count_for(part_len);
-        if bits.len() != block_count.div_ceil(8) {
+        if bits.len() != block_count.div_ceil(8) || hex::encode(&bits) != hex_str {
+            return None;
+        }
+        if let Some(last) = bits.last()
+            && !block_count.is_multiple_of(8)
+            && last >> (block_count % 8) != 0
+        {
             return None;
         }
         Some(PartBlockBitmap {
