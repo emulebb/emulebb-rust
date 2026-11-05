@@ -507,18 +507,6 @@ fn transfer_manifest_roundtrips_sql_tables() {
             .unwrap(),
         "the old source row must be gone after relocation",
     );
-    store
-        .mark_unshared_file(&manifest.file_hash, "manual")
-        .unwrap();
-    assert_eq!(store.completed_transfer_publish_entries().unwrap(), vec![]);
-    assert_eq!(store.completed_transfer_share_entries().unwrap(), vec![]);
-    assert_eq!(
-        store
-            .completed_transfer_share_entry(&manifest.file_hash)
-            .unwrap(),
-        None
-    );
-    store.unmark_unshared_file(&manifest.file_hash).unwrap();
     assert_eq!(store.transfer_manifests().unwrap(), vec![manifest.clone()]);
     assert!(
         store

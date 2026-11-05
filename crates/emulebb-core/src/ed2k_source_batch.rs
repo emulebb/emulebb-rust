@@ -392,7 +392,6 @@ mod tests {
             ed2k_server_callback_last_sent: HashMap::new(),
             ed2k_direct_callback_last_sent: HashMap::new(),
             shared_directories: Vec::new(),
-            unshared_hashes: HashSet::new(),
             monitor_shared_hashes: HashMap::new(),
             kad_running: false,
             last_source_count_emit_at: None,

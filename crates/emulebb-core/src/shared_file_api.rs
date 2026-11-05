@@ -430,32 +430,6 @@ impl EmulebbCore {
         Ok(self.share(hash).await)
     }
 
-    pub async fn unshare_file(&self, hash: &str) -> Result<Option<LocalShare>> {
-        let Some(share) = self.share(hash).await else {
-            return Ok(None);
-        };
-        self.ed2k_transfers
-            .remove_completed_transfer_row(&share.hash)
-            .await?;
-        self.ed2k_transfers
-            .remove_verified_catalog_entry(&share.hash)
-            .await;
-        ensure!(
-            self.metadata_store
-                .mark_unshared_file(&share.hash, "manual")?,
-            "shared file metadata row is missing"
-        );
-        let mut state = self.state.lock().await;
-        let removed = state.transfers.remove(&share.hash).is_some();
-        state.unshared_hashes.insert(share.hash.clone());
-        drop(state);
-        if removed {
-            self.publish_transfer_removed(share.hash.clone());
-        }
-        self.queue_ed2k_shared_catalog_publish();
-        Ok(Some(share))
-    }
-
     pub async fn shared_directories(&self) -> SharedDirectories {
         let roots = self
             .state

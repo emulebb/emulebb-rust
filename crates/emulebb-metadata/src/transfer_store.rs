@@ -667,10 +667,6 @@ impl super::MetadataStore {
                   )
               AND transfers.delete_requested_at_ms IS NULL
               AND transfers.source_path_id IS NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
               AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
             ORDER BY known_files.ed2k_hash
             LIMIT ?2
@@ -1225,10 +1221,6 @@ impl super::MetadataStore {
                     )
                   )
               AND transfers.delete_requested_at_ms IS NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
             ORDER BY known_files.ed2k_hash
             "#,
         )?;
@@ -1285,10 +1277,6 @@ impl super::MetadataStore {
                     )
                   )
               AND transfers.delete_requested_at_ms IS NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
             ORDER BY known_files.ed2k_hash
             "#,
         )?;
@@ -1353,10 +1341,6 @@ impl super::MetadataStore {
                     )
                   )
               AND transfers.delete_requested_at_ms IS NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
             ORDER BY known_files.ed2k_hash
             "#,
         )?;
@@ -1422,10 +1406,6 @@ impl super::MetadataStore {
                         WHERE shared_file_sources.known_file_id = known_files.id
                     )
                   )
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
             LIMIT 1
             "#,
             params![hash],
@@ -1505,10 +1485,6 @@ impl super::MetadataStore {
                     )
                   )
               AND transfers.delete_requested_at_ms IS NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
             ORDER BY known_files.ed2k_hash
             LIMIT ?1 OFFSET ?2
             "#,
@@ -1590,10 +1566,6 @@ impl super::MetadataStore {
                   )
               AND transfers.delete_requested_at_ms IS NULL
               AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
-              AND NOT EXISTS (
-                  SELECT 1 FROM unshared_files
-                  WHERE unshared_files.known_file_id = known_files.id
-              )
             ORDER BY known_files.ed2k_hash
             LIMIT ?2
             "#,
@@ -1692,10 +1664,6 @@ impl super::MetadataStore {
                         )
                       )
                   AND transfers.delete_requested_at_ms IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM unshared_files
-                      WHERE unshared_files.known_file_id = known_files.id
-                  )
             )
         "#;
         let filtered_where = r#"
@@ -1792,10 +1760,6 @@ impl super::MetadataStore {
                         )
                       )
                   AND transfers.delete_requested_at_ms IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM unshared_files
-                      WHERE unshared_files.known_file_id = known_files.id
-                  )
                 "#,
                 [],
                 |row| row.get::<_, i64>(0),

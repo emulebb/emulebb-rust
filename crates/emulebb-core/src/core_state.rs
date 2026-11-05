@@ -107,7 +107,6 @@ pub(crate) struct CoreState {
     pub(crate) ed2k_direct_callback_last_sent:
         HashMap<crate::ed2k_sources::Ed2kDirectCallbackKey, Instant>,
     pub(crate) shared_directories: Vec<SharedDirectoryRoot>,
-    pub(crate) unshared_hashes: HashSet<String>,
     pub(crate) monitor_shared_hashes: HashMap<PathBuf, MonitoredSharedFile>,
     pub(crate) kad_running: bool,
     /// Last time the periodic `sched:source_count` snapshot was emitted, so the

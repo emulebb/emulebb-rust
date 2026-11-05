@@ -445,58 +445,6 @@ impl super::MetadataStore {
         )?;
         Ok(())
     }
-
-    pub fn load_unshared_file_hashes(&self) -> Result<Vec<String>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT lower(hex(known_files.ed2k_hash))
-            FROM unshared_files
-            JOIN known_files ON known_files.id = unshared_files.known_file_id
-            ORDER BY unshared_files.id
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
-
-    pub fn mark_unshared_file(&self, ed2k_hash: &str, reason: &str) -> Result<bool> {
-        let hash = decode_fixed_hex(ed2k_hash, 16, "ED2K hash")?;
-        let known_file_id = self
-            .connection()?
-            .query_row(
-                "SELECT id FROM known_files WHERE ed2k_hash = ?1",
-                params![hash],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        let Some(known_file_id) = known_file_id else {
-            return Ok(false);
-        };
-        self.connection()?.execute(
-            r#"
-            INSERT INTO unshared_files(known_file_id, reason, created_at_ms)
-            VALUES (?1, ?2, ?3)
-            ON CONFLICT(known_file_id) DO UPDATE SET
-                reason = excluded.reason
-            "#,
-            params![known_file_id, reason, unix_ms()],
-        )?;
-        Ok(true)
-    }
-
-    pub fn unmark_unshared_file(&self, ed2k_hash: &str) -> Result<()> {
-        let hash = decode_fixed_hex(ed2k_hash, 16, "ED2K hash")?;
-        self.connection()?.execute(
-            r#"
-            DELETE FROM unshared_files
-            WHERE known_file_id IN (SELECT id FROM known_files WHERE ed2k_hash = ?1)
-            "#,
-            params![hash],
-        )?;
-        Ok(())
-    }
 }
 
 fn upsert_category_in_transaction(
@@ -638,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn server_and_unshared_state_roundtrip() {
+    fn server_state_roundtrip() {
         let store = super::super::MetadataStore::in_memory().unwrap();
         store
             .upsert_server(&MetadataServer {
@@ -711,54 +659,6 @@ mod tests {
             servers[0].udp_key_ip,
             Some(u32::from_le_bytes([198, 51, 100, 9]))
         );
-
-        store
-            .upsert_transfer_manifest(&crate::MetadataTransferManifest {
-                file_hash: "00112233445566778899aabbccddeeff".to_string(),
-                display_name: "Sample.bin".to_string(),
-                display_name_pinned: false,
-                follow_majority_filename: false,
-                file_name_observations: Vec::new(),
-                file_size: 10,
-                piece_size: 10,
-                completed: true,
-                final_rehash_pending: false,
-                md4_hashset_acquired: false,
-                md4_hashset: Vec::new(),
-                aich_hashset_acquired: false,
-                aich_root: None,
-                aich_hashset: Vec::new(),
-                verified_ranges: Vec::new(),
-                upload_priority: "normal".to_string(),
-                auto_upload_priority: false,
-                comment: String::new(),
-                rating: 0,
-                category_id: 0,
-                control_state: None,
-                transfer_row_removed: false,
-                delivery_state: crate::MetadataTransferDeliveryState::Pending,
-                delivery_ownership: crate::MetadataTransferDeliveryOwnership::None,
-                delivered_path: None,
-                source_path: None,
-                source_fingerprint: None,
-                payload_fingerprint: None,
-                pieces: Vec::new(),
-                sources: Vec::new(),
-            })
-            .unwrap();
-        assert!(
-            store
-                .mark_unshared_file("00112233445566778899aabbccddeeff", "manual")
-                .unwrap()
-        );
-        assert_eq!(
-            store.load_unshared_file_hashes().unwrap(),
-            vec!["00112233445566778899aabbccddeeff".to_string()]
-        );
-        store
-            .unmark_unshared_file("00112233445566778899aabbccddeeff")
-            .unwrap();
-        assert!(store.load_unshared_file_hashes().unwrap().is_empty());
     }
 
     #[test]

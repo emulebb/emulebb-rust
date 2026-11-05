@@ -95,7 +95,6 @@ pub(crate) fn load_core_state(
         ed2k_server_callback_last_sent: HashMap::new(),
         ed2k_direct_callback_last_sent: HashMap::new(),
         shared_directories,
-        unshared_hashes: metadata.load_unshared_file_hashes()?.into_iter().collect(),
         monitor_shared_hashes: HashMap::new(),
         kad_running: false,
         last_source_count_emit_at: None,

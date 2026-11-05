@@ -357,7 +357,6 @@ impl EmulebbCore {
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
             return Ok(None);
         }
-        self.metadata_store.unmark_unshared_file(hash)?;
         // Cancel any in-flight attempt and free everything it holds for this hash
         // (candidates, leases, active endpoints, the dedup + cancel slots) so the
         // orphan attempt stops churning peers and the hash can be re-created and
@@ -365,7 +364,6 @@ impl EmulebbCore {
         self.teardown_download_for_delete(hash).await;
         let mut state = self.state.lock().await;
         state.transfers.remove(hash);
-        state.unshared_hashes.remove(hash);
         drop(state);
         self.publish_transfer_removed(hash);
         Ok(Some(transfer))
