@@ -8,6 +8,34 @@ use rusqlite::params;
 use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
 impl MetadataStore {
+    /// Whether a verified path has ever been governed by a shared root.
+    pub fn local_file_has_root_membership(&self, path: &Path) -> Result<bool> {
+        let native = NativePath::from(path);
+        let exists: i64 = self.connection()?.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM shared_file_memberships
+                JOIN local_paths ON local_paths.id = shared_file_memberships.path_id
+                WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
+             )",
+            params![NativePath::platform(), native.storage_bytes()],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    /// Withdraw a changed local path from every root while retaining its
+    /// path-to-hash cache for later reconciliation.
+    pub fn withdraw_local_file_path(&self, path: &Path) -> Result<usize> {
+        let native = NativePath::from(path);
+        let changed = self.connection()?.execute(
+            "UPDATE shared_file_memberships SET removed_at_ms = ?3
+             WHERE path_id = (SELECT id FROM local_paths WHERE platform = ?1 AND native_path = ?2)
+               AND removed_at_ms IS NULL",
+            params![NativePath::platform(), native.storage_bytes(), unix_ms()],
+        )?;
+        Ok(changed)
+    }
+
     /// Commit one successful full scan of a root. The caller supplies only
     /// scanned local paths with their live fingerprints; a failed or incomplete
     /// scan must never call this. Only safely matched cache entries are admitted.
@@ -185,6 +213,15 @@ mod tests {
             .replace_root_memberships(&nested, std::slice::from_ref(&nested_file))
             .unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 1);
+        assert_eq!(store.withdraw_local_file_path(&file).unwrap(), 2);
+        assert_eq!(store.active_shared_content_count().unwrap(), 0);
+        assert!(store.local_file_instance(&file).unwrap().is_some());
+        store
+            .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
+            .unwrap();
+        store
+            .replace_root_memberships(&nested, std::slice::from_ref(&nested_file))
+            .unwrap();
         let page = store.active_local_share_page(None, 10).unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].file_hash, hash);

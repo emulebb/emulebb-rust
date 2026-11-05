@@ -98,6 +98,10 @@ enum VerifiedPayloadAuthority {
         path: PathBuf,
         expected: NativeFileFingerprint,
     },
+    LocalInstance {
+        path: PathBuf,
+        expected: NativeFileFingerprint,
+    },
 }
 
 impl VerifiedPayloadAuthority {
@@ -107,7 +111,9 @@ impl VerifiedPayloadAuthority {
             Self::ManagedCompleted { expected } | Self::ManifestSource { expected, .. } => {
                 expected.as_ref()
             }
-            Self::SharedFallback { expected, .. } => Some(expected),
+            Self::SharedFallback { expected, .. } | Self::LocalInstance { expected, .. } => {
+                Some(expected)
+            }
         }
     }
 
@@ -121,6 +127,7 @@ impl VerifiedPayloadAuthority {
             Self::ManagedCompleted { .. } => "managed_completed",
             Self::ManifestSource { .. } => "manifest_source",
             Self::SharedFallback { .. } => "shared_fallback",
+            Self::LocalInstance { .. } => "local_instance",
         }
     }
 }
@@ -822,71 +829,100 @@ impl Ed2kTransferRuntime {
         file_hash: &Ed2kHash,
     ) -> Result<Option<Ed2kVerifiedRangeReader>> {
         let hash_hex = file_hash.to_string();
+        let metadata = self.metadata.clone();
+        let lookup_hash = hash_hex.clone();
+        let local =
+            tokio::task::spawn_blocking(move || metadata.active_local_file_by_hash(&lookup_hash))
+                .await??;
         // Read the manifest geometry (verified-range check + payload path) under
         // the per-file manifest lock, then drop it before touching the payload, so
         // the file open/seek/read does not hold the lock and serialize concurrent
         // uploads/downloads against each other (FIX B4b).
-        let (payload_path, verified_ranges, authority, incomplete_authority) = {
-            let _guard = self.lock_manifest(&hash_hex).await;
-            let manifest = self.load_manifest_unlocked(&hash_hex).await?;
-            // Share-in-place: serve upload bytes straight from the original
-            // on-disk file (never copied into the piece store). A real download
-            // reads from the internal piece store.
-            match manifest.source_path.as_deref() {
-                Some(source_path) => {
-                    let payload_path = long_path(source_path);
-                    let authority = VerifiedPayloadAuthority::ManifestSource {
-                        path: payload_path.clone(),
-                        expected: manifest.source_fingerprint.clone(),
-                    };
-                    (
-                        payload_path,
-                        manifest.verified_ranges.clone(),
-                        authority,
-                        None,
-                    )
-                }
-                None if !manifest.verified_ranges.is_empty() => {
-                    let (authority, incomplete_authority) = if manifest.completed {
+        let (payload_path, verified_ranges, authority, incomplete_authority) =
+            if let Some(local) = local {
+                let path = long_path(&local.path);
+                (
+                    path.clone(),
+                    vec![Ed2kSharedRange {
+                        start: 0,
+                        end: local.file_size,
+                    }],
+                    VerifiedPayloadAuthority::LocalInstance {
+                        path,
+                        expected: local.verified_fingerprint,
+                    },
+                    None,
+                )
+            } else {
+                let _guard = self.lock_manifest(&hash_hex).await;
+                let manifest = self.load_manifest_unlocked(&hash_hex).await?;
+                // Share-in-place: serve upload bytes straight from the original
+                // on-disk file (never copied into the piece store). A real download
+                // reads from the internal piece store.
+                match manifest.source_path.as_deref() {
+                    Some(source_path) => {
+                        let metadata = self.metadata.clone();
+                        let path = source_path.to_path_buf();
+                        let governed = tokio::task::spawn_blocking(move || {
+                            metadata.local_file_has_root_membership(&path)
+                        })
+                        .await??;
+                        if governed {
+                            return Ok(None);
+                        }
+                        let payload_path = long_path(source_path);
+                        let authority = VerifiedPayloadAuthority::ManifestSource {
+                            path: payload_path.clone(),
+                            expected: manifest.source_fingerprint.clone(),
+                        };
                         (
-                            VerifiedPayloadAuthority::ManagedCompleted {
-                                expected: manifest.payload_fingerprint.clone(),
-                            },
-                            None,
-                        )
-                    } else {
-                        (
-                            VerifiedPayloadAuthority::ManagedIncomplete,
-                            Some(IncompletePayloadAuthority::from_manifest(&manifest)?),
-                        )
-                    };
-                    (
-                        self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
-                        manifest.verified_ranges.clone(),
-                        authority,
-                        incomplete_authority,
-                    )
-                }
-                None => match self.first_present_shared_source(&hash_hex).await? {
-                    Some(source) => {
-                        let path = source.path;
-                        (
-                            path.clone(),
-                            vec![Ed2kSharedRange {
-                                start: 0,
-                                end: manifest.file_size,
-                            }],
-                            VerifiedPayloadAuthority::SharedFallback {
-                                path,
-                                expected: source.fingerprint,
-                            },
+                            payload_path,
+                            manifest.verified_ranges.clone(),
+                            authority,
                             None,
                         )
                     }
-                    None => return Ok(None),
-                },
-            }
-        };
+                    None if !manifest.verified_ranges.is_empty() => {
+                        let (authority, incomplete_authority) = if manifest.completed {
+                            (
+                                VerifiedPayloadAuthority::ManagedCompleted {
+                                    expected: manifest.payload_fingerprint.clone(),
+                                },
+                                None,
+                            )
+                        } else {
+                            (
+                                VerifiedPayloadAuthority::ManagedIncomplete,
+                                Some(IncompletePayloadAuthority::from_manifest(&manifest)?),
+                            )
+                        };
+                        (
+                            self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
+                            manifest.verified_ranges.clone(),
+                            authority,
+                            incomplete_authority,
+                        )
+                    }
+                    None => match self.first_present_shared_source(&hash_hex).await? {
+                        Some(source) => {
+                            let path = source.path;
+                            (
+                                path.clone(),
+                                vec![Ed2kSharedRange {
+                                    start: 0,
+                                    end: manifest.file_size,
+                                }],
+                                VerifiedPayloadAuthority::SharedFallback {
+                                    path,
+                                    expected: source.fingerprint,
+                                },
+                                None,
+                            )
+                        }
+                        None => return Ok(None),
+                    },
+                }
+            };
 
         if authority.requires_fingerprint() && authority.expected_fingerprint().is_none() {
             warn!(
@@ -1035,6 +1071,27 @@ impl Ed2kTransferRuntime {
                 }
                 if invalidated {
                     self.queue_shared_source_invalidation(file_hash, path);
+                }
+                Ok(())
+            }
+            VerifiedPayloadAuthority::LocalInstance { path, .. } => {
+                let metadata = self.metadata.clone();
+                let path_for_db = path.clone();
+                let remaining = tokio::task::spawn_blocking(move || {
+                    metadata.withdraw_local_file_path(&path_for_db)
+                })
+                .await??;
+                if remaining > 0 {
+                    let metadata = self.metadata.clone();
+                    let hash = file_hash.to_string();
+                    let another = tokio::task::spawn_blocking(move || {
+                        metadata.active_local_file_by_hash(&hash)
+                    })
+                    .await??;
+                    if another.is_none() {
+                        self.remove_verified_catalog_entry(file_hash).await;
+                    }
+                    self.queue_shared_source_invalidation(file_hash, &path);
                 }
                 Ok(())
             }
