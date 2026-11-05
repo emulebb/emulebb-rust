@@ -91,9 +91,9 @@ use emulebb_kad_proto::{
     SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq,
 };
 use emulebb_metadata::{
-    MetadataKadOutboundPublish, MetadataKadOutboundPublishKind, MetadataSharedFileCursor,
-    MetadataSharedFileQuery, MetadataStore, MetadataTransferCounts, MetadataTransferPublishEntry,
-    MetadataTransferShareEntry,
+    MetadataKadOutboundPublish, MetadataKadOutboundPublishKind, MetadataLocalShareEntry,
+    MetadataSharedFileCursor, MetadataSharedFileQuery, MetadataStore, MetadataTransferCounts,
+    MetadataTransferPublishEntry,
 };
 use tokio::{
     net::TcpListener,

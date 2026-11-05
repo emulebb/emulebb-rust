@@ -284,7 +284,7 @@ impl EmulebbCore {
         }
     }
 
-    fn local_share_from_entry(&self, entry: MetadataTransferShareEntry) -> LocalShare {
+    fn local_share_from_entry(&self, entry: MetadataLocalShareEntry) -> LocalShare {
         LocalShare {
             hash: entry.file_hash.clone(),
             name: entry.display_name.clone(),
@@ -297,12 +297,7 @@ impl EmulebbCore {
                 entry.aich_root.as_deref(),
             ),
             aich_root: entry.aich_root.clone().unwrap_or_default(),
-            path: normal_path_display(
-                entry
-                    .source_path
-                    .as_deref()
-                    .expect("active local share entry must have a path"),
-            ),
+            path: normal_path_display(&entry.path),
             priority: entry.upload_priority.clone(),
             auto_upload_priority: entry.auto_upload_priority,
             all_time_uploaded_bytes: entry.all_time_uploaded_bytes,

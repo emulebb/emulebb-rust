@@ -6,12 +6,50 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    MetadataSharedFileCursor, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
-    MetadataTransferCatalogEntry, MetadataTransferMediaMetadata, MetadataTransferShareEntry,
+    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferMediaMetadata,
     NativeFileFingerprint, NativePath,
     native_path::path_from_row,
     store::{decode_fixed_hex, unix_ms, upsert_local_path},
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataLocalShareEntry {
+    pub file_hash: String,
+    pub display_name: String,
+    pub file_size: u64,
+    pub part_count: u32,
+    pub path: PathBuf,
+    pub aich_root: Option<String>,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub all_time_uploaded_bytes: u64,
+    pub all_time_upload_requests: u64,
+    pub all_time_upload_accepts: u64,
+    pub comment: String,
+    pub rating: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSharedFileCursor {
+    pub sort_path: String,
+    pub file_hash: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetadataSharedFileQuery {
+    pub search: Option<String>,
+    pub priority: Option<String>,
+    pub after: Option<MetadataSharedFileCursor>,
+    pub limit: usize,
+    pub count_total: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSharedFilePage {
+    pub entries: Vec<MetadataLocalShareEntry>,
+    pub total: usize,
+    pub next_cursor: Option<MetadataSharedFileCursor>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataLocalFileInstance {
@@ -191,7 +229,7 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
-    pub fn active_local_share_entries(&self) -> Result<Vec<MetadataTransferShareEntry>> {
+    pub fn active_local_share_entries(&self) -> Result<Vec<MetadataLocalShareEntry>> {
         self.active_local_catalog_page(None, usize::MAX)?
             .into_iter()
             .map(local_share_from_catalog)
@@ -212,7 +250,7 @@ impl MetadataStore {
     pub fn active_local_share_entry(
         &self,
         file_hash: &str,
-    ) -> Result<Option<MetadataTransferShareEntry>> {
+    ) -> Result<Option<MetadataLocalShareEntry>> {
         self.active_local_catalog_entry(file_hash)?
             .map(local_share_from_catalog)
             .transpose()
@@ -241,12 +279,9 @@ impl MetadataStore {
             .active_local_share_entries()?
             .into_iter()
             .map(|entry| {
-                let sort_path = entry
-                    .source_path
-                    .as_deref()
-                    .map(NativePath::from)
-                    .map(|path| path.display_path().to_lowercase())
-                    .unwrap_or_else(|| entry.display_name.to_lowercase());
+                let sort_path = NativePath::from(entry.path.as_path())
+                    .display_path()
+                    .to_lowercase();
                 (entry, sort_path)
             })
             .filter(|(entry, sort_path)| {
@@ -756,16 +791,16 @@ impl MetadataStore {
 
 fn local_share_from_catalog(
     entry: MetadataTransferCatalogEntry,
-) -> Result<MetadataTransferShareEntry> {
+) -> Result<MetadataLocalShareEntry> {
     let path = entry
         .media_path
         .context("active local catalog entry has no path")?;
-    Ok(MetadataTransferShareEntry {
+    Ok(MetadataLocalShareEntry {
         file_hash: entry.file_hash,
         display_name: entry.display_name,
         file_size: entry.file_size,
         part_count: entry.part_count,
-        source_path: Some(path),
+        path,
         aich_root: entry.aich_root,
         upload_priority: entry.upload_priority,
         auto_upload_priority: entry.auto_upload_priority,

@@ -10,11 +10,10 @@ use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    MetadataCategory, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
-    MetadataTransferCatalogEntry, MetadataTransferCounts,
+    MetadataCategory, MetadataLocalShareEntry, MetadataSharedFilePage, MetadataSharedFileQuery,
+    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferCounts,
     MetadataTransferDirectoryDeletionAuthority, MetadataTransferPublishEntry,
-    MetadataTransferShareEntry, MetadataVerifiedLocalContent, NativeFileFingerprint,
-    NativeFileIdentity,
+    MetadataVerifiedLocalContent, NativeFileFingerprint, NativeFileIdentity,
 };
 use uuid::Uuid;
 
@@ -114,7 +113,7 @@ impl Ed2kTransferRuntime {
     }
 
     /// Return REST shared-file summaries without hydrating every manifest.
-    pub async fn share_entries(&self) -> Result<Vec<MetadataTransferShareEntry>> {
+    pub async fn share_entries(&self) -> Result<Vec<MetadataLocalShareEntry>> {
         let metadata = self.metadata.clone();
         tokio::task::spawn_blocking(move || metadata.active_local_share_entries())
             .await
@@ -122,7 +121,7 @@ impl Ed2kTransferRuntime {
     }
 
     /// Return one REST shared-file summary by ED2K hash without scanning the catalog.
-    pub async fn share_entry(&self, file_hash: &str) -> Result<Option<MetadataTransferShareEntry>> {
+    pub async fn share_entry(&self, file_hash: &str) -> Result<Option<MetadataLocalShareEntry>> {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_owned();
         tokio::task::spawn_blocking(move || metadata.active_local_share_entry(&file_hash))
@@ -135,7 +134,7 @@ impl Ed2kTransferRuntime {
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<(Vec<MetadataTransferShareEntry>, usize)> {
+    ) -> Result<(Vec<MetadataLocalShareEntry>, usize)> {
         let metadata = self.metadata.clone();
         let entries = tokio::task::spawn_blocking(move || {
             let entries = metadata.active_local_share_entries()?;
@@ -237,7 +236,7 @@ impl Ed2kTransferRuntime {
         &self,
         after_hash: Option<&str>,
         limit: usize,
-    ) -> Result<(Vec<MetadataTransferShareEntry>, usize, bool)> {
+    ) -> Result<(Vec<MetadataLocalShareEntry>, usize, bool)> {
         let metadata = self.metadata.clone();
         let after_hash = after_hash.map(str::to_owned);
         let (entries, has_more) = tokio::task::spawn_blocking(move || {
