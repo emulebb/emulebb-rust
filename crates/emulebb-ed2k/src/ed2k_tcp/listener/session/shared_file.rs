@@ -365,7 +365,9 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     // the oracle (ListenSocket.cpp OP_REQUESTFILENAME -> SendCommentInfo). Only
     // for a file we actually serve, when the peer accepts comments and we have a
     // non-empty rating/comment to send.
-    if let Ok(manifest) = transfer_runtime.manifest(&requested.to_string()).await
+    if let Ok(manifest) = transfer_runtime
+        .servable_manifest(&requested.to_string())
+        .await
         && should_send_file_desc(
             peer_accept_comment_version,
             manifest.rating,

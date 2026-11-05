@@ -37,8 +37,9 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         .unwrap();
     admit_local_share(&runtime, &source_dir, &source_path).await;
     let file_hash = summary.file_hash.clone();
-    // (1) The manifest is a completed share that records the ORIGINAL path.
-    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    assert!(runtime.manifest(&file_hash).await.is_err());
+    // (1) The read-only protocol view resolves the original verified path.
+    let manifest = runtime.servable_manifest(&file_hash).await.unwrap();
     let cached = runtime
         .metadata
         .local_file_instance(manifest.source_path.as_deref().unwrap())
@@ -178,7 +179,7 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
         .await
         .unwrap();
     admit_local_share(&runtime, &shared_root, &path).await;
-    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
+    let manifest = runtime.servable_manifest(&summary.file_hash).await.unwrap();
     let native_path = manifest.source_path.unwrap();
     let fingerprint = manifest.source_fingerprint.unwrap();
     let mut metadata = runtime.metadata.clone();
@@ -287,7 +288,10 @@ async fn complete_local_file_never_creates_a_transfer() {
         "Sample.bin"
     );
     drop(catalog);
-    let virtual_manifest = restarted.manifest(&summary.file_hash).await.unwrap();
+    let virtual_manifest = restarted
+        .servable_manifest(&summary.file_hash)
+        .await
+        .unwrap();
     assert!(virtual_manifest.completed);
     assert_eq!(virtual_manifest.source_path, Some(native_path));
     let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
@@ -579,7 +583,7 @@ async fn non_utf8_share_reopens_relocates_and_serves_exact_bytes() {
     drop(runtime);
 
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
+    let manifest = runtime.servable_manifest(&summary.file_hash).await.unwrap();
     assert_eq!(
         manifest.source_path.as_deref(),
         Some(renamed_path.as_path())

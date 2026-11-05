@@ -719,7 +719,11 @@ impl EmulebbCore {
             .collect::<Vec<_>>();
         let mut uploads = Vec::with_capacity(snapshots.len());
         for entry in snapshots {
-            let manifest = match self.ed2k_transfers.manifest(&entry.file_hash).await {
+            let manifest = match self
+                .ed2k_transfers
+                .servable_manifest(&entry.file_hash)
+                .await
+            {
                 Ok(manifest) => Some(manifest),
                 Err(error) => {
                     tracing::warn!(
