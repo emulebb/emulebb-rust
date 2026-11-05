@@ -34,6 +34,33 @@ pub struct MetadataVerifiedLocalContent {
 }
 
 impl MetadataStore {
+    /// Retire a legacy share-in-place transfer only after a verified local
+    /// instance and active root membership independently authorize the file.
+    pub fn retire_synthetic_local_transfer(&self, file_hash: &str) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let changed = self.connection()?.execute(
+            "DELETE FROM transfers WHERE id IN (
+                SELECT transfers.id FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                  AND transfers.source_path_id IS NOT NULL
+                  AND transfers.delete_requested_at_ms IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM local_file_instances
+                    JOIN shared_file_memberships ON shared_file_memberships.path_id = local_file_instances.path_id
+                    JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
+                    WHERE local_file_instances.known_file_id = known_files.id
+                      AND shared_file_memberships.removed_at_ms IS NULL
+                      AND shared_directory_roots.enabled = 1
+                      AND shared_directory_roots.deleted_at_ms IS NULL
+                      AND shared_directory_roots.accessible = 1
+                  )
+             )",
+            params![hash],
+        )?;
+        Ok(changed != 0)
+    }
+
     /// Store verified local content and its path atomically, without a download
     /// transfer. Existing content-level display metadata remains stable when a
     /// second path to the same hash is discovered.

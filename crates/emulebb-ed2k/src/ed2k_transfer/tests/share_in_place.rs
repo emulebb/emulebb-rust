@@ -238,6 +238,62 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
 }
 
 #[tokio::test]
+async fn complete_local_file_survives_retiring_its_synthetic_transfer() {
+    let root = unique_test_dir("ed2k-local-no-transfer");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let shared_root = root.join("library");
+    fs::create_dir_all(&shared_root).unwrap();
+    let path = shared_root.join("Sample.bin");
+    fs::write(&path, b"verified local content").unwrap();
+    let summary = runtime
+        .ingest_local_file(&path, "Sample.bin")
+        .await
+        .unwrap();
+    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
+    let native_path = manifest.source_path.unwrap();
+    let fingerprint = manifest.source_fingerprint.unwrap();
+    let mut metadata = runtime.metadata.clone();
+    metadata
+        .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
+            path: shared_root.to_string_lossy().into_owned(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
+    metadata
+        .replace_root_memberships(
+            &shared_root,
+            &[(native_path.clone(), "Sample.bin".into(), fingerprint)],
+        )
+        .unwrap();
+    assert!(
+        metadata
+            .retire_synthetic_local_transfer(&summary.file_hash)
+            .unwrap()
+    );
+    assert!(
+        metadata
+            .transfer_manifest_by_hash(&summary.file_hash)
+            .unwrap()
+            .is_none()
+    );
+    let restarted = Ed2kTransferRuntime::load_or_create_with_metadata(&root, metadata).unwrap();
+    let virtual_manifest = restarted.manifest(&summary.file_hash).await.unwrap();
+    assert!(virtual_manifest.completed);
+    assert_eq!(virtual_manifest.source_path, Some(native_path));
+    let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
+    assert_eq!(
+        restarted
+            .read_verified_range(&hash, 0, summary.file_size)
+            .await
+            .unwrap()
+            .unwrap(),
+        fs::read(&path).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn relocated_share_uses_new_source_without_runtime_restart() {
     let root = unique_test_dir("ed2k-share-relocate-live-cache");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

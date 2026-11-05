@@ -1068,7 +1068,7 @@ impl Ed2kTransferRuntime {
         let hash_hex = file_hash.to_string();
         let _guard = self.lock_manifest(&hash_hex).await;
         Ok(self
-            .load_manifest_optional_unlocked(&hash_hex)
+            .load_servable_manifest_optional_unlocked(&hash_hex)
             .await?
             .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest)))
     }
@@ -1105,7 +1105,10 @@ impl Ed2kTransferRuntime {
     pub async fn md4_hashset(&self, file_hash: &Ed2kHash) -> Result<Option<Vec<[u8; 16]>>> {
         let hash_hex = file_hash.to_string();
         let _guard = self.lock_manifest(&hash_hex).await;
-        let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
+        let Some(manifest) = self
+            .load_servable_manifest_optional_unlocked(&hash_hex)
+            .await?
+        else {
             return Ok(None);
         };
         if !manifest.md4_hashset_acquired {
@@ -1134,7 +1137,10 @@ impl Ed2kTransferRuntime {
     ) -> Result<Option<Ed2kAichHashset>> {
         let hash_hex = file_hash.to_string();
         let _guard = self.lock_manifest(&hash_hex).await;
-        let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
+        let Some(manifest) = self
+            .load_servable_manifest_optional_unlocked(&hash_hex)
+            .await?
+        else {
             return Ok(None);
         };
         if !manifest.aich_hashset_acquired || manifest.aich_root.is_none() {
@@ -1163,7 +1169,10 @@ impl Ed2kTransferRuntime {
         let hash_hex = file_hash.to_string();
         let (file_size, aich_root) = {
             let _guard = self.lock_manifest(&hash_hex).await;
-            let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
+            let Some(manifest) = self
+                .load_servable_manifest_optional_unlocked(&hash_hex)
+                .await?
+            else {
                 return Ok(None);
             };
             // Only serve from a fully verified (shared) file.
@@ -1202,7 +1211,9 @@ impl Ed2kTransferRuntime {
     /// the current verification or hashset state.
     pub async fn manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
-        self.load_manifest_unlocked(file_hash).await
+        self.load_servable_manifest_optional_unlocked(file_hash)
+            .await?
+            .with_context(|| format!("missing ED2K transfer or shared file {file_hash}"))
     }
 
     /// Returns all readable persisted manifests under the transfer root.

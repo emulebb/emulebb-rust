@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     path::PathBuf,
+    str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,10 +13,12 @@ use emulebb_kad_proto::Ed2kHash;
 use tokio::io::AsyncWriteExt;
 
 use super::manifest::manifest_progress_bytes;
+use super::manifest::{piece_count, rebuild_verified_ranges};
 use super::transfer_sql::{manifest_from_metadata, manifest_to_metadata, piece_to_metadata};
 use super::{
-    ED2K_EMBLOCK_SIZE, Ed2kManifestCheckpointState, Ed2kResumeManifest, Ed2kTransferJob,
-    Ed2kTransferRootReconciliation, Ed2kTransferRuntime, PAYLOAD_FILE_NAME,
+    ED2K_EMBLOCK_SIZE, Ed2kDeliveryState, Ed2kManifestCheckpointState, Ed2kPieceState,
+    Ed2kResumeManifest, Ed2kTransferJob, Ed2kTransferRootReconciliation, Ed2kTransferRuntime,
+    Ed2kTransferState, PAYLOAD_FILE_NAME, expected_piece_length, new_transfer_job,
 };
 
 const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
@@ -275,6 +278,57 @@ impl Ed2kTransferRuntime {
         let manifest = manifest_from_metadata(manifest)?;
         self.mark_manifest_persisted_unlocked(&manifest).await;
         Ok(Some(manifest))
+    }
+
+    /// Resolve a complete local share for read-only protocol views without
+    /// introducing it into transfer mutation or checkpoint paths.
+    pub(super) async fn load_servable_manifest_optional_unlocked(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<Ed2kResumeManifest>> {
+        if let Some(manifest) = self.load_manifest_optional_unlocked(file_hash).await? {
+            return Ok(Some(manifest));
+        }
+        {
+            let metadata = self.metadata.clone();
+            let owned_hash = file_hash.to_string();
+            let local = tokio::task::spawn_blocking(move || {
+                metadata.active_local_content_by_hash(&owned_hash)
+            })
+            .await
+            .context("ED2K local content load task panicked")??;
+            return Ok(local.map(|content| {
+                let file_hash = Ed2kHash::from_str(&content.file_hash)
+                    .expect("SQLite decoded a validated ED2K hash");
+                let job = new_transfer_job(file_hash, content.display_name, content.file_size);
+                let mut manifest = Ed2kResumeManifest::new(&job);
+                manifest.source_path = Some(content.path);
+                manifest.source_fingerprint = Some(content.fingerprint);
+                manifest.delivery_state = Ed2kDeliveryState::NotApplicable;
+                manifest.transfer_row_removed = true;
+                manifest.completed = true;
+                manifest.md4_hashset_acquired = true;
+                manifest.md4_hashset = content.md4_hashset;
+                manifest.aich_hashset_acquired = true;
+                manifest.aich_root = Some(content.aich_root);
+                manifest.aich_hashset = content.aich_hashset;
+                manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
+                    .map(|piece_index| Ed2kPieceState {
+                        piece_index,
+                        state: Ed2kTransferState::Verified,
+                        bytes_written: expected_piece_length(
+                            manifest.file_size,
+                            manifest.piece_size,
+                            u64::from(piece_index),
+                        ),
+                        block_bitmap: None,
+                        ich_corrupted: false,
+                    })
+                    .collect();
+                rebuild_verified_ranges(&mut manifest);
+                manifest
+            }));
+        }
     }
 
     pub(super) async fn load_manifest_unlocked(
