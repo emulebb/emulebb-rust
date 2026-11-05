@@ -233,21 +233,6 @@ pub struct MetadataShareInPlaceReloadEntry {
     pub source_fingerprint: Option<NativeFileFingerprint>,
 }
 
-/// One completed download whose delivered file can be reused (not re-hashed)
-/// when a shared-directory rescan re-finds it in a configured shared Incoming /
-/// category dir. The delivered payload already carries the download's computed
-/// MD4/AICH hashset, so on reload an exact delivered native fingerprint is a
-/// cache hit -- the oracle
-/// `FindKnownFile(name, date, size)` reuse (SharedFileList.cpp:2138), not a
-/// wasteful full re-hash of the whole payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataDeliveredReuseEntry {
-    pub file_hash: String,
-    pub file_size: u64,
-    pub delivered_path: PathBuf,
-    pub delivered_fingerprint: Option<NativeFileFingerprint>,
-}
-
 /// One pathless stock eMule ``known.met`` row imported into a Rust profile.
 ///
 /// Stock ``known.met`` records do not carry a directory path. Rust can safely

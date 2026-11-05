@@ -455,61 +455,24 @@ async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() 
     fs::remove_dir_all(&root).ok();
 }
 
-/// A completed DOWNLOAD delivered into a shared dir has NO share-in-place
-/// source row, so it used to look brand-new on reload and its whole payload
-/// was re-hashed just to reshare content it already hashed while downloading
-/// (HASH-2). With the delivered file's native fingerprint recorded at
-/// delivery, an unchanged delivered file is now a reuse cache HIT (oracle
-/// FindKnownFile) -- reused, not re-hashed. If the operator later replaces
-/// the delivered file, it correctly falls back to a re-hash.
+/// A promoted download uses the same verified local instance cache as any
+/// other library file. A replaced payload must lose that cache hit.
 #[tokio::test]
-async fn incremental_reload_reuses_delivered_download_without_rehash() {
+async fn incremental_reload_reuses_verified_local_instance_without_rehash() {
     let root = scratch_dir("delivered-download");
     let delivered = root.join("Completed.Download.bin");
     fs::write(&delivered, b"completed download payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
-    let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
-    let file_hash = "aabbccddeeff00112233445566778899".to_string();
-    // A completed download: delivered_path set, source_path NONE, and the
-    // delivered native fingerprint recorded (as deliver.rs does at delivery).
-    core.metadata_store
-        .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
-            file_hash: file_hash.clone(),
-            display_name: "Completed.Download.bin".to_string(),
-            display_name_pinned: false,
-            follow_majority_filename: false,
-            file_name_observations: Vec::new(),
-            file_size: size,
-            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
-            completed: true,
-            final_rehash_pending: false,
-            md4_hashset_acquired: true,
-            md4_hashset: Vec::new(),
-            aich_hashset_acquired: false,
-            aich_root: None,
-            aich_hashset: Vec::new(),
-            verified_ranges: vec![emulebb_metadata::MetadataTransferRange {
-                start: 0,
-                end: size,
-            }],
-            pieces: Vec::new(),
-            sources: Vec::new(),
-            upload_priority: "normal".to_string(),
-            auto_upload_priority: false,
-            comment: String::new(),
-            rating: 0,
-            category_id: 0,
-            control_state: None,
-            transfer_row_removed: false,
-            delivery_state: emulebb_metadata::MetadataTransferDeliveryState::Delivered,
-            delivery_ownership: emulebb_metadata::MetadataTransferDeliveryOwnership::Owned,
-            delivered_path: Some(delivered.clone()),
-            source_path: None,
-            source_fingerprint: fingerprint,
-            payload_fingerprint: None,
+    configure_test_root(&core, &root).await;
+    let file_hash = core
+        .share_local_file(LocalShareCreate {
+            path: delivered.display().to_string(),
+            name: None,
         })
-        .unwrap();
+        .await
+        .unwrap()
+        .hash;
 
     // Unchanged delivered file: reuse HIT, no re-hash.
     let plan = plan_incremental_reload(&core, vec![scanned_file(&delivered)])
@@ -538,7 +501,7 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
         "a replaced delivered file must be re-hashed, not served under the old hash"
     );
     assert!(replaced.reused_shares.is_empty());
-    assert_eq!(replaced.stats.new_count, 1);
+    assert_eq!(replaced.stats.changed_count, 1);
     fs::remove_dir_all(&root).ok();
 }
 

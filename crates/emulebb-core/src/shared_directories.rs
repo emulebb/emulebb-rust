@@ -1214,13 +1214,9 @@ fn reload_hash_target(
 
 /// Decide which scanned files actually need (re)hashing on this reload.
 ///
-/// This is the incremental skip: a scanned file whose long-path-normalized path
-/// is already in the persisted share-in-place index with a matching on-disk
-/// native fingerprint is safely reusable (its complete manifest, hash, catalog and
-/// index entry already persist), so the (potentially hundreds-of-GB) payload is
-/// never re-read. A file that is new, resized, re-timestamped, or whose persisted
-/// manifest lacks a native fingerprint falls through to
-/// `to_hash` and is hashed exactly as before.
+/// A scanned file whose path and native fingerprint match a verified local
+/// instance reuses its content identity without reading the payload again.
+/// New or changed files are hashed.
 ///
 /// The directory walk supplies the normalized path and fingerprint used here,
 /// avoiding a second metadata lookup for every file. Files selected for hashing
@@ -1238,10 +1234,6 @@ async fn plan_incremental_reload_with_pruning(
     prune_missing_sources: bool,
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.verified_local_reload_index().await?;
-    // Completed downloads delivered into a shared dir are reuse-only (never
-    // pruned): recognized by delivered path + native fingerprint so an unchanged
-    // delivered file is a cache hit instead of a needless whole-payload re-hash.
-    let delivered_index = core.ed2k_transfers.delivered_reuse_index().await?;
     let failure_entries = load_shared_source_failures(core).await?;
     tokio::task::spawn_blocking(move || {
         let failures = failure_entries
@@ -1325,46 +1317,19 @@ async fn plan_incremental_reload_with_pruning(
                         ));
                     }
                 }
-                // Not a share-in-place source. Before treating it as a
-                // brand-new file to hash, check whether it is a completed
-                // download's delivered file re-found in a shared dir: if
-                // its delivered native fingerprint still matches, the
-                // download already computed this hashset, so reuse it
-                // (oracle FindKnownFile) rather than re-hashing the whole
-                // payload. Reuse-only: this never contributes to pruning.
-                None => match delivered_index.get(&key) {
-                    Some(entry)
-                        if entry
-                            .source_fingerprint
-                            .as_ref()
-                            .zip(fingerprint.as_ref())
-                            .is_some_and(|(stored, current)| stored.safely_matches(current)) =>
-                    {
-                        stats.reused_count += 1;
-                        reused_shares.push(ReusedReloadShare {
-                            file_hash: entry.file_hash.clone(),
-                            source_path: path.clone(),
-                            source_fingerprint: fingerprint.clone(),
-                            stale_hashes: Vec::new(),
-                        });
-                    }
-                    // Imported stock known.met names and timestamps do not
-                    // prove payload identity. Hash every such local path.
-                    _ => {
-                        // Brand-new path: hash it, nothing stale to clean up.
-                        stats.planned_hash_count += 1;
-                        stats.new_count += 1;
-                        to_hash.push(reload_hash_target(
-                            path,
-                            key,
-                            disk_key,
-                            size,
-                            fingerprint,
-                            Vec::new(),
-                            "new",
-                        ));
-                    }
-                },
+                None => {
+                    stats.planned_hash_count += 1;
+                    stats.new_count += 1;
+                    to_hash.push(reload_hash_target(
+                        path,
+                        key,
+                        disk_key,
+                        size,
+                        fingerprint,
+                        Vec::new(),
+                        "new",
+                    ));
+                }
             }
         }
         let kept_hashes = reused_shares

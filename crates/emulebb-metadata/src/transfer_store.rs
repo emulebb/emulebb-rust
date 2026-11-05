@@ -10,10 +10,9 @@ use crate::{
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_model::{
-        MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry,
-        MetadataShareInPlaceReloadEntry, MetadataSharedFileCursor, MetadataSharedFilePage,
-        MetadataSharedFileQuery, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
-        MetadataTransferCounts, MetadataTransferDeletionTombstone,
+        MetadataImportedKnownFileEntry, MetadataShareInPlaceReloadEntry, MetadataSharedFileCursor,
+        MetadataSharedFilePage, MetadataSharedFileQuery, MetadataSharedSourceFailure,
+        MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferDeletionTombstone,
         MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
         MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
         MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
@@ -939,43 +938,6 @@ impl super::MetadataStore {
         )?;
         tx.commit()?;
         Ok(true)
-    }
-
-    /// Completed downloads whose delivered file can be reused (not re-hashed) if
-    /// a shared-directory rescan re-finds it in a configured shared dir. A real
-    /// download has NO `shared_file_sources` row, so without this it looks
-    /// brand-new on reload and its whole payload is needlessly re-hashed to
-    /// convert it to a share. Only rows that recorded the delivered file's native
-    /// fingerprint (captured at delivery for a delivered
-    /// download -- `source_path_id IS NULL` distinguishes it from a share-in-place
-    /// source) are returned, so an unchanged delivered file is a reload cache hit.
-    pub fn completed_delivered_reuse_entries(&self) -> Result<Vec<MetadataDeliveredReuseEntry>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
-                   delivered_paths.platform, delivered_paths.native_path,
-                   transfers.source_fingerprint
-            FROM transfers
-            JOIN known_files ON known_files.id = transfers.known_file_id
-            JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
-            WHERE known_files.completed != 0
-              AND transfers.delete_requested_at_ms IS NULL
-              AND transfers.delivered_path_id IS NOT NULL
-              AND transfers.source_path_id IS NULL
-              AND transfers.source_fingerprint IS NOT NULL
-            ORDER BY delivered_paths.display_path
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(MetadataDeliveredReuseEntry {
-                file_hash: row.get(0)?,
-                file_size: row.get::<_, i64>(1)? as u64,
-                delivered_path: path_from_row(row, 2, 3)?,
-                delivered_fingerprint: optional_fingerprint_from_row(row, 4)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn upsert_imported_known_file(&self, entry: &MetadataImportedKnownFileEntry) -> Result<()> {
