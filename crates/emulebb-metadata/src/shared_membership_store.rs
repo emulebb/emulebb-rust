@@ -185,10 +185,20 @@ mod tests {
             .replace_root_memberships(&nested, std::slice::from_ref(&nested_file))
             .unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 1);
+        let page = store.active_local_share_page(None, 10).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].file_hash, hash);
+        assert!(
+            store
+                .active_local_share_page(Some(hash), 10)
+                .unwrap()
+                .is_empty()
+        );
         store.set_shared_root_accessible(&root, false).unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 1);
         store.set_shared_root_accessible(&nested, false).unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 0);
+        assert!(store.active_local_share_page(None, 10).unwrap().is_empty());
         assert!(store.local_file_instance(&file).unwrap().is_some());
         store
             .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
