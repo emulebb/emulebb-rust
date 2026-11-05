@@ -147,16 +147,12 @@ impl Ed2kTransferRuntime {
     ) -> Result<(Vec<MetadataLocalShareEntry>, usize)> {
         let metadata = self.metadata.clone();
         let (entries, total) = tokio::task::spawn_blocking(move || {
-            let entries = metadata.active_local_share_entries()?;
-            let total = entries.len();
-            Ok::<_, anyhow::Error>((
-                entries
-                    .into_iter()
-                    .skip(offset)
-                    .take(limit)
-                    .collect::<Vec<_>>(),
-                total,
-            ))
+            let entries = metadata
+                .verified_local_share_page(None, offset.saturating_add(limit))?
+                .into_iter()
+                .skip(offset)
+                .collect::<Vec<_>>();
+            Ok::<_, anyhow::Error>((entries, metadata.verified_local_share_count()?))
         })
         .await
         .map_err(anyhow::Error::from)??;
@@ -252,17 +248,9 @@ impl Ed2kTransferRuntime {
         let after_hash = after_hash.map(str::to_owned);
         let (entries, total, has_more) = tokio::task::spawn_blocking(move || {
             let entries = metadata
-                .verified_local_catalog_page(after_hash.as_deref(), limit.saturating_add(1))?;
+                .verified_local_share_page(after_hash.as_deref(), limit.saturating_add(1))?;
             let has_more = entries.len() > limit;
-            let entries = entries
-                .into_iter()
-                .take(limit)
-                .map(|entry| {
-                    metadata
-                        .active_local_share_entry(&entry.file_hash)?
-                        .with_context(|| "active local share disappeared during page read")
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let entries = entries.into_iter().take(limit).collect::<Vec<_>>();
             Ok::<_, anyhow::Error>((entries, metadata.verified_local_share_count()?, has_more))
         })
         .await
