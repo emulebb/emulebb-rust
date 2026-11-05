@@ -282,15 +282,13 @@ CREATE TABLE shared_default_ignore_overrides (
 );
 
 CREATE TABLE shared_file_memberships (
-    id INTEGER PRIMARY KEY,
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     root_id INTEGER NOT NULL REFERENCES shared_directory_roots(id),
-    path_id INTEGER NOT NULL REFERENCES local_paths(id),
+    path_id INTEGER NOT NULL REFERENCES local_file_instances(path_id) ON DELETE CASCADE,
     relative_path TEXT NOT NULL,
     first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
     last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
-    UNIQUE(known_file_id, root_id, path_id)
+    PRIMARY KEY(root_id, path_id)
 );
 
 CREATE TABLE unshared_files (
@@ -689,7 +687,7 @@ CREATE TABLE search_result_observations (
 
 CREATE INDEX known_files_hash_idx ON known_files(ed2k_hash);
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
-CREATE INDEX shared_file_memberships_file_idx ON shared_file_memberships(known_file_id);
+CREATE INDEX shared_file_memberships_path_idx ON shared_file_memberships(path_id);
 CREATE INDEX transfer_sources_transfer_idx ON transfer_sources(transfer_id);
 CREATE INDEX transfers_pending_delete_idx
 ON transfers(delete_requested_at_ms)

@@ -18,6 +18,7 @@ mod profile_store;
 mod schema;
 mod search_model;
 mod search_store;
+mod shared_membership_store;
 mod store;
 mod text;
 mod transfer_model;
