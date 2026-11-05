@@ -488,6 +488,7 @@ pub struct EmulebbCore {
     /// invalidations. It is lifecycle-coupled to the directory monitor because
     /// both reconcile local source paths through the same ingest authority.
     shared_source_reconcile_worker: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    shared_root_health_worker: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     /// Files still pending the initial hash in the detached background reload
     /// worker; surfaced as `hashingCount` on `GET /shared-directories`. Await-free
     /// atomic shared by the sync primitive and the worker (see `shared_directories`).
@@ -681,6 +682,7 @@ impl EmulebbCore {
             ed2k_download_tasks: Arc::new(DownloadTaskSupervisor::new()),
             shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
             shared_source_reconcile_worker: Arc::new(std::sync::Mutex::new(None)),
+            shared_root_health_worker: Arc::new(std::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             shared_directory_reload_progress: Arc::new(std::sync::Mutex::new(
                 SharedDirectoryReloadProgress::default(),
