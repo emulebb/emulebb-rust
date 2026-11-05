@@ -345,14 +345,8 @@ impl EmulebbCore {
     }
 
     pub async fn delete_transfer_files(&self, hash: &str) -> Result<Option<Transfer>> {
-        let transfer = if let Some(transfer) = self.transfer(hash).await {
-            transfer
-        } else {
-            let Ok(manifest) = self.ed2k_transfers.manifest(hash).await else {
-                return Ok(None);
-            };
-            let state_name = manifest_default_state_name(&manifest);
-            self.transfer_from_manifest(&manifest, state_name)
+        let Some(transfer) = self.transfer(hash).await else {
+            return Ok(None);
         };
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
             return Ok(None);

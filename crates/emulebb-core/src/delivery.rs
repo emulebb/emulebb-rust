@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::{Result, ensure};
 use emulebb_ed2k::ed2k_transfer::{Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kResumeManifest};
 
 use crate::EmulebbCore;
@@ -104,35 +105,64 @@ impl EmulebbCore {
             .materialize_completed_payload(hash, &dest_dir)
             .await
         {
-            Ok(Ed2kDeliveryOutcome::Delivered(path)) => {
-                self.delivery_failures.lock().unwrap().remove(hash);
-                tracing::info!("delivered completed transfer {hash} to {}", path.display());
-                if let Ok(Some(transfer)) = self.refresh_transfer_from_manifest_default(hash).await
-                {
-                    self.publish_transfer_updated(transfer);
+            Ok(
+                Ed2kDeliveryOutcome::Delivered(path) | Ed2kDeliveryOutcome::AlreadyDelivered(path),
+            ) => match self.promote_delivered_transfer(hash).await {
+                Ok(()) => {
+                    self.delivery_failures.lock().unwrap().remove(hash);
+                    tracing::info!("promoted completed transfer {hash} at {}", path.display());
                 }
-            }
-            Ok(Ed2kDeliveryOutcome::AlreadyDelivered(_)) => {
-                self.delivery_failures.lock().unwrap().remove(hash);
-                if let Ok(Some(transfer)) = self.refresh_transfer_from_manifest_default(hash).await
-                {
-                    self.publish_transfer_updated(transfer);
-                }
-            }
+                Err(error) => self.record_delivery_failure(hash, &error),
+            },
             Ok(Ed2kDeliveryOutcome::NotRequired | Ed2kDeliveryOutcome::NotCompleted) => {}
             Err(error) => {
-                let message = format!("{error:#}");
-                {
-                    let mut failures = self.delivery_failures.lock().unwrap();
-                    let failure = DeliveryFailure::next(message, failures.get(hash));
-                    failures.insert(hash.to_string(), failure);
-                }
-                tracing::warn!(%error, "failed to deliver completed transfer {hash}");
+                self.record_delivery_failure(hash, &error);
                 let _ = self
                     .refresh_transfer_from_manifest(hash, "completing")
                     .await;
             }
         }
+    }
+
+    async fn promote_delivered_transfer(&self, hash: &str) -> Result<()> {
+        crate::shared_directories::sync_implicit_shared_directory_roots(self).await?;
+        let (path, fingerprint) = self
+            .ed2k_transfers
+            .register_delivered_local_content(hash)
+            .await?;
+        let normalized_path = crate::long_path(&path);
+        let file_metadata = tokio::fs::metadata(&normalized_path).await?;
+        if !crate::shared_directories::load_shared_file_exclusion_policy(self)?
+            .should_ignore(&normalized_path, &file_metadata)
+        {
+            ensure!(
+                crate::shared_dir_monitor::admit_monitored_path(
+                    self,
+                    &normalized_path,
+                    &fingerprint
+                )
+                .await?,
+                "delivered output is not eligible under an Incoming or category root"
+            );
+        }
+        self.ed2k_transfers
+            .remove_completed_transfer_row(hash)
+            .await?;
+        self.ed2k_transfers
+            .refresh_complete_shared_catalog()
+            .await?;
+        self.state.lock().await.transfers.remove(hash);
+        self.publish_transfer_removed(hash);
+        self.queue_ed2k_shared_catalog_publish();
+        Ok(())
+    }
+
+    fn record_delivery_failure(&self, hash: &str, error: &anyhow::Error) {
+        let message = format!("{error:#}");
+        let mut failures = self.delivery_failures.lock().unwrap();
+        let failure = DeliveryFailure::next(message, failures.get(hash));
+        failures.insert(hash.to_string(), failure);
+        tracing::warn!(%error, "failed to complete delivery of transfer {hash}");
     }
 
     /// Deliver every completed-but-undelivered transfer (startup sweep). Covers

@@ -1,15 +1,20 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
-use std::{collections::BTreeMap, net::Ipv4Addr, path::Path};
+use std::{
+    collections::BTreeMap,
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
     MetadataCategory, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
     MetadataTransferCatalogEntry, MetadataTransferCounts,
     MetadataTransferDirectoryDeletionAuthority, MetadataTransferPublishEntry,
-    MetadataTransferShareEntry, NativeFileFingerprint, NativeFileIdentity,
+    MetadataTransferShareEntry, MetadataVerifiedLocalContent, NativeFileFingerprint,
+    NativeFileIdentity,
 };
 use uuid::Uuid;
 
@@ -986,6 +991,63 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
+    /// Cache a delivered download as verified local content without rereading
+    /// its payload. Root membership must be admitted separately by the caller.
+    pub async fn register_delivered_local_content(
+        &self,
+        file_hash: &str,
+    ) -> Result<(PathBuf, NativeFileFingerprint)> {
+        let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
+        let _guard = self.lock_manifest(file_hash).await;
+        let manifest = self.load_manifest_unlocked(file_hash).await?;
+        ensure!(
+            manifest.completed
+                && !manifest.final_rehash_pending
+                && manifest.delivery_state == super::Ed2kDeliveryState::Delivered,
+            "download is not fully delivered"
+        );
+        let path = manifest
+            .delivered_path
+            .clone()
+            .context("delivered download has no output path")?;
+        let path = long_path(&path);
+        let fingerprint = manifest
+            .source_fingerprint
+            .clone()
+            .context("delivered download has no output fingerprint")?;
+        let current = super::ingest::native_file_fingerprint(&path)
+            .context("delivered output has no stable native fingerprint")?;
+        ensure!(
+            fingerprint.safely_matches(&current),
+            "delivered output changed since its verified fingerprint was recorded"
+        );
+        ensure!(
+            manifest.md4_hashset_acquired && manifest.aich_hashset_acquired,
+            "delivered download has incomplete hashsets"
+        );
+        let content = MetadataVerifiedLocalContent {
+            file_hash: manifest.file_hash,
+            display_name: manifest.display_name,
+            file_size: manifest.file_size,
+            part_size: manifest.piece_size,
+            md4_hashset: manifest.md4_hashset,
+            aich_root: manifest
+                .aich_root
+                .context("delivered download has no AICH root")?,
+            aich_hashset: manifest.aich_hashset,
+            path: path.clone(),
+            fingerprint: fingerprint.clone(),
+            upload_priority: manifest.upload_priority,
+            auto_upload_priority: manifest.auto_upload_priority,
+            comment: manifest.comment,
+            rating: manifest.rating,
+        };
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.upsert_verified_local_content(&content))
+            .await??;
+        Ok((path, fingerprint))
+    }
+
     /// Remove only a completed transfer row while preserving local files.
     pub async fn remove_completed_transfer_row(
         &self,
@@ -1089,6 +1151,11 @@ impl Ed2kTransferRuntime {
             sync_parent_directory(&transfer_dir).await?;
             return Ok(true);
         };
+        // WHY: a retired download's delivered path is now independent local
+        // content. A stale transfer-delete request must never remove that file.
+        if manifest.transfer_row_removed && !self.transfer_deletion_requested(&file_hash).await? {
+            return Ok(false);
+        }
         let transfer_directory_authority = if self.transfer_deletion_requested(&file_hash).await? {
             None
         } else {

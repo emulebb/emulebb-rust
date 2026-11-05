@@ -19,10 +19,19 @@ async fn clean_completion_persists_pending_before_restart_finalizer_accepts() {
     let payload = b"completion barrier payload";
     let file_hash = Ed2kHash::from_bytes(md4(payload));
     let job = new_transfer_job(file_hash, "clean.bin".to_string(), payload.len() as u64);
+    let source = root.join("aich-source.bin");
+    std::fs::write(&source, payload).unwrap();
+    let aich =
+        super::super::hashset::build_aich_hashset_from_payload(&source, payload.len() as u64)
+            .unwrap();
 
     {
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
         runtime.ensure_job(&job).await.unwrap();
+        runtime
+            .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+            .await
+            .unwrap();
         runtime
             .store_md4_hashset(&job.file_hash, Vec::new())
             .await
@@ -56,6 +65,8 @@ async fn clean_completion_persists_pending_before_restart_finalizer_accepts() {
     assert!(completed.completed);
     assert!(!completed.final_rehash_pending);
     assert!(completed.payload_fingerprint.is_some());
+    assert!(completed.aich_hashset_acquired);
+    assert_eq!(completed.aich_root, Some(hex::encode(aich.master_hash)));
 }
 
 #[tokio::test]

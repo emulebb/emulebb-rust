@@ -8,7 +8,7 @@ use emulebb_core::{
 use emulebb_kad_proto::{Ed2kHash, PublishEntry, Tag, TagValue, tag_name};
 use kad_swarm_support::{
     LocalKadSwarm, deterministic_payload, file_hash, free_lan_tcp_port, node_id, open_network_core,
-    unique_test_dir, wait_for_completed_transfer, wait_for_kad_connected,
+    unique_test_dir, wait_for_completed_download, wait_for_kad_connected,
 };
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -348,22 +348,20 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
             .expect("resume Kad-discovered transfer");
     }
 
-    let completed = wait_for_completed_transfer(&download_core, &share.hash).await;
+    let completed = wait_for_completed_download(&download_core, &share.hash).await;
     assert_eq!(completed.size_bytes, payload.len() as u64);
-    assert_eq!(completed.completed_bytes, payload.len() as u64);
     assert_eq!(
-        std::fs::read(&completed.path).expect("read completed Kad transfer payload"),
+        std::fs::read(completed.source_path.as_ref().unwrap())
+            .expect("read completed Kad transfer payload"),
         payload
     );
+    assert!(download_core.transfer(&share.hash).await.is_none());
 
-    let second_completed = wait_for_completed_transfer(&download_core, &second_share.hash).await;
+    let second_completed = wait_for_completed_download(&download_core, &second_share.hash).await;
     assert_eq!(second_completed.size_bytes, second_payload.len() as u64);
     assert_eq!(
-        second_completed.completed_bytes,
-        second_payload.len() as u64
-    );
-    assert_eq!(
-        std::fs::read(&second_completed.path).expect("read second completed Kad transfer payload"),
+        std::fs::read(second_completed.source_path.as_ref().unwrap())
+            .expect("read second completed Kad transfer payload"),
         second_payload
     );
 }

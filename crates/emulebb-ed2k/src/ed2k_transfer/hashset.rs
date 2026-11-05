@@ -335,11 +335,11 @@ pub(super) fn refresh_completed_manifest_aich_hashset(
     transfer_dir: &Path,
     manifest: &mut Ed2kResumeManifest,
 ) -> Result<()> {
-    // Once a modern peer has supplied a canonical AICH identity, keep serving
-    // that network-learned root/hashset instead of replacing it on completion.
-    // Completion-time synthesis is only for files that finished without any
-    // prior AICH metadata.
-    if manifest.aich_root.is_some() {
+    // WHY: a peer may supply only an AICH root. A completed local file needs
+    // its own verified hashset before it can be promoted without rereading
+    // the delivered output. Keep an acquired set; synthesize any missing set
+    // from the already verified internal payload at completion.
+    if manifest.aich_root.is_some() && manifest.aich_hashset_acquired {
         return Ok(());
     }
     let payload_path = transfer_dir.join(PAYLOAD_FILE_NAME);

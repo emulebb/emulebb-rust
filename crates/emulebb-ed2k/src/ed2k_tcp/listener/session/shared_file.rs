@@ -734,7 +734,7 @@ async fn source_exchange_peers_excluding(
 
     // Fill the remainder from persisted manifest hints, applying the same
     // non-LowID / non-zero-port eligibility filter and (ip, port) dedup.
-    let manifest = transfer_runtime.manifest(&requested_hex).await?;
+    let manifest = transfer_runtime.servable_manifest(&requested_hex).await?;
     for source in &manifest.sources {
         let Ok(parsed_ip) = source.ip.parse::<Ipv4Addr>() else {
             continue;
