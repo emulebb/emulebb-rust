@@ -9,10 +9,8 @@ use std::fs;
 use emulebb_kad_proto::Ed2kHash;
 use std::str::FromStr;
 
-use super::super::{
-    ED2K_EMBLOCK_SIZE, Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kTransferRuntime,
-    PAYLOAD_FILE_NAME,
-};
+use super::super::test_support::admit_local_share;
+use super::super::{ED2K_EMBLOCK_SIZE, Ed2kDeliveryState, Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
 use super::write_repeating_pattern_file;
 use crate::paths::unique_test_dir;
 use emulebb_metadata::MetadataSharedDirectoryRoot;
@@ -37,6 +35,7 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         .ingest_local_file(&source_path, "Shared.Complete.File.bin")
         .await
         .unwrap();
+    admit_local_share(&runtime, &source_dir, &source_path).await;
     let file_hash = summary.file_hash.clone();
     // (1) The manifest is a completed share that records the ORIGINAL path.
     let manifest = runtime.manifest(&file_hash).await.unwrap();
@@ -53,8 +52,8 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         "shared complete file must stay out of the download queue from its first write",
     );
     assert_eq!(
-        manifest.source_path.as_deref().map(canonicalize_lossy),
-        Some(canonicalize_lossy(&source_path)),
+        manifest.source_path.as_deref(),
+        Some(crate::long_path::long_path(&source_path).as_path()),
         "manifest must record the original on-disk source path",
     );
 
@@ -72,15 +71,13 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         "share-in-place must not create an empty per-hash transfer directory",
     );
 
-    let incoming = root.join("incoming");
-    assert_eq!(
+    assert!(
         runtime
-            .materialize_completed_payload(&file_hash, &incoming)
-            .await
-            .unwrap(),
-        Ed2kDeliveryOutcome::NotRequired,
+            .metadata
+            .transfer_manifest_by_hash(&file_hash)
+            .unwrap()
+            .is_none()
     );
-    assert!(!incoming.exists());
 
     // (3) The original file is untouched and still its full size.
     assert_eq!(fs::metadata(&source_path).unwrap().len(), size);
@@ -180,6 +177,7 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
         .ingest_local_file(&path, "Sample.bin")
         .await
         .unwrap();
+    admit_local_share(&runtime, &shared_root, &path).await;
     let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
     let native_path = manifest.source_path.unwrap();
     let fingerprint = manifest.source_fingerprint.unwrap();
@@ -238,7 +236,7 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
 }
 
 #[tokio::test]
-async fn complete_local_file_survives_retiring_its_synthetic_transfer() {
+async fn complete_local_file_never_creates_a_transfer() {
     let root = unique_test_dir("ed2k-local-no-transfer");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let shared_root = root.join("library");
@@ -249,9 +247,13 @@ async fn complete_local_file_survives_retiring_its_synthetic_transfer() {
         .ingest_local_file(&path, "Sample.bin")
         .await
         .unwrap();
-    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
-    let native_path = manifest.source_path.unwrap();
-    let fingerprint = manifest.source_fingerprint.unwrap();
+    let native_path = crate::long_path::long_path(&path);
+    let fingerprint = runtime
+        .metadata
+        .local_file_instance(&native_path)
+        .unwrap()
+        .unwrap()
+        .verified_fingerprint;
     let mut metadata = runtime.metadata.clone();
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
@@ -269,16 +271,22 @@ async fn complete_local_file_survives_retiring_its_synthetic_transfer() {
         .unwrap();
     assert!(
         metadata
-            .retire_synthetic_local_transfer(&summary.file_hash)
-            .unwrap()
-    );
-    assert!(
-        metadata
             .transfer_manifest_by_hash(&summary.file_hash)
             .unwrap()
             .is_none()
     );
     let restarted = Ed2kTransferRuntime::load_or_create_with_metadata(&root, metadata).unwrap();
+    let catalog = restarted.shared_catalog();
+    let catalog = catalog.read().await;
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(
+        catalog
+            .entry_by_hash(&Ed2kHash::from_str(&summary.file_hash).unwrap())
+            .unwrap()
+            .display_name,
+        "Sample.bin"
+    );
+    drop(catalog);
     let virtual_manifest = restarted.manifest(&summary.file_hash).await.unwrap();
     assert!(virtual_manifest.completed);
     assert_eq!(virtual_manifest.source_path, Some(native_path));
@@ -291,108 +299,6 @@ async fn complete_local_file_survives_retiring_its_synthetic_transfer() {
             .unwrap(),
         fs::read(&path).unwrap()
     );
-}
-
-#[tokio::test]
-async fn relocated_share_uses_new_source_without_runtime_restart() {
-    let root = unique_test_dir("ed2k-share-relocate-live-cache");
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let source_dir = root.join("library");
-    fs::create_dir_all(&source_dir).unwrap();
-    let source_path = source_dir.join("before.bin");
-    let relocated_path = source_dir.join("after.bin");
-    let payload = b"relocated live cache payload";
-    fs::write(&source_path, payload).unwrap();
-    let summary = runtime
-        .ingest_local_file(&source_path, "before.bin")
-        .await
-        .unwrap();
-    let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
-
-    fs::rename(&source_path, &relocated_path).unwrap();
-    let (_, file_size, source_fingerprint) =
-        Ed2kTransferRuntime::scanned_source_identity(&relocated_path).unwrap();
-    assert!(
-        runtime
-            .relocate_shared_source(
-                &summary.file_hash,
-                &source_path,
-                &relocated_path,
-                file_size,
-                source_fingerprint.clone(),
-                "after.bin",
-                "unknown",
-            )
-            .await
-            .unwrap()
-    );
-
-    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
-    let expected_relocated_path = crate::long_path::long_path(&relocated_path);
-    assert_eq!(
-        manifest.source_path.as_deref(),
-        Some(expected_relocated_path.as_path())
-    );
-    assert_eq!(manifest.source_fingerprint, source_fingerprint);
-    assert_eq!(manifest.display_name, "after.bin");
-    assert_eq!(
-        runtime
-            .read_verified_range(&hash, 0, payload.len() as u64)
-            .await
-            .unwrap()
-            .unwrap(),
-        payload,
-    );
-}
-
-#[tokio::test]
-async fn changed_relocation_withdraws_share_until_rehashed() {
-    let root = unique_test_dir("ed2k-share-relocate-changed");
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let source_dir = root.join("library");
-    fs::create_dir_all(&source_dir).unwrap();
-    let source_path = source_dir.join("before.bin");
-    let relocated_path = source_dir.join("after.bin");
-    let payload = vec![0x35; 4096];
-    fs::write(&source_path, &payload).unwrap();
-    let summary = runtime
-        .ingest_local_file(&source_path, "before.bin")
-        .await
-        .unwrap();
-    let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
-    assert_eq!(runtime.shared_catalog_count().await, 1);
-
-    fs::rename(&source_path, &relocated_path).unwrap();
-    assert!(
-        runtime
-            .relocate_shared_source(
-                &summary.file_hash,
-                &source_path,
-                &relocated_path,
-                payload.len() as u64,
-                None,
-                "after.bin",
-                "unknown",
-            )
-            .await
-            .unwrap()
-    );
-
-    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
-    assert_eq!(
-        manifest.source_path.as_deref(),
-        Some(crate::long_path::long_path(&relocated_path).as_path())
-    );
-    assert!(manifest.source_fingerprint.is_none());
-    assert_eq!(runtime.shared_catalog_count().await, 0);
-    assert!(
-        runtime
-            .read_verified_range(&hash, 0, payload.len() as u64)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(fs::read(&relocated_path).unwrap(), payload);
 }
 
 #[tokio::test]
@@ -410,6 +316,7 @@ async fn replaced_share_source_is_withdrawn_before_upload() {
         .ingest_local_file(&source_path, "shared.bin")
         .await
         .unwrap();
+    admit_local_share(&runtime, &source_dir, &source_path).await;
     let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
     let invalidations = runtime.shared_source_invalidation_signal();
     assert_eq!(runtime.shared_catalog_count().await, 1);
@@ -425,9 +332,13 @@ async fn replaced_share_source_is_withdrawn_before_upload() {
             .is_none(),
         "foreign replacement bytes must never be served under the trusted hash"
     );
-    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
-    assert!(manifest.completed);
-    assert!(manifest.source_fingerprint.is_none());
+    assert!(
+        runtime
+            .metadata
+            .active_local_content_by_hash(&summary.file_hash)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(runtime.shared_catalog_count().await, 0);
     assert_eq!(fs::read(&source_path).unwrap(), foreign_payload);
     assert_eq!(fs::read(&original_path).unwrap(), trusted_payload);
@@ -467,6 +378,7 @@ async fn verified_reader_excludes_concurrent_windows_writers() {
         .ingest_local_file(&source_path, "shared.bin")
         .await
         .unwrap();
+    admit_local_share(&runtime, &root, &source_path).await;
     let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
 
     let reader = runtime
@@ -504,6 +416,7 @@ async fn verified_reader_rejects_unix_mutation_after_open() {
         .ingest_local_file(&source_path, "shared.bin")
         .await
         .unwrap();
+    admit_local_share(&runtime, &root, &source_path).await;
     let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
 
     let mut reader = runtime
@@ -523,109 +436,6 @@ async fn verified_reader_rejects_unix_mutation_after_open() {
     );
 }
 
-#[tokio::test]
-async fn relocating_secondary_source_preserves_canonical_manifest_identity() {
-    let root = unique_test_dir("ed2k-share-relocate-secondary");
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let source_dir = root.join("library");
-    fs::create_dir_all(&source_dir).unwrap();
-    let first_path = source_dir.join("first.bin");
-    let second_path = source_dir.join("second.bin");
-    let relocated_path = source_dir.join("relocated-secondary.bin");
-    let payload = vec![0x58; 4096];
-    fs::write(&first_path, &payload).unwrap();
-    fs::write(&second_path, &payload).unwrap();
-    let first = runtime
-        .ingest_local_file(&first_path, "first.bin")
-        .await
-        .unwrap();
-    let second = runtime
-        .ingest_local_file(&second_path, "second.bin")
-        .await
-        .unwrap();
-    assert_eq!(first.file_hash, second.file_hash);
-    let canonical_before = runtime.manifest(&first.file_hash).await.unwrap();
-    assert_eq!(canonical_before.display_name, "second.bin");
-    assert_eq!(
-        canonical_before.source_path.as_deref(),
-        Some(crate::long_path::long_path(&second_path).as_path())
-    );
-
-    fs::rename(&first_path, &relocated_path).unwrap();
-    let (_, file_size, source_fingerprint) =
-        Ed2kTransferRuntime::scanned_source_identity(&relocated_path).unwrap();
-    assert!(
-        runtime
-            .relocate_shared_source(
-                &first.file_hash,
-                &first_path,
-                &relocated_path,
-                file_size,
-                source_fingerprint,
-                "relocated-secondary.bin",
-                "unknown",
-            )
-            .await
-            .unwrap()
-    );
-
-    let canonical_after = runtime.manifest(&first.file_hash).await.unwrap();
-    assert_eq!(canonical_after.display_name, canonical_before.display_name);
-    assert_eq!(canonical_after.source_path, canonical_before.source_path);
-    assert_eq!(
-        canonical_after.source_fingerprint,
-        canonical_before.source_fingerprint
-    );
-    let shared_sources = runtime
-        .metadata
-        .current_shared_files_by_hash(&first.file_hash)
-        .unwrap();
-    assert_eq!(shared_sources.len(), 2);
-    assert!(
-        shared_sources
-            .iter()
-            .all(|source| source.display_name == "second.bin")
-    );
-    assert!(
-        shared_sources
-            .iter()
-            .any(|source| { source.source_path == crate::long_path::long_path(&second_path) })
-    );
-    assert!(
-        shared_sources
-            .iter()
-            .any(|source| { source.source_path == crate::long_path::long_path(&relocated_path) })
-    );
-    assert!(
-        shared_sources
-            .iter()
-            .all(|source| { source.source_path != crate::long_path::long_path(&first_path) })
-    );
-}
-
-/// Best-effort canonicalization for path comparison (the ingest path is stored
-/// after canonicalize + long-path normalization).
-fn canonicalize_lossy(path: &std::path::Path) -> String {
-    std::fs::canonicalize(path)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-}
-
-/// Regression guard: sharing must not silently drop files whose paths carry
-/// non-ASCII characters (accents / CJK), brackets, or that live in nested
-/// subfolders.
-///
-/// Background: on Windows the live failure was ingest converting the source path
-/// to the verbatim (`\\?\`) long-path form and then `canonicalize()`ing it; on
-/// the operator's volume the OS-re-normalized verbatim path no longer resolved
-/// for such names, so the follow-up stat failed and the file was skipped
-/// ("failed to stat local ingest source"). The exact re-normalization mismatch
-/// is filesystem/volume/locale specific and does not reproduce on every NTFS
-/// volume, so this test does not assert the old code panics; instead it exercises
-/// the long-path ingest path end-to-end for exactly the affected name classes and
-/// asserts each file ingests and serves. The fix removes the redundant
-/// `canonicalize()` so ingest stats/hashes the long-path form directly -- the
-/// same absolute path the directory walk already validated.
 #[tokio::test]
 async fn ingest_shares_files_with_unicode_brackets_and_nested_subfolders() {
     let root = unique_test_dir("ed2k-share-unicode-paths");
@@ -678,6 +488,7 @@ async fn ingest_shares_files_with_unicode_brackets_and_nested_subfolders() {
             .ingest_local_file(source_path, display_name)
             .await
             .unwrap_or_else(|error| panic!("ingest of {label} failed: {error:#}"));
+        admit_local_share(&runtime, &library, source_path).await;
         assert_eq!(
             summary.file_size, size as u64,
             "{label}: ingested file size must match the on-disk payload",

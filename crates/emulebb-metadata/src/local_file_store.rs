@@ -6,7 +6,9 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
-    MetadataStore, NativeFileFingerprint, NativePath,
+    MetadataSharedFileCursor, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
+    MetadataTransferCatalogEntry, MetadataTransferMediaMetadata, MetadataTransferShareEntry,
+    NativeFileFingerprint, NativePath,
     native_path::path_from_row,
     store::{decode_fixed_hex, unix_ms, upsert_local_path},
 };
@@ -34,31 +36,234 @@ pub struct MetadataVerifiedLocalContent {
 }
 
 impl MetadataStore {
-    /// Retire a legacy share-in-place transfer only after a verified local
-    /// instance and active root membership independently authorize the file.
-    pub fn retire_synthetic_local_transfer(&self, file_hash: &str) -> Result<bool> {
+    /// Change presentation metadata only for a currently eligible complete
+    /// local file. This does not create or mutate a download job.
+    pub fn update_active_local_share_metadata(
+        &self,
+        file_hash: &str,
+        priority: Option<(&str, bool)>,
+        comment_rating: Option<(&str, u8)>,
+    ) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let changed = self.connection()?.execute(
-            "DELETE FROM transfers WHERE id IN (
-                SELECT transfers.id FROM transfers
-                JOIN known_files ON known_files.id = transfers.known_file_id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.source_path_id IS NOT NULL
-                  AND transfers.delete_requested_at_ms IS NULL
-                  AND EXISTS (
-                    SELECT 1 FROM local_file_instances
-                    JOIN shared_file_memberships ON shared_file_memberships.path_id = local_file_instances.path_id
-                    JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
-                    WHERE local_file_instances.known_file_id = known_files.id
-                      AND shared_file_memberships.removed_at_ms IS NULL
-                      AND shared_directory_roots.enabled = 1
-                      AND shared_directory_roots.deleted_at_ms IS NULL
-                      AND shared_directory_roots.accessible = 1
-                  )
-             )",
-            params![hash],
+        if self.active_local_file_by_hash(file_hash)?.is_none() {
+            return Ok(false);
+        }
+        let conn = self.connection()?;
+        let changed = conn.execute(
+            "UPDATE known_files SET
+                upload_priority = coalesce(?2, upload_priority),
+                auto_upload_priority = coalesce(?3, auto_upload_priority),
+                comment = coalesce(?4, comment),
+                rating = coalesce(?5, rating),
+                updated_at_ms = ?6
+             WHERE ed2k_hash = ?1",
+            params![
+                hash,
+                priority.map(|(value, _)| value),
+                priority.map(|(_, auto)| i64::from(auto)),
+                comment_rating.map(|(value, _)| value),
+                comment_rating.map(|(_, rating)| i64::from(rating)),
+                unix_ms(),
+            ],
         )?;
         Ok(changed != 0)
+    }
+
+    /// Page complete local files eligible for publication independently of
+    /// download rows. The selected path supplies the stable advertised name.
+    pub fn active_local_catalog_page(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        self.active_local_catalog_filtered(after_hash, None, limit)
+    }
+
+    pub fn active_local_catalog_entry(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferCatalogEntry>> {
+        Ok(self
+            .active_local_catalog_filtered(None, Some(file_hash), 1)?
+            .into_iter()
+            .next())
+    }
+
+    fn active_local_catalog_filtered(
+        &self,
+        after_hash: Option<&str>,
+        exact_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        let after_hash = after_hash
+            .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
+            .transpose()?;
+        let exact_hash = exact_hash
+            .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
+            .transpose()?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            "WITH eligible AS (
+                SELECT known_files.id AS known_file_id,
+                       local_paths.platform, local_paths.native_path,
+                       row_number() OVER (
+                           PARTITION BY known_files.id
+                           ORDER BY local_paths.platform, local_paths.native_path
+                       ) AS path_rank
+                FROM shared_file_memberships
+                JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
+                JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
+                JOIN local_paths ON local_paths.id = local_file_instances.path_id
+                JOIN known_files ON known_files.id = local_file_instances.known_file_id
+                WHERE shared_file_memberships.removed_at_ms IS NULL
+                  AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
+                  AND (?3 IS NULL OR known_files.ed2k_hash = ?3)
+                  AND shared_directory_roots.enabled = 1
+                  AND shared_directory_roots.deleted_at_ms IS NULL
+                  AND shared_directory_roots.accessible = 1
+                  AND shared_directory_roots.shareable = 1
+             )
+             SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
+                    coalesce(known_files.part_count, 0),
+                    CASE WHEN known_files.aich_root IS NULL THEN NULL
+                         ELSE lower(hex(known_files.aich_root)) END,
+                    known_files.upload_priority, known_files.auto_upload_priority,
+                    known_files.comment, known_files.rating,
+                    known_files.all_time_uploaded_bytes,
+                    known_files.all_time_upload_requests,
+                    known_files.all_time_upload_accepts,
+                    known_files.last_upload_request_ms,
+                    eligible.platform, eligible.native_path,
+                    known_files.media_artist, known_files.media_album,
+                    known_files.media_title, known_files.media_length_seconds,
+                    known_files.media_bitrate_kbps, known_files.media_codec,
+                    known_files.media_extractor_version
+             FROM eligible JOIN known_files ON known_files.id = eligible.known_file_id
+             WHERE eligible.path_rank = 1
+             ORDER BY known_files.ed2k_hash LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![after_hash, limit, exact_hash], |row| {
+            let path = path_from_row(row, 12, 13)?;
+            let display_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok(MetadataTransferCatalogEntry {
+                file_hash: row.get(0)?,
+                display_name,
+                file_size: row.get::<_, i64>(1)? as u64,
+                part_count: row.get::<_, i64>(2)? as u32,
+                aich_root: row.get(3)?,
+                upload_priority: row.get(4)?,
+                auto_upload_priority: row.get::<_, i64>(5)? != 0,
+                comment: row.get(6)?,
+                rating: row.get::<_, i64>(7)? as u8,
+                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
+                last_upload_request_ms: row.get(11)?,
+                media_path: Some(path),
+                media: MetadataTransferMediaMetadata {
+                    artist: row.get(14)?,
+                    album: row.get(15)?,
+                    title: row.get(16)?,
+                    length_seconds: row.get::<_, i64>(17)? as u32,
+                    bitrate_kbps: row.get::<_, i64>(18)? as u32,
+                    codec: row.get(19)?,
+                    extractor_version: row.get::<_, i64>(20)? as u32,
+                },
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn active_local_share_entries(&self) -> Result<Vec<MetadataTransferShareEntry>> {
+        self.active_local_catalog_page(None, usize::MAX)?
+            .into_iter()
+            .map(local_share_from_catalog)
+            .collect()
+    }
+
+    pub fn active_local_share_entry(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferShareEntry>> {
+        self.active_local_catalog_entry(file_hash)?
+            .map(local_share_from_catalog)
+            .transpose()
+    }
+
+    pub fn query_active_local_share_entries(
+        &self,
+        query: &MetadataSharedFileQuery,
+    ) -> Result<MetadataSharedFilePage> {
+        let search = query
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_lowercase);
+        let priority = query
+            .priority
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_lowercase);
+        if let Some(cursor) = &query.after {
+            decode_fixed_hex(&cursor.file_hash, 16, "ED2K shared-file cursor hash")?;
+        }
+        let mut entries = self
+            .active_local_share_entries()?
+            .into_iter()
+            .map(|entry| {
+                let sort_path = entry
+                    .source_path
+                    .as_deref()
+                    .map(NativePath::from)
+                    .map(|path| path.display_path().to_lowercase())
+                    .unwrap_or_else(|| entry.display_name.to_lowercase());
+                (entry, sort_path)
+            })
+            .filter(|(entry, sort_path)| {
+                search.as_ref().is_none_or(|term| {
+                    entry.display_name.to_lowercase().contains(term)
+                        || sort_path.contains(term)
+                        || entry.file_hash.contains(term)
+                }) && priority
+                    .as_ref()
+                    .is_none_or(|value| entry.upload_priority.to_lowercase() == *value)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            (&left.1, &left.0.file_hash).cmp(&(&right.1, &right.0.file_hash))
+        });
+        let total = if query.count_total { entries.len() } else { 0 };
+        if let Some(cursor) = &query.after {
+            let cursor_hash = cursor.file_hash.to_lowercase();
+            entries.retain(|(entry, sort_path)| {
+                sort_path > &cursor.sort_path
+                    || (sort_path == &cursor.sort_path && entry.file_hash > cursor_hash)
+            });
+        }
+        let has_more = entries.len() > query.limit;
+        entries.truncate(query.limit);
+        let next_cursor = if has_more {
+            entries
+                .last()
+                .map(|(entry, sort_path)| MetadataSharedFileCursor {
+                    sort_path: sort_path.clone(),
+                    file_hash: entry.file_hash.clone(),
+                })
+        } else {
+            None
+        };
+        Ok(MetadataSharedFilePage {
+            entries: entries.into_iter().map(|(entry, _)| entry).collect(),
+            total,
+            next_cursor,
+        })
     }
 
     /// Store verified local content and its path atomically, without a download
@@ -245,6 +450,41 @@ impl MetadataStore {
                 },
             )
             .optional()
+            .map_err(Into::into)
+    }
+
+    /// Enumerate verified path identities for an incremental shared-root scan.
+    /// Membership is intentionally independent; the scan decides which paths
+    /// still belong to configured roots.
+    pub fn verified_local_file_instances(&self) -> Result<Vec<MetadataLocalFileInstance>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            "SELECT local_paths.platform, local_paths.native_path,
+                    lower(hex(known_files.ed2k_hash)), local_file_instances.file_size,
+                    local_file_instances.verified_fingerprint
+             FROM local_file_instances
+             JOIN local_paths ON local_paths.id = local_file_instances.path_id
+             JOIN known_files ON known_files.id = local_file_instances.known_file_id
+             ORDER BY local_paths.platform, local_paths.native_path",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let bytes: Vec<u8> = row.get(4)?;
+            let fingerprint =
+                NativeFileFingerprint::from_storage_bytes(&bytes).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        4,
+                        "verified_fingerprint".to_string(),
+                        rusqlite::types::Type::Blob,
+                    )
+                })?;
+            Ok(MetadataLocalFileInstance {
+                path: path_from_row(row, 0, 1)?,
+                file_hash: row.get(2)?,
+                file_size: row.get::<_, i64>(3)? as u64,
+                verified_fingerprint: fingerprint,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
@@ -466,6 +706,29 @@ impl MetadataStore {
             fingerprint: instance.verified_fingerprint,
         }))
     }
+}
+
+fn local_share_from_catalog(
+    entry: MetadataTransferCatalogEntry,
+) -> Result<MetadataTransferShareEntry> {
+    let path = entry
+        .media_path
+        .context("active local catalog entry has no path")?;
+    Ok(MetadataTransferShareEntry {
+        file_hash: entry.file_hash,
+        display_name: entry.display_name,
+        file_size: entry.file_size,
+        part_count: entry.part_count,
+        source_path: Some(path),
+        aich_root: entry.aich_root,
+        upload_priority: entry.upload_priority,
+        auto_upload_priority: entry.auto_upload_priority,
+        all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
+        all_time_upload_requests: entry.all_time_upload_requests,
+        all_time_upload_accepts: entry.all_time_upload_accepts,
+        comment: entry.comment,
+        rating: entry.rating,
+    })
 }
 
 #[cfg(test)]

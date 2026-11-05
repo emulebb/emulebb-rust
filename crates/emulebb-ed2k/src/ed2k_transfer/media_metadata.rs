@@ -822,6 +822,7 @@ mod tests {
                 .ingest_local_file(&source, "catalog-media.mp3")
                 .await
                 .unwrap();
+            super::super::test_support::admit_local_share(&runtime, temp.path(), &source).await;
             let catalog = runtime.shared_catalog();
             let guard = catalog.read().await;
             let entry = guard
@@ -832,8 +833,6 @@ mod tests {
             assert_eq!(entry.media.bitrate_kbps, 128);
             summary.file_hash
         };
-        std::fs::remove_file(&source).unwrap();
-
         let reloaded = super::super::Ed2kTransferRuntime::load_or_create(&runtime_root).unwrap();
         let catalog = reloaded.shared_catalog();
         let guard = catalog.read().await;
@@ -857,11 +856,13 @@ mod tests {
 
         let file_hash = {
             let runtime = super::super::Ed2kTransferRuntime::load_or_create(&runtime_root).unwrap();
-            runtime
+            let file_hash = runtime
                 .ingest_local_file(&source, "legacy-cache.mp3")
                 .await
                 .unwrap()
-                .file_hash
+                .file_hash;
+            super::super::test_support::admit_local_share(&runtime, temp.path(), &source).await;
+            file_hash
         };
         let metadata =
             emulebb_metadata::MetadataStore::open(runtime_root.join("metadata.sqlite")).unwrap();

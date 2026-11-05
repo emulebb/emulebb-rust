@@ -6,6 +6,26 @@ use md4::{Digest, Md4};
 use super::*;
 use crate::source_publish::emule_high_id_source_type;
 
+async fn configure_test_shared_root(core: &EmulebbCore, file: &Path) {
+    let root = file.parent().unwrap();
+    let path = root.display().to_string();
+    core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
+        path: path.clone(),
+        monitor_owned: false,
+        shareable: true,
+        accessible: true,
+    }];
+    core.metadata_store
+        .clone()
+        .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
+            path,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
+}
+
 #[test]
 fn ed2k_link_parser_decodes_stock_utf8_filename() {
     let link = "ed2k://|file|Linux%20Guide%20%C3%A9%25.pdf|123|00112233445566778899aabbccddeeff|/";
@@ -696,6 +716,23 @@ async fn completed_ed2k_transfer_runtime(
         Arc::new(Ed2kTransferRuntime::load_or_create(&runtime_dir.join("transfers")).unwrap());
     let summary = transfer_runtime
         .ingest_local_file(&payload_path, "fixture.bin")
+        .await
+        .unwrap();
+    transfer_runtime
+        .ensure_job(&emulebb_ed2k::ed2k_transfer::Ed2kTransferJob {
+            file_hash: summary.file_hash.clone(),
+            display_name: summary.display_name.clone(),
+            file_size: summary.file_size,
+            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+        })
+        .await
+        .unwrap();
+    transfer_runtime
+        .store_md4_hashset(&summary.file_hash, Vec::new())
+        .await
+        .unwrap();
+    transfer_runtime
+        .store_piece_data(&summary.file_hash, 0, &payload)
         .await
         .unwrap();
     let secure_ident =

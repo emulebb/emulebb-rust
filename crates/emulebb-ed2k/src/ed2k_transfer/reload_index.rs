@@ -1,9 +1,9 @@
-//! Incremental shared-directory reload index for share-in-place files.
+//! Incremental shared-directory reload index for verified local files.
 //!
 //! The background shared-directory reload used to re-hash the entire shared
 //! library from disk on every daemon start / `reload`, even when nothing
 //! changed. These helpers let the reload skip that waste: each persisted
-//! share-in-place manifest records its `source_path` plus a native file
+//! local file instance records its path plus a native file
 //! fingerprint captured at ingest, so a scanned file whose exact identity still
 //! matches its persisted entry is reused as-is instead of being re-read/re-hashed.
 
@@ -33,33 +33,23 @@ impl Ed2kTransferRuntime {
         )
     }
 
-    /// Build the share-in-place reload index: a map from each persisted
-    /// share-in-place source path (normalized to its long-path form, the same
-    /// form the directory walk produces) to all recorded identities for that
-    /// path ([`Ed2kReloadIndexEntry`]: file hash and native fingerprint).
-    ///
-    /// The incremental shared-directory reload stats each scanned file and, when
-    /// the path is present here with a safely matching fingerprint, skips re-hashing
-    /// and reuses the already-persisted manifest (resolving the share by the
-    /// stored hash). Only manifests that recorded a `source_path` are included
-    /// (real downloads are excluded); a manifest with no fingerprint is always
-    /// re-hashed.
-    pub async fn share_in_place_reload_index(
+    /// Build the verified local path index used by incremental root scans.
+    pub async fn verified_local_reload_index(
         &self,
     ) -> Result<HashMap<PathBuf, Vec<Ed2kReloadIndexEntry>>> {
         let metadata = self.metadata.clone();
-        let entries = tokio::task::spawn_blocking(move || metadata.share_in_place_reload_entries())
+        let entries = tokio::task::spawn_blocking(move || metadata.verified_local_file_instances())
             .await
             .map_err(anyhow::Error::from)??;
         let mut index = HashMap::new();
         for entry in entries {
-            let key = crate::long_path::long_path(&entry.source_path);
+            let key = crate::long_path::long_path(&entry.path);
             index
                 .entry(key)
                 .or_insert_with(Vec::new)
                 .push(Ed2kReloadIndexEntry {
                     file_hash: entry.file_hash,
-                    source_fingerprint: entry.source_fingerprint,
+                    source_fingerprint: Some(entry.verified_fingerprint),
                 });
         }
         Ok(index)

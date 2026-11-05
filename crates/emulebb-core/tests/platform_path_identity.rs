@@ -177,6 +177,9 @@ async fn case_insensitive_macos_alias_keeps_one_native_file_identity() {
             &transfer_root,
         )
         .unwrap();
+        core.add_shared_directory_root(&runtime_dir.display().to_string())
+            .await
+            .unwrap();
         let first = core
             .share_local_file(LocalShareCreate {
                 path: upper_path.display().to_string(),

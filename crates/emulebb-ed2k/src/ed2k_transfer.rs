@@ -1104,4 +1104,6 @@ pub(super) fn upload_queue_policy_from_config(
 }
 
 #[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 mod tests;

@@ -288,6 +288,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::ed2k_transfer::test_support::admit_local_share;
     use crate::ed2k_transfer::{Ed2kSharedRange, Ed2kTransferState, new_transfer_job};
 
     #[tokio::test]
@@ -329,6 +330,7 @@ mod tests {
             .ingest_local_file(&shared_path, "shared.bin")
             .await
             .unwrap();
+        admit_local_share(&runtime, root.path(), &shared_path).await;
         let shared_evidence = runtime.download_evidence(&shared.file_hash).await.unwrap();
         assert!(shared_evidence.active_transfer.is_none());
         assert_eq!(shared_evidence.current_local_files.len(), 1);
@@ -434,6 +436,7 @@ mod tests {
             .ingest_local_file(&shared_path, "shared-redownload.bin")
             .await
             .unwrap();
+        admit_local_share(&runtime, root.path(), &shared_path).await;
         let file_hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
 
         let replacement = runtime
@@ -477,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_redownload_serves_canonical_payload_before_shared_duplicate() {
+    async fn completed_redownload_serves_payload_after_shared_path_withdrawal() {
         let root = tempdir().unwrap();
         let shared_path = root.path().join("shared-then-redownloaded.bin");
         let payload = b"canonical redownload payload";
@@ -487,6 +490,7 @@ mod tests {
             .ingest_local_file(&shared_path, "shared-then-redownloaded.bin")
             .await
             .unwrap();
+        admit_local_share(&runtime, root.path(), &shared_path).await;
         let file_hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
 
         runtime
@@ -498,12 +502,23 @@ mod tests {
             .await
             .unwrap();
         runtime
+            .store_md4_hashset(&shared.file_hash, Vec::new())
+            .await
+            .unwrap();
+        runtime
             .append_piece_block(&shared.file_hash, 0, 0, payload.len() as u64, payload)
             .await
             .unwrap();
         assert!(runtime.manifest(&shared.file_hash).await.unwrap().completed);
 
         fs::write(&shared_path, vec![b'X'; payload.len()]).unwrap();
+        assert!(
+            runtime
+                .read_verified_range(&file_hash, 0, payload.len() as u64)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             runtime
                 .read_verified_range(&file_hash, 0, payload.len() as u64)

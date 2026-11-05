@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use emulebb_metadata::{
     MetadataStore, MetadataTransferCatalogEntry, MetadataTransferDeliveryOwnership,
@@ -204,11 +206,7 @@ pub(super) fn manifest_from_metadata(
 pub(super) fn completed_catalog_from_metadata_store(
     metadata: &MetadataStore,
 ) -> Result<Vec<Ed2kSharedEntry>> {
-    metadata
-        .completed_transfer_catalog_entries()?
-        .into_iter()
-        .map(shared_entry_from_catalog_entry)
-        .collect()
+    completed_catalog_page_from_metadata_store(metadata, None, usize::MAX)
 }
 
 pub(super) fn completed_catalog_page_from_metadata_store(
@@ -216,11 +214,22 @@ pub(super) fn completed_catalog_page_from_metadata_store(
     after_hash: Option<&str>,
     limit: usize,
 ) -> Result<Vec<Ed2kSharedEntry>> {
-    metadata
-        .completed_transfer_catalog_entries_after(after_hash, limit)?
-        .into_iter()
-        .map(shared_entry_from_catalog_entry)
-        .collect()
+    let mut by_hash = BTreeMap::new();
+    // A completed download awaiting delivery can still serve its verified
+    // payload. A complete local file is authorized by a root membership.
+    for entry in metadata.completed_transfer_catalog_entries_after(after_hash, limit)? {
+        by_hash.insert(
+            entry.file_hash.clone(),
+            shared_entry_from_catalog_entry(entry)?,
+        );
+    }
+    for entry in metadata.active_local_catalog_page(after_hash, limit)? {
+        by_hash.insert(
+            entry.file_hash.clone(),
+            shared_entry_from_catalog_entry(entry)?,
+        );
+    }
+    Ok(by_hash.into_values().take(limit).collect())
 }
 
 fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Result<Ed2kSharedEntry> {

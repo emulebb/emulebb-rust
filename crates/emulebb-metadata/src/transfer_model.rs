@@ -128,6 +128,7 @@ pub struct MetadataTransferCatalogEntry {
     pub file_hash: String,
     pub display_name: String,
     pub file_size: u64,
+    pub part_count: u32,
     pub aich_root: Option<String>,
     pub upload_priority: String,
     pub auto_upload_priority: bool,

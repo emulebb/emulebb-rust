@@ -8,6 +8,81 @@ use rusqlite::params;
 use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
 impl MetadataStore {
+    /// Admit one newly verified path from a live watcher without replacing the
+    /// rest of the root's membership set.
+    pub fn admit_local_path_to_root(
+        &self,
+        root: &Path,
+        path: &Path,
+        relative: &Path,
+        current: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        ensure!(
+            !relative.as_os_str().is_empty()
+                && !relative.is_absolute()
+                && relative
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "shared member must have a safe relative path"
+        );
+        let native_root = NativePath::from(root);
+        let native_path = NativePath::from(path);
+        let conn = self.connection()?;
+        let found = conn.query_row(
+            "SELECT shared_directory_roots.id, local_file_instances.path_id,
+                    local_file_instances.verified_fingerprint
+             FROM shared_directory_roots
+             JOIN local_paths root_paths ON root_paths.id = shared_directory_roots.path_id
+             JOIN local_paths file_paths ON file_paths.platform = root_paths.platform
+             JOIN local_file_instances ON local_file_instances.path_id = file_paths.id
+             WHERE root_paths.platform = ?1 AND root_paths.native_path = ?2
+               AND file_paths.native_path = ?3
+               AND shared_directory_roots.enabled = 1
+               AND shared_directory_roots.deleted_at_ms IS NULL
+               AND shared_directory_roots.accessible = 1
+               AND shared_directory_roots.shareable = 1",
+            params![
+                NativePath::platform(),
+                native_root.storage_bytes(),
+                native_path.storage_bytes()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        );
+        let (root_id, path_id, stored) = match found {
+            Ok(found) => found,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if !NativeFileFingerprint::from_storage_bytes(&stored)
+            .is_some_and(|fingerprint| fingerprint.safely_matches(current))
+        {
+            return Ok(false);
+        }
+        let now = unix_ms();
+        conn.execute(
+            "INSERT INTO shared_file_memberships(
+                root_id, path_id, relative_path, first_seen_ms, last_seen_ms, removed_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?4, NULL)
+             ON CONFLICT(root_id, path_id) DO UPDATE SET
+                relative_path = excluded.relative_path,
+                last_seen_ms = excluded.last_seen_ms,
+                removed_at_ms = NULL",
+            params![
+                root_id,
+                path_id,
+                NativePath::from(relative).display_path(),
+                now
+            ],
+        )?;
+        Ok(true)
+    }
+
     /// Whether a verified path has ever been governed by a shared root.
     pub fn local_file_has_root_membership(&self, path: &Path) -> Result<bool> {
         let native = NativePath::from(path);

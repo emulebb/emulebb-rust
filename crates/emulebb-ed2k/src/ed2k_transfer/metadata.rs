@@ -66,7 +66,7 @@ impl Ed2kTransferRuntime {
     /// Return REST shared-file summaries without hydrating every manifest.
     pub async fn share_entries(&self) -> Result<Vec<MetadataTransferShareEntry>> {
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.completed_transfer_share_entries())
+        tokio::task::spawn_blocking(move || metadata.active_local_share_entries())
             .await
             .map_err(anyhow::Error::from)?
     }
@@ -75,7 +75,7 @@ impl Ed2kTransferRuntime {
     pub async fn share_entry(&self, file_hash: &str) -> Result<Option<MetadataTransferShareEntry>> {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_owned();
-        tokio::task::spawn_blocking(move || metadata.completed_transfer_share_entry(&file_hash))
+        tokio::task::spawn_blocking(move || metadata.active_local_share_entry(&file_hash))
             .await
             .map_err(anyhow::Error::from)?
     }
@@ -88,7 +88,14 @@ impl Ed2kTransferRuntime {
     ) -> Result<(Vec<MetadataTransferShareEntry>, usize)> {
         let metadata = self.metadata.clone();
         let entries = tokio::task::spawn_blocking(move || {
-            metadata.completed_transfer_share_entries_page_rows(offset, limit)
+            let entries = metadata.active_local_share_entries()?;
+            Ok::<_, anyhow::Error>(
+                entries
+                    .into_iter()
+                    .skip(offset)
+                    .take(limit)
+                    .collect::<Vec<_>>(),
+            )
         })
         .await
         .map_err(anyhow::Error::from)??;
@@ -102,7 +109,7 @@ impl Ed2kTransferRuntime {
         query: MetadataSharedFileQuery,
     ) -> Result<MetadataSharedFilePage> {
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.query_completed_transfer_share_entries(&query))
+        tokio::task::spawn_blocking(move || metadata.query_active_local_share_entries(&query))
             .await
             .map_err(anyhow::Error::from)?
     }
@@ -184,7 +191,19 @@ impl Ed2kTransferRuntime {
         let metadata = self.metadata.clone();
         let after_hash = after_hash.map(str::to_owned);
         let (entries, has_more) = tokio::task::spawn_blocking(move || {
-            metadata.completed_transfer_share_entries_after_rows(after_hash.as_deref(), limit)
+            let entries = metadata
+                .active_local_catalog_page(after_hash.as_deref(), limit.saturating_add(1))?;
+            let has_more = entries.len() > limit;
+            let entries = entries
+                .into_iter()
+                .take(limit)
+                .map(|entry| {
+                    metadata
+                        .active_local_share_entry(&entry.file_hash)?
+                        .with_context(|| "active local share disappeared during page read")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok::<_, anyhow::Error>((entries, has_more))
         })
         .await
         .map_err(anyhow::Error::from)??;
@@ -757,17 +776,70 @@ impl Ed2kTransferRuntime {
         comment_rating: Option<(&str, u8)>,
     ) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        if let Some((priority, auto_upload_priority)) = priority {
-            manifest.upload_priority = priority.to_string();
-            manifest.auto_upload_priority = auto_upload_priority;
+        let metadata = self.metadata.clone();
+        let lookup_hash = file_hash.to_string();
+        let is_local = tokio::task::spawn_blocking(move || {
+            metadata
+                .active_local_file_by_hash(&lookup_hash)
+                .map(|entry| entry.is_some())
+        })
+        .await??;
+        if !is_local {
+            let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+            if let Some((value, auto)) = priority {
+                manifest.upload_priority = value.to_string();
+                manifest.auto_upload_priority = auto;
+            }
+            if let Some((comment, rating)) = comment_rating {
+                manifest.comment = comment.to_string();
+                manifest.rating = rating;
+            }
+            self.store_manifest_unlocked(&manifest).await?;
+            self.upsert_verified_catalog_entry(&manifest).await;
+            if priority.is_some() {
+                let mut queue = self.upload_queue.lock().await;
+                let queued_count = queue.upload_client_count_for_file(&manifest.file_hash);
+                queue.update_file_priority(
+                    &manifest.file_hash,
+                    upload_priority_score(
+                        &manifest.upload_priority,
+                        manifest.auto_upload_priority,
+                        queued_count,
+                    ),
+                );
+            }
+            return Ok(manifest);
+        }
+        let metadata = self.metadata.clone();
+        let owned_hash = file_hash.to_string();
+        let owned_priority = priority.map(|(value, auto)| (value.to_string(), auto));
+        let owned_comment = comment_rating.map(|(value, rating)| (value.to_string(), rating));
+        anyhow::ensure!(
+            tokio::task::spawn_blocking(move || metadata.update_active_local_share_metadata(
+                &owned_hash,
+                owned_priority
+                    .as_ref()
+                    .map(|(value, auto)| (value.as_str(), *auto)),
+                owned_comment
+                    .as_ref()
+                    .map(|(value, rating)| (value.as_str(), *rating)),
+            ))
+            .await??,
+            "shared file is not eligible under an active root"
+        );
+        let mut manifest = self
+            .load_servable_manifest_optional_unlocked(file_hash)
+            .await?
+            .with_context(|| format!("missing active local file {file_hash}"))?;
+        if let Some((value, auto)) = priority {
+            manifest.upload_priority = value.to_string();
+            manifest.auto_upload_priority = auto;
         }
         if let Some((comment, rating)) = comment_rating {
             manifest.comment = comment.to_string();
             manifest.rating = rating;
         }
-        self.store_manifest_unlocked(&manifest).await?;
-        self.upsert_verified_catalog_entry(&manifest).await;
+        self.refresh_complete_shared_catalog().await?;
         if priority.is_some() {
             let mut queue = self.upload_queue.lock().await;
             // Resolve an auto file's dynamic tier from its live queue depth

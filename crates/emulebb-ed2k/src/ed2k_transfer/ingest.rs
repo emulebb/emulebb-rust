@@ -6,18 +6,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use emulebb_metadata::{
-    MetadataImportedKnownFileEntry, NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp,
-    NativePath,
+    MetadataImportedKnownFileEntry, MetadataVerifiedLocalContent, NativeFileFingerprint,
+    NativeFileIdentity, NativeFileTimestamp, NativePath,
 };
 
 use crate::long_path::long_path;
 
 use super::hashset::build_md4_and_aich_hashsets_from_reader_with_progress;
-use super::manifest::{piece_count, rebuild_verified_ranges};
-use super::{
-    Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kTransferRuntime,
-    Ed2kTransferState, expected_piece_length, new_transfer_job,
-};
+use super::{ED2K_PART_SIZE, Ed2kLocalIngestSummary, Ed2kTransferRuntime};
 
 /// Hashing stage reported while a local payload is ingested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,14 +44,14 @@ pub struct LocalIngestProgressEvent {
 pub type LocalIngestProgressObserver = Arc<dyn Fn(LocalIngestProgressEvent) + Send + Sync>;
 
 impl Ed2kTransferRuntime {
-    /// Copy a local payload into the canonical ED2K transfer store and expose
-    /// it as a fully verified shared file.
+    /// Hash a local payload and persist its verified identity independently of
+    /// download jobs. Root membership controls when it is shared.
     pub async fn ingest_local_file(
         &self,
         source_path: &Path,
         display_name: &str,
     ) -> Result<Ed2kLocalIngestSummary> {
-        self.ingest_local_file_inner(source_path, display_name, None)
+        self.ingest_local_file_inner(source_path, display_name, None, None)
             .await
     }
 
@@ -65,7 +61,7 @@ impl Ed2kTransferRuntime {
         display_name: &str,
         observer: LocalIngestProgressObserver,
     ) -> Result<Ed2kLocalIngestSummary> {
-        self.ingest_local_file_inner(source_path, display_name, Some(observer))
+        self.ingest_local_file_inner(source_path, display_name, Some(observer), None)
             .await
     }
 
@@ -74,6 +70,7 @@ impl Ed2kTransferRuntime {
         source_path: &Path,
         display_name: &str,
         observer: Option<LocalIngestProgressObserver>,
+        expected_hash: Option<&str>,
     ) -> Result<Ed2kLocalIngestSummary> {
         let display_name = display_name.trim();
         if display_name.is_empty() {
@@ -193,160 +190,82 @@ impl Ed2kTransferRuntime {
         })
         .await
         .context("ED2K/AICH hashing task panicked")??;
-        let file_hash = hashsets.file_hash;
-        let job = new_transfer_job(
-            file_hash,
-            display_name.to_string(),
-            source_fingerprint.size_bytes,
-        );
-        let transfer_dir = self.transfer_dir(&job.file_hash);
-        // Seed the shared, already-complete file IN PLACE: it is served for
-        // upload directly from its original on-disk path. We deliberately do NOT
-        // copy it into the internal piece store (`transfer_dir/pieces.bin`),
-        // which would duplicate the whole (potentially hundreds-of-GB) library
-        // on disk, and the manifest records `source_path` so the upload-serving
-        // read path resolves to the original file and finished-file delivery
-        // skips it (delivery is download-only). The resume manifest lives in
-        // SQLite, so no per-hash transfer directory is created for an in-place
-        // share. AICH/MD4 are computed straight from the original file in the
-        // single read pass above.
-        let mut manifest = Ed2kResumeManifest::new(&job);
-        manifest.delivery_state = super::Ed2kDeliveryState::NotApplicable;
-        manifest.source_path = Some(source_path.clone());
-        manifest.source_fingerprint = Some(source_fingerprint);
-        manifest.completed = true;
-        // A share-in-place file belongs in the shared catalog, not the download
-        // queue. Persist that state in the initial transaction so callers do not
-        // need a second full manifest rewrite merely to hide its transfer row.
-        manifest.transfer_row_removed = true;
-        manifest.md4_hashset_acquired = true;
-        manifest.md4_hashset = hashsets.md4_hashset.iter().map(hex::encode).collect();
-        manifest.aich_hashset_acquired = true;
-        manifest.aich_root = Some(hex::encode(hashsets.aich_hashset.master_hash));
-        manifest.aich_hashset = hashsets
-            .aich_hashset
-            .part_hashes
-            .iter()
-            .map(hex::encode)
-            .collect();
-        manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
-            .map(|piece_index| Ed2kPieceState {
-                piece_index,
-                state: Ed2kTransferState::Verified,
-                bytes_written: expected_piece_length(
-                    manifest.file_size,
-                    manifest.piece_size,
-                    u64::from(piece_index),
-                ),
-                block_bitmap: None,
-                ich_corrupted: false,
-            })
-            .collect();
-        rebuild_verified_ranges(&mut manifest);
-        // Only the manifest write needs the manifest lock; held briefly (no hashing
-        // under it), so concurrent REST reads of `manifests()` are not starved.
-        let _guard = self.lock_manifest(&manifest.file_hash).await;
-        self.store_manifest_unlocked(&manifest).await?;
-        // WHY: this function has verified the whole payload. A generic
-        // manifest write can also represent a known.met name/size/time match,
-        // which must not become a trusted path-to-hash cache entry.
+        let file_hash = hashsets.file_hash.to_string();
+        if let Some(expected_hash) = expected_hash {
+            anyhow::ensure!(
+                file_hash == expected_hash,
+                "imported known file does not match verified local payload"
+            );
+        }
+        let aich_root = hex::encode(hashsets.aich_hashset.master_hash);
+        let content = MetadataVerifiedLocalContent {
+            file_hash: file_hash.clone(),
+            display_name: display_name.to_string(),
+            file_size: source_fingerprint.size_bytes,
+            part_size: ED2K_PART_SIZE,
+            md4_hashset: hashsets.md4_hashset.iter().map(hex::encode).collect(),
+            aich_root: aich_root.clone(),
+            aich_hashset: hashsets
+                .aich_hashset
+                .part_hashes
+                .iter()
+                .map(hex::encode)
+                .collect(),
+            path: source_path.clone(),
+            fingerprint: source_fingerprint.clone(),
+        };
         let metadata = self.metadata.clone();
-        let cache_path = source_path.clone();
-        let cache_hash = manifest.file_hash.clone();
-        let cache_fingerprint = manifest
-            .source_fingerprint
-            .clone()
-            .expect("whole-payload hash pass supplied a fingerprint");
+        tokio::task::spawn_blocking(move || metadata.upsert_verified_local_content(&content))
+            .await??;
+        let metadata = self.metadata.clone();
+        let media_path = source_path.clone();
+        let media_name = display_name.to_string();
+        let media_hash = file_hash.clone();
         tokio::task::spawn_blocking(move || {
-            metadata.upsert_local_file_instance(&cache_path, &cache_hash, &cache_fingerprint)
+            let media = super::media_metadata::extract_media_metadata(&media_path, &media_name);
+            metadata.update_transfer_media_metadata(
+                &media_hash,
+                &super::transfer_sql::media_to_metadata(
+                    &media,
+                    super::transfer_sql::MEDIA_METADATA_EXTRACTOR_VERSION,
+                ),
+            )
         })
         .await??;
-        self.upsert_verified_catalog_entry(&manifest).await;
-        drop(_guard);
 
         Ok(Ed2kLocalIngestSummary {
-            file_hash: manifest.file_hash,
-            display_name: manifest.display_name,
-            file_size: manifest.file_size,
-            md4_hashset_count: manifest.md4_hashset.len(),
-            aich_root: manifest.aich_root.unwrap_or_default(),
-            aich_hashset_count: manifest.aich_hashset.len(),
-            transfer_dir: transfer_dir.display().to_string(),
-            source_path: manifest
-                .source_path
-                .as_deref()
-                .map(NativePath::from)
-                .map(|path| path.display_path()),
+            file_hash,
+            display_name: display_name.to_string(),
+            file_size: source_fingerprint.size_bytes,
+            md4_hashset_count: hashsets.md4_hashset.len(),
+            aich_root,
+            aich_hashset_count: hashsets.aich_hashset.part_hashes.len(),
+            transfer_dir: String::new(),
+            source_path: Some(NativePath::from(source_path.as_path()).display_path()),
         })
     }
 
-    /// Promote a pathless stock eMule ``known.met`` row after a shared-directory
-    /// scan finds a unique file-name/size/mtime identity match.
+    /// Verify an imported stock `known.met` candidate against the full payload
+    /// before recording it as local content.
     pub async fn promote_imported_known_file(
         &self,
         entry: MetadataImportedKnownFileEntry,
         source_path: &Path,
-        source_fingerprint: Option<NativeFileFingerprint>,
+        _source_fingerprint: Option<NativeFileFingerprint>,
     ) -> Result<Ed2kLocalIngestSummary> {
-        if entry.display_name.trim().is_empty() {
-            anyhow::bail!("imported known file requires a non-empty canonical name");
-        }
-        let source_path = long_path(source_path);
-        let job = super::Ed2kTransferJob {
-            file_hash: entry.file_hash.clone(),
-            display_name: entry.display_name.clone(),
-            file_size: entry.file_size,
-            piece_size: super::ED2K_PART_SIZE,
-        };
-        let transfer_dir = self.transfer_dir(&job.file_hash);
-
-        let mut manifest = Ed2kResumeManifest::new(&job);
-        manifest.delivery_state = super::Ed2kDeliveryState::NotApplicable;
-        manifest.source_path = Some(source_path.clone());
-        manifest.source_fingerprint = source_fingerprint;
-        manifest.completed = true;
-        manifest.transfer_row_removed = true;
-        manifest.md4_hashset_acquired = true;
-        manifest.md4_hashset = entry.md4_hashset.clone();
-        manifest.aich_hashset_acquired = entry.aich_root.is_some();
-        manifest.aich_root = entry.aich_root.clone();
-        manifest.aich_hashset = entry.aich_hashset.clone();
-        manifest.upload_priority = entry.upload_priority.clone();
-        manifest.auto_upload_priority = entry.auto_upload_priority;
-        manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
-            .map(|piece_index| Ed2kPieceState {
-                piece_index,
-                state: Ed2kTransferState::Verified,
-                bytes_written: expected_piece_length(
-                    manifest.file_size,
-                    manifest.piece_size,
-                    u64::from(piece_index),
-                ),
-                block_bitmap: None,
-                ich_corrupted: false,
-            })
-            .collect();
-        rebuild_verified_ranges(&mut manifest);
-
-        let _guard = self.lock_manifest(&manifest.file_hash).await;
-        self.store_manifest_unlocked(&manifest).await?;
-        self.upsert_verified_catalog_entry_cached(&manifest).await;
-        drop(_guard);
-
-        Ok(Ed2kLocalIngestSummary {
-            file_hash: manifest.file_hash,
-            display_name: manifest.display_name,
-            file_size: manifest.file_size,
-            md4_hashset_count: manifest.md4_hashset.len(),
-            aich_root: manifest.aich_root.unwrap_or_default(),
-            aich_hashset_count: manifest.aich_hashset.len(),
-            transfer_dir: transfer_dir.display().to_string(),
-            source_path: manifest
-                .source_path
-                .as_deref()
-                .map(NativePath::from)
-                .map(|path| path.display_path()),
-        })
+        let summary = self
+            .ingest_local_file_inner(
+                source_path,
+                &entry.display_name,
+                None,
+                Some(&entry.file_hash),
+            )
+            .await?;
+        anyhow::ensure!(
+            summary.file_hash == entry.file_hash && summary.file_size == entry.file_size,
+            "imported known file does not match verified local payload"
+        );
+        Ok(summary)
     }
 }
 

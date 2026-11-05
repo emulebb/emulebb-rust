@@ -142,6 +142,9 @@ async fn shared_local_file_is_not_surfaced_by_network_search_after_core_restart(
 
     {
         let core = open_core(&metadata_path, &transfer_root);
+        core.add_shared_directory_root(&runtime_dir.display().to_string())
+            .await
+            .unwrap();
         core.share_local_file(LocalShareCreate {
             path: payload_path.display().to_string(),
             name: Some("Local.Searchable.Payload.bin".to_string()),

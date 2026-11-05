@@ -350,6 +350,7 @@ async fn verified_reader_cache_survives_repeated_parts_requests_for_slot_file() 
         .ingest_local_file(&source_path, "shared-upload-cache.bin")
         .await
         .unwrap();
+    crate::ed2k_transfer::test_support::admit_local_share(&runtime, &library, &source_path).await;
     let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
 
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 4662);

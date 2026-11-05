@@ -1041,6 +1041,7 @@ async fn ingest_local_file_marks_payload_complete_with_stock_aich_identity() {
         .ingest_local_file(&source_path, "ubuntu-linux-private-roundtrip-large.bin")
         .await
         .unwrap();
+    super::test_support::admit_local_share(&runtime, &source_dir, &source_path).await;
     assert_eq!(summary.file_size, 10_485_760);
     assert_eq!(summary.md4_hashset_count, 2);
     assert_eq!(summary.aich_hashset_count, 2);
@@ -1058,6 +1059,13 @@ async fn ingest_local_file_marks_payload_complete_with_stock_aich_identity() {
     );
     assert_eq!(manifest.md4_hashset.len(), 2);
     assert_eq!(manifest.aich_hashset.len(), 2);
+    assert!(
+        runtime
+            .metadata
+            .transfer_manifest_by_hash(&summary.file_hash)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
