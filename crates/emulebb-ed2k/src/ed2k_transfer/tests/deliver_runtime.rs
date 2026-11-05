@@ -1715,9 +1715,8 @@ async fn materialize_records_delivered_fingerprint_for_reload_reuse() {
         panic!("expected a fresh delivery");
     };
 
-    // The delivered download records its native fingerprint with source_path still
-    // None, so the shared-directory reload's delivered-reuse index picks it up
-    // and an unchanged delivered file is a cache hit rather than a re-hash.
+    // Delivery records the native fingerprint for promotion into the verified
+    // local instance cache, which makes the next root scan a cache hit.
     let manifest = runtime.manifest(&hash).await.unwrap();
     assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
     assert!(

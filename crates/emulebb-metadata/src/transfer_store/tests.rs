@@ -1162,7 +1162,6 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     manifest.transfer_row_removed = false;
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert_eq!(store.completed_transfer_catalog_entries().unwrap().len(), 1);
-    assert_eq!(store.completed_delivered_reuse_entries().unwrap().len(), 1);
     assert_eq!(store.completed_transfer_publish_entries().unwrap().len(), 1);
     assert_eq!(
         store
@@ -1271,12 +1270,6 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     assert!(
         store
             .completed_transfer_catalog_entries()
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        store
-            .completed_delivered_reuse_entries()
             .unwrap()
             .is_empty()
     );

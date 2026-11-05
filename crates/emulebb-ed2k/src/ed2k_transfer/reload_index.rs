@@ -55,41 +55,6 @@ impl Ed2kTransferRuntime {
         Ok(index)
     }
 
-    /// Build the delivered-download reuse index: a map from each completed
-    /// download's delivered file path (normalized to its long-path form, the
-    /// same form the directory walk produces) to its recorded identity
-    /// ([`Ed2kReloadIndexEntry`]: file hash and delivered fingerprint).
-    ///
-    /// A real download has no `share_in_place_sources` row, so when its delivered
-    /// file lands in a configured shared dir (the standard "Incoming is shared"
-    /// setup) a rescan would otherwise treat it as brand-new and re-read/re-hash
-    /// the whole payload just to reshare content it already hashed during
-    /// download. This index lets the reload recognize the delivered file by its
-    /// exact native identity and reuse the already-persisted hash instead --
-    /// the oracle `FindKnownFile(name, date, size)` cache hit
-    /// (SharedFileList.cpp:2138). It is consulted for reuse ONLY: unlike the
-    /// share-in-place index it never drives pruning, so a completed download
-    /// whose Incoming dir is not shared is never dropped from serving.
-    pub async fn delivered_reuse_index(&self) -> Result<HashMap<PathBuf, Ed2kReloadIndexEntry>> {
-        let metadata = self.metadata.clone();
-        let entries =
-            tokio::task::spawn_blocking(move || metadata.completed_delivered_reuse_entries())
-                .await
-                .map_err(anyhow::Error::from)??;
-        let mut index = HashMap::new();
-        for entry in entries {
-            let key = crate::long_path::long_path(&entry.delivered_path);
-            index.insert(
-                key,
-                Ed2kReloadIndexEntry {
-                    file_hash: entry.file_hash,
-                    source_fingerprint: entry.delivered_fingerprint,
-                },
-            );
-        }
-        Ok(index)
-    }
-
     /// Return pathless stock ``known.met`` rows whose exact stock identity
     /// matches one scanned file: file name, byte size, and whole-second mtime.
     pub async fn imported_known_file_identity_matches(
