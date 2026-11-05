@@ -131,9 +131,8 @@ impl Ed2kTransferRuntime {
     }
 
     /// Remove only the empty directory that can remain when startup crashes
-    /// after directory creation but before the first manifest commit, or one
-    /// containing only the retired pre-SQL `resume-manifest.json` artifact.
-    /// Any other non-empty directory, regular file, or symlink has no provable
+    /// after directory creation but before the first manifest commit.
+    /// Any non-empty directory, regular file, or symlink has no provable
     /// ownership without metadata and must never be adopted by a new download.
     pub(super) async fn prepare_new_download_directory(&self, file_hash: &str) -> Result<()> {
         let transfer_dir = self.transfer_dir(file_hash);
@@ -160,26 +159,11 @@ impl Ed2kTransferRuntime {
                 transfer_dir.display()
             )
         })?;
-        let first_entry = entries.next_entry().await?;
-        let second_entry = entries.next_entry().await?;
-        if let Some(entry) = first_entry {
-            let is_retired_manifest = second_entry.is_none()
-                && entry.file_name() == std::ffi::OsStr::new("resume-manifest.json")
-                && entry.file_type().await?.is_file();
-            anyhow::ensure!(
-                is_retired_manifest,
-                "refusing to create ED2K transfer {file_hash}: unmanaged directory {} is not empty",
-                transfer_dir.display()
-            );
-            tokio::fs::remove_file(entry.path())
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to remove retired ED2K resume manifest from {}",
-                        transfer_dir.display()
-                    )
-                })?;
-        }
+        anyhow::ensure!(
+            entries.next_entry().await?.is_none(),
+            "refusing to create ED2K transfer {file_hash}: unmanaged directory {} is not empty",
+            transfer_dir.display()
+        );
         tokio::fs::remove_dir(&transfer_dir)
             .await
             .with_context(|| {
