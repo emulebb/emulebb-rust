@@ -950,6 +950,9 @@ async fn admit_scanned_roots(
         tokio::task::spawn_blocking(move || metadata.replace_root_memberships(&root, &members))
             .await??;
     }
+    // WHY: A full scan is the authority for removed paths. Rebuild offers once
+    // after its memberships commit; per-hash refresh before this point reads
+    // stale membership and grows linearly with every removed file.
     core.ed2k_transfers
         .refresh_complete_shared_catalog()
         .await?;
@@ -1057,9 +1060,8 @@ struct ReloadHashTarget {
     file_size: u64,
     /// Native file fingerprint captured at planning time, when available.
     source_fingerprint: Option<NativeFileFingerprint>,
-    /// Existing hashes for the same source path. Once the current identity is
-    /// known, every different hash here is removed so a changed file does not
-    /// leave duplicate shares for the same source path.
+    /// Existing hashes for this path, used to exclude them from the count of
+    /// hashes pruned because their paths disappeared from the complete scan.
     stale_hashes: Vec<String>,
 }
 
@@ -1072,8 +1074,6 @@ struct ReusedReloadShare {
     source_path: PathBuf,
     /// Native file fingerprint in the reused source identity.
     source_fingerprint: Option<NativeFileFingerprint>,
-    /// Older duplicate hashes for the same source path, if any.
-    stale_hashes: Vec<String>,
 }
 
 struct ReloadPlan {
@@ -1083,9 +1083,6 @@ struct ReloadPlan {
     /// resolve their `Localshare`s for the reload result so an unchanged file
     /// still appears in the returned set.
     reused_shares: Vec<ReusedReloadShare>,
-    /// Persisted share-in-place hashes whose source path is no longer part of
-    /// the current filtered scan and must be removed from serving/publishing.
-    pruned_hashes: Vec<String>,
     /// Live reload counters for REST/WebUI progress.
     stats: ReloadPlanStats,
 }
@@ -1281,11 +1278,6 @@ async fn plan_incremental_reload_with_pruning(
                             file_hash: entry.file_hash.clone(),
                             source_path: path.clone(),
                             source_fingerprint: fingerprint.clone(),
-                            stale_hashes: entries
-                                .iter()
-                                .filter(|stale| stale.file_hash != entry.file_hash)
-                                .map(|stale| stale.file_hash.clone())
-                                .collect(),
                         });
                     } else {
                         stats.planned_hash_count += 1;
@@ -1357,7 +1349,6 @@ async fn plan_incremental_reload_with_pruning(
         ReloadPlan {
             to_hash,
             reused_shares,
-            pruned_hashes,
             stats,
         }
     })
@@ -1710,9 +1701,7 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
             reused.source_fingerprint.clone(),
         )
         .await;
-        forget_stale_shares(core, &reused.stale_hashes, &reused.file_hash).await;
     }
-    forget_stale_shares(core, &plan.pruned_hashes, "").await;
     for target in plan.to_hash {
         let source_path = target.path.clone();
         let share = core
@@ -1721,7 +1710,6 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         // Same HASH-1 registration for a freshly (re)hashed startup share.
         register_monitor_shared_hash(core, source_path, &share.hash, target.source_fingerprint)
             .await;
-        forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
         shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
     }
@@ -1877,7 +1865,6 @@ async fn bootstrap_initial_publish_catalog(
             reused_share.source_fingerprint.clone(),
         )
         .await;
-        forget_stale_shares(core, &reused_share.stale_hashes, &reused_share.file_hash).await;
     }
     hash_reload_targets(core, plan.to_hash).await;
     for file in cohort {
@@ -2084,9 +2071,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
             reused.source_fingerprint.clone(),
         )
         .await;
-        forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
     }
-    forget_stale_shares(&core, &plan.pruned_hashes, "").await;
 
     hash_reload_targets(&core, plan.to_hash).await;
     admit_scanned_roots(&core, root_files).await?;
@@ -2137,7 +2122,6 @@ async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
                 target.source_fingerprint.clone(),
             )
             .await;
-            forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
             record_hash_target_finished(core, &target, Some(&share.hash), None);
         }
         Err(error) => {
