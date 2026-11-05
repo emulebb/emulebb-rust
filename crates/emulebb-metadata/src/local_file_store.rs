@@ -33,6 +33,10 @@ pub struct MetadataVerifiedLocalContent {
     pub aich_hashset: Vec<String>,
     pub path: PathBuf,
     pub fingerprint: NativeFileFingerprint,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub comment: String,
+    pub rating: u8,
 }
 
 impl MetadataStore {
@@ -50,20 +54,18 @@ impl MetadataStore {
         }
         let conn = self.connection()?;
         let changed = conn.execute(
-            "UPDATE known_files SET
+            "UPDATE verified_local_content SET
                 upload_priority = coalesce(?2, upload_priority),
                 auto_upload_priority = coalesce(?3, auto_upload_priority),
                 comment = coalesce(?4, comment),
-                rating = coalesce(?5, rating),
-                updated_at_ms = ?6
-             WHERE ed2k_hash = ?1",
+                rating = coalesce(?5, rating)
+             WHERE known_file_id = (SELECT id FROM known_files WHERE ed2k_hash = ?1)",
             params![
                 hash,
                 priority.map(|(value, _)| value),
                 priority.map(|(_, auto)| i64::from(auto)),
                 comment_rating.map(|(value, _)| value),
                 comment_rating.map(|(_, rating)| i64::from(rating)),
-                unix_ms(),
             ],
         )?;
         Ok(changed != 0)
@@ -125,11 +127,11 @@ impl MetadataStore {
                   AND shared_directory_roots.shareable = 1
              )
              SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
-                    coalesce(known_files.part_count, 0),
-                    CASE WHEN known_files.aich_root IS NULL THEN NULL
-                         ELSE lower(hex(known_files.aich_root)) END,
-                    known_files.upload_priority, known_files.auto_upload_priority,
-                    known_files.comment, known_files.rating,
+                    verified_local_content.part_count,
+                    lower(hex(verified_local_content.aich_root)),
+                    verified_local_content.upload_priority,
+                    verified_local_content.auto_upload_priority,
+                    verified_local_content.comment, verified_local_content.rating,
                     known_files.all_time_uploaded_bytes,
                     known_files.all_time_upload_requests,
                     known_files.all_time_upload_accepts,
@@ -140,6 +142,7 @@ impl MetadataStore {
                     known_files.media_bitrate_kbps, known_files.media_codec,
                     known_files.media_extractor_version
              FROM eligible JOIN known_files ON known_files.id = eligible.known_file_id
+             JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
              WHERE eligible.path_rank = 1
              ORDER BY known_files.ed2k_hash LIMIT ?2",
         )?;
@@ -326,6 +329,24 @@ impl MetadataStore {
             "ED2K identity has conflicting file size"
         );
         tx.execute(
+            "INSERT INTO verified_local_content(
+                known_file_id, display_name, part_size, part_count, aich_root,
+                upload_priority, auto_upload_priority, comment, rating
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(known_file_id) DO NOTHING",
+            params![
+                known_file_id,
+                content.display_name,
+                part_size,
+                part_count,
+                aich_root,
+                content.upload_priority,
+                content.auto_upload_priority,
+                content.comment,
+                content.rating,
+            ],
+        )?;
+        tx.execute(
             "INSERT INTO known_file_origins(
                 known_file_id, origin, size_bytes, first_seen_ms, last_seen_ms
              ) VALUES (?1, 'local_share', ?2, ?3, ?3)
@@ -334,22 +355,22 @@ impl MetadataStore {
             params![known_file_id, size, now],
         )?;
         tx.execute(
-            "DELETE FROM ed2k_part_hashes WHERE known_file_id = ?1",
+            "DELETE FROM verified_local_md4_hashes WHERE known_file_id = ?1",
             params![known_file_id],
         )?;
         tx.execute(
-            "DELETE FROM aich_part_hashes WHERE known_file_id = ?1",
+            "DELETE FROM verified_local_aich_hashes WHERE known_file_id = ?1",
             params![known_file_id],
         )?;
         for (part_index, part_hash) in content.md4_hashset.iter().enumerate() {
             tx.execute(
-                "INSERT INTO ed2k_part_hashes(known_file_id, part_index, md4_hash) VALUES (?1, ?2, ?3)",
+                "INSERT INTO verified_local_md4_hashes(known_file_id, part_index, md4_hash) VALUES (?1, ?2, ?3)",
                 params![known_file_id, i64::try_from(part_index)?, decode_fixed_hex(part_hash, 16, "MD4 part hash")?],
             )?;
         }
         for (part_index, part_hash) in content.aich_hashset.iter().enumerate() {
             tx.execute(
-                "INSERT INTO aich_part_hashes(known_file_id, part_index, aich_hash) VALUES (?1, ?2, ?3)",
+                "INSERT INTO verified_local_aich_hashes(known_file_id, part_index, aich_hash) VALUES (?1, ?2, ?3)",
                 params![known_file_id, i64::try_from(part_index)?, decode_fixed_hex(part_hash, 20, "AICH part hash")?],
             )?;
         }
@@ -660,35 +681,36 @@ impl MetadataStore {
         };
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let (name, size, part_size, aich_root): (String, i64, Option<i64>, Option<String>) = conn
+        let (name, size, part_size, aich_root, priority, auto_priority, comment, rating):
+            (String, i64, i64, String, String, bool, String, u8) = conn
             .query_row(
-            "SELECT display_name, size_bytes, part_size,
-                        CASE WHEN aich_root IS NULL THEN NULL ELSE lower(hex(aich_root)) END
-                 FROM known_files WHERE ed2k_hash = ?1",
+            "SELECT verified_local_content.display_name, known_files.size_bytes,
+                    verified_local_content.part_size,
+                    lower(hex(verified_local_content.aich_root)),
+                    verified_local_content.upload_priority,
+                    verified_local_content.auto_upload_priority,
+                    verified_local_content.comment, verified_local_content.rating
+                 FROM known_files
+                 JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
+                 WHERE known_files.ed2k_hash = ?1",
             params![hash],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
         )?;
-        let Some(part_size) = part_size.filter(|size| *size > 0) else {
-            return Ok(None);
-        };
-        let Some(aich_root) = aich_root else {
-            return Ok(None);
-        };
         ensure!(
             size >= 0 && size as u64 == instance.file_size,
             "active local file size differs from known content"
         );
         let mut md4_stmt = conn.prepare(
-            "SELECT lower(hex(ed2k_part_hashes.md4_hash))
-             FROM ed2k_part_hashes JOIN known_files ON known_files.id = ed2k_part_hashes.known_file_id
+            "SELECT lower(hex(verified_local_md4_hashes.md4_hash))
+             FROM verified_local_md4_hashes JOIN known_files ON known_files.id = verified_local_md4_hashes.known_file_id
              WHERE known_files.ed2k_hash = ?1 ORDER BY part_index",
         )?;
         let md4_hashset = md4_stmt
             .query_map(params![hash], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut aich_stmt = conn.prepare(
-            "SELECT lower(hex(aich_part_hashes.aich_hash))
-             FROM aich_part_hashes JOIN known_files ON known_files.id = aich_part_hashes.known_file_id
+            "SELECT lower(hex(verified_local_aich_hashes.aich_hash))
+             FROM verified_local_aich_hashes JOIN known_files ON known_files.id = verified_local_aich_hashes.known_file_id
              WHERE known_files.ed2k_hash = ?1 ORDER BY part_index",
         )?;
         let aich_hashset = aich_stmt
@@ -704,6 +726,10 @@ impl MetadataStore {
             aich_hashset,
             path: instance.path,
             fingerprint: instance.verified_fingerprint,
+            upload_priority: priority,
+            auto_upload_priority: auto_priority,
+            comment,
+            rating,
         }))
     }
 }
@@ -840,6 +866,10 @@ mod tests {
             aich_hashset: vec!["3333333333333333333333333333333333333333".to_string()],
             path: first_path.clone(),
             fingerprint: fingerprint(41),
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
         };
         store.upsert_verified_local_content(&content).unwrap();
         content.path = second_path.clone();
@@ -851,8 +881,8 @@ mod tests {
             .query_row(
                 "SELECT known_files.display_name,
                 (SELECT count(*) FROM transfers),
-                (SELECT count(*) FROM ed2k_part_hashes),
-                (SELECT count(*) FROM aich_part_hashes),
+                (SELECT count(*) FROM verified_local_md4_hashes),
+                (SELECT count(*) FROM verified_local_aich_hashes),
                 (SELECT count(*) FROM local_file_instances)
              FROM known_files WHERE ed2k_hash = ?1",
                 params![decode_fixed_hex(&content.file_hash, 16, "ED2K hash").unwrap()],

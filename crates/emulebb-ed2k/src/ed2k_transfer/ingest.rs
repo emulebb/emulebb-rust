@@ -213,6 +213,10 @@ impl Ed2kTransferRuntime {
                 .collect(),
             path: source_path.clone(),
             fingerprint: source_fingerprint.clone(),
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
         };
         let metadata = self.metadata.clone();
         tokio::task::spawn_blocking(move || metadata.upsert_verified_local_content(&content))

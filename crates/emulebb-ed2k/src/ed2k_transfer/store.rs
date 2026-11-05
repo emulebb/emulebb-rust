@@ -286,16 +286,13 @@ impl Ed2kTransferRuntime {
         &self,
         file_hash: &str,
     ) -> Result<Option<Ed2kResumeManifest>> {
-        if let Some(manifest) = self.load_manifest_optional_unlocked(file_hash).await? {
-            return Ok(Some(manifest));
-        }
         let metadata = self.metadata.clone();
         let owned_hash = file_hash.to_string();
         let local =
             tokio::task::spawn_blocking(move || metadata.active_local_content_by_hash(&owned_hash))
                 .await
                 .context("ED2K local content load task panicked")??;
-        Ok(local.map(|content| {
+        let local_manifest = local.map(|content| {
             let file_hash = Ed2kHash::from_str(&content.file_hash)
                 .expect("SQLite decoded a validated ED2K hash");
             let display_name = content
@@ -315,6 +312,10 @@ impl Ed2kTransferRuntime {
             manifest.aich_hashset_acquired = true;
             manifest.aich_root = Some(content.aich_root);
             manifest.aich_hashset = content.aich_hashset;
+            manifest.upload_priority = content.upload_priority;
+            manifest.auto_upload_priority = content.auto_upload_priority;
+            manifest.comment = content.comment;
+            manifest.rating = content.rating;
             manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
                 .map(|piece_index| Ed2kPieceState {
                     piece_index,
@@ -330,7 +331,12 @@ impl Ed2kTransferRuntime {
                 .collect();
             rebuild_verified_ranges(&mut manifest);
             manifest
-        }))
+        });
+        if local_manifest.is_some() {
+            Ok(local_manifest)
+        } else {
+            self.load_manifest_optional_unlocked(file_hash).await
+        }
     }
 
     pub(super) async fn load_manifest_unlocked(

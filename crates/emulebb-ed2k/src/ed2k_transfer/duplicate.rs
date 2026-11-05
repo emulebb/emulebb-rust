@@ -449,6 +449,26 @@ mod tests {
             .unwrap();
         assert!(!replacement.completed);
         assert!(replacement.source_path.is_none());
+        let servable = runtime.servable_manifest(&shared.file_hash).await.unwrap();
+        assert!(servable.completed);
+        assert_eq!(
+            servable.source_path.as_deref(),
+            Some(crate::long_path::long_path(&shared_path).as_path())
+        );
+        assert_eq!(servable.display_name, "shared-redownload.bin");
+        runtime
+            .update_shared_file_metadata(
+                &shared.file_hash,
+                Some(("release", false)),
+                Some(("local copy", 4)),
+            )
+            .await
+            .unwrap();
+        let servable = runtime.servable_manifest(&shared.file_hash).await.unwrap();
+        assert_eq!(servable.upload_priority, "release");
+        assert_eq!(servable.comment, "local copy");
+        assert_eq!(servable.rating, 4);
+        assert!(!runtime.manifest(&shared.file_hash).await.unwrap().completed);
         let evidence = runtime.download_evidence(&shared.file_hash).await.unwrap();
         assert!(evidence.active_transfer.is_some());
         assert_eq!(evidence.current_local_files.len(), 1);
@@ -469,6 +489,18 @@ mod tests {
             .unwrap();
         assert!(restarted_evidence.active_transfer.is_some());
         assert_eq!(restarted_evidence.current_local_files.len(), 1);
+        let servable = restarted
+            .servable_manifest(&shared.file_hash)
+            .await
+            .unwrap();
+        assert!(servable.completed);
+        assert_eq!(servable.upload_priority, "release");
+        assert_eq!(servable.comment, "local copy");
+        assert_eq!(servable.rating, 4);
+        assert_eq!(
+            servable.source_path.as_deref(),
+            Some(crate::long_path::long_path(&shared_path).as_path())
+        );
         assert!(
             restarted
                 .shared_catalog()

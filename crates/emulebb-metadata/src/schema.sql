@@ -183,6 +183,35 @@ CREATE TABLE aich_part_hashes (
     UNIQUE(known_file_id, part_index)
 );
 
+-- Verified complete content is independent of a download for the same hash.
+-- A new download must not erase the local file's hashsets or presentation.
+CREATE TABLE verified_local_content (
+    known_file_id INTEGER PRIMARY KEY REFERENCES known_files(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    part_size INTEGER NOT NULL CHECK(part_size > 0),
+    part_count INTEGER NOT NULL CHECK(part_count >= 0),
+    aich_root BLOB NOT NULL CHECK(length(aich_root) = 20),
+    upload_priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
+    auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
+    comment TEXT NOT NULL DEFAULT '',
+    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5)
+);
+
+CREATE TABLE verified_local_md4_hashes (
+    known_file_id INTEGER NOT NULL REFERENCES verified_local_content(known_file_id) ON DELETE CASCADE,
+    part_index INTEGER NOT NULL CHECK(part_index >= 0),
+    md4_hash BLOB NOT NULL CHECK(length(md4_hash) = 16),
+    PRIMARY KEY(known_file_id, part_index)
+);
+
+CREATE TABLE verified_local_aich_hashes (
+    known_file_id INTEGER NOT NULL REFERENCES verified_local_content(known_file_id) ON DELETE CASCADE,
+    part_index INTEGER NOT NULL CHECK(part_index >= 0),
+    aich_hash BLOB NOT NULL CHECK(length(aich_hash) = 20),
+    PRIMARY KEY(known_file_id, part_index)
+);
+
 CREATE TABLE imported_known_files (
     id INTEGER PRIMARY KEY,
     ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
