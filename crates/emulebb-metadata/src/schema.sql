@@ -64,9 +64,6 @@ CREATE TABLE known_files (
     content_type TEXT NOT NULL DEFAULT '',
     part_size INTEGER CHECK(part_size IS NULL OR part_size > 0),
     part_count INTEGER CHECK(part_count IS NULL OR part_count >= 0),
-    completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
-    md4_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(md4_hashset_acquired IN (0, 1)),
-    aich_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(aich_hashset_acquired IN (0, 1)),
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
     upload_priority TEXT NOT NULL DEFAULT 'normal'
         CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
@@ -169,18 +166,18 @@ END;
 
 CREATE TABLE ed2k_part_hashes (
     id INTEGER PRIMARY KEY,
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index >= 0),
     md4_hash BLOB NOT NULL CHECK(length(md4_hash) = 16),
-    UNIQUE(known_file_id, part_index)
+    UNIQUE(transfer_id, part_index)
 );
 
 CREATE TABLE aich_part_hashes (
     id INTEGER PRIMARY KEY,
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index >= 0),
     aich_hash BLOB NOT NULL CHECK(length(aich_hash) = 20),
-    UNIQUE(known_file_id, part_index)
+    UNIQUE(transfer_id, part_index)
 );
 
 -- Verified complete content is independent of a download for the same hash.
@@ -250,7 +247,7 @@ CREATE TABLE imported_known_file_aich_hashes (
 
 CREATE TABLE verified_ranges (
     id INTEGER PRIMARY KEY,
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
     end_offset INTEGER NOT NULL,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
@@ -334,6 +331,9 @@ CREATE TABLE shared_file_memberships (
 CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
+    md4_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(md4_hashset_acquired IN (0, 1)),
+    aich_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(aich_hashset_acquired IN (0, 1)),
     visible_state TEXT NOT NULL CHECK(visible_state IN ('completed', 'completing', 'downloading', 'queued')),
     -- Set after all parts verify and cleared only after the authoritative
     -- whole-file ED2K MD4 completion rehash succeeds or demotes bad parts.

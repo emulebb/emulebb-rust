@@ -58,7 +58,7 @@ impl super::MetadataStore {
         let previous_completion = tx
             .query_row(
                 r#"
-                SELECT known_files.completed, transfers.final_rehash_pending,
+                SELECT transfers.completed, transfers.final_rehash_pending,
                        transfers.completed_at_ms
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
@@ -87,16 +87,11 @@ impl super::MetadataStore {
         let completion_transition = records_completion && !previous_records_completion;
         let previous_completed_at_ms =
             previous_completion.and_then(|(_, _, completed_at_ms)| completed_at_ms);
-        let completion_timestamp_repair =
-            records_completion && previous_records_completion && previous_completed_at_ms.is_none();
-        let completion_timestamp_update = completion_transition || completion_timestamp_repair;
         let completed_at_ms = if completion_transition {
             Some(
                 now.max(previous_completed_at_ms.unwrap_or(0))
                     .max(previous_history_completed_at_ms.unwrap_or(0)),
             )
-        } else if completion_timestamp_repair {
-            Some(previous_history_completed_at_ms.unwrap_or(now))
         } else {
             previous_completed_at_ms
         };
@@ -114,20 +109,16 @@ impl super::MetadataStore {
             r#"
             INSERT INTO known_files(
                 ed2k_hash, size_bytes, display_name,
-                part_size, part_count, completed, md4_hashset_acquired,
-                aich_hashset_acquired, aich_root, upload_priority,
+                part_size, part_count, aich_root, upload_priority,
                 auto_upload_priority, comment, rating,
                 first_seen_ms, last_seen_ms, updated_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?11)
             ON CONFLICT(ed2k_hash) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
                 display_name = excluded.display_name,
                 part_size = excluded.part_size,
                 part_count = excluded.part_count,
-                completed = excluded.completed,
-                md4_hashset_acquired = excluded.md4_hashset_acquired,
-                aich_hashset_acquired = excluded.aich_hashset_acquired,
                 aich_root = excluded.aich_root,
                 upload_priority = excluded.upload_priority,
                 auto_upload_priority = excluded.auto_upload_priority,
@@ -143,9 +134,6 @@ impl super::MetadataStore {
             manifest.display_name,
             manifest.piece_size as i64,
             manifest.pieces.len() as i64,
-            bool_to_i64(manifest.completed),
-            bool_to_i64(manifest.md4_hashset_acquired),
-            bool_to_i64(manifest.aich_hashset_acquired),
             aich_root,
             manifest.upload_priority,
             bool_to_i64(manifest.auto_upload_priority),
@@ -176,13 +164,17 @@ impl super::MetadataStore {
         tx.prepare_cached(
             r#"
             INSERT INTO transfers(
-                known_file_id, visible_state, final_rehash_pending, control_state, download_priority,
+                known_file_id, completed, md4_hashset_acquired, aich_hashset_acquired,
+                visible_state, final_rehash_pending, control_state, download_priority,
                 category_id, payload_directory, delivery_state, delivery_ownership,
                 delivered_path_id, source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
-            VALUES (?1, ?2, ?12, ?3, 'normal', ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
+            VALUES (?1, ?16, ?17, ?18, ?2, ?12, ?3, 'normal', ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
             ON CONFLICT(known_file_id) DO UPDATE SET
+                completed = excluded.completed,
+                md4_hashset_acquired = excluded.md4_hashset_acquired,
+                aich_hashset_acquired = excluded.aich_hashset_acquired,
                 visible_state = excluded.visible_state,
                 final_rehash_pending = excluded.final_rehash_pending,
                 control_state = excluded.control_state,
@@ -219,13 +211,16 @@ impl super::MetadataStore {
             payload_fingerprint,
             bool_to_i64(manifest.final_rehash_pending),
             delivery_state_to_sql(manifest.delivery_state),
-            completion_timestamp_update,
+            completion_transition,
             delivery_ownership_to_sql(manifest.delivery_ownership),
+            bool_to_i64(manifest.completed),
+            bool_to_i64(manifest.md4_hashset_acquired),
+            bool_to_i64(manifest.aich_hashset_acquired),
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
             .query_row(params![known_file_id], |row| row.get(0))?;
-        replace_transfer_children(&tx, known_file_id, transfer_id, manifest, now)?;
+        replace_transfer_children(&tx, transfer_id, manifest, now)?;
         record_completed_download(
             &tx,
             manifest,
@@ -264,11 +259,11 @@ impl super::MetadataStore {
         let row = conn
             .prepare_cached(
                 r#"
-                SELECT known_files.id, transfers.id,
+                SELECT transfers.id,
                        lower(hex(known_files.ed2k_hash)), known_files.display_name,
                        known_files.size_bytes, coalesce(known_files.part_size, 0),
-                       known_files.completed, known_files.md4_hashset_acquired,
-                       known_files.aich_hashset_acquired,
+                       transfers.completed, transfers.md4_hashset_acquired,
+                       transfers.aich_hashset_acquired,
                        CASE
                            WHEN known_files.aich_root IS NULL THEN NULL
                            ELSE lower(hex(known_files.aich_root))
@@ -292,29 +287,28 @@ impl super::MetadataStore {
             )?
             .query_row(params![hash, bool_to_i64(deletion_requested)], |row| {
                 Ok(TransferRow {
-                    known_file_id: row.get(0)?,
-                    transfer_id: row.get(1)?,
-                    file_hash: row.get(2)?,
-                    display_name: row.get(3)?,
-                    file_size: row.get::<_, i64>(4)? as u64,
-                    piece_size: row.get::<_, i64>(5)? as u64,
-                    completed: row.get::<_, i64>(6)? != 0,
-                    md4_hashset_acquired: row.get::<_, i64>(7)? != 0,
-                    aich_hashset_acquired: row.get::<_, i64>(8)? != 0,
-                    aich_root: row.get(9)?,
-                    upload_priority: row.get(10)?,
-                    auto_upload_priority: row.get::<_, i64>(11)? != 0,
-                    comment: row.get(12)?,
-                    rating: row.get::<_, i64>(13)? as u8,
-                    category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
-                    control_state: row.get(15)?,
-                    transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
-                    delivered_path: optional_path_from_row(row, 17, 18)?,
-                    source_fingerprint: optional_fingerprint_from_row(row, 19)?,
-                    payload_fingerprint: optional_fingerprint_from_row(row, 20)?,
-                    final_rehash_pending: row.get::<_, i64>(21)? != 0,
-                    delivery_state: row.get(22)?,
-                    delivery_ownership: row.get(23)?,
+                    transfer_id: row.get(0)?,
+                    file_hash: row.get(1)?,
+                    display_name: row.get(2)?,
+                    file_size: row.get::<_, i64>(3)? as u64,
+                    piece_size: row.get::<_, i64>(4)? as u64,
+                    completed: row.get::<_, i64>(5)? != 0,
+                    md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
+                    aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
+                    aich_root: row.get(8)?,
+                    upload_priority: row.get(9)?,
+                    auto_upload_priority: row.get::<_, i64>(10)? != 0,
+                    comment: row.get(11)?,
+                    rating: row.get::<_, i64>(12)? as u8,
+                    category_id: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u32,
+                    control_state: row.get(14)?,
+                    transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
+                    delivered_path: optional_path_from_row(row, 16, 17)?,
+                    source_fingerprint: optional_fingerprint_from_row(row, 18)?,
+                    payload_fingerprint: optional_fingerprint_from_row(row, 19)?,
+                    final_rehash_pending: row.get::<_, i64>(20)? != 0,
+                    delivery_state: row.get(21)?,
+                    delivery_ownership: row.get(22)?,
                 })
             })
             .optional()?;
@@ -479,12 +473,12 @@ impl super::MetadataStore {
         self.transfer_manifests_filtered("AND transfers.removed_at_ms IS NULL")
     }
 
-    /// Persisted INCOMPLETE download manifests only (`known_files.completed = 0`) —
+    /// Persisted INCOMPLETE download manifests only (`transfers.completed = 0`) —
     /// the startup-resume set. Orders of magnitude smaller than the full (mostly
     /// completed) library, so this can be loaded on startup without hauling every
     /// row like `transfer_manifests`.
     pub fn incomplete_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
-        self.transfer_manifests_filtered("AND known_files.completed = 0")
+        self.transfer_manifests_filtered("AND transfers.completed = 0")
     }
 
     /// Every persisted download whose canonical payload is owned by the
@@ -501,11 +495,11 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let sql = format!(
             r#"
-            SELECT known_files.id, transfers.id,
+            SELECT transfers.id,
                    lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes, coalesce(known_files.part_size, 0),
-                   known_files.completed, known_files.md4_hashset_acquired,
-                   known_files.aich_hashset_acquired,
+                   transfers.completed, transfers.md4_hashset_acquired,
+                   transfers.aich_hashset_acquired,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
@@ -528,29 +522,28 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
             Ok(TransferRow {
-                known_file_id: row.get(0)?,
-                transfer_id: row.get(1)?,
-                file_hash: row.get(2)?,
-                display_name: row.get(3)?,
-                file_size: row.get::<_, i64>(4)? as u64,
-                piece_size: row.get::<_, i64>(5)? as u64,
-                completed: row.get::<_, i64>(6)? != 0,
-                md4_hashset_acquired: row.get::<_, i64>(7)? != 0,
-                aich_hashset_acquired: row.get::<_, i64>(8)? != 0,
-                aich_root: row.get(9)?,
-                upload_priority: row.get(10)?,
-                auto_upload_priority: row.get::<_, i64>(11)? != 0,
-                comment: row.get(12)?,
-                rating: row.get::<_, i64>(13)? as u8,
-                category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
-                control_state: row.get(15)?,
-                transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
-                delivered_path: optional_path_from_row(row, 17, 18)?,
-                source_fingerprint: optional_fingerprint_from_row(row, 19)?,
-                payload_fingerprint: optional_fingerprint_from_row(row, 20)?,
-                final_rehash_pending: row.get::<_, i64>(21)? != 0,
-                delivery_state: row.get(22)?,
-                delivery_ownership: row.get(23)?,
+                transfer_id: row.get(0)?,
+                file_hash: row.get(1)?,
+                display_name: row.get(2)?,
+                file_size: row.get::<_, i64>(3)? as u64,
+                piece_size: row.get::<_, i64>(4)? as u64,
+                completed: row.get::<_, i64>(5)? != 0,
+                md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
+                aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
+                aich_root: row.get(8)?,
+                upload_priority: row.get(9)?,
+                auto_upload_priority: row.get::<_, i64>(10)? != 0,
+                comment: row.get(11)?,
+                rating: row.get::<_, i64>(12)? as u8,
+                category_id: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u32,
+                control_state: row.get(14)?,
+                transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
+                delivered_path: optional_path_from_row(row, 16, 17)?,
+                source_fingerprint: optional_fingerprint_from_row(row, 18)?,
+                payload_fingerprint: optional_fingerprint_from_row(row, 19)?,
+                final_rehash_pending: row.get::<_, i64>(20)? != 0,
+                delivery_state: row.get(21)?,
+                delivery_ownership: row.get(22)?,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -606,7 +599,7 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths media_paths ON media_paths.id = transfers.delivered_path_id
-            WHERE known_files.completed != 0
+            WHERE transfers.completed != 0
               AND transfers.delete_requested_at_ms IS NULL
               AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
             ORDER BY known_files.ed2k_hash
@@ -943,7 +936,7 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE (
-                    known_files.completed != 0
+                    transfers.completed != 0
                     OR EXISTS (
                         SELECT 1 FROM transfer_pieces
                         WHERE transfer_pieces.transfer_id = transfers.id
@@ -1000,7 +993,7 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE (
-                    known_files.completed != 0
+                    transfers.completed != 0
                     OR EXISTS (
                         SELECT 1 FROM transfer_pieces
                         WHERE transfer_pieces.transfer_id = transfers.id
@@ -1053,7 +1046,7 @@ impl super::MetadataStore {
             SELECT lower(hex(known_files.ed2k_hash))
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE known_files.completed != 0
+            WHERE transfers.completed != 0
               AND {delivery_predicate}
               AND transfers.removed_at_ms IS NULL
               AND transfers.delete_requested_at_ms IS NULL
@@ -1106,7 +1099,7 @@ impl super::MetadataStore {
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
-                  AND known_files.completed != 0
+                  AND transfers.completed != 0
                   AND transfers.final_rehash_pending = 0
                   AND transfers.delivery_state = 'pending'
                   AND transfers.delivered_path_id IS NULL
@@ -1215,7 +1208,7 @@ impl super::MetadataStore {
                 FROM transfers
                 JOIN known_files ON known_files.id = transfers.known_file_id
                 WHERE known_files.ed2k_hash = ?1
-                  AND known_files.completed != 0
+                  AND transfers.completed != 0
                   AND transfers.final_rehash_pending = 0
                   AND transfers.delivery_state = 'pending'
                   AND transfers.delivered_path_id IS NULL
@@ -1261,7 +1254,7 @@ impl super::MetadataStore {
                 FROM transfers
                 JOIN known_files ON known_files.id = transfers.known_file_id
                 WHERE known_files.ed2k_hash = ?1
-                  AND known_files.completed != 0
+                  AND transfers.completed != 0
                   AND transfers.final_rehash_pending = 0
                   AND transfers.delivery_state = 'pending'
                   AND transfers.delivered_path_id IS NULL
@@ -1624,7 +1617,7 @@ impl super::MetadataStore {
                 JOIN known_files ON known_files.id = transfers.known_file_id
                 JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
-                  AND known_files.completed = 1
+                  AND transfers.completed = 1
                   AND transfers.delivery_state = 'delivered'
                   AND transfers.removed_at_ms IS NULL
                   AND transfers.delete_requested_at_ms IS NULL
@@ -2046,12 +2039,6 @@ fn delete_transfer_and_unreferenced_identity(
         "DELETE FROM transfers WHERE known_file_id = ?1",
         params![known_file_id],
     )?;
-    for table in ["ed2k_part_hashes", "aich_part_hashes", "verified_ranges"] {
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE known_file_id = ?1"),
-            params![known_file_id],
-        )?;
-    }
     tx.execute(
         "DELETE FROM known_file_origins WHERE known_file_id = ?1 AND origin = 'transfer'",
         params![known_file_id],
@@ -2068,7 +2055,6 @@ fn delete_transfer_and_unreferenced_identity(
 
 #[derive(Debug)]
 struct TransferRow {
-    known_file_id: i64,
     transfer_id: i64,
     file_hash: String,
     display_name: String,
@@ -2095,19 +2081,18 @@ struct TransferRow {
 
 fn replace_transfer_children(
     tx: &rusqlite::Transaction<'_>,
-    known_file_id: i64,
     transfer_id: i64,
     manifest: &MetadataTransferManifest,
     now: i64,
 ) -> Result<()> {
     tx.prepare_cached("DELETE FROM transfer_pieces WHERE transfer_id = ?1")?
         .execute(params![transfer_id])?;
-    tx.prepare_cached("DELETE FROM ed2k_part_hashes WHERE known_file_id = ?1")?
-        .execute(params![known_file_id])?;
-    tx.prepare_cached("DELETE FROM aich_part_hashes WHERE known_file_id = ?1")?
-        .execute(params![known_file_id])?;
-    tx.prepare_cached("DELETE FROM verified_ranges WHERE known_file_id = ?1")?
-        .execute(params![known_file_id])?;
+    tx.prepare_cached("DELETE FROM ed2k_part_hashes WHERE transfer_id = ?1")?
+        .execute(params![transfer_id])?;
+    tx.prepare_cached("DELETE FROM aich_part_hashes WHERE transfer_id = ?1")?
+        .execute(params![transfer_id])?;
+    tx.prepare_cached("DELETE FROM verified_ranges WHERE transfer_id = ?1")?
+        .execute(params![transfer_id])?;
     tx.prepare_cached("DELETE FROM transfer_sources WHERE transfer_id = ?1")?
         .execute(params![transfer_id])?;
     tx.prepare_cached("DELETE FROM transfer_file_name_observations WHERE transfer_id = ?1")?
@@ -2144,13 +2129,13 @@ fn replace_transfer_children(
     drop(insert_piece);
     let mut insert_md4 = tx.prepare_cached(
         r#"
-        INSERT INTO ed2k_part_hashes(known_file_id, part_index, md4_hash)
+        INSERT INTO ed2k_part_hashes(transfer_id, part_index, md4_hash)
         VALUES (?1, ?2, ?3)
         "#,
     )?;
     for (index, hash) in manifest.md4_hashset.iter().enumerate() {
         insert_md4.execute(params![
-            known_file_id,
+            transfer_id,
             index as i64,
             decode_fixed_hex(hash, 16, "MD4 part hash")?,
         ])?;
@@ -2158,13 +2143,13 @@ fn replace_transfer_children(
     drop(insert_md4);
     let mut insert_aich = tx.prepare_cached(
         r#"
-        INSERT INTO aich_part_hashes(known_file_id, part_index, aich_hash)
+        INSERT INTO aich_part_hashes(transfer_id, part_index, aich_hash)
         VALUES (?1, ?2, ?3)
         "#,
     )?;
     for (index, hash) in manifest.aich_hashset.iter().enumerate() {
         insert_aich.execute(params![
-            known_file_id,
+            transfer_id,
             index as i64,
             decode_fixed_hex(hash, 20, "AICH part hash")?,
         ])?;
@@ -2172,13 +2157,13 @@ fn replace_transfer_children(
     drop(insert_aich);
     let mut insert_range = tx.prepare_cached(
         r#"
-        INSERT INTO verified_ranges(known_file_id, start_offset, end_offset, created_at_ms)
+        INSERT INTO verified_ranges(transfer_id, start_offset, end_offset, created_at_ms)
         VALUES (?1, ?2, ?3, ?4)
         "#,
     )?;
     for range in &manifest.verified_ranges {
         insert_range.execute(params![
-            known_file_id,
+            transfer_id,
             range.start as i64,
             range.end as i64,
             now
@@ -2252,17 +2237,17 @@ fn manifest_from_row(
         md4_hashset_acquired: row.md4_hashset_acquired,
         md4_hashset: read_hex_list(
             conn,
-            "SELECT lower(hex(md4_hash)) FROM ed2k_part_hashes WHERE known_file_id = ?1 ORDER BY part_index",
-            row.known_file_id,
+            "SELECT lower(hex(md4_hash)) FROM ed2k_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",
+            row.transfer_id,
         )?,
         aich_hashset_acquired: row.aich_hashset_acquired,
         aich_root: row.aich_root,
         aich_hashset: read_hex_list(
             conn,
-            "SELECT lower(hex(aich_hash)) FROM aich_part_hashes WHERE known_file_id = ?1 ORDER BY part_index",
-            row.known_file_id,
+            "SELECT lower(hex(aich_hash)) FROM aich_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",
+            row.transfer_id,
         )?,
-        verified_ranges: read_ranges(conn, row.known_file_id)?,
+        verified_ranges: read_ranges(conn, row.transfer_id)?,
         pieces: read_pieces(conn, row.transfer_id)?,
         sources: read_sources(conn, row.transfer_id)?,
         upload_priority: row.upload_priority,
@@ -2326,12 +2311,12 @@ fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<Metada
         r#"
         SELECT count(*),
                coalesce(sum(CASE
-                   WHEN known_files.completed = 0
+                   WHEN transfers.completed = 0
                         AND transfers.control_state IS NULL
                         AND transfers.visible_state IN ('completing', 'downloading', 'queued')
                    THEN 1 ELSE 0 END), 0),
                coalesce(sum(CASE
-                   WHEN known_files.completed != 0 THEN 1 ELSE 0 END), 0)
+                   WHEN transfers.completed != 0 THEN 1 ELSE 0 END), 0)
         FROM transfers
         JOIN known_files ON known_files.id = transfers.known_file_id
         WHERE transfers.removed_at_ms IS NULL
@@ -2383,17 +2368,17 @@ fn read_pieces(
 
 fn read_ranges(
     conn: &rusqlite::Connection,
-    known_file_id: i64,
+    transfer_id: i64,
 ) -> Result<Vec<MetadataTransferRange>> {
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT start_offset, end_offset
         FROM verified_ranges
-        WHERE known_file_id = ?1
+        WHERE transfer_id = ?1
         ORDER BY start_offset, end_offset
         "#,
     )?;
-    let rows = stmt.query_map(params![known_file_id], |row| {
+    let rows = stmt.query_map(params![transfer_id], |row| {
         Ok(MetadataTransferRange {
             start: row.get::<_, i64>(0)? as u64,
             end: row.get::<_, i64>(1)? as u64,

@@ -358,9 +358,9 @@ impl MetadataStore {
         tx.execute(
             "INSERT INTO known_files(
                 ed2k_hash, size_bytes, display_name, part_size, part_count,
-                completed, md4_hashset_acquired, aich_hashset_acquired, aich_root,
+                aich_root,
                 first_seen_ms, last_seen_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 1, ?6, ?7, ?7, ?7)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7)
              ON CONFLICT(ed2k_hash) DO UPDATE SET
                 last_seen_ms = excluded.last_seen_ms,
                 updated_at_ms = excluded.updated_at_ms",
