@@ -1892,14 +1892,6 @@ mod tests {
     }
 
     #[test]
-    fn requested_part_still_counts_as_needed() {
-        let manifest =
-            manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Requested]);
-        let peer_bitmap = [false, true];
-        assert!(peer_holds_needed_part(&manifest, &peer_bitmap));
-    }
-
-    #[test]
     fn shorter_peer_bitmap_treats_absent_slots_as_unavailable() {
         let manifest =
             manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);

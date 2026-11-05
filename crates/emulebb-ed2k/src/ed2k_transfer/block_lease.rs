@@ -2,7 +2,7 @@
 //!
 //! The resume manifest records durable bytes only. Network ownership lives in
 //! this registry so a crash, cancellation, or failed teardown cannot strand a
-//! persisted `Requested` state. Multiple peers may reserve distinct eMule
+//! durable network claim. Multiple peers may reserve distinct eMule
 //! blocks from the same part.
 
 use std::{

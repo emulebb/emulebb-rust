@@ -388,49 +388,6 @@ impl Ed2kTransferRuntime {
         self.payload_handles.lock().unwrap().remove(file_hash);
     }
 
-    /// Mark a specific missing piece as requested.
-    #[cfg(test)]
-    pub async fn mark_piece_requested(&self, file_hash: &str, piece_index: u32) -> Result<bool> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let piece = manifest
-            .pieces
-            .iter_mut()
-            .find(|piece| piece.piece_index == piece_index)
-            .with_context(|| format!("missing piece index {piece_index} in {file_hash}"))?;
-        if piece.state == Ed2kTransferState::Missing {
-            piece.state = Ed2kTransferState::Requested;
-            self.store_manifest_unlocked(&manifest).await?;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    /// Requeue legacy persisted transient piece states after a downloader restart.
-    ///
-    /// Requested pieces are session-local claims. If the process exits before
-    /// the downloader releases them, the next process instance must move them
-    /// back to `Missing` so resume can continue from the already persisted byte
-    /// prefix instead of deadlocking on a stale in-flight marker.
-    pub async fn reclaim_stale_piece_requests(&self, file_hash: &str) -> Result<bool> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let mut changed = false;
-        for piece in &mut manifest.pieces {
-            if matches!(
-                piece.state,
-                Ed2kTransferState::Requested | Ed2kTransferState::Written
-            ) {
-                piece.state = Ed2kTransferState::Missing;
-                changed = true;
-            }
-        }
-        if changed {
-            self.store_manifest_unlocked(&manifest).await?;
-        }
-        Ok(changed)
-    }
-
     /// Re-verify every on-disk part of a transfer against the MD4 hashset and
     /// rewrite the piece states + verified ranges + completed flag accordingly
     /// (oracle `CPartFile::HashSinglePart` over the whole file, the forced re-hash

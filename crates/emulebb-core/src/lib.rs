@@ -1219,13 +1219,6 @@ impl EmulebbCore {
         if cancel.is_cancelled() {
             return Ok(None);
         }
-        // Network reservations are process-local block leases. Normalize
-        // manifests written by older builds before any completion or source
-        // decision so a crash cannot leave a durable `Requested`/`Written`
-        // marker that suppresses resume.
-        self.ed2k_transfers
-            .reclaim_stale_piece_requests(&transfer.hash)
-            .await?;
         // A crash may leave every part verified with the durable completion
         // barrier set. Finish that authoritative whole-file check before any
         // network prerequisites so restart cannot bypass or unnecessarily
