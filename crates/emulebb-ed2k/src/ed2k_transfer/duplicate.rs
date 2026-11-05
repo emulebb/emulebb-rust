@@ -7,6 +7,7 @@ use super::{Ed2kResumeManifest, Ed2kTransferJob, Ed2kTransferRuntime};
 
 pub(super) struct PresentSharedSource {
     pub(super) path: PathBuf,
+    pub(super) metadata_path: PathBuf,
     pub(super) fingerprint: NativeFileFingerprint,
 }
 
@@ -27,6 +28,7 @@ pub(super) fn first_present_source(
         {
             return Some(PresentSharedSource {
                 path,
+                metadata_path: shared_file.source_path,
                 fingerprint: expected_fingerprint,
             });
         }
@@ -246,9 +248,14 @@ impl Ed2kTransferRuntime {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_string();
         tokio::task::spawn_blocking(move || {
-            Ok(first_present_source(
-                metadata.current_shared_files_by_hash(&file_hash)?,
-            ))
+            let source = first_present_source(metadata.current_shared_files_by_hash(&file_hash)?);
+            if let Some(source) = source
+                && metadata
+                    .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
+            {
+                return Ok(Some(source));
+            }
+            Ok(None)
         })
         .await
         .context("ED2K shared-source evidence query task panicked")?

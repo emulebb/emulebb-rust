@@ -55,6 +55,12 @@ impl MetadataStore {
             conn: Arc::new(Mutex::new(conn)),
         };
         store.ensure_schema()?;
+        store.connection()?.execute_batch(
+            "CREATE TEMP TABLE session_verified_local_paths (
+                path_id INTEGER PRIMARY KEY,
+                verified_fingerprint BLOB NOT NULL
+            )",
+        )?;
         Ok(store)
     }
 

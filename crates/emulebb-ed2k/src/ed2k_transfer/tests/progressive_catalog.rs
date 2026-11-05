@@ -6,7 +6,8 @@ use emulebb_metadata::{MetadataSharedDirectoryRoot, MetadataStore, MetadataVerif
 async fn progressive_catalog_requires_explicit_initial_hydration() {
     let root = unique_test_dir("progressive-catalog");
     std::fs::create_dir_all(&root).unwrap();
-    let mut metadata = MetadataStore::in_memory().unwrap();
+    let database_path = root.join("metadata.sqlite");
+    let mut metadata = MetadataStore::open(&database_path).unwrap();
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
@@ -77,6 +78,8 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, vec![9; sequence as usize]).unwrap();
     }
+    drop(metadata);
+    let metadata = MetadataStore::open(&database_path).unwrap();
 
     let runtime = Ed2kTransferRuntime::load_or_create_with_metadata_and_config_catalog_mode(
         &root,
@@ -87,6 +90,7 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
     .unwrap();
 
     assert_eq!(runtime.shared_catalog_count().await, 0);
+    assert!(runtime.share_entries().await.unwrap().is_empty());
     assert!(
         runtime
             .servable_manifest(&format!("{:032x}", 1))
@@ -102,17 +106,9 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
             .as_deref(),
         Some(crate::long_path::long_path(&copy_path).as_path())
     );
-    let publish = runtime.publish_entries().await.unwrap();
-    assert_eq!(publish.len(), 2);
-    assert!(
-        publish
-            .iter()
-            .all(|entry| entry.file_hash != format!("{:032x}", 1))
-    );
-    assert_eq!(
-        runtime.try_publish_entries().await.unwrap().unwrap(),
-        publish
-    );
+    let visible = runtime.share_entries().await.unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].display_name, "catalog-2-copy.bin");
     assert_eq!(
         runtime
             .hydrate_initial_shared_catalog_page(1)
@@ -123,6 +119,26 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
     assert_eq!(runtime.shared_catalog_count().await, 0);
     assert_eq!(runtime.hydrate_shared_catalog().await.unwrap(), 2);
     assert_eq!(runtime.shared_catalog_count().await, 2);
+    let page = runtime
+        .query_share_entries(emulebb_metadata::MetadataSharedFileQuery {
+            limit: 10,
+            count_total: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.entries.len(), 2);
+    let (first, total, has_more) = runtime.share_entries_after(None, 1).await.unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(total, 2);
+    assert!(has_more);
+    let publish = runtime.publish_entries().await.unwrap();
+    assert_eq!(publish.len(), 2);
+    assert_eq!(
+        runtime.try_publish_entries().await.unwrap().unwrap(),
+        publish
+    );
     let catalog = runtime.shared_catalog();
     let guard = catalog.read().await;
     assert!(
@@ -139,5 +155,6 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
     );
     drop(guard);
     assert_eq!(runtime.hydrate_shared_catalog().await.unwrap(), 0);
+    drop(runtime);
     std::fs::remove_dir_all(root).ok();
 }

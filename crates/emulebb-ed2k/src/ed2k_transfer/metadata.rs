@@ -51,6 +51,9 @@ fn merge_publish_entries(
         ) else {
             continue;
         };
+        if !metadata.mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)? {
+            continue;
+        }
         let entry = MetadataTransferPublishEntry {
             file_hash: share.file_hash,
             display_name: source
@@ -143,19 +146,20 @@ impl Ed2kTransferRuntime {
         limit: usize,
     ) -> Result<(Vec<MetadataLocalShareEntry>, usize)> {
         let metadata = self.metadata.clone();
-        let entries = tokio::task::spawn_blocking(move || {
+        let (entries, total) = tokio::task::spawn_blocking(move || {
             let entries = metadata.active_local_share_entries()?;
-            Ok::<_, anyhow::Error>(
+            let total = entries.len();
+            Ok::<_, anyhow::Error>((
                 entries
                     .into_iter()
                     .skip(offset)
                     .take(limit)
                     .collect::<Vec<_>>(),
-            )
+                total,
+            ))
         })
         .await
         .map_err(anyhow::Error::from)??;
-        let total = self.shared_catalog.read().await.completed_verified_len();
         Ok((entries, total))
     }
 
@@ -246,9 +250,9 @@ impl Ed2kTransferRuntime {
     ) -> Result<(Vec<MetadataLocalShareEntry>, usize, bool)> {
         let metadata = self.metadata.clone();
         let after_hash = after_hash.map(str::to_owned);
-        let (entries, has_more) = tokio::task::spawn_blocking(move || {
+        let (entries, total, has_more) = tokio::task::spawn_blocking(move || {
             let entries = metadata
-                .active_local_catalog_page(after_hash.as_deref(), limit.saturating_add(1))?;
+                .verified_local_catalog_page(after_hash.as_deref(), limit.saturating_add(1))?;
             let has_more = entries.len() > limit;
             let entries = entries
                 .into_iter()
@@ -259,11 +263,10 @@ impl Ed2kTransferRuntime {
                         .with_context(|| "active local share disappeared during page read")
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok::<_, anyhow::Error>((entries, has_more))
+            Ok::<_, anyhow::Error>((entries, metadata.verified_local_share_count()?, has_more))
         })
         .await
         .map_err(anyhow::Error::from)??;
-        let total = self.shared_catalog.read().await.completed_verified_len();
         Ok((entries, total, has_more))
     }
 

@@ -279,6 +279,14 @@ pub(super) fn completed_catalog_page_from_metadata_store(
                 }
                 continue;
             };
+            if !metadata
+                .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
+            {
+                if let Some(download) = download_fallback {
+                    entries.push(download);
+                }
+                continue;
+            }
             if let Some(name) = source.path.file_name() {
                 entry.display_name = name.to_string_lossy().into_owned();
             }
