@@ -425,12 +425,29 @@ impl MetadataStore {
         &mut self,
         roots: &[MetadataSharedDirectoryRoot],
     ) -> Result<()> {
+        self.replace_shared_directory_roots_by_origin(roots, "explicit")
+    }
+
+    /// Replace mandatory Incoming and category roots independently of the
+    /// operator's explicit root list.
+    pub fn replace_implicit_shared_directory_roots(
+        &mut self,
+        roots: &[MetadataSharedDirectoryRoot],
+    ) -> Result<()> {
+        self.replace_shared_directory_roots_by_origin(roots, "implicit")
+    }
+
+    fn replace_shared_directory_roots_by_origin(
+        &mut self,
+        roots: &[MetadataSharedDirectoryRoot],
+        origin: &str,
+    ) -> Result<()> {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         tx.execute(
-            "UPDATE shared_directory_roots SET deleted_at_ms = ?1 WHERE deleted_at_ms IS NULL",
-            params![now],
+            "DELETE FROM shared_directory_root_origins WHERE origin = ?1",
+            params![origin],
         )?;
         for root in roots {
             let path_id = upsert_local_path(&tx, Path::new(&root.path))?;
@@ -441,12 +458,7 @@ impl MetadataStore {
                     enabled, created_at_ms, deleted_at_ms
                 )
                 VALUES (?1, ?2, ?3, ?4, 1, ?5, NULL)
-                ON CONFLICT(path_id) DO UPDATE SET
-                    monitor_owned = excluded.monitor_owned,
-                    shareable = excluded.shareable,
-                    accessible = excluded.accessible,
-                    enabled = 1,
-                    deleted_at_ms = NULL
+                ON CONFLICT(path_id) DO NOTHING
                 "#,
                 params![
                     path_id,
@@ -456,7 +468,34 @@ impl MetadataStore {
                     now,
                 ],
             )?;
+            tx.execute(
+                "INSERT INTO shared_directory_root_origins(
+                    root_id, origin, monitor_owned, shareable, accessible
+                 ) VALUES (
+                    (SELECT id FROM shared_directory_roots WHERE path_id = ?1),
+                    ?2, ?3, ?4, ?5
+                 ) ON CONFLICT(root_id, origin) DO UPDATE SET
+                    monitor_owned = excluded.monitor_owned,
+                    shareable = excluded.shareable,
+                    accessible = excluded.accessible",
+                params![
+                    path_id,
+                    origin,
+                    bool_to_i64(root.monitor_owned),
+                    bool_to_i64(root.shareable),
+                    bool_to_i64(root.accessible),
+                ],
+            )?;
         }
+        tx.execute(
+            "UPDATE shared_directory_roots SET
+                monitor_owned = coalesce((SELECT max(monitor_owned) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
+                shareable = coalesce((SELECT max(shareable) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
+                accessible = coalesce((SELECT max(shareable * accessible) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
+                enabled = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN 1 ELSE 0 END,
+                deleted_at_ms = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN NULL ELSE ?1 END",
+            params![now],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -466,13 +505,15 @@ impl MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT local_paths.display_path,
-                   shared_directory_roots.monitor_owned,
-                   shared_directory_roots.shareable,
-                   shared_directory_roots.accessible
+                   shared_directory_root_origins.monitor_owned,
+                   shared_directory_root_origins.shareable,
+                   shared_directory_root_origins.accessible
             FROM shared_directory_roots
             JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
+            JOIN shared_directory_root_origins ON shared_directory_root_origins.root_id = shared_directory_roots.id
             WHERE shared_directory_roots.enabled = 1
               AND shared_directory_roots.deleted_at_ms IS NULL
+              AND shared_directory_root_origins.origin = 'explicit'
             ORDER BY shared_directory_roots.id
             "#,
         )?;
@@ -962,6 +1003,66 @@ mod tests {
         let roots = store.shared_directory_roots().unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].path, "/tmp/beta");
+    }
+
+    #[test]
+    fn explicit_and_implicit_roots_keep_independent_ownership() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let path = "/tmp/overlapping-root".to_string();
+        let explicit = MetadataSharedDirectoryRoot {
+            path: path.clone(),
+            monitor_owned: false,
+            shareable: false,
+            accessible: true,
+        };
+        let implicit = MetadataSharedDirectoryRoot {
+            path,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        };
+        store
+            .replace_shared_directory_roots(std::slice::from_ref(&explicit))
+            .unwrap();
+        store
+            .replace_implicit_shared_directory_roots(&[implicit])
+            .unwrap();
+        assert_eq!(store.shared_directory_roots().unwrap(), vec![explicit]);
+        let active: (i64, i64) = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT shareable, accessible FROM shared_directory_roots",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(active, (1, 1));
+
+        store.replace_shared_directory_roots(&[]).unwrap();
+        assert!(store.shared_directory_roots().unwrap().is_empty());
+        let active: (i64, Option<i64>) = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT enabled, deleted_at_ms FROM shared_directory_roots",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(active, (1, None));
+        store.replace_implicit_shared_directory_roots(&[]).unwrap();
+        let retired: (i64, Option<i64>) = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT enabled, deleted_at_ms FROM shared_directory_roots",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retired.0, 0);
+        assert!(retired.1.is_some());
     }
 
     #[test]

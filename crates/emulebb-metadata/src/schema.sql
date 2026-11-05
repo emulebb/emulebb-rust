@@ -298,6 +298,17 @@ CREATE TABLE shared_directory_roots (
     UNIQUE(path_id)
 );
 
+-- A physical directory can be both user-selected and a mandatory Incoming or
+-- category root. Replacing explicit roots must not withdraw implicit membership.
+CREATE TABLE shared_directory_root_origins (
+    root_id INTEGER NOT NULL REFERENCES shared_directory_roots(id) ON DELETE CASCADE,
+    origin TEXT NOT NULL CHECK(origin IN ('explicit', 'implicit')),
+    monitor_owned INTEGER NOT NULL CHECK(monitor_owned IN (0, 1)),
+    shareable INTEGER NOT NULL CHECK(shareable IN (0, 1)),
+    accessible INTEGER NOT NULL CHECK(accessible IN (0, 1)),
+    PRIMARY KEY(root_id, origin)
+);
+
 CREATE TABLE shared_file_exclusions (
     path_id INTEGER PRIMARY KEY REFERENCES local_paths(id) ON DELETE CASCADE,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)

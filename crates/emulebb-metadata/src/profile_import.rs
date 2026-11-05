@@ -76,7 +76,33 @@ impl MetadataStore {
                     now,
                 ],
             )?;
+            tx.execute(
+                "INSERT INTO shared_directory_root_origins(
+                    root_id, origin, monitor_owned, shareable, accessible
+                 ) VALUES (
+                    (SELECT id FROM shared_directory_roots WHERE path_id = ?1),
+                    'explicit', ?2, ?3, ?4
+                 ) ON CONFLICT(root_id, origin) DO UPDATE SET
+                    monitor_owned = excluded.monitor_owned,
+                    shareable = excluded.shareable,
+                    accessible = excluded.accessible",
+                params![
+                    path_id,
+                    bool_to_i64(root.monitor_owned),
+                    bool_to_i64(root.shareable),
+                    bool_to_i64(root.accessible),
+                ],
+            )?;
         }
+
+        tx.execute(
+            "UPDATE shared_directory_roots SET
+                monitor_owned = coalesce((SELECT max(monitor_owned) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
+                shareable = coalesce((SELECT max(shareable) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
+                accessible = coalesce((SELECT max(shareable * accessible) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0)
+             WHERE id IN (SELECT root_id FROM shared_directory_root_origins WHERE origin = 'explicit')",
+            [],
+        )?;
 
         tx.commit()?;
         Ok(MetadataProfileImportSummary {
