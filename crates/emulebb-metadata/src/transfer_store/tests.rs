@@ -166,6 +166,20 @@ fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
 }
 
 #[test]
+fn verified_share_manifest_populates_transfer_independent_path_cache() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = source_backed_manifest();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let path = manifest.source_path.as_ref().unwrap();
+    let cached = store.local_file_instance(path).unwrap().unwrap();
+    assert_eq!(cached.file_hash, manifest.file_hash);
+    assert_eq!(
+        cached.verified_fingerprint,
+        manifest.source_fingerprint.unwrap()
+    );
+}
+
+#[test]
 fn owned_delivery_requires_exact_size_fingerprint_authority() {
     let store = MetadataStore::in_memory().unwrap();
     let mut manifest = completed_pending_download_manifest();
