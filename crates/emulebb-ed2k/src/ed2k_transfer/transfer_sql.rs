@@ -16,8 +16,15 @@ use super::{
 
 pub(super) const MEDIA_METADATA_EXTRACTOR_VERSION: u32 = 1;
 
-pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTransferManifest {
-    MetadataTransferManifest {
+pub(super) fn manifest_to_metadata(
+    manifest: &Ed2kResumeManifest,
+) -> Result<MetadataTransferManifest> {
+    anyhow::ensure!(
+        manifest.source_path.is_none()
+            && manifest.delivery_state != Ed2kDeliveryState::NotApplicable,
+        "local library view cannot be persisted as a download transfer"
+    );
+    Ok(MetadataTransferManifest {
         file_hash: manifest.file_hash.clone(),
         display_name: manifest.display_name.clone(),
         display_name_pinned: manifest.display_name_pinned,
@@ -75,7 +82,7 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
         control_state: manifest.control_state.clone(),
         transfer_row_removed: manifest.transfer_row_removed,
         delivery_state: match manifest.delivery_state {
-            Ed2kDeliveryState::NotApplicable => MetadataTransferDeliveryState::NotApplicable,
+            Ed2kDeliveryState::NotApplicable => unreachable!(),
             Ed2kDeliveryState::Pending => MetadataTransferDeliveryState::Pending,
             Ed2kDeliveryState::Delivered => MetadataTransferDeliveryState::Delivered,
         },
@@ -85,10 +92,9 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
             Ed2kDeliveryOwnership::Unowned => MetadataTransferDeliveryOwnership::Unowned,
         },
         delivered_path: manifest.delivered_path.clone(),
-        source_path: manifest.source_path.clone(),
         source_fingerprint: manifest.source_fingerprint.clone(),
         payload_fingerprint: manifest.payload_fingerprint.clone(),
-    }
+    })
 }
 
 /// SQL form of one runtime piece state, shared by the full manifest upsert and
@@ -187,7 +193,6 @@ pub(super) fn manifest_from_metadata(
         control_state: manifest.control_state,
         transfer_row_removed: manifest.transfer_row_removed,
         delivery_state: match manifest.delivery_state {
-            MetadataTransferDeliveryState::NotApplicable => Ed2kDeliveryState::NotApplicable,
             MetadataTransferDeliveryState::Pending => Ed2kDeliveryState::Pending,
             MetadataTransferDeliveryState::Delivered => Ed2kDeliveryState::Delivered,
         },
@@ -197,7 +202,7 @@ pub(super) fn manifest_from_metadata(
             MetadataTransferDeliveryOwnership::Unowned => Ed2kDeliveryOwnership::Unowned,
         },
         delivered_path: manifest.delivered_path,
-        source_path: manifest.source_path,
+        source_path: None,
         source_fingerprint: manifest.source_fingerprint,
         payload_fingerprint: manifest.payload_fingerprint,
     })
@@ -343,7 +348,6 @@ mod tests {
             delivery_state: MetadataTransferDeliveryState::Pending,
             delivery_ownership: MetadataTransferDeliveryOwnership::None,
             delivered_path: None,
-            source_path: None,
             source_fingerprint: None,
             payload_fingerprint: None,
         }

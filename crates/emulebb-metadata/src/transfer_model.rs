@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataTransferDeliveryState {
-    NotApplicable,
     Pending,
     Delivered,
 }
@@ -96,17 +95,10 @@ pub struct MetadataTransferManifest {
     /// name, or `None` until the transfer is delivered. Persisted on the
     /// `transfers` row to make finished-file delivery idempotent across restarts.
     pub delivered_path: Option<PathBuf>,
-    /// Original on-disk path of a shared, already-complete file seeded IN PLACE
-    /// (added via a shared directory, never downloaded). `Some` marks a
-    /// share-in-place transfer: its payload is read directly from this path for
-    /// upload serving, it is never copied into the internal piece store, and it
-    /// is never delivered to the incoming dir. `None` for a real download.
-    pub source_path: Option<PathBuf>,
-    /// Native file identity, size, and nanosecond timestamps captured at ingest
-    /// or delivery. `None` forces a conservative re-hash on reload.
+    /// Native file identity, size, and timestamps captured at delivery.
     pub source_fingerprint: Option<NativeFileFingerprint>,
     /// Native identity baseline for the canonical internal payload after a
-    /// successful whole-file ED2K verification. Share-in-place rows keep `None`.
+    /// successful whole-file ED2K verification.
     pub payload_fingerprint: Option<NativeFileFingerprint>,
 }
 
@@ -184,14 +176,6 @@ pub struct MetadataTransferPublishEntry {
     pub last_upload_request_ms: i64,
     pub comment: String,
     pub rating: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataShareInPlaceReloadEntry {
-    pub file_hash: String,
-    pub file_size: u64,
-    pub source_path: PathBuf,
-    pub source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 /// One pathless stock eMule ``known.met`` row imported into a Rust profile.

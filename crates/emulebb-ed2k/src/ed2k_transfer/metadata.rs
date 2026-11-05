@@ -1,10 +1,6 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
-use std::{
-    collections::BTreeMap,
-    net::Ipv4Addr,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, net::Ipv4Addr, path::PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
@@ -260,84 +256,6 @@ impl Ed2kTransferRuntime {
         Ok((entries, total, has_more))
     }
 
-    /// Relocate a share-in-place source after a filesystem rename without
-    /// re-reading its payload or rewriting its hashset children.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the old/new path and source identity are one relocation operation"
-    )]
-    pub async fn relocate_shared_source(
-        &self,
-        file_hash: &str,
-        old_source_path: &Path,
-        new_source_path: &Path,
-        file_size: u64,
-        source_fingerprint: Option<NativeFileFingerprint>,
-        display_name: &str,
-        content_type: &str,
-    ) -> Result<bool> {
-        let parsed_hash: Ed2kHash = file_hash.parse()?;
-        let file_hash = parsed_hash.to_string();
-        let old_source_path = long_path(old_source_path);
-        let new_source_path = long_path(new_source_path);
-        let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
-        let _guard = self.lock_manifest(&file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
-        let relocated_canonical_source =
-            manifest.source_path.as_deref() == Some(old_source_path.as_path());
-        let metadata = self.metadata.clone();
-        let file_hash_owned = file_hash.clone();
-        let persisted_new_source_path = new_source_path.clone();
-        let persisted_source_fingerprint = source_fingerprint.clone();
-        let display_name_owned = display_name.to_owned();
-        let persisted_display_name = display_name_owned.clone();
-        let content_type = content_type.to_owned();
-        let changed = tokio::task::spawn_blocking(move || {
-            metadata.relocate_shared_file_source(
-                &file_hash_owned,
-                &old_source_path,
-                &new_source_path,
-                file_size,
-                source_fingerprint.as_ref(),
-                &persisted_display_name,
-                &content_type,
-            )
-        })
-        .await
-        .map_err(anyhow::Error::from)??;
-        if !changed {
-            return Ok(false);
-        }
-
-        if !relocated_canonical_source {
-            return Ok(true);
-        }
-
-        manifest.display_name = display_name_owned.clone();
-        manifest.source_path = Some(persisted_new_source_path);
-        manifest.source_fingerprint = persisted_source_fingerprint;
-        self.mark_manifest_persisted_unlocked(&manifest).await;
-        self.invalidate_payload_handle(&file_hash);
-        if manifest.source_fingerprint.is_none() {
-            self.remove_verified_catalog_entry(&file_hash).await;
-            return Ok(true);
-        }
-        let mut display_name_changed = false;
-        self.shared_catalog
-            .write()
-            .await
-            .update_by_hash(&parsed_hash, |entry| {
-                if entry.display_name != display_name_owned {
-                    entry.display_name = display_name_owned;
-                    display_name_changed = true;
-                }
-            });
-        if display_name_changed {
-            self.note_shared_catalog_entries_changed();
-        }
-        Ok(true)
-    }
-
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
         let _lifecycle_guard = self.lock_lifecycle(&job.file_hash).await;
@@ -355,9 +273,7 @@ impl Ed2kTransferRuntime {
             job.file_hash
         );
         let _guard = self.lock_manifest(&job.file_hash).await;
-        // The store creates a payload directory only when it creates a new
-        // download manifest. An existing share-in-place manifest needs no
-        // directory when its hidden transfer row is restored.
+        // A download manifest owns its internal piece directory.
         self.load_manifest_or_rebuild_unlocked(job).await
     }
 

@@ -22,7 +22,7 @@ fn remove_store_files(path: &std::path::Path) {
     fs::remove_file(path.with_extension("sqlite-shm")).ok();
 }
 
-fn source_backed_manifest() -> MetadataTransferManifest {
+fn completed_download_manifest() -> MetadataTransferManifest {
     MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Concurrent.Sample.bin".to_string(),
@@ -48,20 +48,18 @@ fn source_backed_manifest() -> MetadataTransferManifest {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
-        delivery_state: MetadataTransferDeliveryState::NotApplicable,
+        delivery_state: MetadataTransferDeliveryState::Pending,
         delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
-        source_path: Some("/library/Concurrent.Sample.bin".into()),
-        source_fingerprint: Some(fingerprint(16, 90)),
+        source_fingerprint: None,
         payload_fingerprint: None,
     }
 }
 
 fn completed_pending_download_manifest() -> MetadataTransferManifest {
-    let mut manifest = source_backed_manifest();
+    let mut manifest = completed_download_manifest();
     manifest.display_name = "Delivery.Attempt.bin".to_string();
     manifest.delivery_state = MetadataTransferDeliveryState::Pending;
-    manifest.source_path = None;
     manifest.source_fingerprint = None;
     manifest.payload_fingerprint = Some(fingerprint(manifest.file_size, 91));
     manifest
@@ -92,10 +90,14 @@ fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
 #[test]
 fn metadata_manifest_alone_cannot_claim_verified_local_identity() {
     let store = MetadataStore::in_memory().unwrap();
-    let manifest = source_backed_manifest();
+    let manifest = completed_download_manifest();
     store.upsert_transfer_manifest(&manifest).unwrap();
-    let path = manifest.source_path.as_ref().unwrap();
-    assert!(store.local_file_instance(path).unwrap().is_none());
+    assert!(
+        store
+            .current_shared_files_by_hash(&manifest.file_hash)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -136,7 +138,7 @@ fn transfer_manifest_waits_for_existing_writer_before_reading_snapshot() {
         )
         .unwrap();
 
-    let manifest = source_backed_manifest();
+    let manifest = completed_download_manifest();
     let contender_write = std::thread::spawn(move || contender.upsert_transfer_manifest(&manifest));
     std::thread::sleep(Duration::from_millis(100));
     assert!(!contender_write.is_finished());
@@ -151,234 +153,20 @@ fn transfer_manifest_waits_for_existing_writer_before_reading_snapshot() {
 #[test]
 fn transfer_manifest_roundtrips_sql_tables() {
     let store = MetadataStore::in_memory().unwrap();
-    store
-        .upsert_category(&crate::MetadataCategory {
-            id: 2,
-            name: "Samples".to_string(),
-            path: None,
-            comment: String::new(),
-            sort_order: 1,
-            color: None,
-        })
-        .unwrap();
-    let mut manifest = MetadataTransferManifest {
-        file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        display_name: "Sample.Transfer.bin".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
-        file_size: 1024,
-        piece_size: 1024,
-        completed: true,
-        final_rehash_pending: false,
-        md4_hashset_acquired: true,
-        md4_hashset: Vec::new(),
-        aich_hashset_acquired: true,
-        aich_root: Some("1111111111111111111111111111111111111111".to_string()),
-        aich_hashset: vec!["2222222222222222222222222222222222222222".to_string()],
-        verified_ranges: vec![MetadataTransferRange {
-            start: 0,
-            end: 1024,
-        }],
-        pieces: vec![MetadataTransferPiece {
-            piece_index: 0,
-            state: "Verified".to_string(),
-            bytes_written: 1024,
-            block_bitmap: Some("ab".to_string()),
-            ich_corrupted: true,
-        }],
-        sources: vec![MetadataTransferSource {
-            ip: "192.0.2.10".to_string(),
-            tcp_port: 4662,
-            user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
-            connect_options: Some(0x07),
-            file_comment: "useful source".to_string(),
-            file_rating: 4,
-        }],
-        upload_priority: "high".to_string(),
-        auto_upload_priority: true,
-        comment: "synthetic comment".to_string(),
-        rating: 4,
-        category_id: 2,
-        control_state: Some("paused".to_string()),
-        transfer_row_removed: false,
-        delivery_state: MetadataTransferDeliveryState::NotApplicable,
-        delivery_ownership: MetadataTransferDeliveryOwnership::None,
-        delivered_path: None,
-        source_path: Some("/library/Sample.Transfer.bin".into()),
-        source_fingerprint: Some(fingerprint(1024, 0)),
-        payload_fingerprint: None,
-    };
-
-    let mut invalid = manifest.clone();
-    invalid.delivery_state = MetadataTransferDeliveryState::Delivered;
-    assert!(store.upsert_transfer_manifest(&invalid).is_err());
-    invalid.delivery_state = MetadataTransferDeliveryState::Pending;
-    assert!(store.upsert_transfer_manifest(&invalid).is_err());
-    invalid.delivery_state = MetadataTransferDeliveryState::NotApplicable;
-    invalid.source_path = None;
-    assert!(store.upsert_transfer_manifest(&invalid).is_err());
-    invalid.source_path = manifest.source_path.clone();
-    invalid.payload_fingerprint = Some(fingerprint(1024, 1));
-    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    let mut manifest = completed_pending_download_manifest();
+    manifest.display_name = "Sample.Transfer.bin".to_string();
+    manifest.aich_root = Some("1111111111111111111111111111111111111111".to_string());
+    manifest.aich_hashset_acquired = true;
+    manifest.aich_hashset = vec!["2222222222222222222222222222222222222222".to_string()];
+    manifest.pieces = vec![MetadataTransferPiece {
+        piece_index: 0,
+        state: "Verified".to_string(),
+        bytes_written: manifest.file_size,
+        block_bitmap: None,
+        ich_corrupted: false,
+    }];
 
     store.upsert_transfer_manifest(&manifest).unwrap();
-    assert!(store.managed_download_transfer_hashes().unwrap().is_empty());
-    assert!(
-        store
-            .managed_download_transfer_manifests()
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        !store
-            .managed_download_transfer_exists(&manifest.file_hash)
-            .unwrap()
-    );
-    assert_eq!(
-        store.active_transfer_manifests().unwrap(),
-        vec![manifest.clone()]
-    );
-    manifest.transfer_row_removed = true;
-    store.upsert_transfer_manifest(&manifest).unwrap();
-    assert!(store.active_transfer_manifests().unwrap().is_empty());
-    manifest.transfer_row_removed = false;
-    store.upsert_transfer_manifest(&manifest).unwrap();
-    let restored = store
-        .transfer_manifest_by_hash("00112233445566778899aabbccddeeff")
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(restored, manifest);
-    assert!(
-        store
-            .completed_transfer_catalog_entries()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        store.share_in_place_reload_entries().unwrap(),
-        vec![MetadataShareInPlaceReloadEntry {
-            file_hash: manifest.file_hash.clone(),
-            file_size: manifest.file_size,
-            source_path: manifest.source_path.clone().unwrap(),
-            source_fingerprint: manifest.source_fingerprint.clone(),
-        }]
-    );
-    assert_eq!(
-        store.transfer_counts().unwrap(),
-        MetadataTransferCounts {
-            active: 0,
-            completed: 1,
-            total: 1,
-        }
-    );
-    assert_eq!(
-        store.completed_transfer_publish_entries().unwrap(),
-        vec![MetadataTransferPublishEntry {
-            file_hash: manifest.file_hash.clone(),
-            display_name: manifest.display_name.clone(),
-            file_size: manifest.file_size,
-            aich_root: manifest.aich_root.clone(),
-            upload_priority: manifest.upload_priority.clone(),
-            auto_upload_priority: manifest.auto_upload_priority,
-            session_uploaded_bytes: 0,
-            session_request_count: 0,
-            session_accept_count: 0,
-            all_time_uploaded_bytes: 0,
-            all_time_upload_requests: 0,
-            all_time_upload_accepts: 0,
-            last_upload_request_ms: 0,
-            comment: manifest.comment.clone(),
-            rating: manifest.rating,
-        }]
-    );
-    let media = MetadataTransferMediaMetadata {
-        artist: "Artist".to_string(),
-        album: "Album".to_string(),
-        title: "Title".to_string(),
-        length_seconds: 123,
-        bitrate_kbps: 320,
-        codec: "MP3".to_string(),
-        extractor_version: 1,
-    };
-    assert!(
-        store
-            .update_transfer_media_metadata(&manifest.file_hash, &media)
-            .unwrap()
-    );
-    assert_eq!(
-        store.transfer_media_metadata(&manifest.file_hash).unwrap(),
-        Some(media.clone())
-    );
-    assert!(
-        store
-            .completed_transfer_catalog_entries()
-            .unwrap()
-            .is_empty()
-    );
-    let old_source_path = manifest.source_path.clone().unwrap();
-    let new_source_path = "/library/renamed/Renamed.Sample.bin";
-    let renamed_fingerprint = fingerprint(manifest.file_size, 123);
-    assert!(
-        store
-            .relocate_shared_file_source(
-                &manifest.file_hash,
-                &old_source_path,
-                Path::new(new_source_path),
-                manifest.file_size,
-                Some(&renamed_fingerprint),
-                "Renamed.Sample.bin",
-                "document",
-            )
-            .unwrap()
-    );
-    manifest.source_path = Some(new_source_path.into());
-    manifest.source_fingerprint = Some(renamed_fingerprint);
-    manifest.display_name = "Renamed.Sample.bin".to_string();
-    assert_eq!(
-        store.share_in_place_reload_entries().unwrap(),
-        vec![MetadataShareInPlaceReloadEntry {
-            file_hash: manifest.file_hash.clone(),
-            file_size: manifest.file_size,
-            source_path: new_source_path.into(),
-            source_fingerprint: manifest.source_fingerprint.clone(),
-        }]
-    );
-    assert!(
-        !store
-            .relocate_shared_file_source(
-                &manifest.file_hash,
-                &old_source_path,
-                Path::new("/library/unused.bin"),
-                manifest.file_size,
-                manifest.source_fingerprint.as_ref(),
-                "unused.bin",
-                "document",
-            )
-            .unwrap(),
-        "the old source row must be gone after relocation",
-    );
-    assert_eq!(store.transfer_manifests().unwrap(), vec![manifest.clone()]);
-    assert!(
-        store
-            .managed_download_transfer_manifests()
-            .unwrap()
-            .is_empty()
-    );
-
-    manifest.completed = false;
-    manifest.final_rehash_pending = true;
-    manifest.control_state = None;
-    manifest.delivery_state = MetadataTransferDeliveryState::Pending;
-    manifest.delivered_path = None;
-    manifest.source_path = None;
-    manifest.source_fingerprint = None;
-    store.upsert_transfer_manifest(&manifest).unwrap();
-    assert_eq!(
-        store.managed_download_transfer_manifests().unwrap(),
-        vec![manifest.clone()]
-    );
     assert_eq!(
         store
             .transfer_manifest_by_hash(&manifest.file_hash)
@@ -386,19 +174,38 @@ fn transfer_manifest_roundtrips_sql_tables() {
         Some(manifest.clone())
     );
     assert_eq!(
-        store.transfer_counts().unwrap(),
-        MetadataTransferCounts {
-            active: 1,
-            completed: 0,
-            total: 1,
-        }
+        store.managed_download_transfer_hashes().unwrap(),
+        vec![manifest.file_hash.clone()]
     );
-    let catalog = store.completed_transfer_catalog_entries().unwrap();
-    assert_eq!(catalog.len(), 1);
-    assert_eq!(catalog[0].file_hash, manifest.file_hash);
     assert_eq!(
-        catalog[0].media_path.as_deref(),
-        Some(Path::new("/library/renamed/Renamed.Sample.bin"))
+        store.managed_download_transfer_manifests().unwrap(),
+        vec![manifest.clone()]
+    );
+    assert!(
+        store
+            .managed_download_transfer_exists(&manifest.file_hash)
+            .unwrap()
+    );
+    assert_eq!(
+        store.active_transfer_manifests().unwrap(),
+        vec![manifest.clone()]
+    );
+    assert_eq!(store.completed_transfer_catalog_entries().unwrap().len(), 1);
+    assert_eq!(store.completed_transfer_publish_entries().unwrap().len(), 1);
+
+    manifest.transfer_row_removed = true;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(store.active_transfer_manifests().unwrap().is_empty());
+    assert_eq!(store.transfer_manifests().unwrap(), vec![manifest.clone()]);
+
+    manifest.transfer_row_removed = false;
+    manifest.completed = false;
+    manifest.final_rehash_pending = true;
+    manifest.payload_fingerprint = None;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store.incomplete_transfer_manifests().unwrap(),
+        vec![manifest]
     );
 }
 
@@ -442,7 +249,6 @@ fn upload_demand_counters_persist_on_known_files() {
         delivery_state: MetadataTransferDeliveryState::Pending,
         delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
-        source_path: None,
         source_fingerprint: None,
         payload_fingerprint: Some(fingerprint(1024, 10)),
     };
@@ -543,63 +349,6 @@ fn shared_source_failures_roundtrip_update_and_clear() {
 }
 
 #[test]
-fn transfer_manifest_clears_matching_shared_source_failure() {
-    let store = MetadataStore::in_memory().unwrap();
-    let recovered_fingerprint = fingerprint(1024, 0);
-    store
-        .upsert_shared_source_failure(
-            Path::new("/library/Recovered.Source.bin"),
-            1024,
-            Some(&recovered_fingerprint),
-            "ingest failed",
-        )
-        .unwrap();
-    let manifest = MetadataTransferManifest {
-        file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        display_name: "Recovered.Source.bin".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
-        file_size: 1024,
-        piece_size: 1024,
-        completed: true,
-        final_rehash_pending: false,
-        md4_hashset_acquired: true,
-        md4_hashset: Vec::new(),
-        aich_hashset_acquired: true,
-        aich_root: Some("1111111111111111111111111111111111111111".to_string()),
-        aich_hashset: Vec::new(),
-        verified_ranges: Vec::new(),
-        pieces: vec![MetadataTransferPiece {
-            piece_index: 0,
-            state: "Verified".to_string(),
-            bytes_written: 1024,
-            block_bitmap: None,
-            ich_corrupted: false,
-        }],
-        sources: Vec::new(),
-        upload_priority: "normal".to_string(),
-        auto_upload_priority: true,
-        comment: String::new(),
-        rating: 0,
-        category_id: 0,
-        control_state: None,
-        transfer_row_removed: false,
-        delivery_state: MetadataTransferDeliveryState::NotApplicable,
-        delivery_ownership: MetadataTransferDeliveryOwnership::None,
-        delivered_path: None,
-        source_path: Some("/library/Recovered.Source.bin".into()),
-        source_fingerprint: Some(recovered_fingerprint),
-        payload_fingerprint: None,
-    };
-
-    store.upsert_transfer_manifest(&manifest).unwrap();
-
-    assert!(store.shared_source_failures().unwrap().is_empty());
-    assert_eq!(store.share_in_place_reload_entries().unwrap().len(), 1);
-}
-
-#[test]
 fn imported_known_file_identity_matches_roundtrip_pathless_stock_rows() {
     let store = MetadataStore::in_memory().unwrap();
     let entry = MetadataImportedKnownFileEntry {
@@ -669,6 +418,49 @@ fn imported_known_file_identity_matches_returns_ambiguous_rows() {
 }
 
 #[test]
+fn deleting_download_preserves_same_hash_local_content() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_pending_download_manifest();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let path = std::env::temp_dir().join("emulebb-same-hash-local-content.bin");
+    let content = crate::MetadataVerifiedLocalContent {
+        file_hash: manifest.file_hash.clone(),
+        display_name: "shared.bin".to_string(),
+        file_size: manifest.file_size,
+        part_size: manifest.piece_size,
+        md4_hashset: Vec::new(),
+        aich_root: "1111111111111111111111111111111111111111".to_string(),
+        aich_hashset: Vec::new(),
+        path: path.clone(),
+        fingerprint: fingerprint(manifest.file_size, 200),
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+    };
+    store.upsert_verified_local_content(&content).unwrap();
+
+    assert!(store.delete_transfer_manifest(&manifest.file_hash).unwrap());
+    assert!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.local_file_instance(&path).unwrap().is_some());
+    assert_eq!(
+        store
+            .connection()
+            .unwrap()
+            .query_row("SELECT count(*) FROM verified_local_content", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(!store.delete_transfer_manifest(&manifest.file_hash).unwrap());
+}
+
+#[test]
 fn delete_transfer_manifest_removes_transfer_rows() {
     let store = MetadataStore::in_memory().unwrap();
     let manifest = MetadataTransferManifest {
@@ -705,7 +497,6 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         delivery_state: MetadataTransferDeliveryState::Pending,
         delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
-        source_path: None,
         source_fingerprint: None,
         payload_fingerprint: None,
     };
@@ -930,8 +721,7 @@ fn delivery_attempt_requires_an_authoritative_pending_download() {
     );
 
     manifest.file_hash = "ffeeddccbbaa99887766554433221100".to_string();
-    manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
-    manifest.source_path = Some(std::env::temp_dir().join("shared.bin"));
+    manifest.completed = false;
     manifest.payload_fingerprint = None;
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert!(
@@ -984,7 +774,6 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         delivery_state: MetadataTransferDeliveryState::Delivered,
         delivery_ownership: MetadataTransferDeliveryOwnership::Owned,
         delivered_path: Some("/incoming/Delete.Intent.bin".into()),
-        source_path: None,
         source_fingerprint: Some(fingerprint(1, 9)),
         payload_fingerprint: Some(fingerprint(1, 10)),
     };
@@ -1170,33 +959,6 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
             .pending_transfer_deletion_manifest_by_hash(hash)
             .unwrap()
             .is_none()
-    );
-}
-
-#[test]
-fn share_in_place_deletion_rejects_transfer_directory_identity() {
-    let store = MetadataStore::in_memory().unwrap();
-    let manifest = source_backed_manifest();
-    store.upsert_transfer_manifest(&manifest).unwrap();
-
-    assert!(
-        !store
-            .request_transfer_deletion(
-                &manifest.file_hash,
-                Some(MetadataTransferDirectoryDeletionAuthority {
-                    identity: NativeFileIdentity::Unix {
-                        device_id: 31,
-                        inode_number: 37,
-                    },
-                    marker_id: Uuid::from_u128(41),
-                }),
-            )
-            .unwrap()
-    );
-    assert!(
-        !store
-            .transfer_deletion_requested(&manifest.file_hash)
-            .unwrap()
     );
 }
 
@@ -1428,7 +1190,6 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         delivery_state: MetadataTransferDeliveryState::Pending,
         delivery_ownership: MetadataTransferDeliveryOwnership::None,
         delivered_path: None,
-        source_path: None,
         source_fingerprint: None,
         payload_fingerprint: None,
     };
@@ -1544,7 +1305,6 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 delivery_state: MetadataTransferDeliveryState::Pending,
                 delivery_ownership: MetadataTransferDeliveryOwnership::None,
                 delivered_path: None,
-                source_path: None,
                 source_fingerprint: None,
                 payload_fingerprint: Some(fingerprint(sequence as u64, sequence as u64)),
             })

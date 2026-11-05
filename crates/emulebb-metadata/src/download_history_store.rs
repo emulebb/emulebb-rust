@@ -156,7 +156,7 @@ pub(crate) fn record_completed_download(
 }
 
 pub(crate) fn records_download_completion(manifest: &MetadataTransferManifest) -> bool {
-    manifest.completed && !manifest.final_rehash_pending && manifest.source_path.is_none()
+    manifest.completed && !manifest.final_rehash_pending
 }
 
 #[cfg(test)]
@@ -204,7 +204,6 @@ mod tests {
             delivery_state: MetadataTransferDeliveryState::Delivered,
             delivery_ownership: MetadataTransferDeliveryOwnership::Unowned,
             delivered_path: Some("C:\\incoming\\completed.bin".into()),
-            source_path: None,
             source_fingerprint: None,
             payload_fingerprint: None,
         }
@@ -237,23 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_and_share_in_place_manifests_do_not_create_download_history() {
+    fn incomplete_manifests_do_not_create_download_history() {
         let store = MetadataStore::in_memory().unwrap();
         let mut manifest = completed_download_manifest();
         manifest.completed = false;
-        store.upsert_transfer_manifest(&manifest).unwrap();
-        assert!(
-            store
-                .download_history_by_hash(&manifest.file_hash)
-                .unwrap()
-                .is_none()
-        );
-
-        manifest.completed = true;
-        manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
-        manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
-        manifest.delivered_path = None;
-        manifest.source_path = Some("C:\\shared\\completed.bin".into());
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert!(
             store
@@ -399,43 +385,6 @@ mod tests {
                 .unwrap()
                 .last_completed_at_ms,
             rehash_completed_at
-        );
-
-        let shared_store = MetadataStore::in_memory().unwrap();
-        let mut shared_manifest = completed_download_manifest();
-        shared_manifest.delivery_state = MetadataTransferDeliveryState::NotApplicable;
-        shared_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
-        shared_manifest.delivered_path = None;
-        shared_manifest.source_path = Some("C:\\shared\\completed.bin".into());
-        shared_store
-            .upsert_transfer_manifest(&shared_manifest)
-            .unwrap();
-        assert_eq!(
-            transfer_completed_at_ms(&shared_store, &shared_manifest.file_hash),
-            None
-        );
-        assert!(
-            shared_store
-                .download_history_by_hash(&shared_manifest.file_hash)
-                .unwrap()
-                .is_none()
-        );
-
-        shared_manifest.delivery_state = MetadataTransferDeliveryState::Pending;
-        shared_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
-        shared_manifest.source_path = None;
-        shared_store
-            .upsert_transfer_manifest(&shared_manifest)
-            .unwrap();
-        let download_completed_at =
-            transfer_completed_at_ms(&shared_store, &shared_manifest.file_hash).unwrap();
-        assert_eq!(
-            shared_store
-                .download_history_by_hash(&shared_manifest.file_hash)
-                .unwrap()
-                .unwrap()
-                .last_completed_at_ms,
-            download_completed_at
         );
     }
 

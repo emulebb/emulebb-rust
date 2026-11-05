@@ -496,8 +496,8 @@ pub struct Ed2kResumeManifest {
     #[serde(default)]
     pub transfer_row_removed: bool,
     /// Explicit lifecycle for materializing a download outside the internal
-    /// piece store. Share-in-place files use `NotApplicable`; downloads start
-    /// `Pending` and become `Delivered` only with a persisted verified path.
+    /// piece store. Read-only local-file views use `NotApplicable`; persisted
+    /// downloads start `Pending` and become `Delivered` with a verified path.
     pub delivery_state: Ed2kDeliveryState,
     /// Whether the delivered path is still proven to contain the exact object
     /// this client published. Ambiguous crash recovery records `Unowned` so
@@ -510,21 +510,16 @@ pub struct Ed2kResumeManifest {
     /// Incoming/category folder by name).
     #[serde(default, with = "optional_native_path_serde")]
     pub delivered_path: Option<PathBuf>,
-    /// Original on-disk path of a shared, already-complete file seeded IN PLACE
-    /// (added via a shared directory, never downloaded). `Some` marks a
-    /// share-in-place transfer: its payload is served directly from this path,
-    /// never copied into the internal piece store (`transfer_dir/pieces.bin`),
-    /// and never delivered to the incoming dir (delivery is download-only).
-    /// `None` for a real download whose payload lives in the piece store.
+    /// Local path only in a read-only protocol view synthesized from the
+    /// verified library. Persisted download manifests always leave this empty.
     #[serde(default, with = "optional_native_path_serde")]
     pub source_path: Option<PathBuf>,
-    /// Native file identity, size, and nanosecond timestamps captured for the
-    /// incremental shared-directory reload. `None` forces a conservative hash.
+    /// Verified identity of a delivered download or a read-only local-file view.
     #[serde(default, with = "optional_native_file_fingerprint_serde")]
     pub source_fingerprint: Option<NativeFileFingerprint>,
     /// Native identity baseline for this download's canonical `pieces.bin`
     /// after successful whole-file ED2K verification. `None` forces a
-    /// conservative startup rehash; share-in-place rows never set it.
+    /// conservative startup rehash. Read-only local-file views never set it.
     #[serde(default, with = "optional_native_file_fingerprint_serde")]
     pub payload_fingerprint: Option<NativeFileFingerprint>,
 }

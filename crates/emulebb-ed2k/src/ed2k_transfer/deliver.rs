@@ -221,15 +221,12 @@ impl Ed2kTransferRuntime {
             // Incoming/category dir reuses the download's already-computed
             // hashset instead of re-reading and re-hashing the whole payload
             // (HASH-2; oracle FindKnownFile, SharedFileList.cpp:2138). Only for a
-            // real download (`source_path == None`); a share-in-place manifest
-            // keeps its own source fingerprint and is never delivered. It is
+            // download. It is
             // read AFTER the file is in place, through the same `long_path` stat
             // the reload uses, so an unchanged delivered file compares equal on
             // reload (the copy+rename gets a fresh identity that is stable
             // thereafter).
-            if manifest.source_path.is_none() {
-                manifest.source_fingerprint = Some(installed.fingerprint);
-            }
+            manifest.source_fingerprint = Some(installed.fingerprint);
             self.store_manifest_unlocked(&manifest).await?;
         }
         Ok(Ed2kDeliveryOutcome::Delivered(final_path))

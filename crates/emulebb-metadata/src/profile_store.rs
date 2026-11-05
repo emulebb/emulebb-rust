@@ -841,7 +841,6 @@ mod tests {
             delivery_state: crate::MetadataTransferDeliveryState::Pending,
             delivery_ownership: crate::MetadataTransferDeliveryOwnership::None,
             delivered_path: None,
-            source_path: None,
             source_fingerprint: None,
             payload_fingerprint: None,
             pieces: Vec::new(),
