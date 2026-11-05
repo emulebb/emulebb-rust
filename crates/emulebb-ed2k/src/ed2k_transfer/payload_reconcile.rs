@@ -1295,7 +1295,7 @@ mod tests {
         assert_eq!(report.inspected_downloads, 0);
         assert!(
             runtime
-                .manifest(&shared.file_hash)
+                .servable_manifest(&shared.file_hash)
                 .await
                 .unwrap()
                 .payload_fingerprint

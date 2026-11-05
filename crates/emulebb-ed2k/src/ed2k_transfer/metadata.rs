@@ -1279,9 +1279,16 @@ impl Ed2kTransferRuntime {
         set.create_part_recovery_data(u64::from(part)).map(Some)
     }
 
-    /// Returns the persisted manifest for orchestration code that needs to read
-    /// the current verification or hashset state.
+    /// Returns a persisted download job manifest. Complete local content is
+    /// never represented as an active download job.
     pub async fn manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
+        let _guard = self.lock_manifest(file_hash).await;
+        self.load_manifest_unlocked(file_hash).await
+    }
+
+    /// Resolve a read-only protocol view for a download or eligible complete
+    /// local file without persisting a synthetic transfer row.
+    pub async fn servable_manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
         self.load_servable_manifest_optional_unlocked(file_hash)
             .await?
