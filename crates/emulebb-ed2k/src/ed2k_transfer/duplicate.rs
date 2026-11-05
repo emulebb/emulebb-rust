@@ -438,6 +438,10 @@ mod tests {
             .unwrap();
         admit_local_share(&runtime, root.path(), &shared_path).await;
         let file_hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
+        let published = runtime.publish_entries().await.unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].file_hash, shared.file_hash);
+        assert_eq!(published[0].display_name, "shared-redownload.bin");
 
         let replacement = runtime
             .replace_with_download_job(&new_transfer_job(
@@ -469,6 +473,10 @@ mod tests {
         assert_eq!(servable.comment, "local copy");
         assert_eq!(servable.rating, 4);
         assert!(!runtime.manifest(&shared.file_hash).await.unwrap().completed);
+        let published = runtime.try_publish_entries().await.unwrap().unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].upload_priority, "release");
+        assert_eq!(published[0].comment, "local copy");
         let evidence = runtime.download_evidence(&shared.file_hash).await.unwrap();
         assert!(evidence.active_transfer.is_some());
         assert_eq!(evidence.current_local_files.len(), 1);
