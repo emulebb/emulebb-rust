@@ -471,8 +471,8 @@ async fn run_consumer<F, Fut>(
 // These free functions take `&EmulebbCore` and drive the monitor lifecycle plus
 // the auto-share / auto-remove application of monitor actions. They access the
 // core's private `state` / `shared_dir_monitor` fields directly (a child module
-// may read its ancestor's private items) and reuse the public `share_local_file`
-// / `unshare_file` ingest/catalog paths so MD4/AICH/catalog stay consistent.
+// may read its ancestor's private items) and use the same verified local-content
+// and root-membership operations as the manual share path.
 // ---------------------------------------------------------------------------
 
 use emulebb_ed2k::ed2k_transfer::{

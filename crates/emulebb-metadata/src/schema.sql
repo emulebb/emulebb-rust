@@ -291,14 +291,6 @@ CREATE TABLE shared_file_memberships (
     PRIMARY KEY(root_id, path_id)
 );
 
-CREATE TABLE unshared_files (
-    id INTEGER PRIMARY KEY,
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    reason TEXT NOT NULL DEFAULT '',
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    UNIQUE(known_file_id)
-);
-
 CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
