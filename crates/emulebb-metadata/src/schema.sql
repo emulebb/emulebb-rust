@@ -400,6 +400,19 @@ CREATE TABLE transfers (
     UNIQUE(known_file_id)
 );
 
+-- A delivered download is hidden while its owned piece directory is safely
+-- reclaimed. The output has already become independent verified local content.
+CREATE TABLE transfer_retirements (
+    transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
+    directory_identity BLOB,
+    directory_marker_id TEXT,
+    CHECK (
+        (directory_identity IS NULL AND directory_marker_id IS NULL)
+        OR (directory_identity IS NOT NULL AND directory_marker_id IS NOT NULL
+            AND length(trim(directory_marker_id)) > 0)
+    )
+);
+
 CREATE TABLE delivery_attempts (
     transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
     attempt_id TEXT NOT NULL UNIQUE CHECK(length(trim(attempt_id)) > 0),

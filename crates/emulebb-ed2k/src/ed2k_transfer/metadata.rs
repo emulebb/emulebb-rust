@@ -31,8 +31,8 @@ use super::transfer_sql::manifest_from_metadata;
 use super::upload_queue::upload_priority_score;
 use super::{
     Ed2kAichHashset, Ed2kFileNameObservation, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry,
-    Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport, Ed2kTransferJob, Ed2kTransferRuntime,
-    Ed2kTransferState,
+    Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport, Ed2kTransferJob,
+    Ed2kTransferRetirementRecoveryReport, Ed2kTransferRuntime, Ed2kTransferState,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -345,6 +345,14 @@ impl Ed2kTransferRuntime {
         anyhow::ensure!(
             !self.transfer_deletion_requested(&job.file_hash).await?,
             "cannot create ED2K transfer {} while destructive deletion is pending",
+            job.file_hash
+        );
+        let metadata = self.metadata.clone();
+        let file_hash = job.file_hash.clone();
+        ensure!(
+            !tokio::task::spawn_blocking(move || metadata.transfer_retirement_pending(&file_hash))
+                .await??,
+            "cannot create ED2K transfer {} while download retirement is pending",
             job.file_hash
         );
         let _guard = self.lock_manifest(&job.file_hash).await;
@@ -1048,7 +1056,8 @@ impl Ed2kTransferRuntime {
         Ok((path, fingerprint))
     }
 
-    /// Remove only a completed transfer row while preserving local files.
+    /// Retire a delivered download and reclaim its internal piece store while
+    /// preserving its delivered output, verified content, and history.
     pub async fn remove_completed_transfer_row(
         &self,
         file_hash: &str,
@@ -1070,12 +1079,73 @@ impl Ed2kTransferRuntime {
                 manifest.file_hash
             );
         }
-        if manifest.transfer_row_removed {
-            return Ok(None);
+        let newly_retired = !manifest.transfer_row_removed;
+        if newly_retired {
+            let transfer_dir = self.transfer_dir(&file_hash);
+            let authority = prepare_transfer_directory_deletion_authority(&transfer_dir).await?;
+            let metadata = self.metadata.clone();
+            let owned_hash = file_hash.clone();
+            ensure!(
+                tokio::task::spawn_blocking(move || {
+                    metadata.request_transfer_retirement(&owned_hash, authority)
+                })
+                .await??,
+                "delivered download could not enter retirement"
+            );
         }
         manifest.transfer_row_removed = true;
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(Some(manifest))
+        self.finish_transfer_retirement_unlocked(&file_hash).await?;
+        Ok(newly_retired.then_some(manifest))
+    }
+
+    async fn finish_transfer_retirement_unlocked(&self, file_hash: &str) -> Result<()> {
+        let metadata = self.metadata.clone();
+        let owned_hash = file_hash.to_owned();
+        let authority = tokio::task::spawn_blocking(move || {
+            metadata.transfer_retirement_authority(&owned_hash)
+        })
+        .await??;
+        self.invalidate_payload_handle(file_hash);
+        cleanup_transfer_directory_with_authority(
+            file_hash,
+            &self.transfer_dir(file_hash),
+            authority,
+        )
+        .await?;
+        let metadata = self.metadata.clone();
+        let owned_hash = file_hash.to_owned();
+        ensure!(
+            tokio::task::spawn_blocking(move || metadata.finalize_transfer_retirement(&owned_hash))
+                .await??,
+            "retired download disappeared before finalization"
+        );
+        self.manifest_cache.lock().await.remove(file_hash);
+        self.manifest_checkpoint_state
+            .lock()
+            .await
+            .remove(file_hash);
+        Ok(())
+    }
+
+    /// Resume hidden completed-download retirement after a crash or transient
+    /// filesystem failure. The delivered output is never part of this cleanup.
+    pub async fn recover_pending_transfer_retirements(
+        &self,
+    ) -> Result<Ed2kTransferRetirementRecoveryReport> {
+        let metadata = self.metadata.clone();
+        let hashes =
+            tokio::task::spawn_blocking(move || metadata.pending_transfer_retirement_hashes())
+                .await??;
+        let mut report = Ed2kTransferRetirementRecoveryReport::default();
+        for file_hash in hashes {
+            let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
+            let _manifest_guard = self.lock_manifest(&file_hash).await;
+            match self.finish_transfer_retirement_unlocked(&file_hash).await {
+                Ok(()) => report.recovered += 1,
+                Err(error) => report.failures.push(format!("{file_hash}: {error:#}")),
+            }
+        }
+        Ok(report)
     }
 
     /// Durably accept deletion, hide the transfer, and attempt filesystem cleanup.
@@ -1596,16 +1666,24 @@ async fn cleanup_transfer_directory(
     file_hash: &str,
     transfer_dir: &std::path::Path,
 ) -> Result<()> {
-    let tombstone = transfer_directory_tombstone_path(file_hash, transfer_dir);
-    let transfer_exists = tokio::fs::try_exists(long_path(transfer_dir)).await?;
-    let tombstone_exists = tokio::fs::try_exists(long_path(&tombstone)).await?;
     let metadata_store = metadata.clone();
     let hash = file_hash.to_owned();
-    let persisted_authority = tokio::task::spawn_blocking(move || {
+    let authority = tokio::task::spawn_blocking(move || {
         metadata_store.transfer_directory_deletion_authority(&hash)
     })
     .await
     .context("transfer directory deletion authority load task failed")??;
+    cleanup_transfer_directory_with_authority(file_hash, transfer_dir, authority).await
+}
+
+async fn cleanup_transfer_directory_with_authority(
+    file_hash: &str,
+    transfer_dir: &std::path::Path,
+    persisted_authority: Option<MetadataTransferDirectoryDeletionAuthority>,
+) -> Result<()> {
+    let tombstone = transfer_directory_tombstone_path(file_hash, transfer_dir);
+    let transfer_exists = tokio::fs::try_exists(long_path(transfer_dir)).await?;
+    let tombstone_exists = tokio::fs::try_exists(long_path(&tombstone)).await?;
     if transfer_exists {
         anyhow::ensure!(
             !tombstone_exists,

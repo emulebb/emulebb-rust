@@ -35,10 +35,14 @@ impl super::MetadataStore {
         // snapshot and fail its write upgrade with SQLITE_BUSY_SNAPSHOT after a
         // concurrent connection commits; acquire the writer slot before reading.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let deletion_requested = tx
+        let cleanup_requested = tx
             .query_row(
                 r#"
                 SELECT transfers.delete_requested_at_ms IS NOT NULL
+                       OR EXISTS (
+                           SELECT 1 FROM transfer_retirements
+                           WHERE transfer_retirements.transfer_id = transfers.id
+                       )
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
@@ -49,8 +53,8 @@ impl super::MetadataStore {
             .optional()?
             .unwrap_or(false);
         ensure!(
-            !deletion_requested,
-            "transfer {} has a pending destructive deletion",
+            !cleanup_requested,
+            "transfer {} has pending cleanup",
             manifest.file_hash
         );
         let previous_completion = tx
@@ -2304,6 +2308,24 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
+    pub fn transfer_retirement_pending(&self, file_hash: &str) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        self.connection()?
+            .query_row(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM transfer_retirements
+                    JOIN transfers ON transfers.id = transfer_retirements.transfer_id
+                    JOIN known_files ON known_files.id = transfers.known_file_id
+                    WHERE known_files.ed2k_hash = ?1
+                )
+                "#,
+                params![hash],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn transfer_directory_deletion_authority(
         &self,
         file_hash: &str,
@@ -2320,39 +2342,128 @@ impl super::MetadataStore {
                   AND transfers.delete_requested_at_ms IS NOT NULL
                 "#,
                 params![hash],
-                |row| {
-                    let identity = optional_identity_from_row(row, 0)?;
-                    let marker_id = row.get::<_, Option<String>>(1)?;
-                    match (identity, marker_id) {
-                        (None, None) => Ok(None),
-                        (Some(identity), Some(marker_id)) => {
-                            let marker_id = marker_id.parse::<Uuid>().map_err(|error| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    1,
-                                    rusqlite::types::Type::Text,
-                                    error.into(),
-                                )
-                            })?;
-                            Ok(Some(MetadataTransferDirectoryDeletionAuthority {
-                                identity,
-                                marker_id,
-                            }))
-                        }
-                        _ => Err(rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Blob,
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "incomplete transfer directory deletion authority",
-                            )
-                            .into(),
-                        )),
-                    }
-                },
+                |row| directory_cleanup_authority_from_row(row, 0),
             )
             .optional()
             .map(Option::flatten)
             .map_err(Into::into)
+    }
+
+    /// Hide a delivered download and durably own only its internal piece
+    /// directory. The delivered output and verified local content are retained.
+    pub fn request_transfer_retirement(
+        &self,
+        file_hash: &str,
+        authority: Option<MetadataTransferDirectoryDeletionAuthority>,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transfer_id = tx
+            .query_row(
+                r#"
+                SELECT transfers.id
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                  AND known_files.completed = 1
+                  AND transfers.delivery_state = 'delivered'
+                  AND transfers.source_path_id IS NULL
+                  AND transfers.removed_at_ms IS NULL
+                  AND transfers.delete_requested_at_ms IS NULL
+                "#,
+                params![hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(transfer_id) = transfer_id else {
+            return Ok(false);
+        };
+        tx.execute(
+            "UPDATE transfers SET removed_at_ms = ?2, updated_at_ms = ?2 WHERE id = ?1",
+            params![transfer_id, unix_ms()],
+        )?;
+        tx.execute(
+            "INSERT INTO transfer_retirements(transfer_id, directory_identity, directory_marker_id) VALUES (?1, ?2, ?3)",
+            params![
+                transfer_id,
+                authority.map(|value| value.identity.storage_bytes()),
+                authority.map(|value| value.marker_id.hyphenated().to_string()),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn pending_transfer_retirement_hashes(&self) -> Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash))
+            FROM transfer_retirements
+            JOIN transfers ON transfers.id = transfer_retirements.transfer_id
+            JOIN known_files ON known_files.id = transfers.known_file_id
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        stmt.query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn transfer_retirement_authority(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        self.connection()?
+            .query_row(
+                r#"
+                SELECT transfer_retirements.directory_identity,
+                       transfer_retirements.directory_marker_id
+                FROM transfer_retirements
+                JOIN transfers ON transfers.id = transfer_retirements.transfer_id
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                "#,
+                params![hash],
+                |row| directory_cleanup_authority_from_row(row, 0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
+    }
+
+    /// Drop the transfer and its piece bookkeeping after owned directory
+    /// cleanup. The known file, verified content and download history survive.
+    pub fn finalize_transfer_retirement(&self, file_hash: &str) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let ids = tx
+            .query_row(
+                r#"
+                SELECT transfers.id, known_files.id
+                FROM transfer_retirements
+                JOIN transfers ON transfers.id = transfer_retirements.transfer_id
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE known_files.ed2k_hash = ?1
+                "#,
+                params![hash],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((transfer_id, known_file_id)) = ids else {
+            return Ok(false);
+        };
+        tx.execute("DELETE FROM transfers WHERE id = ?1", params![transfer_id])?;
+        tx.execute(
+            "DELETE FROM known_file_origins WHERE known_file_id = ?1 AND origin = 'transfer'",
+            params![known_file_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Return every transfer whose destructive-delete intent must be resumed.
@@ -3130,6 +3241,39 @@ fn optional_identity_from_row(
             })
         })
         .transpose()
+}
+
+fn directory_cleanup_authority_from_row(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
+    let identity = optional_identity_from_row(row, index)?;
+    let marker_id = row.get::<_, Option<String>>(index + 1)?;
+    match (identity, marker_id) {
+        (None, None) => Ok(None),
+        (Some(identity), Some(marker_id)) => {
+            let marker_id = marker_id.parse::<Uuid>().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index + 1,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?;
+            Ok(Some(MetadataTransferDirectoryDeletionAuthority {
+                identity,
+                marker_id,
+            }))
+        }
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Blob,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "incomplete transfer directory cleanup authority",
+            )
+            .into(),
+        )),
+    }
 }
 
 fn optional_fixed_hex(

@@ -751,7 +751,7 @@ async fn materialize_preserves_byte_identical_replacement_without_adopting_it() 
 }
 
 #[tokio::test]
-async fn pending_completed_download_cannot_hide_its_transfer_row() {
+async fn pending_completed_download_cannot_retire_before_local_content_registration() {
     let root = unique_test_dir("ed2k-deliver-pending-row-removal");
     let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
     let hash = ingest_completed(&runtime, &root, "Pending.Row.mkv").await;
@@ -779,6 +779,12 @@ async fn pending_completed_download_cannot_hide_its_transfer_row() {
         .materialize_completed_payload(&hash, &root.join("incoming"))
         .await
         .unwrap();
+    let (delivered_path, _) = runtime
+        .register_delivered_local_content(&hash)
+        .await
+        .unwrap();
+    let transfer_dir = runtime.transfer_dir_path(&hash);
+    assert!(transfer_dir.exists());
     assert!(
         runtime
             .remove_completed_transfer_row(&hash)
@@ -786,7 +792,125 @@ async fn pending_completed_download_cannot_hide_its_transfer_row() {
             .unwrap()
             .is_some()
     );
-    assert!(runtime.manifest(&hash).await.unwrap().transfer_row_removed);
+    assert!(runtime.manifest(&hash).await.is_err());
+    assert!(!transfer_dir.exists());
+    assert!(delivered_path.exists());
+    assert!(
+        runtime
+            .download_evidence(&hash)
+            .await
+            .unwrap()
+            .previously_completed
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn retired_download_recovery_reclaims_only_owned_piece_storage() {
+    let root = unique_test_dir("ed2k-retired-download-recovery");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Retired.bin").await;
+    let delivered = root.join("incoming").join("Retired.bin");
+    runtime
+        .materialize_completed_payload(&hash, &root.join("incoming"))
+        .await
+        .unwrap();
+    runtime
+        .register_delivered_local_content(&hash)
+        .await
+        .unwrap();
+    let transfer_dir = runtime.transfer_dir_path(&hash);
+    let authority = MetadataTransferDirectoryDeletionAuthority {
+        identity: super::super::ingest::native_directory_identity(&transfer_dir).unwrap(),
+        marker_id: Uuid::new_v4(),
+    };
+    fs::write(
+        transfer_directory_authority_marker_path(&transfer_dir, authority.marker_id),
+        authority.marker_id.as_bytes(),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .metadata
+            .request_transfer_retirement(&hash, Some(authority))
+            .unwrap()
+    );
+    drop(runtime);
+
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let report = runtime
+        .recover_pending_transfer_retirements()
+        .await
+        .unwrap();
+    assert_eq!(report.recovered, 1);
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert!(!transfer_dir.exists());
+    assert!(delivered.exists());
+    assert!(runtime.manifest(&hash).await.is_err());
+    assert!(
+        runtime
+            .download_evidence(&hash)
+            .await
+            .unwrap()
+            .previously_completed
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn retired_download_recovery_preserves_replaced_piece_directory() {
+    let root = unique_test_dir("ed2k-retired-download-collision");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Retired.Collision.bin").await;
+    let delivered = root.join("incoming").join("Retired.Collision.bin");
+    runtime
+        .materialize_completed_payload(&hash, &root.join("incoming"))
+        .await
+        .unwrap();
+    runtime
+        .register_delivered_local_content(&hash)
+        .await
+        .unwrap();
+    let transfer_dir = runtime.transfer_dir_path(&hash);
+    let authority = MetadataTransferDirectoryDeletionAuthority {
+        identity: super::super::ingest::native_directory_identity(&transfer_dir).unwrap(),
+        marker_id: Uuid::new_v4(),
+    };
+    fs::write(
+        transfer_directory_authority_marker_path(&transfer_dir, authority.marker_id),
+        authority.marker_id.as_bytes(),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .metadata
+            .request_transfer_retirement(&hash, Some(authority))
+            .unwrap()
+    );
+    let owned_dir = root.join("owned-piece-directory");
+    fs::rename(&transfer_dir, &owned_dir).unwrap();
+    fs::create_dir(&transfer_dir).unwrap();
+    fs::write(transfer_dir.join("foreign.bin"), b"foreign bytes").unwrap();
+
+    let report = runtime
+        .recover_pending_transfer_retirements()
+        .await
+        .unwrap();
+    assert_eq!(report.recovered, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert!(transfer_dir.join("foreign.bin").exists());
+    assert!(delivered.exists());
+
+    fs::remove_dir_all(&transfer_dir).unwrap();
+    fs::rename(&owned_dir, &transfer_dir).unwrap();
+    let report = runtime
+        .recover_pending_transfer_retirements()
+        .await
+        .unwrap();
+    assert_eq!(report.recovered, 1);
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert!(!transfer_dir.exists());
+    assert!(delivered.exists());
 }
 
 #[tokio::test]

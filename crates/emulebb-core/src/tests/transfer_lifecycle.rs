@@ -759,9 +759,10 @@ async fn completed_delivery_retires_transfer_without_deleting_local_file() {
     core.deliver_completed_transfer(&file_hash).await;
     assert!(core.transfer(&file_hash).await.is_none());
     assert!(core.share(&file_hash).await.is_some());
-    let delivered_manifest = core.ed2k_transfers.manifest(&file_hash).await.unwrap();
-    let delivered_path = PathBuf::from(delivered_manifest.delivered_path.as_deref().unwrap());
+    let delivered_path = incoming_dir.join("Delivered.Delete.bin");
     assert_eq!(std::fs::read(&delivered_path).unwrap(), payload);
+    assert!(core.ed2k_transfers.manifest(&file_hash).await.is_err());
+    assert!(!transfer_root.join(&file_hash).exists());
 
     assert!(
         core.delete_completed_transfer_row(&file_hash)
