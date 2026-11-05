@@ -780,6 +780,20 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
             "pending destructive transfer deletions remain hidden and will retry after startup"
         );
     }
+    let retirement_recovery = core.recover_pending_transfer_retirements().await?;
+    if retirement_recovery.recovered > 0 {
+        info!(
+            recovered_transfer_retirements = retirement_recovery.recovered,
+            "reclaimed retired download storage before REST startup"
+        );
+    }
+    if !retirement_recovery.failures.is_empty() {
+        warn!(
+            failed_transfer_retirements = retirement_recovery.failures.len(),
+            failures = ?retirement_recovery.failures,
+            "retired download storage remains pending for retry"
+        );
+    }
     let transfer_root_reconciliation = core.reconcile_transfer_root().await?;
     if transfer_root_reconciliation.reclaimed_paths > 0 {
         info!(
@@ -894,6 +908,26 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "failed to enumerate pending destructive transfer deletions");
+                }
+            }
+            match delivery_core.recover_pending_transfer_retirements().await {
+                Ok(report) => {
+                    if report.recovered > 0 {
+                        tracing::info!(
+                            recovered = report.recovered,
+                            "reclaimed retired download storage"
+                        );
+                    }
+                    if !report.failures.is_empty() {
+                        tracing::warn!(
+                            failed = report.failures.len(),
+                            failures = ?report.failures,
+                            "retired download storage cleanup remains pending"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to enumerate pending download retirements");
                 }
             }
             delivery_core.deliver_pending_completed_transfers().await;

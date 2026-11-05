@@ -1,6 +1,15 @@
 use super::*;
 
 impl EmulebbCore {
+    /// Finish hidden download retirements before reconciling the piece root.
+    pub async fn recover_pending_transfer_retirements(
+        &self,
+    ) -> Result<Ed2kTransferRetirementRecoveryReport> {
+        self.ed2k_transfers
+            .recover_pending_transfer_retirements()
+            .await
+    }
+
     /// Attempt every durable destructive-deletion intent. Per-transfer cleanup
     /// failures remain hidden and are returned for later maintenance retries.
     pub async fn recover_pending_transfer_deletions(

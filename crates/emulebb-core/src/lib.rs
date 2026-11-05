@@ -53,8 +53,8 @@ use emulebb_ed2k::{
         Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kDownloadStorageReconciliation,
         Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedPublishDemandSignal,
         Ed2kSourceConnectionAdmission, Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport,
-        Ed2kTransferRootReconciliation, Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot,
-        is_unresolved_ed2k_display_name, new_transfer_job,
+        Ed2kTransferRetirementRecoveryReport, Ed2kTransferRootReconciliation, Ed2kTransferRuntime,
+        Ed2kUploadSessionPhaseSnapshot, is_unresolved_ed2k_display_name, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::{

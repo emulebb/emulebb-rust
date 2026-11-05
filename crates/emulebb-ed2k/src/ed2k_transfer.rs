@@ -254,6 +254,15 @@ pub struct Ed2kTransferDeletionRecoveryReport {
     pub failures: Vec<String>,
 }
 
+/// Result of one durable completed-download retirement sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ed2kTransferRetirementRecoveryReport {
+    /// Internal download directories reclaimed and transfer rows finalized.
+    pub recovered: usize,
+    /// Per-download cleanup failures retained for a later retry.
+    pub failures: Vec<String>,
+}
+
 /// Runtime owner for ED2K transfer manifests, piece-store payloads, and the
 /// transfer-backed shared catalog.
 #[derive(Debug)]

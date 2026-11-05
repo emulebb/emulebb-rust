@@ -1333,7 +1333,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     assert!(!checkpointed);
 
     let error = store.upsert_transfer_manifest(&manifest).unwrap_err();
-    assert!(error.to_string().contains("pending destructive deletion"));
+    assert!(error.to_string().contains("pending cleanup"));
     {
         let conn = store.connection().unwrap();
         conn.execute(

@@ -165,9 +165,8 @@ impl EmulebbCore {
         tracing::warn!(%error, "failed to complete delivery of transfer {hash}");
     }
 
-    /// Deliver every completed-but-undelivered transfer (startup sweep). Covers
-    /// transfers that completed before this build added delivery, and the
-    /// crash-after-complete-before-deliver window. Best-effort per transfer.
+    /// Retry completed downloads whose delivery or local-share promotion did
+    /// not finish before shutdown. Best-effort per transfer.
     pub async fn deliver_pending_completed_transfers(&self) {
         let hashes = match self
             .ed2k_transfers
