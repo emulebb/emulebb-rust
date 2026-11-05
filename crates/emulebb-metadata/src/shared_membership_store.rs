@@ -3,11 +3,27 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, ensure};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
 impl MetadataStore {
+    pub fn shared_root_last_scan_ms(&self, root: &Path) -> Result<Option<i64>> {
+        let native = NativePath::from(root);
+        self.connection()?
+            .query_row(
+                "SELECT shared_directory_roots.last_scan_ms
+                 FROM shared_directory_roots
+                 JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
+                 WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2",
+                params![NativePath::platform(), native.storage_bytes()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
+    }
+
     /// Admit one newly verified path from a live watcher without replacing the
     /// rest of the root's membership set.
     pub fn admit_local_path_to_root(
@@ -196,7 +212,9 @@ impl MetadataStore {
     /// Withdraw a root immediately without losing cached path/hash identities.
     pub fn set_shared_root_accessible(&self, root: &Path, accessible: bool) -> Result<bool> {
         let native = NativePath::from(root);
-        let changed = self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
             "UPDATE shared_directory_roots SET accessible = ?3
              WHERE path_id = (SELECT id FROM local_paths WHERE platform = ?1 AND native_path = ?2)
                AND enabled = 1 AND deleted_at_ms IS NULL AND accessible != ?3",
@@ -206,7 +224,21 @@ impl MetadataStore {
                 i64::from(accessible)
             ],
         )?;
-        Ok(changed != 0)
+        let removed = if accessible {
+            0
+        } else {
+            tx.execute(
+                "UPDATE shared_file_memberships SET removed_at_ms = ?3
+                 WHERE root_id = (
+                     SELECT shared_directory_roots.id FROM shared_directory_roots
+                     JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
+                     WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
+                 ) AND removed_at_ms IS NULL",
+                params![NativePath::platform(), native.storage_bytes(), unix_ms()],
+            )?
+        };
+        tx.commit()?;
+        Ok(changed != 0 || removed != 0)
     }
 
     /// Count distinct complete files eligible by persisted root membership.
@@ -317,6 +349,8 @@ mod tests {
         assert!(store.active_local_share_page(None, 10).unwrap().is_empty());
         assert!(store.active_local_file_by_hash(hash).unwrap().is_none());
         assert!(store.local_file_instance(&file).unwrap().is_some());
+        store.set_shared_root_accessible(&root, true).unwrap();
+        assert_eq!(store.active_shared_content_count().unwrap(), 0);
         store
             .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
             .unwrap();

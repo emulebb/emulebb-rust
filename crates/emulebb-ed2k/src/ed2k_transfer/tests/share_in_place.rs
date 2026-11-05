@@ -259,6 +259,24 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
             .open_verified_range_reader(&hash)
             .await
             .unwrap()
+            .is_none()
+    );
+    let fingerprint = metadata
+        .local_file_instance(&native_path)
+        .unwrap()
+        .unwrap()
+        .verified_fingerprint;
+    metadata
+        .replace_root_memberships(
+            &shared_root,
+            &[(native_path.clone(), "Sample.bin".into(), fingerprint)],
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .open_verified_range_reader(&hash)
+            .await
+            .unwrap()
             .is_some()
     );
     fs::write(&path, b"changed content!").unwrap();
