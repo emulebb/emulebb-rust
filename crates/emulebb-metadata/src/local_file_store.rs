@@ -45,14 +45,15 @@ impl MetadataStore {
         );
         let path_id = upsert_local_path(&tx, path)?;
         tx.execute(
-            "INSERT INTO local_file_instances(path_id, known_file_id, file_size, verified_fingerprint, verified_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO local_file_instances(path_id, known_file_id, file_size, native_identity, verified_fingerprint, verified_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(path_id) DO UPDATE SET
                  known_file_id = excluded.known_file_id,
                  file_size = excluded.file_size,
+                 native_identity = excluded.native_identity,
                  verified_fingerprint = excluded.verified_fingerprint,
                  verified_at_ms = excluded.verified_at_ms",
-            params![path_id, known_file_id, known_size, fingerprint.storage_bytes(), unix_ms()],
+            params![path_id, known_file_id, known_size, fingerprint.identity.storage_bytes(), fingerprint.storage_bytes(), unix_ms()],
         )?;
         tx.commit()?;
         Ok(())
@@ -92,6 +93,63 @@ impl MetadataStore {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Find a verified prior path after a rename or hard link. A matching
+    /// native identity alone is insufficient: the full safe fingerprint must
+    /// match, and conflicting remembered content identities force a rehash.
+    pub fn reusable_local_file_by_identity(
+        &self,
+        current: &NativeFileFingerprint,
+    ) -> Result<Option<MetadataLocalFileInstance>> {
+        let size =
+            i64::try_from(current.size_bytes).context("local file exceeds SQLite size range")?;
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            "SELECT local_paths.platform, local_paths.native_path,
+                    lower(hex(known_files.ed2k_hash)), local_file_instances.file_size,
+                    local_file_instances.verified_fingerprint
+             FROM local_file_instances
+             JOIN local_paths ON local_paths.id = local_file_instances.path_id
+             JOIN known_files ON known_files.id = local_file_instances.known_file_id
+             WHERE local_file_instances.native_identity = ?1
+               AND local_file_instances.file_size = ?2
+             ORDER BY local_paths.platform, local_paths.native_path",
+        )?;
+        let rows = statement.query_map(params![current.identity.storage_bytes(), size], |row| {
+            let bytes: Vec<u8> = row.get(4)?;
+            let fingerprint =
+                NativeFileFingerprint::from_storage_bytes(&bytes).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        4,
+                        "verified_fingerprint".to_string(),
+                        rusqlite::types::Type::Blob,
+                    )
+                })?;
+            Ok(MetadataLocalFileInstance {
+                path: path_from_row(row, 0, 1)?,
+                file_hash: row.get(2)?,
+                file_size: row.get::<_, i64>(3)? as u64,
+                verified_fingerprint: fingerprint,
+            })
+        })?;
+        let mut chosen: Option<MetadataLocalFileInstance> = None;
+        for row in rows {
+            let candidate = row?;
+            if !candidate.verified_fingerprint.safely_matches(current) {
+                continue;
+            }
+            if chosen
+                .as_ref()
+                .is_some_and(|prior| prior.file_hash != candidate.file_hash)
+            {
+                return Ok(None);
+            }
+            if chosen.is_none() {
+                chosen = Some(candidate);
+            }
+        }
+        Ok(chosen)
     }
 }
 
@@ -172,6 +230,20 @@ mod tests {
                     }
                 )
                 .is_err()
+        );
+        assert_eq!(
+            store
+                .reusable_local_file_by_identity(&changed)
+                .unwrap()
+                .unwrap()
+                .file_hash,
+            hash
+        );
+        assert!(
+            store
+                .reusable_local_file_by_identity(&fingerprint(13))
+                .unwrap()
+                .is_none()
         );
     }
 }

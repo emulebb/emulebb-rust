@@ -245,12 +245,16 @@ CREATE TABLE local_file_instances (
     path_id INTEGER PRIMARY KEY REFERENCES local_paths(id),
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     file_size INTEGER NOT NULL CHECK(file_size >= 0),
+    native_identity BLOB NOT NULL,
     verified_fingerprint BLOB NOT NULL,
     verified_at_ms INTEGER NOT NULL CHECK(verified_at_ms >= 0)
 );
 
 CREATE INDEX local_file_instances_content_idx
     ON local_file_instances(known_file_id);
+
+CREATE INDEX local_file_instances_identity_idx
+    ON local_file_instances(native_identity, file_size);
 
 CREATE TABLE shared_directory_roots (
     id INTEGER PRIMARY KEY,
