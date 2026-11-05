@@ -47,7 +47,7 @@ import {
   SearchResultMedia,
   ServerItem,
   SharedDirectories,
-  SharedFileExclusions,
+  SharedFileIgnores,
   SharedFile,
   SettingsSectionResourceSpec,
   SettingSurfaceSpec,
@@ -968,7 +968,7 @@ function formatMediaDuration(totalSeconds: number): string {
 
 export function SharingView(props: {
   directories: SharedDirectories | null;
-  exclusions: SharedFileExclusions | null;
+  ignores: SharedFileIgnores | null;
   stats: Record<string, unknown>;
   sharedFiles: SharedFile[];
   uploads: Upload[];
@@ -977,10 +977,10 @@ export function SharingView(props: {
   run: RunFunction;
 }) {
   const [path, setPath] = useState("");
-  const [exclusionPath, setExclusionPath] = useState("");
+  const [ignorePattern, setIgnorePattern] = useState("");
   const roots = props.directories?.roots ?? [];
-  const customExclusions = props.exclusions?.custom ?? [];
-  const defaultExclusions = props.exclusions?.defaults ?? [];
+  const customPatterns = props.ignores?.custom ?? [];
+  const defaultIgnores = props.ignores?.defaults ?? [];
   const reload = props.directories?.reloadProgress ?? {};
   const pathError = sharedRootPathError(path);
   const sharedFileCount = numberField(props.stats, "sharedFiles") ?? props.sharedFiles.length;
@@ -998,17 +998,17 @@ export function SharingView(props: {
   const removeRoot = (rootPath: string) =>
     props.client.delete(`shared-directories/roots?path=${encodeURIComponent(rootPath)}`);
 
-  const addExclusion = async () => {
-    const nextPath = exclusionPath.trim();
-    if (!nextPath) {
+  const addIgnorePattern = async () => {
+    const pattern = ignorePattern.trim();
+    if (!pattern) {
       return;
     }
-    await props.client.post("shared-directories/exclusions", { path: nextPath });
-    setExclusionPath("");
+    await props.client.post("shared-directories/ignores", { pattern });
+    setIgnorePattern("");
   };
 
-  const removeExclusion = (filePath: string) =>
-    props.client.delete(`shared-directories/exclusions?path=${encodeURIComponent(filePath)}`);
+  const removeIgnorePattern = (pattern: string) =>
+    props.client.delete(`shared-directories/ignores?pattern=${encodeURIComponent(pattern)}`);
 
   return (
     <section class="view-grid">
@@ -1078,31 +1078,31 @@ export function SharingView(props: {
 
       <section class="panel card wide sharing-panel">
         <div class="section-title">
-          <h2>Share Exclusions</h2>
-          <StatusPill value={`${customExclusions.length} custom`} />
+          <h2>Share Ignores</h2>
+          <StatusPill value={`${customPatterns.length} custom`} />
         </div>
-        <p class="hint">Excluded files are removed from scans, live monitoring, and publication.</p>
+        <p class="hint">File name glob patterns apply across all shared trees. Matching files are removed from scans, live monitoring, and publication.</p>
         <form class="form-row" onSubmit={(event) => {
           event.preventDefault();
-          if (exclusionPath.trim()) {
-            void props.run(addExclusion, "File excluded");
+          if (ignorePattern.trim()) {
+            void props.run(addIgnorePattern, "Ignore pattern added");
           }
         }}>
-          <input class="form-control share-root-input" value={exclusionPath} placeholder="Exact server file path" aria-label="Exact excluded file path" onInput={(event) => setExclusionPath(event.currentTarget.value)} />
-          <button class="btn" type="submit" disabled={!exclusionPath.trim()}><FolderPlus size={16} />Exclude file</button>
+          <input class="form-control share-root-input" value={ignorePattern} placeholder="*.part or sample-*.bin" aria-label="File name ignore pattern" onInput={(event) => setIgnorePattern(event.currentTarget.value)} />
+          <button class="btn" type="submit" disabled={!ignorePattern.trim()}><FolderPlus size={16} />Add pattern</button>
         </form>
-        <h3 class="panel-subhead">Exact Files</h3>
+        <h3 class="panel-subhead">Custom Patterns</h3>
         <div class="table-wrap">
           <table class="table table-vcenter card-table root-table">
-            <thead><tr><th>File</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Pattern</th><th>Actions</th></tr></thead>
             <tbody>
-              {customExclusions.map((exclusion) => (
-                <tr key={exclusion.path}>
-                  <td class="path-cell" title={displayPath(exclusion.path)}>{displayPath(exclusion.path)}</td>
-                  <td><Action title="Remove exclusion" icon={<Trash2 size={15} />} onClick={() => void props.run(() => removeExclusion(exclusion.path), "Exclusion removed")} /></td>
+              {customPatterns.map((item) => (
+                <tr key={item.pattern}>
+                  <td><code>{item.pattern}</code></td>
+                  <td><Action title="Remove pattern" icon={<Trash2 size={15} />} onClick={() => void props.run(() => removeIgnorePattern(item.pattern), "Ignore pattern removed")} /></td>
                 </tr>
               ))}
-              {customExclusions.length === 0 && <EmptyRow colSpan={2} text="No exact file exclusions." />}
+              {customPatterns.length === 0 && <EmptyRow colSpan={2} text="No custom ignore patterns." />}
             </tbody>
           </table>
         </div>
@@ -1111,12 +1111,12 @@ export function SharingView(props: {
           <table class="table table-vcenter card-table root-table">
             <thead><tr><th>Pattern</th><th>Match</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
-              {defaultExclusions.map((rule) => (
+              {defaultIgnores.map((rule) => (
                 <tr key={rule.key}>
                   <td><code>{rule.pattern}</code></td>
                   <td>{rule.matchKind}</td>
                   <td><StatusPill value={rule.enabled ? "enabled" : "disabled"} /></td>
-                  <td><button class="btn btn-sm" type="button" onClick={() => void props.run(() => props.client.patch(`shared-directories/exclusions/rules/${encodeURIComponent(rule.key)}`, { enabled: !rule.enabled }), rule.enabled ? "Default exclusion disabled" : "Default exclusion enabled")}>{rule.enabled ? "Disable" : "Enable"}</button></td>
+                  <td><button class="btn btn-sm" type="button" onClick={() => void props.run(() => props.client.patch(`shared-directories/ignores/defaults/${encodeURIComponent(rule.key)}`, { enabled: !rule.enabled }), rule.enabled ? "Default ignore disabled" : "Default ignore enabled")}>{rule.enabled ? "Disable" : "Enable"}</button></td>
                 </tr>
               ))}
             </tbody>

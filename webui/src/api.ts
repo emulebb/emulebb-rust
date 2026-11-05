@@ -622,8 +622,8 @@ export type SharedDirectories = {
   [key: string]: unknown;
 };
 
-export type SharedFileExclusion = {
-  path: string;
+export type SharedFileIgnorePattern = {
+  pattern: string;
   [key: string]: unknown;
 };
 
@@ -635,8 +635,8 @@ export type SharedFileIgnoreRule = {
   [key: string]: unknown;
 };
 
-export type SharedFileExclusions = {
-  custom?: SharedFileExclusion[];
+export type SharedFileIgnores = {
+  custom?: SharedFileIgnorePattern[];
   defaults?: SharedFileIgnoreRule[];
   [key: string]: unknown;
 };

@@ -17,9 +17,10 @@ use validators::{
     validate_known_file_policy_body_field, validate_paused_body_field,
     validate_search_create_body_fields, validate_server_create_body_fields,
     validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
-    validate_shared_directory_root_body_fields, validate_shared_file_ignore_rule_body_fields,
-    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
-    validate_transfer_patch_body_fields, validate_url_import_body_fields,
+    validate_shared_directory_root_body_fields, validate_shared_file_ignore_pattern_body_fields,
+    validate_shared_file_ignore_rule_body_fields, validate_shared_file_patch_body_fields,
+    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
+    validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -122,8 +123,8 @@ fn validate_route_specific_body_fields(
     if method == "POST" && path == "/api/v1/shared-directories/roots" {
         return validate_shared_directory_root_body_fields(object);
     }
-    if method == "POST" && path == "/api/v1/shared-directories/exclusions" {
-        return validate_shared_directory_root_body_fields(object);
+    if method == "POST" && path == "/api/v1/shared-directories/ignores" {
+        return validate_shared_file_ignore_pattern_body_fields(object);
     }
     if method == "PATCH" && path_matches_shared_file_ignore_rule(path) {
         return validate_shared_file_ignore_rule_body_fields(object);
@@ -181,6 +182,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
+    const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
     const SHARED_FILE_IGNORE_RULE: &[&str] = &["enabled"];
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
     const DIAGNOSTIC_BUNDLE: &[&str] = &["confirmCapture", "maxBytes"];
@@ -264,8 +266,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     if method == "POST" && path == "/api/v1/shared-directories/roots" {
         return Some(SHARED_DIRECTORY_ROOT);
     }
-    if method == "POST" && path == "/api/v1/shared-directories/exclusions" {
-        return Some(SHARED_DIRECTORY_ROOT);
+    if method == "POST" && path == "/api/v1/shared-directories/ignores" {
+        return Some(SHARED_FILE_IGNORE_PATTERN);
     }
     if method == "POST" && path == "/api/v1/app/shutdown" {
         return Some(CONFIRM_SHUTDOWN);
@@ -316,7 +318,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     match (method, segments.as_slice()) {
         ("PATCH", ["transfers", _]) => Some(TRANSFER_PATCH),
         ("PATCH", ["shared-files", _]) => Some(SHARED_FILE_PATCH),
-        ("PATCH", ["shared-directories", "exclusions", "rules", _]) => {
+        ("PATCH", ["shared-directories", "ignores", "defaults", _]) => {
             Some(SHARED_FILE_IGNORE_RULE)
         }
         ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
@@ -340,7 +342,7 @@ fn path_matches_shared_file_ignore_rule(path: &str) -> bool {
     api_segments(path).is_some_and(|segments| {
         matches!(
             segments.as_slice(),
-            ["shared-directories", "exclusions", "rules", _]
+            ["shared-directories", "ignores", "defaults", _]
         )
     })
 }

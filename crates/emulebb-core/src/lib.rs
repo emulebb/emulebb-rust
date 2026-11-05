@@ -273,11 +273,11 @@ pub use shared_directories::{
     SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryHashActiveFile,
     SharedDirectoryHashDiskProgress, SharedDirectoryHashQueuedFile, SharedDirectoryHashRecentFile,
     SharedDirectoryReloadProgress, SharedDirectoryRoot, SharedDirectoryRootUpdate,
-    SharedFileExclusion, SharedFileExclusionUpdate, SharedFileExclusions, SharedFileIgnoreRule,
-    SharedFileIgnoreRuleUpdate,
+    SharedFileIgnorePattern, SharedFileIgnorePatternUpdate, SharedFileIgnoreRule,
+    SharedFileIgnoreRuleUpdate, SharedFileIgnores,
 };
 use shared_directories::{
-    is_shared_file_ignore_rule, load_shared_file_exclusion_policy, refresh_shared_directory_row,
+    is_shared_file_ignore_rule, load_shared_file_ignore_policy, refresh_shared_directory_row,
     reload_progress_snapshot, shared_directory_from_index, shared_directory_to_index,
     shared_file_ignore_rules,
 };

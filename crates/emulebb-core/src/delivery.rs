@@ -132,7 +132,7 @@ impl EmulebbCore {
             .await?;
         let normalized_path = crate::long_path(&path);
         let file_metadata = tokio::fs::metadata(&normalized_path).await?;
-        if !crate::shared_directories::load_shared_file_exclusion_policy(self)?
+        if !crate::shared_directories::load_shared_file_ignore_policy(self)?
             .should_ignore(&normalized_path, &file_metadata)
         {
             ensure!(

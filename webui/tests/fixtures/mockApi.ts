@@ -308,9 +308,9 @@ function dataFor(method: string, path: string): unknown {
           ]
         }
       };
-    case "shared-directories/exclusions":
+    case "shared-directories/ignores":
       return {
-        custom: [{ path: "C:\\Sample\\Shared\\private.bin" }],
+        custom: [{ pattern: "*.private.bin" }],
         defaults: [
           {
             key: "mfc-runtime-database",

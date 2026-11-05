@@ -53,7 +53,7 @@ use notify_debouncer_full::{
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::shared_directories::{SharedDirectoryRoot, load_shared_file_exclusion_policy};
+use crate::shared_directories::{SharedDirectoryRoot, load_shared_file_ignore_policy};
 
 /// Settle window before a burst of raw FS events for one logical change is
 /// emitted as a settled event. Long enough that a file copied in is fully
@@ -611,7 +611,7 @@ async fn reconcile_invalidated_shared_source(
         }
     };
 
-    match load_shared_file_exclusion_policy(core) {
+    match load_shared_file_ignore_policy(core) {
         Ok(policy) if policy.should_ignore(&key, &metadata) => {
             return finish_unavailable_invalidated_source(core, invalidation, &key).await;
         }
@@ -850,7 +850,7 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
             return;
         }
     };
-    match load_shared_file_exclusion_policy(core) {
+    match load_shared_file_ignore_policy(core) {
         Ok(policy) if policy.should_ignore(&new_key, &metadata) => {
             auto_unshare_monitored_path(core, from).await;
             return;
@@ -1611,7 +1611,7 @@ mod tests {
             EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
                 .unwrap();
         core.metadata_store
-            .add_shared_file_exclusion(&monitor_shared_key(&source))
+            .add_shared_file_ignore_pattern("Excluded.*.bin")
             .unwrap();
 
         auto_share_monitored_path(&core, &source).await;

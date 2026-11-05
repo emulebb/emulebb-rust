@@ -9,6 +9,7 @@ use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::IndexedSharedDirectoryRoot;
 use emulebb_metadata::{MetadataSharedDirectoryRoot, NativeFileFingerprint, NativePath};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -34,15 +35,15 @@ pub struct SharedDirectories {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SharedFileExclusions {
-    pub custom: Vec<SharedFileExclusion>,
+pub struct SharedFileIgnores {
+    pub custom: Vec<SharedFileIgnorePattern>,
     pub defaults: Vec<SharedFileIgnoreRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SharedFileExclusion {
-    pub path: String,
+pub struct SharedFileIgnorePattern {
+    pub pattern: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,8 +57,8 @@ pub struct SharedFileIgnoreRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SharedFileExclusionUpdate {
-    pub path: String,
+pub struct SharedFileIgnorePatternUpdate {
+    pub pattern: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -509,18 +510,29 @@ const DEFAULT_SHARED_FILE_IGNORE_RULES: &[SharedFileIgnoreRuleDefinition] = &[
     },
 ];
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SharedFileExclusionPolicy {
-    exact_paths: HashSet<NativePath>,
+#[derive(Debug, Clone)]
+pub(crate) struct SharedFileIgnorePolicy {
+    custom_patterns: GlobSet,
     disabled_default_rules: HashSet<String>,
 }
 
-impl SharedFileExclusionPolicy {
-    pub(crate) fn new(exact_paths: Vec<NativePath>, disabled_default_rules: Vec<String>) -> Self {
-        Self {
-            exact_paths: exact_paths.into_iter().collect(),
-            disabled_default_rules: disabled_default_rules.into_iter().collect(),
+impl Default for SharedFileIgnorePolicy {
+    fn default() -> Self {
+        Self::new(Vec::new(), Vec::new()).expect("empty ignore policy is valid")
+    }
+}
+
+impl SharedFileIgnorePolicy {
+    pub(crate) fn new(patterns: Vec<String>, disabled_default_rules: Vec<String>) -> Result<Self> {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            validate_shared_file_ignore_pattern(&pattern)?;
+            builder.add(GlobBuilder::new(&pattern).case_insensitive(true).build()?);
         }
+        Ok(Self {
+            custom_patterns: builder.build()?,
+            disabled_default_rules: disabled_default_rules.into_iter().collect(),
+        })
     }
 
     pub(crate) fn should_ignore(&self, path: &Path, metadata: &Metadata) -> bool {
@@ -528,9 +540,7 @@ impl SharedFileExclusionPolicy {
         metadata.len() == 0
             || metadata.len() > MAX_EMULE_FILE_SIZE
             || has_windows_ignored_file_attributes(metadata)
-            || self
-                .exact_paths
-                .contains(&NativePath::from(long_path(path)))
+            || self.custom_patterns.is_match(file_name.as_ref())
             || self.should_ignore_file_name(&file_name)
     }
 
@@ -539,6 +549,23 @@ impl SharedFileExclusionPolicy {
             .iter()
             .any(|rule| !self.disabled_default_rules.contains(rule.key) && rule.matches(file_name))
     }
+}
+
+pub(crate) fn validate_shared_file_ignore_pattern(pattern: &str) -> Result<()> {
+    anyhow::ensure!(
+        !pattern.is_empty() && pattern.len() <= 255 && pattern == pattern.trim(),
+        "ignore pattern must be 1 to 255 characters without surrounding whitespace"
+    );
+    anyhow::ensure!(
+        !pattern.contains(['/', '\\']),
+        "ignore pattern must match file names, not paths"
+    );
+    anyhow::ensure!(
+        pattern.contains(['*', '?', '[']),
+        "ignore pattern must contain a glob wildcard"
+    );
+    GlobBuilder::new(pattern).case_insensitive(true).build()?;
+    Ok(())
 }
 
 impl SharedFileIgnoreRuleDefinition {
@@ -583,14 +610,14 @@ pub(crate) fn is_shared_file_ignore_rule(rule_key: &str) -> bool {
 fn should_ignore_shared_file_candidate_with_policy(
     path: &Path,
     metadata: &Metadata,
-    policy: &SharedFileExclusionPolicy,
+    policy: &SharedFileIgnorePolicy,
 ) -> bool {
     policy.should_ignore(path, metadata)
 }
 
 #[cfg(test)]
 fn should_ignore_shared_file_name(file_name: &str) -> bool {
-    SharedFileExclusionPolicy::default().should_ignore_file_name(file_name)
+    SharedFileIgnorePolicy::default().should_ignore_file_name(file_name)
 }
 
 #[cfg(windows)]
@@ -656,13 +683,13 @@ pub(crate) fn collect_shared_directory_files(
     root: &Path,
     output: &mut Vec<ScannedSharedFile>,
 ) -> Result<usize> {
-    collect_shared_directory_files_with_policy(root, output, &SharedFileExclusionPolicy::default())
+    collect_shared_directory_files_with_policy(root, output, &SharedFileIgnorePolicy::default())
 }
 
 fn collect_shared_directory_files_with_policy(
     root: &Path,
     output: &mut Vec<ScannedSharedFile>,
-    policy: &SharedFileExclusionPolicy,
+    policy: &SharedFileIgnorePolicy,
 ) -> Result<usize> {
     // Resolve the physical disk once per configured root. On a 100k-file
     // library this avoids 100k volume opens + disk-extent IOCTLs, while every
@@ -740,7 +767,7 @@ fn collect_shared_directory_files_with_policy(
 fn collect_initial_publish_candidates(
     root: &Path,
     output: &mut Vec<ScannedSharedFile>,
-    policy: &SharedFileExclusionPolicy,
+    policy: &SharedFileIgnorePolicy,
 ) -> Result<usize> {
     let disk_key = physical_disk_key(root);
     let root = long_path(root);
@@ -841,7 +868,7 @@ fn select_initial_publish_cohort(mut candidates: Vec<ScannedSharedFile>) -> Vec<
 async fn scan_initial_publish_cohort(core: &EmulebbCore) -> Result<Vec<ScannedSharedFile>> {
     sync_implicit_shared_directory_roots(core).await?;
     let roots = effective_shared_directory_roots(core).await;
-    let policy = load_shared_file_exclusion_policy(core)?;
+    let policy = load_shared_file_ignore_policy(core)?;
     tokio::task::spawn_blocking(move || -> Result<Vec<ScannedSharedFile>> {
         let mut candidates = Vec::new();
         for root in roots.into_iter().filter(|root| root.accessible) {
@@ -862,7 +889,7 @@ async fn scan_initial_publish_cohort(core: &EmulebbCore) -> Result<Vec<ScannedSh
 /// recursive filesystem walk on a runtime worker thread.
 pub(crate) async fn scan_shared_directory_roots(
     roots: Vec<SharedDirectoryRoot>,
-    policy: SharedFileExclusionPolicy,
+    policy: SharedFileIgnorePolicy,
 ) -> Result<SharedScanResult> {
     tokio::task::spawn_blocking(move || -> Result<SharedScanResult> {
         let mut files = Vec::new();
@@ -981,7 +1008,7 @@ pub(crate) fn hashing_count_snapshot(core: &EmulebbCore) -> i64 {
 async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     sync_implicit_shared_directory_roots(core).await?;
     let roots = effective_shared_directory_roots(core).await;
-    let policy = load_shared_file_exclusion_policy(core)?;
+    let policy = load_shared_file_ignore_policy(core)?;
     // The recursive directory walk is synchronous and may be large, so the helper
     // runs it off the async executor via spawn_blocking to avoid stalling a tokio
     // worker thread.
@@ -1002,13 +1029,11 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     Ok(result)
 }
 
-pub(crate) fn load_shared_file_exclusion_policy(
-    core: &EmulebbCore,
-) -> Result<SharedFileExclusionPolicy> {
-    Ok(SharedFileExclusionPolicy::new(
-        core.metadata_store.shared_file_exclusions()?,
+pub(crate) fn load_shared_file_ignore_policy(core: &EmulebbCore) -> Result<SharedFileIgnorePolicy> {
+    SharedFileIgnorePolicy::new(
+        core.metadata_store.shared_file_ignore_patterns()?,
         core.metadata_store.disabled_shared_default_ignore_rules()?,
-    ))
+    )
 }
 
 /// Outcome of partitioning a freshly scanned shared-file list against the
