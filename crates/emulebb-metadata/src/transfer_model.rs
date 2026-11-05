@@ -187,45 +187,6 @@ pub struct MetadataTransferPublishEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataTransferShareEntry {
-    pub file_hash: String,
-    pub display_name: String,
-    pub file_size: u64,
-    pub part_count: u32,
-    pub source_path: Option<PathBuf>,
-    pub aich_root: Option<String>,
-    pub upload_priority: String,
-    pub auto_upload_priority: bool,
-    pub all_time_uploaded_bytes: u64,
-    pub all_time_upload_requests: u64,
-    pub all_time_upload_accepts: u64,
-    pub comment: String,
-    pub rating: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataSharedFileCursor {
-    pub sort_path: String,
-    pub file_hash: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MetadataSharedFileQuery {
-    pub search: Option<String>,
-    pub priority: Option<String>,
-    pub after: Option<MetadataSharedFileCursor>,
-    pub limit: usize,
-    pub count_total: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataSharedFilePage {
-    pub entries: Vec<MetadataTransferShareEntry>,
-    pub total: usize,
-    pub next_cursor: Option<MetadataSharedFileCursor>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataShareInPlaceReloadEntry {
     pub file_hash: String,
     pub file_size: u64,
