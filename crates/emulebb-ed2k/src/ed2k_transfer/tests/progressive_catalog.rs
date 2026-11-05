@@ -1,13 +1,11 @@
 use super::*;
 use crate::config::Ed2kRuntimeConfig;
-use emulebb_metadata::{
-    MetadataSharedDirectoryRoot, MetadataStore, MetadataVerifiedLocalContent,
-    NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp,
-};
+use emulebb_metadata::{MetadataSharedDirectoryRoot, MetadataStore, MetadataVerifiedLocalContent};
 
 #[tokio::test]
 async fn progressive_catalog_requires_explicit_initial_hydration() {
     let root = unique_test_dir("progressive-catalog");
+    std::fs::create_dir_all(&root).unwrap();
     let mut metadata = MetadataStore::in_memory().unwrap();
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
@@ -21,15 +19,8 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
         let file_hash = format!("{sequence:032x}");
         let file_name = format!("catalog-{sequence}.bin");
         let path = root.join(&file_name);
-        let fingerprint = NativeFileFingerprint {
-            identity: NativeFileIdentity::WindowsHighResolution {
-                volume_serial_number: 1,
-                file_id: sequence,
-            },
-            size_bytes: sequence as u64,
-            modified: NativeFileTimestamp::new(sequence as i64, 1).unwrap(),
-            changed: Some(NativeFileTimestamp::new(sequence as i64, 2).unwrap()),
-        };
+        std::fs::write(&path, vec![sequence as u8; sequence as usize]).unwrap();
+        let fingerprint = super::super::ingest::native_file_fingerprint(&path).unwrap();
         metadata
             .upsert_verified_local_content(&MetadataVerifiedLocalContent {
                 file_hash: file_hash.clone(),
@@ -59,6 +50,34 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
         );
     }
 
+    let copy_path = root.join("catalog-2-copy.bin");
+    std::fs::write(&copy_path, [2, 2]).unwrap();
+    let mut copy = metadata
+        .active_local_content_by_hash(&format!("{:032x}", 2))
+        .unwrap()
+        .unwrap();
+    copy.path = copy_path.clone();
+    copy.fingerprint = super::super::ingest::native_file_fingerprint(&copy_path).unwrap();
+    metadata.upsert_verified_local_content(&copy).unwrap();
+    assert!(
+        metadata
+            .admit_local_path_to_root(
+                &root,
+                &copy_path,
+                std::path::Path::new("catalog-2-copy.bin"),
+                &copy.fingerprint,
+            )
+            .unwrap()
+    );
+
+    // Simulate same-size replacement while the daemon is offline. The second
+    // hash has another intact path and must remain publishable through it.
+    for sequence in 1..=2u128 {
+        let path = root.join(format!("catalog-{sequence}.bin"));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, vec![9; sequence as usize]).unwrap();
+    }
+
     let runtime = Ed2kTransferRuntime::load_or_create_with_metadata_and_config_catalog_mode(
         &root,
         metadata,
@@ -68,16 +87,57 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
     .unwrap();
 
     assert_eq!(runtime.shared_catalog_count().await, 0);
+    assert!(
+        runtime
+            .servable_manifest(&format!("{:032x}", 1))
+            .await
+            .is_err()
+    );
     assert_eq!(
         runtime
-            .hydrate_initial_shared_catalog_page(2)
+            .servable_manifest(&format!("{:032x}", 2))
+            .await
+            .unwrap()
+            .source_path
+            .as_deref(),
+        Some(crate::long_path::long_path(&copy_path).as_path())
+    );
+    let publish = runtime.publish_entries().await.unwrap();
+    assert_eq!(publish.len(), 2);
+    assert!(
+        publish
+            .iter()
+            .all(|entry| entry.file_hash != format!("{:032x}", 1))
+    );
+    assert_eq!(
+        runtime.try_publish_entries().await.unwrap().unwrap(),
+        publish
+    );
+    assert_eq!(
+        runtime
+            .hydrate_initial_shared_catalog_page(1)
             .await
             .unwrap(),
-        2
+        0
     );
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+    assert_eq!(runtime.hydrate_shared_catalog().await.unwrap(), 2);
     assert_eq!(runtime.shared_catalog_count().await, 2);
-    assert_eq!(runtime.hydrate_shared_catalog().await.unwrap(), 1);
-    assert_eq!(runtime.shared_catalog_count().await, 3);
+    let catalog = runtime.shared_catalog();
+    let guard = catalog.read().await;
+    assert!(
+        guard
+            .entry_by_hash(&format!("{:032x}", 1).parse().unwrap())
+            .is_none()
+    );
+    assert_eq!(
+        guard
+            .entry_by_hash(&format!("{:032x}", 2).parse().unwrap())
+            .unwrap()
+            .display_name,
+        "catalog-2-copy.bin"
+    );
+    drop(guard);
     assert_eq!(runtime.hydrate_shared_catalog().await.unwrap(), 0);
     std::fs::remove_dir_all(root).ok();
 }

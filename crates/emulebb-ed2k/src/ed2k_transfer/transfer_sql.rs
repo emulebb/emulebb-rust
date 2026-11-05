@@ -211,30 +211,72 @@ pub(super) fn manifest_from_metadata(
 pub(super) fn completed_catalog_from_metadata_store(
     metadata: &MetadataStore,
 ) -> Result<Vec<Ed2kSharedEntry>> {
-    completed_catalog_page_from_metadata_store(metadata, None, usize::MAX)
+    Ok(completed_catalog_page_from_metadata_store(metadata, None, usize::MAX)?.entries)
+}
+
+/// A keyset page whose cursor also advances across rejected stale candidates.
+pub(super) struct CompletedCatalogPage {
+    pub entries: Vec<Ed2kSharedEntry>,
+    pub cursor: Option<String>,
+    pub has_more: bool,
 }
 
 pub(super) fn completed_catalog_page_from_metadata_store(
     metadata: &MetadataStore,
     after_hash: Option<&str>,
     limit: usize,
-) -> Result<Vec<Ed2kSharedEntry>> {
+) -> Result<CompletedCatalogPage> {
     let mut by_hash = BTreeMap::new();
     // A completed download awaiting delivery can still serve its verified
     // payload. A complete local file is authorized by a root membership.
     for entry in metadata.completed_transfer_catalog_entries_after(after_hash, limit)? {
         by_hash.insert(
             entry.file_hash.clone(),
-            shared_entry_from_catalog_entry(entry)?,
+            (shared_entry_from_catalog_entry(entry)?, false, None),
         );
     }
     for entry in metadata.active_local_catalog_page(after_hash, limit)? {
+        let download_fallback = by_hash
+            .remove(&entry.file_hash)
+            .map(|(download, _, _)| download);
         by_hash.insert(
             entry.file_hash.clone(),
-            shared_entry_from_catalog_entry(entry)?,
+            (
+                shared_entry_from_catalog_entry(entry)?,
+                true,
+                download_fallback,
+            ),
         );
     }
-    Ok(by_hash.into_values().take(limit).collect())
+    let candidates = by_hash.into_values().take(limit).collect::<Vec<_>>();
+    let cursor = candidates
+        .last()
+        .map(|(entry, _, _)| entry.file_hash.clone());
+    let has_more = candidates.len() == limit;
+    let mut entries = Vec::with_capacity(candidates.len());
+    for (mut entry, local, download_fallback) in candidates {
+        if local {
+            // WHY: a persisted root membership is only a candidate after
+            // restart. Check current identity before any protocol publication.
+            let Some(source) = super::duplicate::first_present_source(
+                metadata.current_shared_files_by_hash(&entry.file_hash)?,
+            ) else {
+                if let Some(download) = download_fallback {
+                    entries.push(download);
+                }
+                continue;
+            };
+            if let Some(name) = source.path.file_name() {
+                entry.display_name = name.to_string_lossy().into_owned();
+            }
+        }
+        entries.push(entry);
+    }
+    Ok(CompletedCatalogPage {
+        entries,
+        cursor,
+        has_more,
+    })
 }
 
 pub(super) fn shared_entry_from_catalog_entry(
