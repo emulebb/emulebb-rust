@@ -247,6 +247,20 @@ impl Ed2kTransferRuntime {
         // under it), so concurrent REST reads of `manifests()` are not starved.
         let _guard = self.lock_manifest(&manifest.file_hash).await;
         self.store_manifest_unlocked(&manifest).await?;
+        // WHY: this function has verified the whole payload. A generic
+        // manifest write can also represent a known.met name/size/time match,
+        // which must not become a trusted path-to-hash cache entry.
+        let metadata = self.metadata.clone();
+        let cache_path = source_path.clone();
+        let cache_hash = manifest.file_hash.clone();
+        let cache_fingerprint = manifest
+            .source_fingerprint
+            .clone()
+            .expect("whole-payload hash pass supplied a fingerprint");
+        tokio::task::spawn_blocking(move || {
+            metadata.upsert_local_file_instance(&cache_path, &cache_hash, &cache_fingerprint)
+        })
+        .await??;
         self.upsert_verified_catalog_entry(&manifest).await;
         drop(_guard);
 

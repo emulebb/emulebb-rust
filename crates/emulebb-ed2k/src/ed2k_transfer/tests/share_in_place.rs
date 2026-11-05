@@ -37,9 +37,14 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         .await
         .unwrap();
     let file_hash = summary.file_hash.clone();
-
     // (1) The manifest is a completed share that records the ORIGINAL path.
     let manifest = runtime.manifest(&file_hash).await.unwrap();
+    let cached = runtime
+        .metadata
+        .local_file_instance(manifest.source_path.as_deref().unwrap())
+        .unwrap()
+        .expect("whole-payload hash pass must cache the verified native path");
+    assert_eq!(cached.file_hash, file_hash);
     assert!(manifest.completed, "shared complete file must be completed");
     assert_eq!(manifest.delivery_state, Ed2kDeliveryState::NotApplicable);
     assert!(
