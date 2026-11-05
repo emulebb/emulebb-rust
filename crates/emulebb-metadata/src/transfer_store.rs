@@ -231,6 +231,33 @@ impl super::MetadataStore {
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
             .query_row(params![known_file_id], |row| row.get(0))?;
         if let Some(source_path_id) = source_path_id {
+            if manifest.completed
+                && let Some(fingerprint) = manifest.source_fingerprint.as_ref()
+            {
+                // WHY: capture the verified path identity in the same transaction
+                // as the hashset. The new library path can later outlive its
+                // legacy synthetic transfer without losing safe hash reuse.
+                tx.prepare_cached(
+                    "INSERT INTO local_file_instances(
+                        path_id, known_file_id, file_size, native_identity,
+                        verified_fingerprint, verified_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(path_id) DO UPDATE SET
+                        known_file_id = excluded.known_file_id,
+                        file_size = excluded.file_size,
+                        native_identity = excluded.native_identity,
+                        verified_fingerprint = excluded.verified_fingerprint,
+                        verified_at_ms = excluded.verified_at_ms",
+                )?
+                .execute(params![
+                    source_path_id,
+                    known_file_id,
+                    manifest.file_size as i64,
+                    fingerprint.identity.storage_bytes(),
+                    fingerprint.storage_bytes(),
+                    now,
+                ])?;
+            }
             tx.prepare_cached(
                 r#"
                 INSERT INTO shared_file_sources(
