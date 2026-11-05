@@ -381,6 +381,64 @@ impl MetadataStore {
             .optional()
             .map_err(Into::into)
     }
+
+    /// Read hashsets and the first eligible verified path without consulting
+    /// download transfers. Used to hydrate complete-file protocol responses.
+    pub fn active_local_content_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataVerifiedLocalContent>> {
+        let Some(instance) = self.active_local_file_by_hash(file_hash)? else {
+            return Ok(None);
+        };
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        let (name, size, part_size, aich_root): (String, i64, Option<i64>, Option<String>) = conn
+            .query_row(
+            "SELECT display_name, size_bytes, part_size,
+                        CASE WHEN aich_root IS NULL THEN NULL ELSE lower(hex(aich_root)) END
+                 FROM known_files WHERE ed2k_hash = ?1",
+            params![hash],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let Some(part_size) = part_size.filter(|size| *size > 0) else {
+            return Ok(None);
+        };
+        let Some(aich_root) = aich_root else {
+            return Ok(None);
+        };
+        ensure!(
+            size >= 0 && size as u64 == instance.file_size,
+            "active local file size differs from known content"
+        );
+        let mut md4_stmt = conn.prepare(
+            "SELECT lower(hex(ed2k_part_hashes.md4_hash))
+             FROM ed2k_part_hashes JOIN known_files ON known_files.id = ed2k_part_hashes.known_file_id
+             WHERE known_files.ed2k_hash = ?1 ORDER BY part_index",
+        )?;
+        let md4_hashset = md4_stmt
+            .query_map(params![hash], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut aich_stmt = conn.prepare(
+            "SELECT lower(hex(aich_part_hashes.aich_hash))
+             FROM aich_part_hashes JOIN known_files ON known_files.id = aich_part_hashes.known_file_id
+             WHERE known_files.ed2k_hash = ?1 ORDER BY part_index",
+        )?;
+        let aich_hashset = aich_stmt
+            .query_map(params![hash], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Some(MetadataVerifiedLocalContent {
+            file_hash: instance.file_hash,
+            display_name: name,
+            file_size: instance.file_size,
+            part_size: part_size as u64,
+            md4_hashset,
+            aich_root,
+            aich_hashset,
+            path: instance.path,
+            fingerprint: instance.verified_fingerprint,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -479,7 +537,7 @@ mod tests {
 
     #[test]
     fn verified_content_writes_hashsets_and_paths_without_download_rows() {
-        let store = MetadataStore::in_memory().unwrap();
+        let mut store = MetadataStore::in_memory().unwrap();
         let first_path = std::env::temp_dir().join("emulebb-local-content-first.bin");
         let second_path = std::env::temp_dir().join("emulebb-local-content-second.bin");
         let mut content = MetadataVerifiedLocalContent {
@@ -523,5 +581,45 @@ mod tests {
             (name.as_str(), transfers, md4, aich, paths),
             ("First.bin", 0, 1, 1, 2)
         );
+        drop(conn);
+        assert!(
+            store
+                .active_local_content_by_hash(&content.file_hash)
+                .unwrap()
+                .is_none()
+        );
+        let root = std::env::temp_dir();
+        store
+            .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
+                path: root.to_string_lossy().into_owned(),
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }])
+            .unwrap();
+        store
+            .replace_root_memberships(
+                &root,
+                &[
+                    (
+                        first_path.clone(),
+                        "emulebb-local-content-first.bin".into(),
+                        fingerprint(41),
+                    ),
+                    (
+                        second_path.clone(),
+                        "emulebb-local-content-second.bin".into(),
+                        fingerprint(42),
+                    ),
+                ],
+            )
+            .unwrap();
+        let active = store
+            .active_local_content_by_hash(&content.file_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.display_name, "First.bin");
+        assert_eq!(active.md4_hashset, content.md4_hashset);
+        assert_eq!(active.aich_hashset, content.aich_hashset);
     }
 }
