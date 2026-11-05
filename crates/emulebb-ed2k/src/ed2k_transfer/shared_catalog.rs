@@ -17,19 +17,32 @@ impl Ed2kTransferRuntime {
     /// in-progress download entries and compatibility hints stay in the catalog.
     pub async fn refresh_complete_shared_catalog(&self) -> anyhow::Result<usize> {
         let metadata = self.metadata.clone();
-        let complete = tokio::task::spawn_blocking(move || {
-            super::transfer_sql::completed_catalog_from_metadata_store(&metadata)
+        let (complete, persisted_partial) = tokio::task::spawn_blocking(move || {
+            let complete = super::transfer_sql::completed_catalog_from_metadata_store(&metadata)?;
+            let partial = metadata
+                .incomplete_transfer_manifests()?
+                .into_iter()
+                .filter(|manifest| !manifest.transfer_row_removed)
+                .map(super::transfer_sql::manifest_from_metadata)
+                .collect::<anyhow::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(manifest_has_servable_payload_authority)
+                .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest))
+                .collect::<Vec<_>>();
+            Ok::<_, anyhow::Error>((complete, partial))
         })
         .await??;
         let count = complete.len();
         let mut catalog = self.shared_catalog.write().await;
-        let mut retained = catalog
+        let retained = catalog
             .iter()
             .filter(|entry| entry.compatibility_hint || !entry.verified_complete)
             .cloned()
             .collect::<Vec<_>>();
-        retained.extend(complete);
-        catalog.replace_with(dedupe_entries(retained));
+        let mut entries = persisted_partial;
+        entries.extend(retained);
+        entries.extend(complete);
+        catalog.replace_with(dedupe_entries(entries));
         drop(catalog);
         self.note_shared_catalog_entries_changed();
         self.notify_shared_publish_demand_changed();
@@ -281,6 +294,32 @@ impl Ed2kTransferRuntime {
         let Ok(file_hash) = Ed2kHash::from_str(&manifest.file_hash) else {
             return;
         };
+        // A download may acquire verified parts while the same hash is already
+        // shared as a complete local file. The local file owns the effective
+        // protocol entry until its root membership is withdrawn.
+        match self
+            .metadata
+            .active_local_catalog_entry(&manifest.file_hash)
+        {
+            Ok(Some(local)) => {
+                match super::transfer_sql::shared_entry_from_catalog_entry(local) {
+                    Ok(entry) => {
+                        self.shared_catalog
+                            .write()
+                            .await
+                            .upsert_verified(file_hash, Some(entry));
+                        self.note_shared_catalog_entries_changed();
+                    }
+                    Err(error) => tracing::warn!(%error, "failed to project local shared entry"),
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "failed to resolve local share precedence");
+                return;
+            }
+        }
         // Build the replacement entry (if any) before taking the write lock so the
         // lock hold covers only the in-place upsert.
         let mut new_entry = manifest_has_servable_payload_authority(manifest)
