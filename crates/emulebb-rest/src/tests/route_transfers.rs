@@ -412,7 +412,7 @@ async fn delete_transfer_files_requires_confirm_and_removes_transfer() {
 }
 
 #[tokio::test]
-async fn delete_completed_transfer_row_preserves_files() {
+async fn transfer_delete_route_preserves_complete_local_share() {
     let runtime_dir = unique_test_dir("delete-completed-transfer-row");
     let transfer_root = runtime_dir.join("transfers");
     let payload_path = runtime_dir.join("Completed.Rest.Row.bin");
@@ -420,6 +420,9 @@ async fn delete_completed_transfer_row_preserves_files() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
+    core.add_shared_directory_root(&runtime_dir.display().to_string())
+        .await
+        .unwrap();
     let share = core
         .share_local_file(LocalShareCreate {
             path: payload_path.display().to_string(),
@@ -476,7 +479,7 @@ async fn delete_completed_transfer_row_preserves_files() {
 }
 
 #[tokio::test]
-async fn clear_completed_transfers_requires_confirmation_and_preserves_files() {
+async fn clear_completed_transfers_requires_confirmation_and_preserves_local_shares() {
     let runtime_dir = unique_test_dir("clear-completed-transfers");
     let transfer_root = runtime_dir.join("transfers");
     let first_path = runtime_dir.join("Completed.Rest.Clear.One.bin");
@@ -486,6 +489,9 @@ async fn clear_completed_transfers_requires_confirmation_and_preserves_files() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
+    core.add_shared_directory_root(&runtime_dir.display().to_string())
+        .await
+        .unwrap();
     let first = core
         .share_local_file(LocalShareCreate {
             path: first_path.display().to_string(),
