@@ -188,6 +188,10 @@ mod tests {
         let page = store.active_local_share_page(None, 10).unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].file_hash, hash);
+        assert_eq!(
+            store.active_local_file_by_hash(hash).unwrap().unwrap().path,
+            file
+        );
         assert!(
             store
                 .active_local_share_page(Some(hash), 10)
@@ -199,6 +203,7 @@ mod tests {
         store.set_shared_root_accessible(&nested, false).unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 0);
         assert!(store.active_local_share_page(None, 10).unwrap().is_empty());
+        assert!(store.active_local_file_by_hash(hash).unwrap().is_none());
         assert!(store.local_file_instance(&file).unwrap().is_some());
         store
             .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
