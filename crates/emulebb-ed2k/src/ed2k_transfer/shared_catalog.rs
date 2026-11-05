@@ -179,7 +179,7 @@ impl Ed2kTransferRuntime {
         };
         let _guard = self.lock_manifest(&entry.file_hash).await;
         let Some(manifest) = self
-            .load_manifest_optional_unlocked(&entry.file_hash)
+            .load_servable_manifest_optional_unlocked(&entry.file_hash)
             .await?
         else {
             return Ok(false);
