@@ -467,7 +467,7 @@ CREATE TABLE transfer_pieces (
     id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     piece_index INTEGER NOT NULL CHECK(piece_index >= 0),
-    state TEXT NOT NULL CHECK(state IN ('Missing', 'Requested', 'Written', 'Verified')),
+    state TEXT NOT NULL CHECK(state IN ('Missing', 'Verified')),
     bytes_written INTEGER NOT NULL DEFAULT 0 CHECK(bytes_written >= 0),
     block_bitmap TEXT,
     ich_corrupted INTEGER NOT NULL DEFAULT 0 CHECK(ich_corrupted IN (0, 1)),

@@ -32,8 +32,6 @@ pub struct Ed2kTransferJob {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ed2kTransferState {
     Missing,
-    Requested,
-    Written,
     Verified,
 }
 

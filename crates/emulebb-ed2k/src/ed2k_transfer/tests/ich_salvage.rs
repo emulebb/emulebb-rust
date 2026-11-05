@@ -51,10 +51,6 @@ async fn corrupted_single_part_transfer(tag: &str) -> (Ed2kTransferRuntime, Stri
         .store_md4_hashset(&job.file_hash, Vec::new())
         .await
         .unwrap();
-    runtime
-        .mark_piece_requested(&job.file_hash, 0)
-        .await
-        .unwrap();
 
     let mut corrupted = payload.clone();
     for byte in &mut corrupted[..BLOCK as usize] {
@@ -164,10 +160,6 @@ async fn ich_corrupted_flag_survives_reload() {
             .store_md4_hashset(&job.file_hash, Vec::new())
             .await
             .unwrap();
-        runtime
-            .mark_piece_requested(&job.file_hash, 0)
-            .await
-            .unwrap();
         let mut corrupted = payload.clone();
         for byte in &mut corrupted[..BLOCK as usize] {
             *byte ^= 0xFF;
@@ -197,7 +189,6 @@ async fn ich_corrupted_flag_survives_reload() {
     );
 
     // And ICH still salvages after the reload.
-    reloaded.mark_piece_requested(&file_hash, 0).await.unwrap();
     let outcome = reloaded
         .append_piece_block(&file_hash, 0, 0, BLOCK, &payload[..BLOCK as usize])
         .await
@@ -303,10 +294,6 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
             *byte ^= 0xAA;
         }
     }
-    runtime
-        .mark_piece_requested(&job.file_hash, 0)
-        .await
-        .unwrap();
     let mut pos = 0u64;
     let mut last_outcome = PieceWriteOutcome::Incomplete;
     while pos < ED2K_PART_SIZE {

@@ -48,7 +48,7 @@ impl Ed2kTransferRuntime {
     /// `master_hash` must match the locally trusted AICH root.
     ///
     /// Marks the good blocks present and the bad blocks missing in the persisted
-    /// per-part bitmap, moves the part into `Requested` (salvage in progress),
+    /// per-part bitmap, leaves the part `Missing` while salvage is in progress,
     /// and returns the still-needed corrupt ranges. Returns `None` when the file
     /// or part is unknown, the part is not currently corrupt, there is no
     /// trusted AICH root, or the recovery data fails verification.

@@ -329,10 +329,6 @@ async fn listener_rejects_oversized_range_and_serves_valid_range() {
         .store_md4_hashset(&file_hash_hex, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
-    transfer_runtime
-        .mark_piece_requested(&file_hash_hex, 0)
-        .await
-        .unwrap();
     // Only part 0 is verified; part 1 stays missing.
     transfer_runtime
         .store_piece_data(&file_hash_hex, 0, &first_piece)

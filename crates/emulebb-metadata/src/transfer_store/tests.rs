@@ -210,6 +210,36 @@ fn transfer_manifest_roundtrips_sql_tables() {
 }
 
 #[test]
+fn current_schema_rejects_persisted_network_claim_states() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_download_manifest();
+    manifest.completed = false;
+    manifest.verified_ranges.clear();
+    manifest.pieces = vec![MetadataTransferPiece {
+        piece_index: 0,
+        state: "Missing".to_string(),
+        bytes_written: 0,
+        block_bitmap: None,
+        ich_corrupted: false,
+    }];
+    store.upsert_transfer_manifest(&manifest).unwrap();
+
+    for state in ["Requested", "Written"] {
+        manifest.pieces[0].state = state.to_string();
+        assert!(store.upsert_transfer_manifest(&manifest).is_err());
+    }
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap()
+            .unwrap()
+            .pieces[0]
+            .state,
+        "Missing"
+    );
+}
+
+#[test]
 fn upload_demand_counters_persist_on_known_files() {
     let store = MetadataStore::in_memory().unwrap();
     let manifest = MetadataTransferManifest {

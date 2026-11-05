@@ -281,10 +281,6 @@ async fn contiguous_download_still_verifies_with_block_bitmap() {
         .unwrap();
 
     // Sequentially append part 0 in EMBLOCKSIZE blocks via the contiguous path.
-    runtime
-        .mark_piece_requested(&job.file_hash, 0)
-        .await
-        .unwrap();
     let mut pos = 0u64;
     let mut completed = false;
     while pos < ED2K_PART_SIZE {
@@ -336,10 +332,6 @@ async fn out_of_order_requested_blocks_are_persisted_by_bitmap() {
     runtime.ensure_job(&job).await.unwrap();
     runtime
         .store_md4_hashset(&job.file_hash, Vec::new())
-        .await
-        .unwrap();
-    runtime
-        .mark_piece_requested(&job.file_hash, 0)
         .await
         .unwrap();
 
@@ -424,10 +416,6 @@ async fn out_of_order_transition_preserves_cached_prefix_blocks() {
     runtime.ensure_job(&job).await.unwrap();
     runtime
         .store_md4_hashset(&job.file_hash, Vec::new())
-        .await
-        .unwrap();
-    runtime
-        .mark_piece_requested(&job.file_hash, 0)
         .await
         .unwrap();
 

@@ -322,10 +322,6 @@ async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
         .unwrap();
 
     runtime
-        .mark_piece_requested(&job.file_hash, 0)
-        .await
-        .unwrap();
-    runtime
         .store_piece_data(&job.file_hash, 0, &first_piece)
         .await
         .unwrap();
@@ -603,10 +599,6 @@ async fn partfile_serves_complete_parts_while_downloading() {
     runtime.ensure_job(&job).await.unwrap();
     runtime
         .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
-        .await
-        .unwrap();
-    runtime
-        .mark_piece_requested(&job.file_hash, 0)
         .await
         .unwrap();
     runtime
@@ -1534,8 +1526,8 @@ async fn batched_checkpoint_persists_pieces_dirtied_by_other_appends() {
 }
 
 #[tokio::test]
-async fn reclaim_stale_piece_requests_restores_missing_state_with_progress() {
-    let root = unique_test_dir("ed2k-transfer-reclaim-stale-request");
+async fn restart_keeps_partial_progress_without_persisted_network_claims() {
+    let root = unique_test_dir("ed2k-transfer-partial-restart");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x6Bu8; 32_768];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
@@ -1547,23 +1539,13 @@ async fn reclaim_stale_piece_requests_restores_missing_state_with_progress() {
         .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
-    // Simulate a legacy process which persisted network ownership after it
-    // had checkpointed useful bytes.
-    assert!(
-        runtime
-            .mark_piece_requested(&job.file_hash, 0)
-            .await
-            .unwrap()
+    assert_eq!(
+        runtime.checkpoint_dirty_download_progress().await.unwrap(),
+        1
     );
-
-    assert!(
-        runtime
-            .reclaim_stale_piece_requests(&job.file_hash)
-            .await
-            .unwrap()
-    );
-
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    drop(runtime);
+    let reloaded = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let manifest = reloaded.manifest(&job.file_hash).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(manifest.pieces[0].bytes_written, split as u64);
 }

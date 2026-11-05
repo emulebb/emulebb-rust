@@ -343,8 +343,6 @@ pub(super) fn media_to_metadata(
 fn transfer_state_to_sql(state: Ed2kTransferState) -> &'static str {
     match state {
         Ed2kTransferState::Missing => "Missing",
-        Ed2kTransferState::Requested => "Requested",
-        Ed2kTransferState::Written => "Written",
         Ed2kTransferState::Verified => "Verified",
     }
 }
@@ -352,8 +350,6 @@ fn transfer_state_to_sql(state: Ed2kTransferState) -> &'static str {
 fn transfer_state_from_sql(value: &str) -> Result<Ed2kTransferState> {
     match value {
         "Missing" => Ok(Ed2kTransferState::Missing),
-        "Requested" => Ok(Ed2kTransferState::Requested),
-        "Written" => Ok(Ed2kTransferState::Written),
         "Verified" => Ok(Ed2kTransferState::Verified),
         _ => anyhow::bail!("unknown ED2K transfer piece state {value:?}"),
     }
