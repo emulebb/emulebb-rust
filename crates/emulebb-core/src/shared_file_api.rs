@@ -64,7 +64,8 @@ impl EmulebbCore {
             crate::shared_dir_monitor::admit_monitored_path(
                 self,
                 &normalized,
-                &instance.verified_fingerprint
+                &instance.verified_fingerprint,
+                &share.hash,
             )
             .await?,
             "verified local file was not admitted by its shared root"

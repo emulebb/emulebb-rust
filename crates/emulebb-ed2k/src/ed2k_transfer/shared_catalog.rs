@@ -13,6 +13,49 @@ use super::{
 };
 
 impl Ed2kTransferRuntime {
+    /// Reconcile one hash after a watcher changes its root membership. A
+    /// local share takes precedence over an independently servable download.
+    pub async fn refresh_shared_catalog_entry(&self, file_hash: &str) -> anyhow::Result<()> {
+        let hash = Ed2kHash::from_str(file_hash)?;
+        let _guard = self.lock_manifest(file_hash).await;
+        let metadata = self.metadata.clone();
+        let owned_hash = file_hash.to_owned();
+        let local = tokio::task::spawn_blocking(move || {
+            let Some(mut entry) = metadata.active_local_catalog_entry(&owned_hash)? else {
+                return Ok(None);
+            };
+            let Some(source) = super::duplicate::first_present_source(
+                metadata.current_shared_files_by_hash(&owned_hash)?,
+            ) else {
+                return Ok(None);
+            };
+            if !metadata
+                .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
+            {
+                return Ok(None);
+            }
+            if let Some(name) = source.path.file_name() {
+                entry.display_name = name.to_string_lossy().into_owned();
+            }
+            super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
+        })
+        .await??;
+        if let Some(local) = local {
+            self.shared_catalog
+                .write()
+                .await
+                .upsert_verified(hash, Some(local));
+            self.note_shared_catalog_entries_changed();
+        } else if let Some(manifest) = self.load_manifest_optional_unlocked(file_hash).await? {
+            self.upsert_partial_catalog_entry(&manifest, hash, false)
+                .await;
+        } else {
+            self.remove_verified_catalog_entry(file_hash).await;
+        }
+        self.notify_shared_publish_demand_changed();
+        Ok(())
+    }
+
     /// Replace a retired download's offer with its independently admitted
     /// local share, or withdraw it when no current local source exists.
     pub(super) async fn refresh_retired_transfer_catalog_entry(

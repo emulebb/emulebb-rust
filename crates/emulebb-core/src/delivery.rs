@@ -139,7 +139,8 @@ impl EmulebbCore {
                 crate::shared_dir_monitor::admit_monitored_path(
                     self,
                     &normalized_path,
-                    &fingerprint
+                    &fingerprint,
+                    hash,
                 )
                 .await?,
                 "delivered output is not eligible under an Incoming or category root"
