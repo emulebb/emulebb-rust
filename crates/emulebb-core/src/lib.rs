@@ -3458,11 +3458,18 @@ impl EmulebbCore {
                 diagnostics.dirty = self.shared_catalog_publish_dirty.load(Ordering::Acquire);
             });
             tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE).await;
-            let wait = {
+            let current_entries = self.ed2k_transfers.shared_catalog_count().await;
+            let previous_entries =
+                ed2k_publish_diagnostics::snapshot(&self.ed2k_publish_diagnostics).total_entries;
+            // An empty startup offer must not hold back the first real file.
+            // A shrinking catalog must withdraw stale server offers promptly.
+            let wait = if previous_entries > 0 && current_entries >= previous_entries {
                 let last = self.shared_catalog_publish_last.lock().await;
                 last.and_then(|last| {
                     ED2K_SHARED_CATALOG_PUBLISH_MIN_INTERVAL.checked_sub(last.elapsed())
                 })
+            } else {
+                None
             };
             if let Some(wait) = wait {
                 ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
