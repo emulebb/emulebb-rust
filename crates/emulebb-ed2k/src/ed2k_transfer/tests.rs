@@ -436,10 +436,10 @@ async fn startup_transfer_root_reconciliation_reclaims_safe_residue_and_preserve
     let empty_dir = runtime.transfer_dir_path(&empty_hash);
     fs::create_dir_all(&empty_dir).unwrap();
 
-    let legacy_hash = Ed2kHash::from_bytes([0x63; 16]).to_string();
-    let legacy_dir = runtime.transfer_dir_path(&legacy_hash);
-    fs::create_dir_all(&legacy_dir).unwrap();
-    fs::write(legacy_dir.join("resume-manifest.json"), b"retired").unwrap();
+    let unowned_hash = Ed2kHash::from_bytes([0x63; 16]).to_string();
+    let unowned_dir = runtime.transfer_dir_path(&unowned_hash);
+    fs::create_dir_all(&unowned_dir).unwrap();
+    fs::write(unowned_dir.join("unexpected-file.bin"), b"preserve me").unwrap();
 
     let occupied_hash = Ed2kHash::from_bytes([0x64; 16]).to_string();
     let occupied_dir = runtime.transfer_dir_path(&occupied_hash);
@@ -460,13 +460,16 @@ async fn startup_transfer_root_reconciliation_reclaims_safe_residue_and_preserve
     assert_eq!(
         reconciliation,
         super::Ed2kTransferRootReconciliation {
-            reclaimed_paths: 2,
-            preserved_collisions: 2,
+            reclaimed_paths: 1,
+            preserved_collisions: 3,
         }
     );
     assert!(owned_dir.is_dir());
     assert!(!empty_dir.exists());
-    assert!(!legacy_dir.exists());
+    assert_eq!(
+        fs::read(unowned_dir.join("unexpected-file.bin")).unwrap(),
+        b"preserve me"
+    );
     assert_eq!(fs::read(&occupied_payload).unwrap(), b"preserve me");
     assert_eq!(fs::read(&occupied_file).unwrap(), b"preserve this path");
     assert_eq!(
@@ -1199,39 +1202,6 @@ async fn ingest_local_file_rejects_symlink_without_reading_target() {
     assert_eq!(fs::read(target_path).unwrap(), b"foreign payload");
     assert!(runtime.manifests().await.unwrap().is_empty());
     assert_eq!(runtime.shared_catalog_count().await, 0);
-}
-
-#[tokio::test]
-async fn ensure_job_ignores_legacy_json_manifest_for_fresh_sql_profiles() {
-    let root = unique_test_dir("ed2k-transfer-legacy-json-ignored");
-    let file_hash = hex::encode([0x41; 16]);
-    let transfer_dir = Path::new(&root).join(&file_hash);
-    fs::create_dir_all(&transfer_dir).unwrap();
-    fs::write(
-            transfer_dir.join("resume-manifest.json"),
-            format!(
-                "{{\"file_hash\":\"{}\",\"display_name\":\"legacy.iso\",\"file_size\":{},\"piece_size\":{},\"completed\":false,\"md4_hashset_acquired\":false,\"md4_hashset\":[],\"verified_ranges\":[],\"pieces\":[],\"sources\":[]}}",
-                file_hash,
-                ED2K_PART_SIZE + 1,
-                ED2K_PART_SIZE,
-            ),
-        )
-        .unwrap();
-
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let rebuilt = runtime
-        .ensure_job(&new_transfer_job(
-            Ed2kHash::from_str(&file_hash).unwrap(),
-            "legacy.iso".to_string(),
-            ED2K_PART_SIZE + 1,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(rebuilt.pieces.len(), 2);
-    assert!(!rebuilt.aich_hashset_acquired);
-    assert!(rebuilt.aich_root.is_none());
-    assert!(rebuilt.aich_hashset.is_empty());
-    assert!(!transfer_dir.join("resume-manifest.json").exists());
 }
 
 #[tokio::test]
