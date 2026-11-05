@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
     MetadataSharedFileCursor, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
@@ -97,6 +97,16 @@ impl MetadataStore {
         exact_hash: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        let conn = self.connection()?;
+        Self::active_local_catalog_filtered_on_connection(&conn, after_hash, exact_hash, limit)
+    }
+
+    fn active_local_catalog_filtered_on_connection(
+        conn: &Connection,
+        after_hash: Option<&str>,
+        exact_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferCatalogEntry>> {
         let after_hash = after_hash
             .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
             .transpose()?;
@@ -104,7 +114,6 @@ impl MetadataStore {
             .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
             .transpose()?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let conn = self.connection()?;
         let mut statement = conn.prepare(
             "WITH eligible AS (
                 SELECT known_files.id AS known_file_id,
@@ -187,6 +196,17 @@ impl MetadataStore {
             .into_iter()
             .map(local_share_from_catalog)
             .collect()
+    }
+
+    /// Return the eligible local publication set only when a metadata
+    /// connection can be acquired immediately.
+    pub fn try_active_local_catalog_page(
+        &self,
+    ) -> Result<Option<Vec<MetadataTransferCatalogEntry>>> {
+        let Some(conn) = self.try_connection()? else {
+            return Ok(None);
+        };
+        Self::active_local_catalog_filtered_on_connection(&conn, None, None, usize::MAX).map(Some)
     }
 
     pub fn active_local_share_entry(

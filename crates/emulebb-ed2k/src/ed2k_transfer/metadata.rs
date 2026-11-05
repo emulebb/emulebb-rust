@@ -7,9 +7,9 @@ use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
     MetadataCategory, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
-    MetadataTransferCounts, MetadataTransferDirectoryDeletionAuthority,
-    MetadataTransferPublishEntry, MetadataTransferShareEntry, NativeFileFingerprint,
-    NativeFileIdentity,
+    MetadataTransferCatalogEntry, MetadataTransferCounts,
+    MetadataTransferDirectoryDeletionAuthority, MetadataTransferPublishEntry,
+    MetadataTransferShareEntry, NativeFileFingerprint, NativeFileIdentity,
 };
 use uuid::Uuid;
 
@@ -36,6 +36,37 @@ enum DeletionCleanupPolicy {
     PropagateFailure,
 }
 
+fn merge_publish_entries(
+    transfers: Vec<MetadataTransferPublishEntry>,
+    local: Vec<MetadataTransferCatalogEntry>,
+) -> Vec<MetadataTransferPublishEntry> {
+    let mut by_hash = transfers
+        .into_iter()
+        .map(|entry| (entry.file_hash.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    for share in local {
+        let entry = MetadataTransferPublishEntry {
+            file_hash: share.file_hash,
+            display_name: share.display_name,
+            file_size: share.file_size,
+            aich_root: share.aich_root,
+            upload_priority: share.upload_priority,
+            auto_upload_priority: share.auto_upload_priority,
+            session_uploaded_bytes: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
+            all_time_uploaded_bytes: share.all_time_uploaded_bytes,
+            all_time_upload_requests: share.all_time_upload_requests,
+            all_time_upload_accepts: share.all_time_upload_accepts,
+            last_upload_request_ms: share.last_upload_request_ms,
+            comment: share.comment,
+            rating: share.rating,
+        };
+        by_hash.insert(entry.file_hash.clone(), entry);
+    }
+    by_hash.into_values().collect()
+}
+
 impl Ed2kTransferRuntime {
     /// Return persisted transfer counts without hydrating every manifest.
     pub fn transfer_counts(&self) -> Result<MetadataTransferCounts> {
@@ -47,20 +78,34 @@ impl Ed2kTransferRuntime {
         self.metadata.try_transfer_counts()
     }
 
-    /// Return Kad publish inputs without hydrating every persisted manifest.
+    /// Return Kad publish inputs from eligible complete local files and
+    /// shareable download parts without hydrating every persisted manifest.
     pub async fn publish_entries(&self) -> Result<Vec<MetadataTransferPublishEntry>> {
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.completed_transfer_publish_entries())
-            .await
-            .map_err(anyhow::Error::from)?
+        tokio::task::spawn_blocking(move || {
+            Ok(merge_publish_entries(
+                metadata.completed_transfer_publish_entries()?,
+                metadata.active_local_catalog_page(None, usize::MAX)?,
+            ))
+        })
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     /// Return Kad publish inputs if the metadata connection is immediately free.
     pub async fn try_publish_entries(&self) -> Result<Option<Vec<MetadataTransferPublishEntry>>> {
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.try_completed_transfer_publish_entries())
-            .await
-            .map_err(anyhow::Error::from)?
+        tokio::task::spawn_blocking(move || {
+            let Some(transfers) = metadata.try_completed_transfer_publish_entries()? else {
+                return Ok(None);
+            };
+            let Some(local) = metadata.try_active_local_catalog_page()? else {
+                return Ok(None);
+            };
+            Ok(Some(merge_publish_entries(transfers, local)))
+        })
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     /// Return REST shared-file summaries without hydrating every manifest.

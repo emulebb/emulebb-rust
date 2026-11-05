@@ -1221,6 +1221,7 @@ impl super::MetadataStore {
                     )
                   )
               AND transfers.delete_requested_at_ms IS NULL
+              AND transfers.removed_at_ms IS NULL
             ORDER BY known_files.ed2k_hash
             "#,
         )?;
@@ -1277,6 +1278,7 @@ impl super::MetadataStore {
                     )
                   )
               AND transfers.delete_requested_at_ms IS NULL
+              AND transfers.removed_at_ms IS NULL
             ORDER BY known_files.ed2k_hash
             "#,
         )?;
