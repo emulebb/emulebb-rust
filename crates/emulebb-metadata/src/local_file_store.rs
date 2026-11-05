@@ -151,6 +151,67 @@ impl MetadataStore {
         }
         Ok(chosen)
     }
+
+    /// Page distinct complete-file candidates from eligible roots. The first
+    /// native path supplies the network name; callers still validate the open
+    /// file fingerprint before serving and withdraw stale candidates.
+    pub fn active_local_share_page(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataLocalFileInstance>> {
+        let after_hash = after_hash
+            .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
+            .transpose()?;
+        let limit = i64::try_from(limit).context("local share page limit exceeds SQLite range")?;
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            "WITH eligible AS (
+                SELECT local_paths.platform, local_paths.native_path,
+                       known_files.ed2k_hash, local_file_instances.file_size,
+                       local_file_instances.verified_fingerprint,
+                       row_number() OVER (
+                           PARTITION BY known_files.id
+                           ORDER BY local_paths.platform, local_paths.native_path
+                       ) AS path_rank
+                FROM shared_file_memberships
+                JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
+                JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
+                JOIN local_paths ON local_paths.id = local_file_instances.path_id
+                JOIN known_files ON known_files.id = local_file_instances.known_file_id
+                WHERE shared_file_memberships.removed_at_ms IS NULL
+                  AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
+                  AND shared_directory_roots.enabled = 1
+                  AND shared_directory_roots.deleted_at_ms IS NULL
+                  AND shared_directory_roots.accessible = 1
+                  AND shared_directory_roots.shareable = 1
+             )
+             SELECT platform, native_path, lower(hex(ed2k_hash)), file_size,
+                    verified_fingerprint
+             FROM eligible
+             WHERE path_rank = 1
+             ORDER BY ed2k_hash LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![after_hash, limit], |row| {
+            let bytes: Vec<u8> = row.get(4)?;
+            let fingerprint =
+                NativeFileFingerprint::from_storage_bytes(&bytes).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        4,
+                        "verified_fingerprint".to_string(),
+                        rusqlite::types::Type::Blob,
+                    )
+                })?;
+            Ok(MetadataLocalFileInstance {
+                path: path_from_row(row, 0, 1)?,
+                file_hash: row.get(2)?,
+                file_size: row.get::<_, i64>(3)? as u64,
+                verified_fingerprint: fingerprint,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
