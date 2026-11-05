@@ -30,6 +30,11 @@ impl Ed2kTransferRuntime {
             ) else {
                 return Ok(None);
             };
+            if !metadata
+                .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
+            {
+                return Ok(None);
+            }
             if let Some(name) = source.path.file_name() {
                 entry.display_name = name.to_string_lossy().into_owned();
             }

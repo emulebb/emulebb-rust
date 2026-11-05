@@ -96,6 +96,11 @@ impl MetadataStore {
                 now
             ],
         )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
+             VALUES (?1, ?2)",
+            params![path_id, stored],
+        )?;
         Ok(true)
     }
 
@@ -231,6 +236,11 @@ impl MetadataStore {
                     NativePath::from(relative.as_path()).display_path(),
                     now
                 ],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
+                 VALUES (?1, ?2)",
+                params![path_id, cached.1],
             )?;
         }
         tx.execute(

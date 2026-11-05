@@ -116,7 +116,16 @@ impl MetadataStore {
         after_hash: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MetadataTransferCatalogEntry>> {
-        self.active_local_catalog_filtered(after_hash, None, limit)
+        self.active_local_catalog_filtered(after_hash, None, limit, false)
+    }
+
+    /// Page local shares whose exact path identity was verified this session.
+    pub fn verified_local_catalog_page(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        self.active_local_catalog_filtered(after_hash, None, limit, true)
     }
 
     pub fn active_local_catalog_entry(
@@ -124,7 +133,7 @@ impl MetadataStore {
         file_hash: &str,
     ) -> Result<Option<MetadataTransferCatalogEntry>> {
         Ok(self
-            .active_local_catalog_filtered(None, Some(file_hash), 1)?
+            .active_local_catalog_filtered(None, Some(file_hash), 1, false)?
             .into_iter()
             .next())
     }
@@ -134,9 +143,16 @@ impl MetadataStore {
         after_hash: Option<&str>,
         exact_hash: Option<&str>,
         limit: usize,
+        verified_only: bool,
     ) -> Result<Vec<MetadataTransferCatalogEntry>> {
         let conn = self.connection()?;
-        Self::active_local_catalog_filtered_on_connection(&conn, after_hash, exact_hash, limit)
+        Self::active_local_catalog_filtered_on_connection(
+            &conn,
+            after_hash,
+            exact_hash,
+            limit,
+            verified_only,
+        )
     }
 
     fn active_local_catalog_filtered_on_connection(
@@ -144,6 +160,7 @@ impl MetadataStore {
         after_hash: Option<&str>,
         exact_hash: Option<&str>,
         limit: usize,
+        verified_only: bool,
     ) -> Result<Vec<MetadataTransferCatalogEntry>> {
         let after_hash = after_hash
             .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
@@ -172,6 +189,11 @@ impl MetadataStore {
                   AND shared_directory_roots.deleted_at_ms IS NULL
                   AND shared_directory_roots.accessible = 1
                   AND shared_directory_roots.shareable = 1
+                  AND (?4 = 0 OR EXISTS (
+                      SELECT 1 FROM temp.session_verified_local_paths verified
+                      WHERE verified.path_id = local_file_instances.path_id
+                        AND verified.verified_fingerprint = local_file_instances.verified_fingerprint
+                  ))
              )
              SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
                     verified_local_content.part_count,
@@ -193,47 +215,94 @@ impl MetadataStore {
              WHERE eligible.path_rank = 1
              ORDER BY known_files.ed2k_hash LIMIT ?2",
         )?;
-        let rows = statement.query_map(params![after_hash, limit, exact_hash], |row| {
-            let path = path_from_row(row, 12, 13)?;
-            let display_name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            Ok(MetadataTransferCatalogEntry {
-                file_hash: row.get(0)?,
-                display_name,
-                file_size: row.get::<_, i64>(1)? as u64,
-                part_count: row.get::<_, i64>(2)? as u32,
-                aich_root: row.get(3)?,
-                upload_priority: row.get(4)?,
-                auto_upload_priority: row.get::<_, i64>(5)? != 0,
-                comment: row.get(6)?,
-                rating: row.get::<_, i64>(7)? as u8,
-                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
-                last_upload_request_ms: row.get(11)?,
-                media_path: Some(path),
-                media: MetadataTransferMediaMetadata {
-                    artist: row.get(14)?,
-                    album: row.get(15)?,
-                    title: row.get(16)?,
-                    length_seconds: row.get::<_, i64>(17)? as u32,
-                    bitrate_kbps: row.get::<_, i64>(18)? as u32,
-                    codec: row.get(19)?,
-                    extractor_version: row.get::<_, i64>(20)? as u32,
-                },
-            })
-        })?;
+        let rows = statement.query_map(
+            params![after_hash, limit, exact_hash, verified_only],
+            |row| {
+                let path = path_from_row(row, 12, 13)?;
+                let display_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                Ok(MetadataTransferCatalogEntry {
+                    file_hash: row.get(0)?,
+                    display_name,
+                    file_size: row.get::<_, i64>(1)? as u64,
+                    part_count: row.get::<_, i64>(2)? as u32,
+                    aich_root: row.get(3)?,
+                    upload_priority: row.get(4)?,
+                    auto_upload_priority: row.get::<_, i64>(5)? != 0,
+                    comment: row.get(6)?,
+                    rating: row.get::<_, i64>(7)? as u8,
+                    all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
+                    all_time_upload_requests: row.get::<_, i64>(9)? as u64,
+                    all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
+                    last_upload_request_ms: row.get(11)?,
+                    media_path: Some(path),
+                    media: MetadataTransferMediaMetadata {
+                        artist: row.get(14)?,
+                        album: row.get(15)?,
+                        title: row.get(16)?,
+                        length_seconds: row.get::<_, i64>(17)? as u32,
+                        bitrate_kbps: row.get::<_, i64>(18)? as u32,
+                        codec: row.get(19)?,
+                        extractor_version: row.get::<_, i64>(20)? as u32,
+                    },
+                })
+            },
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
     pub fn active_local_share_entries(&self) -> Result<Vec<MetadataLocalShareEntry>> {
-        self.active_local_catalog_page(None, usize::MAX)?
+        self.verified_local_catalog_page(None, usize::MAX)?
             .into_iter()
             .map(local_share_from_catalog)
             .collect()
+    }
+
+    /// Remember a live-checked path for this connection only. A subsequent
+    /// rehash changes the stored fingerprint and invalidates this admission.
+    pub fn mark_session_verified_local_path(
+        &self,
+        path: &Path,
+        fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let native = NativePath::from(path);
+        let changed = self.connection()?.execute(
+            "INSERT OR REPLACE INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
+             SELECT local_file_instances.path_id, local_file_instances.verified_fingerprint
+             FROM local_file_instances
+             JOIN local_paths ON local_paths.id = local_file_instances.path_id
+             WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
+               AND local_file_instances.verified_fingerprint = ?3",
+            params![
+                NativePath::platform(),
+                native.storage_bytes(),
+                fingerprint.storage_bytes()
+            ],
+        )?;
+        Ok(changed != 0)
+    }
+
+    /// Count distinct shares with at least one session-verified active path.
+    pub fn verified_local_share_count(&self) -> Result<usize> {
+        let count: i64 = self.connection()?.query_row(
+            "SELECT COUNT(DISTINCT local_file_instances.known_file_id)
+             FROM shared_file_memberships
+             JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
+             JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
+             JOIN temp.session_verified_local_paths verified ON verified.path_id = local_file_instances.path_id
+                  AND verified.verified_fingerprint = local_file_instances.verified_fingerprint
+             WHERE shared_file_memberships.removed_at_ms IS NULL
+               AND shared_directory_roots.enabled = 1
+               AND shared_directory_roots.deleted_at_ms IS NULL
+               AND shared_directory_roots.accessible = 1
+               AND shared_directory_roots.shareable = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     /// Return the eligible local publication set only when a metadata
@@ -244,14 +313,17 @@ impl MetadataStore {
         let Some(conn) = self.try_connection()? else {
             return Ok(None);
         };
-        Self::active_local_catalog_filtered_on_connection(&conn, None, None, usize::MAX).map(Some)
+        Self::active_local_catalog_filtered_on_connection(&conn, None, None, usize::MAX, false)
+            .map(Some)
     }
 
     pub fn active_local_share_entry(
         &self,
         file_hash: &str,
     ) -> Result<Option<MetadataLocalShareEntry>> {
-        self.active_local_catalog_entry(file_hash)?
+        self.active_local_catalog_filtered(None, Some(file_hash), 1, true)?
+            .into_iter()
+            .next()
             .map(local_share_from_catalog)
             .transpose()
     }
