@@ -1,6 +1,9 @@
 //! Durable path-to-content identities, independent of download jobs.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -162,6 +165,29 @@ impl MetadataStore {
         limit: usize,
         verified_only: bool,
     ) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        let mut entries = Vec::new();
+        Self::visit_active_local_catalog_on_connection(
+            conn,
+            after_hash,
+            exact_hash,
+            limit,
+            verified_only,
+            |entry| {
+                entries.push(entry);
+                Ok(())
+            },
+        )?;
+        Ok(entries)
+    }
+
+    fn visit_active_local_catalog_on_connection(
+        conn: &Connection,
+        after_hash: Option<&str>,
+        exact_hash: Option<&str>,
+        limit: usize,
+        verified_only: bool,
+        mut visit: impl FnMut(MetadataTransferCatalogEntry) -> Result<()>,
+    ) -> Result<()> {
         let after_hash = after_hash
             .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
             .transpose()?;
@@ -250,12 +276,22 @@ impl MetadataStore {
                 })
             },
         )?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        for row in rows {
+            visit(row?)?;
+        }
+        Ok(())
     }
 
     pub fn active_local_share_entries(&self) -> Result<Vec<MetadataLocalShareEntry>> {
-        self.verified_local_catalog_page(None, usize::MAX)?
+        self.verified_local_share_page(None, usize::MAX)
+    }
+
+    pub fn verified_local_share_page(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataLocalShareEntry>> {
+        self.verified_local_catalog_page(after_hash, limit)?
             .into_iter()
             .map(local_share_from_catalog)
             .collect()
@@ -347,51 +383,66 @@ impl MetadataStore {
         if let Some(cursor) = &query.after {
             decode_fixed_hex(&cursor.file_hash, 16, "ED2K shared-file cursor hash")?;
         }
-        let mut entries = self
-            .active_local_share_entries()?
-            .into_iter()
-            .map(|entry| {
+        let cursor = query
+            .after
+            .as_ref()
+            .map(|cursor| (cursor.sort_path.as_str(), cursor.file_hash.to_lowercase()));
+        let mut total = 0usize;
+        let mut after_count = 0usize;
+        // Keep the smallest requested path keys while SQLite streams eligible
+        // hashes. REST page memory no longer grows with the whole library.
+        let mut page = BTreeMap::new();
+        let conn = self.connection()?;
+        Self::visit_active_local_catalog_on_connection(
+            &conn,
+            None,
+            None,
+            usize::MAX,
+            true,
+            |catalog_entry| {
+                let entry = local_share_from_catalog(catalog_entry)?;
                 let sort_path = NativePath::from(entry.path.as_path())
                     .display_path()
                     .to_lowercase();
-                (entry, sort_path)
-            })
-            .filter(|(entry, sort_path)| {
-                search.as_ref().is_none_or(|term| {
+                if !search.as_ref().is_none_or(|term| {
                     entry.display_name.to_lowercase().contains(term)
                         || sort_path.contains(term)
                         || entry.file_hash.contains(term)
-                }) && priority
+                }) || !priority
                     .as_ref()
                     .is_none_or(|value| entry.upload_priority.to_lowercase() == *value)
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            (&left.1, &left.0.file_hash).cmp(&(&right.1, &right.0.file_hash))
-        });
-        let total = if query.count_total { entries.len() } else { 0 };
-        if let Some(cursor) = &query.after {
-            let cursor_hash = cursor.file_hash.to_lowercase();
-            entries.retain(|(entry, sort_path)| {
-                sort_path > &cursor.sort_path
-                    || (sort_path == &cursor.sort_path && entry.file_hash > cursor_hash)
-            });
-        }
-        let has_more = entries.len() > query.limit;
-        entries.truncate(query.limit);
+                {
+                    return Ok(());
+                }
+                total += 1;
+                if cursor.as_ref().is_some_and(|(path, hash)| {
+                    (sort_path.as_str(), entry.file_hash.as_str()) <= (*path, hash.as_str())
+                }) {
+                    return Ok(());
+                }
+                after_count += 1;
+                if query.limit > 0 {
+                    page.insert((sort_path, entry.file_hash.clone()), entry);
+                    if page.len() > query.limit {
+                        page.pop_last();
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        let has_more = after_count > query.limit;
         let next_cursor = if has_more {
-            entries
-                .last()
-                .map(|(entry, sort_path)| MetadataSharedFileCursor {
+            page.last_key_value()
+                .map(|((sort_path, file_hash), _)| MetadataSharedFileCursor {
                     sort_path: sort_path.clone(),
-                    file_hash: entry.file_hash.clone(),
+                    file_hash: file_hash.clone(),
                 })
         } else {
             None
         };
         Ok(MetadataSharedFilePage {
-            entries: entries.into_iter().map(|(entry, _)| entry).collect(),
-            total,
+            entries: page.into_values().collect(),
+            total: if query.count_total { total } else { 0 },
             next_cursor,
         })
     }
@@ -1068,5 +1119,77 @@ mod tests {
         assert_eq!(active.display_name, "First.bin");
         assert_eq!(active.md4_hashset, content.md4_hashset);
         assert_eq!(active.aich_hashset, content.aich_hashset);
+    }
+
+    #[test]
+    fn shared_file_query_pages_in_path_order_when_hash_order_differs() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let root = std::env::temp_dir();
+        store
+            .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
+                path: root.to_string_lossy().into_owned(),
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }])
+            .unwrap();
+        let files = [
+            ("Zulu.bin", "00000000000000000000000000000001", 51),
+            ("Middle.bin", "00000000000000000000000000000002", 52),
+            ("Alpha.bin", "00000000000000000000000000000003", 53),
+        ];
+        let mut members = Vec::new();
+        for (name, hash, inode) in files {
+            let path = root.join(name);
+            store
+                .upsert_verified_local_content(&MetadataVerifiedLocalContent {
+                    file_hash: hash.to_string(),
+                    display_name: name.to_string(),
+                    file_size: 32,
+                    part_size: 32,
+                    md4_hashset: vec![hash.to_string()],
+                    aich_root: "22".repeat(20),
+                    aich_hashset: vec!["33".repeat(20)],
+                    path: path.clone(),
+                    fingerprint: fingerprint(inode),
+                    upload_priority: "normal".to_string(),
+                    auto_upload_priority: false,
+                    comment: String::new(),
+                    rating: 0,
+                })
+                .unwrap();
+            members.push((path, PathBuf::from(name), fingerprint(inode)));
+        }
+        store.replace_root_memberships(&root, &members).unwrap();
+        let first = store
+            .query_active_local_share_entries(&MetadataSharedFileQuery {
+                limit: 1,
+                count_total: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(first.total, 3);
+        assert_eq!(first.entries[0].display_name, "Alpha.bin");
+        let second = store
+            .query_active_local_share_entries(&MetadataSharedFileQuery {
+                limit: 1,
+                count_total: true,
+                after: first.next_cursor,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(second.total, 3);
+        assert_eq!(second.entries[0].display_name, "Middle.bin");
+        let third = store
+            .query_active_local_share_entries(&MetadataSharedFileQuery {
+                limit: 1,
+                count_total: true,
+                after: second.next_cursor,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(third.total, 3);
+        assert_eq!(third.entries[0].display_name, "Zulu.bin");
+        assert!(third.next_cursor.is_none());
     }
 }
