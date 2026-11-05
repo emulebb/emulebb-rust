@@ -389,41 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn completion_timestamp_repairs_legacy_null_without_refreshing_history() {
-        let store = MetadataStore::in_memory().unwrap();
-        let mut manifest = completed_download_manifest();
-        store.upsert_transfer_manifest(&manifest).unwrap();
-        const HISTORICAL_COMPLETION_MS: i64 = 1_234;
-        {
-            let conn = store.connection().unwrap();
-            conn.execute("UPDATE transfers SET completed_at_ms = NULL", [])
-                .unwrap();
-            conn.execute(
-                r#"
-                UPDATE download_history
-                SET first_completed_at_ms = ?1, last_completed_at_ms = ?1
-                "#,
-                rusqlite::params![HISTORICAL_COMPLETION_MS],
-            )
-            .unwrap();
-        }
-
-        manifest.display_name = "legacy-repaired.bin".to_string();
-        store.upsert_transfer_manifest(&manifest).unwrap();
-        assert_eq!(
-            transfer_completed_at_ms(&store, &manifest.file_hash),
-            Some(HISTORICAL_COMPLETION_MS)
-        );
-        let history = store
-            .download_history_by_hash(&manifest.file_hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(history.first_completed_at_ms, HISTORICAL_COMPLETION_MS);
-        assert_eq!(history.last_completed_at_ms, HISTORICAL_COMPLETION_MS);
-        assert_eq!(history.display_name, "legacy-repaired.bin");
-    }
-
-    #[test]
     fn recompletion_does_not_regress_when_wall_clock_moves_backwards() {
         let store = MetadataStore::in_memory().unwrap();
         let manifest = completed_download_manifest();

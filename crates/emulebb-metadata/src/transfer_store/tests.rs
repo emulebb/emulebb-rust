@@ -420,7 +420,9 @@ fn imported_known_file_identity_matches_returns_ambiguous_rows() {
 #[test]
 fn deleting_download_preserves_same_hash_local_content() {
     let store = MetadataStore::in_memory().unwrap();
-    let manifest = completed_pending_download_manifest();
+    let mut manifest = completed_pending_download_manifest();
+    manifest.md4_hashset = vec!["22222222222222222222222222222222".to_string()];
+    manifest.aich_hashset = vec!["3333333333333333333333333333333333333333".to_string()];
     store.upsert_transfer_manifest(&manifest).unwrap();
     let path = std::env::temp_dir().join("emulebb-same-hash-local-content.bin");
     let content = crate::MetadataVerifiedLocalContent {
@@ -428,9 +430,9 @@ fn deleting_download_preserves_same_hash_local_content() {
         display_name: "shared.bin".to_string(),
         file_size: manifest.file_size,
         part_size: manifest.piece_size,
-        md4_hashset: Vec::new(),
+        md4_hashset: vec!["44444444444444444444444444444444".to_string()],
         aich_root: "1111111111111111111111111111111111111111".to_string(),
-        aich_hashset: Vec::new(),
+        aich_hashset: vec!["5555555555555555555555555555555555555555".to_string()],
         path: path.clone(),
         fingerprint: fingerprint(manifest.file_size, 200),
         upload_priority: "normal".to_string(),
@@ -439,6 +441,12 @@ fn deleting_download_preserves_same_hash_local_content() {
         rating: 0,
     };
     store.upsert_verified_local_content(&content).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest.clone())
+    );
 
     assert!(store.delete_transfer_manifest(&manifest.file_hash).unwrap());
     assert!(
@@ -448,6 +456,38 @@ fn deleting_download_preserves_same_hash_local_content() {
             .is_none()
     );
     assert!(store.local_file_instance(&path).unwrap().is_some());
+    let conn = store.connection().unwrap();
+    for (table, column, expected) in [
+        (
+            "verified_local_md4_hashes",
+            "md4_hash",
+            "44444444444444444444444444444444",
+        ),
+        (
+            "verified_local_aich_hashes",
+            "aich_hash",
+            "5555555555555555555555555555555555555555",
+        ),
+    ] {
+        let actual: String = conn
+            .query_row(
+                &format!("SELECT lower(hex({column})) FROM {table}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+    for table in ["ed2k_part_hashes", "aich_part_hashes", "verified_ranges"] {
+        assert_eq!(
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "{table} must cascade with the download"
+        );
+    }
+    drop(conn);
     assert_eq!(
         store
             .connection()
