@@ -41,6 +41,10 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
                 aich_hashset: vec!["00".repeat(20)],
                 path: path.clone(),
                 fingerprint: fingerprint.clone(),
+                upload_priority: "normal".to_string(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
             })
             .unwrap();
         assert!(
