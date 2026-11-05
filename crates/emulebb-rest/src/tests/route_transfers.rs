@@ -457,7 +457,7 @@ async fn transfer_delete_route_preserves_complete_local_share() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["items"][0]["ok"], true);
     assert_eq!(value["data"]["items"][0]["hash"], share.hash);
-    assert!(!std::path::Path::new(&share.transfer_dir).exists());
+    assert!(!transfer_root.join(&share.hash).exists());
 
     let read_after_delete = app
         .oneshot(
@@ -562,7 +562,7 @@ async fn clear_completed_transfers_requires_confirmation_and_preserves_local_sha
     let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
-    assert!(!std::path::Path::new(&first.transfer_dir).exists());
-    assert!(!std::path::Path::new(&second.transfer_dir).exists());
+    assert!(!transfer_root.join(&first.hash).exists());
+    assert!(!transfer_root.join(&second.hash).exists());
     assert_eq!(core.shares().await.len(), 2);
 }

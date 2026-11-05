@@ -1868,10 +1868,7 @@ mod tests {
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].hash, hash);
         assert_eq!(shares[0].name, "After.bin");
-        assert_eq!(
-            shares[0].source_path.as_deref(),
-            Some(destination.display().to_string().as_str()),
-        );
+        assert_eq!(shares[0].path, destination.display().to_string(),);
         assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
         assert_eq!(
             core.metadata_store

@@ -209,7 +209,7 @@ pub(crate) struct Ed2kAichHashset {
     pub part_hashes: Vec<[u8; 20]>,
 }
 
-/// Summary returned after a local payload is ingested into the transfer store.
+/// Summary returned after a local file is verified and indexed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ed2kLocalIngestSummary {
@@ -219,8 +219,7 @@ pub struct Ed2kLocalIngestSummary {
     pub md4_hashset_count: usize,
     pub aich_root: String,
     pub aich_hashset_count: usize,
-    pub transfer_dir: String,
-    pub source_path: Option<String>,
+    pub path: String,
 }
 
 /// One persisted share-in-place entry used by the incremental shared-directory

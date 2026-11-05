@@ -143,12 +143,7 @@ async fn live_monitor_auto_shares_relocates_and_removes_a_dropped_file() {
         shares[0].hash, share.hash,
         "rename must preserve content hash"
     );
-    let catalog_path = PathBuf::from(
-        shares[0]
-            .source_path
-            .as_deref()
-            .expect("renamed share must retain its source path"),
-    );
+    let catalog_path = PathBuf::from(&shares[0].path);
     assert_eq!(
         catalog_path.canonicalize().unwrap(),
         renamed_file.canonicalize().unwrap(),

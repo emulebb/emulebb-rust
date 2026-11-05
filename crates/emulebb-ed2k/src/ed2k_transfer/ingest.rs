@@ -244,8 +244,7 @@ impl Ed2kTransferRuntime {
             md4_hashset_count: hashsets.md4_hashset.len(),
             aich_root,
             aich_hashset_count: hashsets.aich_hashset.part_hashes.len(),
-            transfer_dir: String::new(),
-            source_path: Some(NativePath::from(source_path.as_path()).display_path()),
+            path: NativePath::from(source_path.as_path()).display_path(),
         })
     }
 

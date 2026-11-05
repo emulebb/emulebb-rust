@@ -1475,7 +1475,7 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
                 <tr key={file.hash} class={selected?.hash === file.hash ? "selected-row" : ""}>
                   <td>
                     <button type="button" class="link-button" onClick={() => setSelectedHash(file.hash)}>{file.name ?? file.hash}</button>
-                    <small class="shared-file-path">{file.path ?? file.sourcePath ?? ""}</small>
+                    <small class="shared-file-path">{file.path}</small>
                   </td>
                   <td>{formatBytes(file.sizeBytes)}</td>
                   <td>{file.priority ?? "normal"}</td>

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -147,7 +147,7 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
         let first_share = require_share_by_name(&shares, "Persisted Unicode äöü.bin");
         // Share-in-place: the file is seeded directly from its original on-disk
         // path and must NOT be copied into the internal piece store.
-        assert_no_piece_store_copy(&first_share);
+        assert_no_piece_store_copy(&transfer_root, &first_share);
         assert_eq!(
             fs::read(nested_root.join("Persisted Unicode äöü.bin")).unwrap(),
             first_payload
@@ -170,7 +170,7 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
     let existing_shares = reloaded.shares().await;
     let existing_first_share = require_share_by_name(&existing_shares, "Persisted Unicode äöü.bin");
     assert_eq!(existing_first_share.hash, first_hash);
-    assert_no_piece_store_copy(&existing_first_share);
+    assert_no_piece_store_copy(&transfer_root, &existing_first_share);
     assert_eq!(
         fs::read(nested_root.join("Persisted Unicode äöü.bin")).unwrap(),
         first_payload
@@ -182,7 +182,7 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
         vec!["Persisted Unicode äöü.bin", "Reloaded Tree Payload.bin"]
     );
     let second_share = require_share_by_name(&reloaded_shares, "Reloaded Tree Payload.bin");
-    assert_no_piece_store_copy(&second_share);
+    assert_no_piece_store_copy(&transfer_root, &second_share);
     assert_eq!(
         fs::read(shared_root.join("Reloaded Tree Payload.bin")).unwrap(),
         second_payload
@@ -365,7 +365,7 @@ async fn sharing_complete_directory_never_delivers_to_incoming_or_piece_store() 
     // (2) No shared file was copied into the internal piece store, and the
     // original files are untouched.
     for share in &shares {
-        assert_no_piece_store_copy(share);
+        assert_no_piece_store_copy(&transfer_root, share);
     }
     for (name, payload) in payloads {
         assert_eq!(
@@ -558,12 +558,9 @@ fn require_share_by_name(shares: &[LocalShare], name: &str) -> LocalShare {
         .unwrap_or_else(|| panic!("shared directory reload did not publish {name}"))
 }
 
-/// A shared, already-complete file is seeded IN PLACE: the daemon must never
-/// copy its payload into the internal piece store (`transfer_dir/pieces.bin`).
-/// Its resume manifest lives in SQLite, so an empty transfer directory is not
-/// created either.
-fn assert_no_piece_store_copy(share: &LocalShare) {
-    let transfer_dir = PathBuf::from(&share.transfer_dir);
+/// A verified local file must never create an internal transfer payload.
+fn assert_no_piece_store_copy(transfer_root: &Path, share: &LocalShare) {
+    let transfer_dir = transfer_root.join(&share.hash);
     assert!(
         !transfer_dir.exists(),
         "share-in-place must not create an empty transfer directory"

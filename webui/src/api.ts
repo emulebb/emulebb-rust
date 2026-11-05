@@ -469,8 +469,7 @@ export type SharedFile = {
   hash: string;
   name?: string;
   sizeBytes?: number;
-  sourcePath?: string | null;
-  path?: string;
+  path: string;
   priority?: string;
   autoUploadPriority?: boolean;
   allTimeUploadedBytes?: number;

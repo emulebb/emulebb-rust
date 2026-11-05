@@ -49,10 +49,7 @@ async fn non_utf8_shared_path_survives_restart_rename_and_delete() {
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].name, r"native-\xFF.bin");
         let expected_source_path = NativePath::from(source_path.as_path()).display_path();
-        assert_eq!(
-            shares[0].source_path.as_deref(),
-            Some(expected_source_path.as_str()),
-        );
+        assert_eq!(shares[0].path, expected_source_path,);
         assert_eq!(
             core.shared_directories()
                 .await
