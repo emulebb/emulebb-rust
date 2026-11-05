@@ -1940,7 +1940,16 @@ mod tests {
 
         assert_ne!(new_hash, old_hash);
         assert!(core.share(&old_hash).await.is_none());
-        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if core.ed2k_transfers.shared_catalog_count().await == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("targeted re-hash must update the live catalog");
         assert!(!core.shared_reload_running.load(Ordering::Acquire));
         assert!(!core.shared_reload_pending.load(Ordering::Acquire));
         assert!(signal.try_recv().is_none());

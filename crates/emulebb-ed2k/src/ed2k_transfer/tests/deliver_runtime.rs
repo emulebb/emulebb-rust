@@ -793,6 +793,7 @@ async fn pending_completed_download_cannot_retire_before_local_content_registrat
             .is_some()
     );
     assert!(runtime.manifest(&hash).await.is_err());
+    assert_eq!(runtime.shared_catalog_count().await, 0);
     assert!(!transfer_dir.exists());
     assert!(delivered_path.exists());
     assert!(
@@ -835,9 +836,20 @@ async fn retired_download_recovery_reclaims_only_owned_piece_storage() {
             .request_transfer_retirement(&hash, Some(authority))
             .unwrap()
     );
+    assert!(
+        runtime
+            .metadata
+            .completed_transfer_catalog_entries()
+            .unwrap()
+            .is_empty(),
+        "a hidden retirement must not be a completed offer"
+    );
+    runtime.refresh_complete_shared_catalog().await.unwrap();
+    assert_eq!(runtime.shared_catalog_count().await, 0);
     drop(runtime);
 
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(runtime.shared_catalog_count().await, 0);
     let report = runtime
         .recover_pending_transfer_retirements()
         .await

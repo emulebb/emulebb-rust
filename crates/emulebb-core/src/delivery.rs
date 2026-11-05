@@ -148,9 +148,6 @@ impl EmulebbCore {
         self.ed2k_transfers
             .remove_completed_transfer_row(hash)
             .await?;
-        self.ed2k_transfers
-            .refresh_complete_shared_catalog()
-            .await?;
         self.state.lock().await.transfers.remove(hash);
         self.publish_transfer_removed(hash);
         self.queue_ed2k_shared_catalog_publish();
