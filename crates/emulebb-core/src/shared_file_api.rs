@@ -85,7 +85,7 @@ impl EmulebbCore {
             .with_context(|| format!("failed to inspect {}", source_path.display()))?;
         ensure!(metadata.is_file(), "local share path is not a file");
         ensure!(
-            !load_shared_file_exclusion_policy(self)?.should_ignore(source_path, &metadata),
+            !load_shared_file_ignore_policy(self)?.should_ignore(source_path, &metadata),
             "local share path is excluded from sharing"
         );
         let display_name = match requested_name {
@@ -449,47 +449,48 @@ impl EmulebbCore {
         }
     }
 
-    pub fn shared_file_exclusions(&self) -> Result<SharedFileExclusions> {
+    pub fn shared_file_ignores(&self) -> Result<SharedFileIgnores> {
         let custom = self
             .metadata_store
-            .shared_file_exclusions()?
+            .shared_file_ignore_patterns()?
             .into_iter()
-            .map(|path| SharedFileExclusion {
-                path: normal_path_display(path.display_path()),
-            })
+            .map(|pattern| SharedFileIgnorePattern { pattern })
             .collect();
         let disabled = self
             .metadata_store
             .disabled_shared_default_ignore_rules()?
             .into_iter()
             .collect::<HashSet<_>>();
-        Ok(SharedFileExclusions {
+        Ok(SharedFileIgnores {
             custom,
             defaults: shared_file_ignore_rules(&disabled),
         })
     }
 
-    pub async fn add_shared_file_exclusion(&self, path: &str) -> Result<SharedFileExclusions> {
-        let canonical_path = canonical_shared_file_exclusion(path)?;
+    pub async fn add_shared_file_ignore_pattern(&self, pattern: &str) -> Result<SharedFileIgnores> {
+        crate::shared_directories::validate_shared_file_ignore_pattern(pattern)?;
         self.metadata_store
-            .add_shared_file_exclusion(&canonical_path)?;
+            .add_shared_file_ignore_pattern(pattern)?;
         self.reload_shared_directories_detached().await?;
-        self.shared_file_exclusions()
+        self.shared_file_ignores()
     }
 
-    pub async fn remove_shared_file_exclusion(&self, path: &str) -> Result<SharedFileExclusions> {
-        let canonical_path = removable_shared_file_exclusion(path)?;
+    pub async fn remove_shared_file_ignore_pattern(
+        &self,
+        pattern: &str,
+    ) -> Result<SharedFileIgnores> {
+        crate::shared_directories::validate_shared_file_ignore_pattern(pattern)?;
         self.metadata_store
-            .remove_shared_file_exclusion(&canonical_path)?;
+            .remove_shared_file_ignore_pattern(pattern)?;
         self.reload_shared_directories_detached().await?;
-        self.shared_file_exclusions()
+        self.shared_file_ignores()
     }
 
     pub async fn set_shared_file_ignore_rule_enabled(
         &self,
         rule_key: &str,
         enabled: bool,
-    ) -> Result<SharedFileExclusions> {
+    ) -> Result<SharedFileIgnores> {
         ensure!(
             is_shared_file_ignore_rule(rule_key),
             "unknown shared-file ignore rule"
@@ -497,7 +498,7 @@ impl EmulebbCore {
         self.metadata_store
             .set_shared_default_ignore_rule_enabled(rule_key, enabled)?;
         self.reload_shared_directories_detached().await?;
-        self.shared_file_exclusions()
+        self.shared_file_ignores()
     }
 
     pub async fn set_shared_directories(
@@ -725,31 +726,6 @@ fn removable_shared_directory_root(path: &str) -> Result<String> {
             Ok(normal_path_display(canonical.display().to_string()))
         }
         Err(_) => Ok(normal_path_display(path)),
-    }
-}
-
-fn canonical_shared_file_exclusion(path: &str) -> Result<PathBuf> {
-    let path = path.trim();
-    ensure!(!path.is_empty(), "path must not be empty");
-    let canonical = fs::canonicalize(long_path(Path::new(path)))
-        .with_context(|| format!("failed to resolve {path}"))?;
-    let metadata = fs::metadata(&canonical)
-        .with_context(|| format!("failed to inspect {}", canonical.display()))?;
-    ensure!(metadata.is_file(), "path is not a file");
-    Ok(long_path(&canonical))
-}
-
-fn removable_shared_file_exclusion(path: &str) -> Result<PathBuf> {
-    let path = path.trim();
-    ensure!(!path.is_empty(), "path must not be empty");
-    match fs::canonicalize(long_path(Path::new(path))) {
-        Ok(canonical) => {
-            let metadata = fs::metadata(&canonical)
-                .with_context(|| format!("failed to inspect {}", canonical.display()))?;
-            ensure!(metadata.is_file(), "path is not a file");
-            Ok(long_path(&canonical))
-        }
-        Err(_) => Ok(long_path(Path::new(path))),
     }
 }
 

@@ -1058,15 +1058,15 @@ async fn shared_directory_root_operation_body_uses_canonical_validation() {
 }
 
 #[tokio::test]
-async fn shared_file_exclusion_body_uses_canonical_validation() {
+async fn shared_file_ignore_pattern_body_uses_canonical_validation() {
     let app = test_router();
-    let uri = "/api/v1/shared-directories/exclusions";
+    let uri = "/api/v1/shared-directories/ignores";
     let cases = [
-        (r#"{}"#, "path must be a non-empty string path"),
-        (r#"{"path":1}"#, "path must be a non-empty string path"),
-        (r#"{"path":"   "}"#, "path must not be empty"),
+        (r#"{}"#, "pattern must be a non-empty string"),
+        (r#"{"pattern":1}"#, "pattern must be a non-empty string"),
+        (r#"{"pattern":""}"#, "pattern must be a non-empty string"),
         (
-            r#"{"path":"C:/Shared/private.bin","recursive":true}"#,
+            r#"{"pattern":"*.private.bin","recursive":true}"#,
             "unknown JSON field: recursive",
         ),
     ];
@@ -1080,7 +1080,7 @@ async fn shared_file_exclusion_body_uses_canonical_validation() {
 #[tokio::test]
 async fn shared_file_ignore_rule_body_uses_canonical_validation() {
     let app = test_router();
-    let uri = "/api/v1/shared-directories/exclusions/rules/temporary-file";
+    let uri = "/api/v1/shared-directories/ignores/defaults/temporary-file";
     let cases = [
         (r#"{}"#, "enabled is required"),
         (r#"{"enabled":"true"}"#, "enabled must be a boolean"),

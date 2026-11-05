@@ -625,7 +625,7 @@ async fn root_scan_keeps_successful_membership_separate_from_offline_root() {
             accessible: true,
         })
         .to_vec();
-    let scan = scan_shared_directory_roots(roots, SharedFileExclusionPolicy::default())
+    let scan = scan_shared_directory_roots(roots, SharedFileIgnorePolicy::default())
         .await
         .unwrap();
     assert_eq!(scan.root_files.len(), 1);
@@ -681,24 +681,34 @@ fn shared_file_name_policy_matches_mfc_affixes() {
 }
 
 #[test]
-fn shared_scan_applies_exact_exclusions_and_removable_defaults() {
+fn shared_scan_applies_custom_patterns_and_removable_defaults() {
     let root = scratch_dir("exclusion-policy");
     let excluded = root.join("private.bin");
     fs::write(&excluded, b"private").unwrap();
+    fs::write(root.join("PRIVATE2.BIN"), b"private too").unwrap();
     fs::write(root.join("desktop.ini"), b"metadata").unwrap();
     fs::write(root.join("known.met"), b"runtime").unwrap();
     fs::write(root.join("public.bin"), b"public").unwrap();
 
-    let policy = SharedFileExclusionPolicy::new(
-        vec![NativePath::from(long_path(&excluded))],
+    let policy = SharedFileIgnorePolicy::new(
+        vec!["private*.bin".to_string()],
         vec!["noise.desktop-ini".to_string()],
-    );
+    )
+    .unwrap();
     let mut output = Vec::new();
     let skipped = collect_shared_directory_files_with_policy(&root, &mut output, &policy).unwrap();
 
-    assert_eq!(skipped, 2);
+    assert_eq!(skipped, 3);
     assert_eq!(names(output), vec!["desktop.ini", "public.bin"]);
     fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn custom_ignore_patterns_reject_paths_and_exact_file_names() {
+    assert!(validate_shared_file_ignore_pattern("*.private.bin").is_ok());
+    assert!(validate_shared_file_ignore_pattern("C:/Shared/private.bin").is_err());
+    assert!(validate_shared_file_ignore_pattern("private.bin").is_err());
+    assert!(validate_shared_file_ignore_pattern("[").is_err());
 }
 
 #[test]
@@ -710,14 +720,14 @@ fn shared_file_name_policy_ignores_emule_runtime_files() {
 }
 
 #[tokio::test]
-async fn direct_share_rejects_a_persisted_exact_exclusion() {
+async fn direct_share_rejects_a_persisted_ignore_pattern() {
     let root = scratch_dir("direct-exclusion");
     let source = root.join("private.bin");
     fs::write(&source, b"private payload").unwrap();
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
     core.metadata_store
-        .add_shared_file_exclusion(&long_path(&source))
+        .add_shared_file_ignore_pattern("private*.bin")
         .unwrap();
 
     let error = core

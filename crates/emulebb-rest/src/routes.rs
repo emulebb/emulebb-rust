@@ -148,13 +148,13 @@ pub fn router_with_shutdown(
             post(add_shared_directory_root).delete(remove_shared_directory_root),
         )
         .route(
-            "/api/v1/shared-directories/exclusions",
-            get(shared_file_exclusions)
-                .post(add_shared_file_exclusion)
-                .delete(remove_shared_file_exclusion),
+            "/api/v1/shared-directories/ignores",
+            get(shared_file_ignores)
+                .post(add_shared_file_ignore_pattern)
+                .delete(remove_shared_file_ignore_pattern),
         )
         .route(
-            "/api/v1/shared-directories/exclusions/rules/{ruleKey}",
+            "/api/v1/shared-directories/ignores/defaults/{ruleKey}",
             axum::routing::patch(update_shared_file_ignore_rule),
         )
         .route(

@@ -1090,6 +1090,18 @@ pub(super) fn validate_shared_directory_root_body_fields(
     validate_path_text_body_field(object.get("path"), "path")
 }
 
+pub(super) fn validate_shared_file_ignore_pattern_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    let Some(pattern) = object.get("pattern").and_then(|value| value.as_str()) else {
+        return Err(invalid_body_error("pattern must be a non-empty string"));
+    };
+    if pattern.is_empty() {
+        return Err(invalid_body_error("pattern must be a non-empty string"));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_shared_file_ignore_rule_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {

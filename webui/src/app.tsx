@@ -35,7 +35,7 @@ import {
   RuntimeDiagnostics,
   SearchItem,
   SharedDirectories,
-  SharedFileExclusions,
+  SharedFileIgnores,
   SharedFile,
   SettingsSurface,
   Snapshot,
@@ -155,7 +155,7 @@ export function App() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [friends, setFriends] = useState<Friend[]>([]);
   const [sharedDirectories, setSharedDirectories] = useState<SharedDirectories | null>(null);
-  const [sharedFileExclusions, setSharedFileExclusions] = useState<SharedFileExclusions | null>(null);
+  const [sharedFileIgnores, setSharedFileIgnores] = useState<SharedFileIgnores | null>(null);
   const [sharedFiles, setSharedFiles] = useState<SharedFile[]>([]);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [uploadQueue, setUploadQueue] = useState<Upload[]>([]);
@@ -186,7 +186,7 @@ export function App() {
     setCategories([]);
     setFriends([]);
     setSharedDirectories(null);
-    setSharedFileExclusions(null);
+    setSharedFileIgnores(null);
     setSharedFiles([]);
     setUploads([]);
     setUploadQueue([]);
@@ -349,13 +349,13 @@ export function App() {
     let cancelled = false;
     const loadSharing = async () => {
       try {
-        const [nextSharedDirectories, nextSharedFileExclusions] = await Promise.all([
+        const [nextSharedDirectories, nextSharedFileIgnores] = await Promise.all([
           client.get<SharedDirectories>("shared-directories"),
-          client.get<SharedFileExclusions>("shared-directories/exclusions")
+          client.get<SharedFileIgnores>("shared-directories/ignores")
         ]);
         if (!cancelled) {
           setSharedDirectories(nextSharedDirectories);
-          setSharedFileExclusions(nextSharedFileExclusions);
+          setSharedFileIgnores(nextSharedFileIgnores);
         }
       } catch (caught) {
         if (!cancelled) {
@@ -910,7 +910,7 @@ export function App() {
             {tab === "sharing" && (
               <SharingView
                 directories={sharedDirectories}
-                exclusions={sharedFileExclusions}
+                ignores={sharedFileIgnores}
                 stats={stats}
                 sharedFiles={sharedFiles}
                 uploads={uploads}

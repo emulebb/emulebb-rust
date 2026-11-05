@@ -41,10 +41,10 @@ async fn write_routes_use_canonical_json_error_envelope() {
         ("POST", "/api/v1/searches"),
         ("PATCH", "/api/v1/shared-directories"),
         ("POST", "/api/v1/shared-directories/roots"),
-        ("POST", "/api/v1/shared-directories/exclusions"),
+        ("POST", "/api/v1/shared-directories/ignores"),
         (
             "PATCH",
-            "/api/v1/shared-directories/exclusions/rules/temporary-file",
+            "/api/v1/shared-directories/ignores/defaults/temporary-file",
         ),
         (
             "PATCH",
@@ -307,7 +307,7 @@ async fn query_routes_use_canonical_error_envelope() {
         ),
         (
             "DELETE",
-            "/api/v1/shared-directories/exclusions?unsupportedQuery=true",
+            "/api/v1/shared-directories/ignores?unsupportedQuery=true",
         ),
         ("GET", "/api/v1/transfers?unsupportedQuery=true"),
         ("GET", "/api/v1/upload-queue?unsupportedQuery=true"),

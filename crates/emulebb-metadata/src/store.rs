@@ -529,55 +529,28 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
-    pub fn add_shared_file_exclusion(&self, path: &Path) -> Result<()> {
-        let now = unix_ms();
-        let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        let path_id = upsert_local_path(&tx, path)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO shared_file_exclusions(path_id, created_at_ms) VALUES (?1, ?2)",
-            params![path_id, now],
+    pub fn add_shared_file_ignore_pattern(&self, pattern: &str) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO shared_file_ignore_patterns(pattern, created_at_ms) VALUES (?1, ?2)",
+            params![pattern, unix_ms()],
         )?;
-        tx.commit()?;
         Ok(())
     }
 
-    pub fn remove_shared_file_exclusion(&self, path: &Path) -> Result<bool> {
-        let native_path = NativePath::from(path);
-        let conn = self.connection()?;
-        let removed = conn.execute(
-            r#"
-            DELETE FROM shared_file_exclusions
-            WHERE path_id IN (
-                SELECT id FROM local_paths WHERE platform = ?1 AND native_path = ?2
-            )
-            "#,
-            params![current_platform(), native_path.storage_bytes()],
+    pub fn remove_shared_file_ignore_pattern(&self, pattern: &str) -> Result<bool> {
+        let removed = self.connection()?.execute(
+            "DELETE FROM shared_file_ignore_patterns WHERE pattern = ?1",
+            params![pattern],
         )?;
         Ok(removed != 0)
     }
 
-    pub fn shared_file_exclusions(&self) -> Result<Vec<NativePath>> {
+    pub fn shared_file_ignore_patterns(&self) -> Result<Vec<String>> {
         let conn = self.connection()?;
-        let mut stmt = conn.prepare_cached(
-            r#"
-            SELECT local_paths.platform, local_paths.native_path
-            FROM shared_file_exclusions
-            JOIN local_paths ON local_paths.id = shared_file_exclusions.path_id
-            ORDER BY local_paths.id
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let platform: String = row.get(0)?;
-            let native_path: Vec<u8> = row.get(1)?;
-            NativePath::from_storage(&platform, &native_path).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Blob,
-                    error.into(),
-                )
-            })
-        })?;
+        let mut stmt = conn
+            .prepare_cached("SELECT pattern FROM shared_file_ignore_patterns ORDER BY pattern")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -1066,16 +1039,16 @@ mod tests {
     }
 
     #[test]
-    fn shared_file_exclusions_and_default_overrides_survive_restart() {
+    fn shared_file_ignore_patterns_and_default_overrides_survive_restart() {
         let database_path = std::env::temp_dir().join(format!(
-            "emulebb-shared-exclusions-{}-{}.sqlite",
+            "emulebb-shared-ignores-{}-{}.sqlite",
             std::process::id(),
             Uuid::new_v4(),
         ));
-        let excluded_path = std::env::temp_dir().join("emulebb-excluded-file.bin");
+        let pattern = "*.private.bin";
         {
             let store = MetadataStore::open(&database_path).unwrap();
-            store.add_shared_file_exclusion(&excluded_path).unwrap();
+            store.add_shared_file_ignore_pattern(pattern).unwrap();
             store
                 .set_shared_default_ignore_rule_enabled("noise.desktop-ini", false)
                 .unwrap();
@@ -1083,18 +1056,18 @@ mod tests {
         {
             let store = MetadataStore::open(&database_path).unwrap();
             assert_eq!(
-                store.shared_file_exclusions().unwrap(),
-                vec![NativePath::from(excluded_path.as_path())]
+                store.shared_file_ignore_patterns().unwrap(),
+                vec![pattern.to_string()]
             );
             assert_eq!(
                 store.disabled_shared_default_ignore_rules().unwrap(),
                 vec!["noise.desktop-ini".to_string()]
             );
-            assert!(store.remove_shared_file_exclusion(&excluded_path).unwrap());
+            assert!(store.remove_shared_file_ignore_pattern(pattern).unwrap());
             store
                 .set_shared_default_ignore_rule_enabled("noise.desktop-ini", true)
                 .unwrap();
-            assert!(store.shared_file_exclusions().unwrap().is_empty());
+            assert!(store.shared_file_ignore_patterns().unwrap().is_empty());
             assert!(
                 store
                     .disabled_shared_default_ignore_rules()

@@ -681,6 +681,17 @@ test("shared folder add form validates root paths", async ({ page }) => {
   expect(sharedDirectoryPost).toBeDefined();
   expect(JSON.parse(sharedDirectoryPost?.body ?? "{}")).toEqual({ path: "C:\\More\\Shared" });
 
+  const ignoresPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Share Ignores" }) });
+  await ignoresPanel.getByRole("textbox", { name: "File name ignore pattern" }).fill(" *.private.bin ");
+  await ignoresPanel.getByRole("button", { name: "Add pattern" }).click();
+  await expect(page.getByText("Ignore pattern added")).toBeVisible();
+  const ignorePost = requests.find((request) => request.method === "POST" && request.path === "shared-directories/ignores");
+  expect(JSON.parse(ignorePost?.body ?? "{}")).toEqual({ pattern: "*.private.bin" });
+  await ignoresPanel.getByTitle("Remove pattern").first().click();
+  await expect(page.getByText("Ignore pattern removed")).toBeVisible();
+  const ignoreDelete = requests.find((request) => request.method === "DELETE" && request.path === "shared-directories/ignores");
+  expect(new URLSearchParams(ignoreDelete?.query ?? "").get("pattern")).toBe("*.private.bin");
+
   await sharingPanel.getByRole("button", { name: "Reload" }).click();
   await expect(page.getByText("Reload queued")).toBeVisible();
   expect(requests.some((request) => request.method === "POST" && request.path === "shared-directories/operations/reload")).toBe(true);

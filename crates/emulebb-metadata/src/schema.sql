@@ -309,8 +309,8 @@ CREATE TABLE shared_directory_root_origins (
     PRIMARY KEY(root_id, origin)
 );
 
-CREATE TABLE shared_file_exclusions (
-    path_id INTEGER PRIMARY KEY REFERENCES local_paths(id) ON DELETE CASCADE,
+CREATE TABLE shared_file_ignore_patterns (
+    pattern TEXT PRIMARY KEY CHECK(length(pattern) BETWEEN 1 AND 255),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)
 );
 
