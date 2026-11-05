@@ -648,6 +648,9 @@ async fn status_reports_shared_catalog_count_without_catalog_listing() {
     std::fs::write(&payload_path, b"shared count payload").unwrap();
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    core.add_shared_directory_root(&runtime_dir.display().to_string())
+        .await
+        .unwrap();
     core.share_local_file(LocalShareCreate {
         path: payload_path.display().to_string(),
         name: None,
