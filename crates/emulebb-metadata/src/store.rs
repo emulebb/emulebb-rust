@@ -496,6 +496,15 @@ impl MetadataStore {
                 deleted_at_ms = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN NULL ELSE ?1 END",
             params![now],
         )?;
+        tx.execute(
+            "UPDATE shared_file_memberships SET removed_at_ms = ?1
+             WHERE removed_at_ms IS NULL
+               AND root_id IN (
+                   SELECT id FROM shared_directory_roots
+                   WHERE accessible = 0 OR shareable = 0 OR enabled = 0
+               )",
+            params![now],
+        )?;
         tx.commit()?;
         Ok(())
     }

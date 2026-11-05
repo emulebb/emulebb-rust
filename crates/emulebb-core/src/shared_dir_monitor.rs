@@ -585,13 +585,16 @@ async fn run_shared_root_health_worker(core: EmulebbCore) {
         .into_iter()
         .map(|root| (PathBuf::from(root.path), root.accessible))
         .collect::<HashMap<_, _>>();
+    let mut pending_rejoin = HashMap::new();
     let mut root_check = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(2),
         Duration::from_secs(2),
     );
     loop {
         root_check.tick().await;
-        if let Err(error) = reconcile_root_availability(&core, &mut root_availability).await {
+        if let Err(error) =
+            reconcile_root_availability(&core, &mut root_availability, &mut pending_rejoin).await
+        {
             tracing::warn!(%error, "failed to reconcile shared-root availability");
         }
     }
@@ -616,6 +619,7 @@ async fn root_availability_snapshot(core: &EmulebbCore) -> anyhow::Result<HashMa
 async fn reconcile_root_availability(
     core: &EmulebbCore,
     previous: &mut HashMap<PathBuf, bool>,
+    pending_rejoin: &mut HashMap<PathBuf, Option<i64>>,
 ) -> anyhow::Result<()> {
     let current = root_availability_snapshot(core).await?;
     let changed = current
@@ -628,9 +632,20 @@ async fn reconcile_root_availability(
         .filter(|(_, accessible)| !**accessible)
         .map(|(path, _)| path.clone())
         .collect::<Vec<_>>();
-    if changed.is_empty() && missing.is_empty() {
+    if changed.is_empty() && missing.is_empty() && pending_rejoin.is_empty() {
         return Ok(());
     }
+    for (path, accessible) in &changed {
+        if *accessible {
+            pending_rejoin.insert(
+                path.clone(),
+                core.metadata_store.shared_root_last_scan_ms(path)?,
+            );
+        } else {
+            pending_rejoin.remove(path);
+        }
+    }
+    pending_rejoin.retain(|path, _| current.get(path) == Some(&true));
     let mut withdrawn = false;
     for root in &missing {
         let metadata = core.metadata_store.clone();
@@ -657,7 +672,22 @@ async fn reconcile_root_availability(
             .await?;
         core.queue_ed2k_shared_catalog_publish();
     }
-    if changed.iter().any(|(_, accessible)| *accessible) {
+    let recovered = changed.iter().any(|(_, accessible)| *accessible);
+    if !core.shared_reload_running.load(Ordering::Acquire) {
+        let mut scanned = Vec::new();
+        for (path, baseline) in pending_rejoin.iter() {
+            let last_scan = core.metadata_store.shared_root_last_scan_ms(path)?;
+            if last_scan.is_some() && last_scan != *baseline {
+                scanned.push(path.clone());
+            }
+        }
+        for path in scanned {
+            pending_rejoin.remove(&path);
+        }
+    }
+    if recovered
+        || (!pending_rejoin.is_empty() && !core.shared_reload_running.load(Ordering::Acquire))
+    {
         core.reload_shared_directories_detached().await?;
     }
     *previous = current;
@@ -1718,9 +1748,10 @@ mod tests {
         auto_share_monitored_path(&core, &source).await;
         let hash = core.shares().await[0].hash.clone();
         let mut availability = root_availability_snapshot(&core).await.unwrap();
+        let mut pending_rejoin = HashMap::new();
 
         std::fs::rename(&root, &offline).unwrap();
-        reconcile_root_availability(&core, &mut availability)
+        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin)
             .await
             .unwrap();
         assert!(core.shares().await.is_empty());
@@ -1735,7 +1766,7 @@ mod tests {
         core.metadata_store
             .set_shared_root_accessible(&root, true)
             .unwrap();
-        reconcile_root_availability(&core, &mut availability)
+        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin)
             .await
             .unwrap();
         assert!(
@@ -1746,9 +1777,10 @@ mod tests {
         );
 
         std::fs::rename(&offline, &root).unwrap();
-        reconcile_root_availability(&core, &mut availability)
+        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin)
             .await
             .unwrap();
+        assert!(pending_rejoin.contains_key(&root));
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if core.share(&hash).await.is_some() {
@@ -1759,6 +1791,17 @@ mod tests {
         })
         .await
         .expect("reappeared root should rejoin after reload");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while core.shared_reload_running.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("rejoin reload should finish");
+        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin)
+            .await
+            .unwrap();
+        assert!(pending_rejoin.is_empty());
         std::fs::remove_dir_all(&parent).ok();
     }
 
