@@ -127,6 +127,39 @@ impl MetadataStore {
         Ok(changed)
     }
 
+    /// Withdraw memberships only while the path still names the observed
+    /// verified generation. A watcher may replace and re-admit it between an
+    /// upload's snapshot and its failed file open.
+    pub fn withdraw_local_file_path_if_verified(
+        &self,
+        path: &Path,
+        file_hash: &str,
+        expected: &NativeFileFingerprint,
+    ) -> Result<usize> {
+        let native = NativePath::from(path);
+        let hash = crate::store::decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let changed = self.connection()?.execute(
+            "UPDATE shared_file_memberships SET removed_at_ms = ?5
+             WHERE path_id IN (
+                 SELECT local_file_instances.path_id
+                 FROM local_file_instances
+                 JOIN local_paths ON local_paths.id = local_file_instances.path_id
+                 JOIN known_files ON known_files.id = local_file_instances.known_file_id
+                 WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
+                   AND known_files.ed2k_hash = ?3
+                   AND local_file_instances.verified_fingerprint = ?4
+             ) AND removed_at_ms IS NULL",
+            params![
+                NativePath::platform(),
+                native.storage_bytes(),
+                hash,
+                expected.storage_bytes(),
+                unix_ms()
+            ],
+        )?;
+        Ok(changed)
+    }
+
     /// Commit one successful full scan of a root. The caller supplies only
     /// scanned local paths with their live fingerprints; a failed or incomplete
     /// scan must never call this. Only safely matched cache entries are admitted.
@@ -369,6 +402,51 @@ mod tests {
             .unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 1);
         store.replace_root_memberships(&root, &[]).unwrap();
+        assert_eq!(store.active_shared_content_count().unwrap(), 0);
+
+        // An upload holding the old fingerprint must not withdraw a path that
+        // a watcher has already reverified and admitted as a new generation.
+        let mut replacement = fingerprint.clone();
+        replacement.identity = NativeFileIdentity::Unix {
+            device_id: 7,
+            inode_number: 12,
+        };
+        store
+            .upsert_local_file_instance(&file, hash, &replacement)
+            .unwrap();
+        store
+            .replace_root_memberships(
+                &root,
+                &[(
+                    file.clone(),
+                    PathBuf::from("nested/Sample.bin"),
+                    replacement.clone(),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .withdraw_local_file_path_if_verified(&file, hash, &fingerprint)
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.active_shared_content_count().unwrap(), 1);
+        assert_eq!(
+            store
+                .withdraw_local_file_path_if_verified(
+                    &file,
+                    "ffffffffffffffffffffffffffffffff",
+                    &replacement,
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .withdraw_local_file_path_if_verified(&file, hash, &replacement)
+                .unwrap(),
+            1
+        );
         assert_eq!(store.active_shared_content_count().unwrap(), 0);
     }
 }
