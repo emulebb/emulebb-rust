@@ -15,6 +15,7 @@ use super::super::{
 };
 use super::write_repeating_pattern_file;
 use crate::paths::unique_test_dir;
+use emulebb_metadata::MetadataSharedDirectoryRoot;
 
 #[cfg(unix)]
 use emulebb_metadata::NativePath;
@@ -165,6 +166,75 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     assert_eq!(reader.cache_miss_count(), 1);
     assert_eq!(reader.cache_hit_count(), 2);
     assert_eq!(reader.disk_read_bytes(), ED2K_EMBLOCK_SIZE * 3);
+}
+
+#[tokio::test]
+async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() {
+    let root = unique_test_dir("ed2k-member-upload-withdraw");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let shared_root = root.join("library");
+    fs::create_dir_all(&shared_root).unwrap();
+    let path = shared_root.join("Sample.bin");
+    fs::write(&path, b"original content").unwrap();
+    let summary = runtime
+        .ingest_local_file(&path, "Sample.bin")
+        .await
+        .unwrap();
+    let manifest = runtime.manifest(&summary.file_hash).await.unwrap();
+    let native_path = manifest.source_path.unwrap();
+    let fingerprint = manifest.source_fingerprint.unwrap();
+    let mut metadata = runtime.metadata.clone();
+    metadata
+        .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
+            path: shared_root.to_string_lossy().into_owned(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
+    metadata
+        .replace_root_memberships(
+            &shared_root,
+            &[(native_path.clone(), "Sample.bin".into(), fingerprint)],
+        )
+        .unwrap();
+    assert_eq!(metadata.active_shared_content_count().unwrap(), 1);
+    let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
+    metadata
+        .set_shared_root_accessible(&shared_root, false)
+        .unwrap();
+    assert!(
+        runtime
+            .open_verified_range_reader(&hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    metadata
+        .set_shared_root_accessible(&shared_root, true)
+        .unwrap();
+    assert!(
+        runtime
+            .open_verified_range_reader(&hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    fs::write(&path, b"changed content!").unwrap();
+    assert!(
+        runtime
+            .open_verified_range_reader(&hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(metadata.active_shared_content_count().unwrap(), 0);
+    assert!(
+        metadata
+            .local_file_instance(&native_path)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
