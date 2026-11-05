@@ -5,12 +5,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, ensure};
 use rusqlite::params;
 
-use crate::{MetadataStore, NativePath, store::unix_ms};
+use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
 impl MetadataStore {
     /// Commit one successful full scan of a root. The caller supplies only
-    /// verified local paths; a failed or incomplete scan must never call this.
-    pub fn replace_root_memberships(&self, root: &Path, paths: &[PathBuf]) -> Result<()> {
+    /// scanned local paths with their live fingerprints; a failed or incomplete
+    /// scan must never call this. Only safely matched cache entries are admitted.
+    pub fn replace_root_memberships(
+        &self,
+        root: &Path,
+        paths: &[(PathBuf, NativeFileFingerprint)],
+    ) -> Result<()> {
         let native_root = NativePath::from(root);
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
@@ -30,21 +35,33 @@ impl MetadataStore {
              WHERE root_id = ?1 AND removed_at_ms IS NULL",
             params![root_id, now],
         )?;
-        for path in paths {
+        for (path, current_fingerprint) in paths {
             let relative = path.strip_prefix(root)?;
             ensure!(
                 !relative.as_os_str().is_empty(),
                 "shared member is the root itself"
             );
             let native_path = NativePath::from(path.as_path());
-            let path_id: i64 = tx.query_row(
-                "SELECT local_file_instances.path_id
+            let cached: (i64, Vec<u8>) = match tx.query_row(
+                "SELECT local_file_instances.path_id, local_file_instances.verified_fingerprint
                  FROM local_file_instances
                  JOIN local_paths ON local_paths.id = local_file_instances.path_id
                  WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2",
                 params![NativePath::platform(), native_path.storage_bytes()],
-                |row| row.get(0),
-            )?;
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ) {
+                Ok(cached) => cached,
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let Some(stored_fingerprint) = NativeFileFingerprint::from_storage_bytes(&cached.1)
+            else {
+                continue;
+            };
+            if !stored_fingerprint.safely_matches(current_fingerprint) {
+                continue;
+            }
+            let path_id = cached.0;
             tx.execute(
                 "INSERT INTO shared_file_memberships(
                     root_id, path_id, relative_path, first_seen_ms, last_seen_ms, removed_at_ms
@@ -148,11 +165,12 @@ mod tests {
         store
             .upsert_local_file_instance(&file, hash, &fingerprint)
             .unwrap();
+        let verified_file = (file.clone(), fingerprint.clone());
         store
-            .replace_root_memberships(&root, std::slice::from_ref(&file))
+            .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
             .unwrap();
         store
-            .replace_root_memberships(&nested, std::slice::from_ref(&file))
+            .replace_root_memberships(&nested, std::slice::from_ref(&verified_file))
             .unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 1);
         store.set_shared_root_accessible(&root, false).unwrap();
@@ -161,7 +179,17 @@ mod tests {
         assert_eq!(store.active_shared_content_count().unwrap(), 0);
         assert!(store.local_file_instance(&file).unwrap().is_some());
         store
-            .replace_root_memberships(&root, std::slice::from_ref(&file))
+            .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
+            .unwrap();
+        assert_eq!(store.active_shared_content_count().unwrap(), 1);
+        let mut changed = fingerprint.clone();
+        changed.size_bytes = 33;
+        store
+            .replace_root_memberships(&root, &[(file.clone(), changed)])
+            .unwrap();
+        assert_eq!(store.active_shared_content_count().unwrap(), 0);
+        store
+            .replace_root_memberships(&root, &[verified_file])
             .unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 1);
         store.replace_root_memberships(&root, &[]).unwrap();
