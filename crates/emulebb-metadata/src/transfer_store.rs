@@ -1771,7 +1771,9 @@ impl super::MetadataStore {
     }
 
     pub fn pending_completed_delivery_hashes(&self) -> Result<Vec<String>> {
-        self.completed_delivery_hashes("transfers.delivery_state = 'pending'")
+        // A delivered output can still await local-root admission and transfer
+        // retirement after a crash or transient metadata failure.
+        self.completed_delivery_hashes("transfers.delivery_state IN ('pending', 'delivered')")
     }
 
     pub fn completed_delivery_reconciliation_hashes(&self) -> Result<Vec<String>> {

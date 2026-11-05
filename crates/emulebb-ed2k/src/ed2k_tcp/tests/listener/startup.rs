@@ -552,7 +552,14 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     let (returned_hash, returned_aich_root) =
         super::decode_aich_file_hash_answer(&aich_answer[6..]).unwrap();
     assert_eq!(returned_hash, file_hash);
-    assert_eq!(returned_aich_root, aich_root);
+    // Completion replaces an unverified peer root with the hashset computed
+    // from the verified payload; the stale peer root cannot serve recovery.
+    assert!(manifest.aich_hashset_acquired);
+    assert_eq!(
+        hex::encode(returned_aich_root),
+        manifest.aich_root.as_deref().unwrap()
+    );
+    assert_ne!(returned_aich_root, aich_root);
 
     let mut aich_recovery_request = Vec::new();
     aich_recovery_request.extend_from_slice(&file_hash.0);

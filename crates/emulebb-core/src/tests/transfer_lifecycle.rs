@@ -718,7 +718,7 @@ async fn delete_transfer_files_removes_manifest_and_transfer_row() {
 }
 
 #[tokio::test]
-async fn delete_transfer_files_removes_delivered_completed_download() {
+async fn completed_delivery_retires_transfer_without_deleting_local_file() {
     let runtime_dir = unique_runtime_dir("emulebb-core-delete-delivered-transfer");
     let transfer_root = runtime_dir.join("transfers");
     let incoming_dir = runtime_dir.join("incoming");
@@ -727,21 +727,20 @@ async fn delete_transfer_files_removes_delivered_completed_download() {
         .with_incoming_dir(incoming_dir.clone());
     let payload = b"completed delivered download payload".repeat(64);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(format!(
-                "ed2k://|file|Delivered.Delete.bin|{}|{}|/",
-                payload.len(),
-                file_hash
-            )),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
+    core.create_transfer(TransferCreate {
+        known_file_policy: Default::default(),
+        link: Some(format!(
+            "ed2k://|file|Delivered.Delete.bin|{}|{}|/",
+            payload.len(),
+            file_hash
+        )),
+        links: None,
+        category_id: None,
+        category_name: None,
+        paused: Some(true),
+    })
+    .await
+    .unwrap();
 
     core.ed2k_transfers
         .store_md4_hashset(&file_hash, Vec::new())
@@ -758,38 +757,38 @@ async fn delete_transfer_files_removes_delivered_completed_download() {
         .unwrap();
     assert_eq!(awaiting_delivery.state, "completing");
     core.deliver_completed_transfer(&file_hash).await;
-    assert_eq!(core.transfer(&file_hash).await.unwrap().state, "completed");
+    assert!(core.transfer(&file_hash).await.is_none());
+    assert!(core.share(&file_hash).await.is_some());
     let delivered_manifest = core.ed2k_transfers.manifest(&file_hash).await.unwrap();
     let delivered_path = PathBuf::from(delivered_manifest.delivered_path.as_deref().unwrap());
     assert_eq!(std::fs::read(&delivered_path).unwrap(), payload);
 
-    let row_only = core
-        .delete_completed_transfer_row(&file_hash)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(row_only.hash, transfer.hash);
+    assert!(
+        core.delete_completed_transfer_row(&file_hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         delivered_path.exists(),
         "row-only completed transfer removal must preserve the delivered file"
     );
 
-    let deleted = core
-        .delete_transfer_files(&file_hash)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(deleted.hash, transfer.hash);
     assert!(
-        !delivered_path.exists(),
-        "destructive transfer delete must remove the delivered completed file"
+        core.delete_transfer_files(&file_hash)
+            .await
+            .unwrap()
+            .is_none()
     );
-    assert!(!transfer_root.join(&file_hash).exists());
+    assert!(
+        delivered_path.exists(),
+        "retired download actions must not delete local shared content"
+    );
     assert!(core.transfer(&file_hash).await.is_none());
 }
 
 #[tokio::test]
-async fn completed_transfer_list_and_clear_are_persisted_across_restart() {
+async fn completed_download_is_history_only_after_restart() {
     let runtime_dir = unique_runtime_dir("emulebb-core-persisted-completed-list");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -827,7 +826,7 @@ async fn completed_transfer_list_and_clear_are_persisted_across_restart() {
             .await
             .unwrap();
         core.deliver_completed_transfer(&file_hash).await;
-        assert_eq!(core.transfer(&file_hash).await.unwrap().state, "completed");
+        assert!(core.transfer(&file_hash).await.is_none());
     }
 
     let reloaded = EmulebbCore::new(
@@ -837,10 +836,14 @@ async fn completed_transfer_list_and_clear_are_persisted_across_restart() {
     )
     .unwrap()
     .with_incoming_dir(incoming_dir.clone());
-    let listed = reloaded.transfers().await;
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].hash, file_hash);
-    assert_eq!(listed[0].state, "completed");
+    assert!(reloaded.transfers().await.is_empty());
+    let evidence = reloaded
+        .ed2k_transfers
+        .download_evidence(&file_hash)
+        .await
+        .unwrap();
+    assert!(evidence.previously_completed.is_some());
+    assert_eq!(evidence.current_local_files.len(), 1);
 
     let clear_without_prior_lookup = EmulebbCore::new(
         "test",
@@ -867,7 +870,7 @@ async fn completed_transfer_list_and_clear_are_persisted_across_restart() {
 }
 
 #[tokio::test]
-async fn startup_reconciliation_redelivers_replaced_completed_output() {
+async fn retired_download_does_not_redeliver_replaced_local_output() {
     let runtime_dir = unique_runtime_dir("emulebb-core-startup-delivery-reconcile");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -926,32 +929,22 @@ async fn startup_reconciliation_redelivers_replaced_completed_output() {
             .reconcile_persisted_completed_deliveries()
             .await
             .unwrap(),
-        1
+        0
     );
+    reloaded.reload_shared_directories().await.unwrap();
 
     let redelivered_path = incoming_dir.join("Reconcile.Completed (1).bin");
     assert_eq!(
         std::fs::read(&recorded_path).unwrap(),
         unrelated_replacement
     );
-    assert_eq!(std::fs::read(&redelivered_path).unwrap(), payload);
-    let manifest = reloaded.ed2k_transfers.manifest(&file_hash).await.unwrap();
-    assert_eq!(
-        manifest.delivery_state,
-        emulebb_ed2k::ed2k_transfer::Ed2kDeliveryState::Delivered
-    );
-    assert_eq!(
-        manifest.delivered_path.as_deref(),
-        Some(redelivered_path.as_path())
-    );
-    assert_eq!(
-        reloaded.transfer(&file_hash).await.unwrap().state,
-        "completed"
-    );
+    assert!(!redelivered_path.exists());
+    assert!(reloaded.transfer(&file_hash).await.is_none());
+    assert!(reloaded.share(&file_hash).await.is_none());
 }
 
 #[tokio::test]
-async fn startup_deletion_recovery_precedes_hydration_and_delivery_reconciliation() {
+async fn retired_delivery_is_not_subject_to_transfer_deletion_recovery() {
     let runtime_dir = unique_runtime_dir("emulebb-core-startup-delete-recovery");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -959,7 +952,6 @@ async fn startup_deletion_recovery_precedes_hydration_and_delivery_reconciliatio
     let payload = b"startup destructive deletion recovery payload".repeat(32);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
     let delivered_path = incoming_dir.join("Delete.On.Startup.bin");
-    let transfer_dir;
     {
         let core = EmulebbCore::new(
             "test",
@@ -991,19 +983,15 @@ async fn startup_deletion_recovery_precedes_hydration_and_delivery_reconciliatio
             .await
             .unwrap();
         core.deliver_completed_transfer(&file_hash).await;
-        transfer_dir = core.ed2k_transfers.transfer_dir_path(&file_hash);
         assert!(delivered_path.exists());
-        assert!(transfer_dir.exists());
-        std::fs::remove_dir_all(&transfer_dir).unwrap();
-        std::fs::write(&transfer_dir, b"cleanup blocker").unwrap();
         assert!(
-            core.ed2k_transfers
+            !core
+                .ed2k_transfers
                 .delete_transfer_files(&file_hash)
                 .await
                 .unwrap()
         );
-        assert!(!delivered_path.exists());
-        std::fs::remove_file(&transfer_dir).unwrap();
+        assert!(delivered_path.exists());
     }
 
     let reloaded = EmulebbCore::new(
@@ -1014,7 +1002,7 @@ async fn startup_deletion_recovery_precedes_hydration_and_delivery_reconciliatio
     .unwrap()
     .with_incoming_dir(incoming_dir);
     let deletion_recovery = reloaded.recover_pending_transfer_deletions().await.unwrap();
-    assert_eq!(deletion_recovery.recovered, 1);
+    assert_eq!(deletion_recovery.recovered, 0);
     assert!(deletion_recovery.failures.is_empty());
     assert_eq!(reloaded.hydrate_persisted_transfer_rows().await.unwrap(), 0);
     assert_eq!(
@@ -1025,8 +1013,7 @@ async fn startup_deletion_recovery_precedes_hydration_and_delivery_reconciliatio
         0
     );
     assert!(reloaded.transfers().await.is_empty());
-    assert!(!delivered_path.exists());
-    assert!(!transfer_dir.exists());
+    assert!(delivered_path.exists());
     assert!(
         reloaded
             .metadata_store
@@ -1078,9 +1065,8 @@ async fn delivery_failure_stays_completing_and_clears_after_retry() {
 
     std::fs::remove_file(&blocked_incoming).unwrap();
     core.deliver_completed_transfer(&file_hash).await;
-    let recovered = core.transfer(&file_hash).await.unwrap();
-    assert_eq!(recovered.state, "completed");
-    assert!(recovered.delivery_error.is_none());
+    assert!(core.transfer(&file_hash).await.is_none());
+    assert!(core.share(&file_hash).await.is_some());
     assert!(blocked_incoming.join("Retry.bin").exists());
 }
 

@@ -48,14 +48,25 @@ pub async fn wait_for_kad_connected(core: &EmulebbCore) {
     .await;
 }
 
-pub async fn wait_for_completed_transfer(core: &EmulebbCore, hash: &str) -> emulebb_core::Transfer {
-    wait_until("ED2K transfer did not complete from Kad source", || async {
-        core.transfer(hash)
-            .await
-            .filter(|transfer| transfer.state == "completed")
-    })
-    .await
-    .expect("completed transfer")
+pub async fn wait_for_completed_download(
+    core: &EmulebbCore,
+    hash: &str,
+) -> emulebb_core::LocalShare {
+    let deadline = Instant::now() + TRANSFER_TIMEOUT;
+    loop {
+        if let Some(share) = core.share(hash).await
+            && core.transfer(hash).await.is_none()
+        {
+            return share;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ED2K download did not become a local share: transfer={:?}, share={:?}",
+            core.transfer(hash).await,
+            core.share(hash).await,
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub fn free_lan_tcp_port(bind_ip: Ipv4Addr) -> u16 {

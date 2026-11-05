@@ -97,7 +97,10 @@ impl Ed2kTransferRuntime {
             )
             .await?;
         }
-        if let Some(manifest) = manifest.as_ref().filter(|manifest| manifest.completed) {
+        if let Some(manifest) = manifest
+            .as_ref()
+            .filter(|manifest| manifest.completed && !manifest.transfer_row_removed)
+        {
             if let Some(source_path) = manifest.source_path.as_deref() {
                 push_current_file_if_present(
                     &mut current_local_files,
