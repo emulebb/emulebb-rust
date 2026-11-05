@@ -103,10 +103,8 @@ pub struct Ed2kPieceState {
     /// `block_bitmap`.
     pub bytes_written: u64,
     /// Lowercase-hex packed block presence bitmap at `EMBLOCKSIZE` granularity
-    /// within the part. `None` (or absent on disk) means "all present blocks are
-    /// the contiguous prefix up to `bytes_written`", preserving resume-manifest
-    /// backward compatibility for manifests written before block-level salvage.
-    #[serde(default)]
+    /// within the part. `None` is the current compact representation for a
+    /// contiguous prefix up to `bytes_written`.
     pub block_bitmap: Option<String>,
     /// Whether this part previously failed its MD4 flush check and is pending
     /// MD4-only ICH salvage. The stale on-disk bytes are RETAINED (the part is
@@ -116,7 +114,6 @@ pub struct Ed2kPieceState {
     /// `corrupted_list` + the `FlushBuffer` ICH branch, PartFile.cpp:5188-5190
     /// and :5214-5232; persisted like `FT_CORRUPTEDPARTS`,
     /// PartFile.cpp:1445-1462). Cleared when the part verifies.
-    #[serde(default)]
     pub ich_corrupted: bool,
 }
 
@@ -124,16 +121,12 @@ impl Ed2kPieceState {
     /// Resolve the effective per-part block presence bitmap for a part of
     /// `part_len` bytes.
     ///
-    /// When a bitmap was persisted it is decoded; otherwise (legacy manifest or
-    /// the contiguous fast path) the bitmap is derived from `bytes_written` as a
-    /// contiguous prefix of whole blocks. A persisted bitmap with a stale length
-    /// also falls back to the contiguous-prefix derivation, preserving
-    /// resume-manifest backward compatibility.
+    /// A present bitmap was validated when the current-schema row was loaded.
+    /// An absent bitmap represents the current contiguous-prefix form.
     pub(super) fn resolve_block_bitmap(&self, part_len: u64) -> PartBlockBitmap {
         match self.block_bitmap.as_deref() {
-            Some(hex) => PartBlockBitmap::from_hex(part_len, hex).unwrap_or_else(|| {
-                PartBlockBitmap::contiguous_prefix(part_len, self.bytes_written)
-            }),
+            Some(hex) => PartBlockBitmap::from_hex(part_len, hex)
+                .expect("persisted block bitmap must be validated before use"),
             None => PartBlockBitmap::contiguous_prefix(part_len, self.bytes_written),
         }
     }
@@ -147,8 +140,8 @@ impl Ed2kPieceState {
 
     /// Persist `bitmap` into this piece and refresh `bytes_written` to the
     /// contiguous present prefix. The bitmap is dropped (set to `None`) when it
-    /// is a clean contiguous prefix so the legacy/fast path representation is
-    /// kept whenever block-level tracking is not needed.
+    /// is a clean contiguous prefix so the compact representation is kept
+    /// whenever block-level tracking is not needed.
     pub(super) fn apply_block_bitmap(&mut self, bitmap: &PartBlockBitmap) {
         let prefix = bitmap.contiguous_prefix_bytes();
         self.bytes_written = prefix;

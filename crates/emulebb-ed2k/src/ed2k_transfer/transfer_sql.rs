@@ -11,7 +11,7 @@ use emulebb_metadata::{
 use super::{
     Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kFileNameObservation, Ed2kPieceState,
     Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kSourceHint, Ed2kTransferState,
-    catalog::Ed2kSharedPublishStats,
+    block_bitmap::PartBlockBitmap, catalog::Ed2kSharedPublishStats, expected_piece_length,
 };
 
 pub(super) const MEDIA_METADATA_EXTRACTOR_VERSION: u32 = 1;
@@ -123,6 +123,9 @@ pub(super) fn manifest_from_metadata(
             manifest.file_size
         );
     }
+    let file_size = manifest.file_size;
+    let piece_size = manifest.piece_size;
+    let manifest_hash = manifest.file_hash.clone();
     Ok(Ed2kResumeManifest {
         file_hash: manifest.file_hash,
         display_name: manifest.display_name,
@@ -164,6 +167,16 @@ pub(super) fn manifest_from_metadata(
             .pieces
             .into_iter()
             .map(|piece| {
+                if let Some(bitmap) = piece.block_bitmap.as_deref() {
+                    let part_len =
+                        expected_piece_length(file_size, piece_size, u64::from(piece.piece_index));
+                    anyhow::ensure!(
+                        part_len > 0 && PartBlockBitmap::from_hex(part_len, bitmap).is_some(),
+                        "invalid persisted block bitmap for {} piece {}",
+                        manifest_hash,
+                        piece.piece_index
+                    );
+                }
                 Ok(Ed2kPieceState {
                     piece_index: piece.piece_index,
                     state: transfer_state_from_sql(&piece.state)?,
@@ -410,5 +423,23 @@ mod tests {
         // harmless and must not be rejected.
         let manifest = manifest_from_metadata(manifest_row(0, 0)).expect("empty file loads");
         assert_eq!(manifest.file_size, 0);
+    }
+
+    #[test]
+    fn rejects_malformed_persisted_block_bitmap() {
+        let mut row = manifest_row(1024, 1024);
+        row.pieces = vec![MetadataTransferPiece {
+            piece_index: 0,
+            state: "Missing".to_string(),
+            bytes_written: 0,
+            block_bitmap: Some("01".to_string()),
+            ich_corrupted: false,
+        }];
+        assert!(manifest_from_metadata(row.clone()).is_ok());
+        for invalid in ["", "zz", "0000", "0A", "02"] {
+            row.pieces[0].block_bitmap = Some(invalid.to_string());
+            let error = manifest_from_metadata(row.clone()).unwrap_err();
+            assert!(error.to_string().contains("invalid persisted block bitmap"));
+        }
     }
 }
