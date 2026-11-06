@@ -215,6 +215,15 @@ async fn non_utf8_local_share_reopens_and_serves_exact_bytes() {
     assert_eq!(manifest.local_path.as_deref(), Some(source_path.as_path()));
     assert_eq!(
         runtime
+            .download_evidence(&hash)
+            .await
+            .unwrap()
+            .current_local_files[0]
+            .path,
+        NativePath::from(source_path.as_path()).display_path(),
+    );
+    assert_eq!(
+        runtime
             .read_verified_range(&hash, 0, payload.len() as u64)
             .await
             .unwrap()

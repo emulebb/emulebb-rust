@@ -280,8 +280,10 @@ pub(super) fn completed_catalog_page_from_metadata_store(
                 }
                 continue;
             }
-            if let Some(name) = source.path.file_name() {
-                entry.display_name = name.to_string_lossy().into_owned();
+            if let Some(name) =
+                emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
+            {
+                entry.display_name = name;
             }
         }
         entries.push(entry);
