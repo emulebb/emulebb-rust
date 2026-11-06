@@ -227,46 +227,6 @@ CREATE TABLE verified_local_aich_hashes (
     PRIMARY KEY(known_file_id, part_index)
 );
 
-CREATE TABLE imported_known_files (
-    id INTEGER PRIMARY KEY,
-    ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
-    display_name TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
-    modified_s INTEGER NOT NULL CHECK(modified_s > 0),
-    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
-    upload_priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
-    auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
-    all_time_uploaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(all_time_uploaded_bytes >= 0),
-    all_time_upload_requests INTEGER NOT NULL DEFAULT 0 CHECK(all_time_upload_requests >= 0),
-    all_time_upload_accepts INTEGER NOT NULL DEFAULT 0 CHECK(all_time_upload_accepts >= 0),
-    last_upload_request_ms INTEGER NOT NULL DEFAULT 0 CHECK(last_upload_request_ms >= 0),
-    imported_at_ms INTEGER NOT NULL CHECK(imported_at_ms >= 0)
-);
-
-CREATE UNIQUE INDEX imported_known_files_alias_idx
-    ON imported_known_files(ed2k_hash,display_name,size_bytes,modified_s);
-
-CREATE INDEX imported_known_files_identity_idx
-    ON imported_known_files(display_name, size_bytes, modified_s);
-CREATE INDEX imported_known_files_aich_root_idx ON imported_known_files(aich_root,size_bytes);
-
-CREATE TABLE imported_known_file_md4_hashes (
-    id INTEGER PRIMARY KEY,
-    imported_known_file_id INTEGER NOT NULL REFERENCES imported_known_files(id) ON DELETE CASCADE,
-    part_index INTEGER NOT NULL CHECK(part_index >= 0),
-    md4_hash BLOB NOT NULL CHECK(length(md4_hash) = 16),
-    UNIQUE(imported_known_file_id, part_index)
-);
-
-CREATE TABLE imported_known_file_aich_hashes (
-    id INTEGER PRIMARY KEY,
-    imported_known_file_id INTEGER NOT NULL REFERENCES imported_known_files(id) ON DELETE CASCADE,
-    part_index INTEGER NOT NULL CHECK(part_index >= 0),
-    aich_hash BLOB NOT NULL CHECK(length(aich_hash) = 20),
-    UNIQUE(imported_known_file_id, part_index)
-);
-
 CREATE TABLE verified_ranges (
     id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
@@ -733,7 +693,7 @@ CREATE TABLE search_result_observations (
     CHECK((source_client_id IS NULL) = (source_client_port IS NULL))
 );
 
-CREATE INDEX known_files_hash_idx ON known_files(ed2k_hash);
+CREATE INDEX verified_ranges_transfer_idx ON verified_ranges(transfer_id,start_offset,end_offset);
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
 CREATE INDEX shared_file_memberships_path_idx ON shared_file_memberships(path_id);
 CREATE INDEX transfer_sources_transfer_idx ON transfer_sources(transfer_id);

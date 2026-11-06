@@ -1,6 +1,6 @@
 use super::*;
 use emulebb_index::FileIndex;
-use emulebb_metadata::MetadataImportedKnownFileEntry;
+use emulebb_metadata::MetadataFileImportRecord;
 use std::fs;
 use std::sync::atomic::AtomicU64;
 
@@ -447,11 +447,11 @@ async fn incremental_reload_accepts_unique_stock_hash_without_payload_reads() {
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
     let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
-    let imported = MetadataImportedKnownFileEntry {
+    let imported = MetadataFileImportRecord {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Imported.Known.bin".to_string(),
         file_size: size,
-        modified_s: fingerprint.unwrap().modified.seconds,
+        modified_s: fingerprint.as_ref().unwrap().modified.seconds,
         md4_hashset: Vec::new(),
         aich_root: None,
         aich_hashset: Vec::new(),
@@ -463,7 +463,11 @@ async fn incremental_reload_accepts_unique_stock_hash_without_payload_reads() {
         last_upload_request_ms: 1_700_000_001_000,
     };
     core.metadata_store
-        .upsert_imported_known_file(&imported)
+        .accept_imported_local_files(&[(
+            imported.clone(),
+            emulebb_ed2k::long_path::long_path(&source),
+            fingerprint.unwrap(),
+        )])
         .unwrap();
 
     let plan = plan_incremental_reload(&core, vec![scanned_file(&source)])
@@ -484,45 +488,17 @@ async fn incremental_reload_accepts_unique_stock_hash_without_payload_reads() {
 }
 
 #[tokio::test]
-async fn incremental_reload_reports_ambiguous_stock_hashes_without_rehashing() {
-    let root = scratch_dir("imported-known-ambiguous");
-    let source = root.join("Ambiguous.Known.bin");
-    fs::write(&source, b"ambiguous payload").unwrap();
-    let core =
-        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
-    let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
-    for file_hash in [
-        "00112233445566778899aabbccddeeff",
-        "ffeeddccbbaa99887766554433221100",
-    ] {
-        core.metadata_store
-            .upsert_imported_known_file(&MetadataImportedKnownFileEntry {
-                file_hash: file_hash.to_string(),
-                display_name: "Ambiguous.Known.bin".to_string(),
-                file_size: size,
-                modified_s: fingerprint.as_ref().unwrap().modified.seconds,
-                md4_hashset: Vec::new(),
-                aich_root: None,
-                aich_hashset: Vec::new(),
-                upload_priority: "normal".to_string(),
-                auto_upload_priority: false,
-                all_time_uploaded_bytes: 0,
-                all_time_upload_requests: 0,
-                all_time_upload_accepts: 0,
-                last_upload_request_ms: 0,
-            })
-            .unwrap();
-    }
-
+async fn reload_without_live_binding_plans_hashing_without_staging_fallback() {
+    let root = scratch_dir("no-staging-fallback");
+    let source = root.join("Sample.bin");
+    fs::write(&source, b"sample").unwrap();
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let plan = plan_incremental_reload(&core, vec![scanned_file(&source)])
         .await
         .unwrap();
-
-    assert!(plan.to_hash.is_empty());
-    assert_eq!(plan.stats.planned_hash_count, 0);
-    assert_eq!(plan.stats.skipped_failed_count, 1);
+    assert_eq!(plan.stats.planned_hash_count, 1);
     assert_eq!(plan.stats.reused_count, 0);
-    fs::remove_dir_all(&root).ok();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
@@ -541,21 +517,25 @@ async fn trusted_stock_hash_survives_offline_reconciliation_startup_and_restart(
     // would replace this stock identity and make the assertions fail.
     let expected_hash = "00112233445566778899aabbccddeeff";
     core.metadata_store
-        .upsert_imported_known_file(&MetadataImportedKnownFileEntry {
-            file_hash: expected_hash.to_string(),
-            display_name: "Sample.bin".to_string(),
-            file_size: size,
-            modified_s: fingerprint.unwrap().modified.seconds,
-            md4_hashset: Vec::new(),
-            aich_root: None,
-            aich_hashset: Vec::new(),
-            upload_priority: "release".to_string(),
-            auto_upload_priority: false,
-            all_time_uploaded_bytes: 1234,
-            all_time_upload_requests: 9,
-            all_time_upload_accepts: 4,
-            last_upload_request_ms: 1_700_000_001_000,
-        })
+        .accept_imported_local_files(&[(
+            MetadataFileImportRecord {
+                file_hash: expected_hash.to_string(),
+                display_name: "Sample.bin".to_string(),
+                file_size: size,
+                modified_s: fingerprint.as_ref().unwrap().modified.seconds,
+                md4_hashset: Vec::new(),
+                aich_root: None,
+                aich_hashset: Vec::new(),
+                upload_priority: "release".to_string(),
+                auto_upload_priority: false,
+                all_time_uploaded_bytes: 1234,
+                all_time_upload_requests: 9,
+                all_time_upload_accepts: 4,
+                last_upload_request_ms: 1_700_000_001_000,
+            },
+            emulebb_ed2k::long_path::long_path(&source),
+            fingerprint.unwrap(),
+        )])
         .unwrap();
     let report = core.reconcile_shared_files().await.unwrap();
     assert_eq!(report.reused_count, 1);

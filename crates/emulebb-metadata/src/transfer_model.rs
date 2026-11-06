@@ -178,13 +178,11 @@ pub struct MetadataTransferPublishEntry {
     pub rating: u8,
 }
 
-/// One pathless stock eMule ``known.met`` row imported into a Rust profile.
-///
-/// Stock ``known.met`` records do not carry a directory path. Rust can safely
-/// reuse one only after a configured shared-root scan finds exactly one file
-/// with the same file name, byte size, and whole-second mtime.
+/// A parsed stock hash record passed to an explicit live import operation.
+/// This is an input value, never a persistent staging row or runtime lookup.
+/// The caller must verify its file metadata and capture a native fingerprint.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataImportedKnownFileEntry {
+pub struct MetadataFileImportRecord {
     pub file_hash: String,
     pub display_name: String,
     pub file_size: u64,
