@@ -25,6 +25,7 @@ mod text;
 mod transfer_model;
 mod transfer_store;
 
+pub use aich_recovery_store::MetadataAichRecoverySet;
 pub use download_history_model::{MetadataCurrentSharedFile, MetadataDownloadHistoryEntry};
 pub use identity_model::MetadataLocalIdentity;
 pub use kad_publish_model::{
