@@ -227,7 +227,8 @@ async fn network_kademlia_disabled_refuses_kad_bootstrap() {
     })
     .await
     .unwrap();
-    assert!(core.bootstrap_kad("203.0.113.9", 4672).await.is_ok());
+    let error = core.bootstrap_kad("203.0.113.9", 4672).await.unwrap_err();
+    assert!(error.to_string().contains("runtime is not running"));
 }
 
 #[tokio::test]

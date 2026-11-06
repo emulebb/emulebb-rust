@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 
 use crate::{EmulebbCore, KadNode, NetworkStatus};
@@ -36,7 +36,20 @@ impl EmulebbCore {
     pub async fn bootstrap_kad(&self, address: &str, port: u16) -> Result<NetworkStatus> {
         ensure!(!address.trim().is_empty(), "address must not be empty");
         ensure!(port != 0, "port must be between 1 and 65535");
-        self.start_kad().await
+        self.start_kad().await?;
+        let dht = self
+            .ed2k_dht_node()
+            .await
+            .context("Kad network runtime is not running")?;
+        let endpoint = tokio::net::lookup_host((address.trim(), port))
+            .await?
+            .find_map(|endpoint| match endpoint {
+                std::net::SocketAddr::V4(endpoint) => Some(endpoint),
+                std::net::SocketAddr::V6(_) => None,
+            })
+            .context("Kad bootstrap address has no IPv4 endpoint")?;
+        dht.bootstrap_from_endpoint(endpoint).await?;
+        Ok(self.kad_status(true).await)
     }
 
     pub async fn kad_nodes(&self) -> Vec<KadNode> {

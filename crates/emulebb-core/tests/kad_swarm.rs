@@ -264,6 +264,33 @@ async fn local_kad_swarm_publishes_and_searches_notes() {
 }
 
 #[tokio::test]
+async fn explicit_bootstrap_contacts_the_requested_endpoint() {
+    let swarm = LocalKadSwarm::with_star_topology(2).await;
+    let bind_ip = swarm.bind_ip();
+    let selected = swarm.nodes[1].addr;
+    let unavailable = std::net::SocketAddr::new(bind_ip.into(), free_lan_tcp_port(bind_ip));
+    let root = unique_test_dir("kad-explicit-bootstrap");
+    let core = open_network_core(
+        &root,
+        bind_ip,
+        unavailable,
+        free_lan_tcp_port(bind_ip),
+        [0x41; 16],
+        false,
+    );
+    core.connect_ed2k().await.expect("start local network");
+    core.bootstrap_kad(&selected.ip().to_string(), selected.port())
+        .await
+        .expect("bootstrap from explicitly requested endpoint");
+    assert!(
+        core.kad_nodes().await.iter().any(|node| {
+            node.ip == selected.ip().to_string() && node.udp_port == selected.port()
+        })
+    );
+    assert!(core.status().await.kad.connected);
+}
+
+#[tokio::test]
 async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transfers() {
     let swarm = LocalKadSwarm::with_star_topology(4).await;
     let bootstrap = swarm.nodes[0].addr;

@@ -5,13 +5,43 @@ use super::{
 use crate::bootstrap::{BootstrapContact, hardcoded_bootstrap, parse_nodes_dat, parse_nodes_text};
 use crate::error::DhtError;
 use emulebb_kad_net::RpcWorkClass;
-use emulebb_kad_proto::{KadPacket, NodeId, opcode};
+use emulebb_kad_proto::{KadPacket, KadUdpKey, NodeId, opcode};
 use emulebb_kad_routing::Contact;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 impl DhtNode {
+    /// Join through the operator's chosen UDP endpoint, without substituting
+    /// configured or hardcoded seeds. Learn its contacts and perform a self lookup.
+    pub async fn bootstrap_from_endpoint(&self, endpoint: SocketAddrV4) -> Result<(), DhtError> {
+        let contact = BootstrapContact {
+            node_id: NodeId::ZERO,
+            ip: *endpoint.ip(),
+            udp_port: endpoint.port(),
+            tcp_port: 0,
+            version: 0,
+            udp_key: KadUdpKey::ZERO,
+            udp_key_ip: None,
+            verified: false,
+        };
+        if !self
+            .bootstrap_contact(&contact, RpcWorkClass::Interactive)
+            .await
+        {
+            return Err(DhtError::BootstrapFailed);
+        }
+        self.lookup_nodes_with_class(&self.inner.own_id, RpcWorkClass::Interactive)
+            .await?;
+        let size = self.inner.routing_table.lock().await.len();
+        if bootstrap_ready_with_contacts(self.inner.config.bootstrap_min_routing_contacts, size) {
+            self.inner
+                .bootstrapped
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     /// Bootstrap from configured sources. Populates the routing table.
     pub async fn bootstrap(&self) -> Result<(), DhtError> {
         self.bootstrap_with_class(RpcWorkClass::Maintenance).await
