@@ -215,7 +215,7 @@ async fn non_utf8_local_share_reopens_and_serves_exact_bytes() {
     assert_eq!(manifest.local_path.as_deref(), Some(source_path.as_path()));
     assert_eq!(
         runtime
-            .download_evidence(&hash)
+            .download_evidence(&summary.file_hash)
             .await
             .unwrap()
             .current_local_files[0]
