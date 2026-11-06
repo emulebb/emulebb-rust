@@ -67,6 +67,50 @@ impl AichRecoveryHashSet {
         self.root.hash_valid = true;
     }
 
+    /// Load upper part roots and only the requested part's block leaves.
+    /// All sibling proofs are metadata; no payload or full block tree is needed.
+    pub(super) fn from_cached_part(
+        file_size: u64,
+        master: [u8; 20],
+        roots: &[[u8; 20]],
+        part: u16,
+        packed: &[u8],
+    ) -> Result<Self> {
+        let specs = super::hashset::aich_part_specs_for_size(file_size)?;
+        anyhow::ensure!(
+            roots.len() == specs.len() && usize::from(part) < specs.len(),
+            "invalid recovery part geometry"
+        );
+        let mut set = Self::new(file_size);
+        for (index, (spec, hash)) in specs.iter().zip(roots).enumerate() {
+            let mut level = 0;
+            let node = set
+                .root
+                .find_hash_mut(index as u64 * ED2K_PART_SIZE, spec.size, &mut level)
+                .ok_or_else(|| anyhow::anyhow!("invalid AICH part node"))?;
+            node.hash = *hash;
+            node.hash_valid = true;
+        }
+        let length = specs[usize::from(part)].size;
+        anyhow::ensure!(
+            packed.len() as u64 == length.div_ceil(ED2K_EMBLOCK_SIZE) * 20,
+            "invalid recovery leaves"
+        );
+        for (block, hash) in packed.chunks_exact(20).enumerate() {
+            let offset = block as u64 * ED2K_EMBLOCK_SIZE;
+            set.root.set_block_hash(
+                u64::from(part) * ED2K_PART_SIZE + offset,
+                (length - offset).min(ED2K_EMBLOCK_SIZE),
+                hash.try_into()?,
+            )?;
+        }
+        anyhow::ensure!(
+            set.root.recalculate_hash(false) && set.master_hash() == master,
+            "cached recovery tree mismatch"
+        );
+        Ok(set)
+    }
+
     /// Build the full block-level tree from `file_data` (entire file bytes) and
     /// compute the master hash. This is the data path used by a sharer to
     /// answer OP_AICHREQUEST. Mirrors `CKnownFile::CreateAICHHashSetOnly` +

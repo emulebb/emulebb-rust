@@ -28,7 +28,9 @@ use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig};
 
+mod aich_cache;
 mod aich_recovery;
+pub use aich_cache::validate_aich_recovery_set;
 mod aich_tree;
 mod aich_trust;
 mod block_bitmap;

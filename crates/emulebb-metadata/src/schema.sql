@@ -202,6 +202,21 @@ CREATE TABLE verified_local_md4_hashes (
     PRIMARY KEY(known_file_id, part_index)
 );
 
+CREATE TABLE aich_recovery_sets (
+    root BLOB NOT NULL CHECK(length(root) = 20),
+    size_bytes INTEGER NOT NULL CHECK(size_bytes > 0 AND size_bytes <= 274877906944),
+    PRIMARY KEY(root, size_bytes)
+);
+
+CREATE TABLE aich_recovery_parts (
+    root BLOB NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    part_index INTEGER NOT NULL CHECK(part_index >= 0),
+    leaves BLOB NOT NULL CHECK(length(leaves) > 0 AND length(leaves) <= 1060 AND length(leaves) % 20 = 0),
+    PRIMARY KEY(root, size_bytes, part_index),
+    FOREIGN KEY(root, size_bytes) REFERENCES aich_recovery_sets(root, size_bytes) ON DELETE CASCADE
+);
+
 CREATE TABLE verified_local_aich_hashes (
     known_file_id INTEGER NOT NULL REFERENCES verified_local_content(known_file_id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index >= 0),

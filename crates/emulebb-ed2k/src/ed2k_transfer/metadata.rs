@@ -1343,7 +1343,7 @@ impl Ed2kTransferRuntime {
         use super::{ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE};
 
         let hash_hex = file_hash.to_string();
-        let (file_size, aich_root) = {
+        let (file_size, aich_root, part_roots) = {
             let _guard = self.lock_manifest(&hash_hex).await;
             let Some(manifest) = self.load_serving_view_optional_unlocked(&hash_hex).await? else {
                 return Ok(None);
@@ -1355,7 +1355,17 @@ impl Ed2kTransferRuntime {
             let Some(root) = manifest.aich_root.as_deref() else {
                 return Ok(None);
             };
-            (manifest.file_size, decode_aich_hash_hex(root)?)
+            let master = decode_aich_hash_hex(root)?;
+            let roots = if manifest.file_size <= ED2K_PART_SIZE {
+                vec![master]
+            } else {
+                manifest
+                    .aich_hashset
+                    .iter()
+                    .map(|hash| decode_aich_hash_hex(hash))
+                    .collect::<Result<Vec<_>>>()?
+            };
+            (manifest.file_size, master, roots)
         };
 
         // master ProcessAICHRequest guard: file size > PARTSIZE * nPart + EMBLOCKSIZE
@@ -1366,18 +1376,28 @@ impl Ed2kTransferRuntime {
             return Ok(None);
         }
 
-        // The recovery data needs the whole-file tree (sibling hashes come from
-        // other parts), so we read the full verified payload.
-        let Some(file_data) = self.read_verified_range(file_hash, 0, file_size).await? else {
+        // WHY: native fingerprint checks still gate sharing, but a network
+        // request must never cause payload hashing merely to rebuild metadata.
+        let Some(_reader) = self.open_verified_range_reader(file_hash).await? else {
             return Ok(None);
         };
-        let mut set = AichRecoveryHashSet::new(file_size);
-        set.build_from_data(&file_data)?;
-        if set.master_hash() != aich_root {
-            // local data no longer matches the advertised AICH root
-            return Ok(None);
-        }
-        set.create_part_recovery_data(u64::from(part)).map(Some)
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            let Some(leaves) =
+                metadata.aich_recovery_part(&hex::encode(aich_root), file_size, part)?
+            else {
+                return Ok(None);
+            };
+            let mut set = AichRecoveryHashSet::from_cached_part(
+                file_size,
+                aich_root,
+                &part_roots,
+                part,
+                &leaves,
+            )?;
+            set.create_part_recovery_data(u64::from(part)).map(Some)
+        })
+        .await?
     }
 
     /// Returns a persisted download job manifest. Complete local content is

@@ -11,6 +11,7 @@ use super::{
 };
 
 pub(super) struct Ed2kPayloadHashsets {
+    pub recovery_parts: Vec<Vec<u8>>,
     pub file_hash: Ed2kHash,
     pub md4_hashset: Vec<[u8; 16]>,
     pub aich_hashset: Ed2kAichHashset,
@@ -120,6 +121,7 @@ pub(super) fn build_md4_and_aich_hashsets_from_reader_with_progress(
         usize::try_from(chunk_count_for_size(file_size, ED2K_PART_SIZE) + 1).unwrap_or(0),
     );
     let mut aich_part_hashes = Vec::with_capacity(aich_part_specs.len());
+    let mut recovery_parts = Vec::with_capacity(aich_part_specs.len());
     let mut buffer = vec![0u8; usize::try_from(ED2K_EMBLOCK_SIZE).unwrap_or(0)];
 
     for spec in &aich_part_specs {
@@ -150,6 +152,7 @@ pub(super) fn build_md4_and_aich_hashsets_from_reader_with_progress(
             &block_hashes,
             0,
         )?);
+        recovery_parts.push(block_hashes.into_iter().flatten().collect());
     }
 
     let (file_hash, md4_hashset) = if file_size < ED2K_PART_SIZE {
@@ -179,18 +182,19 @@ pub(super) fn build_md4_and_aich_hashsets_from_reader_with_progress(
         }
     };
     Ok(Ed2kPayloadHashsets {
+        recovery_parts,
         file_hash,
         md4_hashset,
         aich_hashset,
     })
 }
 
-struct AichPartSpec {
-    size: u64,
-    is_left_branch: bool,
+pub(super) struct AichPartSpec {
+    pub size: u64,
+    pub is_left_branch: bool,
 }
 
-fn aich_part_specs_for_size(file_size: u64) -> Result<Vec<AichPartSpec>> {
+pub(super) fn aich_part_specs_for_size(file_size: u64) -> Result<Vec<AichPartSpec>> {
     let mut specs = Vec::with_capacity(usize::from(expected_aich_hash_count(file_size)).max(1));
     collect_aich_part_specs(file_size, true, &mut specs)?;
     Ok(specs)
@@ -302,7 +306,7 @@ pub(super) fn validate_aich_hashset(file_size: u64, aich_hashset: &Ed2kAichHashs
     Ok(())
 }
 
-fn reconstruct_aich_root_from_part_hashes(
+pub(super) fn reconstruct_aich_root_from_part_hashes(
     file_size: u64,
     part_hashes: &[[u8; 20]],
 ) -> Result<[u8; 20]> {
@@ -451,7 +455,7 @@ fn read_aich_block_hashes_from_reader(
     Ok(block_hashes)
 }
 
-fn build_aich_block_tree_root(
+pub(super) fn build_aich_block_tree_root(
     size: u64,
     is_left_branch: bool,
     block_hashes: &[[u8; 20]],
