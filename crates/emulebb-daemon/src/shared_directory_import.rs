@@ -53,30 +53,35 @@ pub fn read_shared_directories(file: &Path) -> Result<Vec<MetadataSharedDirector
             accessible: path.is_dir(),
             shareable: path.is_dir(),
             monitor_owned: false,
-            path: path.to_string_lossy().into_owned(),
+            path: emulebb_ed2k::long_path::normal_path_display(&path),
         })
         .collect())
 }
 
 /// Merge roots into live metadata before the caller invokes normal offline hashing.
 pub fn import_shared_directories(store: &MetadataStore, file: &Path) -> Result<usize> {
-    let mut roots = read_shared_directories(file)?;
-    let existing: Vec<PathBuf> = store
-        .shared_directory_roots()?
-        .into_iter()
-        .map(|r| {
-            let path = PathBuf::from(r.path);
-            path.canonicalize().unwrap_or(path)
-        })
-        .collect();
-    roots.retain(|r| {
-        !existing
+    let roots = read_shared_directories(file)?;
+    let canonical = |root: &MetadataSharedDirectoryRoot| {
+        let path = PathBuf::from(&root.path);
+        path.canonicalize().unwrap_or(path)
+    };
+    // This getter returns explicit roots only. Replacing that origin preserves
+    // mandatory Incoming/category roots and all accepted content knowledge.
+    let mut combined = store.shared_directory_roots()?;
+    for root in roots {
+        let key = canonical(&root);
+        if combined
             .iter()
-            .any(|parent| Path::new(&r.path).starts_with(parent))
-    });
-    let count = roots.len();
-    store.merge_shared_directory_roots(&roots)?;
-    Ok(count)
+            .any(|old| old.shareable && old.accessible && key.starts_with(canonical(old)))
+        {
+            continue;
+        }
+        combined.retain(|old| !canonical(old).starts_with(&key));
+        combined.push(root);
+    }
+    let mut writer = store.clone();
+    writer.replace_shared_directory_roots(&combined)?;
+    Ok(combined.len())
 }
 
 #[cfg(test)]
@@ -106,6 +111,11 @@ mod tests {
         import_shared_directories(&db, &input).unwrap();
         import_shared_directories(&db, &input).unwrap();
         assert_eq!(db.shared_directory_roots().unwrap().len(), 2);
+        for root in db.shared_directory_roots().unwrap() {
+            let runtime_path = emulebb_ed2k::long_path::normal_path_display(&root.path);
+            db.replace_root_memberships(Path::new(&runtime_path), &[])
+                .unwrap();
+        }
     }
     #[test]
     fn invalid_text_or_relative_roots_fail_before_writing_live_state() {

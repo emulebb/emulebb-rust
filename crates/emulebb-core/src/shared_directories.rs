@@ -1242,6 +1242,7 @@ async fn plan_incremental_reload_with_pruning(
     prune_missing_sources: bool,
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.verified_local_reload_index().await?;
+    let metadata = core.metadata_store.clone();
     let failure_entries = load_shared_source_failures(core).await?;
     tokio::task::spawn_blocking(move || {
         let failures = failure_entries
@@ -1328,6 +1329,25 @@ async fn plan_incremental_reload_with_pruning(
                     }
                 }
                 None => {
+                    // WHY: an added root may expose an existing file through a
+                    // directory alias. Reuse only the accepted live identity and
+                    // its full safe fingerprint, never an imported name hint.
+                    if let Some(current) = fingerprint.as_ref() {
+                        if let Some(existing) = metadata.reusable_local_file_by_identity(current)? {
+                            metadata.upsert_local_file_instance(
+                                &key,
+                                &existing.file_hash,
+                                current,
+                            )?;
+                            stats.reused_count += 1;
+                            reused_shares.push(ReusedReloadShare {
+                                file_hash: existing.file_hash,
+                                source_path: path,
+                                source_fingerprint: fingerprint,
+                            });
+                            continue;
+                        }
+                    }
                     stats.planned_hash_count += 1;
                     stats.new_count += 1;
                     to_hash.push(reload_hash_target(
