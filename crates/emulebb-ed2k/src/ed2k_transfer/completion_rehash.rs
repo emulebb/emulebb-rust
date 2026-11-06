@@ -20,11 +20,12 @@ use md4::{Digest, Md4};
 
 use super::{
     ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState,
-    hashset::refresh_completed_manifest_aich_hashset, manifest::rebuild_verified_ranges,
+    manifest::rebuild_verified_ranges,
 };
 
 #[derive(Debug)]
 struct FinalRehashComputation {
+    recovery_parts: Vec<Vec<u8>>,
     actual_len: u64,
     file_hash: Option<[u8; 16]>,
     part_hashes: Vec<Option<[u8; 16]>>,
@@ -222,10 +223,32 @@ impl Ed2kTransferRuntime {
             manifest.completed = true;
             manifest.final_rehash_pending = false;
             manifest.payload_fingerprint = computation.payload_fingerprint;
-            refresh_completed_manifest_aich_hashset(
-                &self.transfer_dir(manifest.file_hash.as_str()),
-                &mut manifest,
-            )?;
+            let (master, roots) =
+                super::aich_cache::recovery_roots(manifest.file_size, &computation.recovery_parts)?;
+            // Preserve an acquired trusted identity. A mismatch makes recovery
+            // unavailable; MD4-verified completion remains independent.
+            if manifest.aich_root.is_none() || !manifest.aich_hashset_acquired {
+                manifest.aich_root = Some(hex::encode(master));
+                manifest.aich_hashset = if roots.len() == 1 {
+                    Vec::new()
+                } else {
+                    roots.iter().map(hex::encode).collect()
+                };
+                manifest.aich_hashset_acquired = true;
+            }
+            if manifest.aich_root.as_deref() == Some(hex::encode(master).as_str()) {
+                self.metadata.store_aich_recovery_set(
+                    &hex::encode(master),
+                    manifest.file_size,
+                    &computation.recovery_parts,
+                    &roots,
+                )?;
+            } else {
+                tracing::warn!(
+                    file_hash,
+                    "Completed payload AICH differs from trusted identity; recovery unavailable"
+                );
+            }
             self.store_manifest_unlocked(&manifest).await?;
             self.upsert_verified_catalog_entry(&manifest).await;
             tracing::info!(
@@ -344,6 +367,7 @@ fn failed_content_computation(expected_size: u64, actual_len: u64) -> FinalRehas
     let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
     FinalRehashComputation {
         actual_len,
+        recovery_parts: Vec::new(),
         file_hash: None,
         part_hashes: vec![None; usize::try_from(part_count).unwrap_or(0)],
         payload_fingerprint: None,
@@ -394,12 +418,14 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
     let mut part_hashes = Vec::with_capacity(usize::try_from(part_count).unwrap_or(0));
     file.seek(SeekFrom::Start(0))
         .with_context(|| format!("failed to seek ED2K payload {}", path.display()))?;
+    let mut recovery_parts = Vec::new();
     let mut remaining = expected_size;
     for _ in 0..part_count {
         let part_len = remaining.min(ED2K_PART_SIZE);
         let mut hasher = Md4::new();
         let mut part_remaining = part_len;
-        let mut buffer = [0u8; 65_536];
+        let mut buffer = [0u8; 184_320];
+        let mut leaves = Vec::new();
         let mut readable = true;
         while part_remaining > 0 {
             let chunk_len = usize::try_from(part_remaining.min(buffer.len() as u64)).unwrap_or(0);
@@ -416,8 +442,10 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
                 }
             }
             hasher.update(&buffer[..chunk_len]);
+            leaves.extend_from_slice(&sha1::Sha1::digest(&buffer[..chunk_len]));
             part_remaining -= chunk_len as u64;
         }
+        recovery_parts.push(leaves);
         part_hashes.push(readable.then(|| hasher.finalize().into()));
         remaining = remaining.saturating_sub(part_len);
         if !readable {
@@ -482,6 +510,7 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
         .then_some(post_hash_fingerprint);
     Ok(FinalRehashComputation {
         actual_len: post_hash_metadata.len(),
+        recovery_parts,
         file_hash: computed_file_hash,
         part_hashes,
         payload_fingerprint,

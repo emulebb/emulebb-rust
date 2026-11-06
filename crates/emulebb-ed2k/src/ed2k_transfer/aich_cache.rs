@@ -15,6 +15,15 @@ pub fn validate_aich_recovery_set(
     master: [u8; 20],
     parts: &[Vec<u8>],
 ) -> Result<Vec<[u8; 20]>> {
+    let (actual, roots) = recovery_roots(size, parts)?;
+    ensure!(
+        actual == master,
+        "recovery leaves do not reconstruct AICH master"
+    );
+    Ok(roots)
+}
+
+pub(super) fn recovery_roots(size: u64, parts: &[Vec<u8>]) -> Result<([u8; 20], Vec<[u8; 20]>)> {
     ensure!(
         size > 0 && size <= 0x4000000000,
         "invalid recovery file size"
@@ -43,11 +52,7 @@ pub fn validate_aich_recovery_set(
     } else {
         reconstruct_aich_root_from_part_hashes(size, &roots)?
     };
-    ensure!(
-        actual == master,
-        "recovery leaves do not reconstruct AICH master"
-    );
-    Ok(roots)
+    Ok((actual, roots))
 }
 
 #[cfg(test)]
@@ -57,6 +62,43 @@ mod tests {
         hashset::build_md4_and_aich_hashsets_from_reader_with_progress,
     };
     use super::*;
+
+    #[test]
+    fn large_file_recovery_uses_32bit_framing_without_a_payload() {
+        let size = u64::from(u32::MAX) + 2;
+        let parts: Vec<Vec<u8>> = (0..size.div_ceil(ED2K_PART_SIZE))
+            .map(|index| {
+                vec![
+                    0x59;
+                    ((size - index * ED2K_PART_SIZE)
+                        .min(ED2K_PART_SIZE)
+                        .div_ceil(ED2K_EMBLOCK_SIZE)
+                        * 20) as usize
+                ]
+            })
+            .collect();
+        let (master, roots) = recovery_roots(size, &parts).unwrap();
+        for index in [0, parts.len() - 1] {
+            let mut cached = AichRecoveryHashSet::from_cached_part(
+                size,
+                master,
+                &roots,
+                index as u16,
+                &parts[index],
+            )
+            .unwrap();
+            let body = cached.create_part_recovery_data(index as u64).unwrap();
+            assert_eq!(&body[..2], &[0, 0]);
+            let leaves = super::super::aich_recovery::trusted_part_block_hashes_from_recovery(
+                size,
+                master,
+                index as u64,
+                &body,
+            )
+            .unwrap();
+            assert_eq!(leaves.len() * 20, parts[index].len());
+        }
+    }
 
     #[test]
     fn cached_proofs_match_full_payload_tree_at_boundaries() {

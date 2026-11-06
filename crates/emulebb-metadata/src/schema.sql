@@ -208,10 +208,13 @@ CREATE TABLE aich_recovery_sets (
     PRIMARY KEY(root, size_bytes)
 );
 
+CREATE INDEX verified_local_aich_root_idx ON verified_local_content(aich_root);
+
 CREATE TABLE aich_recovery_parts (
     root BLOB NOT NULL,
     size_bytes INTEGER NOT NULL,
     part_index INTEGER NOT NULL CHECK(part_index >= 0),
+    part_root BLOB NOT NULL CHECK(length(part_root) = 20),
     leaves BLOB NOT NULL CHECK(length(leaves) > 0 AND length(leaves) <= 1060 AND length(leaves) % 20 = 0),
     PRIMARY KEY(root, size_bytes, part_index),
     FOREIGN KEY(root, size_bytes) REFERENCES aich_recovery_sets(root, size_bytes) ON DELETE CASCADE
@@ -243,6 +246,7 @@ CREATE TABLE imported_known_files (
 
 CREATE INDEX imported_known_files_identity_idx
     ON imported_known_files(display_name, size_bytes, modified_s);
+CREATE INDEX imported_known_files_aich_root_idx ON imported_known_files(aich_root,size_bytes);
 
 CREATE TABLE imported_known_file_md4_hashes (
     id INTEGER PRIMARY KEY,
