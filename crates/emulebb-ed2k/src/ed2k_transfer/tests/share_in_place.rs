@@ -168,7 +168,18 @@ async fn non_utf8_local_share_reopens_and_serves_exact_bytes() {
     fs::create_dir_all(&source_dir).unwrap();
     let source_path = source_dir.join(OsString::from_vec(b"native-\xff.bin".to_vec()));
     let payload = b"non-UTF-8 share upload payload";
-    fs::write(&source_path, payload).unwrap();
+    match fs::write(&source_path, payload) {
+        Ok(()) => {}
+        // WHY: filesystems such as APFS reject invalid UTF-8 names with
+        // EILSEQ. Exercise native-byte names wherever they are representable,
+        // but keep all unrelated fixture I/O failures fatal.
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            eprintln!("skipping native-byte filename test: filesystem rejects the name: {error}");
+            fs::remove_dir_all(&root).unwrap();
+            return;
+        }
+        Err(error) => panic!("failed to create native-byte filename fixture: {error}"),
+    }
     let display_name = NativePath::from(source_path.as_path())
         .display_file_name()
         .unwrap();
