@@ -34,8 +34,10 @@ impl Ed2kTransferRuntime {
             {
                 return Ok(None);
             }
-            if let Some(name) = source.path.file_name() {
-                entry.display_name = name.to_string_lossy().into_owned();
+            if let Some(name) =
+                emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
+            {
+                entry.display_name = name;
             }
             super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
         })
@@ -78,8 +80,10 @@ impl Ed2kTransferRuntime {
             {
                 return Ok(None);
             }
-            if let Some(name) = source.path.file_name() {
-                entry.display_name = name.to_string_lossy().into_owned();
+            if let Some(name) =
+                emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
+            {
+                entry.display_name = name;
             }
             super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
         })
@@ -393,8 +397,10 @@ impl Ed2kTransferRuntime {
                         .upsert_partial_catalog_entry(manifest, file_hash, refresh_missing_media)
                         .await;
                 };
-                if let Some(name) = source.path.file_name() {
-                    local.display_name = name.to_string_lossy().into_owned();
+                if let Some(name) =
+                    emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
+                {
+                    local.display_name = name;
                 }
                 match super::transfer_sql::shared_entry_from_catalog_entry(local) {
                     Ok(entry) => {

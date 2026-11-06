@@ -1416,7 +1416,7 @@ fn target_to_queued_file(target: &ReloadHashTarget) -> SharedDirectoryHashQueued
 }
 
 fn display_path(path: &Path) -> String {
-    normal_path_display(path.display().to_string())
+    normal_path_display(path)
 }
 
 fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
