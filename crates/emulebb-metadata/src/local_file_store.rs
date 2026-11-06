@@ -475,6 +475,16 @@ impl MetadataStore {
         let size = i64::try_from(content.file_size)?;
         let part_size = i64::try_from(content.part_size)?;
         let part_count = i64::try_from(content.md4_hashset.len())?;
+        let md4_hashset = content
+            .md4_hashset
+            .iter()
+            .map(|hash| decode_fixed_hex(hash, 16, "MD4 part hash"))
+            .collect::<Result<Vec<_>>>()?;
+        let aich_hashset = content
+            .aich_hashset
+            .iter()
+            .map(|hash| decode_fixed_hex(hash, 20, "AICH part hash"))
+            .collect::<Result<Vec<_>>>()?;
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
@@ -506,7 +516,7 @@ impl MetadataStore {
             stored_size == size,
             "ED2K identity has conflicting file size"
         );
-        tx.execute(
+        let inserted = tx.execute(
             "INSERT INTO verified_local_content(
                 known_file_id, display_name, part_size, part_count, aich_root,
                 upload_priority, auto_upload_priority, comment, rating
@@ -524,6 +534,39 @@ impl MetadataStore {
                 content.rating,
             ],
         )?;
+        if inserted == 0 {
+            let (stored_part_size, stored_part_count, stored_aich_root): (i64, i64, Vec<u8>) = tx
+                .query_row(
+                "SELECT part_size, part_count, aich_root FROM verified_local_content
+                     WHERE known_file_id = ?1",
+                params![known_file_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(
+                stored_part_size == part_size
+                    && stored_part_count == part_count
+                    && stored_aich_root == aich_root,
+                "ED2K identity has conflicting verified local content geometry or AICH root"
+            );
+            let stored_md4_hashset = tx
+                .prepare_cached(
+                    "SELECT md4_hash FROM verified_local_md4_hashes
+                     WHERE known_file_id = ?1 ORDER BY part_index",
+                )?
+                .query_map(params![known_file_id], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let stored_aich_hashset = tx
+                .prepare_cached(
+                    "SELECT aich_hash FROM verified_local_aich_hashes
+                     WHERE known_file_id = ?1 ORDER BY part_index",
+                )?
+                .query_map(params![known_file_id], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(
+                stored_md4_hashset == md4_hashset && stored_aich_hashset == aich_hashset,
+                "ED2K identity has conflicting verified local hashsets"
+            );
+        }
         tx.execute(
             "INSERT INTO known_file_origins(
                 known_file_id, origin, size_bytes, first_seen_ms, last_seen_ms
@@ -532,25 +575,19 @@ impl MetadataStore {
                 last_seen_ms = excluded.last_seen_ms",
             params![known_file_id, size, now],
         )?;
-        tx.execute(
-            "DELETE FROM verified_local_md4_hashes WHERE known_file_id = ?1",
-            params![known_file_id],
-        )?;
-        tx.execute(
-            "DELETE FROM verified_local_aich_hashes WHERE known_file_id = ?1",
-            params![known_file_id],
-        )?;
-        for (part_index, part_hash) in content.md4_hashset.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO verified_local_md4_hashes(known_file_id, part_index, md4_hash) VALUES (?1, ?2, ?3)",
-                params![known_file_id, i64::try_from(part_index)?, decode_fixed_hex(part_hash, 16, "MD4 part hash")?],
-            )?;
-        }
-        for (part_index, part_hash) in content.aich_hashset.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO verified_local_aich_hashes(known_file_id, part_index, aich_hash) VALUES (?1, ?2, ?3)",
-                params![known_file_id, i64::try_from(part_index)?, decode_fixed_hex(part_hash, 20, "AICH part hash")?],
-            )?;
+        if inserted != 0 {
+            for (part_index, part_hash) in md4_hashset.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO verified_local_md4_hashes(known_file_id, part_index, md4_hash) VALUES (?1, ?2, ?3)",
+                    params![known_file_id, i64::try_from(part_index)?, part_hash],
+                )?;
+            }
+            for (part_index, part_hash) in aich_hashset.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO verified_local_aich_hashes(known_file_id, part_index, aich_hash) VALUES (?1, ?2, ?3)",
+                    params![known_file_id, i64::try_from(part_index)?, part_hash],
+                )?;
+            }
         }
         let path_id = upsert_local_path(&tx, &content.path)?;
         tx.execute(
@@ -1119,6 +1156,51 @@ mod tests {
         assert_eq!(active.display_name, "First.bin");
         assert_eq!(active.md4_hashset, content.md4_hashset);
         assert_eq!(active.aich_hashset, content.aich_hashset);
+    }
+
+    #[test]
+    fn same_ed2k_hash_rejects_conflicting_verified_content_without_admitting_path() {
+        let store = MetadataStore::in_memory().unwrap();
+        let original = MetadataVerifiedLocalContent {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "Original.bin".to_string(),
+            file_size: 32,
+            part_size: 32,
+            md4_hashset: vec!["11".repeat(16)],
+            aich_root: "22".repeat(20),
+            aich_hashset: vec!["33".repeat(20)],
+            path: std::env::temp_dir().join("emulebb-original-content.bin"),
+            fingerprint: fingerprint(61),
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+        };
+        store.upsert_verified_local_content(&original).unwrap();
+        let mut collision = original.clone();
+        collision.path = std::env::temp_dir().join("emulebb-colliding-content.bin");
+        collision.fingerprint = fingerprint(62);
+        collision.aich_root = "44".repeat(20);
+        assert!(store.upsert_verified_local_content(&collision).is_err());
+        collision.aich_root = original.aich_root.clone();
+        collision.aich_hashset = vec!["55".repeat(20)];
+        assert!(store.upsert_verified_local_content(&collision).is_err());
+
+        let conn = store.connection().unwrap();
+        let (root, part_hash, paths): (String, String, i64) = conn
+            .query_row(
+                "SELECT lower(hex(verified_local_content.aich_root)),
+                        lower(hex(verified_local_aich_hashes.aich_hash)),
+                        (SELECT count(*) FROM local_file_instances)
+                 FROM verified_local_content
+                 JOIN verified_local_aich_hashes USING (known_file_id)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(root, original.aich_root);
+        assert_eq!(part_hash, original.aich_hashset[0]);
+        assert_eq!(paths, 1);
     }
 
     #[test]
