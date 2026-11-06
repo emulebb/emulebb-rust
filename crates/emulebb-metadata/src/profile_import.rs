@@ -4,7 +4,8 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
-    MetadataFileImportRecord, MetadataStore, MetadataVerifiedLocalContent, NativeFileFingerprint,
+    MetadataContentConflict, MetadataFileImportRecord, MetadataStore, MetadataVerifiedLocalContent,
+    NativeFileFingerprint,
     store::{decode_fixed_hex, unix_ms, upsert_local_path},
 };
 
@@ -23,7 +24,7 @@ impl MetadataStore {
         };
         anyhow::ensure!(
             size == entry.file_size as i64,
-            "imported content size conflicts with live content"
+            MetadataContentConflict("imported content size conflicts with live content")
         );
         let root = entry
             .aich_root
@@ -35,7 +36,7 @@ impl MetadataStore {
                 .as_ref()
                 .zip(root.as_ref())
                 .is_none_or(|(a, b)| a == b),
-            "imported AICH root conflicts with live identity"
+            MetadataContentConflict("imported AICH root conflicts with live identity")
         );
         let path = crate::NativePath::from_storage(&platform, &path)?.into_path_buf();
         let fingerprint = NativeFileFingerprint::from_storage_bytes(&bytes)
@@ -85,7 +86,7 @@ impl MetadataStore {
             anyhow::ensure!(
                 entry.file_size == fingerprint.size_bytes
                     && entry.modified_s == fingerprint.modified.seconds,
-                "imported file metadata differs from the current file"
+                MetadataContentConflict("imported file metadata differs from the current file")
             );
             let hash = decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?;
             let old_root: Option<Option<Vec<u8>>> = tx
@@ -106,13 +107,13 @@ impl MetadataStore {
                     .as_ref()
                     .zip(incoming_root.as_ref())
                     .is_none_or(|(old, new)| old == new),
-                "imported AICH root conflicts with live identity"
+                MetadataContentConflict("imported AICH root conflicts with live identity")
             );
             let path_id = upsert_local_path(&tx, path)?;
             let bound:Option<Vec<u8>>=tx.query_row("SELECT f.ed2k_hash FROM local_file_instances i JOIN known_files f ON f.id=i.known_file_id WHERE i.path_id=?1",[path_id],|r|r.get(0)).optional()?;
             anyhow::ensure!(
                 bound.as_ref().is_none_or(|old| old == &hash),
-                "import conflicts with existing live path binding"
+                MetadataContentConflict("import conflicts with existing live path binding")
             );
             // WHY: stock has already hashed these bytes. Rebind its accepted
             // content identity to this platform's fingerprint instead of scheduling
