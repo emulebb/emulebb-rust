@@ -70,7 +70,8 @@ pub(super) fn answer(
     let response = set.create_part_recovery_data(u64::from(part))?;
     // Include generous per-entry bookkeeping in the byte budget, rather than
     // bounding only the count of entries in a potentially huge library.
-    let cost = response.capacity() + 256;
+    let cached = response.clone();
+    let cost = cached.capacity() + 256;
     if cost <= BYTE_LIMIT {
         let mut cache = cache()
             .lock()
@@ -85,7 +86,7 @@ pub(super) fn answer(
         }
         cache.bytes += cost;
         cache.order.push_back(key);
-        cache.ready.insert(key, response.clone());
+        cache.ready.insert(key, cached);
     }
     Ok(Some(response))
 }
@@ -108,5 +109,15 @@ mod tests {
         .unwrap();
         assert_eq!(leaves, vec![[0x36; 20]; 2]);
         assert_eq!(answer(&db, master, 184_321, 0).unwrap().unwrap(), response);
+        let state = cache().lock().unwrap();
+        assert_eq!(
+            state.bytes,
+            state
+                .ready
+                .values()
+                .map(|answer| answer.capacity() + 256)
+                .sum::<usize>()
+        );
+        assert!(state.bytes <= BYTE_LIMIT);
     }
 }
