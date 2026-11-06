@@ -170,6 +170,36 @@ async fn category_destination_is_shared_and_withdrawn_with_category() {
 }
 
 #[tokio::test]
+async fn reload_returns_cached_files_after_admitting_new_memberships() {
+    let root = scratch_dir("cached-admission-result");
+    let source = root.join("Cached.bin");
+    fs::write(&source, b"cached payload without a root membership").unwrap();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    configure_test_root(&core, &root).await;
+    let cached = core
+        .ed2k_transfers
+        .ingest_local_file(&source, "Cached.bin")
+        .await
+        .unwrap();
+    assert!(core.share(&cached.file_hash).await.is_none());
+
+    let shares = core.reload_shared_directories().await.unwrap();
+
+    assert_eq!(shares.len(), 1);
+    assert_eq!(shares[0].hash, cached.file_hash);
+    assert_eq!(
+        core.shared_directories().await.reload_progress.reused_count,
+        1
+    );
+    assert_eq!(
+        core.shared_directories().await.reload_progress.hashed_count,
+        0
+    );
+    fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
 async fn synchronous_and_detached_reloads_share_one_execution_gate() {
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();

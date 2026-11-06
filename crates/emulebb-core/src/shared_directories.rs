@@ -1685,13 +1685,7 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         .store(plan.to_hash.len() as i64, Ordering::Relaxed);
     let _guard = HashingCountGuard(core.shared_hashing_count.clone());
 
-    let mut shares = Vec::new();
-    // Unchanged files were not re-hashed but are still shared, so resolve their
-    // already-persisted shares so the returned set reflects the whole library.
     for reused in &plan.reused_shares {
-        if let Some(share) = core.share(&reused.file_hash).await {
-            shares.push(share);
-        }
         // Register the source path -> hash so the live directory monitor can
         // de-offer this file if its source is deleted at runtime (HASH-1).
         register_monitor_shared_hash(
@@ -1710,10 +1704,19 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         // Same HASH-1 registration for a freshly (re)hashed startup share.
         register_monitor_shared_hash(core, source_path, &share.hash, target.source_fingerprint)
             .await;
-        shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
     }
     admit_scanned_roots(core, root_files).await?;
+    // WHY: a verified path can be reusable before it has active membership.
+    // Resolve the result after admission so those files cannot disappear from
+    // a successful synchronous reload, and propagate catalog read failures.
+    let shares = core
+        .ed2k_transfers
+        .share_entries()
+        .await?
+        .into_iter()
+        .map(|entry| core.local_share_from_entry(entry))
+        .collect();
     record_reload_progress(core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.disk_count = 0;
