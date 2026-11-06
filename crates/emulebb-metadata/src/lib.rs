@@ -34,8 +34,9 @@ pub use kad_publish_model::{
     MetadataKadSourcePublish,
 };
 pub use local_file_store::{
-    MetadataLocalFileInstance, MetadataLocalShareEntry, MetadataSharedFileCursor,
-    MetadataSharedFilePage, MetadataSharedFileQuery, MetadataVerifiedLocalContent,
+    MetadataContentConflict, MetadataLocalFileInstance, MetadataLocalShareEntry,
+    MetadataSharedFileCursor, MetadataSharedFilePage, MetadataSharedFileQuery,
+    MetadataVerifiedLocalContent,
 };
 pub use model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot};
 pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp};

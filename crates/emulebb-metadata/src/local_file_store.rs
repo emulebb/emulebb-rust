@@ -15,6 +15,18 @@ use crate::{
     store::{decode_fixed_hex, unix_ms, upsert_local_path},
 };
 
+/// A rejected content merge. Database and I/O errors retain their original types.
+#[derive(Debug)]
+pub struct MetadataContentConflict(pub(crate) &'static str);
+
+impl std::fmt::Display for MetadataContentConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for MetadataContentConflict {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataLocalShareEntry {
     pub file_hash: String,
@@ -527,7 +539,7 @@ impl MetadataStore {
         )?;
         ensure!(
             stored_size == size,
-            "ED2K identity has conflicting file size"
+            MetadataContentConflict("ED2K identity has conflicting file size")
         );
         let inserted = tx.execute(
             "INSERT INTO verified_local_content(
@@ -566,7 +578,9 @@ impl MetadataStore {
                         .as_ref()
                         .zip(aich_root.as_ref())
                         .is_none_or(|(stored, incoming)| stored == incoming),
-                "ED2K identity has conflicting verified local content geometry or AICH root"
+                MetadataContentConflict(
+                    "ED2K identity has conflicting verified local content geometry or AICH root"
+                )
             );
             let stored_md4_hashset = tx
                 .prepare_cached(
@@ -587,7 +601,7 @@ impl MetadataStore {
                     && (stored_aich_hashset.is_empty()
                         || aich_hashset.is_empty()
                         || stored_aich_hashset == aich_hashset),
-                "ED2K identity has conflicting verified local hashsets"
+                MetadataContentConflict("ED2K identity has conflicting verified local hashsets")
             );
             // WHY: optional AICH data can be absent from a stock record. Missing
             // data is not a conflict and must not erase a richer cached hashset.

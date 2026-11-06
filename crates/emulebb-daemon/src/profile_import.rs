@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use emulebb_metadata::{
-    MetadataAichRecoverySet, MetadataFileImportRecord, MetadataSharedDirectoryRoot, MetadataStore,
-    NativePath,
+    MetadataAichRecoverySet, MetadataContentConflict, MetadataFileImportRecord,
+    MetadataSharedDirectoryRoot, MetadataStore, NativePath,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -308,11 +308,12 @@ fn merge_exchange_batch(
                     total.skipped_native_known_files += 1;
                     continue;
                 }
-                Err(_) => {
+                Err(error) if error.is::<MetadataContentConflict>() => {
                     *conflicts += 1;
                     continue;
                 }
                 Ok(false) => {}
+                Err(error) => return Err(error.context("failed to enrich live imported content")),
             }
         }
         let mut found = false;
@@ -339,7 +340,7 @@ fn merge_exchange_batch(
             bytes += entry.md4_hashset.len() * 16 + entry.aich_hashset.len() * 20;
             files.push((entry.clone(), path, fingerprint));
             if files.len() >= 128 || bytes >= 4 * 1024 * 1024 {
-                accept_live_batch(metadata, &mut files, total, conflicts);
+                accept_live_batch(metadata, &mut files, total, conflicts)?;
                 bytes = 0;
             }
         }
@@ -347,7 +348,7 @@ fn merge_exchange_batch(
             *unmatched += 1;
         }
     }
-    accept_live_batch(metadata, &mut files, total, conflicts);
+    accept_live_batch(metadata, &mut files, total, conflicts)?;
     if !validated.shared_roots.is_empty() {
         let roots = emulebb_core::consolidate_shared_directory_roots(
             metadata
@@ -372,21 +373,24 @@ fn accept_live_batch(
     )>,
     total: &mut ImportCounts,
     conflicts: &mut usize,
-) {
+) -> Result<()> {
     // Fast path commits one bounded batch; conflicts retry individually so one
     // rejected record cannot discard valid neighbors or overwrite live state.
-    if metadata.accept_imported_local_files(files).is_ok() {
-        total.imported_known_files += files.len();
-    } else {
-        for file in files.drain(..) {
-            if metadata.accept_imported_local_files(&[file]).is_ok() {
-                total.imported_known_files += 1;
-            } else {
-                *conflicts += 1;
+    match metadata.accept_imported_local_files(files) {
+        Ok(()) => total.imported_known_files += files.len(),
+        Err(error) if error.is::<MetadataContentConflict>() => {
+            for file in files.drain(..) {
+                match metadata.accept_imported_local_files(&[file]) {
+                    Ok(()) => total.imported_known_files += 1,
+                    Err(error) if error.is::<MetadataContentConflict>() => *conflicts += 1,
+                    Err(error) => return Err(error.context("failed to persist imported content")),
+                }
             }
         }
+        Err(error) => return Err(error.context("failed to persist imported content batch")),
     }
     files.clear();
+    Ok(())
 }
 
 fn validate_manifest(manifest: ProfileImportManifest) -> Result<ValidatedImport> {
@@ -754,6 +758,49 @@ mod tests {
             all_time_upload_accepts: 0,
             last_upload_request_ms: 0,
         }
+    }
+
+    #[test]
+    fn import_storage_failure_is_not_reported_as_a_content_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("metadata.sqlite");
+        let metadata = MetadataStore::open(&database).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_write BEFORE INSERT ON verified_local_content BEGIN SELECT RAISE(FAIL, 'injected storage failure'); END;").unwrap();
+        let file = validate_manifest(manifest_with_roots(&[]))
+            .unwrap()
+            .known_files
+            .pop()
+            .unwrap();
+        let fingerprint = emulebb_metadata::NativeFileFingerprint {
+            identity: emulebb_metadata::NativeFileIdentity::Unix {
+                device_id: 1,
+                inode_number: 1,
+            },
+            size_bytes: file.file_size,
+            modified: emulebb_metadata::NativeFileTimestamp::new(file.modified_s, 0).unwrap(),
+            changed: None,
+        };
+        let mut files = vec![(file, temp.path().join("sample.bin"), fingerprint)];
+        let mut counts = ImportCounts {
+            imported_known_files: 0,
+            skipped_native_known_files: 0,
+            merged_shared_roots: 0,
+        };
+        let mut conflicts = 0;
+        let error =
+            accept_live_batch(&metadata, &mut files, &mut counts, &mut conflicts).unwrap_err();
+        assert!(format!("{error:#}").contains("injected storage failure"));
+        assert!(!error.is::<MetadataContentConflict>());
+        assert_eq!(conflicts, 0);
+        assert_eq!(counts.imported_known_files, 0);
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM known_files", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     fn manifest_with_roots(paths: &[&str]) -> ProfileImportManifest {
