@@ -106,12 +106,15 @@ async fn main() -> Result<()> {
                 tokio::select! {
                     result = &mut reload => { result?; break; }
                     _ = interval.tick() => {
-                        let state = core.shared_directories().await;
-                        eprintln!("phase={}; hashed={}; remaining={}; reused={}",state.reload_progress.phase,state.reload_progress.hashed_count,state.hashing_count,state.reload_progress.reused_count);
+                        // WHY: awaiting a root snapshot here can wait on the
+                        // reload future that this select must keep driving.
+                        let progress = core.shared_directory_reload_progress();
+                        let remaining = progress.planned_hash_count.saturating_sub(progress.hashed_count + progress.failed_hash_count);
+                        eprintln!("phase={}; hashed={}; remaining={}; reused={}",progress.phase,progress.hashed_count,remaining,progress.reused_count);
                     }
                 }
             }
-            let work = core.shared_directories().await.reload_progress;
+            let work = core.shared_directory_reload_progress();
             let reconciliation = core.reconcile_shared_files().await?;
             println!(
                 "{}",
