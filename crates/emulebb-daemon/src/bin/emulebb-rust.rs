@@ -116,10 +116,15 @@ async fn main() -> Result<()> {
             }
             let work = core.shared_directory_reload_progress();
             let reconciliation = core.reconcile_shared_files().await?;
+            let database = profile.metadata_path();
+            let missing_recovery = tokio::task::spawn_blocking(move || {
+                emulebb_metadata::MetadataStore::open(database)?.missing_live_aich_recovery_count()
+            })
+            .await??;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
-                    &serde_json::json!({"hashing":work,"reconciliation":reconciliation})
+                    &serde_json::json!({"hashing":work,"reconciliation":reconciliation,"missingAichRecoverySets":missing_recovery})
                 )?
             );
             return Ok(());
