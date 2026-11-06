@@ -55,10 +55,8 @@ fn merge_publish_entries(
         }
         let entry = MetadataTransferPublishEntry {
             file_hash: share.file_hash,
-            display_name: source
-                .path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
+            display_name: emulebb_metadata::NativePath::from(source.path.as_path())
+                .display_file_name()
                 .unwrap_or(share.display_name),
             file_size: share.file_size,
             aich_root: share.aich_root,

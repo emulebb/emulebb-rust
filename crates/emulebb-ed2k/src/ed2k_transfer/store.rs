@@ -288,10 +288,8 @@ impl Ed2kTransferRuntime {
             None
         };
         let local_view = local.map(|content| {
-            let display_name = content
-                .path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
+            let display_name = emulebb_metadata::NativePath::from(content.path.as_path())
+                .display_file_name()
                 .unwrap_or(content.display_name);
             super::Ed2kFileServingView {
                 file_hash: content.file_hash,

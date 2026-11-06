@@ -69,9 +69,8 @@ impl super::MetadataStore {
             let path = path_from_row(row, 2, 3)?;
             let name: String = row.get(0)?;
             Ok(MetadataCurrentSharedFile {
-                display_name: path
-                    .file_name()
-                    .map(|part| part.to_string_lossy().into_owned())
+                display_name: crate::NativePath::from(path.as_path())
+                    .display_file_name()
                     .unwrap_or(name),
                 file_size: row.get::<_, i64>(1)? as u64,
                 source_path: path,

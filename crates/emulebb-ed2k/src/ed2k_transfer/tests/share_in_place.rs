@@ -180,6 +180,14 @@ async fn non_utf8_local_share_reopens_and_serves_exact_bytes() {
         .unwrap();
     admit_local_share(&runtime, &source_dir, &source_path).await;
     let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
+    assert_eq!(
+        runtime
+            .serving_view(&summary.file_hash)
+            .await
+            .unwrap()
+            .display_name,
+        display_name,
+    );
     assert!(
         runtime
             .metadata
@@ -192,6 +200,18 @@ async fn non_utf8_local_share_reopens_and_serves_exact_bytes() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.refresh_complete_shared_catalog().await.unwrap();
     let manifest = runtime.serving_view(&summary.file_hash).await.unwrap();
+    assert_eq!(manifest.display_name, display_name);
+    assert_eq!(
+        runtime
+            .shared_catalog()
+            .read()
+            .await
+            .iter()
+            .find(|entry| entry.file_hash == summary.file_hash)
+            .unwrap()
+            .display_name,
+        display_name,
+    );
     assert_eq!(manifest.local_path.as_deref(), Some(source_path.as_path()));
     assert_eq!(
         runtime

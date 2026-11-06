@@ -245,9 +245,8 @@ impl MetadataStore {
             params![after_hash, limit, exact_hash, verified_only],
             |row| {
                 let path = path_from_row(row, 12, 13)?;
-                let display_name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
+                let display_name = crate::NativePath::from(path.as_path())
+                    .display_file_name()
                     .unwrap_or_default();
                 Ok(MetadataTransferCatalogEntry {
                     file_hash: row.get(0)?,
