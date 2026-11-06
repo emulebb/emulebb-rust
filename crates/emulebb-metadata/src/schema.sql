@@ -244,6 +244,9 @@ CREATE TABLE imported_known_files (
     imported_at_ms INTEGER NOT NULL CHECK(imported_at_ms >= 0)
 );
 
+CREATE UNIQUE INDEX imported_known_files_alias_idx
+    ON imported_known_files(ed2k_hash,display_name,size_bytes,modified_s);
+
 CREATE INDEX imported_known_files_identity_idx
     ON imported_known_files(display_name, size_bytes, modified_s);
 CREATE INDEX imported_known_files_aich_root_idx ON imported_known_files(aich_root,size_bytes);

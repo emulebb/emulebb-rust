@@ -162,6 +162,51 @@ fn write_set(
 mod tests {
     use super::*;
     #[test]
+    fn complete_recovery_enriches_alias_part_lists_and_survives_hash_only_reimport() {
+        let db = MetadataStore::in_memory().unwrap();
+        let first = crate::MetadataImportedKnownFileEntry {
+            file_hash: "11".repeat(16),
+            display_name: "Sample.bin".to_string(),
+            file_size: 9_728_001,
+            modified_s: 1700000000,
+            md4_hashset: vec!["22".repeat(16), "33".repeat(16)],
+            aich_root: Some("55".repeat(20)),
+            aich_hashset: Vec::new(),
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            all_time_uploaded_bytes: 0,
+            all_time_upload_requests: 0,
+            all_time_upload_accepts: 0,
+            last_upload_request_ms: 0,
+        };
+        let mut alias = first.clone();
+        alias.display_name = "Alias.bin".to_string();
+        let import = crate::MetadataProfileImport {
+            known_files: vec![first, alias],
+            shared_roots: Vec::new(),
+        };
+        db.merge_profile_import(&import).unwrap();
+        db.store_aich_recovery_set(
+            &"55".repeat(20),
+            9_728_001,
+            &[vec![0; 1060], vec![0; 20]],
+            &[[0x66; 20], [0x77; 20]],
+        )
+        .unwrap();
+        db.merge_profile_import(&import).unwrap();
+        for entry in db.imported_known_file_entries().unwrap() {
+            assert_eq!(entry.aich_hashset, vec!["66".repeat(20), "77".repeat(20)]);
+        }
+        assert_eq!(
+            db.connection()
+                .unwrap()
+                .query_row("SELECT count(*) FROM aich_recovery_parts", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
     fn batch_rejects_one_set_without_losing_other_sets_or_partial_rows() {
         let db = MetadataStore::in_memory().unwrap();
         let sets: Vec<_> = (1..=3u8)
