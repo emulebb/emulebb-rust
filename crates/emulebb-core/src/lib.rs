@@ -274,7 +274,7 @@ pub use shared_directories::{
     SharedDirectoryHashDiskProgress, SharedDirectoryHashQueuedFile, SharedDirectoryHashRecentFile,
     SharedDirectoryReloadProgress, SharedDirectoryRoot, SharedDirectoryRootUpdate,
     SharedFileIgnorePattern, SharedFileIgnorePatternUpdate, SharedFileIgnoreRule,
-    SharedFileIgnoreRuleUpdate, SharedFileIgnores,
+    SharedFileIgnoreRuleUpdate, SharedFileIgnores, consolidate_shared_directory_roots,
 };
 use shared_directories::{
     is_shared_file_ignore_rule, load_shared_file_ignore_policy, refresh_shared_directory_row,

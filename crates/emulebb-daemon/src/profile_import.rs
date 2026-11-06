@@ -348,7 +348,17 @@ fn merge_exchange_batch(
         }
     }
     accept_live_batch(metadata, &mut files, total, conflicts);
-    total.merged_shared_roots += metadata.merge_shared_directory_roots(&validated.shared_roots)?;
+    if !validated.shared_roots.is_empty() {
+        let roots = emulebb_core::consolidate_shared_directory_roots(
+            metadata
+                .shared_directory_roots()?
+                .into_iter()
+                .chain(validated.shared_roots),
+        );
+        let mut writer = metadata.clone();
+        writer.replace_shared_directory_roots(&roots)?;
+        total.merged_shared_roots += roots.len();
+    }
     header["sharedRoots"] = serde_json::json!([]);
     Ok(())
 }

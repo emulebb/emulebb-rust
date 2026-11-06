@@ -25,7 +25,7 @@ pub fn read_shared_directories(file: &Path) -> Result<Vec<MetadataSharedDirector
             .trim_start_matches('\u{feff}')
             .to_owned()
     };
-    let mut paths: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
     for line in text
         .lines()
         .map(str::trim)
@@ -40,64 +40,30 @@ pub fn read_shared_directories(file: &Path) -> Result<Vec<MetadataSharedDirector
             "shared directory must be an absolute path without traversal"
         );
         let path = path.canonicalize().unwrap_or(path);
-        let key = root_comparison_key(&path);
-        if paths.iter().any(|(_, parent)| key.starts_with(parent)) {
-            continue;
-        }
-        paths.retain(|(_, child)| !child.starts_with(&key));
-        paths.push((path, key));
+        paths.push(path);
     }
     ensure!(!paths.is_empty(), "directory list is empty");
-    Ok(paths
-        .into_iter()
-        .map(|(path, _)| MetadataSharedDirectoryRoot {
+    Ok(emulebb_core::consolidate_shared_directory_roots(
+        paths.into_iter().map(|path| MetadataSharedDirectoryRoot {
             accessible: path.is_dir(),
             shareable: path.is_dir(),
             monitor_owned: false,
             path: emulebb_ed2k::long_path::normal_path_display(&path),
-        })
-        .collect())
-}
-
-fn root_comparison_key(path: &Path) -> PathBuf {
-    let display = emulebb_ed2k::long_path::normal_path_display(path);
-    // WHY: canonicalization fails for unavailable children. Their original
-    // casing and verbatim prefix must still compare with an accessible parent.
-    // This key is only for root consolidation; stored native paths stay exact.
-    if cfg!(windows) {
-        PathBuf::from(display.to_lowercase())
-    } else {
-        PathBuf::from(display)
-    }
+        }),
+    ))
 }
 
 /// Merge roots into live metadata before the caller invokes normal offline hashing.
 pub fn import_shared_directories(store: &MetadataStore, file: &Path) -> Result<usize> {
     let roots = read_shared_directories(file)?;
-    let canonical = |root: &MetadataSharedDirectoryRoot| {
-        let path = PathBuf::from(&root.path);
-        root_comparison_key(&path.canonicalize().unwrap_or(path))
-    };
     // This getter returns explicit roots only. Replacing that origin preserves
     // mandatory Incoming/category roots and all accepted content knowledge.
-    let mut combined: Vec<(MetadataSharedDirectoryRoot, PathBuf)> = Vec::new();
     // Consolidate existing roots too: a covering parent may already be present
     // alongside redundant children before this explicit merge begins.
-    for root in store.shared_directory_roots()?.into_iter().chain(roots) {
-        let key = canonical(&root);
-        if combined
-            .iter()
-            .any(|(old, parent)| old.shareable && old.accessible && key.starts_with(parent))
-        {
-            continue;
-        }
-        combined.retain(|(_, child)| {
-            child != &key && !(root.shareable && root.accessible && child.starts_with(&key))
-        });
-        combined.push((root, key));
-    }
+    let roots = emulebb_core::consolidate_shared_directory_roots(
+        store.shared_directory_roots()?.into_iter().chain(roots),
+    );
     let mut writer = store.clone();
-    let roots: Vec<_> = combined.into_iter().map(|(root, _)| root).collect();
     writer.replace_shared_directory_roots(&roots)?;
     Ok(roots.len())
 }
