@@ -1832,40 +1832,66 @@ pub(crate) fn upsert_imported_known_file_tx(
         entry.last_upload_request_ms >= 0,
         "last upload request timestamp must not be negative"
     );
-    tx.execute(
-        r#"
-        DELETE FROM imported_known_files
-        WHERE ed2k_hash = ?1 AND display_name = ?2 AND size_bytes = ?3 AND modified_s = ?4
-        "#,
-        params![hash, entry.display_name, file_size, entry.modified_s],
-    )?;
-    tx.execute(
-        r#"
-        INSERT INTO imported_known_files(
-            ed2k_hash, display_name, size_bytes, modified_s, aich_root,
-            upload_priority, auto_upload_priority, all_time_uploaded_bytes,
-            all_time_upload_requests, all_time_upload_accepts,
-            last_upload_request_ms, imported_at_ms
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-        "#,
-        params![
-            decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?,
-            entry.display_name,
-            file_size,
-            entry.modified_s,
-            aich_root,
-            entry.upload_priority,
-            bool_to_i64(entry.auto_upload_priority),
-            all_time_uploaded_bytes,
-            all_time_upload_requests,
-            all_time_upload_accepts,
-            entry.last_upload_request_ms,
-            now,
-        ],
-    )?;
-    let imported_known_file_id = tx.last_insert_rowid();
-    for (index, hash) in entry.md4_hashset.iter().enumerate() {
+    let existing:Option<(i64,Option<Vec<u8>>)>=tx.query_row("SELECT id,aich_root FROM imported_known_files WHERE ed2k_hash=?1 AND display_name=?2 AND size_bytes=?3 AND modified_s=?4",params![hash,entry.display_name,file_size,entry.modified_s],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+    let mut write_md4 = true;
+    let mut write_aich = true;
+    if let Some((id, old_root)) = existing {
+        ensure!(
+            old_root
+                .as_ref()
+                .zip(aich_root.as_ref())
+                .is_none_or(|(old, new)| old == new),
+            "conflicting imported AICH roots"
+        );
+        for (table, column, incoming, width, write) in [
+            (
+                "imported_known_file_md4_hashes",
+                "md4_hash",
+                &entry.md4_hashset,
+                16,
+                &mut write_md4,
+            ),
+            (
+                "imported_known_file_aich_hashes",
+                "aich_hash",
+                &entry.aich_hashset,
+                20,
+                &mut write_aich,
+            ),
+        ] {
+            let mut query = tx.prepare(&format!(
+                "SELECT {column} FROM {table} WHERE imported_known_file_id=?1 ORDER BY part_index"
+            ))?;
+            let old = query
+                .query_map([id], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !old.is_empty() {
+                if !incoming.is_empty() {
+                    let new = incoming
+                        .iter()
+                        .map(|value| decode_fixed_hex(value, width, "imported part hash"))
+                        .collect::<Result<Vec<_>>>()?;
+                    ensure!(old == new, "conflicting imported part hashes");
+                }
+                *write = false;
+            }
+        }
+    }
+    // WHY: delete/reinsert cascades away richer recovery-derived part lists.
+    // Keep the alias identity stable and enrich optional data monotonically.
+    let imported_known_file_id:i64=tx.query_row(
+        r#"INSERT INTO imported_known_files(ed2k_hash,display_name,size_bytes,modified_s,aich_root,upload_priority,auto_upload_priority,all_time_uploaded_bytes,all_time_upload_requests,all_time_upload_accepts,last_upload_request_ms,imported_at_ms)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+        ON CONFLICT(ed2k_hash,display_name,size_bytes,modified_s) DO UPDATE SET
+          aich_root=coalesce(imported_known_files.aich_root,excluded.aich_root),
+          upload_priority=excluded.upload_priority,auto_upload_priority=excluded.auto_upload_priority,
+          all_time_uploaded_bytes=max(imported_known_files.all_time_uploaded_bytes,excluded.all_time_uploaded_bytes),
+          all_time_upload_requests=max(imported_known_files.all_time_upload_requests,excluded.all_time_upload_requests),
+          all_time_upload_accepts=max(imported_known_files.all_time_upload_accepts,excluded.all_time_upload_accepts),
+          last_upload_request_ms=max(imported_known_files.last_upload_request_ms,excluded.last_upload_request_ms),
+          imported_at_ms=excluded.imported_at_ms RETURNING id"#,
+        params![hash,entry.display_name,file_size,entry.modified_s,aich_root,entry.upload_priority,bool_to_i64(entry.auto_upload_priority),all_time_uploaded_bytes,all_time_upload_requests,all_time_upload_accepts,entry.last_upload_request_ms,now],|row|row.get(0))?;
+    for (index, hash) in entry.md4_hashset.iter().enumerate().filter(|_| write_md4) {
         tx.execute(
             r#"
             INSERT INTO imported_known_file_md4_hashes(
@@ -1880,7 +1906,7 @@ pub(crate) fn upsert_imported_known_file_tx(
             ],
         )?;
     }
-    for (index, hash) in entry.aich_hashset.iter().enumerate() {
+    for (index, hash) in entry.aich_hashset.iter().enumerate().filter(|_| write_aich) {
         tx.execute(
             r#"
             INSERT INTO imported_known_file_aich_hashes(
