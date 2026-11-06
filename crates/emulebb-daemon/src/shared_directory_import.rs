@@ -80,15 +80,10 @@ pub fn import_shared_directories(store: &MetadataStore, file: &Path) -> Result<u
     };
     // This getter returns explicit roots only. Replacing that origin preserves
     // mandatory Incoming/category roots and all accepted content knowledge.
-    let mut combined: Vec<_> = store
-        .shared_directory_roots()?
-        .into_iter()
-        .map(|root| {
-            let key = canonical(&root);
-            (root, key)
-        })
-        .collect();
-    for root in roots {
+    let mut combined: Vec<(MetadataSharedDirectoryRoot, PathBuf)> = Vec::new();
+    // Consolidate existing roots too: a covering parent may already be present
+    // alongside redundant children before this explicit merge begins.
+    for root in store.shared_directory_roots()?.into_iter().chain(roots) {
         let key = canonical(&root);
         if combined
             .iter()
@@ -96,7 +91,9 @@ pub fn import_shared_directories(store: &MetadataStore, file: &Path) -> Result<u
         {
             continue;
         }
-        combined.retain(|(_, child)| !child.starts_with(&key));
+        combined.retain(|(_, child)| {
+            child != &key && !(root.shareable && root.accessible && child.starts_with(&key))
+        });
         combined.push((root, key));
     }
     let mut writer = store.clone();
@@ -127,12 +124,20 @@ mod tests {
         .unwrap();
         assert_eq!(read_shared_directories(&input).unwrap().len(), 1);
         let mut db = MetadataStore::in_memory().unwrap();
-        db.replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
-            path: child,
-            monitor_owned: false,
-            accessible: false,
-            shareable: false,
-        }])
+        db.replace_shared_directory_roots(&[
+            MetadataSharedDirectoryRoot {
+                path: child,
+                monitor_owned: false,
+                accessible: false,
+                shareable: false,
+            },
+            MetadataSharedDirectoryRoot {
+                path: parent.to_string_lossy().into_owned(),
+                monitor_owned: false,
+                accessible: true,
+                shareable: true,
+            },
+        ])
         .unwrap();
         import_shared_directories(&db, &input).unwrap();
         assert_eq!(db.shared_directory_roots().unwrap().len(), 1);
