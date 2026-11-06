@@ -62,7 +62,7 @@ pub struct MetadataLocalFileInstance {
     pub verified_fingerprint: NativeFileFingerprint,
 }
 
-/// Hashsets produced by a full, stable read of a local file.
+/// Local content hashes computed by Rust or accepted from a stock hash cache.
 #[derive(Debug, Clone)]
 pub struct MetadataVerifiedLocalContent {
     pub file_hash: String,
@@ -70,7 +70,7 @@ pub struct MetadataVerifiedLocalContent {
     pub file_size: u64,
     pub part_size: u64,
     pub md4_hashset: Vec<String>,
-    pub aich_root: String,
+    pub aich_root: Option<String>,
     pub aich_hashset: Vec<String>,
     pub path: PathBuf,
     pub fingerprint: NativeFileFingerprint,
@@ -223,7 +223,8 @@ impl MetadataStore {
              )
              SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
                     verified_local_content.part_count,
-                    lower(hex(verified_local_content.aich_root)),
+                    CASE WHEN verified_local_content.aich_root IS NULL THEN NULL
+                         ELSE lower(hex(verified_local_content.aich_root)) END,
                     verified_local_content.upload_priority,
                     verified_local_content.auto_upload_priority,
                     verified_local_content.comment, verified_local_content.rating,
@@ -453,6 +454,18 @@ impl MetadataStore {
         &self,
         content: &MetadataVerifiedLocalContent,
     ) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        Self::upsert_verified_local_content_tx(&tx, content, unix_ms())?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn upsert_verified_local_content_tx(
+        tx: &rusqlite::Transaction<'_>,
+        content: &MetadataVerifiedLocalContent,
+        now: i64,
+    ) -> Result<()> {
         ensure!(
             content.path.is_absolute(),
             "local file path must be absolute"
@@ -470,7 +483,11 @@ impl MetadataStore {
             "local content name is empty"
         );
         let hash = decode_fixed_hex(&content.file_hash, 16, "ED2K hash")?;
-        let aich_root = decode_fixed_hex(&content.aich_root, 20, "AICH root")?;
+        let aich_root = content
+            .aich_root
+            .as_deref()
+            .map(|root| decode_fixed_hex(root, 20, "AICH root"))
+            .transpose()?;
         let size = i64::try_from(content.file_size)?;
         let part_size = i64::try_from(content.part_size)?;
         let part_count = i64::try_from(content.md4_hashset.len())?;
@@ -484,9 +501,6 @@ impl MetadataStore {
             .iter()
             .map(|hash| decode_fixed_hex(hash, 20, "AICH part hash"))
             .collect::<Result<Vec<_>>>()?;
-        let now = unix_ms();
-        let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO known_files(
                 ed2k_hash, size_bytes, display_name, part_size, part_count,
@@ -534,8 +548,11 @@ impl MetadataStore {
             ],
         )?;
         if inserted == 0 {
-            let (stored_part_size, stored_part_count, stored_aich_root): (i64, i64, Vec<u8>) = tx
-                .query_row(
+            let (stored_part_size, stored_part_count, stored_aich_root): (
+                i64,
+                i64,
+                Option<Vec<u8>>,
+            ) = tx.query_row(
                 "SELECT part_size, part_count, aich_root FROM verified_local_content
                      WHERE known_file_id = ?1",
                 params![known_file_id],
@@ -588,7 +605,7 @@ impl MetadataStore {
                 )?;
             }
         }
-        let path_id = upsert_local_path(&tx, &content.path)?;
+        let path_id = upsert_local_path(tx, &content.path)?;
         tx.execute(
             "INSERT INTO local_file_instances(
                 path_id, known_file_id, file_size, native_identity,
@@ -609,7 +626,6 @@ impl MetadataStore {
                 now
             ],
         )?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -896,11 +912,12 @@ impl MetadataStore {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
         let (name, size, part_size, aich_root, priority, auto_priority, comment, rating):
-            (String, i64, i64, String, String, bool, String, u8) = conn
+            (String, i64, i64, Option<String>, String, bool, String, u8) = conn
             .query_row(
             "SELECT verified_local_content.display_name, known_files.size_bytes,
                     verified_local_content.part_size,
-                    lower(hex(verified_local_content.aich_root)),
+                    CASE WHEN verified_local_content.aich_root IS NULL THEN NULL
+                         ELSE lower(hex(verified_local_content.aich_root)) END,
                     verified_local_content.upload_priority,
                     verified_local_content.auto_upload_priority,
                     verified_local_content.comment, verified_local_content.rating
@@ -1076,7 +1093,7 @@ mod tests {
             file_size: 32,
             part_size: 32,
             md4_hashset: vec!["11111111111111111111111111111111".to_string()],
-            aich_root: "2222222222222222222222222222222222222222".to_string(),
+            aich_root: Some("2222222222222222222222222222222222222222".to_string()),
             aich_hashset: vec!["3333333333333333333333333333333333333333".to_string()],
             path: first_path.clone(),
             fingerprint: fingerprint(41),
@@ -1166,7 +1183,7 @@ mod tests {
             file_size: 32,
             part_size: 32,
             md4_hashset: vec!["11".repeat(16)],
-            aich_root: "22".repeat(20),
+            aich_root: Some("22".repeat(20)),
             aich_hashset: vec!["33".repeat(20)],
             path: std::env::temp_dir().join("emulebb-original-content.bin"),
             fingerprint: fingerprint(61),
@@ -1179,7 +1196,7 @@ mod tests {
         let mut collision = original.clone();
         collision.path = std::env::temp_dir().join("emulebb-colliding-content.bin");
         collision.fingerprint = fingerprint(62);
-        collision.aich_root = "44".repeat(20);
+        collision.aich_root = Some("44".repeat(20));
         assert!(store.upsert_verified_local_content(&collision).is_err());
         collision.aich_root = original.aich_root.clone();
         collision.aich_hashset = vec!["55".repeat(20)];
@@ -1197,7 +1214,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(root, original.aich_root);
+        assert_eq!(Some(root), original.aich_root);
         assert_eq!(part_hash, original.aich_hashset[0]);
         assert_eq!(paths, 1);
     }
@@ -1229,7 +1246,7 @@ mod tests {
                     file_size: 32,
                     part_size: 32,
                     md4_hashset: vec![hash.to_string()],
-                    aich_root: "22".repeat(20),
+                    aich_root: Some("22".repeat(20)),
                     aich_hashset: vec!["33".repeat(20)],
                     path: path.clone(),
                     fingerprint: fingerprint(inode),

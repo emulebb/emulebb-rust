@@ -10,6 +10,13 @@ struct SharedFilePublicationContext {
 }
 
 impl EmulebbCore {
+    /// Reconcile cached hashes with target-native file metadata offline.
+    /// Unresolved and changed files are counted but never read or hashed.
+    /// Normal daemon startup remains responsible for active root membership.
+    pub async fn reconcile_shared_files(&self) -> Result<SharedDirectoryReloadProgress> {
+        shared_directories::reconcile_shared_files(self).await
+    }
+
     /// Hydrate the first persisted shared-catalog cohort after startup storage
     /// reconciliation and before REST or network publication.
     pub async fn hydrate_initial_shared_catalog(&self) -> Result<usize> {

@@ -29,7 +29,7 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
                 file_size: sequence as u64,
                 part_size: ED2K_PART_SIZE,
                 md4_hashset: vec![file_hash],
-                aich_root: "00".repeat(20),
+                aich_root: Some("00".repeat(20)),
                 aich_hashset: vec!["00".repeat(20)],
                 path: path.clone(),
                 fingerprint: fingerprint.clone(),

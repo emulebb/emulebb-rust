@@ -187,7 +187,7 @@ CREATE TABLE verified_local_content (
     display_name TEXT NOT NULL,
     part_size INTEGER NOT NULL CHECK(part_size > 0),
     part_count INTEGER NOT NULL CHECK(part_count >= 0),
-    aich_root BLOB NOT NULL CHECK(length(aich_root) = 20),
+    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
     upload_priority TEXT NOT NULL DEFAULT 'normal'
         CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
     auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),

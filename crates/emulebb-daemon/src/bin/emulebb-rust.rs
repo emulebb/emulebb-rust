@@ -29,10 +29,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    #[command(
+        about = "Reconcile imported/cached hashes with file metadata; never hash or start networking"
+    )]
+    ReconcileSharedFiles,
     #[command(about = "Merge a portable stock-compatible eMule profile manifest and exit")]
     ImportEmuleProfile {
         #[arg(value_name = "MANIFEST")]
         manifest: PathBuf,
+        #[arg(
+            long,
+            help = "Import only portable hashes; keep the target's shared roots"
+        )]
+        hashes_only: bool,
     },
 }
 
@@ -40,11 +49,11 @@ enum CliCommand {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut profile = match cli.command.as_ref() {
-        Some(CliCommand::ImportEmuleProfile { .. }) => {
+        Some(_) => {
             let profile_dir = cli
                 .profile
                 .clone()
-                .context("--profile is required when importing an eMule profile")?;
+                .context("--profile is required for offline profile operations")?;
             DaemonProfile::load_for_import(profile_dir)?
         }
         None => DaemonProfile::load(cli.profile)?,
@@ -58,8 +67,24 @@ async fn main() -> Result<()> {
     if let Some(interface) = cli.p2p_bind_interface {
         profile.p2p_bind_interface = Some(interface);
     }
-    if let Some(CliCommand::ImportEmuleProfile { manifest }) = cli.command {
-        let summary = apply_profile_import(&profile, &manifest)?;
+    if let Some(CliCommand::ImportEmuleProfile {
+        manifest,
+        hashes_only,
+    }) = cli.command
+    {
+        let summary = apply_profile_import(&profile, &manifest, hashes_only)?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+    if matches!(cli.command, Some(CliCommand::ReconcileSharedFiles)) {
+        let core = emulebb_core::EmulebbCore::new(
+            BUILD_VERSION,
+            emulebb_index::FileIndex::open(profile.metadata_path())?,
+            profile.transfer_root(),
+        )?
+        .with_profile_dir(profile.profile_dir.clone())
+        .with_incoming_dir(profile.incoming_dir());
+        let summary = core.reconcile_shared_files().await?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }

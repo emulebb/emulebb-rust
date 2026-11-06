@@ -113,19 +113,11 @@ impl NativeFileFingerprint {
 
     /// Return whether `current` is safe to reuse without re-hashing.
     ///
-    /// Exact stable identity, size, modification time, and change time must all
-    /// match. Windows fingerprints require the independently maintained native
-    /// change time, whose precision is an operating-system property rather than
-    /// something inferred from whether one observed value lands on a whole
-    /// second. Other platforms retain the conservative subsecond-signal gate.
+    /// Reuse the cache until identity, size, or an observed timestamp changes.
+    /// Timestamp precision alone is not evidence of a changed file.
     #[must_use]
     pub fn safely_matches(&self, current: &Self) -> bool {
         self == current
-            && match self.identity {
-                NativeFileIdentity::WindowsLowResolution { .. }
-                | NativeFileIdentity::WindowsHighResolution { .. } => self.changed.is_some(),
-                NativeFileIdentity::Unix { .. } => self.has_subsecond_signal(),
-            }
     }
 
     pub(crate) fn storage_bytes(&self) -> Vec<u8> {
@@ -201,13 +193,6 @@ impl NativeFileFingerprint {
             modified,
             changed,
         })
-    }
-
-    fn has_subsecond_signal(&self) -> bool {
-        self.modified.nanoseconds != 0
-            || self
-                .changed
-                .is_some_and(|timestamp| timestamp.nanoseconds != 0)
     }
 }
 
@@ -310,10 +295,10 @@ mod tests {
     }
 
     #[test]
-    fn coarse_fingerprint_is_never_reusable() {
+    fn unchanged_coarse_fingerprint_is_reusable() {
         let baseline = fingerprint(0, Some(0));
 
-        assert!(!baseline.safely_matches(&baseline));
+        assert!(baseline.safely_matches(&baseline));
     }
 
     #[test]
@@ -340,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_fingerprint_without_change_time_is_never_reusable() {
+    fn unchanged_windows_fingerprint_without_change_time_is_reusable() {
         let baseline = NativeFileFingerprint {
             identity: NativeFileIdentity::WindowsHighResolution {
                 volume_serial_number: 19,
@@ -351,7 +336,7 @@ mod tests {
             changed: None,
         };
 
-        assert!(!baseline.safely_matches(&baseline));
+        assert!(baseline.safely_matches(&baseline));
     }
 
     #[test]

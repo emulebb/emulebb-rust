@@ -1,10 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
     MetadataImportedKnownFileEntry, MetadataSharedDirectoryRoot, MetadataStore,
+    MetadataVerifiedLocalContent, NativeFileFingerprint,
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_store::upsert_imported_known_file_tx,
 };
@@ -23,6 +24,72 @@ pub struct MetadataProfileImportSummary {
 }
 
 impl MetadataStore {
+    /// Accept a stock hash cache for an unchanged file without reading its bytes.
+    /// The caller resolves one unambiguous stock identity and captures the
+    /// target-native fingerprint from an opened regular file.
+    pub fn accept_imported_local_files(
+        &self,
+        files: &[(
+            MetadataImportedKnownFileEntry,
+            PathBuf,
+            NativeFileFingerprint,
+        )],
+    ) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let now = unix_ms();
+        for (entry, path, fingerprint) in files {
+            anyhow::ensure!(
+                entry.file_size == fingerprint.size_bytes
+                    && entry.modified_s == fingerprint.modified.seconds,
+                "imported file metadata differs from the current file"
+            );
+            // WHY: stock has already hashed these bytes. Rebind its accepted
+            // content identity to this platform's fingerprint instead of scheduling
+            // a full payload read merely because Rust has not seen the file before.
+            Self::upsert_verified_local_content_tx(
+                &tx,
+                &MetadataVerifiedLocalContent {
+                    file_hash: entry.file_hash.clone(),
+                    display_name: entry.display_name.clone(),
+                    file_size: entry.file_size,
+                    part_size: 9_728_000,
+                    md4_hashset: entry.md4_hashset.clone(),
+                    aich_root: entry.aich_root.clone(),
+                    aich_hashset: entry.aich_hashset.clone(),
+                    path: path.to_path_buf(),
+                    fingerprint: fingerprint.clone(),
+                    upload_priority: entry.upload_priority.clone(),
+                    auto_upload_priority: entry.auto_upload_priority,
+                    comment: String::new(),
+                    rating: 0,
+                },
+                now,
+            )?;
+            let hash = decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?;
+            tx.execute(
+                "UPDATE known_files SET
+                all_time_uploaded_bytes = max(all_time_uploaded_bytes, ?2),
+                all_time_upload_requests = max(all_time_upload_requests, ?3),
+                all_time_upload_accepts = max(all_time_upload_accepts, ?4),
+                last_upload_request_ms = max(last_upload_request_ms, ?5)
+             WHERE ed2k_hash = ?1",
+                params![
+                    hash,
+                    i64::try_from(entry.all_time_uploaded_bytes)?,
+                    i64::try_from(entry.all_time_upload_requests)?,
+                    i64::try_from(entry.all_time_upload_accepts)?,
+                    entry.last_upload_request_ms
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Merge validated legacy eMule hash metadata and roots in one transaction.
     pub fn merge_profile_import(
         &self,
@@ -44,11 +111,13 @@ impl MetadataStore {
                 )
                 .optional()?
                 .is_some();
+            // Retain pathless stock aliases even when this hash is already
+            // native, so a newly mapped second path can reuse the same hashes.
+            upsert_imported_known_file_tx(&tx, entry, now)?;
             if already_native {
                 skipped_native_known_files += 1;
                 continue;
             }
-            upsert_imported_known_file_tx(&tx, entry, now)?;
             imported_known_files += 1;
         }
 
@@ -176,5 +245,39 @@ mod tests {
 
         assert!(store.merge_profile_import(&profile_import).is_err());
         assert!(store.imported_known_file_entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn accepted_stock_batch_is_atomic_and_requires_matching_file_metadata() {
+        let store = MetadataStore::in_memory().unwrap();
+        let file = imported_file("00112233445566778899aabbccddeeff");
+        let fingerprint = NativeFileFingerprint {
+            identity: crate::NativeFileIdentity::Unix {
+                device_id: 7,
+                inode_number: 11,
+            },
+            size_bytes: file.file_size,
+            modified: crate::NativeFileTimestamp::new(file.modified_s, 0).unwrap(),
+            changed: None,
+        };
+        let mut changed = fingerprint.clone();
+        changed.size_bytes += 1;
+        let path = std::env::temp_dir().join("stock-cache-sample.bin");
+        assert!(
+            store
+                .accept_imported_local_files(&[
+                    (file.clone(), path.clone(), fingerprint.clone()),
+                    (file.clone(), path.clone(), changed),
+                ])
+                .is_err()
+        );
+        assert_eq!(store.table_count("known_files").unwrap(), 0);
+        // No file at this synthetic path is needed: the caller supplies stat
+        // evidence and the metadata layer never opens the payload.
+        store
+            .accept_imported_local_files(&[(file, path, fingerprint)])
+            .unwrap();
+        assert_eq!(store.table_count("local_file_instances").unwrap(), 1);
+        assert_eq!(store.table_count("transfers").unwrap(), 0);
     }
 }

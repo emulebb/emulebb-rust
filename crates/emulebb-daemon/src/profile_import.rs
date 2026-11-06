@@ -75,6 +75,7 @@ pub struct ProfileImportApplySummary {
 pub fn apply_profile_import(
     profile: &DaemonProfile,
     manifest_path: &Path,
+    hashes_only: bool,
 ) -> Result<ProfileImportApplySummary> {
     let text = fs::read_to_string(manifest_path)
         .with_context(|| format!("failed to read import manifest {}", manifest_path.display()))?;
@@ -84,7 +85,15 @@ pub fn apply_profile_import(
             manifest_path.display()
         )
     })?;
-    let profile_import = validate_manifest(manifest)?;
+    let profile_import = if hashes_only {
+        validate_manifest(ProfileImportManifest {
+            target_platform: NativePath::platform().to_string(),
+            shared_roots: Vec::new(),
+            ..manifest
+        })?
+    } else {
+        validate_manifest(manifest)?
+    };
     let metadata = MetadataStore::open(profile.metadata_path())?;
     let summary = metadata.merge_profile_import(&profile_import)?;
     Ok(apply_summary(manifest_path, summary))
@@ -117,10 +126,6 @@ fn validate_manifest(manifest: ProfileImportManifest) -> Result<MetadataProfileI
     ensure!(
         !manifest.known_files.is_empty(),
         "profile import must contain at least one known file"
-    );
-    ensure!(
-        !manifest.shared_roots.is_empty(),
-        "profile import must contain at least one shared root"
     );
 
     let mut identities = HashSet::new();
@@ -218,7 +223,8 @@ fn validate_known_file(file: &ProfileImportKnownFile) -> Result<()> {
     if let Some(aich_root) = file.aich_root.as_deref() {
         validate_hex(aich_root, 20, "AICH root")?;
         ensure!(
-            file.aich_hashset.len() == expected_aich_hash_count(file.file_size),
+            file.aich_hashset.is_empty()
+                || file.aich_hashset.len() == expected_aich_hash_count(file.file_size),
             "known-file AICH hashset count does not match file size"
         );
     } else {
@@ -325,6 +331,22 @@ mod tests {
     fn small_file_without_part_hashes_is_valid() {
         let file = small_file();
 
+        validate_known_file(&file).unwrap();
+    }
+
+    #[test]
+    fn hash_only_manifest_needs_no_shared_roots() {
+        let imported = validate_manifest(manifest_with_roots(&[])).unwrap();
+        assert!(imported.shared_roots.is_empty());
+        assert_eq!(imported.known_files.len(), 1);
+    }
+
+    #[test]
+    fn aich_root_without_optional_part_hashes_preserves_ed2k_hashes() {
+        let mut file = small_file();
+        file.file_size = ED2K_PART_SIZE + 1;
+        file.md4_hashset = vec!["11".repeat(16), "22".repeat(16)];
+        file.aich_root = Some("33".repeat(20));
         validate_known_file(&file).unwrap();
     }
 

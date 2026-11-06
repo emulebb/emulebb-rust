@@ -1,4 +1,5 @@
 use super::*;
+use emulebb_index::FileIndex;
 use emulebb_metadata::MetadataImportedKnownFileEntry;
 use std::fs;
 use std::sync::atomic::AtomicU64;
@@ -362,7 +363,7 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
 }
 
 #[tokio::test]
-async fn incremental_reload_never_reuses_same_size_coarse_timestamp() {
+async fn incremental_reload_reuses_unchanged_coarse_timestamp() {
     let root = scratch_dir("coarse-timestamp");
     let source = root.join("Coarse.Timestamp.bin");
     fs::write(&source, b"same-size").unwrap();
@@ -393,9 +394,9 @@ async fn incremental_reload_never_reuses_same_size_coarse_timestamp() {
     .await
     .unwrap();
 
-    assert_eq!(plan.to_hash.len(), 1);
-    assert!(plan.reused_shares.is_empty());
-    assert_eq!(plan.stats.changed_count, 1);
+    assert!(plan.to_hash.is_empty());
+    assert_eq!(plan.reused_shares.len(), 1);
+    assert_eq!(plan.stats.changed_count, 0);
     fs::remove_dir_all(&root).ok();
 }
 
@@ -439,7 +440,7 @@ async fn incremental_reload_reuses_windows_whole_second_timestamp_with_change_ti
 }
 
 #[tokio::test]
-async fn incremental_reload_hashes_unique_pathless_imported_known_file() {
+async fn incremental_reload_accepts_unique_stock_hash_without_payload_reads() {
     let root = scratch_dir("imported-known-pathless");
     let source = root.join("Imported.Known.bin");
     fs::write(&source, b"known payload").unwrap();
@@ -469,15 +470,21 @@ async fn incremental_reload_hashes_unique_pathless_imported_known_file() {
         .await
         .unwrap();
 
-    assert_eq!(plan.to_hash.len(), 1);
-    assert_eq!(plan.stats.planned_hash_count, 1);
-    assert_eq!(plan.stats.reused_count, 0);
+    assert!(plan.to_hash.is_empty());
+    assert_eq!(plan.stats.planned_hash_count, 0);
+    assert_eq!(plan.stats.reused_count, 1);
+    assert_eq!(plan.reused_shares[0].file_hash, imported.file_hash);
+    let repeated = plan_incremental_reload(&core, vec![scanned_file(&source)])
+        .await
+        .unwrap();
+    assert!(repeated.to_hash.is_empty());
+    assert_eq!(repeated.stats.reused_count, 1);
     assert!(core.share(&imported.file_hash).await.is_none());
     fs::remove_dir_all(&root).ok();
 }
 
 #[tokio::test]
-async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() {
+async fn incremental_reload_reports_ambiguous_stock_hashes_without_rehashing() {
     let root = scratch_dir("imported-known-ambiguous");
     let source = root.join("Ambiguous.Known.bin");
     fs::write(&source, b"ambiguous payload").unwrap();
@@ -511,10 +518,90 @@ async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() 
         .await
         .unwrap();
 
-    assert_eq!(plan.to_hash.len(), 1);
-    assert_eq!(plan.stats.planned_hash_count, 1);
-    assert_eq!(plan.stats.new_count, 1);
+    assert!(plan.to_hash.is_empty());
+    assert_eq!(plan.stats.planned_hash_count, 0);
+    assert_eq!(plan.stats.skipped_failed_count, 1);
     assert_eq!(plan.stats.reused_count, 0);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn trusted_stock_hash_survives_offline_reconciliation_startup_and_restart() {
+    let root = scratch_dir("trusted-stock-restart");
+    let shared = root.join("shared");
+    fs::create_dir(&shared).unwrap();
+    let source = shared.join("Sample.bin");
+    fs::write(&source, b"stock payload").unwrap();
+    let db = root.join("profile.db");
+    let transfers = root.join("runtime").join("transfers");
+    let core = EmulebbCore::new("test", FileIndex::open(&db).unwrap(), &transfers).unwrap();
+    configure_test_root(&core, &shared).await;
+    let (_, size, fingerprint) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+    // Deliberately unrelated to the fixture bytes: any content-hashing path
+    // would replace this stock identity and make the assertions fail.
+    let expected_hash = "00112233445566778899aabbccddeeff";
+    core.metadata_store
+        .upsert_imported_known_file(&MetadataImportedKnownFileEntry {
+            file_hash: expected_hash.to_string(),
+            display_name: "Sample.bin".to_string(),
+            file_size: size,
+            modified_s: fingerprint.unwrap().modified.seconds,
+            md4_hashset: Vec::new(),
+            aich_root: None,
+            aich_hashset: Vec::new(),
+            upload_priority: "release".to_string(),
+            auto_upload_priority: false,
+            all_time_uploaded_bytes: 1234,
+            all_time_upload_requests: 9,
+            all_time_upload_accepts: 4,
+            last_upload_request_ms: 1_700_000_001_000,
+        })
+        .unwrap();
+    let report = core.reconcile_shared_files().await.unwrap();
+    assert_eq!(report.reused_count, 1);
+    assert_eq!(report.planned_hash_count, 0);
+    assert_eq!(report.completed_read_bytes, 0);
+    assert_eq!(
+        core.metadata_store.active_shared_content_count().unwrap(),
+        0
+    );
+    let shares = core.reload_shared_directories().await.unwrap();
+    assert_eq!(shares.len(), 1);
+    assert_eq!(shares[0].hash, expected_hash);
+    let view = core
+        .ed2k_transfers
+        .serving_view(expected_hash)
+        .await
+        .unwrap();
+    assert_eq!(view.aich_root, None);
+    assert!(!view.aich_hashset_acquired);
+    let content = core
+        .metadata_store
+        .active_local_file_by_hash(expected_hash)
+        .unwrap();
+    assert!(content.is_some());
+    drop(core);
+
+    let restarted = EmulebbCore::new("test", FileIndex::open(&db).unwrap(), &transfers).unwrap();
+    let report = restarted.reconcile_shared_files().await.unwrap();
+    assert_eq!(report.reused_count, 1);
+    assert_eq!(report.planned_hash_count, 0);
+    let shares = restarted.reload_shared_directories().await.unwrap();
+    assert_eq!(shares[0].hash, expected_hash);
+
+    fs::write(&source, b"changed stock payload").unwrap();
+    let changed = restarted.reconcile_shared_files().await.unwrap();
+    assert_eq!(changed.changed_count, 1);
+    assert_eq!(changed.planned_hash_count, 1);
+    assert_eq!(changed.hashed_count, 0);
+    assert!(
+        restarted
+            .ed2k_transfers
+            .serving_view(expected_hash)
+            .await
+            .is_err()
+    );
+    drop(restarted);
     fs::remove_dir_all(&root).ok();
 }
 
