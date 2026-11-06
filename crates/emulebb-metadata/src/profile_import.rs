@@ -89,6 +89,26 @@ impl MetadataStore {
                 "imported file metadata differs from the current file"
             );
             let hash = decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?;
+            let old_root: Option<Option<Vec<u8>>> = tx
+                .query_row(
+                    "SELECT aich_root FROM known_files WHERE ed2k_hash=?1",
+                    [hash.clone()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let incoming_root = entry
+                .aich_root
+                .as_ref()
+                .map(|r| decode_fixed_hex(r, 20, "AICH root"))
+                .transpose()?;
+            anyhow::ensure!(
+                old_root
+                    .flatten()
+                    .as_ref()
+                    .zip(incoming_root.as_ref())
+                    .is_none_or(|(old, new)| old == new),
+                "imported AICH root conflicts with live identity"
+            );
             let path_id = upsert_local_path(&tx, path)?;
             let bound:Option<Vec<u8>>=tx.query_row("SELECT f.ed2k_hash FROM local_file_instances i JOIN known_files f ON f.id=i.known_file_id WHERE i.path_id=?1",[path_id],|r|r.get(0)).optional()?;
             anyhow::ensure!(
@@ -283,8 +303,19 @@ mod tests {
         // No file at this synthetic path is needed: the caller supplies stat
         // evidence and the metadata layer never opens the payload.
         store
-            .accept_imported_local_files(&[(file, path, fingerprint)])
+            .accept_imported_local_files(&[(file.clone(), path.clone(), fingerprint.clone())])
             .unwrap();
+        let mut enriched = file.clone();
+        enriched.aich_root = Some("11".repeat(20));
+        store
+            .accept_imported_local_files(&[(enriched.clone(), path.clone(), fingerprint.clone())])
+            .unwrap();
+        enriched.aich_root = Some("22".repeat(20));
+        assert!(
+            store
+                .accept_imported_local_files(&[(enriched, path, fingerprint)])
+                .is_err()
+        );
         assert_eq!(store.table_count("local_file_instances").unwrap(), 1);
         assert_eq!(store.table_count("transfers").unwrap(), 0);
     }
