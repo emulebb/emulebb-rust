@@ -153,9 +153,10 @@ impl EmulebbCore {
         }
 
         if let Some(dht) = self.ed2k_dht_node().await {
-            dht.import_nodes_dat(data)
+            return dht
+                .import_nodes_dat(data)
                 .await
-                .map_err(|error| anyhow::anyhow!("nodes.dat import failed: {error}"))?;
+                .map_err(|error| anyhow::anyhow!("nodes.dat import failed: {error}"));
         }
         Ok(contacts.len())
     }

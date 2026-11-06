@@ -288,6 +288,24 @@ async fn explicit_bootstrap_contacts_the_requested_endpoint() {
         })
     );
     assert!(core.status().await.kad.connected);
+    let rejected = emulebb_kad_dht::bootstrap::encode_nodes_dat(&[
+        emulebb_kad_dht::bootstrap::BootstrapContact {
+            node_id: node_id(0x79),
+            ip: bind_ip,
+            udp_port: selected.port(),
+            tcp_port: selected.port(),
+            version: 9,
+            udp_key: emulebb_kad_proto::KadUdpKey::ZERO,
+            udp_key_ip: None,
+            verified: false,
+        },
+    ])
+    .unwrap();
+    assert_eq!(
+        core.import_kad_nodes_bytes(&rejected).await.unwrap(),
+        0,
+        "a rejected duplicate-IP contact must not be reported as imported"
+    );
 }
 
 #[tokio::test]
