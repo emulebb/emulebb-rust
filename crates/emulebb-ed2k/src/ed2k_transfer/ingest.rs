@@ -212,8 +212,13 @@ impl Ed2kTransferRuntime {
             rating: 0,
         };
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.upsert_verified_local_content(&content))
-            .await??;
+        let recovery_root = aich_root.clone();
+        let recovery_parts = hashsets.recovery_parts;
+        tokio::task::spawn_blocking(move || {
+            metadata.upsert_verified_local_content(&content)?;
+            metadata.store_aich_recovery_set(&recovery_root, content.file_size, &recovery_parts)
+        })
+        .await??;
         let metadata = self.metadata.clone();
         let media_path = source_path.clone();
         let media_name = display_name.to_string();

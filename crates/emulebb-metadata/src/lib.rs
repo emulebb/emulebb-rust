@@ -1,5 +1,6 @@
 //! SQLite metadata store for the Rust eMuleBB client.
 
+mod aich_recovery_store;
 mod download_history_model;
 mod download_history_store;
 mod identity_model;
