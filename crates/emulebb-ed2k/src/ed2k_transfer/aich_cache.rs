@@ -63,6 +63,91 @@ mod tests {
     };
     use super::*;
 
+    #[tokio::test]
+    async fn optional_cache_conflicts_do_not_undo_ingest_or_download_completion() {
+        use super::super::{Ed2kTransferRuntime, new_transfer_job};
+        let root = crate::paths::unique_test_dir("aich-optional-cache-conflict");
+        std::fs::create_dir_all(&root).unwrap();
+        let payload = vec![0x6d; 184_321];
+        let hashes = build_md4_and_aich_hashsets_from_reader_with_progress(
+            &mut payload.as_slice(),
+            payload.len() as u64,
+            None,
+        )
+        .unwrap();
+        let master = hashes.aich_hashset.master_hash;
+        // Seed corrupt but structurally valid cache bytes to force a write
+        // conflict after successful payload verification in both workflows.
+        let native = Ed2kTransferRuntime::load_or_create(&root.join("native")).unwrap();
+        native
+            .metadata
+            .store_aich_recovery_set(
+                &hex::encode(master),
+                payload.len() as u64,
+                &[vec![0; 40]],
+                &[master],
+            )
+            .unwrap();
+        let source = root.join("Sample.bin");
+        std::fs::write(&source, &payload).unwrap();
+        let summary = native
+            .ingest_local_file(&source, "Sample.bin")
+            .await
+            .unwrap();
+        super::super::test_support::admit_local_share(&native, &root, &source).await;
+        assert!(
+            native
+                .serving_view(&summary.file_hash)
+                .await
+                .unwrap()
+                .completed
+        );
+        assert!(
+            native
+                .create_aich_recovery_data(&hashes.file_hash, 0, master)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let download_root = root.join("download");
+        let runtime = Ed2kTransferRuntime::load_or_create(&download_root).unwrap();
+        runtime
+            .metadata
+            .store_aich_recovery_set(
+                &hex::encode(master),
+                payload.len() as u64,
+                &[vec![0; 40]],
+                &[master],
+            )
+            .unwrap();
+        let job = new_transfer_job(
+            hashes.file_hash,
+            "Sample.bin".to_string(),
+            payload.len() as u64,
+        );
+        runtime.ensure_job(&job).await.unwrap();
+        runtime
+            .store_md4_hashset(&job.file_hash, Vec::new())
+            .await
+            .unwrap();
+        runtime
+            .store_piece_data_unfinalized(&job.file_hash, 0, &payload)
+            .await
+            .unwrap();
+        assert!(
+            runtime
+                .finalize_pending_transfer(&job.file_hash)
+                .await
+                .unwrap()
+        );
+        drop(runtime);
+        let restarted = Ed2kTransferRuntime::load_or_create(&download_root).unwrap();
+        let manifest = restarted.manifest(&job.file_hash).await.unwrap();
+        assert!(manifest.completed);
+        assert!(!manifest.final_rehash_pending);
+    }
+
     #[test]
     fn large_file_recovery_uses_32bit_framing_without_a_payload() {
         let size = u64::from(u32::MAX) + 2;

@@ -25,7 +25,7 @@ use super::{
 
 #[derive(Debug)]
 struct FinalRehashComputation {
-    recovery_parts: Vec<Vec<u8>>,
+    recovery: Option<emulebb_metadata::MetadataAichRecoverySet>,
     actual_len: u64,
     file_hash: Option<[u8; 16]>,
     part_hashes: Vec<Option<[u8; 16]>>,
@@ -223,34 +223,48 @@ impl Ed2kTransferRuntime {
             manifest.completed = true;
             manifest.final_rehash_pending = false;
             manifest.payload_fingerprint = computation.payload_fingerprint;
-            let (master, roots) =
-                super::aich_cache::recovery_roots(manifest.file_size, &computation.recovery_parts)?;
-            // Preserve an acquired trusted identity. A mismatch makes recovery
-            // unavailable; MD4-verified completion remains independent.
-            if manifest.aich_root.is_none() || !manifest.aich_hashset_acquired {
-                manifest.aich_root = Some(hex::encode(master));
-                manifest.aich_hashset = if roots.len() == 1 {
-                    Vec::new()
-                } else {
-                    roots.iter().map(hex::encode).collect()
-                };
-                manifest.aich_hashset_acquired = true;
-            }
-            if manifest.aich_root.as_deref() == Some(hex::encode(master).as_str()) {
-                self.metadata.store_aich_recovery_set(
-                    &hex::encode(master),
-                    manifest.file_size,
-                    &computation.recovery_parts,
-                    &roots,
-                )?;
-            } else {
-                tracing::warn!(
-                    file_hash,
-                    "Completed payload AICH differs from trusted identity; recovery unavailable"
-                );
+            let recovery = computation.recovery;
+            if let Some(set) = recovery.as_ref() {
+                if manifest.aich_root.is_none() || !manifest.aich_hashset_acquired {
+                    manifest.aich_root = Some(hex::encode(set.root));
+                    manifest.aich_hashset = if set.part_roots.len() == 1 {
+                        Vec::new()
+                    } else {
+                        set.part_roots.iter().map(hex::encode).collect()
+                    };
+                    manifest.aich_hashset_acquired = true;
+                }
             }
             self.store_manifest_unlocked(&manifest).await?;
             self.upsert_verified_catalog_entry(&manifest).await;
+            // WHY: MD4 completion is durable before optional caching. A cache
+            // write failure or crash must not leave final_rehash_pending set.
+            if let Some(set) = recovery {
+                if manifest.aich_root.as_deref() == Some(hex::encode(set.root).as_str()) {
+                    let metadata = self.metadata.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        metadata.store_aich_recovery_set(
+                            &hex::encode(set.root),
+                            set.size,
+                            &set.parts,
+                            &set.part_roots,
+                        )
+                    })
+                    .await;
+                    if !matches!(result, Ok(Ok(()))) {
+                        tracing::warn!(
+                            ?result,
+                            "Completed MD4 content retained without AICH recovery cache"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        file_hash,
+                        "Completed payload AICH differs from trusted identity; recovery unavailable"
+                    );
+                }
+            }
+
             tracing::info!(
                 event = "final_completion_rehash_succeeded",
                 file_hash,
@@ -367,7 +381,7 @@ fn failed_content_computation(expected_size: u64, actual_len: u64) -> FinalRehas
     let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
     FinalRehashComputation {
         actual_len,
-        recovery_parts: Vec::new(),
+        recovery: None,
         file_hash: None,
         part_hashes: vec![None; usize::try_from(part_count).unwrap_or(0)],
         payload_fingerprint: None,
@@ -508,9 +522,28 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
     let payload_fingerprint = pre_hash_fingerprint
         .safely_matches(&post_hash_fingerprint)
         .then_some(post_hash_fingerprint);
+    let recovery = if expected_size > 0
+        && post_hash_metadata.len() == expected_size
+        && part_hashes.iter().all(Option::is_some)
+    {
+        match super::aich_cache::recovery_roots(expected_size, &recovery_parts) {
+            Ok((root, part_roots)) => Some(emulebb_metadata::MetadataAichRecoverySet {
+                root,
+                size: expected_size,
+                parts: recovery_parts,
+                part_roots,
+            }),
+            Err(error) => {
+                tracing::warn!(%error,"AICH recovery unavailable after payload verification");
+                None
+            }
+        }
+    } else {
+        None
+    };
     Ok(FinalRehashComputation {
         actual_len: post_hash_metadata.len(),
-        recovery_parts,
+        recovery,
         file_hash: computed_file_hash,
         part_hashes,
         payload_fingerprint,
