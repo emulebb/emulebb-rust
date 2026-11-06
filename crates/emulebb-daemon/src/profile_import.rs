@@ -1,6 +1,5 @@
 use std::{
-    collections::HashSet,
-    fs,
+    collections::{BTreeMap, HashSet},
     path::{Component, Path, PathBuf},
 };
 
@@ -14,7 +13,7 @@ use serde_json::Value;
 
 use crate::DaemonProfile;
 
-const MANIFEST_SCHEMA: &str = "emulebb-rust.profile-import.v1";
+const MANIFEST_SCHEMA: &str = "emulebb.profile-exchange.v1";
 const ED2K_PART_SIZE: u64 = 9_728_000;
 const UPLOAD_PRIORITIES: &[&str] = &[
     "auto",
@@ -70,6 +69,9 @@ pub struct ProfileImportApplySummary {
     imported_known_files: usize,
     skipped_native_known_files: usize,
     merged_shared_roots: usize,
+    imported_recovery_sets: usize,
+    rejected_recovery_sets: usize,
+    recovery_rejection_reasons: BTreeMap<String, usize>,
 }
 
 pub fn apply_profile_import(
@@ -77,26 +79,132 @@ pub fn apply_profile_import(
     manifest_path: &Path,
     hashes_only: bool,
 ) -> Result<ProfileImportApplySummary> {
-    let text = fs::read_to_string(manifest_path)
-        .with_context(|| format!("failed to read import manifest {}", manifest_path.display()))?;
-    let manifest: ProfileImportManifest = serde_json::from_str(&text).with_context(|| {
-        format!(
-            "failed to parse import manifest {}",
-            manifest_path.display()
-        )
-    })?;
-    let profile_import = if hashes_only {
-        validate_manifest(ProfileImportManifest {
-            target_platform: NativePath::platform().to_string(),
-            shared_roots: Vec::new(),
-            ..manifest
-        })?
-    } else {
-        validate_manifest(manifest)?
-    };
+    use rusqlite::{Connection, OpenFlags};
+    let source = Connection::open_with_flags(manifest_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    source.execute_batch("PRAGMA query_only=ON; PRAGMA cache_size=-8192; BEGIN")?;
+    let header: String = source.query_row("SELECT value FROM header", [], |row| row.get(0))?;
+    let mut header: Value = serde_json::from_str(&header)?;
+    ensure!(
+        header["schema"] == "emulebb.profile-exchange.v1",
+        "unsupported profile exchange format"
+    );
+    if hashes_only {
+        header["targetPlatform"] = Value::from(NativePath::platform());
+        header["sharedRoots"] = serde_json::json!([]);
+    }
     let metadata = MetadataStore::open(profile.metadata_path())?;
-    let summary = metadata.merge_profile_import(&profile_import)?;
-    Ok(apply_summary(manifest_path, summary))
+    let mut total = MetadataProfileImportSummary {
+        imported_known_files: 0,
+        skipped_native_known_files: 0,
+        merged_shared_roots: 0,
+    };
+    let mut query = source.prepare("SELECT record,md4,aich FROM known_files ORDER BY id")?;
+    let mut rows = query.query([])?;
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0usize;
+    let mut count = 0usize;
+    while let Some(row) = rows.next()? {
+        let record: String = row.get(0)?;
+        let mut record_bytes = record.len();
+        ensure!(record.len() <= 65536, "oversized known-file record");
+        let mut record: Value = serde_json::from_str(&record)?;
+        for (column, key, width) in [(1, "md4Hashset", 16), (2, "aichHashset", 20)] {
+            let packed: Vec<u8> = row.get(column)?;
+            record_bytes += packed.len();
+            ensure!(
+                packed.len() % width == 0 && packed.len() <= 1_000_000,
+                "invalid packed hashset"
+            );
+            record[key] = serde_json::to_value(
+                packed
+                    .chunks_exact(width)
+                    .map(hex::encode)
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+        if batch_bytes + record_bytes > 4 * 1024 * 1024 && !batch.is_empty() {
+            merge_exchange_batch(&metadata, &mut header, &mut batch, &mut total)?;
+            batch_bytes = 0;
+        }
+        batch.push(record);
+        batch_bytes += record_bytes;
+        count += 1;
+        if batch.len() == 128 {
+            merge_exchange_batch(&metadata, &mut header, &mut batch, &mut total)?;
+            batch_bytes = 0;
+        }
+    }
+    if !batch.is_empty() {
+        merge_exchange_batch(&metadata, &mut header, &mut batch, &mut total)?;
+    }
+    ensure!(count > 0, "profile exchange contains no known files");
+    let mut summary = apply_summary(manifest_path, total);
+    let mut sets =
+        source.prepare("SELECT root,size_bytes FROM recovery_sets ORDER BY root,size_bytes")?;
+    let mut sets = sets.query([])?;
+    let mut leaves_query=source.prepare("SELECT part_index,leaves FROM recovery_parts WHERE root=?1 AND size_bytes=?2 ORDER BY part_index")?;
+    while let Some(row) = sets.next()? {
+        let root: Vec<u8> = row.get(0)?;
+        let size: i64 = row.get(1)?;
+        let result = (|| -> Result<()> {
+            ensure!(size > 0 && size <= 0x4000000000, "invalid recovery size");
+            let master: [u8; 20] = root.as_slice().try_into()?;
+            let mut leaves = leaves_query.query(rusqlite::params![root, size])?;
+            let mut parts = Vec::new();
+            while let Some(row) = leaves.next()? {
+                let index: i64 = row.get(0)?;
+                ensure!(
+                    index == parts.len() as i64 && index < (size + 9_727_999) / 9_728_000,
+                    "invalid recovery part index"
+                );
+                let packed: Vec<u8> = row.get(1)?;
+                ensure!(packed.len() <= 1060, "oversized recovery part");
+                parts.push(packed);
+            }
+            let roots = emulebb_ed2k::ed2k_transfer::validate_aich_recovery_set(
+                size as u64,
+                master,
+                &parts,
+            )?;
+            metadata.store_aich_recovery_set(&hex::encode(master), size as u64, &parts, &roots)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => summary.imported_recovery_sets += 1,
+            Err(error) => {
+                summary.rejected_recovery_sets += 1;
+                let reason = if summary.recovery_rejection_reasons.len() < 16 {
+                    error.to_string()
+                } else {
+                    "additional rejection reasons".to_string()
+                };
+                *summary
+                    .recovery_rejection_reasons
+                    .entry(reason)
+                    .or_default() += 1;
+                if summary.rejected_recovery_sets <= 8 {
+                    tracing::warn!(%error,"AICH recovery set rejected; MD4 cache retained");
+                }
+            }
+        }
+    }
+    Ok(summary)
+}
+
+fn merge_exchange_batch(
+    metadata: &MetadataStore,
+    header: &mut Value,
+    batch: &mut Vec<Value>,
+    total: &mut MetadataProfileImportSummary,
+) -> Result<()> {
+    let value = serde_json::json!({"schema":MANIFEST_SCHEMA,"generatedAtUtc":"exchange", "targetPlatform":header["targetPlatform"],"source":header["source"],"sharedRoots":header["sharedRoots"],"knownFiles":std::mem::take(batch),"summary":{}});
+    let validated = validate_manifest(serde_json::from_value(value)?)?;
+    let applied = metadata.merge_profile_import(&validated)?;
+    total.imported_known_files += applied.imported_known_files;
+    total.skipped_native_known_files += applied.skipped_native_known_files;
+    total.merged_shared_roots += applied.merged_shared_roots;
+    header["sharedRoots"] = serde_json::json!([]);
+    Ok(())
 }
 
 fn validate_manifest(manifest: ProfileImportManifest) -> Result<MetadataProfileImport> {
@@ -284,12 +392,102 @@ fn apply_summary(
         imported_known_files: summary.imported_known_files,
         skipped_native_known_files: summary.skipped_native_known_files,
         merged_shared_roots: summary.merged_shared_roots,
+        imported_recovery_sets: 0,
+        rejected_recovery_sets: 0,
+        recovery_rejection_reasons: BTreeMap::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_import_streams_100k_aliases_without_payload_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact = temp.path().join("scale.sqlite");
+        let mut source = rusqlite::Connection::open(&artifact).unwrap();
+        source.execute_batch("CREATE TABLE header(value TEXT); CREATE TABLE known_files(id INTEGER PRIMARY KEY,record TEXT,md4 BLOB,aich BLOB); CREATE TABLE recovery_sets(root BLOB,size_bytes INTEGER); CREATE TABLE recovery_parts(root BLOB,size_bytes INTEGER,part_index INTEGER,leaves BLOB);").unwrap();
+        source.execute("INSERT INTO header VALUES (?1)",[serde_json::json!({"schema":MANIFEST_SCHEMA,"targetPlatform":NativePath::platform(),"source":{},"sharedRoots":[]}).to_string()]).unwrap();
+        let mut record = serde_json::json!({"fileHash":"11".repeat(16),"displayName":"Sample.bin","fileSize":1024,"modifiedS":1700000000i64,"aichRoot":null,"uploadPriority":"normal","autoUploadPriority":false,"allTimeUploadedBytes":0,"allTimeUploadRequests":0,"allTimeUploadAccepts":0,"lastUploadRequestMs":0});
+        let tx = source.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO known_files(record,md4,aich) VALUES(?1,X'',X'')")
+                .unwrap();
+            for index in 0..100_001 {
+                record["displayName"] = serde_json::Value::from(format!("Sample {index}.bin"));
+                insert.execute([record.to_string()]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let profile = DaemonProfile::load_for_import(temp.path().join("target")).unwrap();
+        let summary = apply_profile_import(&profile, &artifact, true).unwrap();
+        assert_eq!(summary.imported_known_files, 100_001);
+        assert_eq!(summary.imported_recovery_sets, 0);
+        let target = rusqlite::Connection::open(profile.metadata_path()).unwrap();
+        assert_eq!(
+            target
+                .query_row("SELECT count(*) FROM imported_known_files", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            100_001
+        );
+    }
+
+    #[test]
+    fn sqlite_exchange_reimports_recovery_and_rejects_corruption_without_losing_md4() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact = temp.path().join("hashes.sqlite");
+        let source = rusqlite::Connection::open(&artifact).unwrap();
+        source.execute_batch("CREATE TABLE header(value TEXT); CREATE TABLE known_files(id INTEGER PRIMARY KEY,record TEXT,md4 BLOB,aich BLOB); CREATE TABLE recovery_sets(root BLOB,size_bytes INTEGER); CREATE TABLE recovery_parts(root BLOB,size_bytes INTEGER,part_index INTEGER,leaves BLOB,PRIMARY KEY(root,size_bytes,part_index));").unwrap();
+        let master = hex::encode([7u8; 20]);
+        let header = serde_json::json!({"schema":"emulebb.profile-exchange.v1","targetPlatform":"foreign-platform","sharedRoots":[],"source":{}});
+        source
+            .execute("INSERT INTO header VALUES (?1)", [header.to_string()])
+            .unwrap();
+        let record = serde_json::json!({"fileHash":"11".repeat(16),"displayName":"Sample.bin","fileSize":1024,"modifiedS":1700000000i64,"aichRoot":master,"uploadPriority":"normal","autoUploadPriority":false,"allTimeUploadedBytes":0,"allTimeUploadRequests":0,"allTimeUploadAccepts":0,"lastUploadRequestMs":0});
+        source
+            .execute(
+                "INSERT INTO known_files VALUES(1,?1,X'',X'')",
+                [record.to_string()],
+            )
+            .unwrap();
+        source
+            .execute(
+                "INSERT INTO recovery_sets VALUES (?1,1024)",
+                [[7u8; 20].as_slice()],
+            )
+            .unwrap();
+        source
+            .execute(
+                "INSERT INTO recovery_parts VALUES(?1,1024,0,?1)",
+                [[7u8; 20].as_slice()],
+            )
+            .unwrap();
+        let profile = DaemonProfile::load_for_import(temp.path().join("target")).unwrap();
+        assert!(apply_profile_import(&profile, &artifact, false).is_err());
+        for _ in 0..2 {
+            let summary = apply_profile_import(&profile, &artifact, true).unwrap();
+            assert_eq!(summary.imported_recovery_sets, 1);
+            assert_eq!(summary.rejected_recovery_sets, 0);
+        }
+        source
+            .execute(
+                "UPDATE recovery_parts SET leaves=?1",
+                [[8u8; 20].as_slice()],
+            )
+            .unwrap();
+        let summary = apply_profile_import(&profile, &artifact, true).unwrap();
+        assert_eq!(summary.rejected_recovery_sets, 1);
+        let native = MetadataStore::open(profile.metadata_path()).unwrap();
+        assert_eq!(
+            native.aich_recovery_part(&master, 1024, 0).unwrap(),
+            Some(vec![7; 20])
+        );
+    }
 
     fn small_file() -> ProfileImportKnownFile {
         ProfileImportKnownFile {
