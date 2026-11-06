@@ -221,12 +221,15 @@ impl Ed2kTransferRuntime {
         };
         tokio::task::spawn_blocking(move || {
             metadata.upsert_verified_local_content(&content)?;
-            metadata.store_aich_recovery_set(
+            if let Err(error) = metadata.store_aich_recovery_set(
                 &recovery_root,
                 content.file_size,
                 &recovery_parts,
                 &recovery_roots,
-            )
+            ) {
+                tracing::warn!(%error,"Verified MD4 content retained without AICH recovery cache");
+            }
+            Ok::<(), anyhow::Error>(())
         })
         .await??;
         let metadata = self.metadata.clone();
