@@ -67,9 +67,6 @@ impl Ed2kTransferRuntime {
     }
 
     async fn recheck_verified_partial_pieces(&self, snapshot: Ed2kResumeManifest) -> Result<bool> {
-        if snapshot.source_path.is_some() {
-            return Ok(snapshot.completed);
-        }
         if !snapshot
             .pieces
             .iter()
@@ -149,9 +146,6 @@ impl Ed2kTransferRuntime {
         let (payload_path, expected_size, transfer_dir_id) = {
             let _guard = self.lock_manifest(file_hash).await;
             let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-            if manifest.source_path.is_some() {
-                return Ok(manifest.completed);
-            }
             if !force && !manifest.final_rehash_pending {
                 return Ok(manifest.completed);
             }

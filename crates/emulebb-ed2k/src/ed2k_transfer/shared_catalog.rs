@@ -293,12 +293,12 @@ impl Ed2kTransferRuntime {
         };
         let _guard = self.lock_manifest(&entry.file_hash).await;
         let Some(manifest) = self
-            .load_servable_manifest_optional_unlocked(&entry.file_hash)
+            .load_serving_view_optional_unlocked(&entry.file_hash)
             .await?
         else {
             return Ok(false);
         };
-        if !hydrated_entry_matches_manifest(&entry, &manifest) {
+        if !hydrated_entry_matches_serving_view(&entry, &manifest) {
             return Ok(false);
         }
         let mut catalog = self.shared_catalog.write().await;
@@ -441,9 +441,8 @@ impl Ed2kTransferRuntime {
                 super::transfer_sql::media_from_metadata(cached)
             } else if manifest.completed && refresh_missing_media {
                 let path = manifest
-                    .source_path
+                    .delivered_path
                     .as_deref()
-                    .or(manifest.delivered_path.as_deref())
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| self.payload_path(&manifest.file_hash));
                 let display_name = manifest.display_name.clone();
@@ -493,8 +492,11 @@ impl Ed2kTransferRuntime {
     }
 }
 
-fn hydrated_entry_matches_manifest(entry: &Ed2kSharedEntry, manifest: &Ed2kResumeManifest) -> bool {
-    manifest_has_servable_payload_authority(manifest)
+fn hydrated_entry_matches_serving_view(
+    entry: &Ed2kSharedEntry,
+    manifest: &super::Ed2kFileServingView,
+) -> bool {
+    manifest.has_payload_authority
         && manifest.completed
         && entry.verified_complete
         && entry.file_hash == manifest.file_hash
@@ -514,11 +516,7 @@ fn manifest_has_servable_payload_authority(manifest: &Ed2kResumeManifest) -> boo
     if !manifest.completed {
         return manifest.md4_hashset_acquired && !manifest.verified_ranges.is_empty();
     }
-    if manifest.source_path.is_some() {
-        manifest.source_fingerprint.is_some()
-    } else {
-        manifest.payload_fingerprint.is_some()
-    }
+    manifest.payload_fingerprint.is_some()
 }
 
 fn dedupe_entries(entries: Vec<Ed2kSharedEntry>) -> Vec<Ed2kSharedEntry> {

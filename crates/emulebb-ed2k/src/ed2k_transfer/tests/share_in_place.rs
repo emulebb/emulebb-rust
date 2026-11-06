@@ -7,7 +7,7 @@ use emulebb_kad_proto::Ed2kHash;
 use std::str::FromStr;
 
 use super::super::test_support::admit_local_share;
-use super::super::{ED2K_EMBLOCK_SIZE, Ed2kDeliveryState, Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
+use super::super::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
 use super::write_repeating_pattern_file;
 use crate::paths::unique_test_dir;
 use emulebb_metadata::MetadataSharedDirectoryRoot;
@@ -36,21 +36,16 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     let file_hash = summary.file_hash.clone();
     assert!(runtime.manifest(&file_hash).await.is_err());
     // (1) The read-only protocol view resolves the original verified path.
-    let manifest = runtime.servable_manifest(&file_hash).await.unwrap();
+    let manifest = runtime.serving_view(&file_hash).await.unwrap();
     let cached = runtime
         .metadata
-        .local_file_instance(manifest.source_path.as_deref().unwrap())
+        .local_file_instance(manifest.local_path.as_deref().unwrap())
         .unwrap()
         .expect("whole-payload hash pass must cache the verified native path");
     assert_eq!(cached.file_hash, file_hash);
     assert!(manifest.completed, "shared complete file must be completed");
-    assert_eq!(manifest.delivery_state, Ed2kDeliveryState::NotApplicable);
-    assert!(
-        manifest.transfer_row_removed,
-        "shared complete file must stay out of the download queue from its first write",
-    );
     assert_eq!(
-        manifest.source_path.as_deref(),
+        manifest.local_path.as_deref(),
         Some(crate::long_path::long_path(&source_path).as_path()),
         "manifest must record the original on-disk source path",
     );
@@ -196,8 +191,8 @@ async fn non_utf8_local_share_reopens_and_serves_exact_bytes() {
 
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.refresh_complete_shared_catalog().await.unwrap();
-    let manifest = runtime.servable_manifest(&summary.file_hash).await.unwrap();
-    assert_eq!(manifest.source_path.as_deref(), Some(source_path.as_path()));
+    let manifest = runtime.serving_view(&summary.file_hash).await.unwrap();
+    assert_eq!(manifest.local_path.as_deref(), Some(source_path.as_path()));
     assert_eq!(
         runtime
             .read_verified_range(&hash, 0, payload.len() as u64)
@@ -221,9 +216,9 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
         .await
         .unwrap();
     admit_local_share(&runtime, &shared_root, &path).await;
-    let manifest = runtime.servable_manifest(&summary.file_hash).await.unwrap();
-    let native_path = manifest.source_path.unwrap();
-    let fingerprint = manifest.source_fingerprint.unwrap();
+    let manifest = runtime.serving_view(&summary.file_hash).await.unwrap();
+    let native_path = manifest.local_path.unwrap();
+    let fingerprint = manifest.local_fingerprint.unwrap();
     let mut metadata = runtime.metadata.clone();
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
@@ -348,12 +343,9 @@ async fn complete_local_file_never_creates_a_transfer() {
         "Sample.bin"
     );
     drop(catalog);
-    let virtual_manifest = restarted
-        .servable_manifest(&summary.file_hash)
-        .await
-        .unwrap();
+    let virtual_manifest = restarted.serving_view(&summary.file_hash).await.unwrap();
     assert!(virtual_manifest.completed);
-    assert_eq!(virtual_manifest.source_path, Some(native_path));
+    assert_eq!(virtual_manifest.local_path, Some(native_path));
     let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
     assert_eq!(
         restarted

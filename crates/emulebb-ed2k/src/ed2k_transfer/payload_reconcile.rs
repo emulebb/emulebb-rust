@@ -59,9 +59,6 @@ impl Ed2kTransferRuntime {
                 let Some(manifest) = self.load_manifest_optional_unlocked(&file_hash).await? else {
                     continue;
                 };
-                if manifest.source_path.is_some() {
-                    continue;
-                }
                 manifest
             };
 
@@ -252,7 +249,6 @@ async fn verified_recovery_payload(
     manifest: &Ed2kResumeManifest,
 ) -> Result<Option<VerifiedRecoveryPayload>> {
     let (path, recorded_fingerprint) = match manifest.delivery_state {
-        Ed2kDeliveryState::NotApplicable => return Ok(None),
         Ed2kDeliveryState::Delivered => (
             manifest.delivered_path.clone().with_context(|| {
                 format!(
@@ -1295,11 +1291,11 @@ mod tests {
         assert_eq!(report.inspected_downloads, 0);
         assert!(
             runtime
-                .servable_manifest(&shared.file_hash)
+                .serving_view(&shared.file_hash)
                 .await
                 .unwrap()
-                .payload_fingerprint
-                .is_none()
+                .local_fingerprint
+                .is_some()
         );
         assert!(!runtime.transfer_dir(&shared.file_hash).exists());
         assert_eq!(

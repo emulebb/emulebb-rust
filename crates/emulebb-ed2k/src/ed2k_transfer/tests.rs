@@ -1045,7 +1045,7 @@ async fn ingest_local_file_marks_payload_complete_with_stock_aich_identity() {
         "050066b767710d1bd84377e71b1b23e522cce4af"
     );
 
-    let manifest = runtime.servable_manifest(&summary.file_hash).await.unwrap();
+    let manifest = runtime.serving_view(&summary.file_hash).await.unwrap();
     assert!(manifest.completed);
     assert!(manifest.aich_hashset_acquired);
     assert_eq!(

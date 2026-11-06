@@ -107,8 +107,8 @@ pub use model::{
     ED2K_CALLBACK_TICKET_MAX_LIFETIME, Ed2kCallbackDispatchOutcome, Ed2kCallbackDispatchPermit,
     Ed2kCallbackDownload, Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError,
     Ed2kCallbackTicketId, Ed2kCallbackTicketRequest, Ed2kDeliveryOwnership, Ed2kDeliveryState,
-    Ed2kFileNameObservation, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry,
-    Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
+    Ed2kFileNameObservation, Ed2kFileServingView, Ed2kLocalIngestSummary, Ed2kPieceState,
+    Ed2kReloadIndexEntry, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
 pub(crate) use model::{
     Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,

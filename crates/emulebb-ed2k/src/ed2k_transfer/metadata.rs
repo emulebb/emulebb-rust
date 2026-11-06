@@ -18,8 +18,7 @@ use crate::{long_path::long_path, normalize_ed2k_file_name};
 use super::deliver::OwnedDeliveryOutput;
 use super::fs_durability::{NoReplaceMoveOutcome, move_path_no_replace, sync_parent_directory};
 use super::hashset::{
-    decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
-    validate_aich_hashset, validate_md4_hashset,
+    decode_aich_hash_hex, expected_md4_hash_count, validate_aich_hashset, validate_md4_hashset,
 };
 use super::manifest::{manifest_has_structural_progress, piece_count};
 use super::transfer_sql::manifest_from_metadata;
@@ -749,7 +748,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         priority: Option<(&str, bool)>,
         comment_rating: Option<(&str, u8)>,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::Ed2kFileServingView> {
         let _guard = self.lock_manifest(file_hash).await;
         let metadata = self.metadata.clone();
         let lookup_hash = file_hash.to_string();
@@ -783,7 +782,7 @@ impl Ed2kTransferRuntime {
                     ),
                 );
             }
-            return Ok(manifest);
+            return Ok(super::Ed2kFileServingView::from(&manifest));
         }
         let metadata = self.metadata.clone();
         let owned_hash = file_hash.to_string();
@@ -803,7 +802,7 @@ impl Ed2kTransferRuntime {
             "shared file is not eligible under an active root"
         );
         let mut manifest = self
-            .load_servable_manifest_optional_unlocked(file_hash)
+            .load_serving_view_optional_unlocked(file_hash)
             .await?
             .with_context(|| format!("missing active local file {file_hash}"))?;
         if let Some((value, auto)) = priority {
@@ -1209,9 +1208,7 @@ impl Ed2kTransferRuntime {
     ) -> Result<()> {
         let delivered_output = if let Some(attempted_output) = attempted_output {
             Some(attempted_output)
-        } else if manifest.source_path.is_none()
-            && manifest.delivery_ownership == super::Ed2kDeliveryOwnership::Owned
-        {
+        } else if manifest.delivery_ownership == super::Ed2kDeliveryOwnership::Owned {
             Some(OwnedDeliveryOutput {
                 path: manifest.delivered_path.clone().with_context(|| {
                     format!("owned delivered transfer {file_hash} has no output path")
@@ -1235,15 +1232,15 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
-    /// Return local manifest-backed file metadata even when only part of the
+    /// Return local serving metadata even when only part of the
     /// payload has been verified already.
     pub async fn local_entry(&self, file_hash: &Ed2kHash) -> Result<Option<Ed2kSharedEntry>> {
         let hash_hex = file_hash.to_string();
         let _guard = self.lock_manifest(&hash_hex).await;
         Ok(self
-            .load_servable_manifest_optional_unlocked(&hash_hex)
+            .load_serving_view_optional_unlocked(&hash_hex)
             .await?
-            .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest)))
+            .map(|view| Ed2kSharedEntry::from_serving_view(&view)))
     }
 
     /// Like [`Self::local_entry`] but only returns an entry that may be served
@@ -1263,8 +1260,8 @@ impl Ed2kTransferRuntime {
 
     /// Whether we share or are downloading the file with this hash.
     ///
-    /// A manifest exists for both shared files and in-progress downloads, so a
-    /// present manifest mirrors the oracle ListenSocket.cpp OP_CALLBACK guard
+    /// A serving view resolves shared files and in-progress downloads, mirroring
+    /// the oracle ListenSocket.cpp OP_CALLBACK guard
     /// (`sharedfiles->GetFileByID(...) != NULL || downloadqueue->GetFileByID(...)
     /// != NULL`). Used to reject buddy-relayed callbacks for files we do not own.
     pub async fn owns_file(&self, file_hash: &Ed2kHash) -> bool {
@@ -1278,10 +1275,7 @@ impl Ed2kTransferRuntime {
     pub async fn md4_hashset(&self, file_hash: &Ed2kHash) -> Result<Option<Vec<[u8; 16]>>> {
         let hash_hex = file_hash.to_string();
         let _guard = self.lock_manifest(&hash_hex).await;
-        let Some(manifest) = self
-            .load_servable_manifest_optional_unlocked(&hash_hex)
-            .await?
-        else {
+        let Some(manifest) = self.load_serving_view_optional_unlocked(&hash_hex).await? else {
             return Ok(None);
         };
         if !manifest.md4_hashset_acquired {
@@ -1310,16 +1304,25 @@ impl Ed2kTransferRuntime {
     ) -> Result<Option<Ed2kAichHashset>> {
         let hash_hex = file_hash.to_string();
         let _guard = self.lock_manifest(&hash_hex).await;
-        let Some(manifest) = self
-            .load_servable_manifest_optional_unlocked(&hash_hex)
-            .await?
-        else {
+        let Some(manifest) = self.load_serving_view_optional_unlocked(&hash_hex).await? else {
             return Ok(None);
         };
-        if !manifest.aich_hashset_acquired || manifest.aich_root.is_none() {
+        if !manifest.aich_hashset_acquired {
             return Ok(None);
         }
-        decode_manifest_aich_hashset(&manifest).map(Some)
+        let Some(root) = manifest.aich_root.as_deref() else {
+            return Ok(None);
+        };
+        let hashset = Ed2kAichHashset {
+            master_hash: decode_aich_hash_hex(root)?,
+            part_hashes: manifest
+                .aich_hashset
+                .iter()
+                .map(|hash| decode_aich_hash_hex(hash))
+                .collect::<Result<Vec<_>>>()?,
+        };
+        validate_aich_hashset(manifest.file_size, &hashset)?;
+        Ok(Some(hashset))
     }
 
     /// Build the OP_AICHANSWER recovery-data body for `part` of a locally
@@ -1342,10 +1345,7 @@ impl Ed2kTransferRuntime {
         let hash_hex = file_hash.to_string();
         let (file_size, aich_root) = {
             let _guard = self.lock_manifest(&hash_hex).await;
-            let Some(manifest) = self
-                .load_servable_manifest_optional_unlocked(&hash_hex)
-                .await?
-            else {
+            let Some(manifest) = self.load_serving_view_optional_unlocked(&hash_hex).await? else {
                 return Ok(None);
             };
             // Only serve from a fully verified (shared) file.
@@ -1389,9 +1389,9 @@ impl Ed2kTransferRuntime {
 
     /// Resolve a read-only protocol view for a download or eligible complete
     /// local file without persisting a synthetic transfer row.
-    pub async fn servable_manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
+    pub async fn serving_view(&self, file_hash: &str) -> Result<super::Ed2kFileServingView> {
         let _guard = self.lock_manifest(file_hash).await;
-        self.load_servable_manifest_optional_unlocked(file_hash)
+        self.load_serving_view_optional_unlocked(file_hash)
             .await?
             .with_context(|| format!("missing ED2K transfer or shared file {file_hash}"))
     }

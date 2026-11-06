@@ -73,7 +73,6 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         delivery_state: Ed2kDeliveryState::Pending,
         delivery_ownership: super::super::Ed2kDeliveryOwnership::None,
         delivered_path: None,
-        source_path: None,
         source_fingerprint: None,
         payload_fingerprint: None,
     }

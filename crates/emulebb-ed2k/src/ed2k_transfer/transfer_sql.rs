@@ -19,11 +19,6 @@ pub(super) const MEDIA_METADATA_EXTRACTOR_VERSION: u32 = 1;
 pub(super) fn manifest_to_metadata(
     manifest: &Ed2kResumeManifest,
 ) -> Result<MetadataTransferManifest> {
-    anyhow::ensure!(
-        manifest.source_path.is_none()
-            && manifest.delivery_state != Ed2kDeliveryState::NotApplicable,
-        "local library view cannot be persisted as a download transfer"
-    );
     Ok(MetadataTransferManifest {
         file_hash: manifest.file_hash.clone(),
         display_name: manifest.display_name.clone(),
@@ -82,7 +77,6 @@ pub(super) fn manifest_to_metadata(
         control_state: manifest.control_state.clone(),
         transfer_row_removed: manifest.transfer_row_removed,
         delivery_state: match manifest.delivery_state {
-            Ed2kDeliveryState::NotApplicable => unreachable!(),
             Ed2kDeliveryState::Pending => MetadataTransferDeliveryState::Pending,
             Ed2kDeliveryState::Delivered => MetadataTransferDeliveryState::Delivered,
         },
@@ -215,7 +209,6 @@ pub(super) fn manifest_from_metadata(
             MetadataTransferDeliveryOwnership::Unowned => Ed2kDeliveryOwnership::Unowned,
         },
         delivered_path: manifest.delivered_path,
-        source_path: None,
         source_fingerprint: manifest.source_fingerprint,
         payload_fingerprint: manifest.payload_fingerprint,
     })

@@ -3,7 +3,6 @@
 use std::{
     collections::HashSet,
     path::PathBuf,
-    str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -13,12 +12,10 @@ use emulebb_kad_proto::Ed2kHash;
 use tokio::io::AsyncWriteExt;
 
 use super::manifest::manifest_progress_bytes;
-use super::manifest::{piece_count, rebuild_verified_ranges};
 use super::transfer_sql::{manifest_from_metadata, manifest_to_metadata, piece_to_metadata};
 use super::{
-    ED2K_EMBLOCK_SIZE, Ed2kDeliveryState, Ed2kManifestCheckpointState, Ed2kPieceState,
-    Ed2kResumeManifest, Ed2kTransferJob, Ed2kTransferRootReconciliation, Ed2kTransferRuntime,
-    Ed2kTransferState, PAYLOAD_FILE_NAME, expected_piece_length, new_transfer_job,
+    ED2K_EMBLOCK_SIZE, Ed2kManifestCheckpointState, Ed2kResumeManifest, Ed2kTransferJob,
+    Ed2kTransferRootReconciliation, Ed2kTransferRuntime, PAYLOAD_FILE_NAME,
 };
 
 const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
@@ -266,10 +263,10 @@ impl Ed2kTransferRuntime {
 
     /// Resolve a complete local share for read-only protocol views without
     /// introducing it into transfer mutation or checkpoint paths.
-    pub(super) async fn load_servable_manifest_optional_unlocked(
+    pub(super) async fn load_serving_view_optional_unlocked(
         &self,
         file_hash: &str,
-    ) -> Result<Option<Ed2kResumeManifest>> {
+    ) -> Result<Option<super::Ed2kFileServingView>> {
         let metadata = self.metadata.clone();
         let owned_hash = file_hash.to_string();
         let local =
@@ -290,50 +287,45 @@ impl Ed2kTransferRuntime {
         } else {
             None
         };
-        let local_manifest = local.map(|content| {
-            let file_hash = Ed2kHash::from_str(&content.file_hash)
-                .expect("SQLite decoded a validated ED2K hash");
+        let local_view = local.map(|content| {
             let display_name = content
                 .path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or(content.display_name);
-            let job = new_transfer_job(file_hash, display_name, content.file_size);
-            let mut manifest = Ed2kResumeManifest::new(&job);
-            manifest.source_path = Some(content.path);
-            manifest.source_fingerprint = Some(content.fingerprint);
-            manifest.delivery_state = Ed2kDeliveryState::NotApplicable;
-            manifest.transfer_row_removed = true;
-            manifest.completed = true;
-            manifest.md4_hashset_acquired = true;
-            manifest.md4_hashset = content.md4_hashset;
-            manifest.aich_hashset_acquired = true;
-            manifest.aich_root = Some(content.aich_root);
-            manifest.aich_hashset = content.aich_hashset;
-            manifest.upload_priority = content.upload_priority;
-            manifest.auto_upload_priority = content.auto_upload_priority;
-            manifest.comment = content.comment;
-            manifest.rating = content.rating;
-            manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
-                .map(|piece_index| Ed2kPieceState {
-                    piece_index,
-                    state: Ed2kTransferState::Verified,
-                    bytes_written: expected_piece_length(
-                        manifest.file_size,
-                        manifest.piece_size,
-                        u64::from(piece_index),
-                    ),
-                    block_bitmap: None,
-                    ich_corrupted: false,
-                })
-                .collect();
-            rebuild_verified_ranges(&mut manifest);
-            manifest
+            super::Ed2kFileServingView {
+                file_hash: content.file_hash,
+                display_name,
+                file_size: content.file_size,
+                piece_size: content.part_size,
+                completed: true,
+                md4_hashset_acquired: true,
+                md4_hashset: content.md4_hashset,
+                aich_hashset_acquired: true,
+                aich_root: Some(content.aich_root),
+                aich_hashset: content.aich_hashset,
+                verified_ranges: vec![super::Ed2kSharedRange {
+                    start: 0,
+                    end: content.file_size,
+                }],
+                sources: Vec::new(),
+                upload_priority: content.upload_priority,
+                auto_upload_priority: content.auto_upload_priority,
+                comment: content.comment,
+                rating: content.rating,
+                local_path: Some(content.path),
+                local_fingerprint: Some(content.fingerprint),
+                has_payload_authority: true,
+            }
         });
-        if local_manifest.is_some() {
-            Ok(local_manifest)
+        if local_view.is_some() {
+            Ok(local_view)
         } else {
-            self.load_manifest_optional_unlocked(file_hash).await
+            Ok(self
+                .load_manifest_optional_unlocked(file_hash)
+                .await?
+                .as_ref()
+                .map(super::Ed2kFileServingView::from))
         }
     }
 

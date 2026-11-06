@@ -61,8 +61,6 @@ static DELIVERY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// Outcome of a delivery attempt for one completed transfer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ed2kDeliveryOutcome {
-    /// This is a share-in-place file and has no delivery lifecycle.
-    NotRequired,
     /// The transfer is not complete yet; nothing was delivered.
     NotCompleted,
     /// Already delivered; the recorded file still exists (idempotent no-op).
@@ -90,8 +88,7 @@ impl Ed2kTransferRuntime {
     /// canonical name, recording the delivered path on the manifest so the
     /// operation is idempotent across restarts.
     ///
-    /// Returns [`Ed2kDeliveryOutcome::NotRequired`] for a share-in-place file,
-    /// [`Ed2kDeliveryOutcome::NotCompleted`] when a download is not yet fully
+    /// Returns [`Ed2kDeliveryOutcome::NotCompleted`] when a download is not yet fully
     /// verified, [`Ed2kDeliveryOutcome::AlreadyDelivered`] when a previously
     /// recorded delivered file still exists, or
     /// [`Ed2kDeliveryOutcome::Delivered`] when a new file was created. The heavy
@@ -116,14 +113,10 @@ impl Ed2kTransferRuntime {
         ) = {
             let _guard = self.lock_manifest(file_hash).await;
             let manifest = self.load_manifest_unlocked(file_hash).await?;
-            if manifest.delivery_state == super::Ed2kDeliveryState::NotApplicable {
-                return Ok(Ed2kDeliveryOutcome::NotRequired);
-            }
             if !manifest.completed || manifest.final_rehash_pending {
                 return Ok(Ed2kDeliveryOutcome::NotCompleted);
             }
             let recorded_path = match manifest.delivery_state {
-                super::Ed2kDeliveryState::NotApplicable => unreachable!(),
                 super::Ed2kDeliveryState::Pending => None,
                 super::Ed2kDeliveryState::Delivered => {
                     Some(manifest.delivered_path.clone().with_context(|| {
