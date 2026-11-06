@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use emulebb_metadata::{
-    MetadataImportedKnownFileEntry, MetadataVerifiedLocalContent, NativeFileFingerprint,
-    NativeFileIdentity, NativeFileTimestamp, NativePath,
+    MetadataVerifiedLocalContent, NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp,
+    NativePath,
 };
 
 use crate::long_path::long_path;
@@ -51,7 +51,7 @@ impl Ed2kTransferRuntime {
         source_path: &Path,
         display_name: &str,
     ) -> Result<Ed2kLocalIngestSummary> {
-        self.ingest_local_file_inner(source_path, display_name, None, None)
+        self.ingest_local_file_inner(source_path, display_name, None)
             .await
     }
 
@@ -61,7 +61,7 @@ impl Ed2kTransferRuntime {
         display_name: &str,
         observer: LocalIngestProgressObserver,
     ) -> Result<Ed2kLocalIngestSummary> {
-        self.ingest_local_file_inner(source_path, display_name, Some(observer), None)
+        self.ingest_local_file_inner(source_path, display_name, Some(observer))
             .await
     }
 
@@ -70,7 +70,6 @@ impl Ed2kTransferRuntime {
         source_path: &Path,
         display_name: &str,
         observer: Option<LocalIngestProgressObserver>,
-        expected_hash: Option<&str>,
     ) -> Result<Ed2kLocalIngestSummary> {
         let display_name = display_name.trim();
         if display_name.is_empty() {
@@ -191,12 +190,6 @@ impl Ed2kTransferRuntime {
         .await
         .context("ED2K/AICH hashing task panicked")??;
         let file_hash = hashsets.file_hash.to_string();
-        if let Some(expected_hash) = expected_hash {
-            anyhow::ensure!(
-                file_hash == expected_hash,
-                "imported known file does not match verified local payload"
-            );
-        }
         let aich_root = hex::encode(hashsets.aich_hashset.master_hash);
         let content = MetadataVerifiedLocalContent {
             file_hash: file_hash.clone(),
@@ -204,7 +197,7 @@ impl Ed2kTransferRuntime {
             file_size: source_fingerprint.size_bytes,
             part_size: ED2K_PART_SIZE,
             md4_hashset: hashsets.md4_hashset.iter().map(hex::encode).collect(),
-            aich_root: aich_root.clone(),
+            aich_root: Some(aich_root.clone()),
             aich_hashset: hashsets
                 .aich_hashset
                 .part_hashes
@@ -246,29 +239,6 @@ impl Ed2kTransferRuntime {
             aich_hashset_count: hashsets.aich_hashset.part_hashes.len(),
             path: NativePath::from(source_path.as_path()).display_path(),
         })
-    }
-
-    /// Verify an imported stock `known.met` candidate against the full payload
-    /// before recording it as local content.
-    pub async fn promote_imported_known_file(
-        &self,
-        entry: MetadataImportedKnownFileEntry,
-        source_path: &Path,
-        _source_fingerprint: Option<NativeFileFingerprint>,
-    ) -> Result<Ed2kLocalIngestSummary> {
-        let summary = self
-            .ingest_local_file_inner(
-                source_path,
-                &entry.display_name,
-                None,
-                Some(&entry.file_hash),
-            )
-            .await?;
-        anyhow::ensure!(
-            summary.file_hash == entry.file_hash && summary.file_size == entry.file_size,
-            "imported known file does not match verified local payload"
-        );
-        Ok(summary)
     }
 }
 

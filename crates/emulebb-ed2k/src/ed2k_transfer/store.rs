@@ -299,8 +299,10 @@ impl Ed2kTransferRuntime {
                 completed: true,
                 md4_hashset_acquired: true,
                 md4_hashset: content.md4_hashset,
-                aich_hashset_acquired: true,
-                aich_root: Some(content.aich_root),
+                aich_hashset_acquired: content.aich_root.is_some()
+                    && (content.file_size <= super::ED2K_PART_SIZE
+                        || !content.aich_hashset.is_empty()),
+                aich_root: content.aich_root,
                 aich_hashset: content.aich_hashset,
                 verified_ranges: vec![super::Ed2kSharedRange {
                     start: 0,

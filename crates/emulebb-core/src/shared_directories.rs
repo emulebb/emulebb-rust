@@ -1225,12 +1225,28 @@ async fn plan_incremental_reload(
     plan_incremental_reload_with_pruning(core, files, true).await
 }
 
+/// Accept imported hash matches and report pending work without payload reads.
+pub(crate) async fn reconcile_shared_files(
+    core: &EmulebbCore,
+) -> Result<SharedDirectoryReloadProgress> {
+    let _guard = core.shared_reload_gate.lock().await;
+    let scan = scan_shared_files(core).await?;
+    let mut plan = plan_incremental_reload_with_pruning(core, scan.files, false).await?;
+    plan.stats.skipped_intake_count = scan.skipped_intake_count;
+    Ok(plan.stats.into_diagnostics("idle", false, false))
+}
+
 async fn plan_incremental_reload_with_pruning(
     core: &EmulebbCore,
     files: Vec<ScannedSharedFile>,
     prune_missing_sources: bool,
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.verified_local_reload_index().await?;
+    let imported = core
+        .ed2k_transfers
+        .imported_known_file_identity_index()
+        .await?;
+    let metadata = core.metadata_store.clone();
     let failure_entries = load_shared_source_failures(core).await?;
     tokio::task::spawn_blocking(move || {
         let failures = failure_entries
@@ -1247,6 +1263,7 @@ async fn plan_incremental_reload_with_pruning(
         };
         let mut to_hash = Vec::new();
         let mut reused_shares = Vec::new();
+        let mut accepted_imports = Vec::new();
         let mut scanned_source_keys = HashSet::with_capacity(files.len());
         for file in files {
             let ScannedSharedFile {
@@ -1257,6 +1274,13 @@ async fn plan_incremental_reload_with_pruning(
                 source_fingerprint: fingerprint,
             } = file;
             scanned_source_keys.insert(key.clone());
+            if fingerprint.is_none() {
+                // WHY: failure to inspect a file is not evidence of changed
+                // bytes. Retry its metadata later without scheduling a payload read.
+                stats.missing_fingerprint_count += 1;
+                stats.stat_failed_count += 1;
+                continue;
+            }
             if unchanged_failure(&failures, &key, fingerprint.as_ref()) {
                 stats.skipped_failed_count += 1;
                 continue;
@@ -1310,6 +1334,36 @@ async fn plan_incremental_reload_with_pruning(
                     }
                 }
                 None => {
+                    if let Some(current) = fingerprint.as_ref() {
+                        let name = NativePath::from(path.as_path()).display_file_name();
+                        let identity = (name.unwrap_or_default(), size, current.modified.seconds);
+                        if let Some(entries) = imported.get(&identity) {
+                            let entry = &entries[0];
+                            if entries.iter().any(|other| {
+                                other.file_hash != entry.file_hash
+                                    || other.md4_hashset != entry.md4_hashset
+                                    || other.aich_root != entry.aich_root
+                                    || other.aich_hashset != entry.aich_hashset
+                            }) {
+                                metadata.upsert_shared_source_failure(
+                                    &key,
+                                    size,
+                                    Some(current),
+                                    "ambiguous imported hash records",
+                                )?;
+                                stats.skipped_failed_count += 1;
+                                continue;
+                            }
+                            accepted_imports.push((entry.clone(), key.clone(), current.clone()));
+                            stats.reused_count += 1;
+                            reused_shares.push(ReusedReloadShare {
+                                file_hash: entry.file_hash.clone(),
+                                source_path: path,
+                                source_fingerprint: fingerprint,
+                            });
+                            continue;
+                        }
+                    }
                     stats.planned_hash_count += 1;
                     stats.new_count += 1;
                     to_hash.push(reload_hash_target(
@@ -1324,6 +1378,7 @@ async fn plan_incremental_reload_with_pruning(
                 }
             }
         }
+        metadata.accept_imported_local_files(&accepted_imports)?;
         let kept_hashes = reused_shares
             .iter()
             .map(|share| share.file_hash.to_ascii_lowercase())
@@ -1346,14 +1401,13 @@ async fn plan_incremental_reload_with_pruning(
         };
         stats.pruned_count = pruned_hashes.len();
         stats.planned_hash_bytes = to_hash.iter().map(|target| target.file_size).sum();
-        ReloadPlan {
+        Ok::<_, anyhow::Error>(ReloadPlan {
             to_hash,
             reused_shares,
             stats,
-        }
+        })
     })
-    .await
-    .map_err(Into::into)
+    .await?
 }
 
 async fn load_shared_source_failures(

@@ -461,7 +461,7 @@ fn deleting_download_preserves_same_hash_local_content() {
         file_size: manifest.file_size,
         part_size: manifest.piece_size,
         md4_hashset: vec!["44444444444444444444444444444444".to_string()],
-        aich_root: "1111111111111111111111111111111111111111".to_string(),
+        aich_root: Some("1111111111111111111111111111111111111111".to_string()),
         aich_hashset: vec!["5555555555555555555555555555555555555555".to_string()],
         path: path.clone(),
         fingerprint: fingerprint(manifest.file_size, 200),

@@ -953,9 +953,11 @@ impl Ed2kTransferRuntime {
             file_size: manifest.file_size,
             part_size: manifest.piece_size,
             md4_hashset: manifest.md4_hashset,
-            aich_root: manifest
-                .aich_root
-                .context("delivered download has no AICH root")?,
+            aich_root: Some(
+                manifest
+                    .aich_root
+                    .context("delivered download has no AICH root")?,
+            ),
             aich_hashset: manifest.aich_hashset,
             path: path.clone(),
             fingerprint: fingerprint.clone(),
