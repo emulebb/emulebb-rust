@@ -3,7 +3,7 @@ use crate::{
     MetadataStore, MetadataVerifiedLocalContent,
     store::{decode_fixed_hex, unix_ms},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
 /// One complete, protocol-validated recovery set for a bounded import batch.
@@ -51,6 +51,19 @@ impl MetadataStore {
                 None
             }
             Err(error) => {
+                // WHY: SQLITE_FULL/IO errors may abort the entire transaction,
+                // removing the savepoint and staged MD4 rows together. While
+                // this process is alive, retry only the small verified metadata
+                // write; the successful path remains one atomic transaction.
+                if save.is_autocommit() {
+                    drop(save);
+                    drop(tx);
+                    drop(connection);
+                    self.upsert_verified_local_content(content).context(
+                        "failed to retain verified MD4 after recovery transaction abort",
+                    )?;
+                    return Ok(Some(error));
+                }
                 save.rollback()?;
                 drop(save);
                 Some(error)
@@ -251,15 +264,19 @@ mod tests {
             parts: vec![vec![0x33; 40]],
             part_roots: vec![[0x22; 20]],
         };
-        // Simulate transaction loss after native content has been written but
-        // before recovery can commit. Neither half may survive that rollback.
-        db.connection().unwrap().execute_batch("CREATE TRIGGER abort_cache BEFORE INSERT ON aich_recovery_parts BEGIN SELECT RAISE(ROLLBACK, 'injected transaction loss'); END;").unwrap();
+        // Simulate SQLite aborting the entire transaction during optional
+        // cache persistence. The live process can still retain MD4 without
+        // rereading bytes, and no partial recovery rows may survive.
+        db.connection().unwrap().execute_batch("CREATE TRIGGER abort_cache BEFORE INSERT ON aich_recovery_parts BEGIN SELECT RAISE(ROLLBACK, 'injected cache transaction abort'); END;").unwrap();
         assert!(
             db.upsert_verified_local_content_with_recovery(&content, &set)
-                .is_err()
+                .unwrap()
+                .is_some()
         );
-        assert_eq!(db.table_count("verified_local_content").unwrap(), 0);
+        assert_eq!(db.table_count("verified_local_content").unwrap(), 1);
         assert_eq!(db.table_count("aich_recovery_sets").unwrap(), 0);
+        assert_eq!(db.table_count("aich_recovery_parts").unwrap(), 0);
+        assert_eq!(db.missing_live_aich_recovery_count().unwrap(), 1);
         db.connection()
             .unwrap()
             .execute_batch("DROP TRIGGER abort_cache;")
