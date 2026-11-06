@@ -214,9 +214,19 @@ impl Ed2kTransferRuntime {
         let metadata = self.metadata.clone();
         let recovery_root = aich_root.clone();
         let recovery_parts = hashsets.recovery_parts;
+        let recovery_roots = if hashsets.aich_hashset.part_hashes.is_empty() {
+            vec![hashsets.aich_hashset.master_hash]
+        } else {
+            hashsets.aich_hashset.part_hashes.clone()
+        };
         tokio::task::spawn_blocking(move || {
             metadata.upsert_verified_local_content(&content)?;
-            metadata.store_aich_recovery_set(&recovery_root, content.file_size, &recovery_parts)
+            metadata.store_aich_recovery_set(
+                &recovery_root,
+                content.file_size,
+                &recovery_parts,
+                &recovery_roots,
+            )
         })
         .await??;
         let metadata = self.metadata.clone();

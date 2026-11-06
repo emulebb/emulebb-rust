@@ -115,6 +115,27 @@ impl MetadataStore {
             // native, so a newly mapped second path can reuse the same hashes.
             upsert_imported_known_file_tx(&tx, entry, now)?;
             if already_native {
+                if let Some(root) = entry.aich_root.as_deref() {
+                    let root = decode_fixed_hex(root, 20, "AICH root")?;
+                    let (id, size, old): (i64, i64, Option<Vec<u8>>) = tx.query_row(
+                        "SELECT id,size_bytes,aich_root FROM known_files WHERE ed2k_hash=?1",
+                        params![hash],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?;
+                    anyhow::ensure!(
+                        size == entry.file_size as i64,
+                        "imported identity size conflicts with native content"
+                    );
+                    anyhow::ensure!(
+                        old.as_ref().is_none_or(|old| old == &root),
+                        "imported AICH conflicts with native content"
+                    );
+                    tx.execute(
+                        "UPDATE known_files SET aich_root=coalesce(aich_root,?2) WHERE id=?1",
+                        params![id, root],
+                    )?;
+                    tx.execute("UPDATE verified_local_content SET aich_root=coalesce(aich_root,?2) WHERE known_file_id=?1",params![id,root])?;
+                }
                 skipped_native_known_files += 1;
                 continue;
             }

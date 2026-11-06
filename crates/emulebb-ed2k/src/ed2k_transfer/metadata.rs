@@ -1339,11 +1339,10 @@ impl Ed2kTransferRuntime {
         part: u16,
         requested_master_hash: [u8; 20],
     ) -> Result<Option<Vec<u8>>> {
-        use super::aich_recovery::AichRecoveryHashSet;
         use super::{ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE};
 
         let hash_hex = file_hash.to_string();
-        let (file_size, aich_root, part_roots) = {
+        let (file_size, aich_root) = {
             let _guard = self.lock_manifest(&hash_hex).await;
             let Some(manifest) = self.load_serving_view_optional_unlocked(&hash_hex).await? else {
                 return Ok(None);
@@ -1356,16 +1355,7 @@ impl Ed2kTransferRuntime {
                 return Ok(None);
             };
             let master = decode_aich_hash_hex(root)?;
-            let roots = if manifest.file_size <= ED2K_PART_SIZE {
-                vec![master]
-            } else {
-                manifest
-                    .aich_hashset
-                    .iter()
-                    .map(|hash| decode_aich_hash_hex(hash))
-                    .collect::<Result<Vec<_>>>()?
-            };
-            (manifest.file_size, master, roots)
+            (manifest.file_size, master)
         };
 
         // master ProcessAICHRequest guard: file size > PARTSIZE * nPart + EMBLOCKSIZE
@@ -1376,28 +1366,27 @@ impl Ed2kTransferRuntime {
             return Ok(None);
         }
 
+        let Some(permit) = super::aich_answer_cache::try_work() else {
+            return Ok(None);
+        };
         // WHY: native fingerprint checks still gate sharing, but a network
         // request must never cause payload hashing merely to rebuild metadata.
         let Some(_reader) = self.open_verified_range_reader(file_hash).await? else {
             return Ok(None);
         };
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            let Some(leaves) =
-                metadata.aich_recovery_part(&hex::encode(aich_root), file_size, part)?
-            else {
-                return Ok(None);
-            };
-            let mut set = AichRecoveryHashSet::from_cached_part(
-                file_size,
-                aich_root,
-                &part_roots,
-                part,
-                &leaves,
-            )?;
-            set.create_part_recovery_data(u64::from(part)).map(Some)
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            super::aich_answer_cache::answer(&metadata, aich_root, file_size, part)
         })
-        .await?
+        .await;
+        match result {
+            Ok(Ok(answer)) => Ok(answer),
+            other => {
+                tracing::warn!(?other, "AICH recovery cache unavailable");
+                Ok(None)
+            }
+        }
     }
 
     /// Returns a persisted download job manifest. Complete local content is

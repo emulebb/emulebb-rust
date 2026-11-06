@@ -6,9 +6,7 @@ use sha1::Sha1;
 
 use emulebb_kad_proto::Ed2kHash;
 
-use super::{
-    ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kAichHashset, Ed2kResumeManifest, PAYLOAD_FILE_NAME,
-};
+use super::{ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kAichHashset, Ed2kResumeManifest};
 
 pub(super) struct Ed2kPayloadHashsets {
     pub recovery_parts: Vec<Vec<u8>>,
@@ -333,25 +331,6 @@ pub(super) fn reconstruct_aich_root_from_part_hashes(
     }
 
     build_part_root(0, file_size, true, part_hashes)
-}
-
-pub(super) fn refresh_completed_manifest_aich_hashset(
-    transfer_dir: &Path,
-    manifest: &mut Ed2kResumeManifest,
-) -> Result<()> {
-    // WHY: a peer may supply only an AICH root. A completed local file needs
-    // its own verified hashset before it can be promoted without rereading
-    // the delivered output. Keep an acquired set; synthesize any missing set
-    // from the already verified internal payload at completion.
-    if manifest.aich_root.is_some() && manifest.aich_hashset_acquired {
-        return Ok(());
-    }
-    let payload_path = transfer_dir.join(PAYLOAD_FILE_NAME);
-    let aich_hashset = build_aich_hashset_from_payload(&payload_path, manifest.file_size)?;
-    manifest.aich_root = Some(hex::encode(aich_hashset.master_hash));
-    manifest.aich_hashset = aich_hashset.part_hashes.iter().map(hex::encode).collect();
-    manifest.aich_hashset_acquired = true;
-    Ok(())
 }
 
 pub(super) fn build_aich_hashset_from_payload(
