@@ -145,6 +145,8 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
         .unwrap();
         let shares = core.reload_shared_directories().await.unwrap();
         let first_share = require_share_by_name(&shares, "Persisted Unicode äöü.bin");
+        core.stop_shared_directory_monitor();
+        wait_for_hashing_idle(&core).await;
         // Share-in-place: the file is seeded directly from its original on-disk
         // path and must NOT be copied into the internal piece store.
         assert_no_piece_store_copy(&transfer_root, &first_share);
@@ -497,7 +499,13 @@ async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
 /// finished the whole library), or panic after a generous timeout.
 async fn wait_for_hashing_idle(core: &EmulebbCore) {
     for _ in 0..600 {
-        if core.shared_directories().await.hashing_count == 0 {
+        let directories = core.shared_directories().await;
+        let reload = directories.reload_progress;
+        if directories.hashing_count == 0
+            && !reload.running
+            && !reload.pending
+            && reload.phase == "idle"
+        {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

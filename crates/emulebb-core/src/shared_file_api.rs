@@ -285,7 +285,7 @@ impl EmulebbCore {
         }
     }
 
-    fn local_share_from_entry(&self, entry: MetadataLocalShareEntry) -> LocalShare {
+    pub(crate) fn local_share_from_entry(&self, entry: MetadataLocalShareEntry) -> LocalShare {
         LocalShare {
             hash: entry.file_hash.clone(),
             name: entry.display_name.clone(),
