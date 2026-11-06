@@ -13,6 +13,13 @@ pub struct MetadataAichRecoverySet {
 }
 
 impl MetadataStore {
+    /// Recovery imports only enrich live accepted content, never unmatched staging rows.
+    pub fn has_live_aich_content(&self, root: &[u8], size: i64) -> Result<bool> {
+        Ok(self.connection()?.query_row(
+            "SELECT 1 FROM verified_local_content c JOIN known_files f ON f.id=c.known_file_id WHERE c.aich_root=?1 AND f.size_bytes=?2 LIMIT 1",
+            params![root,size], |_|Ok(()),
+        ).optional()?.is_some())
+    }
     /// Atomically retain a complete set whose tree was validated by the protocol layer.
     /// Repeated imports must agree byte-for-byte; paths and aliases share this set.
     pub fn store_aich_recovery_set(
@@ -114,18 +121,11 @@ fn write_set(
     // WHY: recovery imports can arrive after aliases have native bindings.
     // Enrich missing part lists by content, without opening or rebinding paths.
     if size > PART {
-        for (query, table, key) in [
-            (
-                "SELECT id FROM imported_known_files WHERE aich_root=?1 AND size_bytes=?2",
-                "imported_known_file_aich_hashes",
-                "imported_known_file_id",
-            ),
-            (
-                "SELECT c.known_file_id FROM verified_local_content c JOIN known_files f ON f.id=c.known_file_id WHERE c.aich_root=?1 AND f.size_bytes=?2",
-                "verified_local_aich_hashes",
-                "known_file_id",
-            ),
-        ] {
+        for (query, table, key) in [(
+            "SELECT c.known_file_id FROM verified_local_content c JOIN known_files f ON f.id=c.known_file_id WHERE c.aich_root=?1 AND f.size_bytes=?2",
+            "verified_local_aich_hashes",
+            "known_file_id",
+        )] {
             let mut ids = conn.prepare(query)?;
             let ids = ids
                 .query_map(params![root, size as i64], |row| row.get::<_, i64>(0))?
@@ -162,9 +162,9 @@ fn write_set(
 mod tests {
     use super::*;
     #[test]
-    fn complete_recovery_enriches_alias_part_lists_and_survives_hash_only_reimport() {
+    fn complete_recovery_enriches_live_content_shared_by_multiple_paths() {
         let db = MetadataStore::in_memory().unwrap();
-        let first = crate::MetadataImportedKnownFileEntry {
+        let first = crate::MetadataFileImportRecord {
             file_hash: "11".repeat(16),
             display_name: "Sample.bin".to_string(),
             file_size: 9_728_001,
@@ -181,11 +181,24 @@ mod tests {
         };
         let mut alias = first.clone();
         alias.display_name = "Alias.bin".to_string();
-        let import = crate::MetadataProfileImport {
-            known_files: vec![first, alias],
-            shared_roots: Vec::new(),
+        let fingerprint = crate::NativeFileFingerprint {
+            identity: crate::NativeFileIdentity::Unix {
+                device_id: 1,
+                inode_number: 2,
+            },
+            size_bytes: first.file_size,
+            modified: crate::NativeFileTimestamp::new(first.modified_s, 0).unwrap(),
+            changed: None,
         };
-        db.merge_profile_import(&import).unwrap();
+        db.accept_imported_local_files(&[
+            (
+                first.clone(),
+                std::env::temp_dir().join("Sample.bin"),
+                fingerprint.clone(),
+            ),
+            (alias, std::env::temp_dir().join("Alias.bin"), fingerprint),
+        ])
+        .unwrap();
         db.store_aich_recovery_set(
             &"55".repeat(20),
             9_728_001,
@@ -193,10 +206,14 @@ mod tests {
             &[[0x66; 20], [0x77; 20]],
         )
         .unwrap();
-        db.merge_profile_import(&import).unwrap();
-        for entry in db.imported_known_file_entries().unwrap() {
-            assert_eq!(entry.aich_hashset, vec!["66".repeat(20), "77".repeat(20)]);
-        }
+        assert_eq!(
+            db.connection()
+                .unwrap()
+                .query_row("SELECT count(*) FROM verified_local_aich_hashes", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
         assert_eq!(
             db.connection()
                 .unwrap()

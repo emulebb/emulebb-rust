@@ -41,7 +41,6 @@ pub use model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDi
 pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp};
 pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
-pub use profile_import::{MetadataProfileImport, MetadataProfileImportSummary};
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{
@@ -51,7 +50,7 @@ pub use search_store::normalized_search_query;
 pub use store::MetadataStore;
 pub use text::normalize_search_text;
 pub use transfer_model::{
-    MetadataImportedKnownFileEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
+    MetadataFileImportRecord, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
     MetadataTransferCounts, MetadataTransferDeletionTombstone,
     MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
     MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,

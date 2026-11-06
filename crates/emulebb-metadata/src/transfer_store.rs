@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Result, ensure};
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::{
@@ -10,14 +10,13 @@ use crate::{
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_model::{
-        MetadataImportedKnownFileEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
-        MetadataTransferCounts, MetadataTransferDeletionTombstone,
-        MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
-        MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
-        MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
-        MetadataTransferFileNameObservation, MetadataTransferManifest,
-        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
-        MetadataTransferRange, MetadataTransferSource,
+        MetadataSharedSourceFailure, MetadataTransferCatalogEntry, MetadataTransferCounts,
+        MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
+        MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
+        MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
+        MetadataTransferDirectoryDeletionAuthority, MetadataTransferFileNameObservation,
+        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferSource,
     },
 };
 
@@ -697,136 +696,6 @@ impl super::MetadataStore {
                 media.codec,
                 i64::from(media.extractor_version),
                 unix_ms(),
-            ],
-        )?;
-        Ok(changed != 0)
-    }
-
-    pub fn upsert_imported_known_file(&self, entry: &MetadataImportedKnownFileEntry) -> Result<()> {
-        let now = unix_ms();
-        let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        upsert_imported_known_file_tx(&tx, entry, now)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn imported_known_file_identity_matches(
-        &self,
-        display_name: &str,
-        file_size: u64,
-        modified_s: i64,
-    ) -> Result<Vec<MetadataImportedKnownFileEntry>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT id, lower(hex(ed2k_hash)), display_name, size_bytes, modified_s,
-                   CASE WHEN aich_root IS NULL THEN NULL ELSE lower(hex(aich_root)) END,
-                   upload_priority, auto_upload_priority, all_time_uploaded_bytes,
-                   all_time_upload_requests, all_time_upload_accepts,
-                   last_upload_request_ms
-            FROM imported_known_files
-            WHERE display_name = ?1 AND size_bytes = ?2 AND modified_s = ?3
-            ORDER BY id
-            "#,
-        )?;
-        let rows = stmt.query_map(params![display_name, file_size as i64, modified_s], |row| {
-            let id = row.get::<_, i64>(0)?;
-            Ok((
-                id,
-                MetadataImportedKnownFileEntry {
-                    file_hash: row.get(1)?,
-                    display_name: row.get(2)?,
-                    file_size: row.get::<_, i64>(3)? as u64,
-                    modified_s: row.get(4)?,
-                    md4_hashset: Vec::new(),
-                    aich_root: row.get(5)?,
-                    aich_hashset: Vec::new(),
-                    upload_priority: row.get(6)?,
-                    auto_upload_priority: row.get::<_, i64>(7)? != 0,
-                    all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                    all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                    all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
-                    last_upload_request_ms: row.get(11)?,
-                },
-            ))
-        })?;
-        let mut entries = Vec::new();
-        for row in rows {
-            let (id, mut entry) = row?;
-            entry.md4_hashset = imported_md4_hashset(&conn, id)?;
-            entry.aich_hashset = imported_aich_hashset(&conn, id)?;
-            entries.push(entry);
-        }
-        Ok(entries)
-    }
-
-    pub fn imported_known_file_entries(&self) -> Result<Vec<MetadataImportedKnownFileEntry>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT id, lower(hex(ed2k_hash)), display_name, size_bytes, modified_s,
-                   CASE WHEN aich_root IS NULL THEN NULL ELSE lower(hex(aich_root)) END,
-                   upload_priority, auto_upload_priority, all_time_uploaded_bytes,
-                   all_time_upload_requests, all_time_upload_accepts,
-                   last_upload_request_ms
-            FROM imported_known_files
-            ORDER BY id
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let id = row.get::<_, i64>(0)?;
-            Ok((
-                id,
-                MetadataImportedKnownFileEntry {
-                    file_hash: row.get(1)?,
-                    display_name: row.get(2)?,
-                    file_size: row.get::<_, i64>(3)? as u64,
-                    modified_s: row.get(4)?,
-                    md4_hashset: Vec::new(),
-                    aich_root: row.get(5)?,
-                    aich_hashset: Vec::new(),
-                    upload_priority: row.get(6)?,
-                    auto_upload_priority: row.get::<_, i64>(7)? != 0,
-                    all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                    all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                    all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
-                    last_upload_request_ms: row.get(11)?,
-                },
-            ))
-        })?;
-        let mut entries = Vec::new();
-        for row in rows {
-            let (id, mut entry) = row?;
-            entry.md4_hashset = imported_md4_hashset(&conn, id)?;
-            entry.aich_hashset = imported_aich_hashset(&conn, id)?;
-            entries.push(entry);
-        }
-        Ok(entries)
-    }
-
-    pub fn apply_imported_known_file_stats(
-        &self,
-        file_hash: &str,
-        entry: &MetadataImportedKnownFileEntry,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let conn = self.connection()?;
-        let changed = conn.execute(
-            r#"
-            UPDATE known_files
-            SET all_time_uploaded_bytes = max(all_time_uploaded_bytes, ?2),
-                all_time_upload_requests = max(all_time_upload_requests, ?3),
-                all_time_upload_accepts = max(all_time_upload_accepts, ?4),
-                last_upload_request_ms = max(last_upload_request_ms, ?5)
-            WHERE ed2k_hash = ?1
-            "#,
-            params![
-                hash,
-                entry.all_time_uploaded_bytes as i64,
-                entry.all_time_upload_requests as i64,
-                entry.all_time_upload_accepts as i64,
-                entry.last_upload_request_ms,
             ],
         )?;
         Ok(changed != 0)
@@ -1813,117 +1682,6 @@ impl super::MetadataStore {
     }
 }
 
-pub(crate) fn upsert_imported_known_file_tx(
-    tx: &Transaction<'_>,
-    entry: &MetadataImportedKnownFileEntry,
-    now: i64,
-) -> Result<()> {
-    let hash = decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?;
-    let aich_root = optional_fixed_hex(entry.aich_root.as_deref(), 20, "AICH root")?;
-    let file_size = i64::try_from(entry.file_size)?;
-    let all_time_uploaded_bytes = i64::try_from(entry.all_time_uploaded_bytes)?;
-    let all_time_upload_requests = i64::try_from(entry.all_time_upload_requests)?;
-    let all_time_upload_accepts = i64::try_from(entry.all_time_upload_accepts)?;
-    ensure!(
-        entry.modified_s > 0,
-        "imported known file mtime must be positive"
-    );
-    ensure!(
-        entry.last_upload_request_ms >= 0,
-        "last upload request timestamp must not be negative"
-    );
-    let existing:Option<(i64,Option<Vec<u8>>)>=tx.query_row("SELECT id,aich_root FROM imported_known_files WHERE ed2k_hash=?1 AND display_name=?2 AND size_bytes=?3 AND modified_s=?4",params![hash,entry.display_name,file_size,entry.modified_s],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-    let mut write_md4 = true;
-    let mut write_aich = true;
-    if let Some((id, old_root)) = existing {
-        ensure!(
-            old_root
-                .as_ref()
-                .zip(aich_root.as_ref())
-                .is_none_or(|(old, new)| old == new),
-            "conflicting imported AICH roots"
-        );
-        for (table, column, incoming, width, write) in [
-            (
-                "imported_known_file_md4_hashes",
-                "md4_hash",
-                &entry.md4_hashset,
-                16,
-                &mut write_md4,
-            ),
-            (
-                "imported_known_file_aich_hashes",
-                "aich_hash",
-                &entry.aich_hashset,
-                20,
-                &mut write_aich,
-            ),
-        ] {
-            let mut query = tx.prepare(&format!(
-                "SELECT {column} FROM {table} WHERE imported_known_file_id=?1 ORDER BY part_index"
-            ))?;
-            let old = query
-                .query_map([id], |row| row.get::<_, Vec<u8>>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            if !old.is_empty() {
-                if !incoming.is_empty() {
-                    let new = incoming
-                        .iter()
-                        .map(|value| decode_fixed_hex(value, width, "imported part hash"))
-                        .collect::<Result<Vec<_>>>()?;
-                    ensure!(old == new, "conflicting imported part hashes");
-                }
-                *write = false;
-            }
-        }
-    }
-    // WHY: delete/reinsert cascades away richer recovery-derived part lists.
-    // Keep the alias identity stable and enrich optional data monotonically.
-    let imported_known_file_id:i64=tx.query_row(
-        r#"INSERT INTO imported_known_files(ed2k_hash,display_name,size_bytes,modified_s,aich_root,upload_priority,auto_upload_priority,all_time_uploaded_bytes,all_time_upload_requests,all_time_upload_accepts,last_upload_request_ms,imported_at_ms)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-        ON CONFLICT(ed2k_hash,display_name,size_bytes,modified_s) DO UPDATE SET
-          aich_root=coalesce(imported_known_files.aich_root,excluded.aich_root),
-          upload_priority=excluded.upload_priority,auto_upload_priority=excluded.auto_upload_priority,
-          all_time_uploaded_bytes=max(imported_known_files.all_time_uploaded_bytes,excluded.all_time_uploaded_bytes),
-          all_time_upload_requests=max(imported_known_files.all_time_upload_requests,excluded.all_time_upload_requests),
-          all_time_upload_accepts=max(imported_known_files.all_time_upload_accepts,excluded.all_time_upload_accepts),
-          last_upload_request_ms=max(imported_known_files.last_upload_request_ms,excluded.last_upload_request_ms),
-          imported_at_ms=excluded.imported_at_ms RETURNING id"#,
-        params![hash,entry.display_name,file_size,entry.modified_s,aich_root,entry.upload_priority,bool_to_i64(entry.auto_upload_priority),all_time_uploaded_bytes,all_time_upload_requests,all_time_upload_accepts,entry.last_upload_request_ms,now],|row|row.get(0))?;
-    for (index, hash) in entry.md4_hashset.iter().enumerate().filter(|_| write_md4) {
-        tx.execute(
-            r#"
-            INSERT INTO imported_known_file_md4_hashes(
-                imported_known_file_id, part_index, md4_hash
-            )
-            VALUES (?1, ?2, ?3)
-            "#,
-            params![
-                imported_known_file_id,
-                index as i64,
-                decode_fixed_hex(hash, 16, "MD4 part hash")?,
-            ],
-        )?;
-    }
-    for (index, hash) in entry.aich_hashset.iter().enumerate().filter(|_| write_aich) {
-        tx.execute(
-            r#"
-            INSERT INTO imported_known_file_aich_hashes(
-                imported_known_file_id, part_index, aich_hash
-            )
-            VALUES (?1, ?2, ?3)
-            "#,
-            params![
-                imported_known_file_id,
-                index as i64,
-                decode_fixed_hex(hash, 20, "AICH part hash")?,
-            ],
-        )?;
-    }
-    Ok(())
-}
-
 fn delivery_attempt_by_hash(
     conn: &rusqlite::Connection,
     hash: &[u8],
@@ -2441,32 +2199,6 @@ fn read_sources(
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
-}
-
-fn imported_md4_hashset(conn: &rusqlite::Connection, imported_id: i64) -> Result<Vec<String>> {
-    read_hex_list(
-        conn,
-        r#"
-        SELECT lower(hex(md4_hash))
-        FROM imported_known_file_md4_hashes
-        WHERE imported_known_file_id = ?1
-        ORDER BY part_index
-        "#,
-        imported_id,
-    )
-}
-
-fn imported_aich_hashset(conn: &rusqlite::Connection, imported_id: i64) -> Result<Vec<String>> {
-    read_hex_list(
-        conn,
-        r#"
-        SELECT lower(hex(aich_hash))
-        FROM imported_known_file_aich_hashes
-        WHERE imported_known_file_id = ?1
-        ORDER BY part_index
-        "#,
-        imported_id,
-    )
 }
 
 pub(crate) fn optional_fingerprint_from_row(
