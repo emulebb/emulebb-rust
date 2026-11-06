@@ -1,12 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
-    MetadataFileImportRecord, MetadataSharedDirectoryRoot, MetadataStore,
-    MetadataVerifiedLocalContent, NativeFileFingerprint,
-    store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
+    MetadataFileImportRecord, MetadataStore, MetadataVerifiedLocalContent, NativeFileFingerprint,
+    store::{decode_fixed_hex, unix_ms, upsert_local_path},
 };
 
 impl MetadataStore {
@@ -162,70 +161,6 @@ impl MetadataStore {
         tx.commit()?;
         Ok(())
     }
-
-    /// Merge explicit live roots without removing existing or mandatory roots.
-    pub fn merge_shared_directory_roots(
-        &self,
-        roots: &[MetadataSharedDirectoryRoot],
-    ) -> Result<usize> {
-        let now = unix_ms();
-        let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        for root in roots {
-            let path_id = upsert_local_path(&tx, Path::new(&root.path))?;
-            tx.execute(
-                r#"
-                INSERT INTO shared_directory_roots(
-                    path_id, monitor_owned, shareable, accessible,
-                    enabled, created_at_ms, deleted_at_ms
-                )
-                VALUES (?1, ?2, ?3, ?4, 1, ?5, NULL)
-                ON CONFLICT(path_id) DO UPDATE SET
-                    monitor_owned = excluded.monitor_owned,
-                    shareable = excluded.shareable,
-                    accessible = excluded.accessible,
-                    enabled = 1,
-                    deleted_at_ms = NULL
-                "#,
-                params![
-                    path_id,
-                    bool_to_i64(root.monitor_owned),
-                    bool_to_i64(root.shareable),
-                    bool_to_i64(root.accessible),
-                    now,
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO shared_directory_root_origins(
-                    root_id, origin, monitor_owned, shareable, accessible
-                 ) VALUES (
-                    (SELECT id FROM shared_directory_roots WHERE path_id = ?1),
-                    'explicit', ?2, ?3, ?4
-                 ) ON CONFLICT(root_id, origin) DO UPDATE SET
-                    monitor_owned = excluded.monitor_owned,
-                    shareable = excluded.shareable,
-                    accessible = excluded.accessible",
-                params![
-                    path_id,
-                    bool_to_i64(root.monitor_owned),
-                    bool_to_i64(root.shareable),
-                    bool_to_i64(root.accessible),
-                ],
-            )?;
-        }
-
-        tx.execute(
-            "UPDATE shared_directory_roots SET
-                monitor_owned = coalesce((SELECT max(monitor_owned) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
-                shareable = coalesce((SELECT max(shareable) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
-                accessible = coalesce((SELECT max(shareable * accessible) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0)
-             WHERE id IN (SELECT root_id FROM shared_directory_root_origins WHERE origin = 'explicit')",
-            [],
-        )?;
-
-        tx.commit()?;
-        Ok(roots.len())
-    }
 }
 
 #[cfg(test)]
@@ -248,31 +183,6 @@ mod tests {
             all_time_upload_accepts: 0,
             last_upload_request_ms: 0,
         }
-    }
-
-    #[test]
-    fn merge_is_idempotent_and_preserves_existing_roots() {
-        let mut store = MetadataStore::in_memory().unwrap();
-        store
-            .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
-                path: "/existing".to_string(),
-                monitor_owned: false,
-                shareable: false,
-                accessible: false,
-            }])
-            .unwrap();
-        let roots = vec![MetadataSharedDirectoryRoot {
-            path: "/imported".to_string(),
-            monitor_owned: false,
-            shareable: true,
-            accessible: true,
-        }];
-
-        store.merge_shared_directory_roots(&roots).unwrap();
-        store.merge_shared_directory_roots(&roots).unwrap();
-
-        assert_eq!(store.table_count("known_files").unwrap(), 0);
-        assert_eq!(store.shared_directory_roots().unwrap().len(), 2);
     }
 
     #[test]

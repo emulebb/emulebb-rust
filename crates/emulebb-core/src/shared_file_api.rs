@@ -531,40 +531,68 @@ impl EmulebbCore {
     pub async fn add_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
         let canonical_path = canonical_shared_directory_root(path)?;
         let mut roots = self.state.lock().await.shared_directories.clone();
-        if !roots
-            .iter()
-            .any(|root| root.path.eq_ignore_ascii_case(&canonical_path))
-        {
-            roots.push(SharedDirectoryRoot {
-                path: canonical_path,
-                monitor_owned: false,
-                shareable: true,
-                accessible: true,
-            });
-        }
-        self.replace_shared_directory_roots(dedupe_shared_directory_roots(roots))
-            .await
+        roots.push(SharedDirectoryRoot {
+            path: canonical_path,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        });
+        self.replace_shared_directory_roots(roots).await
     }
 
     pub async fn remove_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
         let canonical_path = removable_shared_directory_root(path)?;
+        let key = shared_directories::shared_root_comparison_key(Path::new(&canonical_path));
         let roots = self
             .state
             .lock()
             .await
             .shared_directories
             .iter()
-            .filter(|root| !root.path.eq_ignore_ascii_case(&canonical_path))
+            .filter(|root| {
+                shared_directories::shared_root_comparison_key(Path::new(&root.path)) != key
+            })
             .cloned()
             .collect::<Vec<_>>();
-        self.replace_shared_directory_roots(dedupe_shared_directory_roots(roots))
-            .await
+        self.replace_shared_directory_roots(roots).await
     }
 
     async fn replace_shared_directory_roots(
         &self,
         roots: Vec<SharedDirectoryRoot>,
     ) -> Result<SharedDirectories> {
+        let implicit = shared_directories::implicit_shared_directory_roots(self).await;
+        let implicit_paths: HashSet<_> = implicit.iter().map(|root| root.path.clone()).collect();
+        // Mandatory Incoming/category roots retain their own origins. They
+        // cover explicit children without becoming editable explicit roots.
+        let roots = consolidate_shared_directory_roots(
+            implicit
+                .into_iter()
+                .chain(
+                    roots
+                        .into_iter()
+                        .map(|root| refresh_shared_directory_row(&root)),
+                )
+                .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
+                    path: root.path,
+                    monitor_owned: root.monitor_owned,
+                    shareable: root.shareable,
+                    accessible: root.accessible,
+                }),
+        )
+        .into_iter()
+        .filter(|root| !implicit_paths.contains(&root.path))
+        .map(|root| SharedDirectoryRoot {
+            path: root.path,
+            monitor_owned: root.monitor_owned,
+            shareable: root.shareable,
+            accessible: root.accessible,
+        })
+        .collect::<Vec<_>>();
+        let unchanged = self.state.lock().await.shared_directories == roots;
+        if unchanged {
+            return Ok(self.shared_directories().await);
+        }
         self.index.lock().await.replace_shared_directory_roots(
             &roots
                 .iter()
@@ -730,12 +758,4 @@ fn removable_shared_directory_root(path: &str) -> Result<String> {
         }
         Err(_) => Ok(normal_path_display(path)),
     }
-}
-
-fn dedupe_shared_directory_roots(roots: Vec<SharedDirectoryRoot>) -> Vec<SharedDirectoryRoot> {
-    let mut seen = HashSet::new();
-    roots
-        .into_iter()
-        .filter(|root| seen.insert(root.path.to_ascii_lowercase()))
-        .collect()
 }

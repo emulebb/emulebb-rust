@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 /// One configured shared-directory root exposed through the eMuleBB REST contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedDirectoryRoot {
     pub path: String,
@@ -22,6 +22,37 @@ pub struct SharedDirectoryRoot {
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,
+}
+
+/// Consolidate recursive roots without inventing parents or altering native paths.
+/// Configured ancestors cover descendants, including temporarily unavailable trees.
+/// Imports and every user-facing root mutation use this same policy.
+pub fn consolidate_shared_directory_roots(
+    roots: impl IntoIterator<Item = MetadataSharedDirectoryRoot>,
+) -> Vec<MetadataSharedDirectoryRoot> {
+    let mut combined: Vec<(MetadataSharedDirectoryRoot, PathBuf)> = Vec::new();
+    for root in roots {
+        let key = shared_root_comparison_key(Path::new(&root.path));
+        if combined.iter().any(|(_, parent)| key.starts_with(parent)) {
+            continue;
+        }
+        combined.retain(|(_, child)| !child.starts_with(&key));
+        combined.push((root, key));
+    }
+    combined.into_iter().map(|(root, _)| root).collect()
+}
+
+pub(crate) fn shared_root_comparison_key(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let display = normal_path_display(canonical);
+    // WHY: unavailable children cannot be canonicalized, but Windows casing
+    // and verbatim prefixes must still compare with their accessible parents.
+    // This comparison key never replaces the exact stored native path.
+    if cfg!(windows) {
+        PathBuf::from(display.to_lowercase())
+    } else {
+        PathBuf::from(display)
+    }
 }
 
 /// Current shared-directory configuration plus lightweight hashing status.
@@ -272,7 +303,7 @@ pub(crate) async fn implicit_shared_directory_roots(
         .into_iter()
         .filter_map(|path| {
             let display = normal_path_display(&path);
-            if !seen.insert(display.to_lowercase()) {
+            if !seen.insert(shared_root_comparison_key(&path)) {
                 return None;
             }
             Some(refresh_shared_directory_row(&SharedDirectoryRoot {
@@ -290,9 +321,20 @@ pub(crate) async fn effective_shared_directory_roots(
 ) -> Vec<SharedDirectoryRoot> {
     let mut roots = implicit_shared_directory_roots(core).await;
     roots.extend(core.state.lock().await.shared_directories.clone());
-    let mut seen = HashSet::new();
-    roots.retain(|root| seen.insert(root.path.to_lowercase()));
-    roots
+    consolidate_shared_directory_roots(roots.into_iter().map(|root| MetadataSharedDirectoryRoot {
+        path: root.path,
+        monitor_owned: root.monitor_owned,
+        shareable: root.shareable,
+        accessible: root.accessible,
+    }))
+    .into_iter()
+    .map(|root| SharedDirectoryRoot {
+        path: root.path,
+        monitor_owned: root.monitor_owned,
+        shareable: root.shareable,
+        accessible: root.accessible,
+    })
+    .collect()
 }
 
 pub(crate) async fn sync_implicit_shared_directory_roots(core: &EmulebbCore) -> Result<()> {

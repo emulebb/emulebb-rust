@@ -115,6 +115,96 @@ async fn set_shared_directories_canonicalizes_configured_root() {
 }
 
 #[tokio::test]
+async fn api_root_updates_collapse_recursive_children_and_keep_siblings() {
+    let temp = scratch_dir("api-recursive-roots");
+    let parent = temp.join("Shared");
+    let child = parent.join("Child");
+    let sibling = temp.join("Shared-Other");
+    fs::create_dir_all(&child).unwrap();
+    fs::create_dir(&sibling).unwrap();
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    core.add_shared_directory_root(child.to_str().unwrap())
+        .await
+        .unwrap();
+    let added = core
+        .add_shared_directory_root(parent.to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(added.roots.len(), 1);
+    assert!(Path::new(&added.roots[0].path).ends_with("Shared"));
+    let covered = core
+        .add_shared_directory_root(child.to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(covered.roots, added.roots);
+    let replacement = core
+        .set_shared_directories(SharedDirectoriesUpdate {
+            confirm_replace_roots: true,
+            roots: [&child, &sibling, &parent, &child]
+                .into_iter()
+                .map(|path| SharedDirectoryRootUpdate {
+                    path: path.display().to_string(),
+                })
+                .collect(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replacement.roots.len(), 2);
+    assert!(
+        replacement
+            .roots
+            .iter()
+            .any(|root| Path::new(&root.path).ends_with("Shared"))
+    );
+    assert_eq!(
+        core.metadata_store.shared_directory_roots().unwrap().len(),
+        2
+    );
+    core.stop_shared_directory_monitor();
+    fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
+async fn api_does_not_add_children_already_shared_by_incoming() {
+    let temp = scratch_dir("api-incoming-roots");
+    let child = temp.join("Child");
+    fs::create_dir(&child).unwrap();
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap())
+        .unwrap()
+        .with_incoming_dir(temp.clone());
+    let result = core
+        .add_shared_directory_root(child.to_str().unwrap())
+        .await
+        .unwrap();
+    assert!(result.roots.is_empty());
+    assert!(
+        core.metadata_store
+            .shared_directory_roots()
+            .unwrap()
+            .is_empty()
+    );
+    fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn unavailable_configured_parent_still_covers_its_children() {
+    let temp = scratch_dir("unavailable-recursive-root");
+    let parent = temp.join("Unavailable");
+    let roots =
+        consolidate_shared_directory_roots([parent.join("Child"), parent.clone()].map(|path| {
+            MetadataSharedDirectoryRoot {
+                path: path.display().to_string(),
+                monitor_owned: false,
+                shareable: false,
+                accessible: false,
+            }
+        }));
+    assert_eq!(roots.len(), 1);
+    assert_eq!(Path::new(&roots[0].path), parent);
+    fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
 async fn incoming_is_shared_without_an_explicit_root() {
     let incoming = scratch_dir("implicit-incoming");
     let path = incoming.join("Sample.bin");

@@ -1,6 +1,58 @@
 use crate::rest_test_support::*;
 
 #[tokio::test]
+async fn shared_root_api_consolidates_children_for_ui_and_direct_calls() {
+    let temp = unique_test_dir("recursive-roots");
+    let parent = temp.join("Shared");
+    let child = parent.join("Child");
+    let sibling = temp.join("Shared-Other");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let app = router(
+        core.clone(),
+        RestServerSettings {
+            api_key: "secret".to_string(),
+            web_root_dir: None,
+        },
+    );
+    for (path, count) in [(&child, 1), (&parent, 1), (&child, 1), (&sibling, 2)] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shared-directories/roots")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(json!({"path":path}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(value["data"]["roots"].as_array().unwrap().len(), count);
+    }
+    let roots = core.shared_directories().await.roots;
+    assert!(
+        roots
+            .iter()
+            .any(|root| std::path::Path::new(&root.path).ends_with("Shared"))
+    );
+    assert!(
+        !roots
+            .iter()
+            .any(|root| std::path::Path::new(&root.path).ends_with("Child"))
+    );
+    core.stop_shared_directory_monitor();
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
 async fn app_shutdown_requires_confirmation_and_signals_daemon() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
