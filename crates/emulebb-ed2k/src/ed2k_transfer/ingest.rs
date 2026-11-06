@@ -212,7 +212,7 @@ impl Ed2kTransferRuntime {
             rating: 0,
         };
         let metadata = self.metadata.clone();
-        let recovery_root = aich_root.clone();
+        let recovery_root = hashsets.aich_hashset.master_hash;
         let recovery_parts = hashsets.recovery_parts;
         let recovery_roots = if hashsets.aich_hashset.part_hashes.is_empty() {
             vec![hashsets.aich_hashset.master_hash]
@@ -220,13 +220,15 @@ impl Ed2kTransferRuntime {
             hashsets.aich_hashset.part_hashes.clone()
         };
         tokio::task::spawn_blocking(move || {
-            metadata.upsert_verified_local_content(&content)?;
-            if let Err(error) = metadata.store_aich_recovery_set(
-                &recovery_root,
-                content.file_size,
-                &recovery_parts,
-                &recovery_roots,
-            ) {
+            let recovery = emulebb_metadata::MetadataAichRecoverySet {
+                root: recovery_root,
+                size: content.file_size,
+                parts: recovery_parts,
+                part_roots: recovery_roots,
+            };
+            if let Some(error) =
+                metadata.upsert_verified_local_content_with_recovery(&content, &recovery)?
+            {
                 tracing::warn!(%error,"Verified MD4 content retained without AICH recovery cache");
             }
             Ok::<(), anyhow::Error>(())

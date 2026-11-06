@@ -235,10 +235,9 @@ impl Ed2kTransferRuntime {
                     manifest.aich_hashset_acquired = true;
                 }
             }
-            self.store_manifest_unlocked(&manifest).await?;
-            self.upsert_verified_catalog_entry(&manifest).await;
-            // WHY: MD4 completion is durable before optional caching. A cache
-            // write failure or crash must not leave final_rehash_pending set.
+            // WHY: save available recovery before publishing completion. A
+            // crash must not leave a completed file missing its computed tree.
+            // Optional cache failure still permits durable MD4 completion.
             if let Some(set) = recovery {
                 if manifest.aich_root.as_deref() == Some(hex::encode(set.root).as_str()) {
                     let metadata = self.metadata.clone();
@@ -264,6 +263,9 @@ impl Ed2kTransferRuntime {
                     );
                 }
             }
+
+            self.store_manifest_unlocked(&manifest).await?;
+            self.upsert_verified_catalog_entry(&manifest).await;
 
             tracing::info!(
                 event = "final_completion_rehash_succeeded",

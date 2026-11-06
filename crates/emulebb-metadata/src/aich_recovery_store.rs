@@ -1,5 +1,8 @@
 //! Content-owned, packed AICH recovery leaves. No native paths enter this cache.
-use crate::{MetadataStore, store::decode_fixed_hex};
+use crate::{
+    MetadataStore, MetadataVerifiedLocalContent,
+    store::{decode_fixed_hex, unix_ms},
+};
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
@@ -13,6 +16,60 @@ pub struct MetadataAichRecoverySet {
 }
 
 impl MetadataStore {
+    /// Commit native verified content and successful recovery caching together.
+    /// The inner error reports optional caching failure; the outer error means
+    /// verified content could not commit. A crash cannot split successful writes.
+    pub fn upsert_verified_local_content_with_recovery(
+        &self,
+        content: &MetadataVerifiedLocalContent,
+        recovery: &MetadataAichRecoverySet,
+    ) -> Result<Option<anyhow::Error>> {
+        ensure!(
+            content.file_size == recovery.size
+                && content
+                    .aich_root
+                    .as_deref()
+                    .map(|r| decode_fixed_hex(r, 20, "AICH root"))
+                    .transpose()?
+                    .as_deref()
+                    == Some(recovery.root.as_slice()),
+            "recovery set differs from verified local content"
+        );
+        let mut connection = self.connection()?;
+        let mut tx = connection.transaction()?;
+        Self::upsert_verified_local_content_tx(&tx, content, unix_ms())?;
+        let mut save = tx.savepoint()?;
+        let recovery_error = match write_set(
+            &save,
+            &recovery.root,
+            recovery.size,
+            &recovery.parts,
+            &recovery.part_roots,
+        ) {
+            Ok(()) => {
+                save.commit()?;
+                None
+            }
+            Err(error) => {
+                save.rollback()?;
+                drop(save);
+                Some(error)
+            }
+        };
+        tx.commit()?;
+        Ok(recovery_error)
+    }
+
+    /// Count accepted live contents with an AICH master but no saved full tree.
+    /// Missing rows are durable coverage state, never a request to read payloads.
+    pub fn missing_live_aich_recovery_count(&self) -> Result<u64> {
+        let count: i64 = self.connection()?.query_row(
+            "SELECT count(*) FROM verified_local_content c JOIN known_files f ON f.id=c.known_file_id WHERE c.aich_root IS NOT NULL AND f.size_bytes>184320 AND NOT EXISTS (SELECT 1 FROM aich_recovery_sets r WHERE r.root=c.aich_root AND r.size_bytes=f.size_bytes)",
+            [], |row| row.get(0),
+        )?;
+        Ok(count.try_into()?)
+    }
+
     /// Recovery imports only enrich live accepted content, never unmatched staging rows.
     pub fn has_live_aich_content(&self, root: &[u8], size: i64) -> Result<bool> {
         Ok(self.connection()?.query_row(
@@ -161,6 +218,78 @@ fn write_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_content_and_recovery_commit_together_or_preserve_md4_on_optional_failure() {
+        let db = MetadataStore::in_memory().unwrap();
+        let content = MetadataVerifiedLocalContent {
+            file_hash: "11".repeat(16),
+            display_name: "Sample.bin".to_string(),
+            file_size: 184_321,
+            part_size: 9_728_000,
+            md4_hashset: Vec::new(),
+            aich_root: Some("22".repeat(20)),
+            aich_hashset: Vec::new(),
+            path: std::env::temp_dir().join("atomic-aich-sample.bin"),
+            fingerprint: crate::NativeFileFingerprint {
+                identity: crate::NativeFileIdentity::Unix {
+                    device_id: 1,
+                    inode_number: 2,
+                },
+                size_bytes: 184_321,
+                modified: crate::NativeFileTimestamp::new(1700000000, 0).unwrap(),
+                changed: None,
+            },
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+        };
+        let set = MetadataAichRecoverySet {
+            root: [0x22; 20],
+            size: content.file_size,
+            parts: vec![vec![0x33; 40]],
+            part_roots: vec![[0x22; 20]],
+        };
+        // Simulate transaction loss after native content has been written but
+        // before recovery can commit. Neither half may survive that rollback.
+        db.connection().unwrap().execute_batch("CREATE TRIGGER abort_cache BEFORE INSERT ON aich_recovery_parts BEGIN SELECT RAISE(ROLLBACK, 'injected transaction loss'); END;").unwrap();
+        assert!(
+            db.upsert_verified_local_content_with_recovery(&content, &set)
+                .is_err()
+        );
+        assert_eq!(db.table_count("verified_local_content").unwrap(), 0);
+        assert_eq!(db.table_count("aich_recovery_sets").unwrap(), 0);
+        db.connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER abort_cache;")
+            .unwrap();
+        // A malformed optional tree is recoverable and does not lose valid MD4.
+        let malformed = MetadataAichRecoverySet {
+            parts: vec![vec![0; 20]],
+            ..set
+        };
+        assert!(
+            db.upsert_verified_local_content_with_recovery(&content, &malformed)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(db.table_count("verified_local_content").unwrap(), 1);
+        assert_eq!(db.table_count("aich_recovery_sets").unwrap(), 0);
+        assert_eq!(db.missing_live_aich_recovery_count().unwrap(), 1);
+        let repaired = MetadataAichRecoverySet {
+            parts: vec![vec![0x33; 40]],
+            ..malformed
+        };
+        assert!(
+            db.upsert_verified_local_content_with_recovery(&content, &repaired)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(db.missing_live_aich_recovery_count().unwrap(), 0);
+        assert_eq!(db.table_count("aich_recovery_sets").unwrap(), 1);
+    }
+
     #[test]
     fn complete_recovery_enriches_live_content_shared_by_multiple_paths() {
         let db = MetadataStore::in_memory().unwrap();
