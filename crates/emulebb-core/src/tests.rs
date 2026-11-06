@@ -8,7 +8,9 @@ use crate::source_publish::emule_high_id_source_type;
 
 async fn configure_test_shared_root(core: &EmulebbCore, file: &Path) {
     let root = file.parent().unwrap();
-    let path = root.display().to_string();
+    // WHY: this fixture bypasses the API, but must retain its canonical root
+    // invariant so mixed Windows separators do not create a different key.
+    let path = emulebb_ed2k::long_path::normal_path_display(std::fs::canonicalize(root).unwrap());
     core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
         path: path.clone(),
         monitor_owned: false,
