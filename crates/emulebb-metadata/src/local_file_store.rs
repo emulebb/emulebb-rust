@@ -547,6 +547,7 @@ impl MetadataStore {
                 content.rating,
             ],
         )?;
+        let mut write_aich = inserted != 0;
         if inserted == 0 {
             let (stored_part_size, stored_part_count, stored_aich_root): (
                 i64,
@@ -561,7 +562,10 @@ impl MetadataStore {
             ensure!(
                 stored_part_size == part_size
                     && stored_part_count == part_count
-                    && stored_aich_root == aich_root,
+                    && stored_aich_root
+                        .as_ref()
+                        .zip(aich_root.as_ref())
+                        .is_none_or(|(stored, incoming)| stored == incoming),
                 "ED2K identity has conflicting verified local content geometry or AICH root"
             );
             let stored_md4_hashset = tx
@@ -579,9 +583,21 @@ impl MetadataStore {
                 .query_map(params![known_file_id], |row| row.get::<_, Vec<u8>>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ensure!(
-                stored_md4_hashset == md4_hashset && stored_aich_hashset == aich_hashset,
+                stored_md4_hashset == md4_hashset
+                    && (stored_aich_hashset.is_empty()
+                        || aich_hashset.is_empty()
+                        || stored_aich_hashset == aich_hashset),
                 "ED2K identity has conflicting verified local hashsets"
             );
+            // WHY: optional AICH data can be absent from a stock record. Missing
+            // data is not a conflict and must not erase a richer cached hashset.
+            write_aich = stored_aich_hashset.is_empty() && !aich_hashset.is_empty();
+            if stored_aich_root.is_none() && aich_root.is_some() {
+                tx.execute(
+                    "UPDATE verified_local_content SET aich_root = ?2 WHERE known_file_id = ?1",
+                    params![known_file_id, aich_root],
+                )?;
+            }
         }
         tx.execute(
             "INSERT INTO known_file_origins(
@@ -598,6 +614,8 @@ impl MetadataStore {
                     params![known_file_id, i64::try_from(part_index)?, part_hash],
                 )?;
             }
+        }
+        if write_aich {
             for (part_index, part_hash) in aich_hashset.iter().enumerate() {
                 tx.execute(
                     "INSERT INTO verified_local_aich_hashes(known_file_id, part_index, aich_hash) VALUES (?1, ?2, ?3)",
@@ -1172,6 +1190,52 @@ mod tests {
         assert_eq!(active.display_name, "First.bin");
         assert_eq!(active.md4_hashset, content.md4_hashset);
         assert_eq!(active.aich_hashset, content.aich_hashset);
+    }
+
+    #[test]
+    fn optional_aich_enriches_cached_content_without_losing_richer_hashsets() {
+        let store = MetadataStore::in_memory().unwrap();
+        let mut native = fingerprint(41);
+        native.size_bytes = 9_728_001;
+        let mut content = MetadataVerifiedLocalContent {
+            file_hash: "11".repeat(16),
+            display_name: "Sample.bin".to_string(),
+            file_size: native.size_bytes,
+            part_size: 9_728_000,
+            md4_hashset: vec!["22".repeat(16), "33".repeat(16)],
+            aich_root: None,
+            aich_hashset: Vec::new(),
+            path: std::env::temp_dir().join("stock-sample-first.bin"),
+            fingerprint: native,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+        };
+        store.upsert_verified_local_content(&content).unwrap();
+        content.path = std::env::temp_dir().join("stock-sample-richer.bin");
+        content.aich_root = Some("44".repeat(20));
+        content.aich_hashset = vec!["55".repeat(20), "66".repeat(20)];
+        store.upsert_verified_local_content(&content).unwrap();
+        content.path = std::env::temp_dir().join("stock-sample-no-aich.bin");
+        content.aich_root = None;
+        content.aich_hashset.clear();
+        store.upsert_verified_local_content(&content).unwrap();
+        let (root, parts, paths): (String, i64, i64) = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT lower(hex(aich_root)),
+                (SELECT count(*) FROM verified_local_aich_hashes),
+                (SELECT count(*) FROM local_file_instances)
+             FROM verified_local_content",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(root, "44".repeat(20));
+        assert_eq!(parts, 2);
+        assert_eq!(paths, 3);
     }
 
     #[test]
