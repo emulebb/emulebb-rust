@@ -277,7 +277,7 @@ async fn push_current_file_if_present(
     evidence.push(Ed2kCurrentLocalFileEvidence {
         display_name,
         file_size,
-        path: path.to_string_lossy().into_owned(),
+        path: emulebb_metadata::NativePath::from(path.as_path()).display_path(),
         kind,
     });
     Ok(())
