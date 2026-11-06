@@ -1076,6 +1076,10 @@ async fn removing_root_withdraws_live_share_but_preserves_verified_hash() {
     let runtime_dir = unique_runtime_dir("emulebb-core-unshare-shared-catalog");
     let transfer_root = runtime_dir.join("transfers");
     let shared_path = runtime_dir.join("shared.bin");
+    // Hosted Windows output roots contain mixed separators; exercise the
+    // same fixture spelling without changing the inherited output root.
+    #[cfg(windows)]
+    let shared_path = PathBuf::from(shared_path.to_string_lossy().replace('\\', "/"));
     fs::write(&shared_path, b"shared catalog removal payload").unwrap();
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
     configure_test_shared_root(&core, &shared_path).await;
