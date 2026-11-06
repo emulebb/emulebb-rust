@@ -468,6 +468,35 @@ impl Ed2kSharedEntry {
         }
     }
 
+    #[must_use]
+    pub fn from_serving_view(manifest: &super::Ed2kFileServingView) -> Self {
+        let complete_parts = if manifest.completed {
+            // A complete file serves the whole payload; the part-status answer
+            // collapses to the master "complete" sentinel, so no per-part vector.
+            Vec::new()
+        } else {
+            complete_parts_from_ranges(manifest.file_size, &manifest.verified_ranges)
+        };
+        Self {
+            file_hash: manifest.file_hash.clone(),
+            display_name: manifest.display_name.clone(),
+            file_size: manifest.file_size,
+            verified_complete: manifest.completed,
+            verified_ranges: manifest.verified_ranges.clone(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: manifest.aich_root.clone(),
+            upload_priority: manifest.upload_priority.clone(),
+            auto_upload_priority: manifest.auto_upload_priority,
+            comment: manifest.comment.clone(),
+            rating: manifest.rating,
+            media: Ed2kMediaMetadata::default(),
+            all_time_uploaded_bytes: 0,
+            complete_parts,
+            publish: Ed2kSharedPublishStats::default(),
+        }
+    }
+
     /// Parse the ED2K hash carried by this entry.
     pub fn parsed_hash(&self) -> Result<Ed2kHash> {
         Ed2kHash::from_str(&self.file_hash)

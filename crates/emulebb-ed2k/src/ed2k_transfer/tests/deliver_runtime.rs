@@ -1731,10 +1731,6 @@ async fn materialize_records_delivered_fingerprint_for_reload_reuse() {
     // local instance cache, which makes the next root scan a cache hit.
     let manifest = runtime.manifest(&hash).await.unwrap();
     assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
-    assert!(
-        manifest.source_path.is_none(),
-        "a delivered download must stay source_path == None"
-    );
     let recorded = manifest
         .source_fingerprint
         .expect("the delivered file fingerprint must be recorded");

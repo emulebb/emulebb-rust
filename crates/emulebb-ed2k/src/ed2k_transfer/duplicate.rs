@@ -127,17 +127,6 @@ impl Ed2kTransferRuntime {
             .as_ref()
             .filter(|manifest| manifest.completed && !manifest.transfer_row_removed)
         {
-            if let Some(source_path) = manifest.source_path.as_deref() {
-                push_current_file_if_present(
-                    &mut current_local_files,
-                    &mut seen_paths,
-                    manifest.display_name.clone(),
-                    manifest.file_size,
-                    PathBuf::from(source_path),
-                    Ed2kCurrentLocalFileKind::Shared,
-                )
-                .await?;
-            }
             if let Some(delivered_path) = manifest.delivered_path.as_deref() {
                 push_current_file_if_present(
                     &mut current_local_files,
@@ -149,7 +138,7 @@ impl Ed2kTransferRuntime {
                 )
                 .await?;
             }
-            if manifest.source_path.is_none() {
+            {
                 push_current_file_if_present(
                     &mut current_local_files,
                     &mut seen_paths,
@@ -468,11 +457,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!replacement.completed);
-        assert!(replacement.source_path.is_none());
-        let servable = runtime.servable_manifest(&shared.file_hash).await.unwrap();
+        let servable = runtime.serving_view(&shared.file_hash).await.unwrap();
         assert!(servable.completed);
         assert_eq!(
-            servable.source_path.as_deref(),
+            servable.local_path.as_deref(),
             Some(crate::long_path::long_path(&shared_path).as_path())
         );
         assert_eq!(servable.display_name, "shared-redownload.bin");
@@ -484,7 +472,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let servable = runtime.servable_manifest(&shared.file_hash).await.unwrap();
+        let servable = runtime.serving_view(&shared.file_hash).await.unwrap();
         assert_eq!(servable.upload_priority, "release");
         assert_eq!(servable.comment, "local copy");
         assert_eq!(servable.rating, 4);
@@ -513,16 +501,13 @@ mod tests {
             .unwrap();
         assert!(restarted_evidence.active_transfer.is_some());
         assert_eq!(restarted_evidence.current_local_files.len(), 1);
-        let servable = restarted
-            .servable_manifest(&shared.file_hash)
-            .await
-            .unwrap();
+        let servable = restarted.serving_view(&shared.file_hash).await.unwrap();
         assert!(servable.completed);
         assert_eq!(servable.upload_priority, "release");
         assert_eq!(servable.comment, "local copy");
         assert_eq!(servable.rating, 4);
         assert_eq!(
-            servable.source_path.as_deref(),
+            servable.local_path.as_deref(),
             Some(crate::long_path::long_path(&shared_path).as_path())
         );
         assert!(
@@ -547,7 +532,7 @@ mod tests {
             .await
             .unwrap();
         admit_local_share(&runtime, root.path(), &shared_path).await;
-        let local = runtime.servable_manifest(&shared.file_hash).await.unwrap();
+        let local = runtime.serving_view(&shared.file_hash).await.unwrap();
         let hashes = local
             .md4_hashset
             .iter()

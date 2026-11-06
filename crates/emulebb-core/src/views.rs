@@ -179,7 +179,7 @@ pub(crate) fn preserve_transfer_public_metadata(transfer: &mut Transfer, existin
 }
 
 pub(crate) fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
-    if manifest.completed && manifest.source_path.is_none() && manifest.delivered_path.is_none() {
+    if manifest.completed && manifest.delivered_path.is_none() {
         "completing"
     } else if manifest.completed {
         "completed"

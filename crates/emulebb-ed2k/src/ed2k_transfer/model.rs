@@ -400,7 +400,6 @@ pub(crate) enum Ed2kCallbackClaimError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ed2kDeliveryState {
-    NotApplicable,
     Pending,
     Delivered,
 }
@@ -413,8 +412,65 @@ pub enum Ed2kDeliveryOwnership {
     Unowned,
 }
 
-/// Durable download resume metadata stored next to the piece payload.
+/// A read-only projection for protocol serving and upload presentation.
+/// It has no download lifecycle or persistence representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kFileServingView {
+    pub file_hash: String,
+    pub display_name: String,
+    pub file_size: u64,
+    pub piece_size: u64,
+    pub completed: bool,
+    pub md4_hashset_acquired: bool,
+    pub md4_hashset: Vec<String>,
+    pub aich_hashset_acquired: bool,
+    pub aich_root: Option<String>,
+    pub aich_hashset: Vec<String>,
+    pub verified_ranges: Vec<Ed2kSharedRange>,
+    pub sources: Vec<Ed2kSourceHint>,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub comment: String,
+    pub rating: u8,
+    pub local_path: Option<PathBuf>,
+    pub local_fingerprint: Option<NativeFileFingerprint>,
+    pub(crate) has_payload_authority: bool,
+}
+
+impl From<&Ed2kResumeManifest> for Ed2kFileServingView {
+    fn from(download: &Ed2kResumeManifest) -> Self {
+        Self {
+            file_hash: download.file_hash.clone(),
+            display_name: download.display_name.clone(),
+            file_size: download.file_size,
+            piece_size: download.piece_size,
+            completed: download.completed,
+            md4_hashset_acquired: download.md4_hashset_acquired,
+            md4_hashset: download.md4_hashset.clone(),
+            aich_hashset_acquired: download.aich_hashset_acquired,
+            aich_root: download.aich_root.clone(),
+            aich_hashset: download.aich_hashset.clone(),
+            verified_ranges: download.verified_ranges.clone(),
+            sources: download.sources.clone(),
+            upload_priority: download.upload_priority.clone(),
+            auto_upload_priority: download.auto_upload_priority,
+            comment: download.comment.clone(),
+            rating: download.rating,
+            local_path: None,
+            local_fingerprint: None,
+            has_payload_authority: !download.final_rehash_pending
+                && if download.completed {
+                    download.payload_fingerprint.is_some()
+                } else {
+                    download.md4_hashset_acquired && !download.verified_ranges.is_empty()
+                },
+        }
+    }
+}
+
+/// Durable resume metadata for a download's managed piece payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Ed2kResumeManifest {
     /// ED2K file hash in lowercase hex.
     pub file_hash: String,
@@ -487,8 +543,8 @@ pub struct Ed2kResumeManifest {
     #[serde(default)]
     pub transfer_row_removed: bool,
     /// Explicit lifecycle for materializing a download outside the internal
-    /// piece store. Read-only local-file views use `NotApplicable`; persisted
-    /// downloads start `Pending` and become `Delivered` with a verified path.
+    /// piece store. Downloads start `Pending` and become `Delivered` with a
+    /// verified path.
     pub delivery_state: Ed2kDeliveryState,
     /// Whether the delivered path is still proven to contain the exact object
     /// this client published. Ambiguous crash recovery records `Unowned` so
@@ -501,16 +557,12 @@ pub struct Ed2kResumeManifest {
     /// Incoming/category folder by name).
     #[serde(default, with = "optional_native_path_serde")]
     pub delivered_path: Option<PathBuf>,
-    /// Local path only in a read-only protocol view synthesized from the
-    /// verified library. Persisted download manifests always leave this empty.
-    #[serde(default, with = "optional_native_path_serde")]
-    pub source_path: Option<PathBuf>,
-    /// Verified identity of a delivered download or a read-only local-file view.
+    /// Verified identity of a delivered download.
     #[serde(default, with = "optional_native_file_fingerprint_serde")]
     pub source_fingerprint: Option<NativeFileFingerprint>,
     /// Native identity baseline for this download's canonical `pieces.bin`
     /// after successful whole-file ED2K verification. `None` forces a
-    /// conservative startup rehash. Read-only local-file views never set it.
+    /// conservative startup rehash.
     #[serde(default, with = "optional_native_file_fingerprint_serde")]
     pub payload_fingerprint: Option<NativeFileFingerprint>,
 }
@@ -757,7 +809,6 @@ impl Ed2kResumeManifest {
             delivery_state: Ed2kDeliveryState::Pending,
             delivery_ownership: Ed2kDeliveryOwnership::None,
             delivered_path: None,
-            source_path: None,
             source_fingerprint: None,
             payload_fingerprint: None,
         }
@@ -780,16 +831,16 @@ fn default_shared_upload_priority() -> String {
 mod tests {
     use super::*;
 
-    fn manifest_with_source_path(source_path: PathBuf) -> Ed2kResumeManifest {
+    fn manifest_with_delivered_path(source_path: PathBuf) -> Ed2kResumeManifest {
         let mut manifest = Ed2kResumeManifest::new(&Ed2kTransferJob {
             file_hash: "00112233445566778899aabbccddeeff".to_string(),
             display_name: "native-path.bin".to_string(),
             file_size: 1,
             piece_size: 1,
         });
-        manifest.delivery_state = Ed2kDeliveryState::NotApplicable;
+        manifest.delivery_state = Ed2kDeliveryState::Delivered;
         manifest.delivery_ownership = Ed2kDeliveryOwnership::None;
-        manifest.source_path = Some(source_path);
+        manifest.delivered_path = Some(source_path);
         manifest.source_fingerprint = Some(NativeFileFingerprint {
             identity: NativeFileIdentity::Unix {
                 device_id: 7,
@@ -804,7 +855,7 @@ mod tests {
 
     #[test]
     fn resume_manifest_native_path_json_round_trips() {
-        let manifest = manifest_with_source_path(PathBuf::from("shared/native-path.bin"));
+        let manifest = manifest_with_delivered_path(PathBuf::from("shared/native-path.bin"));
         let json = serde_json::to_string(&manifest).unwrap();
         let decoded = serde_json::from_str::<Ed2kResumeManifest>(&json).unwrap();
 
@@ -813,13 +864,24 @@ mod tests {
         assert_eq!(decoded, manifest);
     }
 
+    #[test]
+    fn download_manifest_rejects_retired_local_share_fields() {
+        let manifest = manifest_with_delivered_path(PathBuf::from("incoming/file.bin"));
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value["source_path"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<Ed2kResumeManifest>(value).is_err());
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value["delivery_state"] = "not_applicable".into();
+        assert!(serde_json::from_value::<Ed2kResumeManifest>(value).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn resume_manifest_non_utf8_unix_path_json_round_trips() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
         let path = PathBuf::from(OsString::from_vec(b"shared/invalid-\xFF.bin".to_vec()));
-        let manifest = manifest_with_source_path(path);
+        let manifest = manifest_with_delivered_path(path);
         let json = serde_json::to_string(&manifest).unwrap();
         let decoded = serde_json::from_str::<Ed2kResumeManifest>(&json).unwrap();
 
@@ -841,7 +903,7 @@ mod tests {
             b'i' as u16,
             b'n' as u16,
         ]));
-        let manifest = manifest_with_source_path(path);
+        let manifest = manifest_with_delivered_path(path);
         let json = serde_json::to_string(&manifest).unwrap();
         let decoded = serde_json::from_str::<Ed2kResumeManifest>(&json).unwrap();
 

@@ -50,18 +50,13 @@ impl EmulebbCore {
         state_name: &str,
     ) -> Transfer {
         let parts_total = manifest.pieces.len() as u32;
-        // A share-in-place file lives at (and is served from) its original path;
-        // a real download reports its internal piece-store payload path.
-        let display_path = manifest.source_path.as_deref().map(normal_path_display);
         let mut transfer = transfer_from_manifest(
             manifest,
             state_name,
-            display_path.unwrap_or_else(|| {
-                self.ed2k_transfers
-                    .payload_path(&manifest.file_hash)
-                    .display()
-                    .to_string()
-            }),
+            self.ed2k_transfers
+                .payload_path(&manifest.file_hash)
+                .display()
+                .to_string(),
             self.ed2k_transfers
                 .download_speed_bytes_per_sec(&manifest.file_hash),
             self.ed2k_transfers
@@ -174,7 +169,7 @@ impl EmulebbCore {
     ///
     /// Persisted transfer rows are hydrated independently before this queueing
     /// pass. This method skips completed transfers, user paused/stopped transfers
-    /// (`control_state`), and share-in-place shared files (`source_path` set).
+    /// (`control_state`).
     pub async fn resume_persisted_downloads(&self) -> usize {
         // Load ONLY the incomplete rows, off the async runtime (spawn_blocking) — see
         // `incomplete_manifests`. Loading the full library inline (`manifests`) blocks
@@ -198,7 +193,6 @@ impl EmulebbCore {
         let mut resumed = 0usize;
         for manifest in manifests {
             if manifest.completed
-                || manifest.source_path.is_some()
                 || matches!(
                     manifest.control_state.as_deref(),
                     Some("paused") | Some("stopped")

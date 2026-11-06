@@ -91,18 +91,13 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
 
     assert_eq!(runtime.shared_catalog_count().await, 0);
     assert!(runtime.share_entries().await.unwrap().is_empty());
-    assert!(
-        runtime
-            .servable_manifest(&format!("{:032x}", 1))
-            .await
-            .is_err()
-    );
+    assert!(runtime.serving_view(&format!("{:032x}", 1)).await.is_err());
     assert_eq!(
         runtime
-            .servable_manifest(&format!("{:032x}", 2))
+            .serving_view(&format!("{:032x}", 2))
             .await
             .unwrap()
-            .source_path
+            .local_path
             .as_deref(),
         Some(crate::long_path::long_path(&copy_path).as_path())
     );

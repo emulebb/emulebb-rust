@@ -2,14 +2,14 @@
 //!
 //! Pure helpers that build the REST `Upload` / `UploadPolicyMetrics` response
 //! structs from the lower-layer upload-queue snapshot entries + capacity
-//! snapshot + resume manifest, plus the small upload-state/part-count helpers
+//! snapshot + file serving view, plus the small upload-state/part-count helpers
 //! they rely on. Moved verbatim out of `lib.rs` during the maintainability
 //! restructuring; they carry no behavior beyond what they had inline.
 //! Re-exported `pub(crate)` from the crate root so the `EmulebbCore` impl
 //! reaches them by their bare names.
 
 use emulebb_ed2k::ed2k_transfer::{
-    Ed2kResumeManifest, Ed2kUploadQueueCapacitySnapshot, Ed2kUploadQueueSnapshotEntry,
+    Ed2kFileServingView, Ed2kUploadQueueCapacitySnapshot, Ed2kUploadQueueSnapshotEntry,
     Ed2kUploadSessionPhaseSnapshot,
 };
 
@@ -17,16 +17,16 @@ use crate::{Upload, UploadPolicyMetrics, UploadScoreBreakdown};
 
 pub(crate) fn upload_from_snapshot(
     entry: Ed2kUploadQueueSnapshotEntry,
-    manifest: Option<&Ed2kResumeManifest>,
+    view: Option<&Ed2kFileServingView>,
 ) -> Upload {
     let user_hash = entry.user_hash.map(hex::encode);
     let client_id = user_hash
         .clone()
         .unwrap_or_else(|| format!("{}:{}", entry.ip, entry.tcp_port));
-    let requested_parts_total = manifest
-        .map(|manifest| manifest.pieces.len() as u32)
+    let requested_parts_total = view
+        .map(|view| view.file_size.div_ceil(view.piece_size) as u32)
         .unwrap_or_default();
-    let requested_parts_obtained = manifest.map(upload_obtained_part_count).unwrap_or_default();
+    let requested_parts_obtained = view.map(upload_obtained_part_count).unwrap_or_default();
     let requested_parts_progress_text = if requested_parts_total == 0 {
         String::new()
     } else {
@@ -88,8 +88,8 @@ pub(crate) fn upload_from_snapshot(
         uploading,
         waiting_queue,
         requested_file_hash: Some(entry.file_hash),
-        requested_file_name: manifest.map(|manifest| manifest.display_name.clone()),
-        requested_file_size_bytes: manifest.map(|manifest| manifest.file_size),
+        requested_file_name: view.map(|view| view.display_name.clone()),
+        requested_file_size_bytes: view.map(|view| view.file_size),
         requested_parts_obtained,
         requested_parts_total,
         requested_parts_progress_text,
@@ -122,30 +122,44 @@ fn upload_state_name(phase: Ed2kUploadSessionPhaseSnapshot) -> &'static str {
     }
 }
 
-fn upload_obtained_part_count(manifest: &Ed2kResumeManifest) -> u32 {
-    if manifest.completed {
-        return manifest.pieces.len() as u32;
+fn upload_obtained_part_count(view: &Ed2kFileServingView) -> u32 {
+    if view.completed {
+        return view.file_size.div_ceil(view.piece_size) as u32;
     }
-    manifest
-        .pieces
-        .iter()
-        .filter(|piece| {
-            piece.bytes_written >= upload_expected_piece_length(manifest, piece.piece_index)
+    (0..view.file_size.div_ceil(view.piece_size))
+        .filter(|index| {
+            let start = index.saturating_mul(view.piece_size);
+            let end = start.saturating_add(view.piece_size).min(view.file_size);
+            view.verified_ranges
+                .iter()
+                .any(|range| range.start <= start && range.end >= end)
         })
         .count() as u32
 }
 
-fn upload_expected_piece_length(manifest: &Ed2kResumeManifest, piece_index: u32) -> u64 {
-    let start = u64::from(piece_index).saturating_mul(manifest.piece_size);
-    if start >= manifest.file_size {
-        return 0;
-    }
-    manifest
-        .file_size
-        .saturating_sub(start)
-        .min(manifest.piece_size)
-}
-
 fn is_low_id_client_id(client_id: u32) -> bool {
     client_id != 0 && client_id < 0x0100_0000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use emulebb_ed2k::ed2k_transfer::{Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferJob};
+
+    #[test]
+    fn upload_parts_count_only_verified_ranges() {
+        let mut download = Ed2kResumeManifest::new(&Ed2kTransferJob {
+            file_hash: "11".repeat(16),
+            display_name: "file.bin".into(),
+            file_size: 12,
+            piece_size: 8,
+        });
+        download.pieces[0].bytes_written = 8;
+        let mut view = Ed2kFileServingView::from(&download);
+        assert_eq!(upload_obtained_part_count(&view), 0);
+        view.verified_ranges = vec![Ed2kSharedRange { start: 8, end: 12 }];
+        assert_eq!(upload_obtained_part_count(&view), 1);
+        view.completed = true;
+        assert_eq!(upload_obtained_part_count(&view), 2);
+    }
 }

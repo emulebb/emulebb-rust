@@ -988,7 +988,7 @@ impl Ed2kTransferRuntime {
         let _lifecycle_guard = self.lock_lifecycle(&failure.file_hash).await;
         let _manifest_guard = self.lock_manifest(&failure.file_hash).await;
         let mut manifest = self.load_manifest_unlocked(&failure.file_hash).await?;
-        if manifest.source_path.is_some() || manifest.completed || manifest.final_rehash_pending {
+        if manifest.completed || manifest.final_rehash_pending {
             return Ok(());
         }
         self.invalidate_payload_handle(&failure.file_hash);

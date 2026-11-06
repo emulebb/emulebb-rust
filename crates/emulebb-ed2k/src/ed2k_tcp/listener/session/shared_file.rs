@@ -365,9 +365,7 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     // the oracle (ListenSocket.cpp OP_REQUESTFILENAME -> SendCommentInfo). Only
     // for a file we actually serve, when the peer accepts comments and we have a
     // non-empty rating/comment to send.
-    if let Ok(manifest) = transfer_runtime
-        .servable_manifest(&requested.to_string())
-        .await
+    if let Ok(manifest) = transfer_runtime.serving_view(&requested.to_string()).await
         && should_send_file_desc(
             peer_accept_comment_version,
             manifest.rating,
@@ -734,7 +732,7 @@ async fn source_exchange_peers_excluding(
 
     // Fill the remainder from persisted manifest hints, applying the same
     // non-LowID / non-zero-port eligibility filter and (ip, port) dedup.
-    let manifest = transfer_runtime.servable_manifest(&requested_hex).await?;
+    let manifest = transfer_runtime.serving_view(&requested_hex).await?;
     for source in &manifest.sources {
         let Ok(parsed_ip) = source.ip.parse::<Ipv4Addr>() else {
             continue;

@@ -193,7 +193,7 @@ impl EmulebbCore {
         settings: &Ed2kSettings,
         categories: &std::collections::BTreeMap<u32, crate::Category>,
     ) {
-        if manifest.completed || manifest.source_path.is_some() {
+        if manifest.completed {
             return;
         }
         let remaining = manifest

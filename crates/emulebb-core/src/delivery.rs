@@ -3,9 +3,9 @@
 //! When a transfer completes, the eD2K runtime materializes its internal piece
 //! store into an operator-facing file by name (see
 //! `emulebb_ed2k::ed2k_transfer::deliver`). This module resolves WHERE that file
-//! lands — a per-category download path when set, otherwise the global incoming
+//! lands â€” a per-category download path when set, otherwise the global incoming
 //! directory (eMule per-category Incoming override, else the global Incoming
-//! folder) — and drives delivery at completion, on a confirming recheck, and as
+//! folder) â€” and drives delivery at completion, on a confirming recheck, and as
 //! a startup sweep for transfers that finished before delivery ran.
 
 use std::{
@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use emulebb_ed2k::ed2k_transfer::{Ed2kDeliveryOutcome, Ed2kDeliveryState, Ed2kResumeManifest};
+use emulebb_ed2k::ed2k_transfer::{Ed2kDeliveryOutcome, Ed2kResumeManifest};
 
 use crate::EmulebbCore;
 
@@ -96,9 +96,6 @@ impl EmulebbCore {
         if !manifest.completed || manifest.final_rehash_pending {
             return;
         }
-        if manifest.delivery_state == Ed2kDeliveryState::NotApplicable {
-            return;
-        }
         let dest_dir = self.delivery_destination_dir(&manifest).await;
         match self
             .ed2k_transfers
@@ -114,7 +111,7 @@ impl EmulebbCore {
                 }
                 Err(error) => self.record_delivery_failure(hash, &error),
             },
-            Ok(Ed2kDeliveryOutcome::NotRequired | Ed2kDeliveryOutcome::NotCompleted) => {}
+            Ok(Ed2kDeliveryOutcome::NotCompleted) => {}
             Err(error) => {
                 self.record_delivery_failure(hash, &error);
                 let _ = self
