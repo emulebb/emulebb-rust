@@ -32,6 +32,7 @@ mod aich_answer_cache;
 mod aich_cache;
 mod aich_recovery;
 pub use aich_cache::validate_aich_recovery_set;
+pub use hashset::{validate_aich_part_hashes, validate_md4_hashset};
 mod aich_tree;
 mod aich_trust;
 mod block_bitmap;

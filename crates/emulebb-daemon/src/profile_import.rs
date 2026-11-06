@@ -510,6 +510,16 @@ fn validate_known_file(file: &ProfileImportKnownFile) -> Result<()> {
     for hash in &file.md4_hashset {
         validate_hex(hash, 16, "MD4 part hash")?;
     }
+    // WHY: trusting stock avoids payload reads, but contradictory metadata
+    // must never become verified live content. Reuse protocol-layer geometry.
+    emulebb_ed2k::ed2k_transfer::validate_md4_hashset(
+        &file.file_hash,
+        &file
+            .md4_hashset
+            .iter()
+            .map(|h| decode_hash(h))
+            .collect::<Result<Vec<_>>>()?,
+    )?;
     if let Some(aich_root) = file.aich_root.as_deref() {
         validate_hex(aich_root, 20, "AICH root")?;
         ensure!(
@@ -525,6 +535,21 @@ fn validate_known_file(file: &ProfileImportKnownFile) -> Result<()> {
     }
     for hash in &file.aich_hashset {
         validate_hex(hash, 20, "AICH part hash")?;
+    }
+    if let Some(master) = file
+        .aich_root
+        .as_deref()
+        .filter(|_| !file.aich_hashset.is_empty())
+    {
+        emulebb_ed2k::ed2k_transfer::validate_aich_part_hashes(
+            file.file_size,
+            decode_hash(master)?,
+            &file
+                .aich_hashset
+                .iter()
+                .map(|h| decode_hash(h))
+                .collect::<Result<Vec<_>>>()?,
+        )?;
     }
     ensure!(
         UPLOAD_PRIORITIES.contains(&file.upload_priority.as_str()),
@@ -551,6 +576,12 @@ fn validate_hex(value: &str, byte_len: usize, label: &str) -> Result<()> {
         byte_len * 2
     );
     Ok(())
+}
+
+fn decode_hash<const N: usize>(value: &str) -> Result<[u8; N]> {
+    let mut hash = [0; N];
+    hex::decode_to_slice(value, &mut hash)?;
+    Ok(hash)
 }
 
 fn expected_md4_hash_count(file_size: u64) -> usize {
@@ -762,8 +793,36 @@ mod tests {
         let mut file = small_file();
         file.file_size = ED2K_PART_SIZE + 1;
         file.md4_hashset = vec!["11".repeat(16), "22".repeat(16)];
+        file.file_hash = "4fc04f905ecaa1d0a09de4b001f26bc2".to_string();
         file.aich_root = Some("33".repeat(20));
         validate_known_file(&file).unwrap();
+    }
+
+    #[test]
+    fn imported_part_hashes_must_reconstruct_their_advertised_identities() {
+        let mut file = small_file();
+        file.file_size = ED2K_PART_SIZE + 1;
+        file.file_hash = "4fc04f905ecaa1d0a09de4b001f26bc2".to_string();
+        file.md4_hashset = vec!["11".repeat(16), "22".repeat(16)];
+        file.aich_root = Some("4e6858ecb73b468331a1e83dd183a1e069b0aa10".to_string());
+        file.aich_hashset = vec!["33".repeat(20), "44".repeat(20)];
+        validate_known_file(&file).unwrap();
+
+        file.md4_hashset[0] = "55".repeat(16);
+        assert!(
+            validate_known_file(&file)
+                .unwrap_err()
+                .to_string()
+                .contains("MD4 hashset does not reconstruct")
+        );
+        file.md4_hashset[0] = "11".repeat(16);
+        file.aich_hashset[0] = "55".repeat(20);
+        assert!(
+            validate_known_file(&file)
+                .unwrap_err()
+                .to_string()
+                .contains("AICH hashset does not reconstruct")
+        );
     }
 
     #[test]
