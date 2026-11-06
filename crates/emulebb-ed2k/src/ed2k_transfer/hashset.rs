@@ -24,7 +24,9 @@ pub(super) fn expected_md4_hash_count(file_size: u64) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
 }
 
-pub(super) fn validate_md4_hashset(file_hash: &str, md4_hashset: &[[u8; 16]]) -> Result<()> {
+/// Check that supplied part hashes reconstruct the advertised ED2K identity.
+/// An empty set represents a small file whose identity needs no part list.
+pub fn validate_md4_hashset(file_hash: &str, md4_hashset: &[[u8; 16]]) -> Result<()> {
     let expected = Ed2kHash::from_str(file_hash)
         .with_context(|| format!("invalid ED2K file hash {}", file_hash))?;
     if md4_hashset.is_empty() {
@@ -284,11 +286,24 @@ fn expected_aich_hash_count(file_size: u64) -> u16 {
 }
 
 pub(super) fn validate_aich_hashset(file_size: u64, aich_hashset: &Ed2kAichHashset) -> Result<()> {
+    validate_aich_part_hashes(
+        file_size,
+        aich_hashset.master_hash,
+        &aich_hashset.part_hashes,
+    )
+}
+
+/// Check part geometry and reconstruct the advertised AICH master from metadata.
+pub fn validate_aich_part_hashes(
+    file_size: u64,
+    master: [u8; 20],
+    parts: &[[u8; 20]],
+) -> Result<()> {
     let expected = usize::from(expected_aich_hash_count(file_size));
-    if aich_hashset.part_hashes.len() != expected {
+    if parts.len() != expected {
         anyhow::bail!(
             "unexpected AICH hashset length {} expected {} for file size {}",
-            aich_hashset.part_hashes.len(),
+            parts.len(),
             expected,
             file_size
         );
@@ -296,9 +311,8 @@ pub(super) fn validate_aich_hashset(file_size: u64, aich_hashset: &Ed2kAichHashs
     if expected == 0 {
         return Ok(());
     }
-    let reconstructed =
-        reconstruct_aich_root_from_part_hashes(file_size, &aich_hashset.part_hashes)?;
-    if reconstructed != aich_hashset.master_hash {
+    let reconstructed = reconstruct_aich_root_from_part_hashes(file_size, parts)?;
+    if reconstructed != master {
         anyhow::bail!("AICH hashset does not reconstruct the advertised master hash");
     }
     Ok(())
