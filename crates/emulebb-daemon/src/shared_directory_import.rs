@@ -25,7 +25,7 @@ pub fn read_shared_directories(file: &Path) -> Result<Vec<MetadataSharedDirector
             .trim_start_matches('\u{feff}')
             .to_owned()
     };
-    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut paths: Vec<(PathBuf, PathBuf)> = Vec::new();
     for line in text
         .lines()
         .map(str::trim)
@@ -40,16 +40,17 @@ pub fn read_shared_directories(file: &Path) -> Result<Vec<MetadataSharedDirector
             "shared directory must be an absolute path without traversal"
         );
         let path = path.canonicalize().unwrap_or(path);
-        if paths.iter().any(|parent| path.starts_with(parent)) {
+        let key = root_comparison_key(&path);
+        if paths.iter().any(|(_, parent)| key.starts_with(parent)) {
             continue;
         }
-        paths.retain(|child| !child.starts_with(&path));
-        paths.push(path);
+        paths.retain(|(_, child)| !child.starts_with(&key));
+        paths.push((path, key));
     }
     ensure!(!paths.is_empty(), "directory list is empty");
     Ok(paths
         .into_iter()
-        .map(|path| MetadataSharedDirectoryRoot {
+        .map(|(path, _)| MetadataSharedDirectoryRoot {
             accessible: path.is_dir(),
             shareable: path.is_dir(),
             monitor_owned: false,
@@ -58,35 +59,84 @@ pub fn read_shared_directories(file: &Path) -> Result<Vec<MetadataSharedDirector
         .collect())
 }
 
+fn root_comparison_key(path: &Path) -> PathBuf {
+    let display = emulebb_ed2k::long_path::normal_path_display(path);
+    // WHY: canonicalization fails for unavailable children. Their original
+    // casing and verbatim prefix must still compare with an accessible parent.
+    // This key is only for root consolidation; stored native paths stay exact.
+    if cfg!(windows) {
+        PathBuf::from(display.to_lowercase())
+    } else {
+        PathBuf::from(display)
+    }
+}
+
 /// Merge roots into live metadata before the caller invokes normal offline hashing.
 pub fn import_shared_directories(store: &MetadataStore, file: &Path) -> Result<usize> {
     let roots = read_shared_directories(file)?;
     let canonical = |root: &MetadataSharedDirectoryRoot| {
         let path = PathBuf::from(&root.path);
-        path.canonicalize().unwrap_or(path)
+        root_comparison_key(&path.canonicalize().unwrap_or(path))
     };
     // This getter returns explicit roots only. Replacing that origin preserves
     // mandatory Incoming/category roots and all accepted content knowledge.
-    let mut combined = store.shared_directory_roots()?;
+    let mut combined: Vec<_> = store
+        .shared_directory_roots()?
+        .into_iter()
+        .map(|root| {
+            let key = canonical(&root);
+            (root, key)
+        })
+        .collect();
     for root in roots {
         let key = canonical(&root);
         if combined
             .iter()
-            .any(|old| old.shareable && old.accessible && key.starts_with(canonical(old)))
+            .any(|(old, parent)| old.shareable && old.accessible && key.starts_with(parent))
         {
             continue;
         }
-        combined.retain(|old| !canonical(old).starts_with(&key));
-        combined.push(root);
+        combined.retain(|(_, child)| !child.starts_with(&key));
+        combined.push((root, key));
     }
     let mut writer = store.clone();
-    writer.replace_shared_directory_roots(&combined)?;
-    Ok(combined.len())
+    let roots: Vec<_> = combined.into_iter().map(|(root, _)| root).collect();
+    writer.replace_shared_directory_roots(&roots)?;
+    Ok(roots.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn unavailable_children_collapse_across_windows_case_and_prefix_differences() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("Shared");
+        std::fs::create_dir(&parent).unwrap();
+        let child = parent.join("Unavailable").to_string_lossy().to_uppercase();
+        let input = temp.path().join("shareddir.dat");
+        std::fs::write(
+            &input,
+            format!(
+                "{child}\n{}\n{}\\Missing\n",
+                parent.display(),
+                parent.display().to_string().to_lowercase()
+            ),
+        )
+        .unwrap();
+        assert_eq!(read_shared_directories(&input).unwrap().len(), 1);
+        let mut db = MetadataStore::in_memory().unwrap();
+        db.replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
+            path: child,
+            monitor_owned: false,
+            accessible: false,
+            shareable: false,
+        }])
+        .unwrap();
+        import_shared_directories(&db, &input).unwrap();
+        assert_eq!(db.shared_directory_roots().unwrap().len(), 1);
+    }
     #[test]
     fn utf16_roots_collapse_without_synthesizing_parents_and_merge_idempotently() {
         let temp = tempfile::tempdir().unwrap();
