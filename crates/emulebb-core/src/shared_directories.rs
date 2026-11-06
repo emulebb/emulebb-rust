@@ -1718,6 +1718,11 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         let share = core
             .share_native_local_file_with_progress(&target.path, None, None)
             .await?;
+        record_reload_progress(core, |progress| {
+            progress.hashed_count += 1;
+            progress.completed_hash_bytes += share.size_bytes;
+            progress.completed_read_bytes += share.size_bytes;
+        });
         // Same HASH-1 registration for a freshly (re)hashed startup share.
         register_monitor_shared_hash(core, source_path, &share.hash, target.source_fingerprint)
             .await;

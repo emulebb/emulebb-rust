@@ -33,6 +33,10 @@ enum CliCommand {
         about = "Reconcile imported/cached hashes with file metadata; never hash or start networking"
     )]
     ReconcileSharedFiles,
+    #[command(
+        about = "Merge a shared-directory text list, reuse live hashes, hash new or changed files offline, and exit"
+    )]
+    ImportSharedDirectories { file: PathBuf },
     #[command(about = "Merge a portable SQLite eMule profile export and exit")]
     ImportEmuleProfile {
         #[arg(value_name = "MANIFEST")]
@@ -76,7 +80,14 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
-    if matches!(cli.command, Some(CliCommand::ReconcileSharedFiles)) {
+    if matches!(
+        cli.command,
+        Some(CliCommand::ReconcileSharedFiles | CliCommand::ImportSharedDirectories { .. })
+    ) {
+        if let Some(CliCommand::ImportSharedDirectories { ref file }) = cli.command {
+            let store = emulebb_metadata::MetadataStore::open(profile.metadata_path())?;
+            emulebb_daemon::shared_directory_import::import_shared_directories(&store, file)?;
+        }
         let core = emulebb_core::EmulebbCore::new(
             BUILD_VERSION,
             emulebb_index::FileIndex::open(profile.metadata_path())?,
@@ -84,6 +95,32 @@ async fn main() -> Result<()> {
         )?
         .with_profile_dir(profile.profile_dir.clone())
         .with_incoming_dir(profile.incoming_dir());
+        if matches!(
+            cli.command,
+            Some(CliCommand::ImportSharedDirectories { .. })
+        ) {
+            let reload = core.reload_shared_directories();
+            tokio::pin!(reload);
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    result = &mut reload => { result?; break; }
+                    _ = interval.tick() => {
+                        let state = core.shared_directories().await;
+                        eprintln!("phase={}; hashed={}; remaining={}; reused={}",state.reload_progress.phase,state.reload_progress.hashed_count,state.hashing_count,state.reload_progress.reused_count);
+                    }
+                }
+            }
+            let work = core.shared_directories().await.reload_progress;
+            let reconciliation = core.reconcile_shared_files().await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"hashing":work,"reconciliation":reconciliation})
+                )?
+            );
+            return Ok(());
+        }
         let summary = core.reconcile_shared_files().await?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
