@@ -448,8 +448,14 @@ impl EmulebbCore {
             roots,
             // Files still pending the initial hash in the background reload worker.
             hashing_count: shared_directories::hashing_count_snapshot(self),
-            reload_progress: reload_progress_snapshot(self),
+            reload_progress: self.shared_directory_reload_progress(),
         }
+    }
+
+    /// Read cached scan/hash counters without locking root configuration or
+    /// probing its filesystem. Progress readers must not stall the reload worker.
+    pub fn shared_directory_reload_progress(&self) -> SharedDirectoryReloadProgress {
+        reload_progress_snapshot(self)
     }
 
     pub fn shared_file_ignores(&self) -> Result<SharedFileIgnores> {
