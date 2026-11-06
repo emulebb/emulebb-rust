@@ -33,7 +33,7 @@ enum CliCommand {
         about = "Reconcile imported/cached hashes with file metadata; never hash or start networking"
     )]
     ReconcileSharedFiles,
-    #[command(about = "Merge a portable stock-compatible eMule profile manifest and exit")]
+    #[command(about = "Merge a portable SQLite eMule profile export and exit")]
     ImportEmuleProfile {
         #[arg(value_name = "MANIFEST")]
         manifest: PathBuf,
