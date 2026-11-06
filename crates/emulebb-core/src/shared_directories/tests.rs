@@ -502,6 +502,47 @@ async fn reload_without_live_binding_plans_hashing_without_staging_fallback() {
 }
 
 #[tokio::test]
+async fn added_path_reuses_accepted_live_identity_without_stock_lookup_or_payload_hash() {
+    let root = scratch_dir("native-alias-reuse");
+    let first = root.join("First.bin");
+    let second = root.join("Second.bin");
+    fs::write(&first, b"sample bytes").unwrap();
+    fs::hard_link(&first, &second).unwrap();
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let (key, size, fp) = Ed2kTransferRuntime::scanned_source_identity(&first).unwrap();
+    let fp = fp.unwrap();
+    let expected = "00112233445566778899aabbccddeeff";
+    core.metadata_store
+        .accept_imported_local_files(&[(
+            MetadataFileImportRecord {
+                file_hash: expected.into(),
+                display_name: "First.bin".into(),
+                file_size: size,
+                modified_s: fp.modified.seconds,
+                md4_hashset: Vec::new(),
+                aich_root: None,
+                aich_hashset: Vec::new(),
+                upload_priority: "normal".into(),
+                auto_upload_priority: false,
+                all_time_uploaded_bytes: 0,
+                all_time_upload_requests: 0,
+                all_time_upload_accepts: 0,
+                last_upload_request_ms: 0,
+            },
+            key,
+            fp,
+        )])
+        .unwrap();
+    let plan = plan_incremental_reload(&core, vec![scanned_file(&second)])
+        .await
+        .unwrap();
+    assert!(plan.to_hash.is_empty());
+    assert_eq!(plan.stats.reused_count, 1);
+    assert_eq!(plan.reused_shares[0].file_hash, expected);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn trusted_stock_hash_survives_offline_reconciliation_startup_and_restart() {
     let root = scratch_dir("trusted-stock-restart");
     let shared = root.join("shared");
