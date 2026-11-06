@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use emulebb_metadata::{
-    MetadataImportedKnownFileEntry, MetadataProfileImport, MetadataProfileImportSummary,
-    MetadataSharedDirectoryRoot, MetadataStore, NativePath,
+    MetadataAichRecoverySet, MetadataImportedKnownFileEntry, MetadataProfileImport,
+    MetadataProfileImportSummary, MetadataSharedDirectoryRoot, MetadataStore, NativePath,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -143,10 +143,12 @@ pub fn apply_profile_import(
         source.prepare("SELECT root,size_bytes FROM recovery_sets ORDER BY root,size_bytes")?;
     let mut sets = sets.query([])?;
     let mut leaves_query=source.prepare("SELECT part_index,leaves FROM recovery_parts WHERE root=?1 AND size_bytes=?2 ORDER BY part_index")?;
+    let mut recovery_batch = Vec::new();
+    let mut recovery_bytes = 0usize;
     while let Some(row) = sets.next()? {
         let root: Vec<u8> = row.get(0)?;
         let size: i64 = row.get(1)?;
-        let result = (|| -> Result<()> {
+        let result = (|| -> Result<MetadataAichRecoverySet> {
             ensure!(size > 0 && size <= 0x4000000000, "invalid recovery size");
             let master: [u8; 20] = root.as_slice().try_into()?;
             let mut leaves = leaves_query.query(rusqlite::params![root, size])?;
@@ -166,29 +168,67 @@ pub fn apply_profile_import(
                 master,
                 &parts,
             )?;
-            metadata.store_aich_recovery_set(&hex::encode(master), size as u64, &parts, &roots)?;
-            Ok(())
+            Ok(MetadataAichRecoverySet {
+                root: master,
+                size: size as u64,
+                parts,
+                part_roots: roots,
+            })
         })();
         match result {
-            Ok(()) => summary.imported_recovery_sets += 1,
-            Err(error) => {
-                summary.rejected_recovery_sets += 1;
-                let reason = if summary.recovery_rejection_reasons.len() < 16 {
-                    error.to_string()
-                } else {
-                    "additional rejection reasons".to_string()
-                };
-                *summary
-                    .recovery_rejection_reasons
-                    .entry(reason)
-                    .or_default() += 1;
-                if summary.rejected_recovery_sets <= 8 {
-                    tracing::warn!(%error,"AICH recovery set rejected; MD4 cache retained");
+            Ok(entry) => {
+                let bytes =
+                    entry.parts.iter().map(Vec::len).sum::<usize>() + entry.part_roots.len() * 20;
+                if !recovery_batch.is_empty() && recovery_bytes + bytes > 8 * 1024 * 1024 {
+                    flush_recovery_batch(&metadata, &mut recovery_batch, &mut summary)?;
+                    recovery_bytes = 0;
+                }
+                recovery_batch.push(entry);
+                recovery_bytes += bytes;
+                if recovery_batch.len() == 128 {
+                    flush_recovery_batch(&metadata, &mut recovery_batch, &mut summary)?;
+                    recovery_bytes = 0;
                 }
             }
+            Err(error) => reject_recovery(&mut summary, error),
         }
     }
+    if !recovery_batch.is_empty() {
+        flush_recovery_batch(&metadata, &mut recovery_batch, &mut summary)?;
+    }
+
     Ok(summary)
+}
+
+fn reject_recovery(summary: &mut ProfileImportApplySummary, error: anyhow::Error) {
+    summary.rejected_recovery_sets += 1;
+    let reason = if summary.recovery_rejection_reasons.len() < 16 {
+        error.to_string()
+    } else {
+        "additional rejection reasons".to_string()
+    };
+    *summary
+        .recovery_rejection_reasons
+        .entry(reason)
+        .or_default() += 1;
+    if summary.rejected_recovery_sets <= 8 {
+        tracing::warn!(%error,"AICH recovery set rejected; MD4 cache retained");
+    }
+}
+
+fn flush_recovery_batch(
+    metadata: &MetadataStore,
+    batch: &mut Vec<MetadataAichRecoverySet>,
+    summary: &mut ProfileImportApplySummary,
+) -> Result<()> {
+    for result in metadata.store_aich_recovery_batch(batch)? {
+        match result {
+            Ok(()) => summary.imported_recovery_sets += 1,
+            Err(error) => reject_recovery(summary, error),
+        }
+    }
+    batch.clear();
+    Ok(())
 }
 
 fn merge_exchange_batch(
@@ -415,16 +455,36 @@ mod tests {
             let mut insert = tx
                 .prepare("INSERT INTO known_files(record,md4,aich) VALUES(?1,X'',X'')")
                 .unwrap();
+            let mut insert_set = tx
+                .prepare("INSERT INTO recovery_sets VALUES (?1,1024)")
+                .unwrap();
+            let mut insert_part = tx
+                .prepare("INSERT INTO recovery_parts VALUES (?1,1024,0,?1)")
+                .unwrap();
             for index in 0..100_001 {
+                let identity = index / 2;
+                let mut master = [0u8; 20];
+                master[..8].copy_from_slice(&((identity + 1) as u64).to_le_bytes());
+                record["fileHash"] =
+                    serde_json::Value::from(hex::encode(((identity + 1) as u128).to_le_bytes()));
+                record["aichRoot"] = if identity % 3 == 2 {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::from(hex::encode(master))
+                };
                 record["displayName"] = serde_json::Value::from(format!("Sample {index}.bin"));
                 insert.execute([record.to_string()]).unwrap();
+                if index % 2 == 0 && identity % 3 == 0 {
+                    insert_set.execute([master.as_slice()]).unwrap();
+                    insert_part.execute([master.as_slice()]).unwrap();
+                }
             }
         }
         tx.commit().unwrap();
         let profile = DaemonProfile::load_for_import(temp.path().join("target")).unwrap();
         let summary = apply_profile_import(&profile, &artifact, true).unwrap();
         assert_eq!(summary.imported_known_files, 100_001);
-        assert_eq!(summary.imported_recovery_sets, 0);
+        assert_eq!(summary.imported_recovery_sets, 16_667);
         let target = rusqlite::Connection::open(profile.metadata_path()).unwrap();
         assert_eq!(
             target

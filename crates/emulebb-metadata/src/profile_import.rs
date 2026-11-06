@@ -117,17 +117,18 @@ impl MetadataStore {
             if already_native {
                 if let Some(root) = entry.aich_root.as_deref() {
                     let root = decode_fixed_hex(root, 20, "AICH root")?;
-                    let (id, size, old): (i64, i64, Option<Vec<u8>>) = tx.query_row(
-                        "SELECT id,size_bytes,aich_root FROM known_files WHERE ed2k_hash=?1",
+                    let (id, size, old, verified): (i64, i64, Option<Vec<u8>>,Option<Vec<u8>>) = tx.query_row(
+                        "SELECT f.id,f.size_bytes,f.aich_root,c.aich_root FROM known_files f LEFT JOIN verified_local_content c ON c.known_file_id=f.id WHERE f.ed2k_hash=?1",
                         params![hash],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,row.get(3)?)),
                     )?;
                     anyhow::ensure!(
                         size == entry.file_size as i64,
                         "imported identity size conflicts with native content"
                     );
                     anyhow::ensure!(
-                        old.as_ref().is_none_or(|old| old == &root),
+                        old.as_ref().is_none_or(|old| old == &root)
+                            && verified.as_ref().is_none_or(|old| old == &root),
                         "imported AICH conflicts with native content"
                     );
                     tx.execute(
@@ -206,6 +207,60 @@ impl MetadataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enriches_missing_identity_root_but_preserves_verified_content_on_conflict() {
+        let store = MetadataStore::in_memory().unwrap();
+        let mut file = imported_file("00112233445566778899aabbccddeeff");
+        file.aich_root = Some("11".repeat(20));
+        let fingerprint = NativeFileFingerprint {
+            identity: crate::NativeFileIdentity::Unix {
+                device_id: 1,
+                inode_number: 2,
+            },
+            size_bytes: file.file_size,
+            modified: crate::NativeFileTimestamp::new(file.modified_s, 0).unwrap(),
+            changed: None,
+        };
+        store
+            .accept_imported_local_files(&[(
+                file.clone(),
+                std::env::temp_dir().join("aich-enrichment-sample.bin"),
+                fingerprint,
+            )])
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute("UPDATE known_files SET aich_root=NULL", [])
+            .unwrap();
+        let mut conflict = file.clone();
+        conflict.aich_root = Some("22".repeat(20));
+        assert!(
+            store
+                .merge_profile_import(&MetadataProfileImport {
+                    known_files: vec![conflict],
+                    shared_roots: Vec::new()
+                })
+                .is_err()
+        );
+        assert!(store.imported_known_file_entries().unwrap().is_empty());
+        store
+            .merge_profile_import(&MetadataProfileImport {
+                known_files: vec![file],
+                shared_roots: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(store.table_count("local_file_instances").unwrap(), 1);
+        let root: String = store
+            .connection()
+            .unwrap()
+            .query_row("SELECT lower(hex(aich_root)) FROM known_files", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(root, "11".repeat(20));
+    }
 
     fn imported_file(hash: &str) -> MetadataImportedKnownFileEntry {
         MetadataImportedKnownFileEntry {
