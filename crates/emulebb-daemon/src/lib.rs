@@ -34,6 +34,7 @@ mod bind_config;
 mod discovery_bootstrap;
 pub mod logging;
 mod profile_import;
+pub mod shared_directory_import;
 mod vpn_guard_monitor;
 
 pub use profile_import::{ProfileImportApplySummary, apply_profile_import};
