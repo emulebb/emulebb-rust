@@ -135,6 +135,7 @@ allowed_ipv6_mentions = [
     "crates/emulebb-ed2k/src/ed2k_tcp/download/session.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs",
     "crates/emulebb-ed2k/src/stun.rs",
+    "crates/emulebb-ed2k/src/networking/windows_routes/tests.rs",
     "crates/emulebb-ed2k/src/nat/miniupnpc.rs",
     "crates/emulebb-ed2k/src/nat/pcpnatpmp.rs",
     "crates/emulebb-kad-dht/src/publish.rs",
