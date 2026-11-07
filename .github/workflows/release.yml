@@ -281,6 +281,9 @@ jobs:
     needs: [prepare, native-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
       EMULEBB_RUST_REPO: ${{ github.workspace }}
@@ -320,8 +323,15 @@ jobs:
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
+          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Authenticate upstream GHCR base pulls
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download all native assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -343,6 +353,7 @@ jobs:
           version: v0.75.0
           cache: true
       - name: Generate per-platform image SBOMs
+        id: image-sbom
         shell: bash
         env:
           IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
@@ -379,15 +390,14 @@ jobs:
           )
           exit "$scan_status"
       - name: Retain image security evidence
-        if: always()
+        if: ${{ always() && steps.image-sbom.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: emulebb-rust-image-security
           path: ${{ runner.temp }}/emulebb-rust-out/image-security/*
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
       - name: Retain image candidate
-        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: emulebb-rust-image-candidate
@@ -481,7 +491,7 @@ jobs:
   publish-image:
     name: Publish verified GHCR image
     if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
-    needs: [prepare, image-candidate]
+    needs: [prepare, image-candidate, assemble-candidate]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
