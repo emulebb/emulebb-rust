@@ -30,6 +30,7 @@ mod store;
 mod text;
 mod transfer_model;
 mod transfer_store;
+mod transfer_validation;
 
 pub use aich_recovery_store::MetadataAichRecoverySet;
 pub use download_history_model::{MetadataCurrentSharedFile, MetadataDownloadHistoryEntry};

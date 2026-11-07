@@ -22,7 +22,7 @@ use crate::{
 
 impl super::MetadataStore {
     pub fn upsert_transfer_manifest(&self, manifest: &MetadataTransferManifest) -> Result<()> {
-        validate_delivery_state(manifest)?;
+        crate::transfer_validation::validate_manifest(manifest)?;
         let hash = decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?;
         let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
         let now = unix_ms();
@@ -2329,44 +2329,6 @@ fn local_path_id(conn: &rusqlite::Connection, path: &Path) -> Result<Option<i64>
     )
     .optional()
     .map_err(Into::into)
-}
-
-fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
-    let valid = match (manifest.delivery_state, manifest.delivery_ownership) {
-        (MetadataTransferDeliveryState::Pending, MetadataTransferDeliveryOwnership::None) => {
-            manifest.delivered_path.is_none()
-        }
-        (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Owned) => {
-            manifest.delivered_path.is_some()
-                && manifest
-                    .source_fingerprint
-                    .as_ref()
-                    .is_some_and(|fingerprint| fingerprint.size_bytes == manifest.file_size)
-        }
-        (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Unowned) => {
-            manifest.delivered_path.is_some()
-        }
-        _ => false,
-    };
-    if !valid {
-        anyhow::bail!(
-            "invalid delivery state {:?}/{:?} for transfer {}: delivered_path={}",
-            manifest.delivery_state,
-            manifest.delivery_ownership,
-            manifest.file_hash,
-            manifest.delivered_path.is_some()
-        );
-    }
-    if let Some(fingerprint) = manifest.payload_fingerprint.as_ref() {
-        ensure!(
-            manifest.completed
-                && !manifest.final_rehash_pending
-                && fingerprint.size_bytes == manifest.file_size,
-            "invalid canonical payload fingerprint for transfer {}",
-            manifest.file_hash
-        );
-    }
-    Ok(())
 }
 
 fn delivery_state_to_sql(state: MetadataTransferDeliveryState) -> &'static str {
