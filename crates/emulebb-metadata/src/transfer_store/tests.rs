@@ -101,6 +101,34 @@ fn metadata_manifest_alone_cannot_claim_verified_local_identity() {
 }
 
 #[test]
+fn invalid_payload_geometry_cannot_replace_a_valid_transfer() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_download_manifest();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let mut invalid = manifest.clone();
+    invalid.verified_ranges[0].end += 1;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid = manifest.clone();
+    invalid.pieces.push(MetadataTransferPiece {
+        piece_index: 0,
+        state: "Missing".into(),
+        bytes_written: manifest.file_size + 1,
+        block_bitmap: None,
+        ich_corrupted: false,
+    });
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid.pieces[0].bytes_written = 0;
+    invalid.pieces[0].piece_index = 1;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
+}
+
+#[test]
 fn transfer_presentation_is_independent_of_canonical_index_names() {
     let mut store = MetadataStore::in_memory().unwrap();
     let manifest = completed_download_manifest();
