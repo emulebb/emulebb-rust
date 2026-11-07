@@ -20,7 +20,10 @@ CREATE TABLE local_identities (
     private_secret BLOB,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    CHECK (public_identity IS NULL OR length(public_identity) IN (16, 20))
+    CHECK (
+        (identity_kind = 'ed2k-user-hash' AND public_identity IS NOT NULL AND length(public_identity) = 16 AND private_secret IS NULL)
+        OR (identity_kind = 'ed2k-secure-ident' AND public_identity IS NULL AND private_secret IS NOT NULL AND length(private_secret) > 0)
+    )
 ) STRICT;
 
 CREATE TABLE settings (
@@ -249,8 +252,8 @@ CREATE TABLE local_file_instances (
     path_id INTEGER PRIMARY KEY REFERENCES local_paths(id),
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
-    native_identity BLOB NOT NULL,
-    verified_fingerprint BLOB NOT NULL,
+    native_identity BLOB NOT NULL CHECK(length(native_identity) > 0),
+    verified_fingerprint BLOB NOT NULL CHECK(length(verified_fingerprint) > 0),
     verified_at_ms INTEGER NOT NULL CHECK(verified_at_ms >= 0)
 ) STRICT;
 

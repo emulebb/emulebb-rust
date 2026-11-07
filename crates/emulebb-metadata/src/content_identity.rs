@@ -1,7 +1,7 @@
 //! Admission rules shared by every writer of accepted content identity.
 
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use crate::MetadataContentConflict;
 
@@ -12,20 +12,24 @@ pub(crate) fn check_accepted_identity(
     size_bytes: i64,
     aich_root: Option<&[u8]>,
 ) -> Result<()> {
-    let existing = conn
-        .query_row(
-            "SELECT f.size_bytes, coalesce(c.aich_root, f.aich_root)
+    // WHY: a removed download's completion history remains identity authority,
+    // while an incomplete job still needs to learn provisional size/root claims.
+    let mut stmt = conn.prepare(
+        "SELECT size_bytes, aich_root FROM download_history WHERE ed2k_hash = ?1
+             UNION ALL
+             SELECT f.size_bytes, coalesce(c.aich_root, f.aich_root)
              FROM known_files f
              LEFT JOIN verified_local_content c ON c.known_file_id = f.id
              WHERE f.ed2k_hash = ?1
                AND (c.known_file_id IS NOT NULL
                     OR EXISTS (SELECT 1 FROM transfers t WHERE t.known_file_id = f.id
                                AND t.completed = 1 AND t.final_rehash_pending = 0))",
-            params![hash],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
-        )
-        .optional()?;
-    if let Some((stored_size, stored_root)) = existing {
+    )?;
+    let rows = stmt.query_map(params![hash], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+    })?;
+    for row in rows {
+        let (stored_size, stored_root) = row?;
         ensure!(
             stored_size == size_bytes,
             MetadataContentConflict("ED2K identity has conflicting file size")

@@ -106,6 +106,8 @@ fn schema_rejects_wrong_storage_types_null_keys_and_out_of_range_values() {
         "INSERT INTO metadata_schema(schema_id,schema_version,created_at_ms) VALUES ('second-schema',1,0)",
         "INSERT INTO shared_file_ignore_patterns(pattern,created_at_ms) VALUES (NULL,0)",
         "INSERT INTO peers(user_hash,secure_ident_pubkey,secure_ident_pubkey_len,first_seen_at_ms,last_seen_at_ms) VALUES(zeroblob(16),x'01',2,0,0)",
+        "INSERT INTO local_identities(identity_kind, public_identity, created_at_ms, updated_at_ms) VALUES('ed2k-secure-ident',zeroblob(16),0,0)",
+        "INSERT INTO local_identities(identity_kind, created_at_ms, updated_at_ms) VALUES('ed2k-user-hash',0,0)",
     ] {
         assert!(
             conn.execute(sql, []).is_err(),

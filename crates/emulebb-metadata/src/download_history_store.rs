@@ -448,5 +448,14 @@ mod tests {
                 .file_size,
             1024
         );
+        store.delete_transfer_manifest(&manifest.file_hash).unwrap();
+        manifest.completed = false;
+        assert!(
+            store
+                .upsert_transfer_manifest(&manifest)
+                .unwrap_err()
+                .is::<crate::MetadataContentConflict>()
+        );
+        assert_eq!(store.table_count("transfers").unwrap(), 0);
     }
 }
