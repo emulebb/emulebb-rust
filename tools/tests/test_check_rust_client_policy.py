@@ -301,11 +301,16 @@ class TestRequiredCiGates(unittest.TestCase):
     def test_rejects_incomplete_aggregate_checks(self) -> None:
         errors = CHECKER.check_required_ci_gates("jobs: {}\n", "jobs: {}\n")
 
-        self.assertEqual(len(errors), 17)
+        self.assertEqual(len(errors), 19)
         self.assertTrue(any("single-active-PR job" in error for error in errors))
         self.assertTrue(any("workflow-lint fail-fast" in error for error in errors))
         self.assertTrue(any("complete CI aggregate dependency" in error for error in errors))
         self.assertTrue(any("complete CodeQL matrix dependency" in error for error in errors))
+
+    def test_linux_build_cannot_be_omitted_from_aggregate(self) -> None:
+        ci = (CHECKER.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        errors = CHECKER.check_required_ci_gates(ci.replace('"$BUILD_LINUX_RESULT"', '"success"'))
+        self.assertTrue(any("Linux build result verification" in error for error in errors))
 
 
 class TestDefaultBranchPolicy(unittest.TestCase):
@@ -374,7 +379,7 @@ class TestLiveRestOpenApiCi(unittest.TestCase):
     def test_accepts_tested_artifact_and_pinned_support_repositories(self) -> None:
         workflow = f"""
 rest-openapi:
-  needs: build-test
+  needs: build-linux
   EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{{{ runner.temp }}}}/emulebb-rust-out
   repository: emulebb/emulebb-build-tests
   ref: {'a' * 40}
