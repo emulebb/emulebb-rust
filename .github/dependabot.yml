@@ -69,3 +69,8 @@ updates:
       time: "05:45"
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+
+  - package-ecosystem: pip
+    directory: /tools
+    schedule:
+      interval: weekly

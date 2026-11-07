@@ -17,13 +17,8 @@ class CiParityTests(unittest.TestCase):
         covered = set()
         for job, gate in QUALITY.CI_JOBS.items():
             steps = jobs[job]["steps"]
-            if job == "supply-chain":
-                # The pinned container action is an adapter until tool setup is unified.
-                command = next(step["with"]["command"] for step in steps if "cargo-deny-action@" in step.get("uses", ""))
-                self.assertEqual(command.split(), QUALITY.supply_chain_step()[1][2:])
-            else:
-                dispatched = [shlex.split(step["run"]) for step in steps if "rust_quality_gate.py" in step.get("run", "")]
-                self.assertTrue(any(command[-1] == gate for command in dispatched), f"{job} must dispatch {gate}")
+            dispatched = [shlex.split(step["run"]) for step in steps if "rust_quality_gate.py" in step.get("run", "")]
+            self.assertTrue(any(command[-1] == gate for command in dispatched), f"{job} must dispatch {gate}")
             covered.update(QUALITY.GATES[gate])
         self.assertEqual(covered, set(QUALITY.GATES["pre-push"]))
 

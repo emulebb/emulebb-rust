@@ -206,7 +206,7 @@ class TestDependencyUpdateCoverage(unittest.TestCase):
             "  - package-ecosystem: cargo\n    directory: /\n"
         )
 
-        self.assertEqual(len(errors), 4)
+        self.assertEqual(len(errors), 5)
         self.assertTrue(any("cargo dependencies in /fuzz" in error for error in errors))
         self.assertTrue(any("npm dependencies in /webui" in error for error in errors))
         self.assertTrue(any("docker dependencies" in error for error in errors))
@@ -273,7 +273,7 @@ class TestWorkflowLintCi(unittest.TestCase):
 workflow-lint:
   name: GitHub Actions workflow lint
   uses: actions/setup-go@{'a' * 40}
-  go-version: "1.27.1"
+  go-version: "1.27.3"
   cache: false
   run: python tools/rust_quality_gate.py workflow-lint
 """

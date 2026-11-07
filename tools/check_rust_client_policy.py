@@ -509,13 +509,11 @@ def check_supply_chain_policy() -> list[str]:
         if deny.get("sources", {}).get(key) != "deny":
             errors.append(f"deny.toml sources.{key} must be 'deny'")
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    if not re.search(
-        r"EmbarkStudios/cargo-deny-action@[0-9a-f]{40}\s+#\s*v2\b", workflow
-    ):
-        errors.append(".github/workflows/ci.yml must pin cargo-deny-action v2 by commit")
-    command = "command: check advisories licenses sources"
-    if command not in workflow:
-        errors.append(f".github/workflows/ci.yml is missing cargo-deny guard: {command}")
+    toolchain = json.loads((ROOT / "tools/ci-toolchain.json").read_text(encoding="utf-8"))
+    if f"tool: cargo-deny@{toolchain['cargo_deny']}" not in workflow:
+        errors.append(".github/workflows/ci.yml must install the declared cargo-deny version")
+    if "run: python tools/rust_quality_gate.py supply-chain" not in workflow:
+        errors.append(".github/workflows/ci.yml must dispatch the shared supply-chain gate")
     return errors
 
 
@@ -530,6 +528,7 @@ def check_dependency_update_coverage(dependabot_text: str | None = None) -> list
         ("npm", "/webui"),
         ("github-actions", "/"),
         ("docker", "/packaging/docker"),
+        ("pip", "/tools"),
     )
     errors = []
     for ecosystem, directory in required:
@@ -643,10 +642,11 @@ def check_workflow_lint_ci(workflow_text: str | None = None) -> list[str]:
 
     workflow = ROOT / ".github" / "workflows" / "ci.yml"
     text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    toolchain = json.loads((ROOT / "tools/ci-toolchain.json").read_text(encoding="utf-8"))
     required = {
         "workflow-lint:": "workflow lint job",
         "name: GitHub Actions workflow lint": "named workflow lint check",
-        'go-version: "1.27.1"': "pinned Go toolchain",
+        f'go-version: "{toolchain["go"]}"': "pinned Go toolchain",
         "cache: false": "disabled Go cache for the tool-only job",
     }
     errors = [
