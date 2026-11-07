@@ -258,9 +258,7 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
         shared_names, expected_names,
         "detached reload must hash and share the entire library on its own",
     );
-    wait_for_hashing_idle(&core).await;
-    assert_eq!(core.shared_directories().await.hashing_count, 0);
-    let progress = core.shared_directories().await.reload_progress;
+    let progress = wait_for_hashing_idle(&core).await;
     // WHY: progress describes the latest reload. A watcher reconciliation may
     // already have reused the newly indexed files before this snapshot; require
     // a complete successful scan without assuming the initial job is still last.
@@ -506,7 +504,7 @@ async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
 
 /// Poll until the live `hashingCount` reaches 0 (the background reload worker has
 /// finished the whole library), or panic after a generous timeout.
-async fn wait_for_hashing_idle(core: &EmulebbCore) {
+async fn wait_for_hashing_idle(core: &EmulebbCore) -> emulebb_core::SharedDirectoryReloadProgress {
     for _ in 0..600 {
         let directories = core.shared_directories().await;
         let reload = directories.reload_progress;
@@ -515,7 +513,7 @@ async fn wait_for_hashing_idle(core: &EmulebbCore) {
             && !reload.pending
             && reload.phase == "idle"
         {
-            return;
+            return reload;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
