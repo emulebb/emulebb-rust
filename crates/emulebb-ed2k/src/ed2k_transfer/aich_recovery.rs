@@ -96,12 +96,12 @@ impl AichRecoveryHashSet {
             packed.len() as u64 == length.div_ceil(ED2K_EMBLOCK_SIZE) * 20,
             "invalid recovery leaves"
         );
-        for (block, hash) in packed.chunks_exact(20).enumerate() {
+        for (block, hash) in packed.as_chunks::<20>().0.iter().enumerate() {
             let offset = block as u64 * ED2K_EMBLOCK_SIZE;
             set.root.set_block_hash(
                 u64::from(part) * ED2K_PART_SIZE + offset,
                 (length - offset).min(ED2K_EMBLOCK_SIZE),
-                hash.try_into()?,
+                *hash,
             )?;
         }
         anyhow::ensure!(
