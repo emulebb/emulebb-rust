@@ -794,9 +794,11 @@ fn buffer_to_string(buffer: &[c_char]) -> Option<String> {
     if nul == 0 {
         return None;
     }
+    // WHY: c_char signedness varies by target. Preserve its byte representation
+    // so UTF-8 survives both signed and unsigned C character buffers.
     let bytes = buffer[..nul]
         .iter()
-        .map(|byte| *byte as u8)
+        .map(|byte| byte.to_ne_bytes()[0])
         .collect::<Vec<_>>();
     let value = String::from_utf8_lossy(&bytes).trim().to_string();
     (!value.is_empty()).then_some(value)
@@ -963,7 +965,7 @@ mod tests {
                 .iter_mut()
                 .zip(service_type.as_bytes())
             {
-                *destination = *source as c_char;
+                *destination = c_char::from_ne_bytes([*source]);
             }
         }
         data
@@ -1025,6 +1027,15 @@ mod tests {
     #[test]
     fn buffer_to_string_ignores_empty_values() {
         assert_eq!(buffer_to_string(&[0; 4]), None);
+    }
+
+    #[test]
+    fn buffer_to_string_preserves_utf8_and_bounds_on_every_c_char_target() {
+        let buffer = [b' ', 0xc3, 0xa9, b' ', 0, b'x'].map(|byte| c_char::from_ne_bytes([byte]));
+        assert_eq!(buffer_to_string(&buffer).as_deref(), Some("\u{e9}"));
+        assert_eq!(buffer_to_string(&buffer[..4]).as_deref(), Some("\u{e9}"));
+        let invalid = [0xff, 0].map(|byte| c_char::from_ne_bytes([byte]));
+        assert_eq!(buffer_to_string(&invalid).as_deref(), Some("\u{fffd}"));
     }
 
     #[test]
