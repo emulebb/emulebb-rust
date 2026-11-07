@@ -1,16 +1,12 @@
 //! Durable path-to-content identities, independent of download jobs.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferMediaMetadata,
-    NativeFileFingerprint, NativePath,
+    MetadataStore, MetadataTransferCatalogEntry, NativeFileFingerprint, NativePath,
     native_path::path_from_row,
     store::{decode_fixed_hex, unix_ms, upsert_local_path},
 };
@@ -207,86 +203,12 @@ impl MetadataStore {
             .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
             .transpose()?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut statement = conn.prepare(
-            "WITH eligible AS (
-                SELECT known_files.id AS known_file_id,
-                       local_paths.platform, local_paths.native_path,
-                       row_number() OVER (
-                           PARTITION BY known_files.id
-                           ORDER BY local_paths.platform, local_paths.native_path
-                       ) AS path_rank
-                FROM shared_file_memberships
-                JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
-                JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
-                JOIN local_paths ON local_paths.id = local_file_instances.path_id
-                JOIN known_files ON known_files.id = local_file_instances.known_file_id
-                WHERE shared_file_memberships.removed_at_ms IS NULL
-                  AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
-                  AND (?3 IS NULL OR known_files.ed2k_hash = ?3)
-                  AND shared_directory_roots.enabled = 1
-                  AND shared_directory_roots.deleted_at_ms IS NULL
-                  AND shared_directory_roots.accessible = 1
-                  AND shared_directory_roots.shareable = 1
-                  AND (?4 = 0 OR EXISTS (
-                      SELECT 1 FROM temp.session_verified_local_paths verified
-                      WHERE verified.path_id = local_file_instances.path_id
-                        AND verified.verified_fingerprint = local_file_instances.verified_fingerprint
-                  ))
-             )
-             SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
-                    verified_local_content.part_count,
-                    CASE WHEN verified_local_content.aich_root IS NULL THEN NULL
-                         ELSE lower(hex(verified_local_content.aich_root)) END,
-                    verified_local_content.upload_priority,
-                    verified_local_content.auto_upload_priority,
-                    verified_local_content.comment, verified_local_content.rating,
-                    known_files.all_time_uploaded_bytes,
-                    known_files.all_time_upload_requests,
-                    known_files.all_time_upload_accepts,
-                    known_files.last_upload_request_ms,
-                    eligible.platform, eligible.native_path,
-                    known_files.media_artist, known_files.media_album,
-                    known_files.media_title, known_files.media_length_seconds,
-                    known_files.media_bitrate_kbps, known_files.media_codec,
-                    known_files.media_extractor_version
-             FROM eligible JOIN known_files ON known_files.id = eligible.known_file_id
-             JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
-             WHERE eligible.path_rank = 1
-             ORDER BY known_files.ed2k_hash LIMIT ?2",
-        )?;
+        let sql = crate::local_catalog::catalog_sql(exact_hash.is_some(), verified_only, false);
+        let boundary = exact_hash.or(after_hash).unwrap_or_default();
+        let mut statement = conn.prepare(&sql)?;
         let rows = statement.query_map(
-            params![after_hash, limit, exact_hash, verified_only],
-            |row| {
-                let path = path_from_row(row, 12, 13)?;
-                let display_name = crate::NativePath::from(path.as_path())
-                    .display_file_name()
-                    .unwrap_or_default();
-                Ok(MetadataTransferCatalogEntry {
-                    file_hash: row.get(0)?,
-                    display_name,
-                    file_size: crate::sql_value::unsigned::<u64>(row, 1)?,
-                    part_count: row.get::<_, u32>(2)?,
-                    aich_root: row.get(3)?,
-                    upload_priority: row.get(4)?,
-                    auto_upload_priority: row.get::<_, i64>(5)? != 0,
-                    comment: row.get(6)?,
-                    rating: row.get::<_, u8>(7)?,
-                    all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 8)?,
-                    all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 9)?,
-                    all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 10)?,
-                    last_upload_request_ms: row.get(11)?,
-                    media_path: Some(path),
-                    media: MetadataTransferMediaMetadata {
-                        artist: row.get(14)?,
-                        album: row.get(15)?,
-                        title: row.get(16)?,
-                        length_seconds: row.get::<_, u32>(17)?,
-                        bitrate_kbps: row.get::<_, u32>(18)?,
-                        codec: row.get(19)?,
-                        extractor_version: row.get::<_, u32>(20)?,
-                    },
-                })
-            },
+            params![limit, boundary],
+            crate::local_catalog::catalog_entry,
         )?;
         for row in rows {
             visit(row?)?;
@@ -374,89 +296,6 @@ impl MetadataStore {
             .next()
             .map(local_share_from_catalog)
             .transpose()
-    }
-
-    pub fn query_active_local_share_entries(
-        &self,
-        query: &MetadataSharedFileQuery,
-    ) -> Result<MetadataSharedFilePage> {
-        let search = query
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_lowercase);
-        let priority = query
-            .priority
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_lowercase);
-        if let Some(cursor) = &query.after {
-            decode_fixed_hex(&cursor.file_hash, 16, "ED2K shared-file cursor hash")?;
-        }
-        let cursor = query
-            .after
-            .as_ref()
-            .map(|cursor| (cursor.sort_path.as_str(), cursor.file_hash.to_lowercase()));
-        let mut total = 0usize;
-        let mut after_count = 0usize;
-        // Keep the smallest requested path keys while SQLite streams eligible
-        // hashes. REST page memory no longer grows with the whole library.
-        let mut page = BTreeMap::new();
-        let conn = self.connection()?;
-        Self::visit_active_local_catalog_on_connection(
-            &conn,
-            None,
-            None,
-            usize::MAX,
-            true,
-            |catalog_entry| {
-                let entry = local_share_from_catalog(catalog_entry)?;
-                let sort_path = NativePath::from(entry.path.as_path())
-                    .display_path()
-                    .to_lowercase();
-                if !search.as_ref().is_none_or(|term| {
-                    entry.display_name.to_lowercase().contains(term)
-                        || sort_path.contains(term)
-                        || entry.file_hash.contains(term)
-                }) || !priority
-                    .as_ref()
-                    .is_none_or(|value| entry.upload_priority.to_lowercase() == *value)
-                {
-                    return Ok(());
-                }
-                total += 1;
-                if cursor.as_ref().is_some_and(|(path, hash)| {
-                    (sort_path.as_str(), entry.file_hash.as_str()) <= (*path, hash.as_str())
-                }) {
-                    return Ok(());
-                }
-                after_count += 1;
-                if query.limit > 0 {
-                    page.insert((sort_path, entry.file_hash.clone()), entry);
-                    if page.len() > query.limit {
-                        page.pop_last();
-                    }
-                }
-                Ok(())
-            },
-        )?;
-        let has_more = after_count > query.limit;
-        let next_cursor = if has_more {
-            page.last_key_value()
-                .map(|((sort_path, file_hash), _)| MetadataSharedFileCursor {
-                    sort_path: sort_path.clone(),
-                    file_hash: file_hash.clone(),
-                })
-        } else {
-            None
-        };
-        Ok(MetadataSharedFilePage {
-            entries: page.into_values().collect(),
-            total: if query.count_total { total } else { 0 },
-            next_cursor,
-        })
     }
 
     /// Store verified local content and its path atomically, without a download
@@ -844,34 +683,9 @@ impl MetadataStore {
             .transpose()?;
         let limit = i64::try_from(limit).context("local share page limit exceeds SQLite range")?;
         let conn = self.connection()?;
-        let mut statement = conn.prepare(
-            "WITH eligible AS (
-                SELECT local_paths.platform, local_paths.native_path,
-                       known_files.ed2k_hash, local_file_instances.file_size,
-                       local_file_instances.verified_fingerprint,
-                       row_number() OVER (
-                           PARTITION BY known_files.id
-                           ORDER BY local_paths.platform, local_paths.native_path
-                       ) AS path_rank
-                FROM shared_file_memberships
-                JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
-                JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
-                JOIN local_paths ON local_paths.id = local_file_instances.path_id
-                JOIN known_files ON known_files.id = local_file_instances.known_file_id
-                WHERE shared_file_memberships.removed_at_ms IS NULL
-                  AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
-                  AND shared_directory_roots.enabled = 1
-                  AND shared_directory_roots.deleted_at_ms IS NULL
-                  AND shared_directory_roots.accessible = 1
-                  AND shared_directory_roots.shareable = 1
-             )
-             SELECT platform, native_path, lower(hex(ed2k_hash)), file_size,
-                    verified_fingerprint
-             FROM eligible
-             WHERE path_rank = 1
-             ORDER BY ed2k_hash LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![after_hash, limit], |row| {
+        let sql = crate::local_catalog::catalog_sql(false, false, true);
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(params![limit, after_hash.unwrap_or_default()], |row| {
             let bytes: Vec<u8> = row.get(4)?;
             let fingerprint =
                 NativeFileFingerprint::from_storage_bytes(&bytes).ok_or_else(|| {
@@ -1000,7 +814,7 @@ impl MetadataStore {
     }
 }
 
-fn local_share_from_catalog(
+pub(crate) fn local_share_from_catalog(
     entry: MetadataTransferCatalogEntry,
 ) -> Result<MetadataLocalShareEntry> {
     let path = entry

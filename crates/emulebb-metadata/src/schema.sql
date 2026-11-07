@@ -241,12 +241,15 @@ CREATE TABLE local_paths (
     display_path TEXT NOT NULL,
     native_path BLOB NOT NULL,
     search_key TEXT NOT NULL,
+    sort_key TEXT NOT NULL,
+    file_name_search_key TEXT NOT NULL,
     platform TEXT NOT NULL CHECK(platform IN ('windows', 'unix', 'macos')),
     CHECK(length(native_path) > 0 AND (platform != 'windows' OR length(native_path) % 2 = 0)),
     UNIQUE(platform, native_path)
 ) STRICT;
 
 CREATE INDEX idx_local_paths_search ON local_paths(platform, search_key);
+CREATE INDEX local_paths_sort_idx ON local_paths(sort_key);
 
 -- Durable, verified path-to-content cache. Presence in this table does not
 -- authorize serving: current root membership and a live fingerprint match do.
