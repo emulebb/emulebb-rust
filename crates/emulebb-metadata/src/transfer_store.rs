@@ -1883,23 +1883,42 @@ fn replace_transfer_children(
     manifest: &MetadataTransferManifest,
     now: i64,
 ) -> Result<()> {
-    tx.prepare_cached("DELETE FROM transfer_pieces WHERE transfer_id = ?1")?
-        .execute(params![transfer_id])?;
-    tx.prepare_cached("DELETE FROM ed2k_part_hashes WHERE transfer_id = ?1")?
-        .execute(params![transfer_id])?;
-    tx.prepare_cached("DELETE FROM aich_part_hashes WHERE transfer_id = ?1")?
-        .execute(params![transfer_id])?;
-    tx.prepare_cached("DELETE FROM verified_ranges WHERE transfer_id = ?1")?
-        .execute(params![transfer_id])?;
-    tx.prepare_cached("DELETE FROM transfer_sources WHERE transfer_id = ?1")?
-        .execute(params![transfer_id])?;
-    tx.prepare_cached("DELETE FROM transfer_file_name_observations WHERE transfer_id = ?1")?
-        .execute(params![transfer_id])?;
-    tx.prepare_cached("DELETE FROM transfer_name_state WHERE transfer_id = ?1")?
-        .execute(params![transfer_id])?;
+    let snapshots = [
+        crate::snapshot::SnapshotTable::begin(
+            tx,
+            "transfer_pieces",
+            &["transfer_id", "piece_index"],
+        )?,
+        crate::snapshot::SnapshotTable::begin(
+            tx,
+            "ed2k_part_hashes",
+            &["transfer_id", "part_index"],
+        )?,
+        crate::snapshot::SnapshotTable::begin(
+            tx,
+            "aich_part_hashes",
+            &["transfer_id", "part_index"],
+        )?,
+        crate::snapshot::SnapshotTable::begin(
+            tx,
+            "verified_ranges",
+            &["transfer_id", "start_offset", "end_offset"],
+        )?,
+        crate::snapshot::SnapshotTable::begin(
+            tx,
+            "transfer_sources",
+            &["transfer_id", "ip", "tcp_port"],
+        )?,
+        crate::snapshot::SnapshotTable::begin(
+            tx,
+            "transfer_file_name_observations",
+            &["transfer_id", "position"],
+        )?,
+        crate::snapshot::SnapshotTable::begin(tx, "transfer_name_state", &["transfer_id"])?,
+    ];
 
     tx.prepare_cached(
-        "INSERT INTO transfer_name_state(transfer_id, display_name_pinned, follow_majority_filename) VALUES (?1, ?2, ?3)",
+        "INSERT INTO temp.incoming_transfer_name_state(transfer_id, display_name_pinned, follow_majority_filename) VALUES (?1, ?2, ?3)",
     )?
     .execute(params![
         transfer_id,
@@ -1909,7 +1928,7 @@ fn replace_transfer_children(
 
     let mut insert_piece = tx.prepare_cached(
         r#"
-        INSERT INTO transfer_pieces(transfer_id, piece_index, state, bytes_written, block_bitmap, ich_corrupted, updated_at_ms)
+        INSERT INTO temp.incoming_transfer_pieces(transfer_id, piece_index, state, bytes_written, block_bitmap, ich_corrupted, updated_at_ms)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         "#,
     )?;
@@ -1927,7 +1946,7 @@ fn replace_transfer_children(
     drop(insert_piece);
     let mut insert_md4 = tx.prepare_cached(
         r#"
-        INSERT INTO ed2k_part_hashes(transfer_id, part_index, md4_hash)
+        INSERT INTO temp.incoming_ed2k_part_hashes(transfer_id, part_index, md4_hash)
         VALUES (?1, ?2, ?3)
         "#,
     )?;
@@ -1941,7 +1960,7 @@ fn replace_transfer_children(
     drop(insert_md4);
     let mut insert_aich = tx.prepare_cached(
         r#"
-        INSERT INTO aich_part_hashes(transfer_id, part_index, aich_hash)
+        INSERT INTO temp.incoming_aich_part_hashes(transfer_id, part_index, aich_hash)
         VALUES (?1, ?2, ?3)
         "#,
     )?;
@@ -1955,7 +1974,7 @@ fn replace_transfer_children(
     drop(insert_aich);
     let mut insert_range = tx.prepare_cached(
         r#"
-        INSERT INTO verified_ranges(transfer_id, start_offset, end_offset, created_at_ms)
+        INSERT INTO temp.incoming_verified_ranges(transfer_id, start_offset, end_offset, created_at_ms)
         VALUES (?1, ?2, ?3, ?4)
         "#,
     )?;
@@ -1970,7 +1989,7 @@ fn replace_transfer_children(
     drop(insert_range);
     let mut insert_source = tx.prepare_cached(
         r#"
-        INSERT INTO transfer_sources(
+        INSERT INTO temp.incoming_transfer_sources(
             transfer_id, ip, tcp_port, user_hash, connect_options,
             file_comment, file_rating, first_seen_ms, last_seen_ms
         )
@@ -1992,14 +2011,14 @@ fn replace_transfer_children(
     drop(insert_source);
     let mut insert_name_observation = tx.prepare_cached(
         r#"
-        INSERT INTO transfer_file_name_observations(
-            transfer_id, source_ip, source_tcp_port, user_hash, client_software,
+        INSERT INTO temp.incoming_transfer_file_name_observations(
+            transfer_id, source_ip, source_tcp_port, user_hash, client_software, position,
             origin, server_endpoint, raw_name, normalized_name, observed_at_ms
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?11, ?6, ?7, ?8, ?9, ?10)
         "#,
     )?;
-    for observation in &manifest.file_name_observations {
+    for (position, observation) in manifest.file_name_observations.iter().enumerate() {
         insert_name_observation.execute(params![
             transfer_id,
             observation.source_ip,
@@ -2011,7 +2030,11 @@ fn replace_transfer_children(
             observation.raw_name,
             observation.normalized_name,
             observation.observed_at_ms,
+            i64::try_from(position)?,
         ])?;
+    }
+    for snapshot in snapshots {
+        snapshot.finish(tx, Some(("transfer_id", transfer_id)))?;
     }
     Ok(())
 }
