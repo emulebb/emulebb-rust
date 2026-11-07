@@ -3,10 +3,12 @@ from __future__ import annotations
 import importlib.util
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "rust_quality_gate.py"
+sys.path.insert(0, str(SCRIPT_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("rust_quality_gate", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 QUALITY_GATE = importlib.util.module_from_spec(SPEC)
@@ -14,6 +16,18 @@ SPEC.loader.exec_module(QUALITY_GATE)
 
 
 class TestDiagnosticsGate(unittest.TestCase):
+    def test_composite_reuses_only_a_bundle_produced_by_its_earlier_ui_check(self):
+        env = self.build_env_fixture()
+        for gate in ("ci", "pre-push"):
+            steps = QUALITY_GATE.commands_for_gate(gate, env)
+            labels = [label for label, _ in steps]
+            build_index = labels.index("fresh debug/release workspace builds")
+            self.assertLess(labels.index("WebUI SPA tests"), build_index)
+            self.assertIn("--webui-dist", steps[build_index][1])
+        for gate in ("build", "ci-test"):
+            command = next(command for label, command in QUALITY_GATE.commands_for_gate(gate, env) if label == "fresh debug/release workspace builds")
+            self.assertNotIn("--webui-dist", command)
+
     def build_env_fixture(self) -> dict[str, str]:
         output_root = Path(tempfile.gettempdir()) / "emulebb-out"
         return {

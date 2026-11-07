@@ -14,12 +14,17 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
+from time import perf_counter
+from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLCHAIN = json.loads((ROOT / "tools/ci-toolchain.json").read_text(encoding="utf-8"))
 
-QUICK_CHECKS = ("environment", "policy", "policy-tests", "fmt", "clippy", "diagnostics", "webui-test")
+STATIC_CHECKS = ("policy", "policy-tests", "fmt")
+COMPILE_CHECKS = ("clippy", "diagnostics", "webui-test")
+QUICK_CHECKS = ("environment",) + STATIC_CHECKS + COMPILE_CHECKS
 TEST_CHECKS = ("build", "test-workspace", "test-vpn-leak")
 GATES = {name: (name,) for name in (
     "fmt", "clippy", "diagnostics", "webui-test", "build", "test-workspace",
@@ -32,7 +37,7 @@ GATES.update({
     "quick": QUICK_CHECKS,
     "ci-test": TEST_CHECKS,
     "ci": QUICK_CHECKS + TEST_CHECKS,
-    "pre-push": ("workflow-lint",) + QUICK_CHECKS + TEST_CHECKS + ("supply-chain", "rest-openapi"),
+    "pre-push": ("environment", "workflow-lint") + STATIC_CHECKS + ("supply-chain",) + COMPILE_CHECKS + TEST_CHECKS + ("rest-openapi",),
 })
 CI_JOBS = {
     "workflow-lint": "workflow-lint", "quality": "quick", "build-linux": "ci-test",
@@ -66,9 +71,35 @@ def main(argv: list[str] | None = None) -> int:
     if args.describe:
         print(json.dumps([{"label": label, "command": command} for label, command in commands], indent=2))
         return 0
-    for label, command in commands:
-        run_step(label, command, env)
+    execute_gate(args.gate, commands, env)
     return 0
+
+
+def execute_gate(gate: str, commands: list[tuple[str, list[str]]], env: dict[str, str]) -> Path:
+    """Retain per-check timings and failures without reusing prior pass results."""
+    output = require_path_env(env, "EMULEBB_WORKSPACE_OUTPUT_ROOT")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
+    directory = output / "reports" / "rust-quality-gate" / run_id
+    directory.mkdir(parents=True)
+    path = directory / "results.json"
+    report = {"gate": gate, "started_at": datetime.now(timezone.utc).isoformat(), "status": "running", "checks": []}
+    for label, command in commands:
+        started = perf_counter()
+        check = {"label": label, "command": command, "status": "failed"}
+        try:
+            run_step(label, command, env)
+            check["status"] = "passed"
+        except BaseException as exc:
+            check["error"] = str(exc)
+            raise
+        finally:
+            check["elapsed_seconds"] = round(perf_counter() - started, 3)
+            report["checks"].append(check)
+            report["status"] = "failed" if check["status"] == "failed" else "passed" if len(report["checks"]) == len(commands) else "running"
+            report["elapsed_seconds"] = round(sum(item["elapsed_seconds"] for item in report["checks"]), 3)
+            path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            print(f"{check['status']}: {label} ({check['elapsed_seconds']:.3f}s); report: {path}", flush=True)
+    return path
 
 
 def build_env() -> dict[str, str]:
@@ -163,7 +194,16 @@ def commands_for_gate(
         "supply-chain": supply_chain_step, "rest-openapi": lambda: rest_openapi_step(env),
         "environment": lambda: ("CI toolchain and input provenance", [sys.executable, "tools/ci_environment.py"]),
     }
-    return [factories[name]() for name in GATES[gate]]
+    result = []
+    seen = set()
+    for name in GATES[gate]:
+        if name == "build" and "webui-test" in seen:
+            from webui_workspace import webui_dist_path
+            result.append(build_step(env, force_rebuild=force_rebuild, webui_dist=webui_dist_path("webui-test", env)))
+        else:
+            result.append(factories[name]())
+        seen.add(name)
+    return result
 
 
 def workflow_lint_step() -> tuple[str, list[str]]:
@@ -236,7 +276,7 @@ def webui_test_step() -> tuple[str, list[str]]:
     return ("WebUI SPA tests", [sys.executable, "tools/test_webui.py"])
 
 
-def build_step(env: dict[str, str], *, force_rebuild: bool = False) -> tuple[str, list[str]]:
+def build_step(env: dict[str, str], *, force_rebuild: bool = False, webui_dist: Path | None = None) -> tuple[str, list[str]]:
     command = [
         sys.executable,
         "tools/fresh_rust_build.py",
@@ -245,6 +285,8 @@ def build_step(env: dict[str, str], *, force_rebuild: bool = False) -> tuple[str
     ]
     if force_rebuild:
         command.append("--force-rebuild")
+    if webui_dist is not None:
+        command.extend(["--webui-dist", str(webui_dist)])
     return (
         "fresh debug/release workspace builds",
         command,

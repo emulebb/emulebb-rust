@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -45,12 +47,32 @@ def build_and_stage(stage_dir: Path, workspace: WebUiWorkspace) -> None:
         [npm, "run", "build", "--", "--outDir", str(workspace.dist), "--emptyOutDir"],
         workspace,
     )
-    if not (workspace.dist / "index.html").is_file():
-        raise SystemExit(f"webui build did not produce {workspace.dist / 'index.html'}")
+    stage_dist(workspace.dist, stage_dir, workspace.output_root)
+
+
+def asset_hashes(root: Path) -> dict[str, str]:
+    """Fingerprint every staged asset using stable relative names."""
+    return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def stage_dist(dist: Path, stage_dir: Path, output_root: Path) -> None:
+    """Stage an existing bundle and verify its contents after copying."""
+    dist = require_output_path(dist, output_root, "WebUI dist")
+    stage_dir = require_output_path(stage_dir, output_root, "WebUI stage")
+    assert_paths_do_not_overlap(stage_dir, (dist,), "WebUI stage")
+    if not (dist / "index.html").is_file():
+        raise SystemExit(f"webui build did not produce {dist / 'index.html'}")
+    expected = asset_hashes(dist)
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
-    shutil.copytree(workspace.dist, stage_dir)
-    print(f"staged WebUI {stage_dir}", flush=True)
+    shutil.copytree(dist, stage_dir)
+    if asset_hashes(stage_dir) != expected:
+        raise SystemExit("Staged WebUI assets differ from the built bundle")
+    reports = output_root / "reports" / "webui-stage"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "latest.json").write_text(json.dumps({"source": str(dist), "stage": str(stage_dir), "assets": expected}, indent=2) + "\n", encoding="utf-8")
+    print(f"staged and verified WebUI {stage_dir}", flush=True)
 
 
 def npm_command() -> str:
