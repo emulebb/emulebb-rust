@@ -224,16 +224,16 @@ impl Ed2kTransferRuntime {
             manifest.final_rehash_pending = false;
             manifest.payload_fingerprint = computation.payload_fingerprint;
             let recovery = computation.recovery;
-            if let Some(set) = recovery.as_ref() {
-                if manifest.aich_root.is_none() || !manifest.aich_hashset_acquired {
-                    manifest.aich_root = Some(hex::encode(set.root));
-                    manifest.aich_hashset = if set.part_roots.len() == 1 {
-                        Vec::new()
-                    } else {
-                        set.part_roots.iter().map(hex::encode).collect()
-                    };
-                    manifest.aich_hashset_acquired = true;
-                }
+            if let Some(set) = recovery.as_ref()
+                && (manifest.aich_root.is_none() || !manifest.aich_hashset_acquired)
+            {
+                manifest.aich_root = Some(hex::encode(set.root));
+                manifest.aich_hashset = if set.part_roots.len() == 1 {
+                    Vec::new()
+                } else {
+                    set.part_roots.iter().map(hex::encode).collect()
+                };
+                manifest.aich_hashset_acquired = true;
             }
             // WHY: save available recovery before publishing completion. A
             // crash must not leave a completed file missing its computed tree.
