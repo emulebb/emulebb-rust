@@ -937,10 +937,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO transfers(
                      id, known_file_id, visible_state, delivery_state,
-                     created_at_ms, updated_at_ms, removed_at_ms
+                     created_at_ms, updated_at_ms, removed_at_ms, display_name, part_size, part_count
                  )
-                 VALUES (1, 1, 'downloading', 'pending', 0, 0, NULL),
-                        (2, 2, 'downloading', 'pending', 0, 0, ?1)",
+                 VALUES (1, 1, 'downloading', 'pending', 0, 0, NULL, 'a.bin', 1, 1),
+                        (2, 2, 'downloading', 'pending', 0, 0, ?1, 'b.bin', 1, 1)",
                 params![now],
             )
             .unwrap();

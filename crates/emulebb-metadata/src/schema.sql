@@ -63,14 +63,7 @@ CREATE TABLE known_files (
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     display_name TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT '',
-    part_size INTEGER CHECK(part_size IS NULL OR part_size > 0),
-    part_count INTEGER CHECK(part_count IS NULL OR part_count BETWEEN 0 AND 4294967295),
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
-    upload_priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
-    auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
-    comment TEXT NOT NULL DEFAULT '',
-    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
     media_artist TEXT NOT NULL DEFAULT '',
     media_album TEXT NOT NULL DEFAULT '',
     media_title TEXT NOT NULL DEFAULT '',
@@ -317,6 +310,14 @@ CREATE TABLE shared_file_memberships (
 CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    part_size INTEGER NOT NULL CHECK(part_size > 0),
+    part_count INTEGER NOT NULL CHECK(part_count BETWEEN 0 AND 4294967295),
+    upload_priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
+    auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
+    comment TEXT NOT NULL DEFAULT '',
+    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
     completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
     md4_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(md4_hashset_acquired IN (0, 1)),
     aich_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(aich_hashset_acquired IN (0, 1)),
@@ -327,10 +328,6 @@ CREATE TABLE transfers (
         CHECK(final_rehash_pending IN (0, 1)),
     control_state TEXT CHECK(control_state IS NULL OR control_state IN ('paused', 'stopped')),
     category_id INTEGER REFERENCES categories(id),
-    download_priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(download_priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'veryhigh')),
-    target_path_id INTEGER REFERENCES local_paths(id),
-    payload_directory TEXT NOT NULL DEFAULT '',
     -- Downloads remain pending until a verified output path is committed.
     delivery_state TEXT NOT NULL
         CHECK(delivery_state IN ('pending', 'delivered')),
@@ -717,7 +714,6 @@ CREATE INDEX search_result_observations_result_idx
 ON search_result_observations(result_id, observed_at_ms, id);
 CREATE INDEX categories_path_id_idx ON categories(path_id);
 CREATE INDEX transfers_category_id_idx ON transfers(category_id);
-CREATE INDEX transfers_target_path_id_idx ON transfers(target_path_id);
 CREATE INDEX transfers_delivered_path_id_idx ON transfers(delivered_path_id);
 CREATE INDEX delivery_attempts_target_path_id_idx ON delivery_attempts(target_path_id);
 CREATE INDEX delivery_attempts_staging_path_id_idx ON delivery_attempts(staging_path_id);

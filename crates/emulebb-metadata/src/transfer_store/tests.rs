@@ -101,6 +101,31 @@ fn metadata_manifest_alone_cannot_claim_verified_local_identity() {
 }
 
 #[test]
+fn transfer_presentation_is_independent_of_canonical_index_names() {
+    let mut store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_download_manifest();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    store
+        .upsert_indexed_file(
+            &crate::MetadataIndexedFile {
+                ed2k_hash: manifest.file_hash.clone(),
+                name: "local-sample.bin".into(),
+                size_bytes: manifest.file_size,
+                content_type: String::new(),
+                availability_score: 0,
+            },
+            crate::MetadataIndexedFileOrigin::LocalShare,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
+}
+
+#[test]
 fn accepted_identity_survives_conflicting_transfer_and_index_observations() {
     let mut store = MetadataStore::in_memory().unwrap();
     let mut manifest = completed_download_manifest();
@@ -109,7 +134,7 @@ fn accepted_identity_survives_conflicting_transfer_and_index_observations() {
     store.upsert_transfer_manifest(&manifest).unwrap();
     store.connection().unwrap().execute(
         "INSERT INTO verified_local_content(known_file_id, display_name, part_size, part_count, aich_root)
-         SELECT id, display_name, part_size, part_count, aich_root FROM known_files",
+         SELECT known_files.id, transfers.display_name, transfers.part_size, transfers.part_count, aich_root FROM known_files JOIN transfers ON transfers.known_file_id = known_files.id",
         [],
     ).unwrap();
 

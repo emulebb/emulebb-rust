@@ -355,24 +355,15 @@ impl MetadataStore {
             .collect::<Result<Vec<_>>>()?;
         tx.execute(
             "INSERT INTO known_files(
-                ed2k_hash, size_bytes, display_name, part_size, part_count,
-                aich_root,
+                ed2k_hash, size_bytes, display_name, aich_root,
                 first_seen_ms, last_seen_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)
              ON CONFLICT(ed2k_hash) DO UPDATE SET
                  size_bytes = excluded.size_bytes,
                  aich_root = coalesce(excluded.aich_root, known_files.aich_root),
                 last_seen_ms = excluded.last_seen_ms,
                 updated_at_ms = excluded.updated_at_ms",
-            params![
-                hash,
-                size,
-                content.display_name,
-                part_size,
-                part_count,
-                aich_root,
-                now
-            ],
+            params![hash, size, content.display_name, aich_root, now],
         )?;
         let (known_file_id, stored_size): (i64, i64) = tx.query_row(
             "SELECT id, size_bytes FROM known_files WHERE ed2k_hash = ?1",
