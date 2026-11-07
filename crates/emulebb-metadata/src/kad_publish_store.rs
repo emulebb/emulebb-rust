@@ -14,19 +14,38 @@ impl super::MetadataStore {
     pub fn replace_kad_publish_cache(&self, cache: &MetadataKadPublishCache) -> Result<()> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM kad_keyword_publishes", [])?;
-        tx.execute("DELETE FROM kad_source_publishes", [])?;
-        tx.execute("DELETE FROM kad_note_publishes", [])?;
+        let snapshots = [
+            crate::snapshot::SnapshotTable::begin(
+                &tx,
+                "kad_keyword_publishes",
+                &["target_node_id", "file_hash", "size_bytes"],
+            )?,
+            crate::snapshot::SnapshotTable::begin(
+                &tx,
+                "kad_source_publishes",
+                &[
+                    "target_node_id",
+                    "source_ip",
+                    "source_tcp_port",
+                    "source_udp_port",
+                ],
+            )?,
+            crate::snapshot::SnapshotTable::begin(
+                &tx,
+                "kad_note_publishes",
+                &["target_node_id", "publisher_id", "publisher_ip"],
+            )?,
+        ];
 
         for publish in &cache.keyword_publishes {
             let file_hash = decode_fixed_hex(&publish.file_hash, 16, "Kad keyword file hash")?;
             let known_file_id = known_file_id_by_hash(&tx, &file_hash)?;
             tx.execute(
                 r#"
-                INSERT INTO kad_keyword_publishes(
-                    target_node_id, file_hash, known_file_id, raw_tags, load, valid, observed_at_ms
+                INSERT INTO temp.incoming_kad_keyword_publishes(
+                    target_node_id, file_hash, known_file_id, raw_tags, load, valid, observed_at_ms, size_bytes
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+                VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)
                 "#,
                 params![
                     decode_fixed_hex(&publish.target_node_id, 16, "Kad keyword target node ID")?,
@@ -35,6 +54,7 @@ impl super::MetadataStore {
                     publish.raw_tags,
                     publish.load.map(i64::from),
                     publish.observed_at_ms,
+                    publish.size_bytes.to_be_bytes().as_slice(),
                 ],
             )?;
         }
@@ -43,7 +63,7 @@ impl super::MetadataStore {
             let file_hash = decode_fixed_hex(&publish.file_hash, 16, "Kad source file hash")?;
             tx.execute(
                 r#"
-                INSERT INTO kad_source_publishes(
+                INSERT INTO temp.incoming_kad_source_publishes(
                     target_node_id, publisher_id, file_hash, source_ip, source_tcp_port,
                     source_udp_port, raw_tags, load, valid, observed_at_ms
                 )
@@ -66,7 +86,7 @@ impl super::MetadataStore {
         for publish in &cache.note_publishes {
             tx.execute(
                 r#"
-                INSERT INTO kad_note_publishes(
+                INSERT INTO temp.incoming_kad_note_publishes(
                     target_node_id, publisher_id, publisher_ip, file_hash, raw_tags, load, valid,
                     observed_at_ms
                 )
@@ -84,6 +104,9 @@ impl super::MetadataStore {
             )?;
         }
 
+        for snapshot in snapshots {
+            snapshot.finish(&tx, None)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -189,7 +212,7 @@ fn known_file_id_by_hash(tx: &rusqlite::Transaction<'_>, file_hash: &[u8]) -> Re
 fn load_keyword_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadKeywordPublish>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT lower(hex(target_node_id)), lower(hex(file_hash)), raw_tags, load, observed_at_ms
+        SELECT lower(hex(target_node_id)), lower(hex(file_hash)), raw_tags, load, observed_at_ms, size_bytes
         FROM kad_keyword_publishes
         WHERE valid = 1
         ORDER BY observed_at_ms, id
@@ -197,6 +220,7 @@ fn load_keyword_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKad
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(MetadataKadKeywordPublish {
+            size_bytes: u64::from_be_bytes(row.get::<_, [u8; 8]>(5)?),
             target_node_id: row.get(0)?,
             file_hash: row.get(1)?,
             raw_tags: row.get(2)?,
@@ -282,6 +306,7 @@ mod tests {
         let store = MetadataStore::in_memory().unwrap();
         let cache = MetadataKadPublishCache {
             keyword_publishes: vec![MetadataKadKeywordPublish {
+                size_bytes: 0,
                 target_node_id: "00112233445566778899aabbccddeeff".to_string(),
                 file_hash: "11112222333344445555666677778888".to_string(),
                 raw_tags: b"keyword-tags".to_vec(),
@@ -312,6 +337,13 @@ mod tests {
 
         store.replace_kad_publish_cache(&cache).unwrap();
 
+        store.connection().unwrap().execute_batch(
+            "CREATE TEMP TRIGGER keep_keyword BEFORE DELETE ON main.kad_keyword_publishes BEGIN SELECT RAISE(ABORT,'unchanged keyword deleted'); END;
+             CREATE TEMP TRIGGER keep_source BEFORE DELETE ON main.kad_source_publishes BEGIN SELECT RAISE(ABORT,'unchanged source deleted'); END;
+             CREATE TEMP TRIGGER keep_note BEFORE DELETE ON main.kad_note_publishes BEGIN SELECT RAISE(ABORT,'unchanged note deleted'); END;"
+        ).unwrap();
+        store.replace_kad_publish_cache(&cache).unwrap();
+
         assert_eq!(store.load_kad_publish_cache().unwrap(), cache);
     }
 
@@ -321,6 +353,7 @@ mod tests {
         store
             .replace_kad_publish_cache(&MetadataKadPublishCache {
                 keyword_publishes: vec![MetadataKadKeywordPublish {
+                    size_bytes: 0,
                     target_node_id: "00112233445566778899aabbccddeeff".to_string(),
                     file_hash: "11112222333344445555666677778888".to_string(),
                     raw_tags: Vec::new(),

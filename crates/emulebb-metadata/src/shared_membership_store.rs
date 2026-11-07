@@ -187,10 +187,9 @@ impl MetadataStore {
             |row| row.get(0),
         )?;
         let now = unix_ms();
-        tx.execute(
-            "UPDATE shared_file_memberships SET removed_at_ms = ?2
-             WHERE root_id = ?1 AND removed_at_ms IS NULL",
-            params![root_id, now],
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS scanned_membership_paths(path_id INTEGER PRIMARY KEY);
+            DELETE FROM temp.scanned_membership_paths;",
         )?;
         for (path, relative, current_fingerprint) in paths {
             ensure!(
@@ -223,6 +222,10 @@ impl MetadataStore {
             }
             let path_id = cached.0;
             tx.execute(
+                "INSERT OR IGNORE INTO temp.scanned_membership_paths VALUES(?1)",
+                [path_id],
+            )?;
+            tx.execute(
                 "INSERT INTO shared_file_memberships(
                     root_id, path_id, relative_path, first_seen_ms, last_seen_ms, removed_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?4, NULL)
@@ -243,6 +246,13 @@ impl MetadataStore {
                 params![path_id, cached.1],
             )?;
         }
+        tx.execute(
+            "UPDATE shared_file_memberships SET removed_at_ms = ?2
+            WHERE root_id = ?1 AND removed_at_ms IS NULL
+              AND path_id NOT IN (SELECT path_id FROM temp.scanned_membership_paths)",
+            params![root_id, now],
+        )?;
+        tx.execute("DELETE FROM temp.scanned_membership_paths", [])?;
         tx.execute(
             "UPDATE shared_directory_roots SET accessible = 1, last_scan_ms = ?2
              WHERE id = ?1",
@@ -363,6 +373,15 @@ mod tests {
             .replace_root_memberships(&nested, std::slice::from_ref(&nested_file))
             .unwrap();
         assert_eq!(store.active_shared_content_count().unwrap(), 1);
+        store.connection().unwrap().execute_batch("CREATE TEMP TRIGGER keep_active_membership BEFORE UPDATE OF removed_at_ms ON main.shared_file_memberships WHEN new.removed_at_ms IS NOT NULL BEGIN SELECT RAISE(ABORT,'live member withdrawn during scan'); END;").unwrap();
+        store
+            .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER keep_active_membership;")
+            .unwrap();
         assert_eq!(store.withdraw_local_file_path(&file).unwrap(), 2);
         assert_eq!(store.active_shared_content_count().unwrap(), 0);
         assert!(store.local_file_instance(&file).unwrap().is_some());

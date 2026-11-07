@@ -644,3 +644,8 @@ impl KadLocalStore {
 
 #[cfg(test)]
 mod tests;
+
+/// Content size participating in keyword-cache identity.
+pub(crate) fn keyword_cache_size(tags: &[Tag]) -> u64 {
+    stock_keyword_file_size(tags).unwrap_or_default()
+}

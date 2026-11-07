@@ -95,6 +95,7 @@ fn metadata_keyword_publish(
     publish: &KadKeywordPublishSnapshot,
 ) -> Result<MetadataKadKeywordPublish> {
     Ok(MetadataKadKeywordPublish {
+        size_bytes: crate::kad_store::keyword_cache_size(&publish.tags),
         target_node_id: publish.target.to_string(),
         file_hash: publish.file_hash.to_string(),
         raw_tags: encode_tags(&publish.tags)?,
@@ -132,11 +133,16 @@ fn metadata_note_publish(publish: &KadNotePublishSnapshot) -> Result<MetadataKad
 fn keyword_publish_from_metadata(
     publish: MetadataKadKeywordPublish,
 ) -> Result<KadKeywordPublishSnapshot> {
+    let tags = decode_tags(&publish.raw_tags)?;
+    ensure!(
+        publish.size_bytes == crate::kad_store::keyword_cache_size(&tags),
+        "stored keyword identity differs from its wire tags"
+    );
     Ok(KadKeywordPublishSnapshot {
         observed_at: timestamp_ms(publish.observed_at_ms, "Kad keyword observed_at_ms")?,
         target: publish.target_node_id.parse()?,
         file_hash: publish.file_hash.parse()?,
-        tags: decode_tags(&publish.raw_tags)?,
+        tags,
         load: publish.load,
     })
 }
@@ -260,6 +266,7 @@ mod tests {
     fn invalid_tag_payload_is_rejected() {
         let metadata = MetadataKadPublishCache {
             keyword_publishes: vec![MetadataKadKeywordPublish {
+                size_bytes: 0,
                 target_node_id: "00112233445566778899aabbccddeeff".to_string(),
                 file_hash: "11112222333344445555666677778888".to_string(),
                 raw_tags: vec![1, 0, 0xaa],
