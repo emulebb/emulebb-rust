@@ -52,6 +52,8 @@ impl MetadataKadOutboundPublishKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataKadKeywordPublish {
+    /// Full unsigned size from the observed wire tags; zero denotes unavailable.
+    pub size_bytes: u64,
     pub target_node_id: String,
     pub file_hash: String,
     pub raw_tags: Vec<u8>,

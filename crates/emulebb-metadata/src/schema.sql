@@ -581,13 +581,15 @@ CREATE TABLE kad_bootstrap_endpoints (
 
 CREATE TABLE kad_keyword_publishes (
     id INTEGER PRIMARY KEY,
+    size_bytes BLOB NOT NULL CHECK(length(size_bytes) = 8),
     target_node_id BLOB NOT NULL CHECK(length(target_node_id) = 16),
     file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
     known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    UNIQUE(target_node_id, file_hash, size_bytes)
 ) STRICT;
 
 CREATE TABLE kad_source_publishes (
@@ -601,7 +603,8 @@ CREATE TABLE kad_source_publishes (
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    UNIQUE(target_node_id, source_ip, source_tcp_port, source_udp_port)
 ) STRICT;
 
 CREATE TABLE kad_note_publishes (
@@ -613,7 +616,8 @@ CREATE TABLE kad_note_publishes (
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    UNIQUE(target_node_id, publisher_id, publisher_ip)
 ) STRICT;
 
 CREATE TABLE kad_outbound_publish_schedule (
