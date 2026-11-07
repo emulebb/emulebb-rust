@@ -10,6 +10,8 @@ import sys
 import tomllib
 from pathlib import Path, PurePosixPath
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "policy" / "rust-client.toml"
@@ -708,16 +710,16 @@ def check_required_ci_gates(
         for fragment, (source, description) in required.items()
         if fragment not in source
     ]
+    jobs = (yaml.safe_load(ci) or {}).get("jobs", {})
     for job in ("workflow-lint", "build-linux", "build-test", "quality", "supply-chain"):
-        match = re.search(
-            rf"(?ms)^  {re.escape(job)}:\s*$\n"
-            r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
-            ci,
-        )
-        if match is None or "needs: single-active-pr" not in match.group("body"):
+        needs = jobs.get(job, {}).get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        if "single-active-pr" not in needs:
             errors.append(
                 f"required branch gate is missing {job} fail-fast PR policy dependency"
             )
+        elif job in {"build-linux", "build-test", "quality"} and "workflow-lint" not in needs:
+            errors.append(f"{job} must wait for workflow-lint before expensive validation")
     return errors
 
 

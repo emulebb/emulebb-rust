@@ -17,6 +17,8 @@ import tomllib
 import urllib.request
 import zipfile
 
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOLCHAIN = json.loads((ROOT / "tools/ci-toolchain.json").read_text(encoding="utf-8"))
 

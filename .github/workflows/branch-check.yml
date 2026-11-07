@@ -44,7 +44,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: branch-evidence-${{ github.sha }}
+          name: branch-evidence-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/reports/rust-quality-gate/
             ${{ runner.temp }}/emulebb-rust-out/reports/ci-environment/
