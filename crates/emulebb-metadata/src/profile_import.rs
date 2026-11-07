@@ -9,21 +9,35 @@ use crate::{
     store::{decode_fixed_hex, unix_ms, upsert_local_path},
 };
 
+struct LiveImportBinding {
+    platform: String,
+    native_path: Vec<u8>,
+    fingerprint: Vec<u8>,
+    size: i64,
+    aich_root: Option<Vec<u8>>,
+}
+
 impl MetadataStore {
     /// Enrich already accepted live content without changing its path fingerprint.
     /// This is content-addressed merge, never a way to admit an unmatched file.
     pub fn enrich_live_import(&self, entry: &MetadataFileImportRecord) -> Result<bool> {
         let hash = decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
-        let row:Option<(String,Vec<u8>,Vec<u8>,i64,Option<Vec<u8>>)>=conn.query_row(
+        let row = conn.query_row(
             "SELECT p.platform,p.native_path,i.verified_fingerprint,f.size_bytes,f.aich_root FROM known_files f JOIN verified_local_content c ON c.known_file_id=f.id JOIN local_file_instances i ON i.known_file_id=f.id JOIN local_paths p ON p.id=i.path_id WHERE f.ed2k_hash=?1 LIMIT 1",
-            [hash.clone()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+            [hash.clone()], |row| Ok(LiveImportBinding {
+                platform: row.get(0)?,
+                native_path: row.get(1)?,
+                fingerprint: row.get(2)?,
+                size: row.get(3)?,
+                aich_root: row.get(4)?,
+            }),
         ).optional()?;
-        let Some((platform, path, bytes, size, old_root)) = row else {
+        let Some(binding) = row else {
             return Ok(false);
         };
         anyhow::ensure!(
-            size == entry.file_size as i64,
+            binding.size == entry.file_size as i64,
             MetadataContentConflict("imported content size conflicts with live content")
         );
         let root = entry
@@ -32,14 +46,16 @@ impl MetadataStore {
             .map(|r| decode_fixed_hex(r, 20, "AICH root"))
             .transpose()?;
         anyhow::ensure!(
-            old_root
+            binding
+                .aich_root
                 .as_ref()
                 .zip(root.as_ref())
                 .is_none_or(|(a, b)| a == b),
             MetadataContentConflict("imported AICH root conflicts with live identity")
         );
-        let path = crate::NativePath::from_storage(&platform, &path)?.into_path_buf();
-        let fingerprint = NativeFileFingerprint::from_storage_bytes(&bytes)
+        let path = crate::NativePath::from_storage(&binding.platform, &binding.native_path)?
+            .into_path_buf();
+        let fingerprint = NativeFileFingerprint::from_storage_bytes(&binding.fingerprint)
             .ok_or_else(|| anyhow::anyhow!("invalid live fingerprint"))?;
         let tx = conn.transaction()?;
         Self::upsert_verified_local_content_tx(
