@@ -68,10 +68,12 @@ fn resolve_default_route_ip(interfaces: &[NetworkInterface]) -> Result<Ipv4Addr>
     match candidates.as_slice() {
         [address] => Ok(*address),
         [] => bail!(
-            "p2pBindIp or p2pBindInterface is required because no default-route IPv4 interface was detected"
+            "p2pBindIp or p2pBindInterface is required because no default-route IPv4 interface was detected; \
+             start with --p2p-bind-interface <NAME>, then save the P2P bind interface in WebUI Settings > Network"
         ),
         _ => bail!(
-            "p2pBindIp or p2pBindInterface is required because multiple default-route IPv4 interfaces were detected"
+            "p2pBindIp or p2pBindInterface is required because multiple default-route IPv4 interfaces were detected; \
+             start with --p2p-bind-interface <NAME>, then save the P2P bind interface in WebUI Settings > Network"
         ),
     }
 }

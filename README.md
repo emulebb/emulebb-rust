@@ -206,6 +206,52 @@ running and `503` during graceful shutdown; it exposes no profile, peer,
 network, or credential data. The OCI image uses this loopback-only probe for its
 built-in healthcheck.
 
+### VPN Startup And Listener Troubleshooting
+
+If startup reports no default-route IPv4 interface, or multiple candidates,
+select the intended P2P interface explicitly. On Windows, list adapter names
+with `Get-NetAdapter | Select-Object Name, Status`. Replace `TUNNEL_NAME` below
+with the actual interface name, keeping quotes around names containing spaces:
+
+```powershell
+.\emulebb-rust.exe --p2p-bind-interface "TUNNEL_NAME"
+```
+
+The override applies only to this run. Once the WebUI opens, save **P2P bind
+interface** under **Settings > Network** to retain the choice across launches.
+The corresponding API setting is `daemon.p2pBindInterface` in
+`PATCH /api/v1/app/settings`. Runtime network settings belong in SQLite through
+the WebUI/API; adding them to the bootstrap TOML is rejected.
+
+Windows default-route detection reads the IPv4 routing table and associates
+routes with adapters by interface index. A tunnel's on-link default route does
+not need an advertised adapter gateway. Multiple candidates, multiple IPv4
+addresses, and tunnels using only specific routes can still require explicit
+selection. The client never chooses an arbitrary interface to bypass an
+unresolved bind.
+
+A failure to bind the **REST/WebUI TCP listener** is separate from P2P binding.
+On Windows, socket error `10013` means access was denied; it can involve an
+excluded/reserved port, exclusive socket ownership, or security software. Check
+the listener address in the error and, for the default port, inspect:
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+Get-NetTCPConnection -LocalPort 4711 -ErrorAction SilentlyContinue
+```
+
+Try an available loopback port outside the excluded ranges, for example:
+
+```powershell
+.\emulebb-rust.exe --p2p-bind-interface "TUNNEL_NAME" --rest-bind-addr 127.0.0.1:14711
+```
+
+Open `http://127.0.0.1:14711/` and authenticate with the existing profile's API
+key. The listener override is temporary: while the daemon is stopped, save
+`bindAddr = "127.0.0.1:14711"` in the bootstrap TOML's `[rest]` section to retain
+it. Keep the listener on loopback for local access. Selecting a different REST
+port does not change eD2K/Kad ports or P2P interface binding.
+
 ## Import An Existing eMule Profile
 
 The one-shot importer can bootstrap a current Rust profile from a stopped stock
