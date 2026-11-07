@@ -439,7 +439,7 @@ mod tests {
 
         manifest.file_size += 1;
         let error = store.upsert_transfer_manifest(&manifest).unwrap_err();
-        assert!(error.to_string().contains("has size 1024, not 1025"));
+        assert!(error.is::<crate::MetadataContentConflict>());
         assert_eq!(
             store
                 .transfer_manifest_by_hash(&manifest.file_hash)

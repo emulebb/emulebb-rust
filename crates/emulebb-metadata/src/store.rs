@@ -197,6 +197,12 @@ impl MetadataStore {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        crate::content_identity::check_accepted_identity(
+            &tx,
+            &hash,
+            i64::try_from(file.size_bytes)?,
+            None,
+        )?;
         let existing = tx
             .query_row(
                 r#"

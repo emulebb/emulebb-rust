@@ -32,6 +32,12 @@ impl super::MetadataStore {
         // snapshot and fail its write upgrade with SQLITE_BUSY_SNAPSHOT after a
         // concurrent connection commits; acquire the writer slot before reading.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::content_identity::check_accepted_identity(
+            &tx,
+            &hash,
+            i64::try_from(manifest.file_size)?,
+            aich_root.as_deref(),
+        )?;
         let cleanup_requested = tx
             .query_row(
                 r#"
@@ -118,7 +124,7 @@ impl super::MetadataStore {
                 display_name = excluded.display_name,
                 part_size = excluded.part_size,
                 part_count = excluded.part_count,
-                aich_root = excluded.aich_root,
+                aich_root = coalesce(excluded.aich_root, known_files.aich_root),
                 upload_priority = excluded.upload_priority,
                 auto_upload_priority = excluded.auto_upload_priority,
                 comment = excluded.comment,
