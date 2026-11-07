@@ -24,6 +24,13 @@ struct ImportCounts {
     merged_shared_roots: usize,
 }
 
+/// The read-only archive, live destination, and mode shared by bounded merge batches.
+struct ExchangeMerge<'a> {
+    source: &'a rusqlite::Connection,
+    metadata: &'a MetadataStore,
+    hashes_only: bool,
+}
+
 const MANIFEST_SCHEMA: &str = "emulebb.profile-exchange.v2";
 const ED2K_PART_SIZE: u64 = 9_728_000;
 const UPLOAD_PRIORITIES: &[&str] = &[
@@ -111,6 +118,11 @@ pub fn apply_profile_import(
         skipped_native_known_files: 0,
         merged_shared_roots: 0,
     };
+    let merger = ExchangeMerge {
+        source: &source,
+        metadata: &metadata,
+        hashes_only,
+    };
     let mut query = source.prepare("SELECT record,md4,aich,id FROM known_files ORDER BY id")?;
     let mut rows = query.query([])?;
     let mut batch = Vec::new();
@@ -139,10 +151,7 @@ pub fn apply_profile_import(
             )?;
         }
         if batch_bytes + record_bytes > 4 * 1024 * 1024 && !batch.is_empty() {
-            merge_exchange_batch(
-                &source,
-                hashes_only,
-                &metadata,
+            merger.merge_batch(
                 &mut header,
                 &mut batch,
                 &mut total,
@@ -158,10 +167,7 @@ pub fn apply_profile_import(
         batch_bytes += record_bytes;
         count += 1;
         if batch.len() == 128 {
-            merge_exchange_batch(
-                &source,
-                hashes_only,
-                &metadata,
+            merger.merge_batch(
                 &mut header,
                 &mut batch,
                 &mut total,
@@ -173,10 +179,7 @@ pub fn apply_profile_import(
         }
     }
     if !batch.is_empty() {
-        merge_exchange_batch(
-            &source,
-            hashes_only,
-            &metadata,
+        merger.merge_batch(
             &mut header,
             &mut batch,
             &mut total,
@@ -284,84 +287,92 @@ fn flush_recovery_batch(
     Ok(())
 }
 
-fn merge_exchange_batch(
-    source: &rusqlite::Connection,
-    hashes_only: bool,
-    metadata: &MetadataStore,
-    header: &mut Value,
-    batch: &mut Vec<Value>,
-    total: &mut ImportCounts,
-    paths: &mut Vec<i64>,
-    unmatched: &mut usize,
-    conflicts: &mut usize,
-) -> Result<()> {
-    let value = serde_json::json!({"schema":MANIFEST_SCHEMA,"generatedAtUtc":"exchange", "targetPlatform":header["targetPlatform"],"source":header["source"],"sharedRoots":header["sharedRoots"],"knownFiles":std::mem::take(batch),"summary":{}});
-    let mut validated = validate_manifest(serde_json::from_value(value)?)?;
-    let mut files = Vec::new();
-    let mut bytes = 0;
-    let mut query =
-        source.prepare("SELECT path FROM file_paths WHERE known_file_id=?1 ORDER BY path")?;
-    for (entry, id) in validated.known_files.drain(..).zip(paths.drain(..)) {
-        if hashes_only {
-            match metadata.enrich_live_import(&entry) {
-                Ok(true) => {
-                    total.skipped_native_known_files += 1;
+impl ExchangeMerge<'_> {
+    fn merge_batch(
+        &self,
+        header: &mut Value,
+        batch: &mut Vec<Value>,
+        total: &mut ImportCounts,
+        paths: &mut Vec<i64>,
+        unmatched: &mut usize,
+        conflicts: &mut usize,
+    ) -> Result<()> {
+        let source = self.source;
+        let metadata = self.metadata;
+        let hashes_only = self.hashes_only;
+        let value = serde_json::json!({"schema":MANIFEST_SCHEMA,"generatedAtUtc":"exchange", "targetPlatform":header["targetPlatform"],"source":header["source"],"sharedRoots":header["sharedRoots"],"knownFiles":std::mem::take(batch),"summary":{}});
+        let mut validated = validate_manifest(serde_json::from_value(value)?)?;
+        let mut files = Vec::new();
+        let mut bytes = 0;
+        let mut query =
+            source.prepare("SELECT path FROM file_paths WHERE known_file_id=?1 ORDER BY path")?;
+        for (entry, id) in validated.known_files.drain(..).zip(paths.drain(..)) {
+            if hashes_only {
+                match metadata.enrich_live_import(&entry) {
+                    Ok(true) => {
+                        total.skipped_native_known_files += 1;
+                        continue;
+                    }
+                    Err(error) if error.is::<MetadataContentConflict>() => {
+                        *conflicts += 1;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        return Err(error.context("failed to enrich live imported content"));
+                    }
+                }
+            }
+            let mut found = false;
+            for row in query.query_map([id], |r| r.get::<_, String>(0))? {
+                found = true;
+                let path = PathBuf::from(row?);
+                if !path.is_file() {
+                    *unmatched += 1;
                     continue;
                 }
-                Err(error) if error.is::<MetadataContentConflict>() => {
-                    *conflicts += 1;
+                let Some((path, size, Some(fingerprint))) =
+                    emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity(
+                        &path,
+                    )
+                else {
+                    *unmatched += 1;
+                    continue;
+                };
+                if size != entry.file_size
+                    || fingerprint.modified.seconds != entry.modified_s
+                    || path.file_name().and_then(|n| n.to_str())
+                        != Some(entry.display_name.as_str())
+                {
+                    *unmatched += 1;
                     continue;
                 }
-                Ok(false) => {}
-                Err(error) => return Err(error.context("failed to enrich live imported content")),
+                bytes += entry.md4_hashset.len() * 16 + entry.aich_hashset.len() * 20;
+                files.push((entry.clone(), path, fingerprint));
+                if files.len() >= 128 || bytes >= 4 * 1024 * 1024 {
+                    accept_live_batch(metadata, &mut files, total, conflicts)?;
+                    bytes = 0;
+                }
+            }
+            if !found {
+                *unmatched += 1;
             }
         }
-        let mut found = false;
-        for row in query.query_map([id], |r| r.get::<_, String>(0))? {
-            found = true;
-            let path = PathBuf::from(row?);
-            if !path.is_file() {
-                *unmatched += 1;
-                continue;
-            }
-            let Some((path, size, Some(fingerprint))) =
-                emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity(&path)
-            else {
-                *unmatched += 1;
-                continue;
-            };
-            if size != entry.file_size
-                || fingerprint.modified.seconds != entry.modified_s
-                || path.file_name().and_then(|n| n.to_str()) != Some(entry.display_name.as_str())
-            {
-                *unmatched += 1;
-                continue;
-            }
-            bytes += entry.md4_hashset.len() * 16 + entry.aich_hashset.len() * 20;
-            files.push((entry.clone(), path, fingerprint));
-            if files.len() >= 128 || bytes >= 4 * 1024 * 1024 {
-                accept_live_batch(metadata, &mut files, total, conflicts)?;
-                bytes = 0;
-            }
+        accept_live_batch(metadata, &mut files, total, conflicts)?;
+        if !validated.shared_roots.is_empty() {
+            let roots = emulebb_core::consolidate_shared_directory_roots(
+                metadata
+                    .shared_directory_roots()?
+                    .into_iter()
+                    .chain(validated.shared_roots),
+            );
+            let mut writer = metadata.clone();
+            writer.replace_shared_directory_roots(&roots)?;
+            total.merged_shared_roots += roots.len();
         }
-        if !found {
-            *unmatched += 1;
-        }
+        header["sharedRoots"] = serde_json::json!([]);
+        Ok(())
     }
-    accept_live_batch(metadata, &mut files, total, conflicts)?;
-    if !validated.shared_roots.is_empty() {
-        let roots = emulebb_core::consolidate_shared_directory_roots(
-            metadata
-                .shared_directory_roots()?
-                .into_iter()
-                .chain(validated.shared_roots),
-        );
-        let mut writer = metadata.clone();
-        writer.replace_shared_directory_roots(&roots)?;
-        total.merged_shared_roots += roots.len();
-    }
-    header["sharedRoots"] = serde_json::json!([]);
-    Ok(())
 }
 
 fn accept_live_batch(
