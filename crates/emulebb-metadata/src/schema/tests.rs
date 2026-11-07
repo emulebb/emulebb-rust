@@ -2,6 +2,70 @@ use crate::{MetadataStore, SCHEMA_VERSION};
 use rusqlite::params;
 
 #[test]
+fn every_child_foreign_key_has_a_leading_index() {
+    let store = MetadataStore::in_memory().unwrap();
+    let conn = store.connection().unwrap();
+    let mut tables = conn.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'file_name_fts%' AND name NOT LIKE 'sqlite_%'").unwrap();
+    let tables = tables
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for table in tables {
+        let mut keys = conn
+            .prepare(&format!("PRAGMA foreign_key_list({table})"))
+            .unwrap();
+        let keys = keys
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    crate::sql_value::unsigned::<usize>(r, 1)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap();
+        // Individual components must occur at their declared position in a shared index.
+        // The schema currently has only single-column keys and the recovery-set pair.
+        let mut groups = std::collections::BTreeMap::<i64, Vec<(usize, String)>>::new();
+        for key in keys {
+            let (id, position, column) = key.unwrap();
+            groups.entry(id).or_default().push((position, column));
+        }
+        for columns in groups.values_mut() {
+            columns.sort();
+            let mut indexes = conn
+                .prepare("SELECT name FROM pragma_index_list(?1) WHERE partial = 0")
+                .unwrap();
+            let indexes = indexes
+                .query_map([&table], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let found = indexes.into_iter().any(|index| {
+                let mut info = conn
+                    .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+                    .unwrap();
+                let names = info
+                    .query_map([index], |r| r.get::<_, Option<String>>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                columns.iter().all(|(position, column)| {
+                    names
+                        .get(*position)
+                        .is_some_and(|name| name.as_ref() == Some(column))
+                })
+            });
+            let rowid_key = columns.len() == 1 && conn.query_row("SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2 AND type = 'INTEGER' AND pk = 1", params![table, columns[0].1], |r| r.get::<_, i64>(0)).unwrap() == 1;
+            assert!(
+                found || rowid_key,
+                "unindexed foreign key: {table} {columns:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn schema_rejects_wrong_storage_types_null_keys_and_out_of_range_values() {
     let store = MetadataStore::in_memory().unwrap();
     let conn = store.connection().unwrap();

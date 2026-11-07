@@ -32,7 +32,7 @@ CREATE TABLE settings (
     CHECK(length(trim(section)) > 0),
     CHECK(length(trim(key)) > 0),
     CHECK(json_valid(value_json))
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE categories (
     id INTEGER PRIMARY KEY CHECK(id BETWEEN 1 AND 4294967295),
@@ -100,7 +100,7 @@ CREATE TABLE known_file_origins (
     first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
     last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     PRIMARY KEY(known_file_id, origin)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE INDEX known_file_origins_origin_idx
     ON known_file_origins(origin, availability_score DESC, last_seen_ms DESC);
@@ -135,7 +135,7 @@ CREATE TABLE file_name_origins (
     first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
     last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     PRIMARY KEY(file_name_id, origin)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE INDEX file_name_origins_origin_idx
     ON file_name_origins(origin, last_seen_ms DESC);
@@ -167,20 +167,18 @@ WHEN old.name IS NOT new.name OR old.normalized_name IS NOT new.normalized_name 
 END;
 
 CREATE TABLE ed2k_part_hashes (
-    id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index BETWEEN 0 AND 4294967295),
     md4_hash BLOB NOT NULL CHECK(length(md4_hash) = 16),
-    UNIQUE(transfer_id, part_index)
-) STRICT;
+    PRIMARY KEY(transfer_id, part_index)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE aich_part_hashes (
-    id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index BETWEEN 0 AND 4294967295),
     aich_hash BLOB NOT NULL CHECK(length(aich_hash) = 20),
-    UNIQUE(transfer_id, part_index)
-) STRICT;
+    PRIMARY KEY(transfer_id, part_index)
+) STRICT, WITHOUT ROWID;
 
 -- Verified complete content is independent of a download for the same hash.
 -- A new download must not erase the local file's hashsets or presentation.
@@ -202,13 +200,13 @@ CREATE TABLE verified_local_md4_hashes (
     part_index INTEGER NOT NULL CHECK(part_index BETWEEN 0 AND 4294967295),
     md4_hash BLOB NOT NULL CHECK(length(md4_hash) = 16),
     PRIMARY KEY(known_file_id, part_index)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE aich_recovery_sets (
     root BLOB NOT NULL CHECK(length(root) = 20),
     size_bytes INTEGER NOT NULL CHECK(size_bytes > 0 AND size_bytes <= 274877906944),
     PRIMARY KEY(root, size_bytes)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE INDEX verified_local_aich_root_idx ON verified_local_content(aich_root);
 
@@ -220,14 +218,14 @@ CREATE TABLE aich_recovery_parts (
     leaves BLOB NOT NULL CHECK(length(leaves) > 0 AND length(leaves) <= 1060 AND length(leaves) % 20 = 0),
     PRIMARY KEY(root, size_bytes, part_index),
     FOREIGN KEY(root, size_bytes) REFERENCES aich_recovery_sets(root, size_bytes) ON DELETE CASCADE
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE verified_local_aich_hashes (
     known_file_id INTEGER NOT NULL REFERENCES verified_local_content(known_file_id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index BETWEEN 0 AND 4294967295),
     aich_hash BLOB NOT NULL CHECK(length(aich_hash) = 20),
     PRIMARY KEY(known_file_id, part_index)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE verified_ranges (
     id INTEGER PRIMARY KEY,
@@ -289,7 +287,7 @@ CREATE TABLE shared_directory_root_origins (
     shareable INTEGER NOT NULL CHECK(shareable IN (0, 1)),
     accessible INTEGER NOT NULL CHECK(accessible IN (0, 1)),
     PRIMARY KEY(root_id, origin)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE shared_file_ignore_patterns (
     pattern TEXT NOT NULL PRIMARY KEY CHECK(length(pattern) BETWEEN 1 AND 255),
@@ -311,7 +309,7 @@ CREATE TABLE shared_file_memberships (
     last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
     PRIMARY KEY(root_id, path_id)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
@@ -451,7 +449,6 @@ CREATE TABLE shared_file_scan_failures (
 ) STRICT;
 
 CREATE TABLE transfer_pieces (
-    id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     piece_index INTEGER NOT NULL CHECK(piece_index BETWEEN 0 AND 4294967295),
     state TEXT NOT NULL CHECK(state IN ('Missing', 'Verified')),
@@ -459,8 +456,8 @@ CREATE TABLE transfer_pieces (
     block_bitmap TEXT,
     ich_corrupted INTEGER NOT NULL DEFAULT 0 CHECK(ich_corrupted IN (0, 1)),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    UNIQUE(transfer_id, piece_index)
-) STRICT;
+    PRIMARY KEY(transfer_id, piece_index)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE servers (
     id INTEGER PRIMARY KEY,
@@ -617,14 +614,13 @@ CREATE TABLE kad_note_publishes (
 ) STRICT;
 
 CREATE TABLE kad_outbound_publish_schedule (
-    id INTEGER PRIMARY KEY,
     file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
     publish_kind TEXT NOT NULL CHECK(publish_kind IN ('keyword', 'source', 'notes')),
     keyword TEXT NOT NULL DEFAULT '',
     published_at_ms INTEGER NOT NULL CHECK(published_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    UNIQUE(file_hash, publish_kind, keyword)
-) STRICT;
+    PRIMARY KEY(file_hash, publish_kind, keyword)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE search_sessions (
     id INTEGER PRIMARY KEY,
@@ -704,15 +700,23 @@ CREATE TABLE search_result_observations (
 CREATE INDEX verified_ranges_transfer_idx ON verified_ranges(transfer_id,start_offset,end_offset);
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
 CREATE INDEX shared_file_memberships_path_idx ON shared_file_memberships(path_id);
-CREATE INDEX transfer_sources_transfer_idx ON transfer_sources(transfer_id);
 CREATE INDEX transfers_pending_delete_idx
 ON transfers(delete_requested_at_ms)
 WHERE delete_requested_at_ms IS NOT NULL;
 CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_ms);
 CREATE INDEX kad_source_file_idx ON kad_source_publishes(file_hash, observed_at_ms);
 CREATE INDEX kad_note_file_idx ON kad_note_publishes(file_hash, observed_at_ms);
-CREATE INDEX kad_outbound_publish_file_idx
-ON kad_outbound_publish_schedule(file_hash, publish_kind);
 CREATE INDEX search_results_session_idx ON search_results(session_id, id);
 CREATE INDEX search_result_observations_result_idx
 ON search_result_observations(result_id, observed_at_ms, id);
+CREATE INDEX categories_path_id_idx ON categories(path_id);
+CREATE INDEX transfers_category_id_idx ON transfers(category_id);
+CREATE INDEX transfers_target_path_id_idx ON transfers(target_path_id);
+CREATE INDEX transfers_delivered_path_id_idx ON transfers(delivered_path_id);
+CREATE INDEX delivery_attempts_target_path_id_idx ON delivery_attempts(target_path_id);
+CREATE INDEX delivery_attempts_staging_path_id_idx ON delivery_attempts(staging_path_id);
+CREATE INDEX delivery_output_tombstones_original_path_id_idx ON delivery_output_tombstones(original_path_id);
+CREATE INDEX delivery_output_tombstones_tombstone_path_id_idx ON delivery_output_tombstones(tombstone_path_id);
+CREATE INDEX transfer_sources_peer_id_idx ON transfer_sources(peer_id);
+CREATE INDEX kad_keyword_publishes_known_file_id_idx ON kad_keyword_publishes(known_file_id);
+CREATE INDEX search_results_known_file_id_idx ON search_results(known_file_id);
