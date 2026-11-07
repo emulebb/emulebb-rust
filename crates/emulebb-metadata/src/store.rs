@@ -637,18 +637,25 @@ pub(crate) fn upsert_local_path(tx: &rusqlite::Transaction<'_>, path: &Path) -> 
     tx.execute(
         r#"
         INSERT INTO local_paths(
-            display_path, native_path, search_key, platform
+            display_path, native_path, search_key, platform, sort_key, file_name_search_key
         )
-        VALUES (?1, ?2, ?3, ?4)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         ON CONFLICT(platform, native_path) DO UPDATE SET
             display_path = excluded.display_path,
-            search_key = excluded.search_key
+            search_key = excluded.search_key,
+            sort_key = excluded.sort_key,
+            file_name_search_key = excluded.file_name_search_key
         "#,
         params![
             display_path,
             native_path.storage_bytes(),
             search_key,
             platform,
+            display_path.to_lowercase(),
+            native_path
+                .display_file_name()
+                .unwrap_or_default()
+                .to_lowercase(),
         ],
     )?;
     tx.query_row(
