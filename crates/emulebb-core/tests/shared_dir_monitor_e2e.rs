@@ -88,6 +88,26 @@ async fn live_monitor_auto_shares_relocates_and_removes_a_dropped_file() {
     .unwrap();
     core.start_shared_directory_monitor().await;
 
+    // WHY: the initial detached scan can otherwise satisfy pickup itself and
+    // race the rename/remove legs. Start from an idle empty library so these
+    // assertions exercise the OS watcher rather than startup reconciliation.
+    tokio::time::timeout(CONDITION_TIMEOUT, async {
+        loop {
+            let directories = core.shared_directories().await;
+            let reload = directories.reload_progress;
+            if directories.hashing_count == 0
+                && !reload.running
+                && !reload.pending
+                && reload.phase == "idle"
+            {
+                break;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .expect("initial empty-library reload must finish before watcher assertions");
+
     // Nothing shared yet.
     assert!(
         core.shares().await.is_empty(),
