@@ -80,9 +80,9 @@ impl super::MetadataStore {
             params![search.public_id],
             |row| row.get(0),
         )?;
-        tx.execute(
-            "DELETE FROM search_results WHERE session_id = ?1",
-            params![session_id],
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS incoming_search_result_ids(id INTEGER PRIMARY KEY);
+            DELETE FROM temp.incoming_search_result_ids;",
         )?;
         for result in &search.results {
             let file_hash = decode_fixed_hex(&result.file_hash, 16, "search result ED2K hash")?;
@@ -105,6 +105,39 @@ impl super::MetadataStore {
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                     ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
                 )
+                ON CONFLICT(session_id, file_hash) DO UPDATE SET
+                    known_file_id = excluded.known_file_id,
+                    name = excluded.name,
+                    size_bytes = excluded.size_bytes,
+                    source_count = excluded.source_count,
+                    complete_source_count = excluded.complete_source_count,
+                    file_type = excluded.file_type,
+                    media_artist = excluded.media_artist,
+                    media_album = excluded.media_album,
+                    media_title = excluded.media_title,
+                    media_length_seconds = excluded.media_length_seconds,
+                    media_bitrate_kbps = excluded.media_bitrate_kbps,
+                    media_codec = excluded.media_codec,
+                    rating = excluded.rating,
+                    aich_hash = excluded.aich_hash,
+                    complete = excluded.complete,
+                    directory = excluded.directory
+                WHERE search_results.known_file_id IS NOT excluded.known_file_id OR
+                    search_results.name IS NOT excluded.name OR
+                    search_results.size_bytes IS NOT excluded.size_bytes OR
+                    search_results.source_count IS NOT excluded.source_count OR
+                    search_results.complete_source_count IS NOT excluded.complete_source_count OR
+                    search_results.file_type IS NOT excluded.file_type OR
+                    search_results.media_artist IS NOT excluded.media_artist OR
+                    search_results.media_album IS NOT excluded.media_album OR
+                    search_results.media_title IS NOT excluded.media_title OR
+                    search_results.media_length_seconds IS NOT excluded.media_length_seconds OR
+                    search_results.media_bitrate_kbps IS NOT excluded.media_bitrate_kbps OR
+                    search_results.media_codec IS NOT excluded.media_codec OR
+                    search_results.rating IS NOT excluded.rating OR
+                    search_results.aich_hash IS NOT excluded.aich_hash OR
+                    search_results.complete IS NOT excluded.complete OR
+                    search_results.directory IS NOT excluded.directory
                 "#,
                 params![
                     session_id,
@@ -127,8 +160,37 @@ impl super::MetadataStore {
                     result.directory,
                 ],
             )?;
-            let result_id = tx.last_insert_rowid();
-            for observation in &result.observations {
+            let result_id: i64 = tx.query_row(
+                "SELECT id FROM search_results WHERE session_id = ?1 AND file_hash = ?2",
+                params![session_id, file_hash],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO temp.incoming_search_result_ids VALUES(?1)",
+                [result_id],
+            )?;
+            let observations = result
+                .observations
+                .iter()
+                .cloned()
+                .map(|mut observation| {
+                    if observation.observed_at_ms <= 0 {
+                        observation.observed_at_ms = now;
+                    }
+                    observation
+                })
+                .collect::<Vec<_>>();
+            let stored = load_search_result_observations(&tx, result_id)?;
+            let retained = if observations.starts_with(&stored) {
+                stored.len()
+            } else {
+                tx.execute(
+                    "DELETE FROM search_result_observations WHERE result_id = ?1",
+                    [result_id],
+                )?;
+                0
+            };
+            for observation in observations.iter().skip(retained) {
                 tx.execute(
                     r#"
                     INSERT INTO search_result_observations(
@@ -173,6 +235,12 @@ impl super::MetadataStore {
                 )?;
             }
         }
+        tx.execute(
+            "DELETE FROM search_results WHERE session_id = ?1
+            AND id NOT IN (SELECT id FROM temp.incoming_search_result_ids)",
+            [session_id],
+        )?;
+        tx.execute("DELETE FROM temp.incoming_search_result_ids", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -288,12 +356,29 @@ fn load_search_results(
             },
         ))
     })?;
-    let mut results = Vec::new();
-    for row in rows {
-        let (result_id, mut result) = row?;
-        result.observations = load_search_result_observations(conn, result_id)?;
-        results.push(result);
+    let mut results = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let positions = results
+        .iter()
+        .enumerate()
+        .map(|(position, (id, _))| (*id, position))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut observations = conn.prepare(
+        "SELECT o.origin, o.server_endpoint, o.name, o.size_bytes, o.source_count, o.complete_source_count,
+                o.source_client_id, o.source_client_port, o.file_type, o.media_artist,
+                o.media_album, o.media_title, o.media_length_seconds, o.media_bitrate_kbps,
+                o.media_codec, o.rating, o.aich_hash, o.complete, o.directory, o.observed_at_ms, o.result_id
+         FROM search_results r JOIN search_result_observations o ON o.result_id = r.id
+         WHERE r.session_id = ?1 ORDER BY o.result_id, o.observed_at_ms, o.id")?;
+    let mut rows = observations.query([session_id])?;
+    while let Some(row) = rows.next()? {
+        let result_id: i64 = row.get(20)?;
+        let position = positions[&result_id];
+        results[position]
+            .1
+            .observations
+            .push(search_observation_from_row(row)?);
     }
+    let results = results.into_iter().map(|(_, result)| result).collect();
     Ok(results)
 }
 
@@ -313,32 +398,36 @@ fn load_search_result_observations(
         ORDER BY observed_at_ms, id
         "#,
     )?;
-    let rows = stmt.query_map(params![result_id], |row| {
-        Ok(MetadataSearchResultObservation {
-            origin: row.get(0)?,
-            server_endpoint: row.get(1)?,
-            name: row.get(2)?,
-            size_bytes: crate::sql_value::unsigned::<u64>(row, 3)?,
-            source_count: row.get::<_, u32>(4)?,
-            complete_source_count: row.get::<_, u32>(5)?,
-            source_client_id: row.get::<_, Option<u32>>(6)?,
-            source_client_port: row.get::<_, Option<u16>>(7)?,
-            file_type: row.get(8)?,
-            media_artist: row.get(9)?,
-            media_album: row.get(10)?,
-            media_title: row.get(11)?,
-            media_length_seconds: row.get::<_, u32>(12)?,
-            media_bitrate_kbps: row.get::<_, u32>(13)?,
-            media_codec: row.get(14)?,
-            rating: row.get::<_, u8>(15)?,
-            aich_hash: row.get(16)?,
-            complete: row.get::<_, i64>(17)? != 0,
-            directory: row.get(18)?,
-            observed_at_ms: row.get(19)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![result_id], search_observation_from_row)?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn search_observation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<MetadataSearchResultObservation> {
+    Ok(MetadataSearchResultObservation {
+        origin: row.get(0)?,
+        server_endpoint: row.get(1)?,
+        name: row.get(2)?,
+        size_bytes: crate::sql_value::unsigned::<u64>(row, 3)?,
+        source_count: row.get::<_, u32>(4)?,
+        complete_source_count: row.get::<_, u32>(5)?,
+        source_client_id: row.get::<_, Option<u32>>(6)?,
+        source_client_port: row.get::<_, Option<u16>>(7)?,
+        file_type: row.get(8)?,
+        media_artist: row.get(9)?,
+        media_album: row.get(10)?,
+        media_title: row.get(11)?,
+        media_length_seconds: row.get::<_, u32>(12)?,
+        media_bitrate_kbps: row.get::<_, u32>(13)?,
+        media_codec: row.get(14)?,
+        rating: row.get::<_, u8>(15)?,
+        aich_hash: row.get(16)?,
+        complete: row.get::<_, i64>(17)? != 0,
+        directory: row.get(18)?,
+        observed_at_ms: row.get(19)?,
+    })
 }
 
 fn encode_optional_u64(value: Option<u64>) -> Option<Vec<u8>> {
@@ -388,6 +477,43 @@ pub fn normalized_search_query(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_snapshots_preserve_result_and_observation_identity() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let mut search = sample_search("incremental");
+        store.upsert_search(&search).unwrap();
+        let ids = || {
+            store.connection().unwrap().query_row(
+            "SELECT r.id, o.id FROM search_results r JOIN search_result_observations o ON o.result_id=r.id",
+            [], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)?)),
+        ).unwrap()
+        };
+        let original = ids();
+        store.connection().unwrap().execute_batch(
+            "CREATE TEMP TRIGGER reject_result_delete BEFORE DELETE ON main.search_results BEGIN SELECT RAISE(ABORT,'result identity lost'); END;
+             CREATE TEMP TRIGGER reject_observation_delete BEFORE DELETE ON main.search_result_observations BEGIN SELECT RAISE(ABORT,'observation identity lost'); END;"
+        ).unwrap();
+        store.upsert_search(&search).unwrap();
+        search.results[0].source_count += 1;
+        let mut next = search.results[0].observations[0].clone();
+        next.observed_at_ms += 1;
+        search.results[0].observations.push(next);
+        store.upsert_search(&search).unwrap();
+        assert_eq!(ids(), original);
+        assert_eq!(store.table_count("search_result_observations").unwrap(), 2);
+        store
+            .connection()
+            .unwrap()
+            .execute_batch(
+                "DROP TRIGGER reject_result_delete; DROP TRIGGER reject_observation_delete;",
+            )
+            .unwrap();
+        search.results.clear();
+        store.upsert_search(&search).unwrap();
+        assert_eq!(store.table_count("search_results").unwrap(), 0);
+        assert_eq!(store.table_count("search_result_observations").unwrap(), 0);
+    }
 
     #[test]
     fn search_state_roundtrips_unicode_results() {
