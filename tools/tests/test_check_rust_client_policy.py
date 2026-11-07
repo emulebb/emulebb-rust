@@ -275,7 +275,7 @@ workflow-lint:
   uses: actions/setup-go@{'a' * 40}
   go-version: "1.27.1"
   cache: false
-  run: go run github.com/rhysd/actionlint/cmd/actionlint@{'b' * 40}
+  run: python tools/rust_quality_gate.py workflow-lint
 """
 
         self.assertEqual(CHECKER.check_workflow_lint_ci(workflow), [])
@@ -386,7 +386,7 @@ rest-openapi:
   repository: emulebb/emulebb-tooling
   ref: {'b' * 40}
   name: emulebb-rust-Linux-X64-${{{{ github.sha }}}}
-  run: python scripts/rust-rest-openapi-ci.py
+  run: python repos/emulebb-rust/tools/rust_quality_gate.py rest-openapi
   name: rust-rest-openapi-${{{{ github.sha }}}}
 """
         self.assertEqual(CHECKER.check_live_rest_openapi_ci(workflow), [])
