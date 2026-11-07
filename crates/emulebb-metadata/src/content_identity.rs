@@ -19,7 +19,8 @@ pub(crate) fn check_accepted_identity(
              LEFT JOIN verified_local_content c ON c.known_file_id = f.id
              WHERE f.ed2k_hash = ?1
                AND (c.known_file_id IS NOT NULL
-                    OR EXISTS (SELECT 1 FROM transfers t WHERE t.known_file_id = f.id))",
+                    OR EXISTS (SELECT 1 FROM transfers t WHERE t.known_file_id = f.id
+                               AND t.completed = 1 AND t.final_rehash_pending = 0))",
             params![hash],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
         )
