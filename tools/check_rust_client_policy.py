@@ -659,13 +659,8 @@ def check_workflow_lint_ci(workflow_text: str | None = None) -> list[str]:
         errors.append(
             ".github/workflows/ci.yml must pin actions/setup-go by full commit SHA"
         )
-    actionlint = re.search(
-        r"go run github\.com/rhysd/actionlint/cmd/actionlint@([^\s]+)", text
-    )
-    if actionlint is None or not action_ref_is_immutable(actionlint.group(1)):
-        errors.append(
-            ".github/workflows/ci.yml must pin actionlint by full commit SHA"
-        )
+    if "run: python tools/rust_quality_gate.py workflow-lint" not in text:
+        errors.append(".github/workflows/ci.yml must dispatch pinned actionlint through the workflow-lint gate")
     return errors
 
 
@@ -941,7 +936,7 @@ def check_live_rest_openapi_ci(workflow_text: str | None = None) -> list[str]:
         "needs: build-linux": "dependency on the tested Linux build",
         "name: emulebb-rust-Linux-X64-${{ github.sha }}": "tested Linux daemon artifact",
         "EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out": "external output root",
-        "python scripts/rust-rest-openapi-ci.py": "live response conformance command",
+        "python repos/emulebb-rust/tools/rust_quality_gate.py rest-openapi": "live response conformance command",
         "name: rust-rest-openapi-${{ github.sha }}": "retained conformance evidence",
     }
     errors = [

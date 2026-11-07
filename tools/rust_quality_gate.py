@@ -9,6 +9,7 @@ wrappers, so the same command works on Windows, Linux, and macOS.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -17,31 +18,40 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+QUICK_CHECKS = ("policy", "policy-tests", "fmt", "clippy", "diagnostics", "webui-test")
+TEST_CHECKS = ("build", "test-workspace", "test-vpn-leak")
+GATES = {name: (name,) for name in (
+    "fmt", "clippy", "diagnostics", "webui-test", "build", "test-workspace",
+    "test-kad-swarm", "test-vpn-leak", "workflow-lint", "supply-chain", "rest-openapi",
+)}
+GATES.update({
+    "policy": ("policy", "policy-tests"),
+    "branch-check": ("policy", "policy-tests", "fmt"),
+    "branch-ci": ("workflow-lint", "policy", "policy-tests", "fmt"),
+    "quick": QUICK_CHECKS,
+    "ci-test": TEST_CHECKS,
+    "ci": QUICK_CHECKS + TEST_CHECKS,
+    "pre-push": ("workflow-lint",) + QUICK_CHECKS + TEST_CHECKS + ("supply-chain", "rest-openapi"),
+})
+CI_JOBS = {
+    "workflow-lint": "workflow-lint", "quality": "quick", "build-linux": "ci-test",
+    "build-test": "ci-test", "rest-openapi": "rest-openapi", "supply-chain": "supply-chain",
+}
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "gate",
-        choices=[
-            "branch-check",
-            "quick",
-            "ci",
-            "ci-test",
-            "policy",
-            "fmt",
-            "clippy",
-            "diagnostics",
-            "webui-test",
-            "build",
-            "test-workspace",
-            "test-kad-swarm",
-            "test-vpn-leak",
-        ],
+        choices=sorted(GATES),
         help=(
             "quick=policy+fmt+clippy+diagnostics+webui-test; ci=quick+build+tests; "
             "ci-test=build+full workspace tests+VPN leak test; "
             "test-kad-swarm=focused serialized Kad diagnostics"
         ),
+    )
+    parser.add_argument(
+        "--describe", action="store_true", help="Print the resolved check commands as JSON without executing them."
     )
     parser.add_argument(
         "--force-rebuild",
@@ -52,6 +62,9 @@ def main(argv: list[str] | None = None) -> int:
 
     env = build_env()
     commands = commands_for_gate(args.gate, env, force_rebuild=args.force_rebuild)
+    if args.describe:
+        print(json.dumps([{"label": label, "command": command} for label, command in commands], indent=2))
+        return 0
     for label, command in commands:
         run_step(label, command, env)
     return 0
@@ -140,44 +153,32 @@ def commands_for_gate(
 ) -> list[tuple[str, list[str]]]:
     if env is None:
         env = os.environ.copy()
-    steps = {
-        "branch-check": [policy_step(), policy_tests_step(), fmt_step()],
-        "policy": [policy_step(), policy_tests_step()],
-        "fmt": [fmt_step()],
-        "clippy": [clippy_step()],
-        "diagnostics": [diagnostics_step()],
-        "webui-test": [webui_test_step()],
-        "build": [build_step(env, force_rebuild=force_rebuild)],
-        "test-workspace": [test_workspace_step()],
-        "test-kad-swarm": [test_kad_swarm_step()],
-        "test-vpn-leak": [test_vpn_leak_step()],
-        "quick": [
-            policy_step(),
-            policy_tests_step(),
-            fmt_step(),
-            clippy_step(),
-            diagnostics_step(),
-            webui_test_step(),
-        ],
-        "ci-test": [
-            build_step(env, force_rebuild=force_rebuild),
-            test_workspace_step(),
-            test_vpn_leak_step(),
-        ],
+    factories = {
+        "policy": policy_step, "policy-tests": policy_tests_step, "fmt": fmt_step,
+        "clippy": clippy_step, "diagnostics": diagnostics_step, "webui-test": webui_test_step,
+        "build": lambda: build_step(env, force_rebuild=force_rebuild),
+        "test-workspace": test_workspace_step, "test-kad-swarm": test_kad_swarm_step,
+        "test-vpn-leak": test_vpn_leak_step, "workflow-lint": workflow_lint_step,
+        "supply-chain": supply_chain_step, "rest-openapi": lambda: rest_openapi_step(env),
     }
-    if gate == "ci":
-        return [
-            policy_step(),
-            policy_tests_step(),
-            fmt_step(),
-            clippy_step(),
-            diagnostics_step(),
-            webui_test_step(),
-            build_step(env, force_rebuild=force_rebuild),
-            test_workspace_step(),
-            test_vpn_leak_step(),
-        ]
-    return steps[gate]
+    return [factories[name]() for name in GATES[gate]]
+
+
+def workflow_lint_step() -> tuple[str, list[str]]:
+    """Use the same immutable actionlint revision on every execution surface."""
+    return ("GitHub Actions workflow lint", ["go", "run", "github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca"])
+
+
+def supply_chain_step() -> tuple[str, list[str]]:
+    """Keep advisory, license, and source checks identical locally and remotely."""
+    return ("cargo-deny", ["cargo", "deny", "check", "advisories", "licenses", "sources"])
+
+
+def rest_openapi_step(env: dict[str, str]) -> tuple[str, list[str]]:
+    """Delegate loopback conformance to the persisted shared harness."""
+    root = require_workspace_root_env(env)
+    script = root / "repos" / "emulebb-build-tests" / "scripts" / "rust-rest-openapi-ci.py"
+    return ("live REST/OpenAPI conformance", [sys.executable, str(script)])
 
 
 def policy_step() -> tuple[str, list[str]]:
