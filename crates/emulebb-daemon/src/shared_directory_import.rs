@@ -7,15 +7,20 @@ use std::path::{Path, PathBuf};
 pub fn read_shared_directories(file: &Path) -> Result<Vec<MetadataSharedDirectoryRoot>> {
     let bytes = std::fs::read(file)?;
     let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
-        ensure!(bytes.len() % 2 == 0, "truncated UTF-16 directory list");
+        ensure!(
+            bytes.len().is_multiple_of(2),
+            "truncated UTF-16 directory list"
+        );
         let little = bytes[0] == 0xff;
         let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|b| {
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&unit| {
                 if little {
-                    u16::from_le_bytes([b[0], b[1]])
+                    u16::from_le_bytes(unit)
                 } else {
-                    u16::from_be_bytes([b[0], b[1]])
+                    u16::from_be_bytes(unit)
                 }
             })
             .collect();

@@ -128,7 +128,7 @@ pub fn apply_profile_import(
             let packed: Vec<u8> = row.get(column)?;
             record_bytes += packed.len();
             ensure!(
-                packed.len() % width == 0 && packed.len() <= 1_000_000,
+                packed.len().is_multiple_of(width) && packed.len() <= 1_000_000,
                 "invalid packed hashset"
             );
             record[key] = serde_json::to_value(
