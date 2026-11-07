@@ -18,7 +18,7 @@ const COLUMNS: &str = r#"lower(hex(known_files.ed2k_hash)), known_files.size_byt
                     known_files.all_time_uploaded_bytes,
                     known_files.all_time_upload_requests,
                     known_files.all_time_upload_accepts,
-                    known_files.last_upload_request_ms,
+                    known_files.last_upload_requested_at_ms,
                     local_paths.platform, local_paths.native_path,
                     known_files.media_artist, known_files.media_album,
                     known_files.media_title, known_files.media_length_seconds,
@@ -47,7 +47,7 @@ fn representative_path(verified_only: bool) -> String {
 pub(crate) fn catalog_sql(exact: bool, verified_only: bool, instances: bool) -> String {
     let selection = if exact { "=" } else { ">" };
     let columns = if instances {
-        "local_paths.platform, local_paths.native_path, lower(hex(known_files.ed2k_hash)), local_file_instances.file_size, local_file_instances.verified_fingerprint"
+        "local_paths.platform, local_paths.native_path, lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes, local_file_instances.verified_fingerprint"
     } else {
         COLUMNS
     };

@@ -13,13 +13,13 @@ impl super::MetadataStore {
         self.connection()?.execute(
             r#"
             INSERT INTO peers(
-                user_hash, uploaded_bytes, downloaded_bytes, first_seen_ms, last_seen_ms
+                user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_ms, last_seen_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?4)
             ON CONFLICT(user_hash) DO UPDATE SET
                 uploaded_bytes = excluded.uploaded_bytes,
                 downloaded_bytes = excluded.downloaded_bytes,
-                last_seen_ms = excluded.last_seen_ms
+                last_seen_at_ms = excluded.last_seen_at_ms
             "#,
             params![
                 user_hash,
@@ -83,13 +83,13 @@ impl super::MetadataStore {
         tx.prepare_cached(
             r#"
             INSERT INTO peers(
-                user_hash, uploaded_bytes, downloaded_bytes, first_seen_ms, last_seen_ms
+                user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_ms, last_seen_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?4)
             ON CONFLICT(user_hash) DO UPDATE SET
                 uploaded_bytes = excluded.uploaded_bytes,
                 downloaded_bytes = excluded.downloaded_bytes,
-                last_seen_ms = excluded.last_seen_ms
+                last_seen_at_ms = excluded.last_seen_at_ms
             "#,
         )?
         .execute(params![
@@ -137,13 +137,13 @@ impl super::MetadataStore {
             tx.prepare_cached(
                 r#"
                 INSERT INTO peers(
-                    user_hash, uploaded_bytes, downloaded_bytes, first_seen_ms, last_seen_ms
+                    user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_ms, last_seen_at_ms
                 )
                 VALUES (?1, ?2, ?3, ?4, ?4)
                 ON CONFLICT(user_hash) DO UPDATE SET
                     uploaded_bytes = excluded.uploaded_bytes,
                     downloaded_bytes = excluded.downloaded_bytes,
-                    last_seen_ms = excluded.last_seen_ms
+                    last_seen_at_ms = excluded.last_seen_at_ms
                 "#,
             )?
             .execute(params![
@@ -175,9 +175,10 @@ impl super::MetadataStore {
     pub fn prune_aged_peers(&self) -> Result<usize> {
         const CREDIT_AGE_LIMIT_MS: i64 = 150 * 24 * 60 * 60 * 1000;
         let cutoff = unix_ms().saturating_sub(CREDIT_AGE_LIMIT_MS);
-        let pruned = self
-            .connection()?
-            .execute("DELETE FROM peers WHERE last_seen_ms < ?1", params![cutoff])?;
+        let pruned = self.connection()?.execute(
+            "DELETE FROM peers WHERE last_seen_at_ms < ?1",
+            params![cutoff],
+        )?;
         Ok(pruned)
     }
 
@@ -256,7 +257,7 @@ impl super::MetadataStore {
                         secure_ident_pubkey_len = ?3,
                         uploaded_bytes = 1,
                         downloaded_bytes = 1,
-                        last_seen_ms = ?4
+                        last_seen_at_ms = ?4
                     WHERE user_hash = ?1
                     "#,
                     params![user_hash_bytes, public_key, key_len, now],
@@ -270,13 +271,13 @@ impl super::MetadataStore {
                     r#"
                     INSERT INTO peers(
                         user_hash, secure_ident_pubkey, secure_ident_pubkey_len,
-                        first_seen_ms, last_seen_ms
+                        first_seen_at_ms, last_seen_at_ms
                     )
                     VALUES (?1, ?2, ?3, ?4, ?4)
                     ON CONFLICT(user_hash) DO UPDATE SET
                         secure_ident_pubkey = excluded.secure_ident_pubkey,
                         secure_ident_pubkey_len = excluded.secure_ident_pubkey_len,
-                        last_seen_ms = excluded.last_seen_ms
+                        last_seen_at_ms = excluded.last_seen_at_ms
                     "#,
                     params![user_hash_bytes, public_key, key_len, now],
                 )?;
@@ -421,7 +422,7 @@ mod tests {
             .connection()
             .unwrap()
             .execute(
-                "UPDATE peers SET last_seen_ms = ?1 WHERE user_hash = ?2",
+                "UPDATE peers SET last_seen_at_ms = ?1 WHERE user_hash = ?2",
                 params![cutoff, stale_bytes],
             )
             .unwrap();

@@ -18,7 +18,7 @@ impl super::MetadataStore {
             crate::snapshot::SnapshotTable::begin(
                 &tx,
                 "kad_keyword_publishes",
-                &["target_node_id", "file_hash", "size_bytes"],
+                &["target_node_id", "ed2k_hash", "size_bytes"],
             )?,
             crate::snapshot::SnapshotTable::begin(
                 &tx,
@@ -43,7 +43,7 @@ impl super::MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO temp.incoming_kad_keyword_publishes(
-                    target_node_id, file_hash, known_file_id, raw_tags, load, valid, observed_at_ms, size_bytes
+                    target_node_id, ed2k_hash, known_file_id, raw_tags, load, valid, observed_at_ms, size_bytes
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)
                 "#,
@@ -64,7 +64,7 @@ impl super::MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO temp.incoming_kad_source_publishes(
-                    target_node_id, publisher_id, file_hash, source_ip, source_tcp_port,
+                    target_node_id, publisher_id, ed2k_hash, source_ip, source_tcp_port,
                     source_udp_port, raw_tags, load, valid, observed_at_ms
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
@@ -87,7 +87,7 @@ impl super::MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO temp.incoming_kad_note_publishes(
-                    target_node_id, publisher_id, publisher_ip, file_hash, raw_tags, load, valid,
+                    target_node_id, publisher_id, publisher_ip, ed2k_hash, raw_tags, load, valid,
                     observed_at_ms
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
@@ -129,10 +129,10 @@ impl super::MetadataStore {
         self.connection()?.execute(
             r#"
             INSERT INTO kad_outbound_publish_schedule(
-                file_hash, publish_kind, keyword, published_at_ms, updated_at_ms
+                ed2k_hash, publish_kind, keyword, published_at_ms, updated_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(file_hash, publish_kind, keyword) DO UPDATE SET
+            ON CONFLICT(ed2k_hash, publish_kind, keyword) DO UPDATE SET
                 published_at_ms = excluded.published_at_ms,
                 updated_at_ms = excluded.updated_at_ms
             "#,
@@ -160,7 +160,7 @@ impl super::MetadataStore {
         self.connection()?.execute(
             r#"
             DELETE FROM kad_outbound_publish_schedule
-            WHERE file_hash = ?1 AND publish_kind = ?2
+            WHERE ed2k_hash = ?1 AND publish_kind = ?2
             "#,
             params![file_hash, publish_kind.as_str()],
         )?;
@@ -171,9 +171,9 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(file_hash)), publish_kind, keyword, published_at_ms
+            SELECT lower(hex(ed2k_hash)), publish_kind, keyword, published_at_ms
             FROM kad_outbound_publish_schedule
-            ORDER BY file_hash, publish_kind, keyword
+            ORDER BY ed2k_hash, publish_kind, keyword
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
@@ -212,7 +212,7 @@ fn known_file_id_by_hash(tx: &rusqlite::Transaction<'_>, file_hash: &[u8]) -> Re
 fn load_keyword_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadKeywordPublish>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT lower(hex(target_node_id)), lower(hex(file_hash)), raw_tags, load, observed_at_ms, size_bytes
+        SELECT lower(hex(target_node_id)), lower(hex(ed2k_hash)), raw_tags, load, observed_at_ms, size_bytes
         FROM kad_keyword_publishes
         WHERE valid = 1
         ORDER BY observed_at_ms, id
@@ -235,7 +235,7 @@ fn load_keyword_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKad
 fn load_source_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadSourcePublish>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT lower(hex(target_node_id)), lower(hex(publisher_id)), lower(hex(file_hash)),
+        SELECT lower(hex(target_node_id)), lower(hex(publisher_id)), lower(hex(ed2k_hash)),
                source_ip, source_tcp_port, source_udp_port, raw_tags, load, observed_at_ms
         FROM kad_source_publishes
         WHERE valid = 1
@@ -263,7 +263,7 @@ fn load_note_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadNot
     let mut stmt = conn.prepare(
         r#"
         SELECT lower(hex(target_node_id)), lower(hex(publisher_id)), publisher_ip,
-               CASE WHEN file_hash IS NULL THEN NULL ELSE lower(hex(file_hash)) END,
+               CASE WHEN ed2k_hash IS NULL THEN NULL ELSE lower(hex(ed2k_hash)) END,
                raw_tags, load, observed_at_ms
         FROM kad_note_publishes
         WHERE valid = 1

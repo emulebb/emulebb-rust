@@ -772,6 +772,8 @@ name = "emulebb-metadata"
 version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
+ "data-encoding",
+ "hex",
  "rusqlite",
  "unicode-normalization",
  "uuid",

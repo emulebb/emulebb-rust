@@ -52,8 +52,8 @@ CREATE TABLE friends (
     name TEXT NOT NULL,
     last_address TEXT,
     last_port INTEGER NOT NULL DEFAULT 0 CHECK(last_port BETWEEN 0 AND 65535),
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER CHECK(last_seen_ms IS NULL OR last_seen_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER CHECK(last_seen_at_ms IS NULL OR last_seen_at_ms >= 0),
     deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0)
 ) STRICT;
 
@@ -78,9 +78,9 @@ CREATE TABLE known_files (
     all_time_uploaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(all_time_uploaded_bytes >= 0),
     all_time_upload_requests INTEGER NOT NULL DEFAULT 0 CHECK(all_time_upload_requests >= 0),
     all_time_upload_accepts INTEGER NOT NULL DEFAULT 0 CHECK(all_time_upload_accepts >= 0),
-    last_upload_request_ms INTEGER NOT NULL DEFAULT 0 CHECK(last_upload_request_ms >= 0),
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    last_upload_requested_at_ms INTEGER NOT NULL DEFAULT 0 CHECK(last_upload_requested_at_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
 ) STRICT;
 
@@ -90,13 +90,13 @@ CREATE TABLE known_file_origins (
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     content_type TEXT NOT NULL DEFAULT '',
     availability_score INTEGER NOT NULL DEFAULT 0 CHECK(availability_score >= 0),
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     PRIMARY KEY(known_file_id, origin)
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX known_file_origins_origin_idx
-    ON known_file_origins(origin, availability_score DESC, last_seen_ms DESC);
+    ON known_file_origins(origin, availability_score DESC, last_seen_at_ms DESC);
 
 -- Durable content identity for successful downloads. This intentionally has
 -- no foreign key to current known-file, transfer, share, or path rows: cleanup,
@@ -117,21 +117,21 @@ CREATE TABLE file_names (
     name TEXT NOT NULL,
     normalized_name TEXT NOT NULL,
     seen_count INTEGER NOT NULL DEFAULT 1 CHECK(seen_count >= 1),
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     UNIQUE(known_file_id, normalized_name)
 ) STRICT;
 
 CREATE TABLE file_name_origins (
     file_name_id INTEGER NOT NULL REFERENCES file_names(id) ON DELETE CASCADE,
     origin TEXT NOT NULL CHECK(origin IN ('local_share', 'transfer', 'passive_cache')),
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     PRIMARY KEY(file_name_id, origin)
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX file_name_origins_origin_idx
-    ON file_name_origins(origin, last_seen_ms DESC);
+    ON file_name_origins(origin, last_seen_at_ms DESC);
 
 CREATE VIRTUAL TABLE file_name_fts USING fts5(
     name,
@@ -159,14 +159,14 @@ WHEN old.name IS NOT new.name OR old.normalized_name IS NOT new.normalized_name 
     VALUES (new.id, new.name, new.normalized_name);
 END;
 
-CREATE TABLE ed2k_part_hashes (
+CREATE TABLE transfer_md4_part_hashes (
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index BETWEEN 0 AND 4294967295),
     md4_hash BLOB NOT NULL CHECK(length(md4_hash) = 16),
     PRIMARY KEY(transfer_id, part_index)
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE aich_part_hashes (
+CREATE TABLE transfer_aich_part_hashes (
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index BETWEEN 0 AND 4294967295),
     aich_hash BLOB NOT NULL CHECK(length(aich_hash) = 20),
@@ -178,7 +178,7 @@ CREATE TABLE aich_part_hashes (
 CREATE TABLE verified_local_content (
     known_file_id INTEGER PRIMARY KEY REFERENCES known_files(id) ON DELETE CASCADE,
     display_name TEXT NOT NULL,
-    part_size INTEGER NOT NULL CHECK(part_size > 0),
+    part_size_bytes INTEGER NOT NULL CHECK(part_size_bytes > 0),
     part_count INTEGER NOT NULL CHECK(part_count BETWEEN 0 AND 4294967295),
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
     upload_priority TEXT NOT NULL DEFAULT 'normal'
@@ -241,7 +241,7 @@ CREATE TABLE local_paths (
     UNIQUE(platform, native_path)
 ) STRICT;
 
-CREATE INDEX idx_local_paths_search ON local_paths(platform, search_key);
+CREATE INDEX local_paths_search_idx ON local_paths(platform, search_key);
 CREATE INDEX local_paths_sort_idx ON local_paths(sort_key);
 
 -- Durable, verified path-to-content cache. Presence in this table does not
@@ -249,7 +249,7 @@ CREATE INDEX local_paths_sort_idx ON local_paths(sort_key);
 CREATE TABLE local_file_instances (
     path_id INTEGER PRIMARY KEY REFERENCES local_paths(id),
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    file_size INTEGER NOT NULL CHECK(file_size >= 0),
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     native_identity BLOB NOT NULL,
     verified_fingerprint BLOB NOT NULL,
     verified_at_ms INTEGER NOT NULL CHECK(verified_at_ms >= 0)
@@ -259,7 +259,7 @@ CREATE INDEX local_file_instances_content_idx
     ON local_file_instances(known_file_id);
 
 CREATE INDEX local_file_instances_identity_idx
-    ON local_file_instances(native_identity, file_size);
+    ON local_file_instances(native_identity, size_bytes);
 
 CREATE TABLE shared_directory_roots (
     id INTEGER PRIMARY KEY,
@@ -268,7 +268,7 @@ CREATE TABLE shared_directory_roots (
     shareable INTEGER NOT NULL DEFAULT 1 CHECK(shareable IN (0, 1)),
     accessible INTEGER NOT NULL DEFAULT 1 CHECK(accessible IN (0, 1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
-    last_scan_ms INTEGER CHECK(last_scan_ms IS NULL OR last_scan_ms >= 0),
+    last_scanned_at_ms INTEGER CHECK(last_scanned_at_ms IS NULL OR last_scanned_at_ms >= 0),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0),
     UNIQUE(path_id)
@@ -301,8 +301,8 @@ CREATE TABLE shared_file_memberships (
     root_id INTEGER NOT NULL REFERENCES shared_directory_roots(id),
     path_id INTEGER NOT NULL REFERENCES local_file_instances(path_id) ON DELETE CASCADE,
     relative_path TEXT NOT NULL,
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
     PRIMARY KEY(root_id, path_id)
 ) STRICT, WITHOUT ROWID;
@@ -311,7 +311,7 @@ CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     display_name TEXT NOT NULL,
-    part_size INTEGER NOT NULL CHECK(part_size > 0),
+    part_size_bytes INTEGER NOT NULL CHECK(part_size_bytes > 0),
     part_count INTEGER NOT NULL CHECK(part_count BETWEEN 0 AND 4294967295),
     upload_priority TEXT NOT NULL DEFAULT 'normal'
         CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
@@ -408,7 +408,7 @@ CREATE TABLE delivery_attempts (
     )
 ) STRICT;
 
-CREATE INDEX idx_delivery_attempts_phase ON delivery_attempts(phase, transfer_id);
+CREATE INDEX delivery_attempts_phase_idx ON delivery_attempts(phase, transfer_id);
 
 CREATE TABLE delivery_output_tombstones (
     transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
@@ -427,7 +427,7 @@ CREATE TABLE delivery_output_tombstones (
     )
 ) STRICT;
 
-CREATE INDEX idx_delivery_output_tombstones_phase
+CREATE INDEX delivery_output_tombstones_phase_idx
 ON delivery_output_tombstones(phase, transfer_id);
 
 CREATE TRIGGER clear_delivery_attempt_after_delivered
@@ -440,7 +440,7 @@ END;
 CREATE TABLE shared_file_scan_failures (
     id INTEGER PRIMARY KEY,
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
-    file_size INTEGER NOT NULL CHECK(file_size >= 0),
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     source_fingerprint BLOB,
     reason TEXT NOT NULL DEFAULT '',
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
@@ -484,8 +484,8 @@ CREATE TABLE servers (
     udp_flags INTEGER CHECK(udp_flags IS NULL OR udp_flags >= 0),
     udp_key INTEGER CHECK(udp_key IS NULL OR udp_key BETWEEN 1 AND 4294967295),
     udp_key_ip INTEGER CHECK(udp_key_ip IS NULL OR udp_key_ip BETWEEN 1 AND 4294967295),
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0),
     UNIQUE(address, port)
 ) STRICT;
@@ -513,8 +513,8 @@ CREATE TABLE peers (
     banned INTEGER NOT NULL DEFAULT 0 CHECK(banned IN (0, 1)),
     uploaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(uploaded_bytes >= 0),
     downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(downloaded_bytes >= 0),
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     CHECK((secure_ident_pubkey IS NULL AND secure_ident_pubkey_len = 0)
           OR (secure_ident_pubkey IS NOT NULL AND length(secure_ident_pubkey) = secure_ident_pubkey_len
               AND secure_ident_pubkey_len BETWEEN 1 AND 80)),
@@ -530,8 +530,8 @@ CREATE TABLE transfer_sources (
     connect_options INTEGER CHECK(connect_options IS NULL OR connect_options BETWEEN 0 AND 255),
     file_comment TEXT NOT NULL DEFAULT '',
     file_rating INTEGER NOT NULL DEFAULT 0 CHECK(file_rating BETWEEN 0 AND 255),
-    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
-    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
+    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     last_outcome TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
@@ -580,20 +580,20 @@ CREATE TABLE kad_keyword_publishes (
     id INTEGER PRIMARY KEY,
     size_bytes BLOB NOT NULL CHECK(length(size_bytes) = 8),
     target_node_id BLOB NOT NULL CHECK(length(target_node_id) = 16),
-    file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
+    ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
     known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
     observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
-    UNIQUE(target_node_id, file_hash, size_bytes)
+    UNIQUE(target_node_id, ed2k_hash, size_bytes)
 ) STRICT;
 
 CREATE TABLE kad_source_publishes (
     id INTEGER PRIMARY KEY,
     target_node_id BLOB NOT NULL CHECK(length(target_node_id) = 16),
     publisher_id BLOB NOT NULL CHECK(length(publisher_id) = 16),
-    file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
+    ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
     source_ip TEXT NOT NULL,
     source_tcp_port INTEGER NOT NULL CHECK(source_tcp_port BETWEEN 0 AND 65535),
     source_udp_port INTEGER NOT NULL CHECK(source_udp_port BETWEEN 0 AND 65535),
@@ -609,7 +609,7 @@ CREATE TABLE kad_note_publishes (
     target_node_id BLOB NOT NULL CHECK(length(target_node_id) = 16),
     publisher_id BLOB NOT NULL CHECK(length(publisher_id) = 16),
     publisher_ip TEXT NOT NULL,
-    file_hash BLOB CHECK(file_hash IS NULL OR length(file_hash) = 16),
+    ed2k_hash BLOB CHECK(ed2k_hash IS NULL OR length(ed2k_hash) = 16),
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
@@ -618,12 +618,12 @@ CREATE TABLE kad_note_publishes (
 ) STRICT;
 
 CREATE TABLE kad_outbound_publish_schedule (
-    file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
+    ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
     publish_kind TEXT NOT NULL CHECK(publish_kind IN ('keyword', 'source', 'notes')),
     keyword TEXT NOT NULL DEFAULT '',
     published_at_ms INTEGER NOT NULL CHECK(published_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    PRIMARY KEY(file_hash, publish_kind, keyword)
+    PRIMARY KEY(ed2k_hash, publish_kind, keyword)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE search_sessions (
@@ -649,14 +649,15 @@ CREATE TABLE search_sessions (
     status_reason TEXT CHECK(status_reason IS NULL OR length(status_reason) > 0),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0)
+    completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
+    CHECK(min_size_bytes IS NULL OR max_size_bytes IS NULL OR min_size_bytes <= max_size_bytes)
 ) STRICT;
 
 CREATE TABLE search_results (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,
     known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
-    file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
+    ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
     name TEXT NOT NULL,
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count BETWEEN 0 AND 4294967295),
@@ -669,10 +670,10 @@ CREATE TABLE search_results (
     media_bitrate_kbps INTEGER NOT NULL DEFAULT 0 CHECK(media_bitrate_kbps BETWEEN 0 AND 4294967295),
     media_codec TEXT NOT NULL DEFAULT '',
     rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
-    aich_hash TEXT NOT NULL DEFAULT '',
+    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
     complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
     directory TEXT NOT NULL DEFAULT '',
-    UNIQUE(session_id, file_hash)
+    UNIQUE(session_id, ed2k_hash)
 ) STRICT;
 
 CREATE TABLE search_result_observations (
@@ -694,7 +695,7 @@ CREATE TABLE search_result_observations (
     media_bitrate_kbps INTEGER NOT NULL DEFAULT 0 CHECK(media_bitrate_kbps BETWEEN 0 AND 4294967295),
     media_codec TEXT NOT NULL DEFAULT '',
     rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
-    aich_hash TEXT NOT NULL DEFAULT '',
+    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
     complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
     directory TEXT NOT NULL DEFAULT '',
     observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
@@ -707,8 +708,8 @@ CREATE INDEX transfers_pending_delete_idx
 ON transfers(delete_requested_at_ms)
 WHERE delete_requested_at_ms IS NOT NULL;
 CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_ms);
-CREATE INDEX kad_source_file_idx ON kad_source_publishes(file_hash, observed_at_ms);
-CREATE INDEX kad_note_file_idx ON kad_note_publishes(file_hash, observed_at_ms);
+CREATE INDEX kad_source_file_idx ON kad_source_publishes(ed2k_hash, observed_at_ms);
+CREATE INDEX kad_note_file_idx ON kad_note_publishes(ed2k_hash, observed_at_ms);
 CREATE INDEX search_results_session_idx ON search_results(session_id, id);
 CREATE INDEX search_result_observations_result_idx
 ON search_result_observations(result_id, observed_at_ms, id);
