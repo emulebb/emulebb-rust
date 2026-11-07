@@ -101,6 +101,62 @@ fn metadata_manifest_alone_cannot_claim_verified_local_identity() {
 }
 
 #[test]
+fn accepted_identity_survives_conflicting_transfer_and_index_observations() {
+    let mut store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_download_manifest();
+    manifest.completed = false;
+    manifest.aich_root = Some("11".repeat(20));
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    store.connection().unwrap().execute(
+        "INSERT INTO verified_local_content(known_file_id, display_name, part_size, part_count, aich_root)
+         SELECT id, display_name, part_size, part_count, aich_root FROM known_files",
+        [],
+    ).unwrap();
+
+    let mut conflicting = manifest.clone();
+    conflicting.file_size += 1;
+    assert!(
+        store
+            .upsert_transfer_manifest(&conflicting)
+            .unwrap_err()
+            .is::<crate::MetadataContentConflict>()
+    );
+    conflicting = manifest.clone();
+    conflicting.aich_root = Some("22".repeat(20));
+    assert!(
+        store
+            .upsert_transfer_manifest(&conflicting)
+            .unwrap_err()
+            .is::<crate::MetadataContentConflict>()
+    );
+    assert!(
+        store
+            .upsert_indexed_file(
+                &crate::MetadataIndexedFile {
+                    ed2k_hash: manifest.file_hash.clone(),
+                    name: "sample.bin".into(),
+                    size_bytes: manifest.file_size + 1,
+                    content_type: String::new(),
+                    availability_score: 1,
+                },
+                crate::MetadataIndexedFileOrigin::LocalShare
+            )
+            .unwrap_err()
+            .is::<crate::MetadataContentConflict>()
+    );
+
+    let mut sparse = manifest.clone();
+    sparse.aich_root = None;
+    store.upsert_transfer_manifest(&sparse).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
+}
+
+#[test]
 fn owned_delivery_requires_exact_size_fingerprint_authority() {
     let store = MetadataStore::in_memory().unwrap();
     let mut manifest = completed_pending_download_manifest();
@@ -402,6 +458,8 @@ fn deleting_download_preserves_same_hash_local_content() {
         rating: 0,
     };
     store.upsert_verified_local_content(&content).unwrap();
+    // Content identity enrichment is shared; transfer-owned hashsets stay independent.
+    manifest.aich_root = content.aich_root.clone();
     assert_eq!(
         store
             .transfer_manifest_by_hash(&manifest.file_hash)

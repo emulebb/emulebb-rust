@@ -503,6 +503,7 @@ impl MetadataStore {
         let size = i64::try_from(content.file_size)?;
         let part_size = i64::try_from(content.part_size)?;
         let part_count = i64::try_from(content.md4_hashset.len())?;
+        crate::content_identity::check_accepted_identity(tx, &hash, size, aich_root.as_deref())?;
         let md4_hashset = content
             .md4_hashset
             .iter()
@@ -520,6 +521,8 @@ impl MetadataStore {
                 first_seen_ms, last_seen_ms, updated_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7)
              ON CONFLICT(ed2k_hash) DO UPDATE SET
+                 size_bytes = excluded.size_bytes,
+                 aich_root = coalesce(excluded.aich_root, known_files.aich_root),
                 last_seen_ms = excluded.last_seen_ms,
                 updated_at_ms = excluded.updated_at_ms",
             params![
