@@ -36,14 +36,11 @@ pub(super) fn recovery_roots(size: u64, parts: &[Vec<u8>]) -> Result<([u8; 20], 
             packed.len() as u64 == spec.size.div_ceil(ED2K_EMBLOCK_SIZE) * 20,
             "invalid recovery block count"
         );
-        let leaves: Vec<[u8; 20]> = packed
-            .chunks_exact(20)
-            .map(|bytes| bytes.try_into().expect("fixed hash width"))
-            .collect();
+        let (leaves, _) = packed.as_chunks::<20>();
         roots.push(build_aich_block_tree_root(
             spec.size,
             spec.is_left_branch,
-            &leaves,
+            leaves,
             0,
         )?);
     }
