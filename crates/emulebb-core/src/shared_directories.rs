@@ -1374,21 +1374,17 @@ async fn plan_incremental_reload_with_pruning(
                     // WHY: an added root may expose an existing file through a
                     // directory alias. Reuse only the accepted live identity and
                     // its full safe fingerprint, never an imported name hint.
-                    if let Some(current) = fingerprint.as_ref() {
-                        if let Some(existing) = metadata.reusable_local_file_by_identity(current)? {
-                            metadata.upsert_local_file_instance(
-                                &key,
-                                &existing.file_hash,
-                                current,
-                            )?;
-                            stats.reused_count += 1;
-                            reused_shares.push(ReusedReloadShare {
-                                file_hash: existing.file_hash,
-                                source_path: path,
-                                source_fingerprint: fingerprint,
-                            });
-                            continue;
-                        }
+                    if let Some(current) = fingerprint.as_ref()
+                        && let Some(existing) = metadata.reusable_local_file_by_identity(current)?
+                    {
+                        metadata.upsert_local_file_instance(&key, &existing.file_hash, current)?;
+                        stats.reused_count += 1;
+                        reused_shares.push(ReusedReloadShare {
+                            file_hash: existing.file_hash,
+                            source_path: path,
+                            source_fingerprint: fingerprint,
+                        });
+                        continue;
                     }
                     stats.planned_hash_count += 1;
                     stats.new_count += 1;
