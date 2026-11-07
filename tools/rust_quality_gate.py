@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Canonical Rust quality gates for emulebb-rust.
 
-This script is the single entrypoint for local and CI Rust validation. It uses
-only the Python standard library and invokes cargo/rustfmt/clippy without shell
-wrappers, so the same command works on Windows, Linux, and macOS.
+This script defines local and CI Rust validation. Tool and Python dependency
+pins live in ci-toolchain.json and requirements-ci.txt. It invokes tools without
+shell wrappers, so the same checks work on Windows, Linux, and macOS.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from time import perf_counter
 from uuid import uuid4
+
+sys.dont_write_bytecode = True
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -116,7 +116,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/reports/rust-quality-gate/
             ${{ runner.temp }}/emulebb-rust-out/reports/ci-environment/
@@ -126,7 +126,7 @@ jobs:
 
   build-linux:
     name: build+test (ubuntu-24.04)
-    needs: single-active-pr
+    needs: [single-active-pr, workflow-lint]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -197,7 +197,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/reports/rust-quality-gate/
             ${{ runner.temp }}/emulebb-rust-out/reports/ci-environment/
@@ -207,7 +207,7 @@ jobs:
 
   build-test:
     name: build+test (${{ matrix.os }})
-    needs: single-active-pr
+    needs: [single-active-pr, workflow-lint]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -282,7 +282,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/reports/rust-quality-gate/
             ${{ runner.temp }}/emulebb-rust-out/reports/ci-environment/
@@ -353,7 +353,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/reports/rust-quality-gate/
             ${{ runner.temp }}/emulebb-rust-out/reports/ci-environment/
@@ -363,7 +363,7 @@ jobs:
 
   quality:
     name: policy + format + clippy
-    needs: single-active-pr
+    needs: [single-active-pr, workflow-lint]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -436,7 +436,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/reports/rust-quality-gate/
             ${{ runner.temp }}/emulebb-rust-out/reports/ci-environment/
@@ -477,7 +477,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+          name: ci-evidence-${{ runner.os }}-${{ github.job }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/reports/rust-quality-gate/
             ${{ runner.temp }}/emulebb-rust-out/reports/ci-environment/

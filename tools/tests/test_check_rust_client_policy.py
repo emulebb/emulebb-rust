@@ -295,6 +295,14 @@ run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
 
 class TestRequiredCiGates(unittest.TestCase):
+    def test_expensive_jobs_cannot_start_before_workflow_lint(self) -> None:
+        import yaml
+        path = CHECKER.ROOT / ".github/workflows/ci.yml"
+        ci = yaml.safe_load(path.read_text(encoding="utf-8"))
+        ci["jobs"]["quality"]["needs"] = "single-active-pr"
+        errors = CHECKER.check_required_ci_gates(yaml.safe_dump(ci))
+        self.assertTrue(any("quality must wait for workflow-lint" in error for error in errors))
+
     def test_current_workflows_expose_stable_aggregate_checks(self) -> None:
         self.assertEqual(CHECKER.check_required_ci_gates(), [])
 
