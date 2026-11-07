@@ -490,6 +490,13 @@ class TestReleaseImagePromotion(unittest.TestCase):
     def test_current_workflow_promotes_smoke_tested_archive(self) -> None:
         self.assertEqual(CHECKER.check_release_image_promotion(), [])
 
+    def test_rejects_image_publication_before_complete_candidate_validation(self) -> None:
+        workflow = (CHECKER.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        workflow = workflow.replace("needs: [prepare, image-candidate, assemble-candidate]",
+                                    "needs: [prepare, image-candidate]", 1)
+        errors = CHECKER.check_release_image_promotion(workflow)
+        self.assertTrue(any("complete-candidate-before-image-publication" in error for error in errors))
+
     def test_rejects_rebuilding_the_image_for_publication(self) -> None:
         workflow = f"""
   publish-image:
@@ -612,7 +619,7 @@ class TestReleaseImageSecurity(unittest.TestCase):
 
         errors = CHECKER.check_release_image_security(
             workflow,
-            f"FROM lscr.io/linuxserver/baseimage-ubuntu:noble@sha256:{'a' * 64}\n",
+            f"FROM ghcr.io/linuxserver/baseimage-ubuntu:resolute@sha256:{'a' * 64}\n",
             "- package-ecosystem: docker\n  directory: /packaging/docker\n",
         )
 

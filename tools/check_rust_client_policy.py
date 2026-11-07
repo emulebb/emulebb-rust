@@ -1101,6 +1101,9 @@ def check_release_image_promotion(workflow_text: str | None = None) -> list[str]
         errors.append(".github/workflows/release.yml is missing the image publishing job")
     else:
         publish_required = {
+            "needs: [prepare, image-candidate, assemble-candidate]": (
+                "complete-candidate-before-image-publication ordering"
+            ),
             "name: emulebb-rust-image-candidate": "smoke-tested image artifact download",
             "regclient/actions/regctl-installer@": "pinned registry client installer",
             "release: v0.11.6": "pinned registry client release",
@@ -1282,12 +1285,12 @@ def check_release_image_security(
         else dockerfile_text
     )
     if not re.search(
-        r"(?m)^FROM\s+lscr\.io/linuxserver/baseimage-ubuntu:noble"
+        r"(?m)^FROM\s+ghcr\.io/linuxserver/baseimage-ubuntu:resolute"
         r"@sha256:[0-9a-f]{64}\s*$",
         dockerfile_source,
     ):
         errors.append(
-            "packaging/docker/Dockerfile must pin the LinuxServer Noble base by digest"
+            "packaging/docker/Dockerfile must pin the LinuxServer Ubuntu Resolute GHCR base by digest"
         )
 
     dependabot = ROOT / ".github" / "dependabot.yml"
