@@ -3,7 +3,20 @@ use crate::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp, Nati
 
 #[test]
 fn large_catalog_uses_hash_seeks_and_path_cursors() {
-    let store = MetadataStore::in_memory().unwrap();
+    let database = format!(
+        "file:library-catalog-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let open = || {
+        rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap()
+    };
+    let store = MetadataStore::from_connection(open()).unwrap();
     let root = std::env::temp_dir().join("synthetic-catalog");
     let fingerprint = NativeFileFingerprint {
         identity: NativeFileIdentity::Unix {
@@ -87,6 +100,15 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         .unwrap();
     assert_eq!(first.total, 0);
     assert_eq!(first.entries.len(), 2);
+    store
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TEMP TRIGGER keep_projection BEFORE DELETE ON session_library_catalog
+         BEGIN SELECT RAISE(ABORT,'unchanged catalog rebuilt'); END;
+         UPDATE known_files SET all_time_uploaded_bytes = 1 WHERE id = 1;",
+        )
+        .unwrap();
     let next = store
         .query_active_local_share_entries(&MetadataSharedFileQuery {
             limit: 2,
@@ -114,4 +136,43 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         .unwrap();
     assert_eq!(filtered.entries.len(), 1);
     assert!(filtered.next_cursor.is_none());
+    store
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER keep_projection;
+        UPDATE local_file_instances SET known_file_id = 1 WHERE known_file_id != 1;",
+        )
+        .unwrap();
+    let aliases = store
+        .query_active_local_share_entries(&MetadataSharedFileQuery {
+            limit: 2,
+            count_total: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(aliases.total, 1);
+    assert_eq!(aliases.entries.len(), 1);
+    let chosen = aliases.entries[0].path.clone();
+    store.connection().unwrap().execute("DELETE FROM temp.session_verified_local_paths WHERE path_id = (SELECT id FROM local_paths WHERE native_path = ?1)", [NativePath::from(chosen.as_path()).storage_bytes()]).unwrap();
+    let next_alias = store
+        .query_active_local_share_entries(&MetadataSharedFileQuery {
+            limit: 2,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(next_alias.entries.len(), 1);
+    assert_ne!(next_alias.entries[0].path, chosen);
+    let other = MetadataStore::from_connection(open()).unwrap();
+    other.set_shared_root_accessible(&root, false).unwrap();
+    assert!(
+        store
+            .query_active_local_share_entries(&MetadataSharedFileQuery {
+                limit: 2,
+                ..Default::default()
+            })
+            .unwrap()
+            .entries
+            .is_empty()
+    );
 }

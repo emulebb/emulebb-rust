@@ -39,6 +39,14 @@ pub(crate) fn validate(conn: &Connection) -> Result<()> {
         profile.is_some_and(|id| uuid::Uuid::parse_str(&id).is_ok()),
         "metadata profile identity is missing or invalid"
     );
+    ensure!(
+        conn.query_row(
+            "SELECT count(*) FROM library_catalog_revision WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )? == 1,
+        "metadata catalog revision is missing"
+    );
     Ok(())
 }
 

@@ -26,7 +26,7 @@ const COLUMNS: &str = r#"lower(hex(known_files.ed2k_hash)), known_files.size_byt
                     known_files.media_extractor_version
 "#;
 
-fn representative_path(verified_only: bool) -> String {
+pub(crate) fn representative_path(verified_only: bool) -> String {
     let verified = if verified_only {
         "AND EXISTS (SELECT 1 FROM temp.session_verified_local_paths v
          WHERE v.path_id = candidate.path_id AND v.verified_fingerprint = candidate.verified_fingerprint)"
@@ -126,16 +126,17 @@ impl MetadataStore {
         } else {
             ("", Vec::new())
         };
-        let representative = representative_path(true);
-        let from = format!("FROM local_paths
-            CROSS JOIN local_file_instances ON local_file_instances.path_id = local_paths.id
-            CROSS JOIN known_files ON known_files.id = local_file_instances.known_file_id
+        let from = "FROM temp.session_library_catalog cache
+            CROSS JOIN local_paths ON local_paths.id = cache.path_id
+            CROSS JOIN known_files ON known_files.id = cache.known_file_id
             CROSS JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
-            WHERE local_file_instances.path_id = ({representative})
-              AND (?3 IS NULL OR instr(local_paths.file_name_search_key, ?3) > 0
-                  OR instr(local_paths.sort_key, ?3) > 0 OR instr(lower(hex(known_files.ed2k_hash)), ?3) > 0)
-              AND (?4 IS NULL OR verified_local_content.upload_priority = ?4)");
-        let conn = self.connection()?;
+            WHERE (?3 IS NULL OR instr(local_paths.file_name_search_key, ?3) > 0
+                  OR instr(cache.sort_key, ?3) > 0 OR instr(lower(hex(cache.ed2k_hash)), ?3) > 0)
+              AND (?4 IS NULL OR verified_local_content.upload_priority = ?4)";
+        let mut guard = self.connection()?;
+        let tx = guard.transaction()?;
+        crate::library_projection::refresh(&tx)?;
+        let conn = &tx;
         let total = if query.count_total {
             let sql = format!("SELECT count(*) {from}");
             conn.query_row(
@@ -152,10 +153,10 @@ impl MetadataStore {
             0
         };
         let sql = format!(
-            "SELECT {COLUMNS}, local_paths.sort_key {from}
-            AND local_paths.sort_key >= ?1
-            AND (local_paths.sort_key, known_files.ed2k_hash) > (?1, ?2)
-            ORDER BY local_paths.sort_key, known_files.ed2k_hash LIMIT ?5"
+            "SELECT {COLUMNS}, cache.sort_key {from}
+            AND cache.sort_key >= ?1
+            AND (cache.sort_key, cache.ed2k_hash) > (?1, ?2)
+            ORDER BY cache.sort_key, cache.ed2k_hash LIMIT ?5"
         );
         let mut stmt = conn.prepare(&sql)?;
         let limit = i64::try_from(query.limit.saturating_add(1)).unwrap_or(i64::MAX);
@@ -175,6 +176,9 @@ impl MetadataStore {
             });
             entries.push(entry);
         }
+        drop(rows);
+        drop(stmt);
+        tx.commit()?;
         Ok(MetadataSharedFilePage {
             entries,
             total,

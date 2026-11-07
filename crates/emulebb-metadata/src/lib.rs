@@ -8,6 +8,7 @@ mod identity_model;
 mod identity_store;
 mod kad_publish_model;
 mod kad_publish_store;
+mod library_projection;
 mod local_catalog;
 mod local_file_store;
 mod model;

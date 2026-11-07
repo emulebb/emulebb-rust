@@ -242,7 +242,6 @@ CREATE TABLE local_paths (
 ) STRICT;
 
 CREATE INDEX local_paths_search_idx ON local_paths(platform, search_key);
-CREATE INDEX local_paths_sort_idx ON local_paths(sort_key);
 
 -- Durable, verified path-to-content cache. Presence in this table does not
 -- authorize serving: current root membership and a live fingerprint match do.
@@ -722,3 +721,89 @@ CREATE INDEX delivery_output_tombstones_original_path_id_idx ON delivery_output_
 CREATE INDEX delivery_output_tombstones_tombstone_path_id_idx ON delivery_output_tombstones(tombstone_path_id);
 CREATE INDEX kad_keyword_publishes_known_file_id_idx ON kad_keyword_publishes(known_file_id);
 CREATE INDEX search_results_known_file_id_idx ON search_results(known_file_id);
+
+-- A cheap durable invalidation clock shared by every connection. It contains no
+-- parallel client state: session catalog projections are disposable derivatives.
+CREATE TABLE library_catalog_revision (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    revision INTEGER NOT NULL CHECK(revision >= 0)
+) STRICT;
+INSERT INTO library_catalog_revision VALUES(1, 0);
+
+CREATE TRIGGER library_catalog_local_file_instances_insert
+AFTER INSERT ON local_file_instances
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_local_file_instances_delete
+AFTER DELETE ON local_file_instances
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_local_file_instances_update
+AFTER UPDATE OF known_file_id, verified_fingerprint ON local_file_instances
+WHEN old.known_file_id IS NOT new.known_file_id OR old.verified_fingerprint IS NOT new.verified_fingerprint
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_shared_file_memberships_insert
+AFTER INSERT ON shared_file_memberships
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_shared_file_memberships_delete
+AFTER DELETE ON shared_file_memberships
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_shared_file_memberships_update
+AFTER UPDATE OF root_id, path_id, removed_at_ms ON shared_file_memberships
+WHEN old.root_id IS NOT new.root_id OR old.path_id IS NOT new.path_id OR old.removed_at_ms IS NOT new.removed_at_ms
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_shared_directory_roots_update
+AFTER UPDATE OF enabled, accessible, shareable, deleted_at_ms ON shared_directory_roots
+WHEN old.enabled IS NOT new.enabled OR old.accessible IS NOT new.accessible OR old.shareable IS NOT new.shareable OR old.deleted_at_ms IS NOT new.deleted_at_ms
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_local_paths_update
+AFTER UPDATE OF sort_key, file_name_search_key, platform, native_path ON local_paths
+WHEN old.sort_key IS NOT new.sort_key OR old.file_name_search_key IS NOT new.file_name_search_key OR old.platform IS NOT new.platform OR old.native_path IS NOT new.native_path
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_known_files_update
+AFTER UPDATE OF ed2k_hash ON known_files
+WHEN old.ed2k_hash IS NOT new.ed2k_hash
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_verified_local_content_insert
+AFTER INSERT ON verified_local_content
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_verified_local_content_delete
+AFTER DELETE ON verified_local_content
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_verified_local_content_update
+AFTER UPDATE OF known_file_id ON verified_local_content
+WHEN old.known_file_id IS NOT new.known_file_id
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;

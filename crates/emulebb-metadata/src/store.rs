@@ -61,6 +61,7 @@ impl MetadataStore {
                 verified_fingerprint BLOB NOT NULL
             )",
         )?;
+        crate::library_projection::initialize(&*store.connection()?)?;
         Ok(store)
     }
 
