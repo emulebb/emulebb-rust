@@ -67,7 +67,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13.12"
       - name: Derive and validate release version
         id: identity
         env:
@@ -90,7 +90,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13.12"
       - name: Verify required checks on the exact source commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -152,14 +152,17 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13.12"
       - name: Install pinned workspace CLI dependencies
         run: python -m pip install click==8.4.1 pydantic==2.13.4
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "26.13.0"
           package-manager-cache: false
+      - name: Install pinned npm
+        run: npm install --global npm@11.20.0
+
       - name: Install Linux build dependencies
         if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libfontconfig1-dev
@@ -254,7 +257,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13.12"
       - name: Install pinned rendered WebUI smoke dependency
         if: matrix.os == 'windows' && matrix.arch == 'x64'
         run: python -m pip install playwright==1.59.0 && python -m playwright install chromium
@@ -301,7 +304,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13.12"
       - name: Install pinned workspace CLI dependencies
         run: python -m pip install click==8.4.1 pydantic==2.13.4
       - name: Set up Docker with multi-platform image store
@@ -416,7 +419,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13.12"
       - name: Install pinned workspace CLI dependencies
         run: python -m pip install click==8.4.1 pydantic==2.13.4
       - name: Download all native assets
@@ -557,7 +560,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13.12"
       - name: Download assembled release candidate
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -647,7 +650,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13.12"
       - name: Prune superseded nightly releases
         continue-on-error: true
         working-directory: emulebb-rust

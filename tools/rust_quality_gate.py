@@ -17,17 +17,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TOOLCHAIN = json.loads((ROOT / "tools/ci-toolchain.json").read_text(encoding="utf-8"))
 
-QUICK_CHECKS = ("policy", "policy-tests", "fmt", "clippy", "diagnostics", "webui-test")
+QUICK_CHECKS = ("environment", "policy", "policy-tests", "fmt", "clippy", "diagnostics", "webui-test")
 TEST_CHECKS = ("build", "test-workspace", "test-vpn-leak")
 GATES = {name: (name,) for name in (
     "fmt", "clippy", "diagnostics", "webui-test", "build", "test-workspace",
-    "test-kad-swarm", "test-vpn-leak", "workflow-lint", "supply-chain", "rest-openapi",
+    "test-kad-swarm", "test-vpn-leak", "workflow-lint", "supply-chain", "rest-openapi", "environment",
 )}
 GATES.update({
     "policy": ("policy", "policy-tests"),
     "branch-check": ("policy", "policy-tests", "fmt"),
-    "branch-ci": ("workflow-lint", "policy", "policy-tests", "fmt"),
+    "branch-ci": ("environment", "workflow-lint", "policy", "policy-tests", "fmt"),
     "quick": QUICK_CHECKS,
     "ci-test": TEST_CHECKS,
     "ci": QUICK_CHECKS + TEST_CHECKS,
@@ -160,13 +161,14 @@ def commands_for_gate(
         "test-workspace": test_workspace_step, "test-kad-swarm": test_kad_swarm_step,
         "test-vpn-leak": test_vpn_leak_step, "workflow-lint": workflow_lint_step,
         "supply-chain": supply_chain_step, "rest-openapi": lambda: rest_openapi_step(env),
+        "environment": lambda: ("CI toolchain and input provenance", [sys.executable, "tools/ci_environment.py"]),
     }
     return [factories[name]() for name in GATES[gate]]
 
 
 def workflow_lint_step() -> tuple[str, list[str]]:
     """Use the same immutable actionlint revision on every execution surface."""
-    return ("GitHub Actions workflow lint", ["go", "run", "github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca"])
+    return ("GitHub Actions workflow lint", ["go", "run", f"github.com/rhysd/actionlint/cmd/actionlint@{TOOLCHAIN['actionlint']}"])
 
 
 def supply_chain_step() -> tuple[str, list[str]]:
@@ -306,7 +308,9 @@ def test_vpn_leak_step() -> tuple[str, list[str]]:
 
 
 def run_step(label: str, command: list[str], env: dict[str, str]) -> None:
+    from ci_environment import prepare_command
     print(f"==> {label}", flush=True)
+    command = prepare_command(command, env)
     print("+ " + " ".join(command), flush=True)
     subprocess.run(command, cwd=ROOT, env=env, check=True)
 

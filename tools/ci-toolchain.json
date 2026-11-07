@@ -1,0 +1,40 @@
+{
+  "python": "3.13.12",
+  "go": "1.27.3",
+  "cargo_deny": "0.20.2",
+  "actionlint": "914e7df21a07ef503a81201c76d2b11c789d3fca",
+  "shellcheck": {
+    "version": "0.11.0",
+    "assets": {
+      "windows-x86_64": [
+        "shellcheck-v0.11.0.zip",
+        "8a4e35ab0b331c85d73567b12f2a444df187f483e5079ceffa6bda1faa2e740e"
+      ],
+      "linux-x86_64": [
+        "shellcheck-v0.11.0.linux.x86_64.tar.gz",
+        "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6"
+      ],
+      "linux-aarch64": [
+        "shellcheck-v0.11.0.linux.aarch64.tar.gz",
+        "68a8133197a50beb8803f8d42f9908d1af1c5540d4bb05fdfca8c1fa47decefc"
+      ],
+      "darwin-x86_64": [
+        "shellcheck-v0.11.0.darwin.x86_64.tar.gz",
+        "c2c15e08df0e8fbc374c335b230a7ee958c313fa5714817a59aa59f1aa594f51"
+      ],
+      "darwin-aarch64": [
+        "shellcheck-v0.11.0.darwin.aarch64.tar.gz",
+        "339b930feb1ea764467013cc1f72d09cd6b869ebf1013296ba9055ab2ffbd26f"
+      ]
+    }
+  },
+  "inputs": {
+    "emulebb-miniupnp": "4e7a10948004ca2085ac8103e14fc77edb898b4c",
+    "emulebb-libpcpnatpmp": "a6e787f837e507336a8774522c33b54264ef4a4b",
+    "emulebb-build-tests": "8c5cdd8c97dde0ed39ed133b29d881df95a847cb",
+    "emulebb-tooling": "01e96f56d9f3939e109f78f724902fbb7febc029"
+  },
+  "node": "26.13.0",
+  "npm": "11.20.0",
+  "openapi_sha256": "81f7134686f66b5a26ce13a489304d1661d0a3e45b0ff4f0269df8f32da500c9"
+}
