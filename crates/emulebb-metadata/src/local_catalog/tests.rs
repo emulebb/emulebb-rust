@@ -25,9 +25,9 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         )
         .unwrap();
         tx.execute_batch("WITH RECURSIVE files(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM files WHERE n<100000)
-            INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_ms,last_seen_ms,updated_at_ms)
+            INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
             SELECT n,CAST(printf('%016d',n) AS BLOB),32,'sample',0,0,0 FROM files;
-            INSERT INTO verified_local_content(known_file_id,display_name,part_size,part_count)
+            INSERT INTO verified_local_content(known_file_id,display_name,part_size_bytes,part_count)
             SELECT id,'sample',9728000,0 FROM known_files;").unwrap();
         {
             let mut insert = tx.prepare("INSERT INTO local_paths(id,display_path,native_path,search_key,platform,sort_key,file_name_search_key) VALUES(?1,?2,?3,?2,?4,?5,?6)").unwrap();

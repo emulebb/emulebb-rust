@@ -75,7 +75,7 @@ impl SnapshotTable {
             .iter()
             .filter(|column| {
                 !self.keys.contains(&column.as_str())
-                    && !matches!(column.as_str(), "first_seen_ms" | "created_at_ms")
+                    && !matches!(column.as_str(), "first_seen_at_ms" | "created_at_ms")
             })
             .collect::<Vec<_>>();
         let changed = mutable

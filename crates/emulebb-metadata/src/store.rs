@@ -130,7 +130,7 @@ impl MetadataStore {
         conn.execute(
             r#"
             DELETE FROM transfer_sources
-            WHERE last_seen_ms < ?1
+            WHERE last_seen_at_ms < ?1
                OR transfer_id IN (
                    SELECT id FROM transfers WHERE removed_at_ms IS NOT NULL
                )
@@ -232,7 +232,7 @@ impl MetadataStore {
                         display_name = ?3,
                         content_type = ?4,
                         availability_score = max(availability_score, ?5),
-                        last_seen_ms = ?6,
+                        last_seen_at_ms = ?6,
                         updated_at_ms = ?6
                     WHERE id = ?1
                     "#,
@@ -250,7 +250,7 @@ impl MetadataStore {
                     r#"
                     UPDATE known_files
                     SET availability_score = max(availability_score, ?2),
-                        last_seen_ms = ?3,
+                        last_seen_at_ms = ?3,
                         updated_at_ms = ?3
                     WHERE id = ?1
                     "#,
@@ -263,7 +263,7 @@ impl MetadataStore {
                 r#"
                 INSERT INTO known_files(
                     ed2k_hash, size_bytes, display_name,
-                    content_type, availability_score, first_seen_ms, last_seen_ms, updated_at_ms
+                    content_type, availability_score, first_seen_at_ms, last_seen_at_ms, updated_at_ms
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
                 "#,
@@ -283,14 +283,14 @@ impl MetadataStore {
             r#"
             INSERT INTO known_file_origins(
                 known_file_id, origin, size_bytes, content_type,
-                availability_score, first_seen_ms, last_seen_ms
+                availability_score, first_seen_at_ms, last_seen_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
             ON CONFLICT(known_file_id, origin) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
                 content_type = excluded.content_type,
                 availability_score = max(known_file_origins.availability_score, excluded.availability_score),
-                last_seen_ms = excluded.last_seen_ms
+                last_seen_at_ms = excluded.last_seen_at_ms
             "#,
             params![
                 known_file_id,
@@ -304,12 +304,12 @@ impl MetadataStore {
 
         tx.execute(
             r#"
-            INSERT INTO file_names(known_file_id, name, normalized_name, seen_count, first_seen_ms, last_seen_ms)
+            INSERT INTO file_names(known_file_id, name, normalized_name, seen_count, first_seen_at_ms, last_seen_at_ms)
             VALUES (?1, ?2, ?3, 1, ?4, ?4)
             ON CONFLICT(known_file_id, normalized_name) DO UPDATE SET
                 name = excluded.name,
                 seen_count = file_names.seen_count + 1,
-                last_seen_ms = excluded.last_seen_ms
+                last_seen_at_ms = excluded.last_seen_at_ms
             "#,
             params![known_file_id, file.name, normalized, now],
         )?;
@@ -320,10 +320,10 @@ impl MetadataStore {
         )?;
         tx.execute(
             r#"
-            INSERT INTO file_name_origins(file_name_id, origin, first_seen_ms, last_seen_ms)
+            INSERT INTO file_name_origins(file_name_id, origin, first_seen_at_ms, last_seen_at_ms)
             VALUES (?1, ?2, ?3, ?3)
             ON CONFLICT(file_name_id, origin) DO UPDATE SET
-                last_seen_ms = excluded.last_seen_ms
+                last_seen_at_ms = excluded.last_seen_at_ms
             "#,
             params![file_name_id, origin.as_str(), now],
         )?;
@@ -677,11 +677,7 @@ pub(crate) fn decode_fixed_hex(value: &str, byte_len: usize, label: &str) -> Res
         "{label} must be {} hex characters",
         byte_len * 2
     );
-    let mut out = Vec::with_capacity(byte_len);
-    for index in (0..clean.len()).step_by(2) {
-        out.push(u8::from_str_radix(&clean[index..index + 2], 16)?);
-    }
-    Ok(out)
+    hex::decode(clean).with_context(|| format!("invalid {label}"))
 }
 
 pub(crate) fn unix_ms() -> i64 {
@@ -776,7 +772,7 @@ mod tests {
             );
             CREATE TABLE files(id INTEGER PRIMARY KEY);
             INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms)
-            VALUES ('emulebb.metadata.clean-v2', 24, 0);
+            VALUES ('emulebb.metadata', 24, 0);
             INSERT INTO files(id) VALUES (7);
             "#,
         )
@@ -929,7 +925,7 @@ mod tests {
             let conn = store.connection().unwrap();
             // Two known files + transfers: one live, one removed.
             conn.execute(
-                "INSERT INTO known_files(id, ed2k_hash, size_bytes, display_name, first_seen_ms, last_seen_ms, updated_at_ms)
+                "INSERT INTO known_files(id, ed2k_hash, size_bytes, display_name, first_seen_at_ms, last_seen_at_ms, updated_at_ms)
                  VALUES (1, ?1, 1, 'a.bin', 0, 0, 0), (2, ?2, 1, 'b.bin', 0, 0, 0)",
                 params![vec![0x11u8; 16], vec![0x22u8; 16]],
             )
@@ -937,7 +933,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO transfers(
                      id, known_file_id, visible_state, delivery_state,
-                     created_at_ms, updated_at_ms, removed_at_ms, display_name, part_size, part_count
+                     created_at_ms, updated_at_ms, removed_at_ms, display_name, part_size_bytes, part_count
                  )
                  VALUES (1, 1, 'downloading', 'pending', 0, 0, NULL, 'a.bin', 1, 1),
                         (2, 2, 'downloading', 'pending', 0, 0, ?1, 'b.bin', 1, 1)",
@@ -947,7 +943,7 @@ mod tests {
             // Live transfer: one fresh source (kept) + one stale source (pruned).
             // Removed transfer: one fresh source (pruned by transfer removal).
             conn.execute(
-                "INSERT INTO transfer_sources(transfer_id, ip, tcp_port, first_seen_ms, last_seen_ms)
+                "INSERT INTO transfer_sources(transfer_id, ip, tcp_port, first_seen_at_ms, last_seen_at_ms)
                  VALUES (1, '10.0.0.1', 4662, 0, ?1),
                         (1, '10.0.0.2', 4662, 0, ?2),
                         (2, '10.0.0.3', 4662, 0, ?1)",

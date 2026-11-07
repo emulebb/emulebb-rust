@@ -96,16 +96,16 @@ impl super::MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO search_results(
-                    session_id, known_file_id, file_hash, name, size_bytes,
+                    session_id, known_file_id, ed2k_hash, name, size_bytes,
                     source_count, complete_source_count, file_type, media_artist,
                     media_album, media_title, media_length_seconds, media_bitrate_kbps,
-                    media_codec, rating, aich_hash, complete, directory
+                    media_codec, rating, aich_root, complete, directory
                 )
                 VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                     ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
                 )
-                ON CONFLICT(session_id, file_hash) DO UPDATE SET
+                ON CONFLICT(session_id, ed2k_hash) DO UPDATE SET
                     known_file_id = excluded.known_file_id,
                     name = excluded.name,
                     size_bytes = excluded.size_bytes,
@@ -119,7 +119,7 @@ impl super::MetadataStore {
                     media_bitrate_kbps = excluded.media_bitrate_kbps,
                     media_codec = excluded.media_codec,
                     rating = excluded.rating,
-                    aich_hash = excluded.aich_hash,
+                    aich_root = excluded.aich_root,
                     complete = excluded.complete,
                     directory = excluded.directory
                 WHERE search_results.known_file_id IS NOT excluded.known_file_id OR
@@ -135,7 +135,7 @@ impl super::MetadataStore {
                     search_results.media_bitrate_kbps IS NOT excluded.media_bitrate_kbps OR
                     search_results.media_codec IS NOT excluded.media_codec OR
                     search_results.rating IS NOT excluded.rating OR
-                    search_results.aich_hash IS NOT excluded.aich_hash OR
+                    search_results.aich_root IS NOT excluded.aich_root OR
                     search_results.complete IS NOT excluded.complete OR
                     search_results.directory IS NOT excluded.directory
                 "#,
@@ -155,13 +155,13 @@ impl super::MetadataStore {
                     i64::from(result.media_bitrate_kbps),
                     result.media_codec,
                     i64::from(result.rating),
-                    result.aich_hash,
+                    encode_aich_root(&result.aich_hash)?,
                     bool_to_i64(result.complete),
                     result.directory,
                 ],
             )?;
             let result_id: i64 = tx.query_row(
-                "SELECT id FROM search_results WHERE session_id = ?1 AND file_hash = ?2",
+                "SELECT id FROM search_results WHERE session_id = ?1 AND ed2k_hash = ?2",
                 params![session_id, file_hash],
                 |row| row.get(0),
             )?;
@@ -198,7 +198,7 @@ impl super::MetadataStore {
                         complete_source_count, source_client_id, source_client_port,
                         file_type, media_artist, media_album, media_title,
                         media_length_seconds, media_bitrate_kbps, media_codec,
-                        rating, aich_hash, complete, directory, observed_at_ms
+                        rating, aich_root, complete, directory, observed_at_ms
                     )
                     VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
@@ -223,7 +223,7 @@ impl super::MetadataStore {
                         i64::from(observation.media_bitrate_kbps),
                         observation.media_codec,
                         i64::from(observation.rating),
-                        observation.aich_hash,
+                        encode_aich_root(&observation.aich_hash)?,
                         bool_to_i64(observation.complete),
                         observation.directory,
                         if observation.observed_at_ms > 0 {
@@ -323,10 +323,10 @@ fn load_search_results(
 ) -> Result<Vec<MetadataSearchResult>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, lower(hex(file_hash)),
+        SELECT id, lower(hex(ed2k_hash)),
                name, size_bytes, source_count, complete_source_count, file_type,
                media_artist, media_album, media_title, media_length_seconds,
-               media_bitrate_kbps, media_codec, rating, aich_hash, complete, directory
+               media_bitrate_kbps, media_codec, rating, aich_root, complete, directory
         FROM search_results
         WHERE session_id = ?1
         ORDER BY id
@@ -349,7 +349,8 @@ fn load_search_results(
                 media_bitrate_kbps: row.get::<_, u32>(11)?,
                 media_codec: row.get(12)?,
                 rating: row.get::<_, u8>(13)?,
-                aich_hash: row.get(14)?,
+                aich_hash: data_encoding::BASE32_NOPAD
+                    .encode(&row.get::<_, Option<Vec<u8>>>(14)?.unwrap_or_default()),
                 complete: row.get::<_, i64>(15)? != 0,
                 directory: row.get(16)?,
                 observations: Vec::new(),
@@ -366,7 +367,7 @@ fn load_search_results(
         "SELECT o.origin, o.server_endpoint, o.name, o.size_bytes, o.source_count, o.complete_source_count,
                 o.source_client_id, o.source_client_port, o.file_type, o.media_artist,
                 o.media_album, o.media_title, o.media_length_seconds, o.media_bitrate_kbps,
-                o.media_codec, o.rating, o.aich_hash, o.complete, o.directory, o.observed_at_ms, o.result_id
+                o.media_codec, o.rating, o.aich_root, o.complete, o.directory, o.observed_at_ms, o.result_id
          FROM search_results r JOIN search_result_observations o ON o.result_id = r.id
          WHERE r.session_id = ?1 ORDER BY o.result_id, o.observed_at_ms, o.id")?;
     let mut rows = observations.query([session_id])?;
@@ -391,7 +392,7 @@ fn load_search_result_observations(
         SELECT origin, server_endpoint, name, size_bytes, source_count, complete_source_count,
                source_client_id, source_client_port, file_type, media_artist,
                media_album, media_title, media_length_seconds,
-               media_bitrate_kbps, media_codec, rating, aich_hash, complete,
+               media_bitrate_kbps, media_codec, rating, aich_root, complete,
                directory, observed_at_ms
         FROM search_result_observations
         WHERE result_id = ?1
@@ -423,15 +424,25 @@ fn search_observation_from_row(
         media_bitrate_kbps: row.get::<_, u32>(13)?,
         media_codec: row.get(14)?,
         rating: row.get::<_, u8>(15)?,
-        aich_hash: row.get(16)?,
+        aich_hash: data_encoding::BASE32_NOPAD
+            .encode(&row.get::<_, Option<Vec<u8>>>(16)?.unwrap_or_default()),
         complete: row.get::<_, i64>(17)? != 0,
         directory: row.get(18)?,
         observed_at_ms: row.get(19)?,
     })
 }
 
+fn encode_aich_root(value: &str) -> Result<Option<Vec<u8>>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let bytes = data_encoding::BASE32_NOPAD.decode(value.as_bytes())?;
+    anyhow::ensure!(bytes.len() == 20, "AICH root must contain 20 bytes");
+    Ok(Some(bytes))
+}
+
 fn encode_optional_u64(value: Option<u64>) -> Option<Vec<u8>> {
-    value.map(|value| value.to_le_bytes().to_vec())
+    value.map(|value| value.to_be_bytes().to_vec())
 }
 
 fn decode_optional_u64(value: Option<Vec<u8>>, column: usize) -> rusqlite::Result<Option<u64>> {
@@ -451,7 +462,7 @@ fn decode_optional_u64(value: Option<Vec<u8>>, column: usize) -> rusqlite::Resul
                     .into(),
                 )
             })?;
-            Ok(u64::from_le_bytes(bytes))
+            Ok(u64::from_be_bytes(bytes))
         })
         .transpose()
 }
@@ -477,6 +488,32 @@ pub fn normalized_search_query(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_storage_has_binary_roots_and_ordered_unsigned_filter_bounds() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let mut search = sample_search("typed-search");
+        search.spec.min_size_bytes = Some(255);
+        search.spec.max_size_bytes = Some(256);
+        store.upsert_search(&search).unwrap();
+        let conn = store.connection().unwrap();
+        let (size, valid): (i64, bool) = conn.query_row(
+            "SELECT (SELECT length(aich_root) FROM search_results), min_size_bytes < max_size_bytes FROM search_sessions",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(size, 20);
+        assert!(valid);
+        drop(conn);
+        search.spec.min_size_bytes = Some(257);
+        assert!(store.upsert_search(&search).is_err());
+        search.spec.min_size_bytes = Some(255);
+        search.results[0].aich_hash = "invalid-root".into();
+        assert!(store.upsert_search(&search).is_err());
+        assert_eq!(
+            store.load_searches().unwrap()[0].spec.min_size_bytes,
+            Some(255)
+        );
+    }
 
     #[test]
     fn search_snapshots_preserve_result_and_observation_identity() {

@@ -133,8 +133,8 @@ fn accepted_identity_survives_conflicting_transfer_and_index_observations() {
     manifest.aich_root = Some("11".repeat(20));
     store.upsert_transfer_manifest(&manifest).unwrap();
     store.connection().unwrap().execute(
-        "INSERT INTO verified_local_content(known_file_id, display_name, part_size, part_count, aich_root)
-         SELECT known_files.id, transfers.display_name, transfers.part_size, transfers.part_count, aich_root FROM known_files JOIN transfers ON transfers.known_file_id = known_files.id",
+        "INSERT INTO verified_local_content(known_file_id, display_name, part_size_bytes, part_count, aich_root)
+         SELECT known_files.id, transfers.display_name, transfers.part_size_bytes, transfers.part_count, aich_root FROM known_files JOIN transfers ON transfers.known_file_id = known_files.id",
         [],
     ).unwrap();
 
@@ -204,10 +204,10 @@ fn transfer_snapshots_keep_unchanged_children_and_source_first_seen() {
     });
     store.upsert_transfer_manifest(&manifest).unwrap();
     store.connection().unwrap().execute_batch(
-        "UPDATE transfer_sources SET first_seen_ms = 1;
+        "UPDATE transfer_sources SET first_seen_at_ms = 1;
          CREATE TEMP TRIGGER no_piece_delete BEFORE DELETE ON main.transfer_pieces BEGIN SELECT RAISE(ABORT,'unchanged piece deleted'); END;
          CREATE TEMP TRIGGER no_piece_update BEFORE UPDATE ON main.transfer_pieces BEGIN SELECT RAISE(ABORT,'unchanged piece updated'); END;
-         CREATE TEMP TRIGGER no_hash_delete BEFORE DELETE ON main.ed2k_part_hashes BEGIN SELECT RAISE(ABORT,'unchanged hash deleted'); END;
+         CREATE TEMP TRIGGER no_hash_delete BEFORE DELETE ON main.transfer_md4_part_hashes BEGIN SELECT RAISE(ABORT,'unchanged hash deleted'); END;
          CREATE TEMP TRIGGER no_range_delete BEFORE DELETE ON main.verified_ranges BEGIN SELECT RAISE(ABORT,'unchanged range deleted'); END;"
     ).unwrap();
     manifest.comment = "updated comment".into();
@@ -216,8 +216,10 @@ fn transfer_snapshots_keep_unchanged_children_and_source_first_seen() {
         store
             .connection()
             .unwrap()
-            .query_row("SELECT first_seen_ms FROM transfer_sources", [], |r| r
-                .get::<_, i64>(0))
+            .query_row("SELECT first_seen_at_ms FROM transfer_sources", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
             .unwrap(),
         1
     );
@@ -580,7 +582,11 @@ fn deleting_download_preserves_same_hash_local_content() {
             .unwrap();
         assert_eq!(actual, expected);
     }
-    for table in ["ed2k_part_hashes", "aich_part_hashes", "verified_ranges"] {
+    for table in [
+        "transfer_md4_part_hashes",
+        "transfer_aich_part_hashes",
+        "verified_ranges",
+    ] {
         assert_eq!(
             conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
                 .get::<_, i64>(0))

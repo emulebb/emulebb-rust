@@ -356,12 +356,12 @@ impl MetadataStore {
         tx.execute(
             "INSERT INTO known_files(
                 ed2k_hash, size_bytes, display_name, aich_root,
-                first_seen_ms, last_seen_ms, updated_at_ms
+                first_seen_at_ms, last_seen_at_ms, updated_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)
              ON CONFLICT(ed2k_hash) DO UPDATE SET
                  size_bytes = excluded.size_bytes,
                  aich_root = coalesce(excluded.aich_root, known_files.aich_root),
-                last_seen_ms = excluded.last_seen_ms,
+                last_seen_at_ms = excluded.last_seen_at_ms,
                 updated_at_ms = excluded.updated_at_ms",
             params![hash, size, content.display_name, aich_root, now],
         )?;
@@ -376,7 +376,7 @@ impl MetadataStore {
         );
         let inserted = tx.execute(
             "INSERT INTO verified_local_content(
-                known_file_id, display_name, part_size, part_count, aich_root,
+                known_file_id, display_name, part_size_bytes, part_count, aich_root,
                 upload_priority, auto_upload_priority, comment, rating
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(known_file_id) DO NOTHING",
@@ -399,7 +399,7 @@ impl MetadataStore {
                 i64,
                 Option<Vec<u8>>,
             ) = tx.query_row(
-                "SELECT part_size, part_count, aich_root FROM verified_local_content
+                "SELECT part_size_bytes, part_count, aich_root FROM verified_local_content
                      WHERE known_file_id = ?1",
                 params![known_file_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -448,10 +448,10 @@ impl MetadataStore {
         }
         tx.execute(
             "INSERT INTO known_file_origins(
-                known_file_id, origin, size_bytes, first_seen_ms, last_seen_ms
+                known_file_id, origin, size_bytes, first_seen_at_ms, last_seen_at_ms
              ) VALUES (?1, 'local_share', ?2, ?3, ?3)
              ON CONFLICT(known_file_id, origin) DO UPDATE SET
-                last_seen_ms = excluded.last_seen_ms",
+                last_seen_at_ms = excluded.last_seen_at_ms",
             params![known_file_id, size, now],
         )?;
         if inserted != 0 {
@@ -473,12 +473,12 @@ impl MetadataStore {
         let path_id = upsert_local_path(tx, &content.path)?;
         tx.execute(
             "INSERT INTO local_file_instances(
-                path_id, known_file_id, file_size, native_identity,
+                path_id, known_file_id, size_bytes, native_identity,
                 verified_fingerprint, verified_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(path_id) DO UPDATE SET
                 known_file_id = excluded.known_file_id,
-                file_size = excluded.file_size,
+                size_bytes = excluded.size_bytes,
                 native_identity = excluded.native_identity,
                 verified_fingerprint = excluded.verified_fingerprint,
                 verified_at_ms = excluded.verified_at_ms",
@@ -519,11 +519,11 @@ impl MetadataStore {
         );
         let path_id = upsert_local_path(&tx, path)?;
         tx.execute(
-            "INSERT INTO local_file_instances(path_id, known_file_id, file_size, native_identity, verified_fingerprint, verified_at_ms)
+            "INSERT INTO local_file_instances(path_id, known_file_id, size_bytes, native_identity, verified_fingerprint, verified_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(path_id) DO UPDATE SET
                  known_file_id = excluded.known_file_id,
-                 file_size = excluded.file_size,
+                 size_bytes = excluded.size_bytes,
                  native_identity = excluded.native_identity,
                  verified_fingerprint = excluded.verified_fingerprint,
                  verified_at_ms = excluded.verified_at_ms",
@@ -540,7 +540,7 @@ impl MetadataStore {
         self.connection()?
             .query_row(
                 "SELECT local_paths.platform, local_paths.native_path,
-                        lower(hex(known_files.ed2k_hash)), local_file_instances.file_size,
+                        lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
                         local_file_instances.verified_fingerprint
                  FROM local_file_instances
                  JOIN local_paths ON local_paths.id = local_file_instances.path_id
@@ -576,7 +576,7 @@ impl MetadataStore {
         let conn = self.connection()?;
         let mut statement = conn.prepare(
             "SELECT local_paths.platform, local_paths.native_path,
-                    lower(hex(known_files.ed2k_hash)), local_file_instances.file_size,
+                    lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
                     local_file_instances.verified_fingerprint
              FROM local_file_instances
              JOIN local_paths ON local_paths.id = local_file_instances.path_id
@@ -616,13 +616,13 @@ impl MetadataStore {
         let conn = self.connection()?;
         let mut statement = conn.prepare(
             "SELECT local_paths.platform, local_paths.native_path,
-                    lower(hex(known_files.ed2k_hash)), local_file_instances.file_size,
+                    lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
                     local_file_instances.verified_fingerprint
              FROM local_file_instances
              JOIN local_paths ON local_paths.id = local_file_instances.path_id
              JOIN known_files ON known_files.id = local_file_instances.known_file_id
              WHERE local_file_instances.native_identity = ?1
-               AND local_file_instances.file_size = ?2
+               AND local_file_instances.size_bytes = ?2
              ORDER BY local_paths.platform, local_paths.native_path",
         )?;
         let rows = statement.query_map(params![current.identity.storage_bytes(), size], |row| {
@@ -707,7 +707,7 @@ impl MetadataStore {
         self.connection()?
             .query_row(
                 "SELECT local_paths.platform, local_paths.native_path,
-                        lower(hex(known_files.ed2k_hash)), local_file_instances.file_size,
+                        lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
                         local_file_instances.verified_fingerprint
                  FROM local_file_instances
                  JOIN local_paths ON local_paths.id = local_file_instances.path_id
@@ -755,7 +755,7 @@ impl MetadataStore {
             (String, i64, i64, Option<String>, String, bool, String, u8) = conn
             .query_row(
             "SELECT verified_local_content.display_name, known_files.size_bytes,
-                    verified_local_content.part_size,
+                    verified_local_content.part_size_bytes,
                     CASE WHEN verified_local_content.aich_root IS NULL THEN NULL
                          ELSE lower(hex(verified_local_content.aich_root)) END,
                     verified_local_content.upload_priority,
@@ -854,7 +854,7 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO known_files(ed2k_hash, size_bytes, display_name,
-                first_seen_ms, last_seen_ms, updated_at_ms)
+                first_seen_at_ms, last_seen_at_ms, updated_at_ms)
              VALUES (?1, 32, 'Sample.bin', 1, 1, 1)",
                 params![decode_fixed_hex(hash, 16, "ED2K hash").unwrap()],
             )

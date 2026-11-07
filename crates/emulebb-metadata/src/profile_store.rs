@@ -274,7 +274,7 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(user_hash)), name, last_address, last_port, first_seen_ms, last_seen_ms
+            SELECT lower(hex(user_hash)), name, last_address, last_port, first_seen_at_ms, last_seen_at_ms
             FROM friends
             WHERE deleted_at_ms IS NULL
             ORDER BY name, user_hash
@@ -299,13 +299,13 @@ impl super::MetadataStore {
         let user_hash = decode_fixed_hex(&friend.user_hash, 16, "friend user hash")?;
         self.connection()?.execute(
             r#"
-            INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_ms, last_seen_ms, deleted_at_ms)
+            INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_ms, last_seen_at_ms, deleted_at_ms)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
             ON CONFLICT(user_hash) DO UPDATE SET
                 name = excluded.name,
                 last_address = excluded.last_address,
                 last_port = excluded.last_port,
-                last_seen_ms = excluded.last_seen_ms,
+                last_seen_at_ms = excluded.last_seen_at_ms,
                 deleted_at_ms = NULL
             "#,
             params![
@@ -391,7 +391,7 @@ impl super::MetadataStore {
                 enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
                 soft_files, hard_files,
                 version, obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key,
-                udp_key_ip, first_seen_ms, last_seen_ms, deleted_at_ms
+                udp_key_ip, first_seen_at_ms, last_seen_at_ms, deleted_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24, NULL)
             ON CONFLICT(address, port) DO UPDATE SET
@@ -416,7 +416,7 @@ impl super::MetadataStore {
                 udp_flags = excluded.udp_flags,
                 udp_key = excluded.udp_key,
                 udp_key_ip = excluded.udp_key_ip,
-                last_seen_ms = excluded.last_seen_ms,
+                last_seen_at_ms = excluded.last_seen_at_ms,
                 deleted_at_ms = NULL
             "#,
             params![

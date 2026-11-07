@@ -112,14 +112,14 @@ impl super::MetadataStore {
 
         tx.prepare_cached(
             r#"
-            INSERT INTO known_files(ed2k_hash, size_bytes, display_name, aich_root, first_seen_ms, last_seen_ms, updated_at_ms)
+            INSERT INTO known_files(ed2k_hash, size_bytes, display_name, aich_root, first_seen_at_ms, last_seen_at_ms, updated_at_ms)
             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)
             ON CONFLICT(ed2k_hash) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
                 display_name = CASE WHEN EXISTS(SELECT 1 FROM verified_local_content WHERE known_file_id = known_files.id)
                     THEN known_files.display_name ELSE excluded.display_name END,
                 aich_root = coalesce(excluded.aich_root, known_files.aich_root),
-                last_seen_ms = excluded.last_seen_ms,
+                last_seen_at_ms = excluded.last_seen_at_ms,
                 updated_at_ms = excluded.updated_at_ms
             "#,
         )?.execute(params![hash, i64::try_from(manifest.file_size)?, manifest.display_name, aich_root, now])?;
@@ -133,12 +133,12 @@ impl super::MetadataStore {
             r#"
             INSERT INTO known_file_origins(
                 known_file_id, origin, size_bytes, content_type,
-                availability_score, first_seen_ms, last_seen_ms
+                availability_score, first_seen_at_ms, last_seen_at_ms
             )
             VALUES (?1, 'transfer', ?2, '', 0, ?3, ?3)
             ON CONFLICT(known_file_id, origin) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
-                last_seen_ms = excluded.last_seen_ms
+                last_seen_at_ms = excluded.last_seen_at_ms
             "#,
         )?
         .execute(params![
@@ -154,7 +154,7 @@ impl super::MetadataStore {
                 visible_state, final_rehash_pending, control_state,
                 category_id, display_name, delivery_state, delivery_ownership,
                 delivered_path_id, source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
-                completed_at_ms, removed_at_ms, part_size, part_count, upload_priority, auto_upload_priority, comment, rating
+                completed_at_ms, removed_at_ms, part_size_bytes, part_count, upload_priority, auto_upload_priority, comment, rating
             )
             VALUES (?1, ?16, ?17, ?18, ?2, ?12, ?3, ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9, ?19, ?20, ?21, ?22, ?23, ?24)
             ON CONFLICT(known_file_id) DO UPDATE SET
@@ -166,7 +166,7 @@ impl super::MetadataStore {
                 control_state = excluded.control_state,
                 category_id = excluded.category_id,
                 display_name = excluded.display_name,
-                part_size = excluded.part_size, part_count = excluded.part_count,
+                part_size_bytes = excluded.part_size_bytes, part_count = excluded.part_count,
                 upload_priority = excluded.upload_priority, auto_upload_priority = excluded.auto_upload_priority,
                 comment = excluded.comment, rating = excluded.rating,
                 delivery_state = excluded.delivery_state,
@@ -252,7 +252,7 @@ impl super::MetadataStore {
                 r#"
                 SELECT transfers.id,
                        lower(hex(known_files.ed2k_hash)), transfers.display_name,
-                       known_files.size_bytes, coalesce(transfers.part_size, 0),
+                       known_files.size_bytes, coalesce(transfers.part_size_bytes, 0),
                        transfers.completed, transfers.md4_hashset_acquired,
                        transfers.aich_hashset_acquired,
                        CASE
@@ -383,7 +383,7 @@ impl super::MetadataStore {
                 r#"
                 UPDATE known_files
                 SET all_time_upload_requests = all_time_upload_requests + min(1, 9223372036854775807 - all_time_upload_requests),
-                    last_upload_request_ms = max(last_upload_request_ms, ?2)
+                    last_upload_requested_at_ms = max(last_upload_requested_at_ms, ?2)
                 WHERE ed2k_hash = ?1
                 "#,
             )?
@@ -491,7 +491,7 @@ impl super::MetadataStore {
             r#"
             SELECT transfers.id,
                    lower(hex(known_files.ed2k_hash)), transfers.display_name,
-                   known_files.size_bytes, coalesce(transfers.part_size, 0),
+                   known_files.size_bytes, coalesce(transfers.part_size_bytes, 0),
                    transfers.completed, transfers.md4_hashset_acquired,
                    transfers.aich_hashset_acquired,
                    CASE
@@ -584,7 +584,7 @@ impl super::MetadataStore {
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
-                   known_files.last_upload_request_ms,
+                   known_files.last_upload_requested_at_ms,
                    media_paths.platform, media_paths.native_path,
                    known_files.media_artist, known_files.media_album,
                    known_files.media_title, known_files.media_length_seconds,
@@ -701,7 +701,7 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT local_paths.platform, local_paths.native_path,
-                   shared_file_scan_failures.file_size,
+                   shared_file_scan_failures.size_bytes,
                    shared_file_scan_failures.source_fingerprint, shared_file_scan_failures.reason,
                    shared_file_scan_failures.created_at_ms, shared_file_scan_failures.updated_at_ms
             FROM shared_file_scan_failures
@@ -736,12 +736,12 @@ impl super::MetadataStore {
         tx.execute(
             r#"
             INSERT INTO shared_file_scan_failures(
-                path_id, file_size, source_fingerprint, reason,
+                path_id, size_bytes, source_fingerprint, reason,
                 created_at_ms, updated_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
             ON CONFLICT(path_id) DO UPDATE SET
-                file_size = excluded.file_size,
+                size_bytes = excluded.size_bytes,
                 source_fingerprint = excluded.source_fingerprint,
                 reason = excluded.reason,
                 updated_at_ms = excluded.updated_at_ms
@@ -796,7 +796,7 @@ impl super::MetadataStore {
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
-                   known_files.last_upload_request_ms,
+                   known_files.last_upload_requested_at_ms,
                    transfers.comment, transfers.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -853,7 +853,7 @@ impl super::MetadataStore {
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
-                   known_files.last_upload_request_ms,
+                   known_files.last_upload_requested_at_ms,
                    transfers.comment, transfers.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -1873,12 +1873,12 @@ fn replace_transfer_children(
         )?,
         crate::snapshot::SnapshotTable::begin(
             tx,
-            "ed2k_part_hashes",
+            "transfer_md4_part_hashes",
             &["transfer_id", "part_index"],
         )?,
         crate::snapshot::SnapshotTable::begin(
             tx,
-            "aich_part_hashes",
+            "transfer_aich_part_hashes",
             &["transfer_id", "part_index"],
         )?,
         crate::snapshot::SnapshotTable::begin(
@@ -1928,7 +1928,7 @@ fn replace_transfer_children(
     drop(insert_piece);
     let mut insert_md4 = tx.prepare_cached(
         r#"
-        INSERT INTO temp.incoming_ed2k_part_hashes(transfer_id, part_index, md4_hash)
+        INSERT INTO temp.incoming_transfer_md4_part_hashes(transfer_id, part_index, md4_hash)
         VALUES (?1, ?2, ?3)
         "#,
     )?;
@@ -1942,7 +1942,7 @@ fn replace_transfer_children(
     drop(insert_md4);
     let mut insert_aich = tx.prepare_cached(
         r#"
-        INSERT INTO temp.incoming_aich_part_hashes(transfer_id, part_index, aich_hash)
+        INSERT INTO temp.incoming_transfer_aich_part_hashes(transfer_id, part_index, aich_hash)
         VALUES (?1, ?2, ?3)
         "#,
     )?;
@@ -1973,7 +1973,7 @@ fn replace_transfer_children(
         r#"
         INSERT INTO temp.incoming_transfer_sources(
             transfer_id, ip, tcp_port, user_hash, connect_options,
-            file_comment, file_rating, first_seen_ms, last_seen_ms
+            file_comment, file_rating, first_seen_at_ms, last_seen_at_ms
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
         "#,
@@ -2040,14 +2040,14 @@ fn manifest_from_row(
         md4_hashset_acquired: row.md4_hashset_acquired,
         md4_hashset: read_hex_list(
             conn,
-            "SELECT lower(hex(md4_hash)) FROM ed2k_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",
+            "SELECT lower(hex(md4_hash)) FROM transfer_md4_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",
             row.transfer_id,
         )?,
         aich_hashset_acquired: row.aich_hashset_acquired,
         aich_root: row.aich_root,
         aich_hashset: read_hex_list(
             conn,
-            "SELECT lower(hex(aich_hash)) FROM aich_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",
+            "SELECT lower(hex(aich_hash)) FROM transfer_aich_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",
             row.transfer_id,
         )?,
         verified_ranges: read_ranges(conn, row.transfer_id)?,

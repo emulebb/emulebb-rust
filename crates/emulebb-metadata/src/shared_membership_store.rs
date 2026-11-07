@@ -12,7 +12,7 @@ impl MetadataStore {
         let native = NativePath::from(root);
         self.connection()?
             .query_row(
-                "SELECT shared_directory_roots.last_scan_ms
+                "SELECT shared_directory_roots.last_scanned_at_ms
                  FROM shared_directory_roots
                  JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
                  WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2",
@@ -83,11 +83,11 @@ impl MetadataStore {
         let now = unix_ms();
         conn.execute(
             "INSERT INTO shared_file_memberships(
-                root_id, path_id, relative_path, first_seen_ms, last_seen_ms, removed_at_ms
+                root_id, path_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?4, NULL)
              ON CONFLICT(root_id, path_id) DO UPDATE SET
                 relative_path = excluded.relative_path,
-                last_seen_ms = excluded.last_seen_ms,
+                last_seen_at_ms = excluded.last_seen_at_ms,
                 removed_at_ms = NULL",
             params![
                 root_id,
@@ -227,11 +227,11 @@ impl MetadataStore {
             )?;
             tx.execute(
                 "INSERT INTO shared_file_memberships(
-                    root_id, path_id, relative_path, first_seen_ms, last_seen_ms, removed_at_ms
+                    root_id, path_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?4, NULL)
                  ON CONFLICT(root_id, path_id) DO UPDATE SET
                     relative_path = excluded.relative_path,
-                    last_seen_ms = excluded.last_seen_ms,
+                    last_seen_at_ms = excluded.last_seen_at_ms,
                     removed_at_ms = NULL",
                 params![
                     root_id,
@@ -254,7 +254,7 @@ impl MetadataStore {
         )?;
         tx.execute("DELETE FROM temp.scanned_membership_paths", [])?;
         tx.execute(
-            "UPDATE shared_directory_roots SET accessible = 1, last_scan_ms = ?2
+            "UPDATE shared_directory_roots SET accessible = 1, last_scanned_at_ms = ?2
              WHERE id = ?1",
             params![root_id, now],
         )?;
@@ -339,7 +339,7 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO known_files(ed2k_hash, size_bytes, display_name,
-                first_seen_ms, last_seen_ms, updated_at_ms)
+                first_seen_at_ms, last_seen_at_ms, updated_at_ms)
              VALUES (?1, 32, 'Sample.bin', 1, 1, 1)",
                 params![crate::store::decode_fixed_hex(hash, 16, "ED2K hash").unwrap()],
             )

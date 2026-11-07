@@ -48,7 +48,7 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut statement = conn.prepare_cached(
             r#"
-            SELECT DISTINCT known_files.display_name, local_file_instances.file_size,
+            SELECT DISTINCT known_files.display_name, local_file_instances.size_bytes,
                    local_paths.platform, local_paths.native_path,
                    local_file_instances.verified_fingerprint
             FROM local_file_instances
