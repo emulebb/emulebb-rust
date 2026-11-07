@@ -29,6 +29,9 @@ EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--webui-dist", type=Path, help="Stage this invocation's already-built WebUI bundle without rebuilding it."
+    )
+    parser.add_argument(
         "--stage-bin-dir",
         required=True,
         type=Path,
@@ -81,7 +84,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     release_outputs = verify_profile_outputs(target_dir / "release", RELEASE_BINARIES)
     stage_release_outputs(release_outputs, stage_bin_dir)
-    stage_webui(stage_bin_dir / "webui")
+    if args.webui_dist is None:
+        stage_webui(stage_bin_dir / "webui")
+    else:
+        from build_webui import stage_dist
+        stage_dist(args.webui_dist, stage_bin_dir / "webui", output_root)
     return 0
 
 

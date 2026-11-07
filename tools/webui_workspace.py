@@ -42,7 +42,7 @@ def prepare_webui_workspace(name: str, env: Mapping[str, str] | None = None) -> 
 
     parent = output_root / "builds" / "rust"
     source = parent / f"{name}-source"
-    dist = parent / f"{name}-dist"
+    dist = webui_dist_path(name, process_env)
     remove_directory(source)
     remove_directory(dist)
     parent.mkdir(parents=True, exist_ok=True)
@@ -66,6 +66,12 @@ def prepare_webui_workspace(name: str, env: Mapping[str, str] | None = None) -> 
     for variable in ("TEMP", "TMP", "TMPDIR"):
         process_env[variable] = str(scratch)
     return WebUiWorkspace(source=source, dist=dist, env=process_env, output_root=output_root)
+
+
+def webui_dist_path(name: str, env: Mapping[str, str]) -> Path:
+    """Resolve a build output without preparing or clearing a prior producer."""
+    output = require_path_env(env, "EMULEBB_WORKSPACE_OUTPUT_ROOT")
+    return require_output_path(output / "builds" / "rust" / f"{name}-dist", output, "WebUI dist")
 
 
 def require_output_path(path: Path, output_root: Path, label: str) -> Path:
