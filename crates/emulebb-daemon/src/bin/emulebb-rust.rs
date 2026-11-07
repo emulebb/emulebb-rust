@@ -16,12 +16,15 @@ struct Cli {
     profile: Option<PathBuf>,
     #[arg(
         long,
-        help = "Override the REST listener for this run (for example, inside a container)"
+        help = "Override the REST/WebUI listener for this run (for example, 127.0.0.1:14711); persist it as rest.bindAddr in the bootstrap TOML"
     )]
     rest_bind_addr: Option<SocketAddr>,
     #[arg(long, help = "Override the finished-download directory for this run")]
     incoming_dir: Option<PathBuf>,
-    #[arg(long, help = "Bind P2P traffic to this named interface for this run")]
+    #[arg(
+        long,
+        help = "Bind P2P traffic to this named interface for this run; save the P2P bind interface in WebUI Settings > Network to persist it"
+    )]
     p2p_bind_interface: Option<String>,
     #[command(subcommand)]
     command: Option<CliCommand>,
