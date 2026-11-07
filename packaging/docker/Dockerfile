@@ -12,6 +12,13 @@ ENV HOME=/config \
     XDG_CONFIG_HOME=/config \
     XDG_DATA_HOME=/config
 
+# The pinned base can predate Ubuntu security fixes. Refresh its installed
+# packages before adding the daemon; the release SBOM records resolved versions.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY dist/emulebb-rust-v${VERSION}-linux-${TARGETARCH}.deb /tmp/emulebb-rust.deb
 RUN dpkg-deb -x /tmp/emulebb-rust.deb / && rm /tmp/emulebb-rust.deb
 COPY root/ /
