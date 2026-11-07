@@ -170,7 +170,7 @@ fn write_set(
     );
     conn.execute(
         "INSERT OR IGNORE INTO aich_recovery_sets(root, size_bytes) VALUES (?1, ?2)",
-        params![root, size as i64],
+        params![root, i64::try_from(size)?],
     )?;
     for (index, leaves) in parts.iter().enumerate() {
         let part_size = (size - index as u64 * PART).min(PART);
@@ -178,14 +178,14 @@ fn write_set(
             leaves.len() as u64 == part_size.div_ceil(BLOCK) * 20,
             "invalid recovery leaf count"
         );
-        let old: Option<(Vec<u8>,Vec<u8>)> = conn.query_row("SELECT leaves,part_root FROM aich_recovery_parts WHERE root=?1 AND size_bytes=?2 AND part_index=?3", params![root,size as i64,index as i64], |row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let old: Option<(Vec<u8>,Vec<u8>)> = conn.query_row("SELECT leaves,part_root FROM aich_recovery_parts WHERE root=?1 AND size_bytes=?2 AND part_index=?3", params![root,i64::try_from(size)?,i64::try_from(index)?], |row|Ok((row.get(0)?,row.get(1)?))).optional()?;
         if let Some((old, old_root)) = old {
             ensure!(
                 old == *leaves && old_root == part_roots[index],
                 "conflicting AICH recovery leaves"
             );
         } else {
-            conn.execute("INSERT INTO aich_recovery_parts(root,size_bytes,part_index,leaves,part_root) VALUES (?1,?2,?3,?4,?5)", params![root,size as i64,index as i64,leaves,part_roots[index].as_slice()])?;
+            conn.execute("INSERT INTO aich_recovery_parts(root,size_bytes,part_index,leaves,part_root) VALUES (?1,?2,?3,?4,?5)", params![root,i64::try_from(size)?,i64::try_from(index)?,leaves,part_roots[index].as_slice()])?;
         }
     }
     // WHY: recovery imports can arrive after aliases have native bindings.
@@ -198,7 +198,9 @@ fn write_set(
         )] {
             let mut ids = conn.prepare(query)?;
             let ids = ids
-                .query_map(params![root, size as i64], |row| row.get::<_, i64>(0))?
+                .query_map(params![root, i64::try_from(size)?], |row| {
+                    row.get::<_, i64>(0)
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for id in ids {
                 let mut hashes = conn.prepare(&format!(
@@ -212,7 +214,7 @@ fn write_set(
                         "INSERT INTO {table}({key},part_index,aich_hash) VALUES (?1,?2,?3)"
                     ))?;
                     for (index, hash) in part_roots.iter().enumerate() {
-                        insert.execute(params![id, index as i64, hash.as_slice()])?;
+                        insert.execute(params![id, i64::try_from(index)?, hash.as_slice()])?;
                     }
                 } else {
                     ensure!(

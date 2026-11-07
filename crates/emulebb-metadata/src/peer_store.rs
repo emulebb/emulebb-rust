@@ -44,8 +44,8 @@ impl super::MetadataStore {
             .query_row(params![user_hash_bytes], |row| {
                 Ok(MetadataPeerCredit {
                     user_hash: row.get(0)?,
-                    uploaded_bytes: row.get::<_, i64>(1)? as u64,
-                    downloaded_bytes: row.get::<_, i64>(2)? as u64,
+                    uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 1)?,
+                    downloaded_bytes: crate::sql_value::unsigned::<u64>(row, 2)?,
                 })
             })
             .optional()
@@ -71,7 +71,10 @@ impl super::MetadataStore {
                 "#,
             )?
             .query_row(params![user_hash_bytes], |row| {
-                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+                Ok((
+                    crate::sql_value::unsigned::<u64>(row, 0)?,
+                    crate::sql_value::unsigned::<u64>(row, 1)?,
+                ))
             })
             .optional()?
             .unwrap_or((0, 0));
@@ -124,7 +127,10 @@ impl super::MetadataStore {
                     "#,
                 )?
                 .query_row(params![user_hash_bytes], |row| {
-                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+                    Ok((
+                        crate::sql_value::unsigned::<u64>(row, 0)?,
+                        crate::sql_value::unsigned::<u64>(row, 1)?,
+                    ))
                 })
                 .optional()?
                 .unwrap_or((0, 0));
@@ -152,11 +158,11 @@ impl super::MetadataStore {
             tx.prepare_cached(
                 r#"
                 UPDATE known_files
-                SET all_time_uploaded_bytes = all_time_uploaded_bytes + ?2
+                SET all_time_uploaded_bytes = all_time_uploaded_bytes + min(?2, 9223372036854775807 - all_time_uploaded_bytes)
                 WHERE ed2k_hash = ?1
                 "#,
             )?
-            .execute(params![hash, *delta as i64])?;
+            .execute(params![hash, u64_to_i64_saturating(*delta)])?;
         }
         tx.commit()?;
         Ok(())

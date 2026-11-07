@@ -264,26 +264,26 @@ impl MetadataStore {
                 Ok(MetadataTransferCatalogEntry {
                     file_hash: row.get(0)?,
                     display_name,
-                    file_size: row.get::<_, i64>(1)? as u64,
-                    part_count: row.get::<_, i64>(2)? as u32,
+                    file_size: crate::sql_value::unsigned::<u64>(row, 1)?,
+                    part_count: row.get::<_, u32>(2)?,
                     aich_root: row.get(3)?,
                     upload_priority: row.get(4)?,
                     auto_upload_priority: row.get::<_, i64>(5)? != 0,
                     comment: row.get(6)?,
-                    rating: row.get::<_, i64>(7)? as u8,
-                    all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
-                    all_time_upload_requests: row.get::<_, i64>(9)? as u64,
-                    all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
+                    rating: row.get::<_, u8>(7)?,
+                    all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 8)?,
+                    all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 9)?,
+                    all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 10)?,
                     last_upload_request_ms: row.get(11)?,
                     media_path: Some(path),
                     media: MetadataTransferMediaMetadata {
                         artist: row.get(14)?,
                         album: row.get(15)?,
                         title: row.get(16)?,
-                        length_seconds: row.get::<_, i64>(17)? as u32,
-                        bitrate_kbps: row.get::<_, i64>(18)? as u32,
+                        length_seconds: row.get::<_, u32>(17)?,
+                        bitrate_kbps: row.get::<_, u32>(18)?,
                         codec: row.get(19)?,
-                        extractor_version: row.get::<_, i64>(20)? as u32,
+                        extractor_version: row.get::<_, u32>(20)?,
                     },
                 })
             },
@@ -350,7 +350,7 @@ impl MetadataStore {
             [],
             |row| row.get(0),
         )?;
-        Ok(count as usize)
+        Ok(usize::try_from(count)?)
     }
 
     /// Return the eligible local publication set only when a metadata
@@ -684,7 +684,7 @@ impl MetadataStore {
             )
             .with_context(|| "verified content is absent from known_files")?;
         ensure!(
-            known_size >= 0 && known_size as u64 == fingerprint.size_bytes,
+            known_size >= 0 && u64::try_from(known_size)? == fingerprint.size_bytes,
             "verified local file size differs from known content"
         );
         let path_id = upsert_local_path(&tx, path)?;
@@ -730,7 +730,7 @@ impl MetadataStore {
                     Ok(MetadataLocalFileInstance {
                         path: path_from_row(row, 0, 1)?,
                         file_hash: row.get(2)?,
-                        file_size: row.get::<_, i64>(3)? as u64,
+                        file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                         verified_fingerprint: fingerprint,
                     })
                 },
@@ -766,7 +766,7 @@ impl MetadataStore {
             Ok(MetadataLocalFileInstance {
                 path: path_from_row(row, 0, 1)?,
                 file_hash: row.get(2)?,
-                file_size: row.get::<_, i64>(3)? as u64,
+                file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                 verified_fingerprint: fingerprint,
             })
         })?;
@@ -808,7 +808,7 @@ impl MetadataStore {
             Ok(MetadataLocalFileInstance {
                 path: path_from_row(row, 0, 1)?,
                 file_hash: row.get(2)?,
-                file_size: row.get::<_, i64>(3)? as u64,
+                file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                 verified_fingerprint: fingerprint,
             })
         })?;
@@ -884,7 +884,7 @@ impl MetadataStore {
             Ok(MetadataLocalFileInstance {
                 path: path_from_row(row, 0, 1)?,
                 file_hash: row.get(2)?,
-                file_size: row.get::<_, i64>(3)? as u64,
+                file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                 verified_fingerprint: fingerprint,
             })
         })?;
@@ -926,7 +926,7 @@ impl MetadataStore {
                     Ok(MetadataLocalFileInstance {
                         path: path_from_row(row, 0, 1)?,
                         file_hash: row.get(2)?,
-                        file_size: row.get::<_, i64>(3)? as u64,
+                        file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                         verified_fingerprint: fingerprint,
                     })
                 },
@@ -963,7 +963,7 @@ impl MetadataStore {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
         )?;
         ensure!(
-            size >= 0 && size as u64 == instance.file_size,
+            size >= 0 && u64::try_from(size)? == instance.file_size,
             "active local file size differs from known content"
         );
         let mut md4_stmt = conn.prepare(
@@ -986,7 +986,7 @@ impl MetadataStore {
             file_hash: instance.file_hash,
             display_name: name,
             file_size: instance.file_size,
-            part_size: part_size as u64,
+            part_size: u64::try_from(part_size)?,
             md4_hashset,
             aich_root,
             aich_hashset,

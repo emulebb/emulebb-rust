@@ -238,7 +238,7 @@ impl MetadataStore {
                     "#,
                     params![
                         known_file_id,
-                        file.size_bytes as i64,
+                        i64::try_from(file.size_bytes)?,
                         file.name,
                         file.content_type,
                         file.availability_score,
@@ -269,7 +269,7 @@ impl MetadataStore {
                 "#,
                 params![
                     hash,
-                    file.size_bytes as i64,
+                    i64::try_from(file.size_bytes)?,
                     file.name,
                     file.content_type,
                     file.availability_score,
@@ -295,7 +295,7 @@ impl MetadataStore {
             params![
                 known_file_id,
                 origin.as_str(),
-                file.size_bytes as i64,
+                i64::try_from(file.size_bytes)?,
                 file.content_type,
                 file.availability_score,
                 now,
@@ -360,15 +360,18 @@ impl MetadataStore {
             LIMIT ?3
             "#,
         )?;
-        let rows = stmt.query_map(params![normalized, origin.as_str(), limit as i64], |row| {
-            Ok(MetadataIndexedFile {
-                ed2k_hash: row.get(0)?,
-                name: row.get(1)?,
-                size_bytes: row.get::<_, i64>(2)? as u64,
-                content_type: row.get(3)?,
-                availability_score: row.get(4)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![normalized, origin.as_str(), i64::try_from(limit)?],
+            |row| {
+                Ok(MetadataIndexedFile {
+                    ed2k_hash: row.get(0)?,
+                    name: row.get(1)?,
+                    size_bytes: crate::sql_value::unsigned::<u64>(row, 2)?,
+                    content_type: row.get(3)?,
+                    availability_score: row.get(4)?,
+                })
+            },
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -391,11 +394,11 @@ impl MetadataStore {
             LIMIT ?2
             "#,
         )?;
-        let rows = stmt.query_map(params![normalized, limit as i64], |row| {
+        let rows = stmt.query_map(params![normalized, i64::try_from(limit)?], |row| {
             Ok(MetadataIndexedFile {
                 ed2k_hash: row.get(0)?,
                 name: row.get(1)?,
-                size_bytes: row.get::<_, i64>(2)? as u64,
+                size_bytes: crate::sql_value::unsigned::<u64>(row, 2)?,
                 content_type: row.get(3)?,
                 availability_score: row.get(4)?,
             })
@@ -423,7 +426,7 @@ impl MetadataStore {
                     Ok(MetadataIndexedFile {
                         ed2k_hash: row.get(0)?,
                         name: row.get(1)?,
-                        size_bytes: row.get::<_, i64>(2)? as u64,
+                        size_bytes: crate::sql_value::unsigned::<u64>(row, 2)?,
                         content_type: row.get(3)?,
                         availability_score: row.get(4)?,
                     })

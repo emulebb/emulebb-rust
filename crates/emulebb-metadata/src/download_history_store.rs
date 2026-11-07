@@ -30,7 +30,7 @@ impl super::MetadataStore {
                 Ok(MetadataDownloadHistoryEntry {
                     file_hash: row.get(0)?,
                     display_name: row.get(1)?,
-                    file_size: row.get::<_, i64>(2)? as u64,
+                    file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
                     aich_root: row.get(3)?,
                     first_completed_at_ms: row.get(4)?,
                     last_completed_at_ms: row.get(5)?,
@@ -72,7 +72,7 @@ impl super::MetadataStore {
                 display_name: crate::NativePath::from(path.as_path())
                     .display_file_name()
                     .unwrap_or(name),
-                file_size: row.get::<_, i64>(1)? as u64,
+                file_size: crate::sql_value::unsigned::<u64>(row, 1)?,
                 source_path: path,
                 source_fingerprint: optional_fingerprint_from_row(row, 4)?,
             })
@@ -104,7 +104,7 @@ pub(crate) fn record_completed_download(
         .prepare_cached("SELECT size_bytes, aich_root FROM download_history WHERE ed2k_hash = ?1")?
         .query_row(params![hash], |row| {
             Ok((
-                row.get::<_, i64>(0)? as u64,
+                crate::sql_value::unsigned::<u64>(row, 0)?,
                 row.get::<_, Option<Vec<u8>>>(1)?,
             ))
         })
@@ -145,7 +145,7 @@ pub(crate) fn record_completed_download(
     )?
     .execute(params![
         hash,
-        manifest.file_size as i64,
+        i64::try_from(manifest.file_size)?,
         manifest.display_name,
         aich_root,
         completed_at_ms,
