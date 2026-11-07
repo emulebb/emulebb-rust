@@ -1,14 +1,15 @@
 //! Local network interface inventory and bind selection helpers.
 
 use std::collections::{HashMap, HashSet};
-#[cfg(windows)]
-use std::net::IpAddr;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
 use anyhow::{Context, Result};
 use if_addrs::{IfAddr, get_if_addrs};
 use serde::{Deserialize, Serialize};
+
+#[cfg(windows)]
+mod windows_routes;
 
 /// Address family for one interface address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +109,16 @@ pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
             });
         entry.is_vpn_candidate =
             entry.is_vpn_candidate || entry.description.as_deref().is_some_and(is_vpn_like);
-        entry.has_default_route = default_routes.contains(&iface.name);
+        #[cfg(windows)]
+        {
+            entry.has_default_route = iface
+                .index
+                .is_some_and(|index| default_routes.contains(&index));
+        }
+        #[cfg(not(windows))]
+        {
+            entry.has_default_route = default_routes.contains(&iface.name);
+        }
         entry.addresses.push(NetworkInterfaceAddress {
             family: InterfaceAddressFamily::Ipv4,
             address: v4.ip.to_string(),
@@ -257,29 +267,16 @@ fn platform_description(_interface_name: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn platform_default_route_interfaces() -> HashSet<String> {
-    ipconfig::get_adapters()
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter(|adapter| {
-            adapter
-                .gateways()
-                .iter()
-                .any(|gateway| *gateway != IpAddr::from([0, 0, 0, 0]))
-        })
-        // `if_addrs::Interface::name` is the Windows friendly name (for
-        // example, "Ethernet"), while `ipconfig::Adapter::adapter_name` is the
-        // permanent internal identifier (normally a GUID). Retain both so the
-        // route hint joins correctly today and remains tolerant of either
-        // identifier if an enumerator changes its public name in the future.
-        .flat_map(|adapter| {
-            [
-                adapter.friendly_name().to_string(),
-                adapter.adapter_name().to_string(),
-            ]
-        })
-        .collect()
+fn platform_default_route_interfaces() -> HashSet<u32> {
+    match windows_routes::default_route_indices() {
+        Ok(indices) => indices,
+        Err(error) => {
+            // WHY: route inventory failure must be visible without disabling a
+            // valid explicit bind, which needs interface addresses, not a default route.
+            tracing::warn!(error = ?error, "could not inspect Windows IPv4 default routes; configure an explicit P2P bind interface");
+            HashSet::new()
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -346,34 +343,6 @@ mod tests {
         recommend_interface, require_bind_if_index, resolve_bind_if_index, resolve_bind_ip,
     };
     use if_addrs::IfAddr;
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_default_route_inventory_matches_detected_friendly_name() {
-        let expected = ipconfig::get_adapters()
-            .expect("enumerate Windows adapters")
-            .into_iter()
-            .filter(|adapter| {
-                adapter
-                    .gateways()
-                    .iter()
-                    .any(|gateway| *gateway != std::net::IpAddr::from([0, 0, 0, 0]))
-            })
-            .map(|adapter| adapter.friendly_name().to_string())
-            .collect::<std::collections::HashSet<_>>();
-        assert!(
-            !expected.is_empty(),
-            "Windows test host must expose a default-route adapter"
-        );
-
-        let detected = super::detect_interfaces().expect("detect Windows interfaces");
-        assert!(
-            detected
-                .iter()
-                .any(|iface| iface.has_default_route && expected.contains(&iface.name)),
-            "detected interfaces did not join the default route to its friendly name: {detected:?}"
-        );
-    }
 
     fn iface(name: &str, vpn: bool, default_route: bool, ip: &str) -> NetworkInterface {
         NetworkInterface {
