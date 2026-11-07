@@ -256,19 +256,17 @@ impl PacketTracker {
         let massive_floor = -3 * cap;
 
         let state = self.buckets.entry(key).or_insert(TokenBucketState {
-            // Oracle: a fresh entry starts at `MIN2MS(1) - token`, i.e. as if it
-            // were full and had just spent one packet's cost.
-            tokens: cap - cost,
+            tokens: cap,
             last_tick: now,
         });
 
-        if state.last_tick != now || state.tokens != cap - cost {
-            // Existing bucket: refill by elapsed ms (cap at `cap`), then spend.
-            let elapsed_ms =
-                i64::try_from(now.duration_since(state.last_tick).as_millis()).unwrap_or(i64::MAX);
-            state.tokens = (state.tokens.saturating_add(elapsed_ms)).min(cap);
-            state.tokens = state.tokens.saturating_sub(cost);
-        }
+        // WHY: equal timestamps do not identify a new bucket. Every packet must
+        // spend tokens, including bursts within one clock tick. A fresh bucket
+        // starts full, so its first charge still leaves the oracle's cap - cost.
+        let elapsed_ms =
+            i64::try_from(now.duration_since(state.last_tick).as_millis()).unwrap_or(i64::MAX);
+        state.tokens = (state.tokens.saturating_add(elapsed_ms)).min(cap);
+        state.tokens = state.tokens.saturating_sub(cost);
         state.last_tick = now;
         let tokens = state.tokens;
 
@@ -357,6 +355,45 @@ mod tests {
         PacketTrackerKey {
             ip: parse_ip(ip),
             bucket,
+        }
+    }
+
+    #[test]
+    fn every_same_tick_packet_spends_its_oracle_bucket_budget() {
+        use PacketTrackerBucket::*;
+
+        for (bucket, budget) in [
+            (BootstrapReq, 2),
+            (HelloReq, 3),
+            (FindNodeReq, 10),
+            (SearchReq, 3),
+            (PublishKeyReq, 4),
+            (PublishSourceReq, 3),
+            (PublishNotesReq, 2),
+            (FirewalledReq, 2),
+            (FindBuddyReq, 2),
+            (CallbackReq, 1),
+            (PingReq, 2),
+            (SearchRes, 50),
+            (Default, 20),
+        ] {
+            let mut tracker =
+                PacketTracker::new(20, 50, Duration::from_secs(1), Duration::from_secs(60));
+            let key = key("192.0.2.1", bucket);
+            let now = Instant::now();
+            for packet in 1..=4 * budget + 1 {
+                let decision = tracker.record_and_check_at(key, now);
+                let expected = if packet <= budget {
+                    PacketTrackerAction::Allow
+                } else if packet <= 4 * budget {
+                    PacketTrackerAction::Drop
+                } else {
+                    PacketTrackerAction::MassiveDrop
+                };
+                assert_eq!(decision.action, expected, "{bucket:?}, packet {packet}");
+                assert_eq!(decision.observed_packets, packet, "{bucket:?}");
+            }
+            assert!(tracker.is_banned(key.ip), "{bucket:?}");
         }
     }
 
@@ -532,33 +569,19 @@ mod tests {
             PacketTracker::new(20, 50, Duration::from_secs(1), Duration::from_millis(100));
         let addr = key("9.9.9.9", PacketTrackerBucket::BootstrapReq);
         let t0 = Instant::now();
-        // Spend the whole bucket in quick succession: the sub-millisecond offsets
-        // advance `last_tick` (so each existing-bucket call spends) while adding
-        // zero refill (`as_millis()` truncates < 1ms to 0). Fresh call holds 50;
+        // Spend the whole bucket at one instant, with no refill. Fresh call holds 50;
         // then 50 -> 0 (allowed), then 0 -> -50 (dropped).
         assert!(tracker.record_and_check_at(addr, t0).allowed);
-        assert!(
-            tracker
-                .record_and_check_at(addr, t0 + Duration::from_micros(100))
-                .allowed
-        );
-        assert!(
-            !tracker
-                .record_and_check_at(addr, t0 + Duration::from_micros(200))
-                .allowed
-        );
+        assert!(tracker.record_and_check_at(addr, t0).allowed);
+        assert!(!tracker.record_and_check_at(addr, t0).allowed);
         // Idle 130ms: refills 130ms (min-capped at the 100ms cap) over the -50
-        // deficit -> tokens = min(-50+~130,100)-50 = ~29 >= 0, so one packet is
+        // deficit -> tokens = min(-50+130,100)-50 = 30 >= 0, so one packet is
         // allowed again (continuous refill, not a hard window reset).
         let t1 = t0 + Duration::from_millis(130);
         assert!(tracker.record_and_check_at(addr, t1).allowed);
-        // A follow-up ~0ms later sees tokens ~29 -> ~-21, so it drops (the deficit
+        // A follow-up at the same instant sees tokens 30 -> -20, so it drops (the deficit
         // is continuous, not reset to a full window).
-        assert!(
-            !tracker
-                .record_and_check_at(addr, t1 + Duration::from_micros(100))
-                .allowed
-        );
+        assert!(!tracker.record_and_check_at(addr, t1).allowed);
     }
 
     #[test]
