@@ -34,6 +34,7 @@ mod bind_config;
 mod discovery_bootstrap;
 pub mod logging;
 mod profile_import;
+mod rest_listener;
 pub mod shared_directory_import;
 mod vpn_guard_monitor;
 
@@ -853,7 +854,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         },
         Some(shutdown_tx.clone()),
     );
-    let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
+    let listener = rest_listener::bind(rest_bind_addr).await?;
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
     spawn_regular_diagnostic_summary(Arc::clone(&core));
 
