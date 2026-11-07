@@ -267,7 +267,18 @@ mod tests {
         // Simulate SQLite aborting the entire transaction during optional
         // cache persistence. The live process can still retain MD4 without
         // rereading bytes, and no partial recovery rows may survive.
-        db.connection().unwrap().execute_batch("CREATE TRIGGER abort_cache BEFORE INSERT ON aich_recovery_parts BEGIN SELECT RAISE(ROLLBACK, 'injected cache transaction abort'); END;").unwrap();
+        // Keep the fault switch outside the transaction under test. Disable it
+        // through test data so the migration guard remains strict about schema drops.
+        db.connection()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TABLE injected_cache_abort (enabled INTEGER NOT NULL);
+                 INSERT INTO injected_cache_abort VALUES (1);
+                 CREATE TEMP TRIGGER abort_cache BEFORE INSERT ON main.aich_recovery_parts
+                 WHEN (SELECT enabled FROM injected_cache_abort) = 1
+                 BEGIN SELECT RAISE(ROLLBACK, 'injected cache transaction abort'); END;",
+            )
+            .unwrap();
         assert!(
             db.upsert_verified_local_content_with_recovery(&content, &set)
                 .unwrap()
@@ -279,7 +290,7 @@ mod tests {
         assert_eq!(db.missing_live_aich_recovery_count().unwrap(), 1);
         db.connection()
             .unwrap()
-            .execute_batch("DROP TRIGGER abort_cache;")
+            .execute_batch("UPDATE injected_cache_abort SET enabled = 0;")
             .unwrap();
         // A malformed optional tree is recoverable and does not lose valid MD4.
         let malformed = MetadataAichRecoverySet {
