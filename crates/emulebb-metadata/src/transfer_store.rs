@@ -112,40 +112,17 @@ impl super::MetadataStore {
 
         tx.prepare_cached(
             r#"
-            INSERT INTO known_files(
-                ed2k_hash, size_bytes, display_name,
-                part_size, part_count, aich_root, upload_priority,
-                auto_upload_priority, comment, rating,
-                first_seen_ms, last_seen_ms, updated_at_ms
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?11)
+            INSERT INTO known_files(ed2k_hash, size_bytes, display_name, aich_root, first_seen_ms, last_seen_ms, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)
             ON CONFLICT(ed2k_hash) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
-                display_name = excluded.display_name,
-                part_size = excluded.part_size,
-                part_count = excluded.part_count,
+                display_name = CASE WHEN EXISTS(SELECT 1 FROM verified_local_content WHERE known_file_id = known_files.id)
+                    THEN known_files.display_name ELSE excluded.display_name END,
                 aich_root = coalesce(excluded.aich_root, known_files.aich_root),
-                upload_priority = excluded.upload_priority,
-                auto_upload_priority = excluded.auto_upload_priority,
-                comment = excluded.comment,
-                rating = excluded.rating,
                 last_seen_ms = excluded.last_seen_ms,
                 updated_at_ms = excluded.updated_at_ms
             "#,
-        )?
-        .execute(params![
-            hash,
-            i64::try_from(manifest.file_size)?,
-            manifest.display_name,
-            i64::try_from(manifest.piece_size)?,
-            i64::try_from(manifest.pieces.len())?,
-            aich_root,
-            manifest.upload_priority,
-            bool_to_i64(manifest.auto_upload_priority),
-            manifest.comment,
-            i64::from(manifest.rating),
-            now,
-        ])?;
+        )?.execute(params![hash, i64::try_from(manifest.file_size)?, manifest.display_name, aich_root, now])?;
         let known_file_id: i64 = tx
             .prepare_cached("SELECT id FROM known_files WHERE ed2k_hash = ?1")?
             .query_row(
@@ -174,12 +151,12 @@ impl super::MetadataStore {
             r#"
             INSERT INTO transfers(
                 known_file_id, completed, md4_hashset_acquired, aich_hashset_acquired,
-                visible_state, final_rehash_pending, control_state, download_priority,
-                category_id, payload_directory, delivery_state, delivery_ownership,
+                visible_state, final_rehash_pending, control_state,
+                category_id, display_name, delivery_state, delivery_ownership,
                 delivered_path_id, source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
-                completed_at_ms, removed_at_ms
+                completed_at_ms, removed_at_ms, part_size, part_count, upload_priority, auto_upload_priority, comment, rating
             )
-            VALUES (?1, ?16, ?17, ?18, ?2, ?12, ?3, 'normal', ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9)
+            VALUES (?1, ?16, ?17, ?18, ?2, ?12, ?3, ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9, ?19, ?20, ?21, ?22, ?23, ?24)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 completed = excluded.completed,
                 md4_hashset_acquired = excluded.md4_hashset_acquired,
@@ -188,7 +165,10 @@ impl super::MetadataStore {
                 final_rehash_pending = excluded.final_rehash_pending,
                 control_state = excluded.control_state,
                 category_id = excluded.category_id,
-                payload_directory = excluded.payload_directory,
+                display_name = excluded.display_name,
+                part_size = excluded.part_size, part_count = excluded.part_count,
+                upload_priority = excluded.upload_priority, auto_upload_priority = excluded.auto_upload_priority,
+                comment = excluded.comment, rating = excluded.rating,
                 delivery_state = excluded.delivery_state,
                 delivery_ownership = excluded.delivery_ownership,
                 delivered_path_id = excluded.delivered_path_id,
@@ -207,7 +187,7 @@ impl super::MetadataStore {
             visible_state(manifest),
             manifest.control_state,
             (manifest.category_id != 0).then_some(i64::from(manifest.category_id)),
-            manifest.file_hash,
+            manifest.display_name,
             delivered_path_id,
             now,
             completed_at_ms,
@@ -225,6 +205,8 @@ impl super::MetadataStore {
             bool_to_i64(manifest.completed),
             bool_to_i64(manifest.md4_hashset_acquired),
             bool_to_i64(manifest.aich_hashset_acquired),
+            i64::try_from(manifest.piece_size)?, i64::try_from(manifest.pieces.len())?,
+            manifest.upload_priority, manifest.auto_upload_priority, manifest.comment, i64::from(manifest.rating),
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
@@ -269,16 +251,16 @@ impl super::MetadataStore {
             .prepare_cached(
                 r#"
                 SELECT transfers.id,
-                       lower(hex(known_files.ed2k_hash)), known_files.display_name,
-                       known_files.size_bytes, coalesce(known_files.part_size, 0),
+                       lower(hex(known_files.ed2k_hash)), transfers.display_name,
+                       known_files.size_bytes, coalesce(transfers.part_size, 0),
                        transfers.completed, transfers.md4_hashset_acquired,
                        transfers.aich_hashset_acquired,
                        CASE
                            WHEN known_files.aich_root IS NULL THEN NULL
                            ELSE lower(hex(known_files.aich_root))
                        END,
-                       known_files.upload_priority, known_files.auto_upload_priority,
-                       known_files.comment, known_files.rating,
+                       transfers.upload_priority, transfers.auto_upload_priority,
+                       transfers.comment, transfers.rating,
                        transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                        delivered_paths.platform, delivered_paths.native_path,
                        transfers.source_fingerprint, transfers.payload_fingerprint,
@@ -508,16 +490,16 @@ impl super::MetadataStore {
         let sql = format!(
             r#"
             SELECT transfers.id,
-                   lower(hex(known_files.ed2k_hash)), known_files.display_name,
-                   known_files.size_bytes, coalesce(known_files.part_size, 0),
+                   lower(hex(known_files.ed2k_hash)), transfers.display_name,
+                   known_files.size_bytes, coalesce(transfers.part_size, 0),
                    transfers.completed, transfers.md4_hashset_acquired,
                    transfers.aich_hashset_acquired,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
                    END,
-                   known_files.upload_priority, known_files.auto_upload_priority,
-                   known_files.comment, known_files.rating,
+                   transfers.upload_priority, transfers.auto_upload_priority,
+                   transfers.comment, transfers.rating,
                    transfers.category_id, transfers.control_state, transfers.removed_at_ms,
                    delivered_paths.platform, delivered_paths.native_path,
                    transfers.source_fingerprint, transfers.payload_fingerprint,
@@ -591,14 +573,14 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
-                   known_files.size_bytes, coalesce(known_files.part_count, 0),
+            SELECT lower(hex(known_files.ed2k_hash)), transfers.display_name,
+                   known_files.size_bytes, coalesce(transfers.part_count, 0),
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
                    END,
-                   known_files.upload_priority, known_files.auto_upload_priority,
-                   known_files.comment, known_files.rating,
+                   transfers.upload_priority, transfers.auto_upload_priority,
+                   transfers.comment, transfers.rating,
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
@@ -804,18 +786,18 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
+            SELECT lower(hex(known_files.ed2k_hash)), transfers.display_name,
                    known_files.size_bytes,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
                    END,
-                   known_files.upload_priority, known_files.auto_upload_priority,
+                   transfers.upload_priority, transfers.auto_upload_priority,
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
                    known_files.last_upload_request_ms,
-                   known_files.comment, known_files.rating
+                   transfers.comment, transfers.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE (
@@ -861,18 +843,18 @@ impl super::MetadataStore {
         };
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
+            SELECT lower(hex(known_files.ed2k_hash)), transfers.display_name,
                    known_files.size_bytes,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
                    END,
-                   known_files.upload_priority, known_files.auto_upload_priority,
+                   transfers.upload_priority, transfers.auto_upload_priority,
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
                    known_files.last_upload_request_ms,
-                   known_files.comment, known_files.rating
+                   transfers.comment, transfers.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE (
