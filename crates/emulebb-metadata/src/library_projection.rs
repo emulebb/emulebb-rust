@@ -44,8 +44,8 @@ pub(crate) fn refresh(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM temp.session_library_catalog", [])?;
     conn.execute_batch(&format!("INSERT INTO temp.session_library_catalog
         SELECT known_files.id, local_file_instances.path_id, local_paths.sort_key, known_files.ed2k_hash
-        FROM known_files
-        CROSS JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
+        FROM verified_local_content
+        CROSS JOIN known_files ON known_files.id = verified_local_content.known_file_id
         CROSS JOIN local_file_instances ON local_file_instances.path_id = ({representative})
         CROSS JOIN local_paths ON local_paths.id = local_file_instances.path_id;"))?;
     conn.execute("UPDATE temp.session_library_revision SET cached_durable_revision = ?1, cached_revision = ?2 WHERE id = 1", params![durable, session])?;
