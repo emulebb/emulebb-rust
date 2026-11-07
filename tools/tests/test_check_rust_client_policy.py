@@ -139,6 +139,22 @@ CREATE TABLE shared_directory_roots (
         self.assertEqual(len(errors), 1)
         self.assertIn("shared_directory_roots.recursive", errors[0])
 
+    def test_damage_fixtures_do_not_hide_production_schema_repairs(self) -> None:
+        production = "crates/emulebb-metadata/src/store.rs"
+        damage = 'conn.execute_batch("ALTER TABLE files ADD COLUMN obsolete INTEGER; DROP TRIGGER guard");'
+        errors = CHECKER.check_current_only_metadata_schema(
+            {
+                "crates/emulebb-metadata/src/schema/tests.rs": damage,
+                "crates/emulebb-metadata/src/tests/damaged_schema.rs": damage,
+                r"crates\emulebb-metadata\src\schema_tests.rs": damage,
+                production: 'conn.execute_batch("ALTER TABLE files ADD COLUMN obsolete INTEGER");',
+            }
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith(production))
+        self.assertIn("ALTER TABLE", errors[0])
+
     def test_accepts_current_schema_open_path(self) -> None:
         errors = CHECKER.check_current_only_metadata_schema(
             {

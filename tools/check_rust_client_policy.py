@@ -307,7 +307,7 @@ METADATA_SCHEMA_FORBIDDEN_PATTERNS = (
 
 
 def check_current_only_metadata_schema(file_texts: dict[str, str] | None = None) -> list[str]:
-    """Reject Rust-side metadata migrations and retired schema fields."""
+    """Reject production metadata migrations and retired schema fields."""
 
     if file_texts is None:
         files = {
@@ -320,6 +320,10 @@ def check_current_only_metadata_schema(file_texts: dict[str, str] | None = None)
 
     errors: list[str] = []
     for rel, text in files.items():
+        # WHY: corruption fixtures deliberately damage schema objects to prove
+        # that runtime opening rejects them; only production code can migrate.
+        if is_test_path(rel):
+            continue
         if rel.endswith("schema.sql") and re.search(
             r"CREATE\s+TABLE\s+shared_directory_roots\b.*\brecursive\b",
             text,
