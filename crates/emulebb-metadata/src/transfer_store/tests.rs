@@ -157,6 +157,64 @@ fn accepted_identity_survives_conflicting_transfer_and_index_observations() {
 }
 
 #[test]
+fn transfer_snapshots_keep_unchanged_children_and_source_first_seen() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_download_manifest();
+    manifest.completed = false;
+    manifest.pieces.push(MetadataTransferPiece {
+        piece_index: 0,
+        state: "Missing".into(),
+        bytes_written: 0,
+        block_bitmap: None,
+        ich_corrupted: false,
+    });
+    manifest.md4_hashset.push("11".repeat(16));
+    manifest.sources.push(MetadataTransferSource {
+        ip: "192.0.2.1".into(),
+        tcp_port: 4662,
+        user_hash: None,
+        connect_options: None,
+        file_comment: String::new(),
+        file_rating: 0,
+    });
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    store.connection().unwrap().execute_batch(
+        "UPDATE transfer_sources SET first_seen_ms = 1;
+         CREATE TEMP TRIGGER no_piece_delete BEFORE DELETE ON main.transfer_pieces BEGIN SELECT RAISE(ABORT,'unchanged piece deleted'); END;
+         CREATE TEMP TRIGGER no_piece_update BEFORE UPDATE ON main.transfer_pieces BEGIN SELECT RAISE(ABORT,'unchanged piece updated'); END;
+         CREATE TEMP TRIGGER no_hash_delete BEFORE DELETE ON main.ed2k_part_hashes BEGIN SELECT RAISE(ABORT,'unchanged hash deleted'); END;
+         CREATE TEMP TRIGGER no_range_delete BEFORE DELETE ON main.verified_ranges BEGIN SELECT RAISE(ABORT,'unchanged range deleted'); END;"
+    ).unwrap();
+    manifest.comment = "updated comment".into();
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store
+            .connection()
+            .unwrap()
+            .query_row("SELECT first_seen_ms FROM transfer_sources", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TRIGGER no_piece_update;")
+        .unwrap();
+    manifest.pieces[0].bytes_written = 8;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let expected = manifest.clone();
+    manifest.pieces.push(manifest.pieces[0].clone());
+    assert!(store.upsert_transfer_manifest(&manifest).is_err());
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(expected)
+    );
+}
+
+#[test]
 fn owned_delivery_requires_exact_size_fingerprint_authority() {
     let store = MetadataStore::in_memory().unwrap();
     let mut manifest = completed_pending_download_manifest();

@@ -228,13 +228,13 @@ CREATE TABLE verified_local_aich_hashes (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE verified_ranges (
-    id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
     end_offset INTEGER NOT NULL,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    CHECK(end_offset >= start_offset)
-) STRICT;
+    CHECK(end_offset >= start_offset),
+    PRIMARY KEY(transfer_id, start_offset, end_offset)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE local_paths (
     id INTEGER PRIMARY KEY,
@@ -527,10 +527,8 @@ CREATE TABLE peers (
 CREATE TABLE transfer_sources (
     id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
-    peer_id INTEGER REFERENCES peers(id),
     ip TEXT NOT NULL,
     tcp_port INTEGER NOT NULL CHECK(tcp_port BETWEEN 1 AND 65535),
-    udp_port INTEGER CHECK(udp_port IS NULL OR udp_port BETWEEN 1 AND 65535),
     user_hash BLOB CHECK(user_hash IS NULL OR length(user_hash) = 16),
     connect_options INTEGER CHECK(connect_options IS NULL OR connect_options BETWEEN 0 AND 255),
     file_comment TEXT NOT NULL DEFAULT '',
@@ -541,7 +539,7 @@ CREATE TABLE transfer_sources (
 ) STRICT;
 
 CREATE UNIQUE INDEX transfer_sources_identity_idx
-ON transfer_sources(transfer_id, ip, tcp_port, coalesce(udp_port, 0));
+ON transfer_sources(transfer_id, ip, tcp_port);
 
 CREATE TABLE transfer_name_state (
     transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
@@ -553,6 +551,7 @@ CREATE TABLE transfer_name_state (
 
 CREATE TABLE transfer_file_name_observations (
     id INTEGER PRIMARY KEY,
+    position INTEGER NOT NULL CHECK(position >= 0),
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     source_ip TEXT,
     source_tcp_port INTEGER CHECK(source_tcp_port IS NULL OR source_tcp_port BETWEEN 1 AND 65535),
@@ -565,7 +564,8 @@ CREATE TABLE transfer_file_name_observations (
     observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
     CHECK((source_ip IS NULL) = (source_tcp_port IS NULL)),
     CHECK(length(trim(raw_name)) > 0),
-    CHECK(length(trim(normalized_name)) > 0)
+    CHECK(length(trim(normalized_name)) > 0),
+    UNIQUE(transfer_id, position)
 ) STRICT;
 
 CREATE INDEX transfer_file_name_observations_transfer_idx
@@ -700,7 +700,6 @@ CREATE TABLE search_result_observations (
     CHECK((source_client_id IS NULL) = (source_client_port IS NULL))
 ) STRICT;
 
-CREATE INDEX verified_ranges_transfer_idx ON verified_ranges(transfer_id,start_offset,end_offset);
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
 CREATE INDEX shared_file_memberships_path_idx ON shared_file_memberships(path_id);
 CREATE INDEX transfers_pending_delete_idx
@@ -720,6 +719,5 @@ CREATE INDEX delivery_attempts_target_path_id_idx ON delivery_attempts(target_pa
 CREATE INDEX delivery_attempts_staging_path_id_idx ON delivery_attempts(staging_path_id);
 CREATE INDEX delivery_output_tombstones_original_path_id_idx ON delivery_output_tombstones(original_path_id);
 CREATE INDEX delivery_output_tombstones_tombstone_path_id_idx ON delivery_output_tombstones(tombstone_path_id);
-CREATE INDEX transfer_sources_peer_id_idx ON transfer_sources(peer_id);
 CREATE INDEX kad_keyword_publishes_known_file_id_idx ON kad_keyword_publishes(known_file_id);
 CREATE INDEX search_results_known_file_id_idx ON search_results(known_file_id);

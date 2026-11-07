@@ -22,6 +22,7 @@ mod schema;
 mod search_model;
 mod search_store;
 mod shared_membership_store;
+mod snapshot;
 mod sql_value;
 mod store;
 mod text;
