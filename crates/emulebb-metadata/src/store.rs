@@ -91,7 +91,7 @@ impl MetadataStore {
         if self.table_exists("metadata_schema")? {
             let stored_version = self
                 .stored_schema_version()?
-                .with_context(|| format!("metadata schema marker {SCHEMA_ID:?} is missing"))?;
+                .with_context(|| format!("metadata schema marker {SCHEMA_ID:?} is missing; create an entirely fresh profile for this build"))?;
             ensure!(
                 stored_version == SCHEMA_VERSION,
                 "metadata schema version {stored_version} is not current {SCHEMA_VERSION}; create an entirely fresh profile for this build"
