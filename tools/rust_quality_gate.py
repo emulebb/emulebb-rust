@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "gate",
         choices=[
+            "branch-check",
             "quick",
             "ci",
             "ci-test",
@@ -140,6 +141,7 @@ def commands_for_gate(
     if env is None:
         env = os.environ.copy()
     steps = {
+        "branch-check": [policy_step(), policy_tests_step(), fmt_step()],
         "policy": [policy_step(), policy_tests_step()],
         "fmt": [fmt_step()],
         "clippy": [clippy_step()],

@@ -693,12 +693,13 @@ def check_required_ci_gates(
         ),
         "required-ci:": (ci, "CI aggregate job"),
         "name: Required CI": (ci, "stable CI check name"),
-        "needs: [single-active-pr, workflow-lint, build-test, rest-openapi, quality, supply-chain]": (
+        "needs: [single-active-pr, workflow-lint, build-linux, build-test, rest-openapi, quality, supply-chain]": (
             ci,
             "complete CI aggregate dependency set",
         ),
         "if: ${{ always() }}": (ci, "failure-aware CI aggregate evaluation"),
         'test "$result" = success': (ci, "strict CI result verification"),
+        '"$BUILD_LINUX_RESULT"': (ci, "Linux build result verification"),
         "required-codeql:": (codeql, "CodeQL aggregate job"),
         "name: Required CodeQL": (codeql, "stable CodeQL check name"),
         "needs: analyze": (codeql, "complete CodeQL matrix dependency"),
@@ -712,7 +713,7 @@ def check_required_ci_gates(
         for fragment, (source, description) in required.items()
         if fragment not in source
     ]
-    for job in ("workflow-lint", "build-test", "quality", "supply-chain"):
+    for job in ("workflow-lint", "build-linux", "build-test", "quality", "supply-chain"):
         match = re.search(
             rf"(?ms)^  {re.escape(job)}:\s*$\n"
             r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
@@ -937,7 +938,7 @@ def check_live_rest_openapi_ci(workflow_text: str | None = None) -> list[str]:
     text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
     required = {
         "rest-openapi:": "live REST/OpenAPI job",
-        "needs: build-test": "dependency on the build/test matrix",
+        "needs: build-linux": "dependency on the tested Linux build",
         "name: emulebb-rust-Linux-X64-${{ github.sha }}": "tested Linux daemon artifact",
         "EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out": "external output root",
         "python scripts/rust-rest-openapi-ci.py": "live response conformance command",
