@@ -299,7 +299,7 @@ impl MetadataStore {
                AND shared_directory_roots.shareable = 1",
             [], |row| row.get(0),
         )?;
-        Ok(count as usize)
+        Ok(usize::try_from(count)?)
     }
 }
 

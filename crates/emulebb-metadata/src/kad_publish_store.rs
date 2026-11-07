@@ -200,7 +200,7 @@ fn load_keyword_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKad
             target_node_id: row.get(0)?,
             file_hash: row.get(1)?,
             raw_tags: row.get(2)?,
-            load: row.get::<_, Option<i64>>(3)?.map(|value| value as u8),
+            load: row.get::<_, Option<u8>>(3)?,
             observed_at_ms: row.get(4)?,
         })
     })?;
@@ -224,10 +224,10 @@ fn load_source_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadS
             publisher_id: row.get(1)?,
             file_hash: row.get(2)?,
             source_ip: row.get(3)?,
-            source_tcp_port: row.get::<_, i64>(4)? as u16,
-            source_udp_port: row.get::<_, i64>(5)? as u16,
+            source_tcp_port: row.get::<_, u16>(4)?,
+            source_udp_port: row.get::<_, u16>(5)?,
             raw_tags: row.get(6)?,
-            load: row.get::<_, Option<i64>>(7)?.map(|value| value as u8),
+            load: row.get::<_, Option<u8>>(7)?,
             observed_at_ms: row.get(8)?,
         })
     })?;
@@ -253,7 +253,7 @@ fn load_note_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadNot
             publisher_ip: row.get(2)?,
             file_hash: row.get(3)?,
             raw_tags: row.get(4)?,
-            load: row.get::<_, Option<i64>>(5)?.map(|value| value as u8),
+            load: row.get::<_, Option<u8>>(5)?,
             observed_at_ms: row.get(6)?,
         })
     })?;

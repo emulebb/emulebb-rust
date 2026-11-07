@@ -37,7 +37,7 @@ impl MetadataStore {
             return Ok(false);
         };
         anyhow::ensure!(
-            binding.size == entry.file_size as i64,
+            binding.size == i64::try_from(entry.file_size)?,
             MetadataContentConflict("imported content size conflicts with live content")
         );
         let root = entry

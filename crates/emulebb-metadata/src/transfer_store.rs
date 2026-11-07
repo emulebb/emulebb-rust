@@ -135,10 +135,10 @@ impl super::MetadataStore {
         )?
         .execute(params![
             hash,
-            manifest.file_size as i64,
+            i64::try_from(manifest.file_size)?,
             manifest.display_name,
-            manifest.piece_size as i64,
-            manifest.pieces.len() as i64,
+            i64::try_from(manifest.piece_size)?,
+            i64::try_from(manifest.pieces.len())?,
             aich_root,
             manifest.upload_priority,
             bool_to_i64(manifest.auto_upload_priority),
@@ -164,7 +164,11 @@ impl super::MetadataStore {
                 last_seen_ms = excluded.last_seen_ms
             "#,
         )?
-        .execute(params![known_file_id, manifest.file_size as i64, now])?;
+        .execute(params![
+            known_file_id,
+            i64::try_from(manifest.file_size)?,
+            now
+        ])?;
 
         tx.prepare_cached(
             r#"
@@ -295,8 +299,8 @@ impl super::MetadataStore {
                     transfer_id: row.get(0)?,
                     file_hash: row.get(1)?,
                     display_name: row.get(2)?,
-                    file_size: row.get::<_, i64>(3)? as u64,
-                    piece_size: row.get::<_, i64>(4)? as u64,
+                    file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
+                    piece_size: crate::sql_value::unsigned::<u64>(row, 4)?,
                     completed: row.get::<_, i64>(5)? != 0,
                     md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
                     aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
@@ -304,8 +308,8 @@ impl super::MetadataStore {
                     upload_priority: row.get(9)?,
                     auto_upload_priority: row.get::<_, i64>(10)? != 0,
                     comment: row.get(11)?,
-                    rating: row.get::<_, i64>(12)? as u8,
-                    category_id: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u32,
+                    rating: row.get::<_, u8>(12)?,
+                    category_id: row.get::<_, Option<u32>>(13)?.unwrap_or_default(),
                     control_state: row.get(14)?,
                     transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
                     delivered_path: optional_path_from_row(row, 16, 17)?,
@@ -359,7 +363,7 @@ impl super::MetadataStore {
                 hash,
                 i64::from(piece.piece_index),
                 piece.state,
-                piece.bytes_written as i64,
+                i64::try_from(piece.bytes_written)?,
                 piece.block_bitmap,
                 piece.ich_corrupted,
                 now,
@@ -380,11 +384,11 @@ impl super::MetadataStore {
             .prepare_cached(
                 r#"
                 UPDATE known_files
-                SET all_time_uploaded_bytes = all_time_uploaded_bytes + ?2
+                SET all_time_uploaded_bytes = all_time_uploaded_bytes + min(?2, 9223372036854775807 - all_time_uploaded_bytes)
                 WHERE ed2k_hash = ?1
                 "#,
             )?
-            .execute(params![hash, delta as i64])?;
+            .execute(params![hash, i64::try_from(delta).unwrap_or(i64::MAX)])?;
         Ok(updated != 0)
     }
 
@@ -396,7 +400,7 @@ impl super::MetadataStore {
             .prepare_cached(
                 r#"
                 UPDATE known_files
-                SET all_time_upload_requests = all_time_upload_requests + 1,
+                SET all_time_upload_requests = all_time_upload_requests + min(1, 9223372036854775807 - all_time_upload_requests),
                     last_upload_request_ms = max(last_upload_request_ms, ?2)
                 WHERE ed2k_hash = ?1
                 "#,
@@ -413,7 +417,7 @@ impl super::MetadataStore {
             .prepare_cached(
                 r#"
                 UPDATE known_files
-                SET all_time_upload_accepts = all_time_upload_accepts + 1
+                SET all_time_upload_accepts = all_time_upload_accepts + min(1, 9223372036854775807 - all_time_upload_accepts)
                 WHERE ed2k_hash = ?1
                 "#,
             )?
@@ -438,7 +442,10 @@ impl super::MetadataStore {
             "#,
         )?
         .query_row(params![hash], |row| {
-            Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+            Ok((
+                crate::sql_value::unsigned::<u64>(row, 0)?,
+                crate::sql_value::unsigned::<u64>(row, 1)?,
+            ))
         })
         .optional()
         .map_err(Into::into)
@@ -530,8 +537,8 @@ impl super::MetadataStore {
                 transfer_id: row.get(0)?,
                 file_hash: row.get(1)?,
                 display_name: row.get(2)?,
-                file_size: row.get::<_, i64>(3)? as u64,
-                piece_size: row.get::<_, i64>(4)? as u64,
+                file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
+                piece_size: crate::sql_value::unsigned::<u64>(row, 4)?,
                 completed: row.get::<_, i64>(5)? != 0,
                 md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
                 aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
@@ -539,8 +546,8 @@ impl super::MetadataStore {
                 upload_priority: row.get(9)?,
                 auto_upload_priority: row.get::<_, i64>(10)? != 0,
                 comment: row.get(11)?,
-                rating: row.get::<_, i64>(12)? as u8,
-                category_id: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u32,
+                rating: row.get::<_, u8>(12)?,
+                category_id: row.get::<_, Option<u32>>(13)?.unwrap_or_default(),
                 control_state: row.get(14)?,
                 transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
                 delivered_path: optional_path_from_row(row, 16, 17)?,
@@ -616,26 +623,26 @@ impl super::MetadataStore {
             Ok(MetadataTransferCatalogEntry {
                 file_hash: row.get(0)?,
                 display_name: row.get(1)?,
-                file_size: row.get::<_, i64>(2)? as u64,
-                part_count: row.get::<_, i64>(3)? as u32,
+                file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
+                part_count: row.get::<_, u32>(3)?,
                 aich_root: row.get(4)?,
                 upload_priority: row.get(5)?,
                 auto_upload_priority: row.get::<_, i64>(6)? != 0,
                 comment: row.get(7)?,
-                rating: row.get::<_, i64>(8)? as u8,
-                all_time_uploaded_bytes: row.get::<_, i64>(9)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(10)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(11)? as u64,
+                rating: row.get::<_, u8>(8)?,
+                all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 9)?,
+                all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 10)?,
+                all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 11)?,
                 last_upload_request_ms: row.get(12)?,
                 media_path: optional_path_from_row(row, 13, 14)?,
                 media: MetadataTransferMediaMetadata {
                     artist: row.get(15)?,
                     album: row.get(16)?,
                     title: row.get(17)?,
-                    length_seconds: row.get::<_, i64>(18)? as u32,
-                    bitrate_kbps: row.get::<_, i64>(19)? as u32,
+                    length_seconds: row.get::<_, u32>(18)?,
+                    bitrate_kbps: row.get::<_, u32>(19)?,
                     codec: row.get(20)?,
-                    extractor_version: row.get::<_, i64>(21)? as u32,
+                    extractor_version: row.get::<_, u32>(21)?,
                 },
             })
         })?;
@@ -662,10 +669,10 @@ impl super::MetadataStore {
                         artist: row.get(0)?,
                         album: row.get(1)?,
                         title: row.get(2)?,
-                        length_seconds: row.get::<_, i64>(3)? as u32,
-                        bitrate_kbps: row.get::<_, i64>(4)? as u32,
+                        length_seconds: row.get::<_, u32>(3)?,
+                        bitrate_kbps: row.get::<_, u32>(4)?,
                         codec: row.get(5)?,
-                        extractor_version: row.get::<_, i64>(6)? as u32,
+                        extractor_version: row.get::<_, u32>(6)?,
                     })
                 },
             )
@@ -723,7 +730,7 @@ impl super::MetadataStore {
         let rows = stmt.query_map([], |row| {
             Ok(MetadataSharedSourceFailure {
                 source_path: path_from_row(row, 0, 1)?,
-                file_size: row.get::<_, i64>(2)? as u64,
+                file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
                 source_fingerprint: optional_fingerprint_from_row(row, 3)?,
                 reason: row.get(4)?,
                 created_at_ms: row.get(5)?,
@@ -759,7 +766,7 @@ impl super::MetadataStore {
             "#,
             params![
                 path_id,
-                file_size as i64,
+                i64::try_from(file_size)?,
                 source_fingerprint.map(NativeFileFingerprint::storage_bytes),
                 reason,
                 now
@@ -828,19 +835,19 @@ impl super::MetadataStore {
             Ok(MetadataTransferPublishEntry {
                 file_hash: row.get(0)?,
                 display_name: row.get(1)?,
-                file_size: row.get::<_, i64>(2)? as u64,
+                file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
                 aich_root: row.get(3)?,
                 upload_priority: row.get(4)?,
                 auto_upload_priority: row.get::<_, i64>(5)? != 0,
                 session_uploaded_bytes: 0,
                 session_request_count: 0,
                 session_accept_count: 0,
-                all_time_uploaded_bytes: row.get::<_, i64>(6)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(7)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(8)? as u64,
+                all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 6)?,
+                all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 7)?,
+                all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 8)?,
                 last_upload_request_ms: row.get(9)?,
                 comment: row.get(10)?,
-                rating: row.get::<_, i64>(11)? as u8,
+                rating: row.get::<_, u8>(11)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -885,19 +892,19 @@ impl super::MetadataStore {
             Ok(MetadataTransferPublishEntry {
                 file_hash: row.get(0)?,
                 display_name: row.get(1)?,
-                file_size: row.get::<_, i64>(2)? as u64,
+                file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
                 aich_root: row.get(3)?,
                 upload_priority: row.get(4)?,
                 auto_upload_priority: row.get::<_, i64>(5)? != 0,
                 session_uploaded_bytes: 0,
                 session_request_count: 0,
                 session_accept_count: 0,
-                all_time_uploaded_bytes: row.get::<_, i64>(6)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(7)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(8)? as u64,
+                all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 6)?,
+                all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 7)?,
+                all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 8)?,
                 last_upload_request_ms: row.get(9)?,
                 comment: row.get(10)?,
-                rating: row.get::<_, i64>(11)? as u8,
+                rating: row.get::<_, u8>(11)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -1911,7 +1918,7 @@ fn replace_transfer_children(
             transfer_id,
             i64::from(piece.piece_index),
             piece.state,
-            piece.bytes_written as i64,
+            i64::try_from(piece.bytes_written)?,
             piece.block_bitmap,
             piece.ich_corrupted,
             now,
@@ -1927,7 +1934,7 @@ fn replace_transfer_children(
     for (index, hash) in manifest.md4_hashset.iter().enumerate() {
         insert_md4.execute(params![
             transfer_id,
-            index as i64,
+            i64::try_from(index)?,
             decode_fixed_hex(hash, 16, "MD4 part hash")?,
         ])?;
     }
@@ -1941,7 +1948,7 @@ fn replace_transfer_children(
     for (index, hash) in manifest.aich_hashset.iter().enumerate() {
         insert_aich.execute(params![
             transfer_id,
-            index as i64,
+            i64::try_from(index)?,
             decode_fixed_hex(hash, 20, "AICH part hash")?,
         ])?;
     }
@@ -1955,8 +1962,8 @@ fn replace_transfer_children(
     for range in &manifest.verified_ranges {
         insert_range.execute(params![
             transfer_id,
-            range.start as i64,
-            range.end as i64,
+            i64::try_from(range.start)?,
+            i64::try_from(range.end)?,
             now
         ])?;
     }
@@ -2083,7 +2090,7 @@ fn read_file_name_observations(
     let rows = stmt.query_map(params![transfer_id], |row| {
         Ok(MetadataTransferFileNameObservation {
             source_ip: row.get(0)?,
-            source_tcp_port: row.get::<_, Option<i64>>(1)?.map(|value| value as u16),
+            source_tcp_port: row.get::<_, Option<u16>>(1)?,
             user_hash: row.get(2)?,
             client_software: row.get(3)?,
             origin: row.get(4)?,
@@ -2116,9 +2123,9 @@ fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<Metada
         [],
         |row| {
             Ok(MetadataTransferCounts {
-                total: row.get::<_, i64>(0)? as usize,
-                active: row.get::<_, i64>(1)? as usize,
-                completed: row.get::<_, i64>(2)? as usize,
+                total: crate::sql_value::unsigned::<usize>(row, 0)?,
+                active: crate::sql_value::unsigned::<usize>(row, 1)?,
+                completed: crate::sql_value::unsigned::<usize>(row, 2)?,
             })
         },
     )
@@ -2146,9 +2153,9 @@ fn read_pieces(
     )?;
     let rows = stmt.query_map(params![transfer_id], |row| {
         Ok(MetadataTransferPiece {
-            piece_index: row.get::<_, i64>(0)? as u32,
+            piece_index: row.get::<_, u32>(0)?,
             state: row.get(1)?,
-            bytes_written: row.get::<_, i64>(2)? as u64,
+            bytes_written: crate::sql_value::unsigned::<u64>(row, 2)?,
             block_bitmap: row.get::<_, Option<String>>(3)?,
             ich_corrupted: row.get::<_, bool>(4)?,
         })
@@ -2171,8 +2178,8 @@ fn read_ranges(
     )?;
     let rows = stmt.query_map(params![transfer_id], |row| {
         Ok(MetadataTransferRange {
-            start: row.get::<_, i64>(0)? as u64,
-            end: row.get::<_, i64>(1)? as u64,
+            start: crate::sql_value::unsigned::<u64>(row, 0)?,
+            end: crate::sql_value::unsigned::<u64>(row, 1)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -2196,11 +2203,11 @@ fn read_sources(
     let rows = stmt.query_map(params![transfer_id], |row| {
         Ok(MetadataTransferSource {
             ip: row.get(0)?,
-            tcp_port: row.get::<_, i64>(1)? as u16,
+            tcp_port: row.get::<_, u16>(1)?,
             user_hash: row.get(2)?,
-            connect_options: row.get::<_, Option<i64>>(3)?.map(|value| value as u8),
+            connect_options: row.get::<_, Option<u8>>(3)?,
             file_comment: row.get(4)?,
-            file_rating: row.get::<_, i64>(5)? as u8,
+            file_rating: row.get::<_, u8>(5)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()

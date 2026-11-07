@@ -142,7 +142,7 @@ impl super::MetadataStore {
                 INSERT INTO kad_bootstrap_endpoints(position, endpoint, updated_at_ms)
                 VALUES (?1, ?2, ?3)
                 "#,
-                params![position as i64, endpoint, now],
+                params![i64::try_from(position)?, endpoint, now],
             )?;
         }
         tx.commit()?;
@@ -163,12 +163,12 @@ impl super::MetadataStore {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(MetadataCategory {
-                id: row.get::<_, i64>(0)? as u32,
+                id: row.get::<_, u32>(0)?,
                 name: row.get(1)?,
                 path: row.get(2)?,
                 comment: row.get(3)?,
-                sort_order: row.get::<_, i64>(4)? as u32,
-                color: row.get::<_, Option<i64>>(5)?.map(|value| value as u32),
+                sort_order: row.get::<_, u32>(4)?,
+                color: row.get::<_, Option<u32>>(5)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -285,7 +285,7 @@ impl super::MetadataStore {
                 user_hash: row.get(0)?,
                 name: row.get(1)?,
                 last_address: row.get(2)?,
-                last_port: row.get::<_, i64>(3)? as u16,
+                last_port: row.get::<_, u16>(3)?,
                 first_seen_ms: row.get(4)?,
                 last_seen_ms: row.get(5)?,
             })
@@ -350,7 +350,7 @@ impl super::MetadataStore {
         let rows = stmt.query_map([], |row| {
             Ok(MetadataServer {
                 address: row.get(0)?,
-                port: row.get::<_, i64>(1)? as u16,
+                port: row.get::<_, u16>(1)?,
                 name: row.get(2)?,
                 description: row.get(3)?,
                 dynamic_host: row.get(4)?,
@@ -358,20 +358,23 @@ impl super::MetadataStore {
                 server_priority: row.get(6)?,
                 static_server: row.get::<_, i64>(7)? != 0,
                 enabled: row.get::<_, i64>(8)? != 0,
-                failed_count: row.get::<_, i64>(9)? as u32,
-                ping_ms: row.get::<_, Option<i64>>(10)?.map(|value| value as u32),
-                users: row.get::<_, Option<i64>>(11)?.unwrap_or_default() as u64,
-                files: row.get::<_, Option<i64>>(12)?.unwrap_or_default() as u64,
-                max_users: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u64,
-                low_id_users: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u64,
-                soft_files: row.get::<_, Option<i64>>(15)?.unwrap_or_default() as u64,
-                hard_files: row.get::<_, Option<i64>>(16)?.unwrap_or_default() as u64,
+                failed_count: row.get::<_, u32>(9)?,
+                ping_ms: row.get::<_, Option<u32>>(10)?,
+                users: crate::sql_value::optional_unsigned::<u64>(row, 11)?.unwrap_or_default(),
+                files: crate::sql_value::optional_unsigned::<u64>(row, 12)?.unwrap_or_default(),
+                max_users: crate::sql_value::optional_unsigned::<u64>(row, 13)?.unwrap_or_default(),
+                low_id_users: crate::sql_value::optional_unsigned::<u64>(row, 14)?
+                    .unwrap_or_default(),
+                soft_files: crate::sql_value::optional_unsigned::<u64>(row, 15)?
+                    .unwrap_or_default(),
+                hard_files: crate::sql_value::optional_unsigned::<u64>(row, 16)?
+                    .unwrap_or_default(),
                 version: row.get(17)?,
-                obfuscation_tcp_port: row.get::<_, Option<i64>>(18)?.map(|value| value as u16),
-                obfuscation_udp_port: row.get::<_, Option<i64>>(19)?.map(|value| value as u16),
-                udp_flags: row.get::<_, Option<i64>>(20)?.map(|value| value as u32),
-                udp_key: row.get::<_, Option<i64>>(21)?.map(|value| value as u32),
-                udp_key_ip: row.get::<_, Option<i64>>(22)?.map(|value| value as u32),
+                obfuscation_tcp_port: row.get::<_, Option<u16>>(18)?,
+                obfuscation_udp_port: row.get::<_, Option<u16>>(19)?,
+                udp_flags: row.get::<_, Option<u32>>(20)?,
+                udp_key: row.get::<_, Option<u32>>(21)?,
+                udp_key_ip: row.get::<_, Option<u32>>(22)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -428,12 +431,12 @@ impl super::MetadataStore {
                 bool_to_i64(server.enabled),
                 i64::from(server.failed_count),
                 server.ping_ms.map(i64::from),
-                server.users as i64,
-                server.files as i64,
-                server.max_users as i64,
-                server.low_id_users as i64,
-                server.soft_files as i64,
-                server.hard_files as i64,
+                i64::try_from(server.users)?,
+                i64::try_from(server.files)?,
+                i64::try_from(server.max_users)?,
+                i64::try_from(server.low_id_users)?,
+                i64::try_from(server.soft_files)?,
+                i64::try_from(server.hard_files)?,
                 server.version,
                 server.obfuscation_tcp_port.map(i64::from),
                 server.obfuscation_udp_port.map(i64::from),
