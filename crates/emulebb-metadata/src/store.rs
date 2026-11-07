@@ -95,6 +95,7 @@ impl MetadataStore {
                 stored_version == SCHEMA_VERSION,
                 "metadata schema version {stored_version} is not current {SCHEMA_VERSION}; create an entirely fresh profile for this build"
             );
+            crate::schema_validation::validate(&*self.connection()?)?;
             self.prune_transfer_sources()?;
             return Ok(());
         }

@@ -2,6 +2,34 @@ use crate::{MetadataStore, SCHEMA_VERSION};
 use rusqlite::params;
 
 #[test]
+fn current_marker_cannot_hide_missing_indexes_triggers_or_wrong_columns() {
+    for damage in [
+        "DROP INDEX search_results_known_file_id_idx",
+        "DROP TRIGGER file_names_ai",
+        "ALTER TABLE known_files ADD COLUMN obsolete_value TEXT",
+        "DELETE FROM profile",
+    ] {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::SCHEMA_SQL).unwrap();
+        conn.execute(
+            "INSERT INTO metadata_schema(schema_id,schema_version,created_at_ms) VALUES(?1,?2,0)",
+            params![crate::SCHEMA_ID, crate::SCHEMA_VERSION],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO profile VALUES(1,'00000000-0000-0000-0000-000000000001','test',0,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(damage).unwrap();
+        assert!(
+            MetadataStore::from_connection(conn).is_err(),
+            "accepted damaged schema: {damage}"
+        );
+    }
+}
+
+#[test]
 fn every_child_foreign_key_has_a_leading_index() {
     let store = MetadataStore::in_memory().unwrap();
     let conn = store.connection().unwrap();

@@ -19,6 +19,7 @@ mod profile_import;
 mod profile_model;
 mod profile_store;
 mod schema;
+mod schema_validation;
 mod search_model;
 mod search_store;
 mod shared_membership_store;
