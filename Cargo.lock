@@ -677,6 +677,7 @@ dependencies = [
  "percent-encoding",
  "rand 0.10.3",
  "rsa",
+ "rustix",
  "serde",
  "serde_json",
  "sha1 0.10.7",

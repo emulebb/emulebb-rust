@@ -109,28 +109,14 @@ fn move_path_no_replace_blocking(
     source: &Path,
     destination: &Path,
 ) -> io::Result<NoReplaceMoveOutcome> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
 
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
-    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "destination path contains NUL")
-    })?;
-    // SAFETY: both paths are NUL-terminated and valid for the duration of the
-    // call. RENAME_NOREPLACE makes publication atomic without clobbering.
-    let result = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
+    // WHY: Rust's bundled musl can lack the renameat2 libc wrapper. Rustix
+    // supplies the safe Linux operation while preserving atomic no-clobber publication.
+    let error = match renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE) {
+        Ok(()) => return Ok(NoReplaceMoveOutcome::Moved),
+        Err(error) => io::Error::from(error),
     };
-    if result == 0 {
-        return Ok(NoReplaceMoveOutcome::Moved);
-    }
-    let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::EEXIST) => Ok(NoReplaceMoveOutcome::AlreadyExists),
         Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => Err(io::Error::new(
