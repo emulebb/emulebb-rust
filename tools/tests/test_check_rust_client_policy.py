@@ -433,7 +433,7 @@ native-package:
   repository: emulebb/emulebb-tooling
   ref: ${{{{ env.EMULEBB_TOOLING_REF }}}}
 """,
-            "  package:\n    permissions:\n      checks: read\n",
+            "  package:\n    permissions:\n      actions: read\n",
         )
 
         self.assertEqual(len(errors), 6)
@@ -455,13 +455,14 @@ native-package:
 
         self.assertTrue(any("must pin EMULEBB_BUILD_REF" in error for error in errors))
 
-    def test_rejects_nightly_caller_without_check_permission(self) -> None:
-        errors = CHECKER.check_release_ci_gate(
-            nightly_text="  package:\n    permissions:\n      contents: write\n"
-        )
-
-        self.assertEqual(len(errors), 1)
-        self.assertIn("nightly.yml", errors[0])
+    def test_rejects_nightly_caller_without_actions_permission(self) -> None:
+        for permission in ("contents: write", "checks: read"):
+            with self.subTest(permission=permission):
+                errors = CHECKER.check_release_ci_gate(
+                    nightly_text=f"  package:\n    permissions:\n      {permission}\n"
+                )
+                self.assertEqual(len(errors), 1)
+                self.assertIn("grant actions: read", errors[0])
 
     def test_rejects_source_gate_without_stable_aggregate_checks(self) -> None:
         errors = CHECKER.check_release_ci_gate(helper_text="REQUIRED_SOURCE_CHECKS = ()\n")

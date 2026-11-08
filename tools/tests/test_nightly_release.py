@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -214,25 +216,6 @@ class TestNightlyGatesAndRetention(unittest.TestCase):
             ("Required CI", "Required CodeQL"),
         )
 
-    def test_required_checks_accept_one_success_per_name(self) -> None:
-        check_runs = [
-            {"name": name, "status": "completed", "conclusion": "success"}
-            for name in NIGHTLY.REQUIRED_SOURCE_CHECKS
-        ]
-        check_runs.append({"name": NIGHTLY.REQUIRED_SOURCE_CHECKS[0], "status": "completed", "conclusion": "skipped"})
-        self.assertEqual(NIGHTLY.successful_required_checks({"check_runs": check_runs}), ())
-
-    def test_required_checks_report_missing_or_failed_names(self) -> None:
-        payload = {
-            "check_runs": [
-                {"name": NIGHTLY.REQUIRED_SOURCE_CHECKS[0], "status": "completed", "conclusion": "failure"}
-            ]
-        }
-        self.assertEqual(
-            NIGHTLY.successful_required_checks(payload),
-            NIGHTLY.REQUIRED_SOURCE_CHECKS,
-        )
-
     def test_pruning_never_selects_formal_or_non_prerelease_tags(self) -> None:
         releases = [
             {
@@ -259,6 +242,124 @@ class TestNightlyGatesAndRetention(unittest.TestCase):
                 "rust-v0.1.0-beta.2.nightly.20261001.g0000001",
             ],
         )
+
+
+class TestSourceWorkflowEligibility(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sha = "a" * 40
+        self.ci = {"id": 20, "run_number": 8, "run_attempt": 2, "head_sha": self.sha, "path": ".github/workflows/ci.yml",
+                   "status": "completed", "conclusion": "success"}
+        self.codeql = {**self.ci, "id": 30, "run_number": 15, "run_attempt": 1, "path": ".github/workflows/codeql.yml"}
+        self.runs = {"ci.yml": [{**self.ci, "id": 10, "run_number": 7, "conclusion": "failure"}, self.ci],
+                     "codeql.yml": [self.codeql]}
+        self.jobs = {"ci.yml": [{"id": 200, "run_id": 20, "run_attempt": 2, "head_sha": self.sha,
+                                 "name": "Required CI", "status": "completed", "conclusion": "success"}],
+                     "codeql.yml": [{"id": 300, "run_id": 30, "run_attempt": 1, "head_sha": self.sha,
+                                     "name": "Required CodeQL", "status": "completed", "conclusion": "success"}]}
+        self.calls = []
+        patcher = mock.patch.object(NIGHTLY, "run", side_effect=self.respond)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def respond(self, command, **_kwargs):
+        self.calls.append(command)
+        self.assertEqual(command[:4], ("gh", "api", "--paginate", "--slurp"))
+        endpoint = command[-1]
+        for workflow, run_id, attempt in (("ci.yml", 20, 2), ("codeql.yml", 30, 1)):
+            if f"/workflows/{workflow}/runs?" in endpoint:
+                self.assertIn(f"head_sha={self.sha}", endpoint)
+                pages = [{"workflow_runs": self.runs[workflow][:1]}, {"workflow_runs": self.runs[workflow][1:]}]
+                break
+            if f"/runs/{run_id}/attempts/{attempt}/jobs?" in endpoint:
+                pages = [{"jobs": []}, {"jobs": self.jobs[workflow]}]
+                break
+        else:
+            self.fail(f"Unexpected eligibility request: {endpoint}")
+        return subprocess.CompletedProcess(command, 0, json.dumps(pages))
+
+    def verify(self):
+        return NIGHTLY.verify_source_checks("example/project", self.sha)
+
+    def test_latest_success_and_exact_attempt_aggregate_are_required_across_all_pages(self) -> None:
+        self.runs["ci.yml"].reverse()
+        self.assertEqual(self.verify(), {
+            "Required CI": {"runId": 20, "runNumber": 8, "runAttempt": 2, "jobId": 200},
+            "Required CodeQL": {"runId": 30, "runNumber": 15, "runAttempt": 1, "jobId": 300},
+        })
+        self.assertEqual(len(self.calls), 4)
+
+    def test_old_success_never_masks_new_pending_failed_cancelled_or_skipped_workflow(self) -> None:
+        for status, conclusion in (("queued", None), ("in_progress", None), ("completed", "failure"),
+                                   ("completed", "cancelled"), ("completed", "skipped")):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.runs["ci.yml"] = [{**self.ci, "id": 10, "run_number": 7, "conclusion": "success"},
+                                       {**self.ci, "status": status, "conclusion": conclusion}]
+                with self.assertRaisesRegex(RuntimeError, "latest workflow attempt"):
+                    self.verify()
+
+    def test_rerunning_old_invocation_does_not_supersede_newer_failed_invocation(self) -> None:
+        self.runs["ci.yml"] = [{**self.ci, "id": 999, "run_number": 7, "run_attempt": 99}, {**self.ci, "conclusion": "failure"}]
+        with self.assertRaisesRegex(RuntimeError, "latest workflow attempt"):
+            self.verify()
+
+    def test_new_attempt_of_same_workflow_blocks_older_success_before_aggregate_starts(self) -> None:
+        self.runs["ci.yml"] = [self.ci, {**self.ci, "run_attempt": 3, "status": "queued", "conclusion": None}]
+        with self.assertRaisesRegex(RuntimeError, "latest workflow attempt"):
+            self.verify()
+
+    def test_inconsistent_latest_snapshot_fails_closed(self) -> None:
+        self.runs["ci.yml"] = [self.ci, {**self.ci, "status": "in_progress", "conclusion": None}]
+        with self.assertRaisesRegex(RuntimeError, "inconsistent"):
+            self.verify()
+
+    def test_codeql_is_required_even_when_ci_passed(self) -> None:
+        self.runs["codeql.yml"] = [{**self.codeql, "conclusion": "failure"}]
+        with self.assertRaisesRegex(RuntimeError, "Required CodeQL latest"):
+            self.verify()
+
+    def test_other_source_or_workflow_cannot_satisfy_gate(self) -> None:
+        for change in ({"head_sha": "b" * 40}, {"path": ".github/workflows/branch-check.yml"}):
+            with self.subTest(change=change):
+                self.runs["ci.yml"] = [{**self.ci, **change}]
+                with self.assertRaises(RuntimeError):
+                    self.verify()
+
+    def test_missing_duplicate_or_unrelated_aggregate_cannot_satisfy_gate(self) -> None:
+        good = self.jobs["ci.yml"][0]
+        for jobs in ([], [good, good], [{**good, "name": "another workflow aggregate"}]):
+            with self.subTest(jobs=jobs):
+                self.jobs["ci.yml"] = jobs
+                with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                    self.verify()
+
+    def test_aggregate_must_match_source_attempt_and_success(self) -> None:
+        good = self.jobs["ci.yml"][0]
+        for change in ({"run_id": 10}, {"run_attempt": 1}, {"run_attempt": True}, {"head_sha": "b" * 40},
+                       {"id": True}, {"status": "queued"}, {"conclusion": "skipped"}, {"conclusion": "failure"}):
+            with self.subTest(change=change):
+                self.jobs["ci.yml"] = [{**good, **change}]
+                with self.assertRaisesRegex(RuntimeError, "exact latest source workflow attempt"):
+                    self.verify()
+
+    def test_malformed_identity_cannot_fall_back_to_old_green(self) -> None:
+        for change in ({"id": True}, {"id": 0}, {"run_number": True}, {"run_number": 0},
+                       {"run_attempt": "2"}, {"run_attempt": 0}):
+            with self.subTest(change=change):
+                self.runs["ci.yml"] = [self.ci, {**self.ci, **change}]
+                with self.assertRaisesRegex(RuntimeError, "identity"):
+                    self.verify()
+
+    def test_malformed_or_missing_pages_fail_closed(self) -> None:
+        for pages in ({"workflow_runs": []}, [], [{"jobs": []}], [{"workflow_runs": [None]}]):
+            with self.subTest(pages=pages), mock.patch.object(NIGHTLY, "run", return_value=
+                    subprocess.CompletedProcess([], 0, json.dumps(pages))):
+                with self.assertRaises(RuntimeError):
+                    self.verify()
+
+    def test_mutable_source_ref_is_rejected_before_api_calls(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "full lowercase source SHA"):
+            NIGHTLY.verify_source_checks("example/project", "main")
+        self.assertFalse(self.calls)
 
 
 if __name__ == "__main__":

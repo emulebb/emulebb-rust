@@ -29,7 +29,8 @@ NIGHTLY_TAG_RE = re.compile(
 SAFE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
 METADATA_SCHEMA_PATH = "crates/emulebb-metadata/src/schema.rs"
 METADATA_SCHEMA_RE = re.compile(r"^pub const SCHEMA_VERSION: i64 = (?P<version>\d+);$", re.MULTILINE)
-REQUIRED_SOURCE_CHECKS = ("Required CI", "Required CodeQL")
+REQUIRED_SOURCE_WORKFLOWS = {"Required CI": "ci.yml", "Required CodeQL": "codeql.yml"}
+REQUIRED_SOURCE_CHECKS = tuple(REQUIRED_SOURCE_WORKFLOWS)
 
 
 @dataclass(frozen=True)
@@ -482,27 +483,63 @@ def render_notes(
     return "\n".join(lines)
 
 
-def successful_required_checks(payload: dict[str, object]) -> tuple[str, ...]:
-    """Returns required check names without a successful completed run."""
+def _action_rows(endpoint: str, field: str) -> list[dict[str, object]]:
+    """Read every Actions page, rejecting incomplete or malformed inventories."""
+    response = run(("gh", "api", "--paginate", "--slurp", endpoint))
+    pages = json.loads(response.stdout)
+    if not isinstance(pages, list) or not pages:
+        raise RuntimeError("Actions eligibility requires a paginated response")
+    rows = []
+    for page in pages:
+        if not isinstance(page, dict) or not isinstance(page.get(field), list):
+            raise RuntimeError(f"Actions eligibility requires a {field} inventory")
+        for row in page[field]:
+            if not isinstance(row, dict):
+                raise RuntimeError(f"Actions {field} entries must be objects")
+            rows.append(row)
+    return rows
 
-    runs = payload.get("check_runs", [])
-    if not isinstance(runs, list):
-        return REQUIRED_SOURCE_CHECKS
-    successes = {
-        str(run.get("name"))
-        for run in runs
-        if isinstance(run, dict) and run.get("status") == "completed" and run.get("conclusion") == "success"
-    }
-    return tuple(name for name in REQUIRED_SOURCE_CHECKS if name not in successes)
 
-
-def verify_source_checks(repository: str, sha: str) -> None:
-    """Require build, conformance, policy, and CodeQL checks for the source SHA."""
-
-    response = run(("gh", "api", f"repos/{repository}/commits/{sha}/check-runs?per_page=100"))
-    missing = successful_required_checks(json.loads(response.stdout))
-    if missing:
-        raise RuntimeError("required source checks are not successful: " + ", ".join(missing))
+def verify_source_checks(repository: str, sha: str) -> dict[str, dict[str, int]]:
+    """Require the newest CI and CodeQL invocation and its exact aggregate job."""
+    if (re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
+            or re.fullmatch(r"[0-9a-f]{40}", sha) is None):
+        raise RuntimeError("Source eligibility requires a repository and full lowercase source SHA")
+    evidence = {}
+    for check in REQUIRED_SOURCE_CHECKS:
+        workflow = REQUIRED_SOURCE_WORKFLOWS[check]
+        rows = _action_rows(f"repos/{repository}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page=100", "workflow_runs")
+        matching = [row for row in rows if row.get("head_sha") == sha]
+        if not matching:
+            raise RuntimeError(f"No {check} workflow invocation for source {sha}")
+        for row in matching:
+            if (row.get("path") != f".github/workflows/{workflow}"
+                    or any(type(row.get(key)) is not int or row[key] <= 0 for key in ("id", "run_number", "run_attempt"))):
+                raise RuntimeError(f"Invalid {check} workflow identity")
+        # WHY: an older green check must not mask a newer failed or queued
+        # workflow, including one whose aggregate job has not started yet.
+        # GitHub's run_number increments per workflow invocation and remains
+        # unchanged by reruns; opaque database IDs do not define that ordering.
+        latest = max(matching, key=lambda row: (row["run_number"], row["run_attempt"]))
+        current = [row for row in matching if (row["run_number"], row["run_attempt"]) == (latest["run_number"], latest["run_attempt"])]
+        if any((row["id"], row.get("status"), row.get("conclusion")) !=
+               (latest["id"], latest.get("status"), latest.get("conclusion")) for row in current):
+            raise RuntimeError(f"{check} latest workflow snapshot is inconsistent")
+        if (latest.get("status"), latest.get("conclusion")) != ("completed", "success"):
+            raise RuntimeError(f"{check} latest workflow attempt must complete successfully")
+        jobs = _action_rows(f"repos/{repository}/actions/runs/{latest['id']}/attempts/{latest['run_attempt']}/jobs?per_page=100", "jobs")
+        aggregate = [job for job in jobs if job.get("name") == check]
+        if len(aggregate) != 1:
+            raise RuntimeError(f"{check} latest attempt must contain exactly one required aggregate job")
+        job = aggregate[0]
+        if (type(job.get("id")) is not int or job["id"] <= 0
+                or type(job.get("run_id")) is not int or job["run_id"] != latest["id"] or type(job.get("run_attempt")) is not int
+                or job["run_attempt"] != latest["run_attempt"] or job.get("head_sha") != sha
+                or (job.get("status"), job.get("conclusion")) != ("completed", "success")):
+            raise RuntimeError(f"{check} aggregate must pass in the exact latest source workflow attempt")
+        evidence[check] = {"runId": latest["id"], "runNumber": latest["run_number"],
+                           "runAttempt": latest["run_attempt"], "jobId": job["id"]}
+    return evidence
 
 
 def nightly_tags_to_prune(releases: Sequence[dict[str, object]], keep: int) -> list[str]:
