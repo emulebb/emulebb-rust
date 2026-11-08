@@ -1,6 +1,7 @@
 """Pinned CI tools and explicit local input provenance; no operator configuration repair."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.metadata
 import json
@@ -13,7 +14,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -71,8 +74,18 @@ def ensure_shellcheck(output: Path) -> Path:
         with tempfile.NamedTemporaryFile(dir=cache, delete=False) as temporary:
             temporary_path = Path(temporary.name)
         try:
-            with urllib.request.urlopen(url, timeout=60) as response, temporary_path.open("wb") as target:
-                shutil.copyfileobj(response, target)
+            for attempt in range(3):
+                try:
+                    with urllib.request.urlopen(url, timeout=60) as response, temporary_path.open("wb") as target:
+                        shutil.copyfileobj(response, target)
+                    break
+                except (urllib.error.URLError, TimeoutError, ConnectionResetError) as error:
+                    if isinstance(error, urllib.error.HTTPError) and error.code not in {429, 500, 502, 503, 504}:
+                        raise
+                    if attempt == 2:
+                        raise
+                    print(f"Transient ShellCheck download failure; retry {attempt + 1}/2", flush=True)
+                    time.sleep(2 ** attempt)
             with temporary_path.open("rb") as source:
                 if hashlib.file_digest(source, "sha256").hexdigest() != expected_hash:
                     raise RuntimeError("Downloaded ShellCheck archive checksum mismatch")
@@ -161,22 +174,27 @@ def report_inputs(env: dict[str, str], names=None) -> dict:
     return inputs
 
 
-def environment_report(env: dict[str, str]) -> dict:
+def environment_report(env: dict[str, str], *, scope: str = "full") -> dict:
     """Capture versions and the exact inputs behind a local or hosted result."""
-    shellcheck = ensure_shellcheck(Path(env["EMULEBB_WORKSPACE_OUTPUT_ROOT"]))
+    if scope not in {"full", "quality"}:
+        raise ValueError("Environment scope must be full or quality")
+    shellcheck = None
     versions = {"python": require_version("Python", platform.python_version(), TOOLCHAIN["python"])}
-    for key, command, pattern in (
-        ("go", ["go", "version"], r"go version go(\S+)"),
-        ("cargo_deny", ["cargo", "deny", "--version"], r"cargo-deny (\S+)"),
-    ):
-        versions[key] = require_version(key, command_version(command, pattern), TOOLCHAIN[key])
+    if scope == "full":
+        shellcheck = ensure_shellcheck(Path(env["EMULEBB_WORKSPACE_OUTPUT_ROOT"]))
+        for key, command, pattern in (
+            ("go", ["go", "version"], r"go version go(\S+)"),
+            ("cargo_deny", ["cargo", "deny", "--version"], r"cargo-deny (\S+)"),
+        ):
+            versions[key] = require_version(key, command_version(command, pattern), TOOLCHAIN[key])
+        versions["shellcheck"] = TOOLCHAIN["shellcheck"]["version"]
+        versions["actionlint"] = TOOLCHAIN["actionlint"]
     expected_rust = tomllib.loads((ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"]
     versions["rust"] = require_version("Rust", command_version(["rustc", "--version"], r"rustc (\S+)"), expected_rust)
-    versions["shellcheck"] = TOOLCHAIN["shellcheck"]["version"]
-    versions["actionlint"] = TOOLCHAIN["actionlint"]
     versions.update(node_versions())
     versions["python_packages"] = {line.split("==")[0]: require_version(line.split("==")[0], importlib.metadata.version(line.split("==")[0]), line.split("==")[1]) for line in (ROOT / "tools/requirements-ci.txt").read_text().splitlines() if "==" in line}
-    report = {"tools": versions, "inputs": report_inputs(env), "platform": platform.platform(), "shellcheck": str(shellcheck)}
+    report = {"scope": scope, "tools": versions, "inputs": report_inputs(env), "platform": platform.platform(),
+              "shellcheck": str(shellcheck) if shellcheck is not None else None}
     report_dir = Path(env["EMULEBB_WORKSPACE_OUTPUT_ROOT"]) / "reports" / "ci-environment"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "latest.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -185,7 +203,9 @@ def environment_report(env: dict[str, str]) -> dict:
 
 if __name__ == "__main__":
     from rust_quality_gate import build_env
-    report = environment_report(build_env())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scope", choices=("full", "quality"), default="full")
+    report = environment_report(build_env(), scope=parser.parse_args().scope)
     print(json.dumps(report, indent=2))
     if any(item["status"] != "matching" for item in report["inputs"].values()):
         print("Input differences recorded: this result describes the current checkouts; GitHub checks the declared pinned inputs.")
