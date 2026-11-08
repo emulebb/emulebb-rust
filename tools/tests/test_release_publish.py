@@ -5,10 +5,12 @@ import importlib.util
 import io
 import json
 import sys
+import subprocess
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "release_publish.py"
@@ -31,91 +33,6 @@ def write_oci_archive(path: Path, blob: bytes, *, digest: str, manifests: int = 
     with tarfile.open(path, mode="w") as archive:
         add_bytes(archive, "index.json", json.dumps(index).encode("utf-8"))
         add_bytes(archive, f"blobs/sha256/{digest.removeprefix('sha256:')}", blob)
-
-
-def write_candidate_evidence(release_dir: Path, version: str) -> str:
-    stem = f"emulebb-rust-v{version}"
-    names = (
-        "SHA256SUMS",
-        f"{stem}-image-security-SHA256SUMS",
-        f"{stem}-windows-x64.zip",
-        f"{stem}-windows-arm64.zip",
-        f"{stem}-linux-amd64.deb",
-        f"{stem}-linux-x86_64.AppImage",
-        f"{stem}-linux-arm64.deb",
-        f"{stem}-linux-aarch64.AppImage",
-        f"{stem}-macos-x64.dmg",
-        f"{stem}-macos-arm64.dmg",
-    )
-    for name in names:
-        (release_dir / name).write_bytes(f"payload:{name}".encode("ascii"))
-    package_smoke_assets = {
-        "windows-x64": [f"{stem}-windows-x64.zip"],
-        "windows-arm64": [f"{stem}-windows-arm64.zip"],
-        "linux-x64": [
-            f"{stem}-linux-amd64.deb",
-            f"{stem}-linux-x86_64.AppImage",
-        ],
-        "linux-arm64": [
-            f"{stem}-linux-arm64.deb",
-            f"{stem}-linux-aarch64.AppImage",
-        ],
-        "macos-x64": [f"{stem}-macos-x64.dmg"],
-        "macos-arm64": [f"{stem}-macos-arm64.dmg"],
-    }
-    for platform, assets in package_smoke_assets.items():
-        write_package_smoke_report(release_dir, version, platform, assets)
-    digest = f"sha256:{'a' * 64}"
-    (release_dir / f"{stem}-multiarch.oci.digest").write_text(f"{digest}\n", encoding="utf-8")
-    return digest
-
-
-def write_package_smoke_report(
-    release_dir: Path,
-    version: str,
-    platform: str,
-    assets: list[str],
-) -> Path:
-    payload_sha256 = "b" * 64
-    payload_size = 262_144
-    report = {
-        "schema": "emulebb.rust.package-smoke/2",
-        "platform": platform,
-        "results": [
-            {
-                "asset": asset,
-                "status": "passed",
-                "localTransfer": {
-                    "payload": {
-                        "name": "emulebb-package-smoke.bin",
-                        "sizeBytes": payload_size,
-                        "sha256": payload_sha256,
-                    },
-                    "sharedFile": {
-                        "hash": "c" * 32,
-                        "name": "emulebb-package-smoke.bin",
-                        "sizeBytes": payload_size,
-                    },
-                    "transferAccepted": True,
-                    "delivery": {
-                        "hash": "c" * 32,
-                        "state": "completed",
-                        "completedBytes": payload_size,
-                        "deliveredPathWithinIncoming": True,
-                        "deliveredSha256": payload_sha256,
-                        "observations": [],
-                    },
-                    "sourceDiscovery": "ed2k-link-direct-source",
-                    "publicDiscoveryDisabled": True,
-                    "gracefulShutdowns": 2,
-                },
-            }
-            for asset in assets
-        ],
-    }
-    path = release_dir / f"emulebb-rust-v{version}-package-smoke-{platform}.json"
-    path.write_text(json.dumps(report), encoding="utf-8")
-    return path
 
 
 class TestReleaseIdentity(unittest.TestCase):
@@ -225,6 +142,15 @@ class TestReleaseIdentity(unittest.TestCase):
 
 
 class TestOciArchiveDigest(unittest.TestCase):
+    def test_oversized_manifest_is_rejected_before_reading_the_blob(self) -> None:
+        blob = b"x" * (PUBLISH.MAX_INDEX_BYTES + 1)
+        digest = "sha256:" + hashlib.sha256(blob).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "oversized.oci.tar"
+            write_oci_archive(archive, blob, digest=digest)
+            with self.assertRaisesRegex(RuntimeError, "exceeds"):
+                PUBLISH.oci_archive_digest(archive)
+
     def test_returns_digest_after_verifying_referenced_blob(self) -> None:
         blob = b'{"schemaVersion":2,"manifests":[]}'
         digest = f"sha256:{hashlib.sha256(blob).hexdigest()}"
@@ -271,205 +197,344 @@ class TestOciArchiveDigest(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), f"{digest}\n")
 
 
-class TestCandidateManifest(unittest.TestCase):
-    def test_records_exact_revisions_and_release_evidence(self) -> None:
-        version = "0.1.0-beta.2"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            release_dir = Path(temp_dir)
-            expected_digest = write_candidate_evidence(release_dir, version)
-            output = release_dir / f"emulebb-rust-v{version}-candidate-manifest.json"
-            manifest = PUBLISH.write_candidate_manifest(
-                release_dir=release_dir,
-                output=output,
-                release_version=version,
-                channel="candidate",
-                source_sha="1" * 40,
-                support_refs={
-                    "emulebbBuild": "2" * 40,
-                    "emulebbBuildTests": "3" * 40,
-                    "emulebbTooling": "4" * 40,
-                    "emulebbMiniupnp": "5" * 40,
-                    "emulebbLibpcpnatpmp": "6" * 40,
-                },
-                repository="emulebb/emulebb-rust",
-                run_id="123",
-                run_attempt="2",
-            )
+class TestDraftAssetValidation(unittest.TestCase):
+    def setUp(self) -> None:
+        self.source = "1" * 40
+        self.tag = "rust-v0.1.0-beta.2"
+        self.release = {"id": 42, "draft": True, "prerelease": True,
+                        "tag_name": self.tag, "target_commitish": self.source}
+        self.expected = [{"name": "alpha.zip", "sha256": "a" * 64, "sizeBytes": 1},
+                         {"name": "beta.json", "sha256": "b" * 64, "sizeBytes": 5}]
+        self.assets = [{"name": row["name"], "size": row["sizeBytes"], "digest": "sha256:" + row["sha256"],
+                        "state": "uploaded"} for row in self.expected]
 
-            self.assertEqual(manifest["source"]["emulebbRust"], "1" * 40)
-            self.assertEqual(manifest["ociManifestDigest"], expected_digest)
-            self.assertEqual(manifest["formatVersion"], 2)
-            self.assertEqual(
-                {evidence["platform"] for evidence in manifest["packageSmoke"]},
-                {
-                    "windows-x64",
-                    "windows-arm64",
-                    "linux-x64",
-                    "linux-arm64",
-                    "macos-x64",
-                    "macos-arm64",
-                },
-            )
-            artifact_names = {artifact["name"] for artifact in manifest["artifacts"]}
-            self.assertIn(f"emulebb-rust-v{version}-windows-x64.zip", artifact_names)
-            self.assertIn(
-                f"emulebb-rust-v{version}-package-smoke-windows-x64.json",
-                artifact_names,
-            )
-            self.assertNotIn(output.name, artifact_names)
-            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), manifest)
+    def validate(self, **changes):
+        return PUBLISH.validate_draft_assets(**{
+            "release": self.release, "assets": self.assets, "expected": self.expected,
+            "tag": self.tag, "source_sha": self.source, "complete": False, **changes,
+        })
 
-    def test_rejects_missing_package_smoke_report(self) -> None:
-        version = "0.1.0-beta.2"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            release_dir = Path(temp_dir)
-            write_candidate_evidence(release_dir, version)
-            (release_dir / f"emulebb-rust-v{version}-package-smoke-macos-arm64.json").unlink()
+    def test_matching_subset_can_resume_but_cannot_be_finalized(self) -> None:
+        self.assertEqual(self.validate(assets=self.assets[:1]), 42)
+        with self.assertRaisesRegex(RuntimeError, "complete verified candidate"):
+            self.validate(assets=self.assets[:1], complete=True)
+        self.assertEqual(self.validate(complete=True, release_id="42"), 42)
 
-            with self.assertRaisesRegex(RuntimeError, "candidate release evidence is missing"):
-                PUBLISH.write_candidate_manifest(
-                    release_dir=release_dir,
-                    output=release_dir / "candidate.json",
-                    release_version=version,
-                    channel="candidate",
-                    source_sha="1" * 40,
-                    support_refs={"emulebbBuild": "2" * 40},
-                    repository="emulebb/emulebb-rust",
-                    run_id="123",
-                    run_attempt="1",
-                )
+    def test_absent_release_is_allowed_only_before_upload(self) -> None:
+        self.assertIsNone(self.validate(release=None, assets=[]))
+        with self.assertRaisesRegex(RuntimeError, "draft release is missing"):
+            self.validate(release=None, assets=[], complete=True)
 
-    def test_rejects_failed_package_transfer(self) -> None:
-        version = "0.1.0-beta.2"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            release_dir = Path(temp_dir)
-            write_candidate_evidence(release_dir, version)
-            report_path = release_dir / f"emulebb-rust-v{version}-package-smoke-windows-x64.json"
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            report["results"][0]["status"] = "failed"
-            report_path.write_text(json.dumps(report), encoding="utf-8")
+    def test_published_wrong_source_or_non_prerelease_version_cannot_be_rewritten(self) -> None:
+        for field, value in (("draft", False), ("prerelease", False), ("target_commitish", "2" * 40),
+                             ("tag_name", "rust-v9.9.9-beta.1"), ("id", True)):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(RuntimeError, "outside the expected source-bound"):
+                    self.validate(release={**self.release, field: value})
 
-            with self.assertRaisesRegex(RuntimeError, "result 0 did not pass"):
-                PUBLISH.write_candidate_manifest(
-                    release_dir=release_dir,
-                    output=release_dir / "candidate.json",
-                    release_version=version,
-                    channel="candidate",
-                    source_sha="1" * 40,
-                    support_refs={"emulebbBuild": "2" * 40},
-                    repository="emulebb/emulebb-rust",
-                    run_id="123",
-                    run_attempt="1",
-                )
+    def test_existing_asset_must_match_size_digest_and_completed_upload_state(self) -> None:
+        for field, value in (("size", True), ("size", 2), ("digest", None),
+                             ("digest", "sha256:" + "c" * 64), ("state", "starter")):
+            with self.subTest(field=field, value=value):
+                assets = [{**self.assets[0], field: value}, self.assets[1]]
+                with self.assertRaisesRegex(RuntimeError, "asset bytes differ"):
+                    self.validate(assets=assets)
 
-    def test_rejects_malformed_package_smoke_report(self) -> None:
-        version = "0.1.0-beta.2"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            release_dir = Path(temp_dir)
-            write_candidate_evidence(release_dir, version)
-            report_path = release_dir / f"emulebb-rust-v{version}-package-smoke-macos-x64.json"
-            report_path.write_text("{not-json", encoding="utf-8")
+    def test_unknown_duplicate_or_missing_assets_fail_closed(self) -> None:
+        for assets in ([*self.assets, {**self.assets[0], "name": "unexpected.key"}],
+                       [*self.assets, self.assets[0]]):
+            with self.subTest(assets=assets):
+                with self.assertRaisesRegex(RuntimeError, "unexpected or repeated"):
+                    self.validate(assets=assets)
+        with self.assertRaisesRegex(RuntimeError, "complete verified candidate"):
+            self.validate(assets=[], complete=True)
 
-            with self.assertRaisesRegex(RuntimeError, "could not read package smoke report"):
-                PUBLISH.write_candidate_manifest(
-                    release_dir=release_dir,
-                    output=release_dir / "candidate.json",
-                    release_version=version,
-                    channel="candidate",
-                    source_sha="1" * 40,
-                    support_refs={"emulebbBuild": "2" * 40},
-                    repository="emulebb/emulebb-rust",
-                    run_id="123",
-                    run_attempt="1",
-                )
+    def test_finalization_requires_the_same_numeric_release_id(self) -> None:
+        for value in ("43", "0", "main", "42\n"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                    self.validate(complete=True, release_id=value)
 
-    def test_rejects_package_transfer_digest_mismatch(self) -> None:
-        version = "0.1.0-beta.2"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            release_dir = Path(temp_dir)
-            write_candidate_evidence(release_dir, version)
-            report_path = release_dir / f"emulebb-rust-v{version}-package-smoke-linux-x64.json"
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            report["results"][0]["localTransfer"]["delivery"]["deliveredSha256"] = "d" * 64
-            report_path.write_text(json.dumps(report), encoding="utf-8")
 
-            with self.assertRaisesRegex(RuntimeError, "delivered SHA-256 does not match"):
-                PUBLISH.write_candidate_manifest(
-                    release_dir=release_dir,
-                    output=release_dir / "candidate.json",
-                    release_version=version,
-                    channel="candidate",
-                    source_sha="1" * 40,
-                    support_refs={"emulebbBuild": "2" * 40},
-                    repository="emulebb/emulebb-rust",
-                    run_id="123",
-                    run_attempt="1",
-                )
+class TestGitHubReleaseRows(unittest.TestCase):
+    def test_all_pages_are_read_and_errors_are_not_interpreted_as_absence(self) -> None:
+        pages = [[], [{"id": 1}], [{"id": 2}]]
+        with mock.patch.object(PUBLISH.subprocess, "check_output", return_value=json.dumps(pages)) as query:
+            self.assertEqual(PUBLISH.gh_rows("repos/example/project/releases?per_page=100"), [{"id": 1}, {"id": 2}])
+        query.assert_called_once_with(
+            ["gh", "api", "--paginate", "--slurp", "repos/example/project/releases?per_page=100"],
+            text=True, timeout=120,
+        )
+        with mock.patch.object(PUBLISH.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, "gh")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                PUBLISH.gh_rows("repos/example/project/releases?per_page=100")
 
-    def test_rejects_mutable_support_ref(self) -> None:
-        version = "0.1.0-beta.2"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            release_dir = Path(temp_dir)
-            write_candidate_evidence(release_dir, version)
+    def test_malformed_pages_are_rejected(self) -> None:
+        for payload in ('{"pages":[]}', '[{}]', '[["not-an-asset"]]', "not JSON"):
+            with self.subTest(payload=payload):
+                with mock.patch.object(PUBLISH.subprocess, "check_output", return_value=payload):
+                    with self.assertRaisesRegex(RuntimeError, "malformed release metadata"):
+                        PUBLISH.gh_rows("repos/example/project/releases")
 
-            with self.assertRaisesRegex(RuntimeError, "full lowercase commit SHAs"):
-                PUBLISH.write_candidate_manifest(
-                    release_dir=release_dir,
-                    output=release_dir / "candidate.json",
-                    release_version=version,
-                    channel="candidate",
-                    source_sha="1" * 40,
-                    support_refs={"emulebbBuild": "main"},
-                    repository="emulebb/emulebb-rust",
-                    run_id="123",
-                    run_attempt="1",
-                )
 
-    def test_command_writes_candidate_manifest(self) -> None:
-        version = "0.1.0-beta.2"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            release_dir = Path(temp_dir)
-            write_candidate_evidence(release_dir, version)
-            output = release_dir / "candidate.json"
+class TestRegistryPublication(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = "registry.invalid/example/image"
+        self.version = "0.1.0-beta.2"
+        self.digests = {"ubuntu": "sha256:" + "a" * 64, "alpine": "sha256:" + "b" * 64}
+        self.archives = {variant: Path(variant + ".oci.tar") for variant in self.digests}
+        self.references = {}
+        self.calls = []
+        self.writes = []
 
-            self.assertEqual(
-                PUBLISH.main(
-                    [
-                        "candidate-manifest",
-                        "--release-dir",
-                        str(release_dir),
-                        "--output",
-                        str(output),
-                        "--release-version",
-                        version,
-                        "--channel",
-                        "candidate",
-                        "--source-sha",
-                        "1" * 40,
-                        "--emulebb-build-ref",
-                        "2" * 40,
-                        "--emulebb-build-tests-ref",
-                        "3" * 40,
-                        "--emulebb-tooling-ref",
-                        "4" * 40,
-                        "--emulebb-miniupnp-ref",
-                        "5" * 40,
-                        "--emulebb-libpcpnatpmp-ref",
-                        "6" * 40,
-                        "--repository",
-                        "emulebb/emulebb-rust",
-                        "--run-id",
-                        "123",
-                        "--run-attempt",
-                        "1",
-                    ]
-                ),
-                0,
-            )
-            self.assertEqual(
-                json.loads(output.read_text(encoding="utf-8"))["formatVersion"],
-                2,
-            )
+    def client(self, *arguments):
+        self.calls.append(arguments)
+        operation = arguments[:2]
+        if operation == ("tag", "ls"):
+            return "\n".join(reference.removeprefix(self.repository + ":") for reference in self.references)
+        if operation == ("image", "digest"):
+            return self.references[arguments[2]]
+        if operation == ("image", "import"):
+            self.writes.append(arguments)
+            variant = "alpine" if arguments[2].endswith("-alpine") else "ubuntu"
+            self.references[arguments[2]] = self.digests[variant]
+            return ""
+        if operation == ("image", "copy"):
+            self.writes.append(arguments)
+            source, target = arguments[2:]
+            self.assertTrue(source.startswith(self.repository + "@sha256:"))
+            self.references[target] = source.split("@", 1)[1]
+            return ""
+        raise AssertionError(f"unexpected registry operation: {arguments}")
+
+    def seed_versions(self) -> None:
+        self.references = {self.repository + ":" + self.version + "-" + variant: digest
+                           for variant, digest in self.digests.items()}
+        self.references[self.repository + ":" + self.version] = self.digests["ubuntu"]
+
+    def publish(self, **changes) -> None:
+        PUBLISH.publish_verified_images(**{
+            "repository": self.repository, "version": self.version, "digests": self.digests,
+            "archives": self.archives, "client": self.client, **changes,
+        })
+
+    def promote(self, **changes) -> None:
+        PUBLISH.promote_nightly(**{
+            "repository": self.repository, "version": self.version, "digests": self.digests,
+            "client": self.client, **changes,
+        })
+
+    def test_both_imports_and_default_alias_use_only_bound_digests(self) -> None:
+        self.publish()
+        self.assertEqual([row[:2] for row in self.writes], [("image", "import"), ("image", "import"), ("image", "copy")])
+        self.assertEqual(self.references[self.repository + ":" + self.version], self.digests["ubuntu"])
+        self.assertEqual(self.references[self.repository + ":" + self.version + "-alpine"], self.digests["alpine"])
+        self.assertEqual(self.calls.count(("tag", "ls", self.repository)), 1)
+
+    def test_conflict_in_any_immutable_tag_blocks_every_write(self) -> None:
+        for suffix in ("-ubuntu", "-alpine", ""):
+            with self.subTest(suffix=suffix):
+                self.seed_versions()
+                self.calls.clear()
+                self.writes.clear()
+                self.references[self.repository + ":" + self.version + suffix] = "sha256:" + "c" * 64
+                with self.assertRaisesRegex(RuntimeError, "Immutable image tag conflicts"):
+                    self.publish()
+                self.assertFalse(self.writes)
+
+    def test_existing_matching_versions_are_never_reimported_or_overwritten(self) -> None:
+        self.seed_versions()
+        self.publish()
+        self.assertFalse(self.writes)
+
+    def test_partial_import_retry_keeps_the_already_verified_ubuntu_tag(self) -> None:
+        self.references[self.repository + ":" + self.version + "-ubuntu"] = self.digests["ubuntu"]
+        self.publish()
+        self.assertEqual([row[:2] for row in self.writes], [("image", "import"), ("image", "copy")])
+        self.assertTrue(self.writes[0][2].endswith("-alpine"))
+
+    def test_registry_transport_failure_is_never_treated_as_an_absent_tag(self) -> None:
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.publish(client=mock.Mock(side_effect=subprocess.CalledProcessError(1, "regctl")))
+        self.assertFalse(self.writes)
+
+    def test_wrong_imported_digest_blocks_the_other_variant_and_default_alias(self) -> None:
+        def broken(*arguments):
+            value = self.client(*arguments)
+            if arguments[:2] == ("image", "import"):
+                self.references[arguments[2]] = "sha256:" + "c" * 64
+            return value
+
+        with self.assertRaisesRegex(RuntimeError, "Imported image differs"):
+            self.publish(client=broken)
+        self.assertEqual(len(self.writes), 1)
+
+    def test_nightly_checks_all_versions_before_any_alias_change(self) -> None:
+        for suffix in ("-ubuntu", "-alpine", ""):
+            with self.subTest(suffix=suffix):
+                self.seed_versions()
+                self.writes.clear()
+                self.references[self.repository + ":" + self.version + suffix] = "sha256:" + "c" * 64
+                with self.assertRaisesRegex(RuntimeError, "changed before nightly promotion"):
+                    self.promote()
+                self.assertFalse(self.writes)
+
+    def test_every_nightly_alias_copies_a_digest_and_is_verified_after_copy(self) -> None:
+        self.seed_versions()
+        self.promote()
+        self.assertEqual(len(self.writes), 3)
+        for tag, digest in (("nightly-ubuntu", self.digests["ubuntu"]),
+                            ("nightly-alpine", self.digests["alpine"]), ("nightly", self.digests["ubuntu"])):
+            self.assertEqual(self.references[self.repository + ":" + tag], digest)
+        self.assertEqual(self.calls[-1], ("image", "digest", self.repository + ":nightly"))
+
+    def test_invalid_or_missing_digest_is_rejected_before_registry_access(self) -> None:
+        for value in ({"ubuntu": self.digests["ubuntu"]}, {"ubuntu": "latest", "alpine": self.digests["alpine"]}):
+            with self.subTest(digests=value):
+                with self.assertRaisesRegex(RuntimeError, "both bound OCI digests"):
+                    self.publish(digests=value)
+                self.assertFalse(self.calls)
+
+
+class TestCandidateControl(unittest.TestCase):
+    def test_registry_writes_require_actual_archive_verification_and_current_source_checks(self) -> None:
+        for fault in ("archive", "assembly-hash", "source"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                path = root / "emulebb-rust-v0.1.0-beta.2-candidate-manifest.json"
+                data = {"images": {variant: {"archive": variant + ".oci.tar",
+                                             "ociManifestDigest": "sha256:" + character * 64}
+                                   for variant, character in (("ubuntu", "a"), ("alpine", "b"))}}
+                path.write_text(json.dumps(data), encoding="utf-8")
+                owner = mock.Mock()
+                owner.candidate_path.return_value = path
+                owner.verify_candidate.return_value = data
+                if fault == "archive":
+                    owner.verify_candidate.side_effect = RuntimeError("actual archive changed")
+                digest = "f" * 64 if fault == "assembly-hash" else hashlib.sha256(path.read_bytes()).hexdigest()
+                with (
+                    mock.patch.object(PUBLISH, "candidate_owner", return_value=owner),
+                    mock.patch.object(PUBLISH, "candidate_context", return_value=object()),
+                    mock.patch.object(PUBLISH, "archive_identity_reader", return_value=object()),
+                    mock.patch.object(PUBLISH, "require_publication_source") as source,
+                    mock.patch.object(PUBLISH, "publish_verified_images") as publish,
+                ):
+                    if fault == "source":
+                        source.side_effect = RuntimeError("latest source workflow is not green")
+                    with self.assertRaises(RuntimeError):
+                        PUBLISH.main([
+                            "publish-images", *self.common(root), "--archives-dir", str(root / "archives"),
+                            "--harness-repo", str(root / "harness"), "--assembled-candidate-sha256", digest,
+                        ])
+                publish.assert_not_called()
+                if fault != "source":
+                    source.assert_not_called()
+
+    def test_expected_identities_can_come_from_the_workflow_environment(self) -> None:
+        environment = {
+            "RELEASE_VERSION": "0.1.0-beta.2", "RELEASE_CHANNEL": "candidate",
+            "EMULEBB_SOURCE_REVISION": "1" * 40, "EMULEBB_BUILD_REF": "2" * 40,
+            "EMULEBB_BUILD_TESTS_REF": "3" * 40, "EMULEBB_TOOLING_REF": "4" * 40,
+            "MINIUPNP_REF": "5" * 40, "PCPNATPMP_REF": "6" * 40,
+            "GITHUB_REPOSITORY": "example/project", "GITHUB_RUN_ID": "101",
+            "GITHUB_RUN_ATTEMPT": "2", "GITHUB_WORKFLOW_SHA": "7" * 40,
+        }
+        with mock.patch.dict(PUBLISH.os.environ, environment):
+            args = PUBLISH.build_parser().parse_args([
+                "verify-public-candidate", "--release-dir", "synthetic", "--build-repo", "build",
+                "--verified-candidate-sha256", "a" * 64,
+            ])
+        self.assertEqual(args.source_sha, "1" * 40)
+        self.assertEqual(args.emulebb_build_ref, "2" * 40)
+        self.assertEqual(args.emulebb_build_tests_ref, "3" * 40)
+        self.assertEqual(args.workflow_sha, "7" * 40)
+        self.assertEqual((args.repository, args.run_id, args.run_attempt), ("example/project", "101", "2"))
+
+    @staticmethod
+    def common(root: Path) -> list[str]:
+        return [
+            "--release-dir", str(root), "--release-version", "0.1.0-beta.2", "--channel", "candidate",
+            "--source-sha", "1" * 40, "--emulebb-build-ref", "2" * 40,
+            "--emulebb-build-tests-ref", "3" * 40, "--emulebb-tooling-ref", "4" * 40,
+            "--emulebb-miniupnp-ref", "5" * 40, "--emulebb-libpcpnatpmp-ref", "6" * 40,
+            "--repository", "example/project", "--run-id", "101", "--run-attempt", "2",
+            "--workflow-sha", "7" * 40, "--build-repo", str(root / "build"),
+        ]
+
+    def test_assembly_and_verification_delegate_to_the_checked_packaging_owner(self) -> None:
+        for command in ("candidate-manifest", "verify-candidate", "verify-public-candidate"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                path = root / "emulebb-rust-v0.1.0-beta.2-candidate-manifest.json"
+                data = {"images": {"ubuntu": {"ociManifestDigest": "sha256:" + "a" * 64},
+                                   "alpine": {"ociManifestDigest": "sha256:" + "b" * 64}}}
+                path.write_text(json.dumps(data), encoding="utf-8")
+                owner = mock.Mock()
+                owner.candidate_path.return_value = path
+                owner.verify_candidate.return_value = data
+                owner.verify_public_candidate.return_value = data
+                context, reader = object(), object()
+                extra = ["--github-output", str(root / "github-output")]
+                if command == "candidate-manifest":
+                    extra += ["--output", str(path)]
+                if command in {"candidate-manifest", "verify-candidate"}:
+                    extra += ["--archives-dir", str(root / "archives"), "--harness-repo", str(root / "harness")]
+                else:
+                    extra += ["--verified-candidate-sha256", "c" * 64]
+                with (
+                    mock.patch.object(PUBLISH, "candidate_owner", return_value=owner),
+                    mock.patch.object(PUBLISH, "candidate_context", return_value=context),
+                    mock.patch.object(PUBLISH, "archive_identity_reader", return_value=reader) as load_reader,
+                ):
+                    self.assertEqual(PUBLISH.main([command, *self.common(root), *extra]), 0)
+                if command == "candidate-manifest":
+                    owner.write_candidate.assert_called_once_with(
+                        release_dir=root, context=context, archives_dir=root / "archives", archive_identity=reader,
+                    )
+                elif command == "verify-candidate":
+                    owner.verify_candidate.assert_called_once_with(
+                        release_dir=root, context=context, archives_dir=root / "archives", archive_identity=reader,
+                    )
+                else:
+                    load_reader.assert_not_called()
+                    owner.verify_public_candidate.assert_called_once_with(
+                        release_dir=root, context=context, verified_candidate_sha256="c" * 64,
+                    )
+                outputs = (root / "github-output").read_text(encoding="utf-8")
+                self.assertIn("candidate_sha256=" + hashlib.sha256(path.read_bytes()).hexdigest(), outputs)
+                self.assertIn("ubuntu_digest=sha256:" + "a" * 64, outputs)
+                self.assertIn("alpine_digest=sha256:" + "b" * 64, outputs)
+
+    def test_local_calls_fail_before_checkout_or_import(self) -> None:
+        args = PUBLISH.build_parser().parse_args([
+            "verify-public-candidate", *self.common(Path("synthetic")),
+            "--verified-candidate-sha256", "a" * 64,
+        ])
+        with (
+            mock.patch.dict(PUBLISH.os.environ, {"GITHUB_ACTIONS": "false"}),
+            mock.patch.object(PUBLISH, "checked_checkout") as checkout,
+            mock.patch.object(PUBLISH.importlib, "import_module") as load,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "actual GitHub run"):
+                PUBLISH.candidate_owner(args)
+        checkout.assert_not_called()
+        load.assert_not_called()
+
+    def test_dirty_packaging_owner_is_never_imported(self) -> None:
+        args = PUBLISH.build_parser().parse_args([
+            "verify-public-candidate", *self.common(Path("synthetic")),
+            "--verified-candidate-sha256", "a" * 64,
+        ])
+        environment = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/project",
+                       "GITHUB_RUN_ID": "101", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_WORKFLOW_SHA": "7" * 40}
+        with (
+            mock.patch.dict(PUBLISH.os.environ, environment),
+            mock.patch.object(PUBLISH, "checked_checkout", side_effect=[PUBLISH.ROOT, RuntimeError("dirty owner")]),
+            mock.patch.object(PUBLISH.importlib, "import_module") as load,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "dirty owner"):
+                PUBLISH.candidate_owner(args)
+        load.assert_not_called()
 
 
 if __name__ == "__main__":

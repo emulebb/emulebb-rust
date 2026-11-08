@@ -17,8 +17,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  EMULEBB_BUILD_REF: baaf150ce3ceca30e5d8cf821d2b913471a0862b
-  EMULEBB_BUILD_TESTS_REF: a37c775b383cacda5aa4269778d865b9430d684b
+  EMULEBB_BUILD_REF: 010c266c29d73e17a654306d0dca8008d8db9006
+  EMULEBB_BUILD_TESTS_REF: fd4c6d21e079fab2b84704294c7c7000b893a81e
   EMULEBB_TOOLING_REF: 630d1a3492ae65acad0a8dfd1575d671ff7b492c
   # Pin the native NAT sources linked by the sys crates.
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
@@ -441,7 +441,7 @@ jobs:
         with:
           persist-credentials: false
           repository: emulebb/emulebb-build-tests
-          ref: a37c775b383cacda5aa4269778d865b9430d684b
+          ref: fd4c6d21e079fab2b84704294c7c7000b893a81e
           path: repos/emulebb-build-tests
 
       - name: Checkout pinned Rust OpenAPI contract

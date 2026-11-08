@@ -351,7 +351,7 @@ class TestWorkflowJobTimeouts(unittest.TestCase):
 
         errors = CHECKER.check_workflow_job_timeouts(incomplete)
 
-        self.assertEqual(len(errors), 21)
+        self.assertEqual(len(errors), 25)
         self.assertTrue(any("ci.yml job build-test" in error for error in errors))
         self.assertTrue(any("release.yml job publish-native" in error for error in errors))
 
@@ -478,7 +478,9 @@ class TestReleaseControlTrust(unittest.TestCase):
 
     def test_candidate_checkout_cannot_supply_control_helpers(self) -> None:
         for filename, keyword, jobs in (
-            ("release.yml", "workflow_text", ("prepare", "verify-source", "publish-native", "cleanup-nightlies")),
+            ("release.yml", "workflow_text", ("prepare", "verify-source", "native-package-smoke",
+                                             "image-native-validation", "assemble-candidate", "publish-image",
+                                             "publish-native", "publish-nightly-channel", "cleanup-nightlies")),
             ("nightly.yml", "nightly_text", ("prepare", "verify-source")),
         ):
             text = (CHECKER.ROOT / ".github" / "workflows" / filename).read_text(encoding="utf-8")
@@ -587,7 +589,7 @@ class TestReleaseImagePromotion(unittest.TestCase):
 
         errors = CHECKER.check_release_image_promotion(workflow)
 
-        self.assertTrue(any("before the GitHub release" in error for error in errors))
+        self.assertTrue(any("bypasses the tested publication helper" in error for error in errors))
 
     def test_rejects_fatal_post_publication_cleanup(self) -> None:
         workflow = (CHECKER.ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -616,37 +618,37 @@ class TestReleaseImageSecurity(unittest.TestCase):
         self.assertTrue(any("pin the LinuxServer" in error for error in errors))
         self.assertTrue(any("dependabot" in error.lower() for error in errors))
 
-    def test_rejects_mutable_trivy_installer(self) -> None:
-        workflow = """
-  image-candidate:
-    steps:
-      - uses: aquasecurity/setup-trivy@v0.3.1
-        with:
-          version: v0.75.0
-      - run: |
-          trivy image --image-src docker --platform "$platform" --format spdx-json "$IMAGE"
-          trivy image --image-src docker --platform "$platform" --scanners vuln \
-            --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
-      - with:
-          name: emulebb-rust-image-security
-  assemble-candidate:
-    steps:
-      - with:
-          name: emulebb-rust-image-security
-  publish-native:
-    steps:
-      - with:
-          name: emulebb-rust-release-candidate
-"""
-
-        errors = CHECKER.check_release_image_security(
-            workflow,
-            f"FROM ghcr.io/linuxserver/baseimage-ubuntu:resolute@sha256:{'a' * 64}\n",
-            "- package-ecosystem: docker\n  directory: /packaging/docker\n",
+    def test_rejects_a_floating_shared_image_security_owner(self) -> None:
+        workflow = (CHECKER.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        workflow, count = re.subn(
+            r"(?m)^  EMULEBB_BUILD_REF: [0-9a-f]{40}$", "  EMULEBB_BUILD_REF: main", workflow
         )
-
+        self.assertEqual(count, 1)
+        errors = CHECKER.check_release_image_security(workflow)
         self.assertEqual(len(errors), 1)
         self.assertIn("full commit SHA", errors[0])
+
+    def test_native_proof_cannot_enable_cpu_emulation(self) -> None:
+        workflow = (CHECKER.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        before, body = workflow.split("  image-native-validation:\n", 1)
+        workflow = before + "  image-native-validation:\n" + body.replace(
+            "    steps:\n", "    steps:\n      - uses: docker/setup-qemu-action@synthetic\n", 1
+        )
+        errors = CHECKER.check_release_image_security(workflow)
+        self.assertTrue(any("must not install CPU emulation" in error for error in errors))
+
+    def test_rejects_an_alpine_runtime_without_a_digest(self) -> None:
+        errors = CHECKER.check_release_image_security(alpine_text="FROM ghcr.io/linuxserver/baseimage-alpine:3.24\n")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Alpine 3.24", errors[0])
+
+    def test_final_checksum_cannot_precede_image_evidence(self) -> None:
+        workflow = (CHECKER.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        workflow = workflow.replace("assemble-emulebb-rust-image-evidence-ci", "TEMPORARY_IMAGE_OWNER")
+        workflow = workflow.replace("assemble-emulebb-rust-release-ci", "assemble-emulebb-rust-image-evidence-ci")
+        workflow = workflow.replace("TEMPORARY_IMAGE_OWNER", "assemble-emulebb-rust-release-ci")
+        errors = CHECKER.check_release_image_security(workflow)
+        self.assertTrue(any("checksum the final evidence" in error for error in errors))
 
 
 class TestContainerHealthContract(unittest.TestCase):
@@ -788,10 +790,10 @@ working-directory: .ci/emulebb-build
       - name: emulebb-rust-package-smoke-${{ matrix.slug }}
       - pattern: emulebb-rust-package-smoke-*
 package-emulebb-rust-ci --release-version 0.1.0-beta.2 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
-smoke-rust-container.py
+validate-emulebb-rust-image-ci
 path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
-needs: [prepare, native-package-smoke, image-candidate]
+needs: [prepare, native-package-smoke, musl-package, image-native-validation]
 assemble-candidate:
 ref: ${{ github.workflow_sha }}
 candidate-manifest
@@ -799,7 +801,7 @@ name: emulebb-rust-release-candidate
 needs: [prepare, assemble-candidate, publish-image]
 RELEASE-${RELEASE_VERSION}-NOTES.md
 RELEASE-${RELEASE_VERSION}-CHANGELOG.md
-body_path: ${{ inputs.channel == 'nightly' && 'nightly-release-notes.md' || 'release-notes.md' }}
+--source-root ../.ci/candidate
 """
         self.assertEqual(CHECKER.check_release_output_paths(workflow), [])
 
