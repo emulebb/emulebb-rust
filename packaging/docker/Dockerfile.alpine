@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+ARG VERSION=0.1.0-beta.2
+FROM docker.io/library/alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS unpack
+ARG VERSION
+ARG TARGETARCH
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+RUN apk add --no-cache zstd
+COPY dist/emulebb-rust-v${VERSION}-linux-${TARGETARCH}-musl.tar.zst /tmp/package.tar.zst
+RUN mkdir /payload \
+    && zstd -dc /tmp/package.tar.zst | tar -x -C /payload --strip-components=1
+
+FROM ghcr.io/linuxserver/baseimage-alpine:3.24@sha256:7315b19a32460a84b4474993ef33065483ffec792fbc70dbe12eab918aa2bbf4
+ARG VERSION
+LABEL org.opencontainers.image.title="eMuleBB Rust" \
+      org.opencontainers.image.source="https://github.com/emulebb/emulebb-rust" \
+      org.opencontainers.image.version="${VERSION}" \
+      io.emulebb.image.variant="alpine"
+ENV HOME=/config \
+    XDG_CONFIG_HOME=/config \
+    XDG_DATA_HOME=/config
+
+# Refresh the pinned base's security packages; the SBOM records resolved versions.
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
+COPY --from=unpack /payload/ /usr/lib/emulebb-rust/
+COPY root/ /
+RUN chmod 755 /usr/lib/emulebb-rust/emulebb-rust \
+    /etc/s6-overlay/s6-rc.d/svc-emulebb-rust/run \
+    /usr/local/bin/emulebb-rust-healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["/usr/local/bin/emulebb-rust-healthcheck"]
+EXPOSE 4711/tcp 4662/tcp 4672/udp
+VOLUME /config /data
