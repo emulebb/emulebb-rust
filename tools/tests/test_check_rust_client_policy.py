@@ -472,6 +472,27 @@ native-package:
         self.assertTrue(any("Required CodeQL" in error for error in errors))
 
 
+class TestReleaseControlTrust(unittest.TestCase):
+    def test_current_helpers_use_workflow_revision(self) -> None:
+        self.assertEqual(CHECKER.check_release_control_trust(), [])
+
+    def test_candidate_checkout_cannot_supply_control_helpers(self) -> None:
+        for filename, keyword, jobs in (
+            ("release.yml", "workflow_text", ("prepare", "verify-source", "publish-native", "cleanup-nightlies")),
+            ("nightly.yml", "nightly_text", ("prepare", "verify-source")),
+        ):
+            text = (CHECKER.ROOT / ".github" / "workflows" / filename).read_text(encoding="utf-8")
+            for job in jobs:
+                with self.subTest(filename=filename, job=job):
+                    before, body = text.split(f"  {job}:\n", 1)
+                    changed = before + f"  {job}:\n" + body.replace(
+                        "ref: ${{ github.workflow_sha }}", "ref: ${{ inputs.source_ref }}", 1
+                    )
+                    errors = CHECKER.check_release_control_trust(**{keyword: changed})
+                    self.assertEqual(len(errors), 1)
+                    self.assertIn(f"{filename} {job}", errors[0])
+
+
 class TestNightlyCoordination(unittest.TestCase):
     def test_current_workflow_selects_one_daily_green_main_nightly(self) -> None:
         self.assertEqual(CHECKER.check_nightly_coordination(), [])

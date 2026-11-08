@@ -161,6 +161,44 @@ class TestNightlyMetadata(unittest.TestCase):
 
 
 class TestNightlyNotes(unittest.TestCase):
+    def test_git_reads_use_the_selected_source_directory(self) -> None:
+        candidate = Path("candidate-history")
+        with mock.patch.object(NIGHTLY, "run") as run:
+            run.return_value.stdout = "  source-value\n"
+            self.assertEqual(NIGHTLY.git_output("rev-parse", "HEAD", root=candidate), "source-value")
+        run.assert_called_once_with(("git", "rev-parse", "HEAD"), cwd=candidate)
+
+    def test_notes_command_reads_all_history_and_schemas_from_candidate(self) -> None:
+        candidate = Path("candidate-history")
+        output = Path("notes-output.md")
+        source_sha = "a" * 40
+        responses = (
+            source_sha,
+            "b" * 40 + "\tfix: preserve verified data",
+            "pub const SCHEMA_VERSION: i64 = 25;",
+            "pub const SCHEMA_VERSION: i64 = 24;",
+        )
+        with (
+            mock.patch.object(NIGHTLY, "git_output", side_effect=responses) as git,
+            mock.patch.object(Path, "mkdir"),
+            mock.patch.object(Path, "write_text") as write,
+        ):
+            self.assertEqual(NIGHTLY.main([
+                "notes", "--version", "0.1.0-beta.2.nightly.20261108.gaaaaaaaa",
+                "--previous-ref", "rust-v0.1.0-beta.2", "--source-root", str(candidate),
+                "--output", str(output),
+            ]), 0)
+        self.assertEqual(git.call_args_list, [
+            mock.call("rev-parse", "HEAD", root=candidate),
+            mock.call("log", "--reverse", "--format=%H%x09%s", f"rust-v0.1.0-beta.2..{source_sha}", root=candidate),
+            mock.call("show", f"{source_sha}:{NIGHTLY.METADATA_SCHEMA_PATH}", root=candidate),
+            mock.call("show", f"rust-v0.1.0-beta.2:{NIGHTLY.METADATA_SCHEMA_PATH}", root=candidate),
+        ])
+        rendered = write.call_args.args[0]
+        self.assertIn("changed from `24`", rendered)
+        self.assertIn(source_sha, rendered)
+        self.assertIn("Preserve verified data", rendered)
+
     def test_commit_subjects_are_grouped_and_linked(self) -> None:
         log = "\n".join(
             (

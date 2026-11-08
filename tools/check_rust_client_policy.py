@@ -98,6 +98,7 @@ def main() -> int:
     errors.extend(check_scheduled_fuzz_ci())
     errors.extend(check_live_rest_openapi_ci())
     errors.extend(check_release_ci_gate())
+    errors.extend(check_release_control_trust())
     errors.extend(check_nightly_coordination())
     errors.extend(check_release_build_identity())
     errors.extend(check_release_image_promotion())
@@ -1028,6 +1029,35 @@ def check_release_ci_gate(
                 "tools/nightly_release.py must require the exact-source "
                 f"{name} aggregate check"
             )
+    return errors
+
+
+def check_release_control_trust(
+    workflow_text: str | None = None,
+    nightly_text: str | None = None,
+) -> list[str]:
+    """Keep eligibility and write-capable helpers on the workflow's own revision."""
+    errors = []
+    for filename, supplied, jobs in (
+        ("release.yml", workflow_text, ("prepare", "verify-source", "publish-native", "cleanup-nightlies")),
+        ("nightly.yml", nightly_text, ("prepare", "verify-source")),
+    ):
+        text = supplied if supplied is not None else (
+            ROOT / ".github" / "workflows" / filename
+        ).read_text(encoding="utf-8")
+        for job in jobs:
+            body = re.search(
+                rf"(?ms)^  {re.escape(job)}:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)", text
+            )
+            checkout = None if body is None else re.search(
+                r"(?ms)^      - name: [^\n]*\n        uses: actions/checkout@[^\n]*\n(?P<options>.*?)(?=^      - |\Z)",
+                body.group("body"),
+            )
+            options = "" if checkout is None else checkout.group("options")
+            if not all(fragment in options for fragment in (
+                "ref: ${{ github.workflow_sha }}", "persist-credentials: false",
+            )):
+                errors.append(f"{filename} {job} must check out trusted release-control code without persisted credentials")
     return errors
 
 

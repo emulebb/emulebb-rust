@@ -56,12 +56,20 @@ jobs:
       release_version: ${{ steps.identity.outputs.version }}
       source_sha: ${{ steps.source.outputs.sha }}
     steps:
+      - name: Checkout trusted release-control helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.event.inputs.ref || github.ref }}
+          path: .ci/candidate
+          persist-credentials: false
       - name: Resolve immutable source commit
         id: source
+        working-directory: .ci/candidate
         shell: bash
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Set up Python
@@ -72,7 +80,7 @@ jobs:
         id: identity
         env:
           REQUESTED_VERSION: ${{ inputs.release_version }}
-        run: python tools/release_publish.py release-identity --requested-version "$REQUESTED_VERSION" --channel "$RELEASE_CHANNEL" --ref-name "$GITHUB_REF_NAME" --ref-type "$GITHUB_REF_TYPE" --github-output "$GITHUB_OUTPUT"
+        run: python tools/release_publish.py release-identity --requested-version "$REQUESTED_VERSION" --channel "$RELEASE_CHANNEL" --ref-name "$GITHUB_REF_NAME" --ref-type "$GITHUB_REF_TYPE" --github-output "$GITHUB_OUTPUT" --source-root .ci/candidate
 
   verify-source:
     name: Require green source checks
@@ -83,10 +91,11 @@ jobs:
       contents: read
       actions: read
     steps:
-      - name: Checkout candidate
+      - name: Checkout trusted source-check helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -555,12 +564,19 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - name: Checkout candidate for nightly notes
+      - name: Checkout trusted publication and notes helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          path: emulebb-rust
+      - name: Checkout candidate history as notes input
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
           fetch-depth: 0
-          path: emulebb-rust
+          path: .ci/candidate
       - name: Checkout pinned release documentation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -586,7 +602,7 @@ jobs:
       - name: Generate commit-based nightly notes
         if: ${{ inputs.channel == 'nightly' }}
         working-directory: emulebb-rust
-        run: python tools/nightly_release.py notes --version "${RELEASE_VERSION}" --previous-ref "${{ inputs.previous_ref }}" --output "${{ runner.temp }}/nightly-release-notes.md"
+        run: python tools/nightly_release.py notes --version "${RELEASE_VERSION}" --previous-ref "${{ inputs.previous_ref }}" --source-root ../.ci/candidate --output "${{ runner.temp }}/nightly-release-notes.md"
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -652,10 +668,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout candidate
+      - name: Checkout trusted retention helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           path: emulebb-rust
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
