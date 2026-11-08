@@ -204,6 +204,25 @@ class TestReleaseIdentity(unittest.TestCase):
             )
             self.assertEqual(output.read_text(encoding="utf-8"), "version=0.1.0-beta.2\n")
 
+    def test_command_reads_candidate_metadata_without_executing_candidate_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate = Path(temp_dir) / "candidate"
+            candidate.mkdir()
+            (candidate / "Cargo.toml").write_text(
+                '[workspace.package]\nversion = "2.3.4-beta.5"\n', encoding="utf-8"
+            )
+            (candidate / "tools").mkdir()
+            (candidate / "tools" / "release_publish.py").write_text(
+                'raise AssertionError("candidate code must not run")\n', encoding="utf-8"
+            )
+            output = Path(temp_dir) / "github-output"
+            self.assertEqual(PUBLISH.main([
+                "release-identity", "--channel", "candidate", "--ref-name", "topic",
+                "--ref-type", "branch", "--github-output", str(output),
+                "--source-root", str(candidate),
+            ]), 0)
+            self.assertEqual(output.read_text(encoding="utf-8"), "version=2.3.4-beta.5\n")
+
 
 class TestOciArchiveDigest(unittest.TestCase):
     def test_returns_digest_after_verifying_referenced_blob(self) -> None:

@@ -438,6 +438,8 @@ def build_parser() -> argparse.ArgumentParser:
     identity.add_argument("--ref-name", required=True)
     identity.add_argument("--ref-type", required=True)
     identity.add_argument("--github-output", required=True, type=Path)
+    identity.add_argument("--source-root", type=Path, default=ROOT,
+                         help="Read Cargo metadata from this candidate directory as data.")
     candidate = subparsers.add_parser(
         "candidate-manifest",
         help="record exact candidate revisions and retained release evidence",
@@ -472,7 +474,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             channel=args.channel,
             ref_name=args.ref_name,
             ref_type=args.ref_type,
-            cargo_version=workspace_version(),
+            cargo_version=workspace_version(args.source_root),
         )
         with args.github_output.open("a", encoding="utf-8") as stream:
             stream.write(f"version={version}\n")

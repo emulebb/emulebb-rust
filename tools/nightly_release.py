@@ -55,10 +55,10 @@ def run(command: Sequence[str], *, cwd: Path = ROOT) -> subprocess.CompletedProc
     )
 
 
-def git_output(*args: str) -> str:
+def git_output(*args: str, root: Path = ROOT) -> str:
     """Returns stripped output from git in the Rust repository."""
 
-    return run(("git", *args)).stdout.strip()
+    return run(("git", *args), cwd=root).stdout.strip()
 
 
 def workspace_version(root: Path = ROOT) -> str:
@@ -109,12 +109,12 @@ def metadata_schema_version(source: str) -> int:
     return int(matches[0])
 
 
-def metadata_schema_version_at_ref(ref: str) -> int:
+def metadata_schema_version_at_ref(ref: str, *, root: Path = ROOT) -> int:
     """Reads the metadata schema version from one validated Git ref."""
 
     if not SAFE_REF_RE.fullmatch(ref):
         raise RuntimeError(f"unsafe metadata schema ref: {ref}")
-    source = git_output("show", f"{ref}:{METADATA_SCHEMA_PATH}")
+    source = git_output("show", f"{ref}:{METADATA_SCHEMA_PATH}", root=root)
     return metadata_schema_version(source)
 
 
@@ -600,6 +600,8 @@ def build_parser() -> argparse.ArgumentParser:
     notes_parser.add_argument("--previous-ref", required=True)
     notes_parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     notes_parser.add_argument("--output", type=Path, required=True)
+    notes_parser.add_argument("--source-root", type=Path, default=ROOT,
+                              help="Candidate Git history to read as data using this trusted helper.")
 
     verify_parser = subparsers.add_parser(
         "verify-source",
@@ -634,10 +636,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "notes":
         if not SAFE_REF_RE.fullmatch(args.previous_ref):
             raise RuntimeError(f"unsafe previous nightly ref: {args.previous_ref}")
-        source_sha = git_output("rev-parse", "HEAD").lower()
-        raw_log = git_output("log", "--reverse", "--format=%H%x09%s", f"{args.previous_ref}..{source_sha}")
-        schema_version = metadata_schema_version_at_ref(source_sha)
-        previous_schema_version = metadata_schema_version_at_ref(args.previous_ref)
+        source_sha = git_output("rev-parse", "HEAD", root=args.source_root).lower()
+        raw_log = git_output("log", "--reverse", "--format=%H%x09%s", f"{args.previous_ref}..{source_sha}", root=args.source_root)
+        schema_version = metadata_schema_version_at_ref(source_sha, root=args.source_root)
+        previous_schema_version = metadata_schema_version_at_ref(args.previous_ref, root=args.source_root)
         rendered = render_notes(
             version=args.version,
             previous_ref=args.previous_ref,
