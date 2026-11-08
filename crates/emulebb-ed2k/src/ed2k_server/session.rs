@@ -84,6 +84,37 @@ pub(super) enum OfferFilesPacingMode {
     Negotiated(OfferFilesPolicy),
 }
 
+/// Why the offer-files pump is waiting. Diagnostics use this to distinguish a
+/// deliberate pacing wait from an idle pump that lost its wakeup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OfferFilesWaitReason {
+    /// A batch is due now; the connection loop should publish it immediately.
+    Due,
+    /// The negotiated or legacy minimum interval has not elapsed yet.
+    Pacing,
+    /// A paced probe for candidates added to the live catalog (bounded refill).
+    CandidateRefill,
+    /// The connection is not publishable yet (login or capability negotiation).
+    Connection,
+    /// The pump owns no batch and no eligible candidates remain to schedule.
+    CaughtUp,
+    /// A batch is requested but there is no bounded wakeup for it.
+    IdleUnbounded,
+}
+
+impl OfferFilesWaitReason {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Due => "due",
+            Self::Pacing => "pacing",
+            Self::CandidateRefill => "candidateRefill",
+            Self::Connection => "connectionWait",
+            Self::CaughtUp => "caughtUp",
+            Self::IdleUnbounded => "idleUnbounded",
+        }
+    }
+}
+
 impl ServerSessionPhase {
     pub(super) fn as_str(self) -> &'static str {
         match self {
@@ -587,22 +618,37 @@ impl ServerSession {
         )
     }
 
+    fn offer_files_pacing_delay(&self, entries: usize) -> Duration {
+        match self.offer_files_pacing {
+            OfferFilesPacingMode::Negotiated(policy) => policy.next_batch_delay(entries.max(1)),
+            OfferFilesPacingMode::Legacy { .. } => OFFER_FILES_LEGACY_MIN_INTERVAL,
+            OfferFilesPacingMode::AwaitingCapability => Duration::ZERO,
+        }
+    }
+
+    /// Earliest instant at which the next offer batch may be published.
+    ///
+    /// WHY: The negotiated interval starts when the previous `OP_OFFERFILES`
+    /// packet reached the wire. Anchoring on `Instant::now()` would silently
+    /// add every post-send catalog update and bookkeeping step to the
+    /// advertised cadence, stretching a large publication far past its pacing
+    /// floor even though the wire interval already elapsed.
+    fn offer_files_next_deadline(&self, entries: usize, now: Instant) -> Instant {
+        self.offer_files_sent_at
+            .map_or(now, |sent_at| {
+                sent_at + self.offer_files_pacing_delay(entries)
+            })
+            .max(now)
+    }
+
     fn schedule_offer_files_after_pacing_resolution(&mut self) {
         if !self.offer_files_publish_requested {
             self.offer_files_next_publish_at = None;
             return;
         }
         let now = Instant::now();
-        let due = match (self.offer_files_sent_at, &self.offer_files_pacing) {
-            (Some(sent_at), OfferFilesPacingMode::Legacy { .. }) => {
-                sent_at + OFFER_FILES_LEGACY_MIN_INTERVAL
-            }
-            (Some(sent_at), OfferFilesPacingMode::Negotiated(policy)) => {
-                sent_at + policy.next_batch_delay(self.offer_files_last_batch_entries.max(1))
-            }
-            _ => now,
-        };
-        self.offer_files_next_publish_at = Some(due.max(now));
+        self.offer_files_next_publish_at =
+            Some(self.offer_files_next_deadline(self.offer_files_last_batch_entries.max(1), now));
     }
 
     pub(super) fn offer_files_negotiation_timeout_due(&self) -> bool {
@@ -634,15 +680,8 @@ impl ServerSession {
         if !self.offer_files_pacing_allows_publication() {
             return;
         }
-        let due = match (self.offer_files_sent_at, &self.offer_files_pacing) {
-            (Some(sent_at), OfferFilesPacingMode::Legacy { .. }) => {
-                sent_at + OFFER_FILES_LEGACY_MIN_INTERVAL
-            }
-            (Some(sent_at), OfferFilesPacingMode::Negotiated(policy)) => {
-                sent_at + policy.next_batch_delay(self.offer_files_last_batch_entries.max(1))
-            }
-            _ => Instant::now(),
-        };
+        let due = self
+            .offer_files_next_deadline(self.offer_files_last_batch_entries.max(1), Instant::now());
         self.offer_files_next_publish_at = Some(
             self.offer_files_next_publish_at
                 .map_or(due, |current| current.max(due)),
@@ -675,6 +714,33 @@ impl ServerSession {
             && self
                 .offer_files_next_publish_at
                 .is_some_and(|due| due <= Instant::now())
+    }
+
+    /// Classify the current pump wait so diagnostics can separate deliberate
+    /// pacing from a requested batch that lost its wakeup.
+    pub(super) fn offer_files_wait_reason(&self, now: Instant) -> OfferFilesWaitReason {
+        match self.offer_files_pacing {
+            OfferFilesPacingMode::AwaitingCapability => OfferFilesWaitReason::Connection,
+            OfferFilesPacingMode::Legacy { .. } | OfferFilesPacingMode::Negotiated(_) => {
+                if !self.login_accepted {
+                    return OfferFilesWaitReason::Connection;
+                }
+                if !self.offer_files_publish_requested {
+                    return OfferFilesWaitReason::CaughtUp;
+                }
+                match self.offer_files_next_publish_at {
+                    Some(deadline) if deadline > now => {
+                        if self.offer_files_refresh_catalog {
+                            OfferFilesWaitReason::CandidateRefill
+                        } else {
+                            OfferFilesWaitReason::Pacing
+                        }
+                    }
+                    Some(_) => OfferFilesWaitReason::Due,
+                    None => OfferFilesWaitReason::IdleUnbounded,
+                }
+            }
+        }
     }
 
     pub(super) fn offer_files_batch_limit(&self) -> usize {
@@ -734,23 +800,27 @@ impl ServerSession {
             self.offer_files_last_batch_entries = entries_sent;
         }
         let has_budgeted_pending = self.has_publishable_offer_files();
-        let continue_pump = pending_entries > 0
+        let continued_work = pending_entries > 0
             && has_budgeted_pending
             && self.offer_files_batch_limit() > 0
             && !skipped_duplicate_batch
             && entries_sent > 0;
+        // WHY: The ranked catalog is a snapshot. After publishing all of it,
+        // issue one paced probe so candidates hashed while the batch was in
+        // flight are picked up without waiting for the out-of-band publisher's
+        // slower minimum interval. An empty probe ends the pump.
+        let refill_after_exhaustion = pending_entries == 0
+            && entries_sent > 0
+            && !skipped_duplicate_batch
+            && matches!(self.offer_files_pacing, OfferFilesPacingMode::Negotiated(_));
+        if refill_after_exhaustion {
+            self.offer_files_refresh_catalog = true;
+        }
+        let continue_pump = continued_work || refill_after_exhaustion;
         self.offer_files_publish_requested = continue_pump;
         self.offer_files_next_publish_at =
             if continue_pump && self.offer_files_pacing_allows_publication() {
-                match self.offer_files_pacing {
-                    OfferFilesPacingMode::Negotiated(policy) => {
-                        Some(Instant::now() + policy.next_batch_delay(entries_sent))
-                    }
-                    OfferFilesPacingMode::Legacy { .. } => {
-                        Some(Instant::now() + OFFER_FILES_LEGACY_MIN_INTERVAL)
-                    }
-                    OfferFilesPacingMode::AwaitingCapability => None,
-                }
+                Some(self.offer_files_next_deadline(entries_sent, Instant::now()))
             } else {
                 None
             };
@@ -1709,6 +1779,125 @@ mod tests {
             session.offer_files_next_publish_at,
             Some(existing_deadline),
             "a re-trigger must preserve a later in-flight pacing deadline"
+        );
+    }
+
+    async fn negotiated_session_with_one_candidate(hash_byte: u8) -> ServerSession {
+        let (mut session, _peer) = connected_test_session_with_peer().await;
+        session.login_accepted = true;
+        session.offer_files_pacing = OfferFilesPacingMode::Negotiated(
+            OfferFilesPolicy::validate(1, 200, 500, 1_000, 201).unwrap(),
+        );
+        session.offer_files_last_batch_entries = 200;
+        session.offer_files_ranked_catalog = vec![(
+            [hash_byte; 16],
+            "sample.bin".to_string(),
+            1,
+            0,
+            true,
+            0,
+            Default::default(),
+        )];
+        session
+    }
+
+    #[tokio::test]
+    async fn batch_deadline_is_anchored_to_the_last_send_not_post_send_work() {
+        let mut session = negotiated_session_with_one_candidate(0x42).await;
+        // The packet reached the wire two seconds ago. Catalog bookkeeping then
+        // consumed the intervening time, so the 500 ms envelope already elapsed.
+        session.offer_files_sent_at = Some(Instant::now() - Duration::from_secs(2));
+
+        session.finish_offer_files_batch(200, 1, false);
+
+        assert!(session.offer_files_publish_requested);
+        assert!(
+            session.offer_files_next_publish_at.unwrap() <= Instant::now(),
+            "post-send work must not be added to the negotiated interval",
+        );
+        assert!(
+            session.offer_files_publish_due(),
+            "the next batch is due as soon as the wire interval has elapsed",
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_batch_never_loses_its_bounded_wakeup() {
+        let mut session = negotiated_session_with_one_candidate(0x43).await;
+        session.offer_files_sent_at = Some(Instant::now());
+
+        session.finish_offer_files_batch(200, 1, false);
+
+        assert!(session.offer_files_publish_requested);
+        assert!(session.offer_files_wakeup_at().is_some());
+        assert_ne!(
+            session.offer_files_wait_reason(Instant::now()),
+            OfferFilesWaitReason::IdleUnbounded,
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_negotiated_snapshot_keeps_one_bounded_refill_probe() {
+        let mut session = negotiated_session_with_one_candidate(0x44).await;
+        session.offer_files_sent_at = Some(Instant::now());
+        session.offer_files_published_hashes.insert([0x44; 16]);
+
+        session.finish_offer_files_batch(200, 0, false);
+
+        assert!(session.offer_files_publish_requested);
+        assert!(session.offer_files_refresh_catalog);
+        assert!(session.offer_files_wakeup_at().is_some());
+
+        // The paced probe found no newly hashed candidates and ends the pump.
+        session.finish_offer_files_batch(0, 0, true);
+        assert!(!session.offer_files_publish_requested);
+        assert!(session.offer_files_next_publish_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_reason_separates_pacing_from_an_unbounded_idle_pump() {
+        let (mut session, _peer) = connected_test_session_with_peer().await;
+        session.login_accepted = true;
+        session.offer_files_pacing = OfferFilesPacingMode::Negotiated(
+            OfferFilesPolicy::validate(1, 200, 500, 1_000, 201).unwrap(),
+        );
+        let now = Instant::now();
+
+        assert_eq!(
+            session.offer_files_wait_reason(now),
+            OfferFilesWaitReason::CaughtUp,
+        );
+
+        session.offer_files_publish_requested = true;
+        session.offer_files_refresh_catalog = false;
+        session.offer_files_next_publish_at = Some(now + Duration::from_millis(500));
+        assert_eq!(
+            session.offer_files_wait_reason(now),
+            OfferFilesWaitReason::Pacing,
+        );
+
+        session.offer_files_refresh_catalog = true;
+        assert_eq!(
+            session.offer_files_wait_reason(now),
+            OfferFilesWaitReason::CandidateRefill,
+        );
+
+        session.offer_files_next_publish_at = Some(now);
+        assert_eq!(
+            session.offer_files_wait_reason(now),
+            OfferFilesWaitReason::Due,
+        );
+
+        session.offer_files_next_publish_at = None;
+        assert_eq!(
+            session.offer_files_wait_reason(now),
+            OfferFilesWaitReason::IdleUnbounded,
+        );
+
+        session.offer_files_pacing = OfferFilesPacingMode::AwaitingCapability;
+        assert_eq!(
+            session.offer_files_wait_reason(now),
+            OfferFilesWaitReason::Connection,
         );
     }
 
