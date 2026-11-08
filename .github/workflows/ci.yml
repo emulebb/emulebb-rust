@@ -17,7 +17,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  EMULEBB_BUILD_REF: 1a462f658be63fcdab168ca42307a4b27b89959b
+  EMULEBB_BUILD_REF: baaf150ce3ceca30e5d8cf821d2b913471a0862b
   EMULEBB_BUILD_TESTS_REF: a37c775b383cacda5aa4269778d865b9430d684b
   EMULEBB_TOOLING_REF: 630d1a3492ae65acad0a8dfd1575d671ff7b492c
   # Pin the native NAT sources linked by the sys crates.
