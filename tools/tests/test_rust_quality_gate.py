@@ -60,6 +60,14 @@ class TestDiagnosticsGate(unittest.TestCase):
     def test_ci_test_gate_keeps_webui_out_of_multi_os_rust_tests(self) -> None:
         labels = [label for label, _ in QUALITY_GATE.commands_for_gate("ci-test")]
         self.assertNotIn("WebUI SPA tests", labels)
+        self.assertIn("clippy", labels)
+        self.assertIn("packet diagnostics binary", labels)
+
+    def test_ci_quality_keeps_target_compilation_in_the_native_matrix(self) -> None:
+        labels = [label for label, _ in QUALITY_GATE.commands_for_gate("ci-quality")]
+        self.assertIn("WebUI SPA tests", labels)
+        self.assertNotIn("clippy", labels)
+        self.assertNotIn("packet diagnostics binary", labels)
 
     def test_workspace_gate_includes_local_kad_swarm(self) -> None:
         label, command = QUALITY_GATE.test_workspace_step()
