@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
@@ -162,17 +163,72 @@ pub(crate) async fn assert_invalid_query_response(app: Router, method: &str, uri
 }
 
 pub(crate) fn unique_test_dir(name: &str) -> std::path::PathBuf {
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before unix epoch")
         .as_nanos();
-    let path = rust_test_tmp_root().join(format!(
-        "emulebb-rest-{name}-{}-{stamp}",
+    let root = rust_test_tmp_root();
+    std::fs::create_dir_all(&root).expect("create test root");
+    allocate_test_dir(&root, name, stamp, &NEXT_DIRECTORY)
+}
+
+fn allocate_test_dir(
+    root: &std::path::Path,
+    name: &str,
+    stamp: u128,
+    next: &AtomicU64,
+) -> std::path::PathBuf {
+    loop {
+        let sequence = next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("test directory counter exhausted");
+        let path = root.join(format!(
+            "emulebb-rest-{name}-{}-{stamp}-{sequence}",
+            std::process::id()
+        ));
+        // WHY: Windows clocks can return the same timestamp on parallel test
+        // threads. Claim a new directory atomically; never reuse or delete an
+        // existing fixture while another test may still have its database open.
+        match std::fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("create test directory {}: {error}", path.display()),
+        }
+    }
+}
+
+#[test]
+fn same_clock_directory_allocations_are_isolated_and_preserve_existing_fixtures() {
+    let root = unique_test_dir("directory-allocation");
+    let existing = root.join(format!(
+        "emulebb-rest-same-clock-{}-7-0",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).expect("create test dir");
-    path
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("active-fixture.txt");
+    std::fs::write(&sentinel, b"still owned by another test").unwrap();
+    let next = AtomicU64::new(0);
+    let paths = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| allocate_test_dir(&root, "same-clock", 7, &next)))
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+    });
+    assert_eq!(paths.len(), 8);
+    assert!(!paths.contains(&existing));
+    for path in paths {
+        assert_eq!(std::fs::read_dir(path).unwrap().count(), 0);
+    }
+    assert_eq!(
+        std::fs::read(sentinel).unwrap(),
+        b"still owned by another test"
+    );
 }
 
 fn rust_test_tmp_root() -> std::path::PathBuf {
