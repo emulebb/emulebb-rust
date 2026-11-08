@@ -26,7 +26,6 @@ concurrency:
 permissions:
   actions: read
   contents: read
-  checks: read
 
 jobs:
   prepare:
@@ -80,7 +79,7 @@ jobs:
     uses: ./.github/workflows/release.yml
     permissions:
       contents: write
-      checks: read
+      actions: read
       packages: write
       attestations: write
       id-token: write

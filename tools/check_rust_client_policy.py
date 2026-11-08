@@ -972,7 +972,7 @@ def check_release_ci_gate(
     required = {
         "verify-source:": "source-check verification job",
         "name: Require green source checks": "named release source gate",
-        "checks: read": "check-run read permission",
+        "actions: read": "workflow-run read permission",
         'echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"': "immutable source resolution",
         'python tools/nightly_release.py verify-source --sha "${{ needs.prepare.outputs.source_sha }}"':
             "exact-source verification command",
@@ -1013,11 +1013,11 @@ def check_release_ci_gate(
         nightly_source,
     )
     if package_job is None or not re.search(
-        r"(?m)^      checks:\s*read\s*$",
+        r"(?m)^      actions:\s*read\s*$",
         package_job.group("body"),
     ):
         errors.append(
-            ".github/workflows/nightly.yml reusable release caller must grant checks: read"
+            ".github/workflows/nightly.yml reusable release caller must grant actions: read"
         )
     helper_path = ROOT / "tools" / "nightly_release.py"
     helper = helper_path.read_text(encoding="utf-8") if helper_text is None else helper_text
