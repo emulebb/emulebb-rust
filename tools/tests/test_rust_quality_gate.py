@@ -69,6 +69,14 @@ class TestDiagnosticsGate(unittest.TestCase):
         self.assertNotIn("clippy", labels)
         self.assertNotIn("packet diagnostics binary", labels)
 
+    def test_only_ci_quality_scopes_its_environment_inventory(self) -> None:
+        quality = [command for _, command in QUALITY_GATE.commands_for_gate("ci-quality", self.build_env_fixture()) if "tools/ci_environment.py" in command]
+        self.assertEqual(quality, [[sys.executable, "tools/ci_environment.py", "--scope", "quality"]])
+        for gate in ("pre-push", "environment", "ci", "branch-ci"):
+            with self.subTest(gate=gate):
+                command = next(command for _, command in QUALITY_GATE.commands_for_gate(gate, self.build_env_fixture()) if "tools/ci_environment.py" in command)
+                self.assertEqual(command, [sys.executable, "tools/ci_environment.py"])
+
     def test_workspace_gate_includes_local_kad_swarm(self) -> None:
         label, command = QUALITY_GATE.test_workspace_step()
         self.assertEqual(label, "workspace tests")

@@ -196,7 +196,8 @@ def commands_for_gate(
         "test-workspace": test_workspace_step, "test-kad-swarm": test_kad_swarm_step,
         "test-vpn-leak": test_vpn_leak_step, "workflow-lint": workflow_lint_step,
         "supply-chain": supply_chain_step, "rest-openapi": lambda: rest_openapi_step(env),
-        "environment": lambda: ("CI toolchain and input provenance", [sys.executable, "tools/ci_environment.py"]),
+        "environment": lambda: ("CI toolchain and input provenance", [sys.executable, "tools/ci_environment.py",
+                                *(["--scope", "quality"] if gate == "ci-quality" else [])]),
     }
     result = []
     seen = set()
