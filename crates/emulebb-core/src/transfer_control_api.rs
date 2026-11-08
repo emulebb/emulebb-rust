@@ -166,10 +166,19 @@ impl EmulebbCore {
     /// Transfer details: the transfer plus its per-part breakdown and source
     /// list, mirroring the master `BuildTransferDetailsJson` shape.
     pub async fn transfer_details(&self, hash: &str) -> Result<Option<TransferDetails>> {
-        let Some(transfer) = self.transfer(hash).await else {
+        let Some(cached) = self.transfer(hash).await else {
             return Ok(None);
         };
         let manifest = self.ed2k_transfers.manifest(hash).await?;
+        // WHY: active downloads can verify parts before the cached state changes.
+        // Build the header and parts from the same manifest, preserving public metadata.
+        let state_name = if cached.stopped {
+            "stopped"
+        } else {
+            &cached.state
+        };
+        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
+        preserve_transfer_public_metadata(&mut transfer, &cached);
         let banned = self.state.lock().await.banned_source_clients.clone();
         let part_total = manifest.pieces.len() as u32;
         let mut sources = transfer_sources_from_manifest(&manifest, &banned);
