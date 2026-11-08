@@ -750,19 +750,24 @@ mod tests {
         datagram.extend_from_slice(&0x0102_0304_u32.to_le_bytes());
         datagram.extend_from_slice(&4662_u16.to_le_bytes());
         datagram.extend_from_slice(&0_u32.to_le_bytes());
-        tokio::spawn(async move {
+        let sender_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(25)).await;
             sender.send_to(&datagram, destination).await.unwrap();
         });
 
         let mut results = Vec::new();
         let cancel = CancellationToken::new();
+        let cancel_on_result = cancel.clone();
+        let result_sink = move |_| cancel_on_result.cancel();
+        // WHY: a 100 ms socket deadline races OS scheduling in the parallel
+        // workspace suite. Stop on the observed reply instead of waiting out
+        // the generous failure deadline; production response timers stay intact.
         let error = drain_keyword_udp_responses(
             &receiver,
             &[server],
-            TokioInstant::now() + Duration::from_millis(100),
+            TokioInstant::now() + Duration::from_secs(2),
             None,
-            None,
+            Some(&result_sink),
             &mut results,
             &cancel,
         )
@@ -773,6 +778,7 @@ mod tests {
         assert_eq!(results[0].file.file_hash.0, [0x44; 16]);
         assert_eq!(results[0].file.client_id, 0x0102_0304);
         assert_eq!(results[0].file.client_port, 4662);
+        sender_task.await.unwrap();
     }
 
     #[tokio::test]
@@ -793,29 +799,49 @@ mod tests {
             datagram.extend_from_slice(&0_u32.to_le_bytes());
             datagram
         };
-        tokio::spawn(async move {
+        let (reply_observed, mut observations) = tokio::sync::mpsc::unbounded_channel();
+        let sender_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(25)).await;
             sender.send_to(&response(0x44), destination).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(125)).await;
-            sender.send_to(&response(0x55), destination).await.unwrap();
+            for hash_byte in [0x55, 0x66] {
+                observations.recv().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                sender
+                    .send_to(&response(hash_byte), destination)
+                    .await
+                    .unwrap();
+            }
         });
 
         let mut results = Vec::new();
         let cancel = CancellationToken::new();
+        let cancel_on_result = cancel.clone();
+        let result_sink = move |observation: super::Ed2kServerSearchObservation| {
+            if observation.file.file_hash.0 == [0x66; 16] {
+                cancel_on_result.cancel();
+            } else {
+                reply_observed.send(()).unwrap();
+            }
+        };
+        // WHY: acknowledgements anchor each delayed send to an actual received
+        // reply. The second reply exceeds the initial deadline, and the third
+        // exceeds the first extension, proving that every reply renews it.
         let error = drain_keyword_udp_responses(
             &receiver,
             &[server],
-            TokioInstant::now() + Duration::from_millis(100),
-            Some(Duration::from_millis(200)),
-            None,
+            TokioInstant::now() + Duration::from_secs(2),
+            Some(Duration::from_secs(4)),
+            Some(&result_sink),
             &mut results,
             &cancel,
         )
         .await;
 
         assert!(error.is_none());
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 3);
         assert_eq!(results[0].file.file_hash.0, [0x44; 16]);
         assert_eq!(results[1].file.file_hash.0, [0x55; 16]);
+        assert_eq!(results[2].file.file_hash.0, [0x66; 16]);
+        sender_task.await.unwrap();
     }
 }
