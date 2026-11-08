@@ -1,5 +1,57 @@
 use super::*;
 
+#[tokio::test]
+async fn transfer_details_refresh_verified_parts_without_a_state_change() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-details-verified-parts");
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        runtime_dir.join("transfers"),
+    )
+    .unwrap();
+    let part = vec![0x35; emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE as usize];
+    let tail = b"tail";
+    let hashset: Vec<[u8; 16]> = vec![Md4::digest(&part).into(), Md4::digest(tail).into()];
+    let hash = Ed2kHash::from_bytes(Md4::digest(hashset.concat()).into()).to_string();
+    let size = part.len() + tail.len();
+    core.create_transfer(TransferCreate {
+        known_file_policy: KnownFilePolicy::Reject,
+        link: Some(format!("ed2k://|file|Sample.Parts.bin|{size}|{hash}|/")),
+        links: None,
+        category_id: None,
+        category_name: None,
+        paused: Some(true),
+    })
+    .await
+    .unwrap();
+    {
+        let mut state = core.state.lock().await;
+        let cached = state.transfers.get_mut(&hash).unwrap();
+        assert_eq!(cached.parts_obtained, 0);
+        cached.priority = "high".to_string();
+        cached.category_id = 7;
+        cached.category_name = "Sample Category".to_string();
+    }
+    core.ed2k_transfers
+        .store_md4_hashset(&hash, hashset)
+        .await
+        .unwrap();
+    core.ed2k_transfers
+        .store_piece_data(&hash, 0, &part)
+        .await
+        .unwrap();
+    let details = core.transfer_details(&hash).await.unwrap().unwrap();
+    assert!(details.parts[0].complete);
+    assert!(!details.parts[1].complete);
+    assert_eq!(details.transfer.parts_obtained, 1);
+    assert_eq!(details.transfer.parts_progress_text, "#0");
+    assert_eq!(details.transfer.completed_bytes, part.len() as u64);
+    assert_eq!(details.transfer.state, "paused");
+    assert_eq!(details.transfer.priority, "high");
+    assert_eq!(details.transfer.category_id, 7);
+    assert_eq!(details.transfer.category_name, "Sample Category");
+}
+
 #[test]
 fn keyword_target_is_stable() {
     assert_eq!(
@@ -1400,6 +1452,13 @@ async fn stopped_transfer_cannot_be_resumed() {
     // Master parity: stopped is reported as the `paused` state + stopped flag.
     assert_eq!(stopped_transfer.state, "paused");
     assert!(stopped_transfer.stopped);
+    let details = core
+        .transfer_details(&transfer.hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(details.transfer.state, "paused");
+    assert!(details.transfer.stopped);
 
     let error = core.resume_transfer(&transfer.hash).await.unwrap_err();
 
