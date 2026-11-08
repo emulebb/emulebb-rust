@@ -32,6 +32,28 @@ class CiParityTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.assert_workflow_parity(jobs)
 
+    def test_required_matrix_covers_six_native_targets_and_both_musl_cpus(self):
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+        native = {jobs["build-linux"]["runs-on"], *jobs["build-test"]["strategy"]["matrix"]["runner"]}
+        self.assertEqual(native, {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm",
+                                  "macos-15-intel", "macos-15"})
+        musl = jobs["build-musl"]
+        self.assertEqual({(row["architecture"], row["runner"]) for row in musl["strategy"]["matrix"]["include"]},
+                         {("amd64", "ubuntu-24.04"), ("arm64", "ubuntu-24.04-arm")})
+        self.assertTrue(any("package-emulebb-rust-linux-ci" in step.get("run", "")
+                            and "--test-scope full --smoke" in step["run"] for step in musl["steps"]))
+        self.assertIn("build-musl", jobs["required-ci"]["needs"])
+        aggregate = jobs["required-ci"]["steps"][0]
+        self.assertEqual(aggregate["env"]["BUILD_MUSL_RESULT"], "${{ needs.build-musl.result }}")
+        self.assertIn('"$BUILD_MUSL_RESULT"', aggregate["run"])
+
+    def test_ci_checkout_credentials_do_not_survive_into_builds(self):
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+        for name, job in jobs.items():
+            for step in job.get("steps", []):
+                if step.get("uses", "").startswith("actions/checkout@"):
+                    self.assertIs(step.get("with", {}).get("persist-credentials"), False, name)
+
     def test_branch_workflow_dispatches_the_shared_light_gate(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/branch-check.yml").read_text(encoding="utf-8"))["jobs"]
         self.assertTrue(any(step.get("run") == "python tools/rust_quality_gate.py branch-ci" for step in jobs["check"]["steps"]))

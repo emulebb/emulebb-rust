@@ -37,12 +37,13 @@ GATES.update({
     "branch-check": ("policy", "policy-tests", "fmt"),
     "branch-ci": ("environment", "workflow-lint", "policy", "policy-tests", "fmt"),
     "quick": QUICK_CHECKS,
-    "ci-test": TEST_CHECKS,
+    "ci-quality": ("environment",) + STATIC_CHECKS + ("webui-test",),
+    "ci-test": ("clippy", "diagnostics") + TEST_CHECKS,
     "ci": QUICK_CHECKS + TEST_CHECKS,
     "pre-push": ("environment", "workflow-lint") + STATIC_CHECKS + ("supply-chain",) + COMPILE_CHECKS + TEST_CHECKS + ("rest-openapi",),
 })
 CI_JOBS = {
-    "workflow-lint": "workflow-lint", "quality": "quick", "build-linux": "ci-test",
+    "workflow-lint": "workflow-lint", "quality": "ci-quality", "build-linux": "ci-test",
     "build-test": "ci-test", "rest-openapi": "rest-openapi", "supply-chain": "supply-chain",
 }
 
@@ -54,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=sorted(GATES),
         help=(
             "quick=policy+fmt+clippy+diagnostics+webui-test; ci=quick+build+tests; "
-            "ci-test=build+full workspace tests+VPN leak test; "
+            "ci-quality=environment+policy+fmt+webui-test; "
+            "ci-test=clippy+diagnostics+build+full workspace tests+VPN leak test; "
             "test-kad-swarm=focused serialized Kad diagnostics"
         ),
     )
