@@ -4,20 +4,26 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import os
 import hashlib
 import json
 import re
+import runpy
+import subprocess
+import sys
 import tarfile
 import tomllib
 from pathlib import Path
 from typing import Sequence
 
 
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[1]
 OCI_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
-ED2K_HASH_RE = re.compile(r"[0-9a-f]{32}")
 SEMVER_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\."
     r"(?:0|[1-9][0-9]*)\."
@@ -37,16 +43,6 @@ BETA_VERSION_RE = re.compile(
 )
 NIGHTLY_SUFFIX_RE = re.compile(r"nightly\.[0-9]{8}\.g[0-9a-f]{7,40}")
 MAX_INDEX_BYTES = 1024 * 1024
-MAX_PACKAGE_SMOKE_REPORT_BYTES = 1024 * 1024
-PACKAGE_SMOKE_SCHEMA = "emulebb.rust.package-smoke/2"
-PACKAGE_SMOKE_ASSET_SUFFIXES = {
-    "windows-x64": ("windows-x64.zip",),
-    "windows-arm64": ("windows-arm64.zip",),
-    "linux-x64": ("linux-amd64.deb", "linux-x86_64.AppImage"),
-    "linux-arm64": ("linux-arm64.deb", "linux-aarch64.AppImage"),
-    "macos-x64": ("macos-x64.dmg",),
-    "macos-arm64": ("macos-arm64.dmg",),
-}
 
 
 def _sha256(path: Path) -> str:
@@ -182,6 +178,7 @@ def oci_archive_digest(path: Path) -> str:
             blob = _read_unique_regular_member(
                 archive,
                 f"blobs/{algorithm}/{hex_digest}",
+                max_bytes=MAX_INDEX_BYTES,
             )
     except (OSError, tarfile.TarError) as error:
         raise RuntimeError(f"could not read OCI archive {path}: {error}") from error
@@ -194,230 +191,211 @@ def oci_archive_digest(path: Path) -> str:
     return digest
 
 
-def _package_smoke_requirements(stem: str) -> dict[str, tuple[str, tuple[str, ...]]]:
-    return {
-        platform: (
-            f"{stem}-package-smoke-{platform}.json",
-            tuple(f"{stem}-{suffix}" for suffix in suffixes),
-        )
-        for platform, suffixes in PACKAGE_SMOKE_ASSET_SUFFIXES.items()
-    }
+def checked_checkout(root: Path, expected_sha: str, *, label: str) -> Path:
+    """Require a clean Git root at the caller's immutable revision before loading code."""
+    if COMMIT_SHA_RE.fullmatch(expected_sha) is None:
+        raise RuntimeError(f"{label} requires a full lowercase commit SHA")
+    root = root.resolve()
+    if not root.is_dir():
+        raise RuntimeError(f"{label} checkout does not exist")
+
+    def git(*arguments: str) -> str:
+        return subprocess.check_output(["git", "-C", str(root), *arguments], text=True, timeout=30).strip()
+
+    if (Path(git("rev-parse", "--show-toplevel")).resolve() != root
+            or git("rev-parse", "HEAD") != expected_sha
+            or git("status", "--porcelain", "--untracked-files=all")):
+        raise RuntimeError(f"{label} must be a clean Git root at the required revision")
+    return root
 
 
-def _object(value: object, *, label: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise RuntimeError(f"{label} must be an object")
-    return value
+def candidate_owner(args: argparse.Namespace):
+    """Load packaging code only after verifying its clean, pinned checkout."""
+    expected = {"GITHUB_REPOSITORY": args.repository, "GITHUB_RUN_ID": args.run_id,
+                "GITHUB_RUN_ATTEMPT": args.run_attempt, "GITHUB_WORKFLOW_SHA": args.workflow_sha}
+    if os.environ.get("GITHUB_ACTIONS") != "true" or any(
+        os.environ.get(key) != value for key, value in expected.items()
+    ):
+        raise RuntimeError("Candidate control requires the actual GitHub run and workflow identities")
+    checked_checkout(ROOT, args.workflow_sha, label="Release control")
+    build_root = checked_checkout(args.build_repo, args.emulebb_build_ref, label="Packaging owner")
+    for name, module in tuple(sys.modules.items()):
+        if name == "emule_workspace" or name.startswith("emule_workspace."):
+            filename = getattr(module, "__file__", None)
+            if filename is None or not Path(filename).resolve().is_relative_to(build_root):
+                raise RuntimeError("A different packaging owner is already loaded")
+    # WHY: candidate metadata selects no executable code. The explicit checkout
+    # must pass its source fence before Python imports any packaging helper.
+    sys.path.insert(0, str(build_root))
+    try:
+        owner = importlib.import_module("emule_workspace.release_candidate")
+    finally:
+        sys.path.pop(0)
+    if Path(owner.__file__).resolve() != build_root / "emule_workspace/release_candidate.py":
+        raise RuntimeError("Candidate verification loaded a different packaging owner")
+    return owner
 
 
-def _positive_int(value: object, *, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise RuntimeError(f"{label} must be a positive integer")
-    return value
+def candidate_context(args: argparse.Namespace, owner):
+    return owner.CandidateContext(
+        version=args.release_version, channel=args.channel,
+        source={"emulebbRust": args.source_sha, "emulebbBuild": args.emulebb_build_ref,
+                "emulebbBuildTests": args.emulebb_build_tests_ref, "emulebbTooling": args.emulebb_tooling_ref,
+                "emulebbMiniupnp": args.emulebb_miniupnp_ref, "emulebbLibpcpnatpmp": args.emulebb_libpcpnatpmp_ref},
+        workflow={"repository": args.repository, "runId": args.run_id,
+                  "runAttempt": args.run_attempt, "workflowSha": args.workflow_sha},
+    ).checked()
 
 
-def _validate_package_smoke_result(
-    result: object,
-    *,
-    report_name: str,
-    index: int,
-) -> str:
-    label = f"package smoke report {report_name} result {index}"
-    result_object = _object(result, label=label)
-    asset = result_object.get("asset")
-    if not isinstance(asset, str) or not asset:
-        raise RuntimeError(f"{label} has an invalid asset name")
-    if result_object.get("status") != "passed":
-        raise RuntimeError(f"{label} did not pass")
+def archive_identity_reader(args: argparse.Namespace):
+    harness = checked_checkout(args.harness_repo, args.emulebb_build_tests_ref, label="OCI reader")
+    identities = runpy.run_path(str(harness / "scripts/smoke-rust-container.py"))["oci_platform_identities"]
 
-    transfer = _object(result_object.get("localTransfer"), label=f"{label} localTransfer")
-    payload = _object(transfer.get("payload"), label=f"{label} payload")
-    payload_name = payload.get("name")
-    if not isinstance(payload_name, str) or not payload_name:
-        raise RuntimeError(f"{label} payload name is invalid")
-    payload_size = _positive_int(payload.get("sizeBytes"), label=f"{label} payload size")
-    payload_sha256 = payload.get("sha256")
-    if not isinstance(payload_sha256, str) or SHA256_RE.fullmatch(payload_sha256) is None:
-        raise RuntimeError(f"{label} payload SHA-256 is invalid")
+    def read(archive: Path):
+        return oci_archive_digest(archive), identities(archive)
 
-    shared_file = _object(transfer.get("sharedFile"), label=f"{label} sharedFile")
-    shared_hash = shared_file.get("hash")
-    if not isinstance(shared_hash, str) or ED2K_HASH_RE.fullmatch(shared_hash) is None:
-        raise RuntimeError(f"{label} shared eD2k hash is invalid")
-    if shared_file.get("name") != payload_name or shared_file.get("sizeBytes") != payload_size:
-        raise RuntimeError(f"{label} shared file does not match the payload")
-
-    if transfer.get("transferAccepted") is not True:
-        raise RuntimeError(f"{label} transfer was not accepted")
-    if transfer.get("sourceDiscovery") != "ed2k-link-direct-source":
-        raise RuntimeError(f"{label} did not use direct eD2k source discovery")
-    if transfer.get("publicDiscoveryDisabled") is not True:
-        raise RuntimeError(f"{label} did not disable public discovery")
-    if transfer.get("gracefulShutdowns") != 2:
-        raise RuntimeError(f"{label} did not record two graceful shutdowns")
-
-    delivery = _object(transfer.get("delivery"), label=f"{label} delivery")
-    if delivery.get("hash") != shared_hash:
-        raise RuntimeError(f"{label} delivered transfer hash does not match")
-    if delivery.get("state") != "completed":
-        raise RuntimeError(f"{label} transfer did not complete")
-    if delivery.get("completedBytes") != payload_size:
-        raise RuntimeError(f"{label} completed byte count does not match the payload")
-    if delivery.get("deliveredPathWithinIncoming") is not True:
-        raise RuntimeError(f"{label} was not delivered inside the incoming directory")
-    if delivery.get("deliveredSha256") != payload_sha256:
-        raise RuntimeError(f"{label} delivered SHA-256 does not match the payload")
-    return asset
+    return read
 
 
-def _validate_package_smoke_reports(
-    release_dir: Path,
-    stem: str,
-) -> list[dict[str, object]]:
-    evidence = []
-    for platform, (report_name, expected_assets) in _package_smoke_requirements(stem).items():
-        report_path = release_dir / report_name
-        if report_path.stat().st_size > MAX_PACKAGE_SMOKE_REPORT_BYTES:
-            raise RuntimeError(
-                f"package smoke report {report_name} exceeds "
-                f"{MAX_PACKAGE_SMOKE_REPORT_BYTES} bytes"
-            )
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"could not read package smoke report {report_name}: {error}") from error
-        report_object = _object(report, label=f"package smoke report {report_name}")
-        if report_object.get("schema") != PACKAGE_SMOKE_SCHEMA:
-            raise RuntimeError(f"package smoke report {report_name} has an invalid schema")
-        if report_object.get("platform") != platform:
-            raise RuntimeError(f"package smoke report {report_name} has the wrong platform")
-        results = report_object.get("results")
-        if not isinstance(results, list) or not results:
-            raise RuntimeError(f"package smoke report {report_name} has no results")
-        actual_assets = [
-            _validate_package_smoke_result(result, report_name=report_name, index=index)
-            for index, result in enumerate(results)
-        ]
-        if len(actual_assets) != len(set(actual_assets)):
-            raise RuntimeError(f"package smoke report {report_name} repeats an asset")
-        if set(actual_assets) != set(expected_assets):
-            raise RuntimeError(
-                f"package smoke report {report_name} covers the wrong assets: "
-                + ", ".join(sorted(actual_assets))
-            )
-        evidence.append(
-            {
-                "platform": platform,
-                "report": report_name,
-                "sha256": _sha256(report_path),
-                "assets": sorted(expected_assets),
-            }
-        )
-    return evidence
+def candidate_outputs(path: Path, data: dict, output: Path | None) -> None:
+    """Expose only verified scalar identities to dependent publishing jobs."""
+    values = {"candidate_sha256": _sha256(path),
+              "ubuntu_digest": data["images"]["ubuntu"]["ociManifestDigest"],
+              "alpine_digest": data["images"]["alpine"]["ociManifestDigest"]}
+    if output is not None:
+        with output.open("a", encoding="utf-8", newline="\n") as stream:
+            for name, value in values.items():
+                stream.write(f"{name}={value}\n")
+    print(json.dumps(values, sort_keys=True))
 
 
-def write_candidate_manifest(
-    *,
-    release_dir: Path,
-    output: Path,
-    release_version: str,
-    channel: str,
-    source_sha: str,
-    support_refs: dict[str, str],
-    repository: str,
-    run_id: str,
-    run_attempt: str,
-) -> dict[str, object]:
-    """Write a reproducible non-publishing candidate evidence manifest."""
+def registry(*arguments: str) -> str:
+    """Use the pinned registry client; transport errors never mean a missing tag."""
+    return subprocess.check_output(["regctl", *arguments], text=True, timeout=600).strip()
 
-    if SEMVER_RE.fullmatch(release_version) is None:
-        raise RuntimeError(f"candidate release version is not valid SemVer: {release_version!r}")
-    if channel not in {"beta", "candidate", "nightly"}:
-        raise RuntimeError(f"unsupported candidate channel: {channel!r}")
-    revisions = {"emulebbRust": source_sha, **support_refs}
-    invalid = [name for name, value in revisions.items() if COMMIT_SHA_RE.fullmatch(value) is None]
-    if invalid:
-        raise RuntimeError(
-            "candidate manifest requires full lowercase commit SHAs for: "
-            + ", ".join(sorted(invalid))
-        )
-    release_dir = release_dir.resolve()
-    output = output.resolve()
-    if not release_dir.is_dir():
-        raise RuntimeError(f"candidate release directory does not exist: {release_dir}")
-    if output.parent != release_dir:
-        raise RuntimeError(
-            "candidate manifest output must be a direct child of the release directory"
-        )
 
-    stem = f"emulebb-rust-v{release_version}"
-    required_files = {
-        "SHA256SUMS",
-        f"{stem}-image-security-SHA256SUMS",
-        f"{stem}-multiarch.oci.digest",
-        f"{stem}-windows-x64.zip",
-        f"{stem}-windows-arm64.zip",
-        f"{stem}-linux-amd64.deb",
-        f"{stem}-linux-x86_64.AppImage",
-        f"{stem}-linux-arm64.deb",
-        f"{stem}-linux-aarch64.AppImage",
-        f"{stem}-macos-x64.dmg",
-        f"{stem}-macos-arm64.dmg",
-    }
-    required_files.update(
-        report_name
-        for report_name, _expected_assets in _package_smoke_requirements(stem).values()
+def _image_targets(version: str, digests: dict[str, str]) -> dict[str, str]:
+    if (SEMVER_RE.fullmatch(version) is None or set(digests) != {"ubuntu", "alpine"}
+            or any(not isinstance(value, str) or OCI_DIGEST_RE.fullmatch(value) is None
+                   for value in digests.values())):
+        raise RuntimeError("Image publication requires a valid version and both bound OCI digests")
+    return {version + "-ubuntu": digests["ubuntu"], version + "-alpine": digests["alpine"],
+            version: digests["ubuntu"]}
+
+
+def publish_verified_images(*, repository: str, version: str, digests: dict[str, str],
+                            archives: dict[str, Path], client=registry) -> None:
+    """Preflight every immutable ref before importing either already-verified archive."""
+    targets = _image_targets(version, digests)
+    if set(archives) != {"ubuntu", "alpine"}:
+        raise RuntimeError("Image publication requires both verified archives")
+    tags = set(client("tag", "ls", repository).splitlines())
+    for tag, expected in targets.items():
+        if tag in tags and client("image", "digest", repository + ":" + tag) != expected:
+            raise RuntimeError(f"Immutable image tag conflicts with the verified candidate: {tag}")
+    for variant in ("ubuntu", "alpine"):
+        tag = version + "-" + variant
+        reference = repository + ":" + tag
+        if tag not in tags:
+            client("image", "import", reference, str(archives[variant]))
+        if client("image", "digest", reference) != digests[variant]:
+            raise RuntimeError(f"Imported image differs from the verified candidate: {variant}")
+    if version not in tags:
+        client("image", "copy", repository + "@" + digests["ubuntu"], repository + ":" + version)
+    if client("image", "digest", repository + ":" + version) != digests["ubuntu"]:
+        raise RuntimeError("Default image tag differs from the verified Ubuntu candidate")
+
+
+def promote_nightly(*, repository: str, version: str, digests: dict[str, str], client=registry) -> None:
+    """Preflight all versioned refs, then copy only the bound digest to each alias."""
+    targets = _image_targets(version, digests)
+    for tag, expected in targets.items():
+        if client("image", "digest", repository + ":" + tag) != expected:
+            raise RuntimeError(f"Versioned image changed before nightly promotion: {tag}")
+    channels = {"nightly-ubuntu": digests["ubuntu"], "nightly-alpine": digests["alpine"],
+                "nightly": digests["ubuntu"]}
+    for tag, expected in channels.items():
+        client("image", "copy", repository + "@" + expected, repository + ":" + tag)
+        if client("image", "digest", repository + ":" + tag) != expected:
+            raise RuntimeError(f"Nightly channel differs from its bound digest: {tag}")
+
+
+def require_publication_source(repository: str, sha: str) -> None:
+    """Recheck the latest CI and CodeQL attempts through this trusted checkout."""
+    helper = runpy.run_path(str(ROOT / "tools/nightly_release.py"))
+    helper["verify_source_checks"](repository, sha)
+
+
+def gh_rows(endpoint: str) -> list[dict]:
+    """Read every API page; auth, transport and malformed responses fail closed."""
+    response = subprocess.check_output(["gh", "api", "--paginate", "--slurp", endpoint], text=True, timeout=120)
+    try:
+        pages = json.loads(response)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("GitHub returned malformed release metadata") from error
+    if (not isinstance(pages, list) or any(not isinstance(page, list) for page in pages)
+            or any(not isinstance(row, dict) for page in pages for row in page)):
+        raise RuntimeError("GitHub returned malformed release metadata pages")
+    return [row for page in pages for row in page]
+
+
+def validate_draft_assets(*, release: dict | None, assets: list[dict], expected: list[dict],
+                          tag: str, source_sha: str, complete: bool, release_id: str | None = None) -> int | None:
+    """Allow a draft retry only when existing uploaded bytes match the candidate."""
+    if release is None:
+        if complete:
+            raise RuntimeError("The uploaded draft release is missing")
+        return None
+    identifier = release.get("id")
+    if (type(identifier) is not int or identifier <= 0
+            or release.get("draft") is not True or release.get("prerelease") is not True
+            or release.get("tag_name") != tag or release.get("target_commitish") != source_sha):
+        raise RuntimeError("Release version already exists outside the expected source-bound prerelease draft")
+    if release_id is not None and (re.fullmatch(r"[1-9][0-9]*", release_id) is None or int(release_id) != identifier):
+        raise RuntimeError("Uploaded draft identity changed during publication")
+    expected_by_name = {item["name"]: item for item in expected}
+    if len(expected_by_name) != len(expected):
+        raise RuntimeError("Candidate repeats a public asset")
+    seen = set()
+    for asset in assets:
+        name = asset.get("name")
+        if not isinstance(name, str) or name not in expected_by_name or name in seen:
+            raise RuntimeError("Draft contains an unexpected or repeated asset")
+        seen.add(name)
+        record = expected_by_name[name]
+        if (type(asset.get("size")) is not int or asset["size"] != record["sizeBytes"]
+                or asset.get("state") != "uploaded"
+                or asset.get("digest") != "sha256:" + record["sha256"]):
+            raise RuntimeError(f"Draft asset bytes differ from the verified candidate: {name}")
+    if complete and seen != set(expected_by_name):
+        raise RuntimeError("Uploaded draft does not contain the complete verified candidate")
+    return identifier
+
+
+def verify_release_assets(args: argparse.Namespace, data: dict, candidate: Path) -> None:
+    """Check existing draft assets before upload and the full set before finalizing."""
+    tag = "rust-v" + args.release_version
+    releases = [row for row in gh_rows(f"repos/{args.repository}/releases?per_page=100")
+                if row.get("tag_name") == tag]
+    if len(releases) > 1:
+        raise RuntimeError("GitHub returned more than one release for the candidate tag")
+    release = releases[0] if releases else None
+    assets = []
+    if release is not None:
+        identifier = release.get("id")
+        if type(identifier) is not int or identifier <= 0:
+            raise RuntimeError("GitHub returned an invalid release identity")
+        assets = gh_rows(f"repos/{args.repository}/releases/{identifier}/assets?per_page=100")
+    if args.phase == "after-upload" and args.release_id is None:
+        raise RuntimeError("Final draft verification requires the uploader's release ID")
+    expected = [*data["artifacts"], {"name": candidate.name, "sha256": _sha256(candidate),
+                                    "sizeBytes": candidate.stat().st_size}]
+    identifier = validate_draft_assets(
+        release=release, assets=assets, expected=expected, tag=tag,
+        source_sha=args.source_sha, complete=args.phase == "after-upload", release_id=args.release_id,
     )
-    available = {
-        path.name
-        for path in release_dir.iterdir()
-        if path.is_file() and not path.is_symlink()
-    }
-    missing = sorted(required_files - available)
-    if missing:
-        raise RuntimeError("candidate release evidence is missing: " + ", ".join(missing))
-
-    oci_digest_path = release_dir / f"{stem}-multiarch.oci.digest"
-    oci_digest = oci_digest_path.read_text(encoding="utf-8").strip()
-    if OCI_DIGEST_RE.fullmatch(oci_digest) is None:
-        raise RuntimeError("candidate OCI digest file is invalid")
-    package_smoke = _validate_package_smoke_reports(release_dir, stem)
-
-    artifacts = []
-    for path in sorted(release_dir.iterdir(), key=lambda candidate: candidate.name):
-        if path.is_symlink():
-            raise RuntimeError(
-                f"candidate release evidence must not contain symlinks: {path.name}"
-            )
-        if path == output or not path.is_file():
-            continue
-        artifacts.append(
-            {
-                "name": path.name,
-                "sha256": _sha256(path),
-                "sizeBytes": path.stat().st_size,
-            }
-        )
-
-    manifest: dict[str, object] = {
-        "formatVersion": 2,
-        "releaseVersion": release_version,
-        "channel": channel,
-        "source": revisions,
-        "workflow": {
-            "repository": repository,
-            "runId": run_id,
-            "runAttempt": run_attempt,
-        },
-        "ociManifestDigest": oci_digest,
-        "packageSmoke": package_smoke,
-        "artifacts": artifacts,
-    }
-    output.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return manifest
+    require_publication_source(args.repository, args.source_sha)
+    print(json.dumps({"phase": args.phase, "releaseId": identifier, "verifiedAssets": len(assets)}, sort_keys=True))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -440,23 +418,43 @@ def build_parser() -> argparse.ArgumentParser:
     identity.add_argument("--github-output", required=True, type=Path)
     identity.add_argument("--source-root", type=Path, default=ROOT,
                          help="Read Cargo metadata from this candidate directory as data.")
-    candidate = subparsers.add_parser(
-        "candidate-manifest",
-        help="record exact candidate revisions and retained release evidence",
-    )
-    candidate.add_argument("--release-dir", required=True, type=Path)
-    candidate.add_argument("--output", required=True, type=Path)
-    candidate.add_argument("--release-version", required=True)
-    candidate.add_argument("--channel", required=True)
-    candidate.add_argument("--source-sha", required=True)
-    candidate.add_argument("--emulebb-build-ref", required=True)
-    candidate.add_argument("--emulebb-build-tests-ref", required=True)
-    candidate.add_argument("--emulebb-tooling-ref", required=True)
-    candidate.add_argument("--emulebb-miniupnp-ref", required=True)
-    candidate.add_argument("--emulebb-libpcpnatpmp-ref", required=True)
-    candidate.add_argument("--repository", required=True)
-    candidate.add_argument("--run-id", required=True)
-    candidate.add_argument("--run-attempt", required=True)
+    for command in ("candidate-manifest", "verify-candidate", "verify-public-candidate", "release-assets", "publish-images"):
+        candidate = subparsers.add_parser(command, help="strict source-bound release evidence control")
+        candidate.add_argument("--release-dir", required=True, type=Path)
+        expected_arguments = {
+            "release-version": "RELEASE_VERSION", "channel": "RELEASE_CHANNEL",
+            "source-sha": "EMULEBB_SOURCE_REVISION", "emulebb-build-ref": "EMULEBB_BUILD_REF",
+            "emulebb-build-tests-ref": "EMULEBB_BUILD_TESTS_REF", "emulebb-tooling-ref": "EMULEBB_TOOLING_REF",
+            "emulebb-miniupnp-ref": "MINIUPNP_REF", "emulebb-libpcpnatpmp-ref": "PCPNATPMP_REF",
+            "repository": "GITHUB_REPOSITORY", "run-id": "GITHUB_RUN_ID",
+            "run-attempt": "GITHUB_RUN_ATTEMPT", "workflow-sha": "GITHUB_WORKFLOW_SHA",
+        }
+        for flag, environment in expected_arguments.items():
+            default = os.environ.get(environment)
+            candidate.add_argument("--" + flag, default=default, required=not default,
+                                   help=f"Expected identity; defaults to the caller's {environment}.")
+        candidate.add_argument("--build-repo", required=True, type=Path)
+        candidate.add_argument("--github-output", type=Path)
+        if command in {"candidate-manifest", "verify-candidate", "publish-images"}:
+            candidate.add_argument("--archives-dir", required=True, type=Path)
+            candidate.add_argument("--harness-repo", required=True, type=Path)
+        else:
+            candidate.add_argument("--verified-candidate-sha256", required=True)
+        if command == "candidate-manifest":
+            candidate.add_argument("--output", required=True, type=Path)
+        if command == "publish-images":
+            candidate.add_argument("--assembled-candidate-sha256", required=True)
+        if command == "release-assets":
+            candidate.add_argument("--phase", required=True, choices=("before-upload", "after-upload"))
+            candidate.add_argument("--release-id")
+    channel = subparsers.add_parser("promote-nightly", help="advance only verified nightly image digests")
+    for flag, environment in {
+        "release-version": "RELEASE_VERSION", "source-sha": "EMULEBB_SOURCE_REVISION",
+        "repository": "GITHUB_REPOSITORY", "workflow-sha": "GITHUB_WORKFLOW_SHA",
+        "ubuntu-digest": "UBUNTU_DIGEST", "alpine-digest": "ALPINE_DIGEST",
+    }.items():
+        default = os.environ.get(environment)
+        channel.add_argument("--" + flag, default=default, required=not default)
     return parser
 
 
@@ -480,25 +478,51 @@ def main(argv: Sequence[str] | None = None) -> int:
             stream.write(f"version={version}\n")
         print(version)
         return 0
-    if args.command == "candidate-manifest":
-        write_candidate_manifest(
-            release_dir=args.release_dir,
-            output=args.output,
-            release_version=args.release_version,
-            channel=args.channel,
-            source_sha=args.source_sha,
-            support_refs={
-                "emulebbBuild": args.emulebb_build_ref,
-                "emulebbBuildTests": args.emulebb_build_tests_ref,
-                "emulebbTooling": args.emulebb_tooling_ref,
-                "emulebbMiniupnp": args.emulebb_miniupnp_ref,
-                "emulebbLibpcpnatpmp": args.emulebb_libpcpnatpmp_ref,
-            },
-            repository=args.repository,
-            run_id=args.run_id,
-            run_attempt=args.run_attempt,
-        )
-        print(args.output)
+    if args.command in {"candidate-manifest", "verify-candidate", "verify-public-candidate", "release-assets", "publish-images"}:
+        owner = candidate_owner(args)
+        context = candidate_context(args, owner)
+        release_dir = args.release_dir.resolve()
+        path = owner.candidate_path(release_dir, context)
+        common = {"release_dir": release_dir, "context": context}
+        if args.command in {"candidate-manifest", "verify-candidate", "publish-images"}:
+            common.update(archives_dir=args.archives_dir.resolve(), archive_identity=archive_identity_reader(args))
+            if args.command == "candidate-manifest":
+                if args.output.resolve() != path.resolve():
+                    raise RuntimeError("Candidate output must use its canonical release filename")
+                owner.write_candidate(**common)
+                data = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                data = owner.verify_candidate(**common)
+        else:
+            data = owner.verify_public_candidate(
+                **common, verified_candidate_sha256=args.verified_candidate_sha256,
+            )
+        if args.command == "release-assets":
+            verify_release_assets(args, data, path)
+        else:
+            if args.command == "publish-images":
+                if (SHA256_RE.fullmatch(args.assembled_candidate_sha256) is None
+                        or _sha256(path) != args.assembled_candidate_sha256):
+                    raise RuntimeError("Image publisher candidate differs from the assembled candidate")
+                require_publication_source(args.repository, args.source_sha)
+                publish_verified_images(
+                    repository="ghcr.io/emulebb/emulebb-rust", version=args.release_version,
+                    digests={variant: data["images"][variant]["ociManifestDigest"] for variant in ("ubuntu", "alpine")},
+                    archives={variant: args.archives_dir.resolve() / data["images"][variant]["archive"]
+                              for variant in ("ubuntu", "alpine")},
+                )
+            candidate_outputs(path, data, args.github_output)
+        return 0
+    if args.command == "promote-nightly":
+        if (os.environ.get("GITHUB_ACTIONS") != "true"
+                or args.repository != os.environ.get("GITHUB_REPOSITORY")
+                or args.workflow_sha != os.environ.get("GITHUB_WORKFLOW_SHA")):
+            raise RuntimeError("Nightly promotion requires the actual GitHub workflow")
+        checked_checkout(ROOT, args.workflow_sha, label="Nightly control")
+        digests = {"ubuntu": args.ubuntu_digest, "alpine": args.alpine_digest}
+        _image_targets(args.release_version, digests)
+        require_publication_source(args.repository, args.source_sha)
+        promote_nightly(repository="ghcr.io/emulebb/emulebb-rust", version=args.release_version, digests=digests)
         return 0
     raise AssertionError(f"unhandled command: {args.command}")
 

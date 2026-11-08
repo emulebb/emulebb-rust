@@ -41,9 +41,9 @@ permissions:
 
 env:
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
-  EMULEBB_BUILD_REF: bd96006a94b92ab9a8499f563c86011f36dfbfd9
-  EMULEBB_BUILD_TESTS_REF: 389a0bc90039e8695a1a4809dd906f4af8b2952f
-  EMULEBB_TOOLING_REF: 9af34723a508b46be839502138b64a0be7e39dde
+  EMULEBB_BUILD_REF: 010c266c29d73e17a654306d0dca8008d8db9006
+  EMULEBB_BUILD_TESTS_REF: fd4c6d21e079fab2b84704294c7c7000b893a81e
+  EMULEBB_TOOLING_REF: 630d1a3492ae65acad0a8dfd1575d671ff7b492c
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
@@ -131,28 +131,33 @@ jobs:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.prepare.outputs.source_sha }}
       - name: Checkout native MiniUPnP source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: emulebb/emulebb-miniupnp
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
       - name: Checkout native libpcpnatpmp source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: emulebb/emulebb-libpcpnatpmp
           ref: ${{ env.PCPNATPMP_REF }}
           path: .ci/emulebb-libpcpnatpmp
       - name: Checkout pinned workspace packaging
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: emulebb/emulebb-build
           ref: ${{ env.EMULEBB_BUILD_REF }}
           path: .ci/emulebb-build
       - name: Checkout pinned release documentation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: emulebb/emulebb-tooling
           ref: ${{ env.EMULEBB_TOOLING_REF }}
           path: .ci/emulebb-tooling
@@ -174,7 +179,7 @@ jobs:
 
       - name: Install Linux build dependencies
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libfontconfig1-dev
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y dpkg-dev libfontconfig1-dev
       - name: Install verified AppImage builder
         if: matrix.os == 'linux'
         shell: bash
@@ -222,17 +227,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
       - name: Retain package and provenance
-        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: emulebb-rust-package-${{ matrix.slug }}
+          name: emulebb-rust-native-payload-${{ matrix.slug }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.zip
             ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.deb
             ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.AppImage
             ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.dmg
             ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
   native-package-smoke:
@@ -256,10 +260,18 @@ jobs:
       - name: Checkout trusted release-control source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.workflow_sha }}
+      - name: Checkout candidate schema as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+          path: .ci/candidate
       - name: Checkout pinned package smoke harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: emulebb/emulebb-build-tests
           ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
           path: .ci/emulebb-build-tests
@@ -273,10 +285,10 @@ jobs:
       - name: Download native package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: emulebb-rust-package-${{ matrix.slug }}
+          name: emulebb-rust-native-payload-${{ matrix.slug }}
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Prove packaged lifecycle, local transfer, and embedded WebUI
-        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --rust-repo . --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} ${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}
+        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --rust-repo .ci/candidate --expected-source-sha "${{ needs.prepare.outputs.source_sha }}" --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} ${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}
       - name: Retain package lifecycle evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -285,11 +297,126 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  musl-package:
+    name: Static musl ${{ matrix.architecture }}
+    needs: [prepare, verify-source]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {architecture: amd64, slug: linux-x64-musl, runner: ubuntu-24.04}
+          - {architecture: arm64, slug: linux-arm64-musl, runner: ubuntu-24.04-arm}
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_RUST_REPO: ${{ github.workspace }}
+      EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
+      EMULEBB_BUILD_TESTS_REPO: ${{ github.workspace }}/.ci/emulebb-build-tests
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+      - name: Checkout pinned MiniUPnP
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+          persist-credentials: false
+      - name: Checkout pinned PCP/NAT-PMP
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
+          persist-credentials: false
+      - name: Checkout pinned workspace packaging
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_BUILD_REF }}
+          path: .ci/emulebb-build
+          persist-credentials: false
+      - name: Checkout pinned release scope
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: ${{ env.EMULEBB_TOOLING_REF }}
+          path: .ci/emulebb-tooling
+          persist-credentials: false
+      - name: Checkout pinned lifecycle harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
+          path: .ci/emulebb-build-tests
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Install pinned workspace CLI dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.14.3
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.0"
+          package-manager-cache: false
+      - name: Install pinned npm
+        run: npm install --global npm@11.20.0
+      - name: Set up pinned native Docker
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
+        with:
+          version: v29.6.1
+      - name: Build, test and smoke static musl with the local recipe
+        working-directory: .ci/emulebb-build
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+        run: >-
+          python -B -m emule_workspace package-emulebb-rust-linux-ci
+          --libc musl --architecture ${{ matrix.architecture }} --release-version "$RELEASE_VERSION"
+          --test-scope full --smoke
+          --smoke-report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json"
+      - name: Retain static musl payload and provenance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-musl-payload-${{ matrix.architecture }}
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/packages/rust-linux/${{ env.RELEASE_VERSION }}/musl-${{ matrix.architecture }}/*.tar.zst
+            ${{ runner.temp }}/emulebb-rust-out/packages/rust-linux/${{ env.RELEASE_VERSION }}/musl-${{ matrix.architecture }}/*.manifest.json
+            ${{ runner.temp }}/emulebb-rust-out/packages/rust-linux/${{ env.RELEASE_VERSION }}/musl-${{ matrix.architecture }}/*.sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain native musl lifecycle evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-package-smoke-${{ matrix.slug }}
+          path: ${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain musl diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-musl-build-logs-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/emulebb-rust-out/reports/rust-linux/**/*.log
+          if-no-files-found: warn
+          retention-days: 30
+
   image-candidate:
-    name: Build multiarch image candidate
-    needs: [prepare, native-package]
+    name: Build multiarch ${{ matrix.variant }} image candidate
+    needs: [prepare, native-package, musl-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [ubuntu, alpine]
     permissions:
       contents: read
       packages: read
@@ -301,195 +428,325 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+      - name: Checkout trusted OCI control helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci/control
+          persist-credentials: false
       - name: Checkout pinned workspace packaging
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build
           ref: ${{ env.EMULEBB_BUILD_REF }}
           path: .ci/emulebb-build
-      - name: Checkout pinned image smoke harness
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: emulebb/emulebb-build-tests
-          ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
-          path: .ci/emulebb-build-tests
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15.2"
       - name: Install pinned workspace CLI dependencies
         run: python -m pip install click==8.4.1 pydantic==2.14.3
-      - name: Set up Docker with multi-platform image store
+      - name: Set up pinned Docker with multi-platform image store
         uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
         with:
+          version: v29.6.1
           daemon-config: |
-            {
-              "features": {
-                "containerd-snapshotter": true
-              }
-            }
-      - name: Set up ARM64 emulation
+            {"features":{"containerd-snapshotter":true}}
+      - name: Set up ARM64 build emulation
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
           image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
-      - name: Set up Docker Buildx
+      - name: Install pinned Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.35.0
+          driver: docker
+          use: false
       - name: Authenticate upstream GHCR base pulls
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Download all native assets
+      - name: Download GNU Linux inputs for Ubuntu
+        if: matrix.variant == 'ubuntu'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: emulebb-rust-package-*
+          pattern: emulebb-rust-native-payload-linux-*
           merge-multiple: true
-          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-      - name: Build OCI archive without publishing
+          path: ${{ runner.temp }}/emulebb-rust-out/image-inputs
+      - name: Download static musl inputs for Alpine
+        if: matrix.variant == 'alpine'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-musl-payload-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/emulebb-rust-out/image-inputs
+      - name: Build provenance-bearing OCI archive without publishing
         working-directory: .ci/emulebb-build
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
-        run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
-      - name: Smoke first-run LinuxServer image
-        run: python .ci/emulebb-build-tests/scripts/smoke-rust-container.py --archive "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar" --image "ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}"
-      - name: Record the verified OCI manifest digest
-        run: python tools/release_publish.py oci-digest --archive "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar" --output "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.digest"
-      - name: Install pinned Trivy
-        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
-        with:
-          version: v0.75.0
-          cache: true
-      - name: Generate per-platform image SBOMs
-        id: image-sbom
-        shell: bash
-        env:
-          IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
-          SECURITY_DIR: ${{ runner.temp }}/emulebb-rust-out/image-security
-        run: |
-          set -euo pipefail
-          mkdir -p "$SECURITY_DIR"
-          for platform in linux/amd64 linux/arm64; do
-            architecture="${platform#linux/}"
-            trivy image --image-src docker --platform "$platform" --no-progress \
-              --format spdx-json \
-              --output "$SECURITY_DIR/emulebb-rust-v${RELEASE_VERSION}-image-${architecture}.sbom.spdx.json" \
-              "$IMAGE"
-          done
-      - name: Reject fixable high or critical image vulnerabilities
-        shell: bash
-        env:
-          IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
-          SECURITY_DIR: ${{ runner.temp }}/emulebb-rust-out/image-security
-        run: |
-          set -uo pipefail
-          scan_status=0
-          for platform in linux/amd64 linux/arm64; do
-            architecture="${platform#linux/}"
-            if ! trivy image --image-src docker --platform "$platform" --no-progress \
-              --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 \
-              "$IMAGE" | tee "$SECURITY_DIR/emulebb-rust-v${RELEASE_VERSION}-image-${architecture}.vulnerabilities.txt"; then
-              scan_status=1
-            fi
-          done
-          (
-            cd "$SECURITY_DIR"
-            sha256sum -- *.json *.txt > "emulebb-rust-v${RELEASE_VERSION}-image-security-SHA256SUMS"
-          )
-          exit "$scan_status"
-      - name: Retain image security evidence
-        if: ${{ always() && steps.image-sbom.outcome != 'skipped' }}
+        run: >-
+          python -B -m emule_workspace package-emulebb-rust-image-ci
+          --variant ${{ matrix.variant }} --release-version "$RELEASE_VERSION"
+          --assets-dir "${{ runner.temp }}/emulebb-rust-out/image-inputs"
+          --control-rust-repo "${{ github.workspace }}/.ci/control"
+      - name: Retain exact OCI archive and build identity
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: emulebb-rust-image-security
-          path: ${{ runner.temp }}/emulebb-rust-out/image-security/*
-          if-no-files-found: warn
-          retention-days: 30
-      - name: Retain image candidate
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: emulebb-rust-image-candidate
+          name: emulebb-rust-image-archive-${{ matrix.variant }}
           path: |
-            ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar
-            ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.digest
+            ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-${{ matrix.variant }}-multiarch.oci.tar
+            ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-${{ matrix.variant }}-multiarch.oci.tar.manifest.json
           if-no-files-found: error
           retention-days: 30
+      - name: Retain image build diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-image-build-logs-${{ matrix.variant }}
+          path: ${{ runner.temp }}/emulebb-rust-out/reports/rust-image-build/**/*.log
+          if-no-files-found: warn
+          retention-days: 30
 
-  assemble-candidate:
-    name: Assemble non-publishing release candidate
-    needs: [prepare, native-package-smoke, image-candidate]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+  image-native-validation:
+    name: Native ${{ matrix.variant }} image ${{ matrix.architecture }}
+    needs: [prepare, image-candidate]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [ubuntu, alpine]
+        architecture: [amd64, arm64]
+        include:
+          - {architecture: amd64, runner: ubuntu-24.04}
+          - {architecture: arm64, runner: ubuntu-24.04-arm}
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_RUST_REPO: ${{ github.workspace }}/.ci/candidate
+      EMULEBB_BUILD_TESTS_REPO: ${{ github.workspace }}/.ci/emulebb-build-tests
     steps:
-      - name: Checkout trusted release-control helper
+      - name: Checkout trusted OCI control helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
-          path: emulebb-rust
-      - name: Checkout pinned workspace packaging
+          persist-credentials: false
+      - name: Checkout candidate recipe as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          path: .ci/candidate
+          persist-credentials: false
+      - name: Checkout pinned workspace image validator
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build
           ref: ${{ env.EMULEBB_BUILD_REF }}
-          path: emulebb-build
+          path: .ci/emulebb-build
+          persist-credentials: false
+      - name: Checkout pinned image lifecycle harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
+          path: .ci/emulebb-build-tests
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15.2"
       - name: Install pinned workspace CLI dependencies
         run: python -m pip install click==8.4.1 pydantic==2.14.3
-      - name: Download all native assets
+      - name: Set up pinned native Docker with multi-platform image store
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
+        with:
+          version: v29.6.1
+          daemon-config: |
+            {"features":{"containerd-snapshotter":true}}
+      - name: Download exact assembled OCI archive
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: emulebb-rust-package-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-      - name: Verify complete native set and write SHA256SUMS
-        working-directory: emulebb-build
+          name: emulebb-rust-image-archive-${{ matrix.variant }}
+          path: ${{ runner.temp }}/emulebb-rust-out/artifacts
+      - name: Prove native lifecycle, CPU-specific SPDX and fixable vulnerability gate
+        working-directory: .ci/emulebb-build
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
-        run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
-      - name: Download package lifecycle evidence
+        run: >-
+          python -B -m emule_workspace validate-emulebb-rust-image-ci
+          --archive "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-${{ matrix.variant }}-multiarch.oci.tar"
+          --image "ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}-${{ matrix.variant }}"
+          --architecture ${{ matrix.architecture }}
+          --security-dir "${{ runner.temp }}/emulebb-rust-out/evidence/${{ matrix.variant }}-${{ matrix.architecture }}"
+          --control-rust-repo "${{ github.workspace }}"
+      - name: Retain bounded native image proof
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-image-native-proof-${{ matrix.variant }}-${{ matrix.architecture }}
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/evidence/${{ matrix.variant }}-${{ matrix.architecture }}/*.json
+            ${{ runner.temp }}/emulebb-rust-out/evidence/${{ matrix.variant }}-${{ matrix.architecture }}/*.txt
+            ${{ runner.temp }}/emulebb-rust-out/evidence/${{ matrix.variant }}-${{ matrix.architecture }}/*-security-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain image validation diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-image-validation-logs-${{ matrix.variant }}-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/emulebb-rust-out/evidence/${{ matrix.variant }}-${{ matrix.architecture }}/*.log
+          if-no-files-found: warn
+          retention-days: 30
+
+  assemble-candidate:
+    name: Assemble verified native and container candidate
+    needs: [prepare, native-package-smoke, musl-package, image-native-validation]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      candidate_sha256: ${{ steps.candidate.outputs.candidate_sha256 }}
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
+    steps:
+      - name: Checkout trusted release-control source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: emulebb-rust
+          persist-credentials: false
+      - name: Checkout pinned candidate assembler
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_BUILD_REF }}
+          path: emulebb-build
+          persist-credentials: false
+      - name: Checkout pinned image evidence reader
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
+          path: emulebb-build-tests
+          persist-credentials: false
+      - name: Checkout pinned release documentation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: ${{ env.EMULEBB_TOOLING_REF }}
+          path: emulebb-tooling
+          persist-credentials: false
+      - name: Checkout candidate history as nightly notes input
+        if: env.RELEASE_CHANNEL == 'nightly'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+          path: .ci/candidate
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Install pinned workspace CLI dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.14.3
+      - name: Download native payloads
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-native-payload-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Download static musl payloads
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-musl-payload-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Download all eight native package lifecycle proofs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: emulebb-rust-package-smoke-*
           merge-multiple: true
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-      - name: Download image security evidence
+      - name: Download both OCI archives separately from public assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: emulebb-rust-image-security
-          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-      - name: Download smoke-tested image identity
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: emulebb-rust-image-candidate
+          pattern: emulebb-rust-image-archive-*
+          merge-multiple: true
           path: ${{ runner.temp }}/emulebb-rust-out/artifacts
-      - name: Add verified OCI digest to candidate evidence
+      - name: Download both native Ubuntu proofs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-image-native-proof-ubuntu-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/emulebb-rust-out/image-evidence/ubuntu
+      - name: Download both native Alpine proofs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-image-native-proof-alpine-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/emulebb-rust-out/image-evidence/alpine
+      - name: Bind both native CPU proofs to each exact OCI archive
+        working-directory: emulebb-build
+        shell: bash
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+        run: |
+          set -euo pipefail
+          for variant in ubuntu alpine; do
+            python -B -m emule_workspace assemble-emulebb-rust-image-evidence-ci \
+              --archive "$EMULEBB_WORKSPACE_OUTPUT_ROOT/artifacts/emulebb-rust-v$RELEASE_VERSION-$variant-multiarch.oci.tar" \
+              --evidence-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/image-evidence/$variant" \
+              --release-dir "$RELEASE_DIR" --release-version "$RELEASE_VERSION" \
+              --source-sha "$EMULEBB_SOURCE_REVISION" \
+              --harness-repo "$GITHUB_WORKSPACE/emulebb-build-tests" --harness-sha "$EMULEBB_BUILD_TESTS_REF" \
+              --control-rust-repo "$GITHUB_WORKSPACE/emulebb-rust"
+          done
+      - name: Add versioned formal release documentation
+        if: env.RELEASE_CHANNEL != 'nightly'
         shell: bash
         env:
           RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-        run: cp "${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${RELEASE_VERSION}-multiarch.oci.digest" "$RELEASE_DIR/"
-      - name: Write exact candidate revision and evidence manifest
+        run: |
+          set -euo pipefail
+          cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-NOTES.md" "$RELEASE_DIR/"
+          cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-CHANGELOG.md" "$RELEASE_DIR/"
+      - name: Generate versioned commit-based nightly release notes
+        if: env.RELEASE_CHANNEL == 'nightly'
+        working-directory: emulebb-rust
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+          PREVIOUS_REF: ${{ inputs.previous_ref }}
         run: >-
-          python emulebb-rust/tools/release_publish.py candidate-manifest
-          --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
-          --output "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/emulebb-rust-v${{ env.RELEASE_VERSION }}-candidate-manifest.json"
-          --release-version "${{ env.RELEASE_VERSION }}"
-          --channel "${{ env.RELEASE_CHANNEL }}"
-          --source-sha "${{ needs.prepare.outputs.source_sha }}"
-          --emulebb-build-ref "${{ env.EMULEBB_BUILD_REF }}"
-          --emulebb-build-tests-ref "${{ env.EMULEBB_BUILD_TESTS_REF }}"
-          --emulebb-tooling-ref "${{ env.EMULEBB_TOOLING_REF }}"
-          --emulebb-miniupnp-ref "${{ env.MINIUPNP_REF }}"
-          --emulebb-libpcpnatpmp-ref "${{ env.PCPNATPMP_REF }}"
-          --repository "${{ github.repository }}"
-          --run-id "${{ github.run_id }}"
-          --run-attempt "${{ github.run_attempt }}"
-      - name: Retain assembled release candidate
+          python -B tools/nightly_release.py notes --version "$RELEASE_VERSION"
+          --previous-ref "$PREVIOUS_REF" --source-root ../.ci/candidate
+          --output "$RELEASE_DIR/RELEASE-${RELEASE_VERSION}-NOTES.md"
+      - name: Verify all payloads and checksum the final public evidence set
+        working-directory: emulebb-build
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+        run: >-
+          python -B -m emule_workspace assemble-emulebb-rust-release-ci
+          --release-version "$RELEASE_VERSION" --assets-dir "$RELEASE_DIR"
+      - name: Verify exact source pins, native proofs and candidate bytes
+        id: candidate
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+        run: >-
+          python -B emulebb-rust/tools/release_publish.py candidate-manifest
+          --release-dir "$RELEASE_DIR"
+          --output "$RELEASE_DIR/emulebb-rust-v$RELEASE_VERSION-candidate-manifest.json"
+          --archives-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/artifacts"
+          --build-repo emulebb-build --harness-repo emulebb-build-tests
+          --github-output "$GITHUB_OUTPUT"
+      - name: Retain the exact public release candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: emulebb-rust-release-candidate
@@ -498,166 +755,222 @@ jobs:
           retention-days: 30
 
   publish-image:
-    name: Publish verified GHCR image
-    if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
+    name: Publish both verified container variants
     needs: [prepare, image-candidate, assemble-candidate]
+    if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+    concurrency:
+      group: rust-image-publication
+      cancel-in-progress: false
     permissions:
       contents: read
+      actions: read
       packages: write
+      attestations: write
+      id-token: write
+    outputs:
+      candidate_sha256: ${{ steps.published.outputs.candidate_sha256 }}
+      ubuntu_digest: ${{ steps.published.outputs.ubuntu_digest }}
+      alpine_digest: ${{ steps.published.outputs.alpine_digest }}
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
     steps:
-      - name: Download smoke-tested image candidate
+      - name: Checkout trusted publication helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: emulebb-rust
+          persist-credentials: false
+      - name: Checkout pinned candidate verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_BUILD_REF }}
+          path: emulebb-build
+          persist-credentials: false
+      - name: Checkout pinned OCI graph reader
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
+          path: emulebb-build-tests
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Install pinned workspace CLI dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.14.3
+      - name: Download the final public candidate
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: emulebb-rust-image-candidate
+          name: emulebb-rust-release-candidate
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Download both exact OCI archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-image-archive-*
+          merge-multiple: true
           path: ${{ runner.temp }}/emulebb-rust-out/artifacts
       - name: Install pinned registry client
         uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # v0.2.0
         with:
           release: v0.11.6
-      - name: Log in to GHCR
+      - name: Authenticate publication to GHCR
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish the versioned image exactly once
-        shell: bash
+      - name: Verify candidate bytes, preflight immutable tags and publish both variants
+        id: published
         env:
-          OCI_ARCHIVE: ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar
-          CANDIDATE_DIGEST_FILE: ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.digest
-          IMAGE_REPOSITORY: ghcr.io/emulebb/emulebb-rust
-          VERSIONED_IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
-        run: |
-          set -euo pipefail
-          candidate_digest="$(tr -d '\r\n' < "$CANDIDATE_DIGEST_FILE")"
-          [[ "$candidate_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "invalid candidate digest: $candidate_digest" >&2
-            exit 1
-          }
-          available_tags="$(regctl tag ls "$IMAGE_REPOSITORY")"
-          if printf '%s\n' "$available_tags" | grep -Fqx -- "$RELEASE_VERSION"; then
-            existing_digest="$(regctl image digest "$VERSIONED_IMAGE")"
-            test "$existing_digest" = "$candidate_digest" || {
-              echo "$VERSIONED_IMAGE already exists with conflicting digest $existing_digest" >&2
-              exit 1
-            }
-          else
-            regctl image import "$VERSIONED_IMAGE" "$OCI_ARCHIVE"
-          fi
-          published_digest="$(regctl image digest "$VERSIONED_IMAGE")"
-          test "$published_digest" = "$candidate_digest"
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSEMBLED_CANDIDATE_SHA: ${{ needs.assemble-candidate.outputs.candidate_sha256 }}
+        run: >-
+          python -B emulebb-rust/tools/release_publish.py publish-images
+          --release-dir "$RELEASE_DIR" --archives-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/artifacts"
+          --build-repo emulebb-build --harness-repo emulebb-build-tests
+          --assembled-candidate-sha256 "$ASSEMBLED_CANDIDATE_SHA" --github-output "$GITHUB_OUTPUT"
+      - name: Attest the published Ubuntu digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/emulebb/emulebb-rust
+          subject-digest: ${{ steps.published.outputs.ubuntu_digest }}
+          push-to-registry: true
+      - name: Attest the published Alpine digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/emulebb/emulebb-rust
+          subject-digest: ${{ steps.published.outputs.alpine_digest }}
+          push-to-registry: true
 
   publish-native:
-    name: Publish verified native assets
-    if: ${{ startsWith(github.ref, 'refs/tags/rust-v') || inputs.publish }}
+    name: Publish verified native release assets
     needs: [prepare, assemble-candidate, publish-image]
+    if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+    concurrency:
+      group: rust-native-release-${{ needs.prepare.outputs.release_version }}
+      cancel-in-progress: false
     permissions:
       contents: write
+      actions: read
       attestations: write
       id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
+      VERIFIED_CANDIDATE_SHA: ${{ needs.publish-image.outputs.candidate_sha256 }}
     steps:
-      - name: Checkout trusted publication and notes helpers
+      - name: Checkout trusted publication helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
-          persist-credentials: false
           path: emulebb-rust
-      - name: Checkout candidate history as notes input
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
-          fetch-depth: 0
-          path: .ci/candidate
-      - name: Checkout pinned release documentation
+      - name: Checkout pinned public candidate verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: emulebb/emulebb-tooling
-          ref: ${{ env.EMULEBB_TOOLING_REF }}
-          path: emulebb-tooling
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_BUILD_REF }}
+          path: emulebb-build
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15.2"
-      - name: Download assembled release candidate
+      - name: Install pinned workspace CLI dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.14.3
+      - name: Download the exact image-publisher-verified public candidate
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: emulebb-rust-release-candidate
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-      - name: Add versioned release documentation
-        if: ${{ inputs.channel != 'nightly' }}
-        shell: bash
+      - name: Recheck source eligibility and existing draft bytes
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          release_dir="${{ runner.temp }}/emulebb-rust-out/release/rust-v${RELEASE_VERSION}"
-          cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-NOTES.md" "$release_dir/"
-          cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-CHANGELOG.md" "$release_dir/"
-      - name: Generate commit-based nightly notes
-        if: ${{ inputs.channel == 'nightly' }}
-        working-directory: emulebb-rust
-        run: python tools/nightly_release.py notes --version "${RELEASE_VERSION}" --previous-ref "${{ inputs.previous_ref }}" --source-root ../.ci/candidate --output "${{ runner.temp }}/nightly-release-notes.md"
-      - name: Attest release artifacts
+          set -euo pipefail
+          python -B emulebb-rust/tools/release_publish.py release-assets \
+            --release-dir "$RELEASE_DIR" --build-repo emulebb-build \
+            --verified-candidate-sha256 "$VERIFIED_CANDIDATE_SHA" --phase before-upload
+      - name: Attest the exact native release candidate
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
-      - name: Publish GitHub prerelease
+      - name: Upload immutable assets to a draft prerelease
         id: draft-release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          tag_name: ${{ inputs.channel == 'nightly' && format('rust-v{0}', needs.prepare.outputs.release_version) || github.ref_name }}
+          tag_name: rust-v${{ env.RELEASE_VERSION }}
           target_commitish: ${{ needs.prepare.outputs.source_sha }}
           draft: true
           prerelease: true
           make_latest: false
-          body_path: ${{ inputs.channel == 'nightly' && format('{0}/nightly-release-notes.md', runner.temp) || format('emulebb-tooling/docs/products/emulebb-rust/RELEASE-{0}-NOTES.md', needs.prepare.outputs.release_version) }}
-          files: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
-          fail_on_unmatched_files: true
           overwrite_files: false
-      - name: Publish the complete prerelease
+          body_path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/RELEASE-${{ env.RELEASE_VERSION }}-NOTES.md
+          files: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
+      - name: Verify every uploaded asset before finalizing the draft
         env:
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.draft-release.outputs.id }}
-        run: gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -F draft=false -F prerelease=true -f make_latest=false --silent
+        run: |
+          set -euo pipefail
+          python -B emulebb-rust/tools/release_publish.py release-assets \
+            --release-dir "$RELEASE_DIR" --build-repo emulebb-build \
+            --verified-candidate-sha256 "$VERIFIED_CANDIDATE_SHA" --phase after-upload --release-id "$RELEASE_ID"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false
 
   publish-nightly-channel:
-    name: Advance the nightly image channel
-    if: ${{ inputs.publish && inputs.channel == 'nightly' }}
-    needs: [prepare, publish-native]
+    name: Advance both verified nightly image channels
+    needs: [prepare, publish-image, publish-native]
+    if: inputs.channel == 'nightly' && inputs.publish
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+    concurrency:
+      group: rust-image-publication
+      cancel-in-progress: false
     permissions:
       contents: read
+      actions: read
       packages: write
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
     steps:
-      - name: Install pinned registry client
+      - name: Checkout trusted channel control helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Install pinned channel registry client
         uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # v0.2.0
         with:
           release: v0.11.6
-      - name: Log in to GHCR
+      - name: Authenticate nightly channel publication
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Point the floating nightly tag at the published image
-        shell: bash
+      - name: Recheck source and immutable versions, then promote only bound digests
         env:
-          VERSIONED_IMAGE: ghcr.io/emulebb/emulebb-rust:${{ env.RELEASE_VERSION }}
-          CHANNEL_IMAGE: ghcr.io/emulebb/emulebb-rust:nightly
-        run: |
-          set -euo pipefail
-          versioned_digest="$(regctl image digest "$VERSIONED_IMAGE")"
-          regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"
-          test "$versioned_digest" = "$(regctl image digest "$CHANNEL_IMAGE")"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UBUNTU_DIGEST: ${{ needs.publish-image.outputs.ubuntu_digest }}
+          ALPINE_DIGEST: ${{ needs.publish-image.outputs.alpine_digest }}
+        run: python -B tools/release_publish.py promote-nightly
 
   cleanup-nightlies:
     name: Retain the newest 14 nightlies

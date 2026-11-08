@@ -828,7 +828,11 @@ def check_workflow_job_timeouts(
             "prepare": 10,
             "verify-source": 10,
             "native-package": 45,
+            "native-package-smoke": 15,
+            "musl-package": 60,
             "image-candidate": 45,
+            "image-native-validation": 30,
+            "assemble-candidate": 15,
             "publish-image": 15,
             "publish-native": 20,
             "publish-nightly-channel": 10,
@@ -1039,7 +1043,9 @@ def check_release_control_trust(
     """Keep eligibility and write-capable helpers on the workflow's own revision."""
     errors = []
     for filename, supplied, jobs in (
-        ("release.yml", workflow_text, ("prepare", "verify-source", "publish-native", "cleanup-nightlies")),
+        ("release.yml", workflow_text, ("prepare", "verify-source", "native-package-smoke",
+                                       "image-native-validation", "assemble-candidate", "publish-image",
+                                       "publish-native", "publish-nightly-channel", "cleanup-nightlies")),
         ("nightly.yml", nightly_text, ("prepare", "verify-source")),
     ):
         text = supplied if supplied is not None else (
@@ -1101,153 +1107,98 @@ def check_nightly_coordination(
 
 
 def check_release_image_promotion(workflow_text: str | None = None) -> list[str]:
-    """Require release publication to be digest-bound, ordered, and write-once."""
-
-    workflow = ROOT / ".github" / "workflows" / "release.yml"
-    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    """Keep mutation in the tested, workflow-pinned publication helper."""
+    text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8") if workflow_text is None else workflow_text
     errors: list[str] = []
 
     def job_body(name: str) -> str | None:
         match = re.search(
-            rf"(?ms)^  {re.escape(name)}:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
-            text,
+            rf"(?ms)^  {re.escape(name)}:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)", text
         )
         return None if match is None else match.group("body")
 
-    image_candidate = job_body("image-candidate")
-    if image_candidate is None:
-        errors.append(".github/workflows/release.yml is missing the image candidate job")
-    else:
-        candidate_required = {
-            "release_publish.py oci-digest": "verified OCI digest generation",
-            "multiarch.oci.digest": "OCI digest sidecar retention",
-        }
-        errors.extend(
-            f".github/workflows/release.yml image-candidate is missing {description}"
-            for fragment, description in candidate_required.items()
-            if fragment not in image_candidate
-        )
-
-    publish_image = job_body("publish-image")
-    if publish_image is None:
-        errors.append(".github/workflows/release.yml is missing the image publishing job")
-    else:
-        publish_required = {
-            "needs: [prepare, image-candidate, assemble-candidate]": (
-                "complete-candidate-before-image-publication ordering"
-            ),
-            "name: emulebb-rust-image-candidate": "smoke-tested image artifact download",
-            "regclient/actions/regctl-installer@": "pinned registry client installer",
-            "release: v0.11.6": "pinned registry client release",
-            "CANDIDATE_DIGEST_FILE:": "candidate digest sidecar input",
-            'regctl tag ls "$IMAGE_REPOSITORY"': "versioned-tag existence check",
-            'existing_digest="$(regctl image digest "$VERSIONED_IMAGE")"': (
-                "existing image digest comparison"
-            ),
-            'regctl image import "$VERSIONED_IMAGE" "$OCI_ARCHIVE"': (
-                "exact OCI archive import"
-            ),
-            'published_digest="$(regctl image digest "$VERSIONED_IMAGE")"': (
-                "published image digest verification"
-            ),
-            'test "$published_digest" = "$candidate_digest"': (
-                "candidate-to-registry digest equality check"
-            ),
-        }
-        errors.extend(
-            f".github/workflows/release.yml is missing {description} configuration"
-            for fragment, description in publish_required.items()
-            if fragment not in publish_image
-        )
-        installer = re.search(
-            r"regclient/actions/regctl-installer@([^\s#]+)", publish_image
-        )
-        if installer is None or not action_ref_is_immutable(installer.group(1)):
-            errors.append(
-                ".github/workflows/release.yml must pin the publish-image registry client "
-                "installer by full commit SHA"
-            )
-        forbidden = {
-            "package-emulebb-rust-image-ci": "rebuilds the image after smoke testing",
-            "docker/setup-buildx-action": "sets up an unnecessary publishing rebuild",
-            "pattern: emulebb-rust-package-*": "downloads native inputs instead of the tested image",
-            'regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"': (
-                "advances a floating channel before the GitHub release"
-            ),
-        }
-        errors.extend(
-            f".github/workflows/release.yml publish-image {description}"
-            for fragment, description in forbidden.items()
-            if fragment in publish_image
-        )
-
-    publish_native = job_body("publish-native")
-    if publish_native is None:
-        errors.append(".github/workflows/release.yml is missing the native publishing job")
-    else:
-        native_required = {
-            "needs: [prepare, assemble-candidate, publish-image]": (
-                "candidate-and-image-before-release ordering"
-            ),
+    requirements = {
+        "image-candidate": {
+            "variant: [ubuntu, alpine]": "both container variant builds",
+            "package-emulebb-rust-image-ci": "canonical provenance-bearing OCI production",
+            "--control-rust-repo": "trusted OCI reader",
+            "name: emulebb-rust-image-archive-": "separate exact OCI archive retention",
+        },
+        "publish-image": {
+            "needs: [prepare, image-candidate, assemble-candidate]": "complete-candidate-before-image-publication ordering",
+            "name: emulebb-rust-release-candidate": "final public candidate download",
+            "pattern: emulebb-rust-image-archive-*": "both tested OCI archives",
+            "release_publish.py publish-images": "exact OCI archive import through the verified publication helper",
+            "--assembled-candidate-sha256": "assembly-to-publication candidate binding",
+            "--archives-dir": "actual OCI archive byte verification",
+            "--harness-repo": "pinned OCI platform identity reader",
+            "candidate_sha256:": "verified public candidate output",
+            "ubuntu_digest:": "verified Ubuntu digest output",
+            "alpine_digest:": "verified Alpine digest output",
+            "subject-digest: ${{ steps.published.outputs.ubuntu_digest }}": "Ubuntu digest attestation",
+            "subject-digest: ${{ steps.published.outputs.alpine_digest }}": "Alpine digest attestation",
+            "push-to-registry: true": "registry provenance retention",
+        },
+        "publish-native": {
+            "needs: [prepare, assemble-candidate, publish-image]": "candidate-and-image-before-release ordering",
+            "VERIFIED_CANDIDATE_SHA: ${{ needs.publish-image.outputs.candidate_sha256 }}": "image-publisher candidate binding",
+            "release_publish.py release-assets": "verified draft asset preflight",
+            "--phase before-upload": "existing draft byte comparison before upload",
+            "--phase after-upload --release-id": "complete uploaded byte comparison before finalization",
             "id: draft-release": "draft release output",
             "draft: true": "draft-first release creation",
             "overwrite_files: false": "write-once release assets",
             "gh api --method PATCH": "explicit release finalization",
             "-F draft=false": "draft finalization after asset upload",
-        }
-        errors.extend(
-            f".github/workflows/release.yml publish-native is missing {description}"
-            for fragment, description in native_required.items()
-            if fragment not in publish_native
-        )
-
-    publish_channel = job_body("publish-nightly-channel")
-    if publish_channel is None:
-        errors.append(
-            ".github/workflows/release.yml is missing the nightly channel publishing job"
-        )
-    else:
-        channel_required = {
-            "needs: [prepare, publish-native]": "release-before-channel ordering",
+        },
+        "publish-nightly-channel": {
+            "needs: [prepare, publish-image, publish-native]": "release-before-channel ordering",
             "inputs.channel == 'nightly'": "nightly-only channel gate",
-            "regclient/actions/regctl-installer@": "pinned channel registry client installer",
-            "release: v0.11.6": "pinned channel registry client release",
-            'regctl image copy "$VERSIONED_IMAGE" "$CHANNEL_IMAGE"': (
-                "floating-channel promotion"
-            ),
-            'regctl image digest "$CHANNEL_IMAGE"': "published-channel digest verification",
-        }
-        errors.extend(
-            f".github/workflows/release.yml publish-nightly-channel is missing {description}"
-            for fragment, description in channel_required.items()
-            if fragment not in publish_channel
-        )
-        installer = re.search(
-            r"regclient/actions/regctl-installer@([^\s#]+)", publish_channel
-        )
-        if installer is None or not action_ref_is_immutable(installer.group(1)):
-            errors.append(
-                ".github/workflows/release.yml must pin the nightly-channel registry client "
-                "installer by full commit SHA"
-            )
-
-    cleanup = job_body("cleanup-nightlies")
-    if cleanup is None:
-        errors.append(".github/workflows/release.yml is missing the nightly cleanup job")
-    else:
-        cleanup_required = {
-            "needs: [publish-native, publish-nightly-channel]": (
-                "publication-before-cleanup ordering"
-            ),
+            "release_publish.py promote-nightly": "bound-digest floating-channel promotion",
+            "needs.publish-image.outputs.ubuntu_digest": "verified Ubuntu channel input",
+            "needs.publish-image.outputs.alpine_digest": "verified Alpine channel input",
+        },
+        "cleanup-nightlies": {
+            "needs: [publish-native, publish-nightly-channel]": "publication-before-cleanup ordering",
             "always()": "post-publication cleanup evaluation",
             "continue-on-error: true": "non-fatal retention cleanup",
             "nightly_release.py prune --keep 14": "bounded nightly retention",
-        }
-        errors.extend(
-            f".github/workflows/release.yml cleanup-nightlies is missing {description}"
-            for fragment, description in cleanup_required.items()
-            if fragment not in cleanup
-        )
+        },
+    }
+    for job, required in requirements.items():
+        body = job_body(job)
+        if body is None:
+            errors.append(f".github/workflows/release.yml is missing the {job} job")
+            continue
+        errors.extend(f".github/workflows/release.yml {job} is missing {description}"
+                      for fragment, description in required.items() if fragment not in body)
+        if job in {"publish-image", "publish-nightly-channel"}:
+            installer = re.search(r"regclient/actions/regctl-installer@([^\s#]+)", body)
+            if installer is None or not action_ref_is_immutable(installer.group(1)):
+                errors.append(f".github/workflows/release.yml {job} must pin the registry installer by full commit SHA")
+            if "release: v0.11.6" not in body:
+                errors.append(f".github/workflows/release.yml {job} must pin the registry client release")
+            if re.search(r"\bregctl\s+image\s+(?:copy|import)\b", body):
+                errors.append(f".github/workflows/release.yml {job} bypasses the tested publication helper")
+        if job in {"publish-image", "publish-native"} and re.search(r"(?m)^    strategy:", body):
+            errors.append(f".github/workflows/release.yml {job} must use one publisher for the complete candidate")
+        if job == "publish-image":
+            for fragment, description in {
+                "package-emulebb-rust-image-ci": "rebuilds the image after validation",
+                "docker/setup-buildx-action": "sets up an unnecessary publishing rebuild",
+                "pattern: emulebb-rust-package-*": "downloads native inputs instead of the tested image",
+            }.items():
+                if fragment in body:
+                    errors.append(f".github/workflows/release.yml publish-image {description}")
+        if job == "publish-native":
+            before, upload, after, finalize = (
+                body.find("--phase before-upload"), body.find("uses: softprops/action-gh-release@"),
+                body.find("--phase after-upload"), body.find("gh api --method PATCH"),
+            )
+            if min(before, upload, after, finalize) >= 0 and not before < upload < after < finalize:
+                errors.append(".github/workflows/release.yml must verify draft bytes before upload and before finalization")
+            if re.search(r"(?m)^\s*cp\s", body):
+                errors.append(".github/workflows/release.yml must not add public files after candidate assembly")
     return errors
 
 
@@ -1255,90 +1206,71 @@ def check_release_image_security(
     workflow_text: str | None = None,
     dockerfile_text: str | None = None,
     dependabot_text: str | None = None,
+    alpine_text: str | None = None,
 ) -> list[str]:
-    """Keep the exact release image digest-pinned, inventoried, and gated."""
-
-    workflow = ROOT / ".github" / "workflows" / "release.yml"
-    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
-    image_job = re.search(
-        r"(?ms)^  image-candidate:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
-        text,
-    )
+    """Require both native image CPUs through the pinned shared security owner."""
+    text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8") if workflow_text is None else workflow_text
     errors: list[str] = []
-    if image_job is None:
-        errors.append(".github/workflows/release.yml is missing the image candidate job")
-    else:
-        body = image_job.group("body")
-        required = {
-            "aquasecurity/setup-trivy@": "Trivy installer",
-            "version: v0.75.0": "pinned Trivy release",
-            "--image-src docker": "scan of the loaded candidate image",
-            '--platform "$platform"': "per-platform image inspection",
-            "--format spdx-json": "SPDX JSON image SBOM generation",
-            "--scanners vuln": "image vulnerability scanner",
-            "--ignore-unfixed": "fixable-vulnerability filter",
-            "--severity HIGH,CRITICAL": "high and critical severity gate",
-            "--exit-code 1": "failing vulnerability result",
-            "name: emulebb-rust-image-security": "retained image security evidence",
-        }
-        errors.extend(
-            f".github/workflows/release.yml image-candidate is missing {description}"
-            for fragment, description in required.items()
-            if fragment not in body
-        )
-        installer = re.search(r"aquasecurity/setup-trivy@([^\s#]+)", body)
-        if installer is None or not action_ref_is_immutable(installer.group(1)):
-            errors.append(
-                ".github/workflows/release.yml must pin the Trivy installer by full commit SHA"
-            )
 
-    assemble_job = re.search(
-        r"(?ms)^  assemble-candidate:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
-        text,
-    )
-    publish_job = re.search(
-        r"(?ms)^  publish-native:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
-        text,
-    )
-    if (
-        assemble_job is None
-        or "name: emulebb-rust-image-security" not in assemble_job.group("body")
-        or publish_job is None
-        or "name: emulebb-rust-release-candidate" not in publish_job.group("body")
+    def job_body(name: str) -> str:
+        match = re.search(
+            rf"(?ms)^  {re.escape(name)}:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)", text
+        )
+        return "" if match is None else match.group("body")
+
+    native = job_body("image-native-validation")
+    required = {
+        "variant: [ubuntu, alpine]": "both image variants",
+        "architecture: [amd64, arm64]": "both image CPUs",
+        "architecture: amd64, runner: ubuntu-24.04}": "native AMD64 runner",
+        "architecture: arm64, runner: ubuntu-24.04-arm}": "native ARM64 runner",
+        "validate-emulebb-rust-image-ci": "pinned native SPDX JSON and high and critical vulnerability gate",
+        "--architecture ${{ matrix.architecture }}": "explicit native CPU selection",
+        "--control-rust-repo": "trusted OCI control code",
+        "ref: ${{ env.EMULEBB_BUILD_REF }}": "pinned security owner checkout",
+        "name: emulebb-rust-image-native-proof-": "retained native image evidence",
+    }
+    errors.extend(f".github/workflows/release.yml image-native-validation is missing {description}"
+                  for fragment, description in required.items() if fragment not in native)
+    if "setup-qemu-action" in native:
+        errors.append(".github/workflows/release.yml image-native-validation must not install CPU emulation")
+    build_ref = re.search(r"(?m)^  EMULEBB_BUILD_REF:\s*([^\s]+)\s*$", text)
+    if build_ref is None or not action_ref_is_immutable(build_ref.group(1)):
+        errors.append(".github/workflows/release.yml must pin the image security owner by full commit SHA")
+    musl = job_body("musl-package")
+    for fragment, description in {
+        "architecture: amd64, slug: linux-x64-musl, runner: ubuntu-24.04}": "native AMD64 musl producer",
+        "architecture: arm64, slug: linux-arm64-musl, runner: ubuntu-24.04-arm}": "native ARM64 musl producer",
+        "--test-scope full --smoke": "full native musl workspace and lifecycle tests",
+        "--smoke-report-path": "explicit musl lifecycle receipt",
+    }.items():
+        if fragment not in musl:
+            errors.append(f".github/workflows/release.yml musl-package is missing {description}")
+    assemble = job_body("assemble-candidate")
+    for fragment in ("assemble-emulebb-rust-image-evidence-ci",
+                     "pattern: emulebb-rust-image-native-proof-ubuntu-*",
+                     "pattern: emulebb-rust-image-native-proof-alpine-*"):
+        if fragment not in assemble:
+            errors.append(".github/workflows/release.yml must carry both native image security sets through candidate assembly")
+    if "name: emulebb-rust-release-candidate" not in job_body("publish-native"):
+        errors.append(".github/workflows/release.yml must publish the assembled image security evidence")
+    positions = [assemble.find(fragment) for fragment in (
+        "assemble-emulebb-rust-image-evidence-ci", "RELEASE-${RELEASE_VERSION}-NOTES.md",
+        "assemble-emulebb-rust-release-ci", "release_publish.py candidate-manifest",
+    )]
+    if min(positions) >= 0 and not max(positions[:2]) < positions[2] < positions[3]:
+        errors.append(".github/workflows/release.yml must checksum the final evidence and documentation before writing the candidate")
+    for supplied, filename, pattern, label in (
+        (dockerfile_text, "Dockerfile", r"ghcr\.io/linuxserver/baseimage-ubuntu:resolute", "Ubuntu Resolute"),
+        (alpine_text, "Dockerfile.alpine", r"ghcr\.io/linuxserver/baseimage-alpine:3\.24", "Alpine 3.24"),
     ):
-        errors.append(
-            ".github/workflows/release.yml must carry image security evidence through the assembled release candidate"
-        )
-
-    dockerfile = ROOT / "packaging" / "docker" / "Dockerfile"
-    dockerfile_source = (
-        dockerfile.read_text(encoding="utf-8")
-        if dockerfile_text is None
-        else dockerfile_text
-    )
-    if not re.search(
-        r"(?m)^FROM\s+ghcr\.io/linuxserver/baseimage-ubuntu:resolute"
-        r"@sha256:[0-9a-f]{64}\s*$",
-        dockerfile_source,
-    ):
-        errors.append(
-            "packaging/docker/Dockerfile must pin the LinuxServer Ubuntu Resolute GHCR base by digest"
-        )
-
-    dependabot = ROOT / ".github" / "dependabot.yml"
-    dependabot_source = (
-        dependabot.read_text(encoding="utf-8")
-        if dependabot_text is None
-        else dependabot_text
-    )
-    docker_updates = re.search(
-        r"(?ms)- package-ecosystem:\s*docker\s+directory:\s*/packaging/docker\b",
-        dependabot_source,
-    )
-    if docker_updates is None:
-        errors.append(
-            ".github/dependabot.yml must monitor the packaging/docker base image"
-        )
+        recipe = supplied if supplied is not None else (ROOT / "packaging/docker" / filename).read_text(encoding="utf-8")
+        if not re.search(rf"(?m)^FROM\s+{pattern}@sha256:[0-9a-f]{{64}}\s*$", recipe):
+            errors.append(f"packaging/docker/{filename} must pin the LinuxServer {label} GHCR base by digest")
+    dependabot = dependabot_text if dependabot_text is not None else (
+        ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
+    if not re.search(r"(?ms)- package-ecosystem:\s*docker\s+directory:\s*/packaging/docker\b", dependabot):
+        errors.append(".github/dependabot.yml must monitor the packaging/docker base images")
     return errors
 
 
@@ -1396,7 +1328,7 @@ def check_release_build_identity(workflow_text: str | None = None) -> list[str]:
         "EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}": "runtime release channel",
         "EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}":
             "runtime source revision",
-        "RELEASE-{0}-NOTES.md', needs.prepare.outputs.release_version":
+        "body_path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/RELEASE-${{ env.RELEASE_VERSION }}-NOTES.md":
             "prepared version release notes selection",
     }
     errors = [
@@ -1461,11 +1393,11 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "--report-path \"${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json\"": "package lifecycle report output",
         "name: emulebb-rust-package-smoke-${{ matrix.slug }}": "package lifecycle report retention",
         "pattern: emulebb-rust-package-smoke-*": "package lifecycle report assembly",
-        "smoke-rust-container.py": "first-run LinuxServer image smoke",
+        "validate-emulebb-rust-image-ci": "native first-run LinuxServer image smoke",
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
         "assemble-emulebb-rust-release-ci": "verified release assembly",
         "native-package-smoke:": "isolated package lifecycle job",
-        "needs: [prepare, native-package-smoke, image-candidate]": "candidate dependency on package lifecycle evidence",
+        "needs: [prepare, native-package-smoke, musl-package, image-native-validation]": "candidate dependency on all native lifecycle evidence",
         "assemble-candidate:": "non-publishing candidate assembly job",
         "ref: ${{ github.workflow_sha }}": "trusted release-control checkout",
         "candidate-manifest": "candidate revision and evidence manifest",
@@ -1473,7 +1405,7 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "needs: [prepare, assemble-candidate, publish-image]": "publication dependency on candidate assembly",
         "RELEASE-${RELEASE_VERSION}-NOTES.md": "versioned release notes asset",
         "RELEASE-${RELEASE_VERSION}-CHANGELOG.md": "versioned changelog asset",
-        "nightly-release-notes.md": "generated nightly release notes body",
+        "--source-root ../.ci/candidate": "candidate history as nightly notes data",
     }
     errors = [
         f".github/workflows/release.yml is missing {description} configuration"
