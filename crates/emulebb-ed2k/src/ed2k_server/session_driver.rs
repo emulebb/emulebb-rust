@@ -9,6 +9,7 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use super::server_status::status_ping_due_at;
+use super::session::OfferFilesWaitReason;
 use super::types::{ServerSessionContext, ServerUdpPacket};
 use super::udp_runtime::{
     bind_server_udp_socket, read_server_udp_packet_with_key, send_server_udp_crypt_status_request,
@@ -425,12 +426,15 @@ pub(super) async fn run_one_server_session(
                 } else {
                     std::future::pending::<()>().await;
                 }
-            }, if offer_files_wakeup.is_some()
-                && queued_background_search.is_none()
-                && pending_background_search.is_none() => {
+            }, if offer_files_wakeup.is_some() => {
+                // WHY: A pending publication owns its own timer. Gating this arm
+                // on unrelated background-search state let a slow search hold
+                // the offer pump idle for the whole search timeout even though
+                // the connection remained publishable.
                 if session.offer_files_negotiation_timeout_due() {
                     session.request_offer_files_negotiation_fallback().await;
                 }
+                let wake_reason = session.offer_files_wait_reason(std::time::Instant::now());
                 if let Some(stats) = send_due_offer_files_advertisement(
                     &mut session,
                     &context.shared_catalog,
@@ -438,12 +442,19 @@ pub(super) async fn run_one_server_session(
                     context.hello_identity.tcp_port,
                 ).await? {
                     debug!(
-                        "ED2K session offer-files pump endpoint={} entries={} published={} pending={} mode={:?}",
+                        "ED2K session offer-files pump endpoint={} wake_reason={} entries={} published={} pending={} mode={:?}",
                         session.endpoint,
+                        wake_reason.label(),
                         stats.entries_sent,
                         stats.published_entries,
                         stats.pending_entries,
                         session.offer_files_pacing,
+                    );
+                } else if wake_reason == OfferFilesWaitReason::IdleUnbounded {
+                    debug!(
+                        "ED2K session offer-files pump endpoint={} wake_reason={} idle=true",
+                        session.endpoint,
+                        wake_reason.label(),
                     );
                 }
             }
