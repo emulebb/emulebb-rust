@@ -16,6 +16,28 @@ SPEC.loader.exec_module(QUALITY_GATE)
 
 
 class TestDiagnosticsGate(unittest.TestCase):
+    def test_explicit_rest_sources_reach_harness_without_environment_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            rust = workspace / "workspaces/agents/sample/emulebb-rust"
+            harness = workspace / "workspaces/agents/sample/emulebb-build-tests/scripts/rust-rest-openapi-ci.py"
+            contract = workspace / "workspaces/agents/sample/emulebb-tooling/REST-API-OPENAPI.yaml"
+            rust.mkdir(parents=True)
+            for path in (harness, contract):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("synthetic")
+            from unittest.mock import patch
+            env = {"EMULEBB_WORKSPACE_ROOT": str(workspace)}
+            with patch.object(QUALITY_GATE, "ROOT", rust):
+                _, command = QUALITY_GATE.rest_openapi_step(env, harness_script=harness, openapi_contract=contract)
+            self.assertEqual(command[-4:], ["--rust-repo", str(rust), "--openapi-contract", str(contract)])
+            self.assertEqual(env, {"EMULEBB_WORKSPACE_ROOT": str(workspace)})
+
+    def test_explicit_rest_source_outside_workspace_is_rejected(self):
+        env = self.build_env_fixture()
+        with self.assertRaisesRegex(RuntimeError, "workspace source boundaries"):
+            QUALITY_GATE.rest_openapi_step(env, harness_script=Path(__file__))
+
     def test_release_documents_fail_locally_before_expensive_build_checks(self):
         env = self.build_env_fixture()
         steps = QUALITY_GATE.commands_for_gate("pre-push", env)
