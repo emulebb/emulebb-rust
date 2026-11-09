@@ -418,6 +418,14 @@ def render_notes(
         f"- {baseline_label}: `{previous_ref}`",
         *([f"- Baseline commit: `{previous_sha}`"] if previous_sha is not None else []),
         "",
+        *([
+            "## Android developer archives",
+            "",
+            "Android `arm64-v8a` and `x86_64` archives are experimental CLI developer builds, not APKs.",
+            "Compilation and ELF checks do not qualify Android device runtime, transfers or VPN behavior.",
+            "Completed-file delivery and route discovery have known Android limitations. Read the bundled `emulebb-rust/README.txt` before use.",
+            "",
+        ] if channel == "nightly" else []),
         "## Profile compatibility",
         "",
     ]
