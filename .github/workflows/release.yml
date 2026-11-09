@@ -433,6 +433,114 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  android-package:
+    name: Experimental Android developer bundle (${{ matrix.abi }})
+    if: ${{ inputs.channel == 'nightly' }}
+    needs: [prepare, verify-source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_RUST_REPO: ${{ github.workspace }}
+      EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+    steps:
+      - name: Checkout workflow-bound candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Checkout pinned Android packaging
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_BUILD_REF }}
+          path: .ci/emulebb-build
+          persist-credentials: false
+      - name: Checkout pinned release scope
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: ${{ env.EMULEBB_TOOLING_REF }}
+          path: .ci/emulebb-tooling
+          persist-credentials: false
+      - name: Checkout pinned MiniUPnP
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+          persist-credentials: false
+      - name: Checkout pinned PCP/NAT-PMP
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Install pinned workspace CLI dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.14.3
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.0"
+          package-manager-cache: false
+      - name: Install pinned npm
+        run: npm install --global npm@11.20.0
+      - name: Set up pinned Docker
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
+        with:
+          version: v29.6.1
+          daemon-config: '{"features":{"containerd-snapshotter":true}}'
+      - name: Set up pinned Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          version: v0.35.0
+          driver: docker
+          use: false
+      - name: Compile and package experimental Android daemon without runtime claims
+        working-directory: .ci/emulebb-build
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR"
+          python -B -m emule_workspace package-rust-android-ci \
+            --abi ${{ matrix.abi }} --release-version "$RELEASE_VERSION" \
+            --channel nightly --expected-source-sha "$EXPECTED_SOURCE_SHA"
+      - name: Retain experimental developer payload and compile-only evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-android-developer-payload-${{ matrix.abi }}
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/packages/rust-android/${{ env.RELEASE_VERSION }}/${{ matrix.abi }}/*.tar.zst
+            ${{ runner.temp }}/emulebb-rust-out/packages/rust-android/${{ env.RELEASE_VERSION }}/${{ matrix.abi }}/*.manifest.json
+            ${{ runner.temp }}/emulebb-rust-out/packages/rust-android/${{ env.RELEASE_VERSION }}/${{ matrix.abi }}/*.sbom.spdx.json
+            ${{ runner.temp }}/emulebb-rust-out/packages/rust-android/${{ env.RELEASE_VERSION }}/${{ matrix.abi }}/*-compile-elf.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain Android compilation diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-android-build-logs-${{ matrix.abi }}
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/reports/android-toolchain/
+            ${{ runner.temp }}/emulebb-rust-out/reports/rust-android/
+          if-no-files-found: warn
+          retention-days: 30
+
   image-candidate:
     name: Build multiarch ${{ matrix.variant }} image candidate
     needs: [prepare, native-package, musl-package]
@@ -629,7 +737,14 @@ jobs:
 
   assemble-candidate:
     name: Assemble verified native and container candidate
-    needs: [prepare, native-package-smoke, musl-package, image-native-validation]
+    if: >-
+      ${{ !cancelled() && needs.prepare.result == 'success' &&
+          needs.native-package-smoke.result == 'success' &&
+          needs.musl-package.result == 'success' &&
+          needs.image-native-validation.result == 'success' &&
+          (needs.android-package.result == 'success' ||
+           (inputs.channel != 'nightly' && needs.android-package.result == 'skipped')) }}
+    needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
@@ -681,6 +796,13 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: emulebb-rust-musl-payload-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Download experimental Android developer payloads
+        if: ${{ inputs.channel == 'nightly' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-android-developer-payload-*
           merge-multiple: true
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Download all eight native package lifecycle proofs

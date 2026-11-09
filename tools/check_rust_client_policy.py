@@ -106,6 +106,7 @@ def main() -> int:
     errors.extend(check_container_health_contract())
     errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
+    errors.extend(check_release_android_packages())
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
     errors.extend(check_egress_audit_is_test_only())
@@ -832,6 +833,7 @@ def check_workflow_job_timeouts(
             "native-package": 45,
             "native-package-smoke": 15,
             "musl-package": 60,
+            "android-package": 60,
             "image-candidate": 45,
             "image-native-validation": 30,
             "assemble-candidate": 15,
@@ -1045,7 +1047,7 @@ def check_release_control_trust(
     """Keep eligibility and write-capable helpers on the workflow's own revision."""
     errors = []
     for filename, supplied, jobs in (
-        ("release.yml", workflow_text, ("prepare", "verify-source", "native-package", "musl-package",
+        ("release.yml", workflow_text, ("prepare", "verify-source", "native-package", "musl-package", "android-package",
                                        "image-candidate", "native-package-smoke",
                                        "image-native-validation", "assemble-candidate", "publish-image",
                                        "publish-native", "publish-nightly-channel", "cleanup-nightlies")),
@@ -1388,6 +1390,53 @@ def toolchain_versions_match(channel: str, rust_version: str) -> bool:
     )
 
 
+def check_release_android_packages(workflow_text: str | None = None) -> list[str]:
+    """Keep compile-only developer bundles source-bound and nightly-required."""
+    text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8") \
+        if workflow_text is None else workflow_text
+    jobs = yaml.safe_load(text).get("jobs", {})
+    android = jobs.get("android-package", {})
+    assemble = jobs.get("assemble-candidate", {})
+    errors = []
+    if android.get("if") != "${{ inputs.channel == 'nightly' }}":
+        errors.append("Android developer packaging must run only for the nightly channel")
+    if android.get("needs") != ["prepare", "verify-source"]:
+        errors.append("Android developer packaging must require exact-source qualification")
+    if android.get("strategy", {}).get("matrix") != {"abi": ["arm64-v8a", "x86_64"]}:
+        errors.append("Android developer packaging must cover exactly both declared ABIs")
+    steps = android.get("steps", [])
+    commands = [step for step in steps if "package-rust-android-ci" in step.get("run", "")]
+    if len(commands) != 1:
+        errors.append("Android developer packaging must use the single shared packaging owner")
+    else:
+        command = commands[0]
+        for fragment in ("--abi ${{ matrix.abi }}", '--release-version "$RELEASE_VERSION"',
+                         "--channel nightly", '--expected-source-sha "$EXPECTED_SOURCE_SHA"'):
+            if fragment not in command["run"]:
+                errors.append(f"Android developer packaging is missing {fragment}")
+        if command.get("env", {}).get("EXPECTED_SOURCE_SHA") != "${{ needs.prepare.outputs.source_sha }}":
+            errors.append("Android developer packaging must bind the qualified source SHA")
+    if "continue-on-error" in android:
+        errors.append("Android developer packaging must not waive failures")
+    if any("continue-on-error" in step for step in steps):
+        errors.append("Android developer packaging steps must not waive failures")
+    expected_needs = ["prepare", "native-package-smoke", "musl-package", "image-native-validation", "android-package"]
+    if assemble.get("needs") != expected_needs:
+        errors.append("Candidate assembly must retain every native/image/Android prerequisite")
+    expected_condition = """${{ !cancelled() && needs.prepare.result == 'success' &&
+        needs.native-package-smoke.result == 'success' && needs.musl-package.result == 'success' &&
+        needs.image-native-validation.result == 'success' &&
+        (needs.android-package.result == 'success' ||
+         (inputs.channel != 'nightly' && needs.android-package.result == 'skipped')) }}"""
+    if " ".join(assemble.get("if", "").split()) != " ".join(expected_condition.split()):
+        errors.append("Candidate assembly must require Android success at nightly and allow skipped Android only outside nightly")
+    downloads = [step for step in assemble.get("steps", [])
+                 if step.get("with", {}).get("pattern") == "emulebb-rust-android-developer-payload-*"]
+    if len(downloads) != 1 or downloads[0].get("if") != "${{ inputs.channel == 'nightly' }}":
+        errors.append("Candidate assembly must download Android developer bundles exactly for nightly")
+    return errors
+
+
 def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
     """Keep release build products and archives outside the source workspace."""
     workflow = ROOT / ".github" / "workflows" / "release.yml"
@@ -1409,7 +1458,7 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
         "assemble-emulebb-rust-release-ci": "verified release assembly",
         "native-package-smoke:": "isolated package lifecycle job",
-        "needs: [prepare, native-package-smoke, musl-package, image-native-validation]": "candidate dependency on all native lifecycle evidence",
+        "needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package]": "candidate dependency on all native lifecycle and nightly Android evidence",
         "assemble-candidate:": "non-publishing candidate assembly job",
         "ref: ${{ github.workflow_sha }}": "trusted release-control checkout",
         "candidate-manifest": "candidate revision and evidence manifest",
