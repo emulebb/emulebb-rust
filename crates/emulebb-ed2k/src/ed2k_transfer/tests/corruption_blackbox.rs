@@ -176,6 +176,10 @@ async fn salvage_verdicts_ban_only_the_corrupt_block_writer() {
         .await
         .unwrap();
     runtime
+        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .await
+        .unwrap();
+    runtime
         .store_aich_hashset(&job.file_hash, aich.clone())
         .await
         .unwrap();

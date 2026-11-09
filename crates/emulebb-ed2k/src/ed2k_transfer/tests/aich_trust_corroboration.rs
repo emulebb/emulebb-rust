@@ -8,7 +8,7 @@
 
 use std::net::IpAddr;
 
-use super::super::{Ed2kTransferRuntime, new_transfer_job};
+use super::super::{Ed2kAichHashset, Ed2kTransferRuntime, new_transfer_job};
 use crate::paths::unique_test_dir;
 use emulebb_kad_proto::Ed2kHash;
 
@@ -39,6 +39,90 @@ async fn single_peer_root_is_not_trusted() {
     // And it must not be persisted either.
     let reloaded = runtime.manifest(&file_hash).await.unwrap();
     assert!(reloaded.aich_root.is_none());
+}
+
+fn consistent_candidate() -> Ed2kAichHashset {
+    let part_hashes = vec![[0x21; 20], [0x43; 20], [0x65; 20], [0x87; 20]];
+    let master_hash = super::super::hashset::reconstruct_aich_root_from_part_hashes(
+        4 * super::super::ED2K_PART_SIZE,
+        &part_hashes,
+    )
+    .unwrap();
+    Ed2kAichHashset {
+        master_hash,
+        part_hashes,
+    }
+}
+
+#[tokio::test]
+async fn internally_consistent_peer_hashset_does_not_establish_trust() {
+    let (runtime, file_hash) = runtime_with_job().await;
+    let candidate = consistent_candidate();
+    runtime
+        .record_network_aich_root(&file_hash, Some(candidate.master_hash), ip(203, 0, 113, 5))
+        .await
+        .unwrap();
+    let error = runtime
+        .store_aich_hashset(&file_hash, candidate)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("independently trusted master"));
+    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    assert!(manifest.aich_root.is_none());
+    assert!(manifest.aich_hashset.is_empty());
+    assert!(!manifest.aich_hashset_acquired);
+}
+
+#[tokio::test]
+async fn consistent_part_set_activates_only_after_independent_corroboration() {
+    let (runtime, file_hash) = runtime_with_job().await;
+    let candidate = consistent_candidate();
+    for signer in 0..9 {
+        runtime
+            .record_network_aich_root(
+                &file_hash,
+                Some(candidate.master_hash),
+                ip(203, signer, 0, 1),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        runtime
+            .store_aich_hashset(&file_hash, candidate.clone())
+            .await
+            .is_err()
+    );
+    runtime
+        .record_network_aich_root(&file_hash, Some(candidate.master_hash), ip(203, 9, 0, 1))
+        .await
+        .unwrap();
+    let manifest = runtime
+        .store_aich_hashset(&file_hash, candidate.clone())
+        .await
+        .unwrap();
+    assert!(manifest.aich_hashset_acquired);
+    assert_eq!(manifest.aich_root, Some(hex::encode(candidate.master_hash)));
+    assert_eq!(manifest.aich_hashset.len(), 4);
+}
+
+#[tokio::test]
+async fn conflicting_consistent_hashset_cannot_replace_authoritative_identity() {
+    let (runtime, file_hash) = runtime_with_job().await;
+    let authoritative = [0x99; 20];
+    runtime
+        .reconcile_aich_root(&file_hash, Some(authoritative))
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .store_aich_hashset(&file_hash, consistent_candidate())
+            .await
+            .is_err()
+    );
+    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    assert_eq!(manifest.aich_root, Some(hex::encode(authoritative)));
+    assert!(!manifest.aich_hashset_acquired);
 }
 
 #[tokio::test]

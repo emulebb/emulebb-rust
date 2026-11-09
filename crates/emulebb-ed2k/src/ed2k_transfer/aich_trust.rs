@@ -15,7 +15,7 @@
 //! `.met`/manifest metadata) bypass corroboration entirely and are promoted
 //! directly via `reconcile_aich_root`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// How many distinct IPs must propose the same AICH root before it is trusted.
 /// Mirrors `MINUNIQUEIPS_TOTRUST` (`SHAHashSet.cpp:40`).
@@ -24,6 +24,12 @@ pub(super) const MINUNIQUEIPS_TOTRUST: usize = 10;
 /// Minimum share (percent) of all proposing IPs that the leading root must hold
 /// before it is trusted. Mirrors `MINPERCENTAGE_TOTRUST` (`SHAHashSet.cpp:41`).
 pub(super) const MINPERCENTAGE_TOTRUST: u64 = 92;
+
+/// Resource limits do not turn a truncated sample into trust. Once either
+/// limit is exceeded, only independent authoritative metadata can establish
+/// the root for this transfer; ordinary MD4 downloading remains available.
+const MAX_SIGNERS: usize = 4_096;
+const MAX_CANDIDATES: usize = 64;
 
 /// Mask applied to a proposing IPv4 address (in network/big-endian byte order)
 /// before counting it as a unique signer. Mirrors the master's
@@ -48,6 +54,9 @@ fn mask_signer_ip(octets: [u8; 4]) -> [u8; 4] {
 pub(super) struct AichRootCorroboration {
     /// Masked proposing IP -> first root proposed by that signer.
     proposals: HashMap<[u8; 4], [u8; 20]>,
+    /// Ordered roots make equal-weight evidence deterministic.
+    counts: BTreeMap<[u8; 20], usize>,
+    saturated: bool,
 }
 
 impl AichRootCorroboration {
@@ -55,30 +64,29 @@ impl AichRootCorroboration {
     /// Returns `true` only when that signer had not voted before.
     pub(super) fn record(&mut self, root: [u8; 20], from_ip: [u8; 4]) -> bool {
         let masked = mask_signer_ip(from_ip);
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.proposals.entry(masked) {
-            entry.insert(root);
-            true
-        } else {
-            false
+        if self.saturated || self.proposals.contains_key(&masked) {
+            return false;
         }
+        if self.proposals.len() == MAX_SIGNERS
+            || (!self.counts.contains_key(&root) && self.counts.len() == MAX_CANDIDATES)
+        {
+            self.saturated = true;
+            return false;
+        }
+        self.proposals.insert(masked, root);
+        *self.counts.entry(root).or_default() += 1;
+        true
     }
 
     /// Return the leading root if it now satisfies the master's trust gate:
     /// `>= MINUNIQUEIPS_TOTRUST` distinct IPs AND `>= MINPERCENTAGE_TOTRUST`
     /// percent of all proposing IPs. Mirrors `SHAHashSet.cpp:998`.
     pub(super) fn trusted_root(&self) -> Option<[u8; 20]> {
+        if self.saturated {
+            return None;
+        }
         let total_signers = self.proposals.len();
-        let mut counts = HashMap::<[u8; 20], usize>::new();
-        for root in self.proposals.values() {
-            *counts.entry(*root).or_default() += 1;
-        }
-        let mut leader: Option<([u8; 20], usize)> = None;
-        for (root, count) in counts {
-            if leader.is_none_or(|(_, best)| count > best) {
-                leader = Some((root, count));
-            }
-        }
-        let (root, count) = leader?;
+        let (&root, &count) = self.counts.iter().max_by_key(|(_, count)| **count)?;
         if total_signers == 0 {
             return None;
         }
@@ -151,5 +159,57 @@ mod tests {
             assert!(acc.record([1u8; 20], ip(203, i, 0, 7)));
         }
         assert_eq!(acc.trusted_root(), Some([1u8; 20]));
+    }
+
+    #[test]
+    fn signer_mask_matches_stock_little_endian_integer_mask() {
+        for octets in [[1, 2, 15, 255], [1, 2, 16, 1], [203, 0, 113, 7]] {
+            let stock = u32::from_le_bytes(octets) & 0x00F0_FFFF;
+            assert_eq!(mask_signer_ip(octets), stock.to_le_bytes());
+        }
+        assert_eq!(mask_signer_ip([1, 2, 15, 255]), [1, 2, 0, 0]);
+        assert_eq!(mask_signer_ip([1, 2, 16, 1]), [1, 2, 16, 0]);
+    }
+
+    #[test]
+    fn later_disagreement_reconsiders_consensus_at_stock_percentage_boundary() {
+        let mut acc = AichRootCorroboration::default();
+        for signer in 0..92 {
+            acc.record([1; 20], [203, signer, 0, 1]);
+        }
+        for signer in 0..8 {
+            acc.record([2; 20], [198, signer, 0, 1]);
+        }
+        assert_eq!(acc.trusted_root(), Some([1; 20]));
+        acc.record([2; 20], [198, 8, 0, 1]);
+        assert_eq!(acc.trusted_root(), None);
+    }
+
+    #[test]
+    fn candidate_limit_does_not_freeze_previously_trusted_sample() {
+        let mut acc = AichRootCorroboration::default();
+        for signer in 0..10 {
+            acc.record([1; 20], [203, signer, 0, 1]);
+        }
+        assert_eq!(acc.trusted_root(), Some([1; 20]));
+        for candidate in 2..=MAX_CANDIDATES as u8 {
+            acc.record([candidate; 20], [198, candidate, 0, 1]);
+        }
+        assert!(!acc.record([0xff; 20], [192, 0, 0, 1]));
+        assert_eq!(acc.counts.len(), MAX_CANDIDATES);
+        assert_eq!(acc.trusted_root(), None);
+    }
+
+    #[test]
+    fn signer_limit_is_bounded_and_fails_closed() {
+        let mut acc = AichRootCorroboration::default();
+        for signer in 0..MAX_SIGNERS {
+            let bytes = (signer as u16).to_be_bytes();
+            acc.record([1; 20], [bytes[0], bytes[1], 0, 1]);
+        }
+        assert_eq!(acc.trusted_root(), Some([1; 20]));
+        assert!(!acc.record([1; 20], [200, 0, 0, 1]));
+        assert_eq!(acc.proposals.len(), MAX_SIGNERS);
+        assert_eq!(acc.trusted_root(), None);
     }
 }

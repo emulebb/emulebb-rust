@@ -477,8 +477,8 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
-    /// Persist the canonical ED2K AICH root and part hashset after validating
-    /// the payload against the expected file size.
+    /// Activate a peer's part hashset only against an independently trusted
+    /// master. Internal tree consistency never establishes content identity.
     pub(crate) async fn store_aich_hashset(
         &self,
         file_hash: &str,
@@ -486,17 +486,16 @@ impl Ed2kTransferRuntime {
     ) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        if let Some(existing_root) = manifest.aich_root.as_deref() {
-            let existing_root = decode_aich_hash_hex(existing_root)?;
-            if existing_root != aich_hashset.master_hash {
-                anyhow::bail!(
-                    "refusing to replace AICH root for {} with conflicting data",
-                    file_hash
-                );
-            }
-        }
         validate_aich_hashset(manifest.file_size, &aich_hashset)?;
-        manifest.aich_root = Some(hex::encode(aich_hashset.master_hash));
+        let existing_root = manifest
+            .aich_root
+            .as_deref()
+            .context("AICH hashset requires an independently trusted master")?;
+        ensure!(
+            decode_aich_hash_hex(existing_root)? == aich_hashset.master_hash,
+            "refusing to replace AICH root for {} with conflicting data",
+            file_hash
+        );
         manifest.aich_hashset = aich_hashset.part_hashes.iter().map(hex::encode).collect();
         manifest.aich_hashset_acquired = true;
         self.store_manifest_unlocked(&manifest).await?;
