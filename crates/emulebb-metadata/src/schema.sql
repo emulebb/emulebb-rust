@@ -67,6 +67,8 @@ CREATE TABLE known_files (
     display_name TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT '',
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
+    aich_root_origin TEXT CHECK(aich_root_origin IN
+        ('local_computed', 'operator_link', 'stock_import')),
     media_artist TEXT NOT NULL DEFAULT '',
     media_album TEXT NOT NULL DEFAULT '',
     media_title TEXT NOT NULL DEFAULT '',
@@ -84,7 +86,8 @@ CREATE TABLE known_files (
     last_upload_requested_at_ms INTEGER NOT NULL DEFAULT 0 CHECK(last_upload_requested_at_ms >= 0),
     first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
     last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    CHECK((aich_root IS NULL) = (aich_root_origin IS NULL))
 ) STRICT;
 
 CREATE TABLE known_file_origins (
@@ -323,6 +326,12 @@ CREATE TABLE transfers (
     completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
     md4_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(md4_hashset_acquired IN (0, 1)),
     aich_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(aich_hashset_acquired IN (0, 1)),
+    -- A live consensus belongs to the transfer, never accepted known/local
+    -- content. Persist the decision and origin separately from mere acquisition.
+    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
+    aich_root_origin TEXT CHECK(aich_root_origin IN
+        ('local_computed', 'operator_link', 'stock_import', 'network_consensus')),
+    aich_trust_generation INTEGER NOT NULL DEFAULT 0 CHECK(aich_trust_generation >= 0),
     visible_state TEXT NOT NULL CHECK(visible_state IN ('completed', 'completing', 'downloading', 'queued')),
     -- Set after all parts verify and cleared only after the authoritative
     -- whole-file ED2K MD4 completion rehash succeeds or demotes bad parts.
@@ -374,6 +383,8 @@ CREATE TABLE transfers (
         OR (delivery_state = 'delivered' AND delivery_ownership = 'owned' AND delivered_path_id IS NOT NULL AND source_fingerprint IS NOT NULL)
         OR (delivery_state = 'delivered' AND delivery_ownership = 'unowned' AND delivered_path_id IS NOT NULL)
     ),
+    CHECK((aich_root IS NULL) = (aich_root_origin IS NULL)),
+    CHECK(aich_hashset_acquired = 0 OR aich_root IS NOT NULL),
     CHECK((completed = 1) = (visible_state = 'completed')),
     CHECK(payload_fingerprint IS NULL OR (completed = 1 AND final_rehash_pending = 0)),
     UNIQUE(known_file_id)

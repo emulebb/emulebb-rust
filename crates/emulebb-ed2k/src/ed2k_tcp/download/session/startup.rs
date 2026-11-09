@@ -178,11 +178,17 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
         session_state.aich_file_hash_requested = true;
     }
 
+    let request_md4 = !manifest.md4_hashset_acquired && !session_state.hashset_requested;
+    let request_aich = session_state.remote_supports_file_identifiers
+        && manifest.file_size > ED2K_PART_SIZE
+        && manifest.aich_root.is_some()
+        && !manifest.aich_hashset_acquired
+        && session_state.peer_advertised_aich_root
+        && session_state.aich_hashset_requested_generation.is_none();
     if send_initial_requests
         && session_state.hello_complete
         && manifest.file_size != 0
-        && !manifest.md4_hashset_acquired
-        && !session_state.hashset_requested
+        && (request_md4 || request_aich)
         && session_state.startup_file_response_received
     {
         if manifest.file_size <= ED2K_PART_SIZE {
@@ -194,12 +200,10 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
                 encode_hashset_request2(
                     request_file_identifier,
                     Ed2kHashsetRequestOptions {
-                        request_md4: true,
+                        request_md4,
                         // Stock requests part hashes for an already accepted
                         // master. A peer advertisement is evidence, not trust.
-                        request_aich: manifest.file_size > ED2K_PART_SIZE
-                            && manifest.aich_root.is_some()
-                            && session_state.peer_advertised_aich_root,
+                        request_aich,
                     },
                 )?
             } else {
@@ -221,6 +225,11 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
                     }
                 })?;
             session_state.hashset_requested = true;
+            if request_aich {
+                session_state.aich_hashset_requested_generation =
+                    Some(manifest.aich_trust_generation);
+                session_state.aich_hashset_answer_pending = true;
+            }
             session_state.hashset_requested_at = Some(tokio::time::Instant::now());
         }
     }

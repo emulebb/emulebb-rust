@@ -6,6 +6,24 @@ use anyhow::{Context, Result, ensure};
 
 pub(crate) fn validate_manifest(manifest: &MetadataTransferManifest) -> Result<()> {
     ensure!(
+        manifest.aich_root.is_some() == manifest.aich_root_origin.is_some(),
+        "AICH root and accepted origin must be present together"
+    );
+    if let Some(origin) = manifest.aich_root_origin.as_deref() {
+        ensure!(
+            matches!(
+                origin,
+                "local_computed" | "operator_link" | "stock_import" | "network_consensus"
+            ),
+            "invalid AICH root origin"
+        );
+    }
+    ensure!(
+        !manifest.aich_hashset_acquired || manifest.aich_root.is_some(),
+        "acquired AICH part hashes require an accepted master"
+    );
+    i64::try_from(manifest.aich_trust_generation)?;
+    ensure!(
         manifest.piece_size > 0,
         "transfer piece size must be positive"
     );

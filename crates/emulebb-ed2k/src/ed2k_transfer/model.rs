@@ -468,6 +468,37 @@ impl From<&Ed2kResumeManifest> for Ed2kFileServingView {
     }
 }
 
+/// Provenance of an accepted AICH master, separate from acquired part hashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ed2kAichRootOrigin {
+    LocalComputed,
+    OperatorLink,
+    StockImport,
+    NetworkConsensus,
+}
+
+impl Ed2kAichRootOrigin {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalComputed => "local_computed",
+            Self::OperatorLink => "operator_link",
+            Self::StockImport => "stock_import",
+            Self::NetworkConsensus => "network_consensus",
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "local_computed" => Ok(Self::LocalComputed),
+            "operator_link" => Ok(Self::OperatorLink),
+            "stock_import" => Ok(Self::StockImport),
+            "network_consensus" => Ok(Self::NetworkConsensus),
+            _ => anyhow::bail!("invalid accepted AICH origin {value:?}"),
+        }
+    }
+}
+
 /// Durable resume metadata for a download's managed piece payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -512,6 +543,10 @@ pub struct Ed2kResumeManifest {
     pub aich_hashset_acquired: bool,
     /// Canonical AICH root in lowercase hex when known.
     pub aich_root: Option<String>,
+    /// Why this master may authorize verification; acquisition is not a reason.
+    pub aich_root_origin: Option<Ed2kAichRootOrigin>,
+    /// Invalidates responses across trust/master changes, including A -> B -> A.
+    pub aich_trust_generation: u64,
     /// Canonical AICH per-part hashes in lowercase hex.
     pub aich_hashset: Vec<String>,
     /// Upload-safe verified ranges.
@@ -787,6 +822,8 @@ impl Ed2kResumeManifest {
             md4_hashset: Vec::new(),
             aich_hashset_acquired: false,
             aich_root: None,
+            aich_root_origin: None,
+            aich_trust_generation: 0,
             aich_hashset: Vec::new(),
             verified_ranges: Vec::new(),
             pieces: (0..piece_count)

@@ -25,6 +25,12 @@ impl super::MetadataStore {
         crate::transfer_validation::validate_manifest(manifest)?;
         let hash = decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?;
         let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
+        let accepted_aich_root =
+            if manifest.aich_root_origin.as_deref() == Some("network_consensus") {
+                None
+            } else {
+                aich_root.as_deref()
+            };
         let now = unix_ms();
         let mut conn = self.connection()?;
         // WHY: this transaction reads deletion authority before writing paths and
@@ -112,17 +118,24 @@ impl super::MetadataStore {
 
         tx.prepare_cached(
             r#"
-            INSERT INTO known_files(ed2k_hash, size_bytes, display_name, aich_root, first_seen_at_ms, last_seen_at_ms, updated_at_ms)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)
+            INSERT INTO known_files(ed2k_hash, size_bytes, display_name, aich_root, aich_root_origin, first_seen_at_ms, last_seen_at_ms, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?6, ?5, ?5, ?5)
             ON CONFLICT(ed2k_hash) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
                 display_name = CASE WHEN EXISTS(SELECT 1 FROM verified_local_content WHERE known_file_id = known_files.id)
                     THEN known_files.display_name ELSE excluded.display_name END,
                 aich_root = coalesce(excluded.aich_root, known_files.aich_root),
+                aich_root_origin = CASE
+                    WHEN excluded.aich_root IS NULL THEN known_files.aich_root_origin
+                    WHEN known_files.aich_root_origin = 'local_computed' THEN known_files.aich_root_origin
+                    WHEN known_files.aich_root_origin = 'stock_import'
+                         AND excluded.aich_root_origin = 'operator_link' THEN known_files.aich_root_origin
+                    ELSE excluded.aich_root_origin END,
                 last_seen_at_ms = excluded.last_seen_at_ms,
                 updated_at_ms = excluded.updated_at_ms
             "#,
-        )?.execute(params![hash, i64::try_from(manifest.file_size)?, manifest.display_name, aich_root, now])?;
+        )?.execute(params![hash, i64::try_from(manifest.file_size)?, manifest.display_name, accepted_aich_root, now,
+            accepted_aich_root.and(manifest.aich_root_origin.as_deref())])?;
         let known_file_id: i64 = tx
             .prepare_cached("SELECT id FROM known_files WHERE ed2k_hash = ?1")?
             .query_row(
@@ -154,13 +167,17 @@ impl super::MetadataStore {
                 visible_state, final_rehash_pending, control_state,
                 category_id, display_name, delivery_state, delivery_ownership,
                 delivered_path_id, source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
-                completed_at_ms, removed_at_ms, part_size_bytes, part_count, upload_priority, auto_upload_priority, comment, rating
+                completed_at_ms, removed_at_ms, part_size_bytes, part_count, upload_priority, auto_upload_priority, comment, rating,
+                aich_root, aich_root_origin, aich_trust_generation
             )
-            VALUES (?1, ?16, ?17, ?18, ?2, ?12, ?3, ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9, ?19, ?20, ?21, ?22, ?23, ?24)
+            VALUES (?1, ?16, ?17, ?18, ?2, ?12, ?3, ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 completed = excluded.completed,
                 md4_hashset_acquired = excluded.md4_hashset_acquired,
                 aich_hashset_acquired = excluded.aich_hashset_acquired,
+                aich_root = excluded.aich_root,
+                aich_root_origin = excluded.aich_root_origin,
+                aich_trust_generation = excluded.aich_trust_generation,
                 visible_state = excluded.visible_state,
                 final_rehash_pending = excluded.final_rehash_pending,
                 control_state = excluded.control_state,
@@ -207,6 +224,7 @@ impl super::MetadataStore {
             bool_to_i64(manifest.aich_hashset_acquired),
             i64::try_from(manifest.piece_size)?, i64::try_from(manifest.pieces.len())?,
             manifest.upload_priority, manifest.auto_upload_priority, manifest.comment, i64::from(manifest.rating),
+            aich_root, manifest.aich_root_origin, i64::try_from(manifest.aich_trust_generation)?,
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
@@ -216,7 +234,7 @@ impl super::MetadataStore {
             &tx,
             manifest,
             &hash,
-            aich_root.as_deref(),
+            accepted_aich_root,
             completed_at_ms,
             completion_transition,
         )?;
@@ -256,8 +274,8 @@ impl super::MetadataStore {
                        transfers.completed, transfers.md4_hashset_acquired,
                        transfers.aich_hashset_acquired,
                        CASE
-                           WHEN known_files.aich_root IS NULL THEN NULL
-                           ELSE lower(hex(known_files.aich_root))
+                           WHEN coalesce(known_files.aich_root, transfers.aich_root) IS NULL THEN NULL
+                           ELSE lower(hex(coalesce(known_files.aich_root, transfers.aich_root)))
                        END,
                        transfers.upload_priority, transfers.auto_upload_priority,
                        transfers.comment, transfers.rating,
@@ -265,7 +283,9 @@ impl super::MetadataStore {
                        delivered_paths.platform, delivered_paths.native_path,
                        transfers.source_fingerprint, transfers.payload_fingerprint,
                        transfers.final_rehash_pending, transfers.delivery_state,
-                       transfers.delivery_ownership
+                       transfers.delivery_ownership,
+                       coalesce(known_files.aich_root_origin, transfers.aich_root_origin),
+                       transfers.aich_trust_generation
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -287,6 +307,8 @@ impl super::MetadataStore {
                     md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
                     aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
                     aich_root: row.get(8)?,
+                    aich_root_origin: row.get(23)?,
+                    aich_trust_generation: crate::sql_value::unsigned::<u64>(row, 24)?,
                     upload_priority: row.get(9)?,
                     auto_upload_priority: row.get::<_, i64>(10)? != 0,
                     comment: row.get(11)?,
@@ -495,8 +517,8 @@ impl super::MetadataStore {
                    transfers.completed, transfers.md4_hashset_acquired,
                    transfers.aich_hashset_acquired,
                    CASE
-                       WHEN known_files.aich_root IS NULL THEN NULL
-                       ELSE lower(hex(known_files.aich_root))
+                       WHEN coalesce(known_files.aich_root, transfers.aich_root) IS NULL THEN NULL
+                       ELSE lower(hex(coalesce(known_files.aich_root, transfers.aich_root)))
                    END,
                    transfers.upload_priority, transfers.auto_upload_priority,
                    transfers.comment, transfers.rating,
@@ -504,7 +526,9 @@ impl super::MetadataStore {
                    delivered_paths.platform, delivered_paths.native_path,
                    transfers.source_fingerprint, transfers.payload_fingerprint,
                    transfers.final_rehash_pending, transfers.delivery_state,
-                   transfers.delivery_ownership
+                   transfers.delivery_ownership,
+                   coalesce(known_files.aich_root_origin, transfers.aich_root_origin),
+                   transfers.aich_trust_generation
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
@@ -525,6 +549,8 @@ impl super::MetadataStore {
                 md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
                 aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
                 aich_root: row.get(8)?,
+                aich_root_origin: row.get(23)?,
+                aich_trust_generation: crate::sql_value::unsigned::<u64>(row, 24)?,
                 upload_priority: row.get(9)?,
                 auto_upload_priority: row.get::<_, i64>(10)? != 0,
                 comment: row.get(11)?,
@@ -1845,6 +1871,8 @@ struct TransferRow {
     md4_hashset_acquired: bool,
     aich_hashset_acquired: bool,
     aich_root: Option<String>,
+    aich_root_origin: Option<String>,
+    aich_trust_generation: u64,
     upload_priority: String,
     auto_upload_priority: bool,
     comment: String,
@@ -2045,6 +2073,8 @@ fn manifest_from_row(
         )?,
         aich_hashset_acquired: row.aich_hashset_acquired,
         aich_root: row.aich_root,
+        aich_root_origin: row.aich_root_origin,
+        aich_trust_generation: row.aich_trust_generation,
         aich_hashset: read_hex_list(
             conn,
             "SELECT lower(hex(aich_hash)) FROM transfer_aich_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",

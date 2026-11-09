@@ -76,6 +76,8 @@ pub struct MetadataTransferManifest {
     pub md4_hashset: Vec<String>,
     pub aich_hashset_acquired: bool,
     pub aich_root: Option<String>,
+    pub aich_root_origin: Option<String>,
+    pub aich_trust_generation: u64,
     pub aich_hashset: Vec<String>,
     pub verified_ranges: Vec<MetadataTransferRange>,
     pub pieces: Vec<MetadataTransferPiece>,

@@ -879,6 +879,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EMULEPROT, OP_HASHSETANSWER2) => {
                     let hashset_answer = decode_hashset_answer2(&packet.payload)?;
+                    let aich_generation = if session_state.aich_hashset_answer_pending {
+                        session_state.aich_hashset_answer_pending = false;
+                        session_state.aich_hashset_requested_generation
+                    } else {
+                        None
+                    };
                     if !request_file_identifier
                         .matches_relaxed(&hashset_answer.file_identifier)
                     {
@@ -907,10 +913,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     // Unrequested AICH sections cannot establish identity.
                     // Preserve usable MD4 data while ignoring an untrusted tree.
                     if let Some(hashset) = hashset_answer.aich_hashset
-                        && manifest.aich_root.is_some()
+                        && let Some(generation) = aich_generation
                     {
                         manifest = transfer_runtime
-                            .store_aich_hashset(file_hash_hex, hashset)
+                            .store_aich_hashset_for_generation(file_hash_hex, hashset, generation)
                             .await?;
                         request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
                     }

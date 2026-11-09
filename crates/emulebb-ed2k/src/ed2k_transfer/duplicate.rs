@@ -216,6 +216,8 @@ impl Ed2kTransferRuntime {
             replacement.md4_hashset = existing.md4_hashset;
             replacement.aich_hashset_acquired = existing.aich_hashset_acquired;
             replacement.aich_root = existing.aich_root;
+            replacement.aich_root_origin = existing.aich_root_origin;
+            replacement.aich_trust_generation = existing.aich_trust_generation;
             replacement.aich_hashset = existing.aich_hashset;
             replacement.upload_priority = existing.upload_priority;
             replacement.auto_upload_priority = existing.auto_upload_priority;

@@ -89,6 +89,11 @@ pub(super) struct DownloadSessionState {
     pub(super) peer_advertised_aich_root: bool,
     pub(super) aich_file_hash_requested: bool,
     pub(super) hashset_requested: bool,
+    /// One AICH-set attempt per connection, bound to the accepted generation.
+    /// Keep the attempted generation after consuming the reply: the wire has
+    /// no request ID with which to distinguish a delayed ABA response.
+    pub(super) aich_hashset_requested_generation: Option<u64>,
+    pub(super) aich_hashset_answer_pending: bool,
     pub(super) hashset_requested_at: Option<Instant>,
     pub(super) upload_requested: bool,
     /// The next queue-rank packet is solicited by OP_STARTUPLOADREQ (or by an
@@ -186,6 +191,8 @@ impl DownloadSessionState {
             peer_advertised_aich_root: false,
             aich_file_hash_requested: false,
             hashset_requested: false,
+            aich_hashset_requested_generation: None,
+            aich_hashset_answer_pending: false,
             hashset_requested_at: None,
             upload_requested: false,
             queue_rank_pending: false,

@@ -58,7 +58,7 @@ impl MetadataStore {
         let fingerprint = NativeFileFingerprint::from_storage_bytes(&binding.fingerprint)
             .ok_or_else(|| anyhow::anyhow!("invalid live fingerprint"))?;
         let tx = conn.transaction()?;
-        Self::upsert_verified_local_content_tx(
+        Self::upsert_verified_local_content_with_origin_tx(
             &tx,
             &MetadataVerifiedLocalContent {
                 file_hash: entry.file_hash.clone(),
@@ -76,6 +76,7 @@ impl MetadataStore {
                 rating: 0,
             },
             unix_ms(),
+            "stock_import",
         )?;
         tx.execute(
             "UPDATE known_files SET aich_root=coalesce(aich_root,?2) WHERE ed2k_hash=?1",
@@ -134,7 +135,7 @@ impl MetadataStore {
             // WHY: stock has already hashed these bytes. Rebind its accepted
             // content identity to this platform's fingerprint instead of scheduling
             // a full payload read merely because Rust has not seen the file before.
-            Self::upsert_verified_local_content_tx(
+            Self::upsert_verified_local_content_with_origin_tx(
                 &tx,
                 &MetadataVerifiedLocalContent {
                     file_hash: entry.file_hash.clone(),
@@ -152,6 +153,7 @@ impl MetadataStore {
                     rating: 0,
                 },
                 now,
+                "stock_import",
             )?;
             if let Some(root) = &entry.aich_root {
                 tx.execute(
@@ -237,6 +239,14 @@ mod tests {
         store
             .accept_imported_local_files(&[(enriched.clone(), path.clone(), fingerprint.clone())])
             .unwrap();
+        let origin: String = store
+            .connection()
+            .unwrap()
+            .query_row("SELECT aich_root_origin FROM known_files", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "stock_import");
         enriched.aich_root = Some("22".repeat(20));
         assert!(
             store

@@ -2,15 +2,38 @@ use super::*;
 
 #[tokio::test]
 async fn large_file_download_starts_hashset_flow_before_peer_secure_ident_key_arrives() {
-    run_hashset_startup_case(false).await;
+    run_hashset_startup_case(StartupAichCase::Advertised).await;
 }
 
 #[tokio::test]
 async fn consistent_unrelated_peer_aich_tree_cannot_become_download_identity() {
-    run_hashset_startup_case(true).await;
+    run_hashset_startup_case(StartupAichCase::Unrelated).await;
 }
 
-async fn run_hashset_startup_case(unrelated_aich_tree: bool) {
+#[tokio::test]
+async fn trusted_operator_master_allows_a_matching_modern_part_set() {
+    run_hashset_startup_case(StartupAichCase::Operator).await;
+}
+
+#[tokio::test]
+async fn trusted_master_allows_aich_only_acquisition_after_md4_is_known() {
+    run_hashset_startup_case(StartupAichCase::OperatorWithMd4).await;
+}
+
+enum StartupAichCase {
+    Advertised,
+    Unrelated,
+    Operator,
+    OperatorWithMd4,
+}
+
+async fn run_hashset_startup_case(case: StartupAichCase) {
+    let unrelated_aich_tree = matches!(case, StartupAichCase::Unrelated);
+    let operator_root = matches!(
+        case,
+        StartupAichCase::Operator | StartupAichCase::OperatorWithMd4
+    );
+    let md4_preseeded = matches!(case, StartupAichCase::OperatorWithMd4);
     let root = unique_test_dir("ed2k-large-file-secure-ident-order");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
     let payload = vec![0x5A; (ED2K_PART_SIZE as usize) + 32_768];
@@ -72,6 +95,18 @@ async fn run_hashset_startup_case(unrelated_aich_tree: bool) {
         .into();
     }
     let advertised_root = source_aich.master_hash;
+    if operator_root {
+        transfer_runtime
+            .reconcile_aich_root(&file_hash_hex, Some(advertised_root))
+            .await
+            .unwrap();
+    }
+    if md4_preseeded {
+        transfer_runtime
+            .store_md4_hashset(&file_hash_hex, md4_hashset.clone())
+            .await
+            .unwrap();
+    }
     let source_identifier = super::Ed2kFileIdentifier {
         file_hash,
         file_size: Some(payload.len() as u64),
@@ -140,12 +175,12 @@ async fn run_hashset_startup_case(unrelated_aich_tree: bool) {
             requested_identifier.file_size,
             Some(payload_for_server.len() as u64)
         );
-        assert!(request_options.request_md4);
-        assert!(!request_options.request_aich);
+        assert_eq!(request_options.request_md4, !md4_preseeded);
+        assert_eq!(request_options.request_aich, operator_root);
 
         let hashset_answer = super::encode_hashset_answer2(
             &source_identifier,
-            Some(&md4_hashset),
+            (!md4_preseeded).then_some(md4_hashset.as_slice()),
             Some(&source_aich),
         )
         .unwrap();
@@ -163,9 +198,13 @@ async fn run_hashset_startup_case(unrelated_aich_tree: bool) {
             .await
             .unwrap();
         assert!(before_payload.md4_hashset_acquired);
-        assert!(before_payload.aich_root.is_none());
-        assert!(!before_payload.aich_hashset_acquired);
-        assert!(before_payload.aich_hashset.is_empty());
+        if operator_root {
+            assert_eq!(before_payload.aich_root, Some(hex::encode(advertised_root)));
+        } else {
+            assert!(before_payload.aich_root.is_none());
+            assert!(!before_payload.aich_hashset_acquired);
+            assert!(before_payload.aich_hashset.is_empty());
+        }
 
         let accept = encode_accept_upload_req();
         stream.write_all(&accept).await.unwrap();
@@ -279,6 +318,10 @@ async fn run_hashset_startup_case(unrelated_aich_tree: bool) {
     let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
     assert!(manifest.completed);
     assert!(manifest.aich_hashset_acquired);
+    assert_eq!(
+        manifest.aich_root_origin,
+        Some(crate::ed2k_transfer::Ed2kAichRootOrigin::LocalComputed)
+    );
     assert_eq!(manifest.aich_hashset.len(), 2);
     if unrelated_aich_tree {
         assert_ne!(manifest.aich_root, Some(hex::encode(advertised_root)));

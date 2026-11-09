@@ -180,6 +180,8 @@ mod tests {
             md4_hashset: Vec::new(),
             aich_hashset_acquired: true,
             aich_root: Some("1111111111111111111111111111111111111111".to_string()),
+            aich_root_origin: Some("local_computed".to_string()),
+            aich_trust_generation: 1,
             aich_hashset: Vec::new(),
             verified_ranges: vec![MetadataTransferRange {
                 start: 0,
@@ -284,6 +286,8 @@ mod tests {
 
         manifest.display_name = "renamed.bin".to_string();
         manifest.aich_root = None;
+        manifest.aich_root_origin = None;
+        manifest.aich_hashset_acquired = false;
         store.upsert_transfer_manifest(&manifest).unwrap();
         let metadata_refresh = store
             .download_history_by_hash(&manifest.file_hash)
