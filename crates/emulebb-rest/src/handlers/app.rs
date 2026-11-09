@@ -1,9 +1,6 @@
 //! App lifecycle, diagnostics, settings, and dashboard REST handlers
 //! (`/app`, `/app/shutdown`, `/app/settings`, `/diagnostics/*`, `/status`,
 //! `/stats`, `/snapshot`).
-//!
-//! Extracted verbatim from `lib.rs` during the maintainability restructuring;
-//! behavior is unchanged.
 
 use axum::{
     body::{Body, Bytes},
@@ -43,30 +40,48 @@ pub(crate) async fn events(
     State(state): State<RestState>,
 ) -> impl IntoResponse {
     let receiver = state.core.subscribe_transfer_events();
+    let shutdown = state.shutdown.as_ref().map(|request| request.subscribe());
     let core = state.core.clone();
     let pending_reset = last_event_id(&headers).map(|last_event_id| {
         TransferEvent::reset_last_event_id(core.reserve_transfer_event_id(), last_event_id)
     });
     let stream = stream::unfold(
-        (receiver, core, pending_reset),
-        |(mut receiver, core, pending_reset)| async move {
+        (receiver, core, pending_reset, shutdown),
+        |(mut receiver, core, pending_reset, mut shutdown)| async move {
+            if shutdown
+                .as_ref()
+                .is_some_and(|request| *request.borrow() || request.has_changed().is_err())
+            {
+                return None;
+            }
             if let Some(event) = pending_reset {
                 return Some((
                     Ok::<_, Infallible>(sse_event(event)),
-                    (receiver, core, None),
+                    (receiver, core, None, shutdown),
                 ));
             }
-            match receiver.recv().await {
+            // WHY: a live SSE response otherwise keeps HTTP graceful shutdown
+            // waiting forever, delaying network teardown and embedded-host exit.
+            let event = if let Some(request) = shutdown.as_mut() {
+                tokio::select! {
+                    biased;
+                    _ = request.wait_for(|requested| *requested) => return None,
+                    event = receiver.recv() => event,
+                }
+            } else {
+                receiver.recv().await
+            };
+            match event {
                 Ok(event) => Some((
                     Ok::<_, Infallible>(sse_event(event)),
-                    (receiver, core, None),
+                    (receiver, core, None, shutdown),
                 )),
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     let event =
                         TransferEvent::reset_lagged(core.reserve_transfer_event_id(), missed);
                     Some((
                         Ok::<_, Infallible>(sse_event(event)),
-                        (receiver, core, None),
+                        (receiver, core, None, shutdown),
                     ))
                 }
                 Err(broadcast::error::RecvError::Closed) => None,
@@ -125,7 +140,7 @@ pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) ->
         .into_response();
     }
     if let Some(shutdown) = state.shutdown.as_ref() {
-        let _ = shutdown.send(true);
+        shutdown.send_replace(true);
     }
     api_ok(json!({"ok": true})).into_response()
 }

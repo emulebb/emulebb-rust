@@ -1,6 +1,42 @@
 use crate::rest_test_support::*;
 
 #[tokio::test]
+async fn event_stream_closes_without_replay_when_shutdown_is_already_requested() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let (shutdown, _) = watch::channel(false);
+    shutdown.send_replace(true);
+    let app = router_with_shutdown(
+        core,
+        RestServerSettings {
+            api_key: "secret".to_owned(),
+            web_root_dir: None,
+        },
+        Some(shutdown),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/events")
+                .header("X-API-Key", "secret")
+                .header("Last-Event-ID", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        to_bytes(response.into_body(), 4096),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
 async fn shared_root_api_consolidates_children_for_ui_and_direct_calls() {
     let temp = unique_test_dir("recursive-roots");
     let parent = temp.join("Shared");
