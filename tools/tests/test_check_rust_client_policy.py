@@ -422,6 +422,14 @@ class TestReleaseCiGate(unittest.TestCase):
     def test_current_workflow_requires_all_green_source_checks(self) -> None:
         self.assertEqual(CHECKER.check_release_ci_gate(), [])
 
+    def test_release_source_binding_cannot_be_removed(self) -> None:
+        workflow = (CHECKER.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        errors = CHECKER.check_release_ci_gate(
+            workflow.replace("release_publish.py workflow-source", "release_publish.py other"),
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("workflow-bound immutable source resolution", errors[0])
+
     def test_rejects_release_packaging_without_exact_source_gate(self) -> None:
         errors = CHECKER.check_release_ci_gate(
             f"""
@@ -483,7 +491,8 @@ class TestReleaseControlTrust(unittest.TestCase):
 
     def test_candidate_checkout_cannot_supply_control_helpers(self) -> None:
         for filename, keyword, jobs in (
-            ("release.yml", "workflow_text", ("prepare", "verify-source", "native-package-smoke",
+            ("release.yml", "workflow_text", ("prepare", "verify-source", "native-package", "musl-package",
+                                             "image-candidate", "native-package-smoke",
                                              "image-native-validation", "assemble-candidate", "publish-image",
                                              "publish-native", "publish-nightly-channel", "cleanup-nightlies")),
             ("nightly.yml", "nightly_text", ("prepare", "verify-source")),
@@ -499,6 +508,19 @@ class TestReleaseControlTrust(unittest.TestCase):
                     self.assertEqual(len(errors), 1)
                     self.assertIn(f"{filename} {job}", errors[0])
 
+    def test_candidate_data_checkout_cannot_bypass_the_control_checkout(self) -> None:
+        text = (CHECKER.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        for job in ("native-package-smoke", "image-native-validation"):
+            with self.subTest(job=job):
+                before, body = text.split(f"  {job}:\n", 1)
+                control, candidate = body.split("ref: ${{ github.workflow_sha }}", 1)
+                changed = before + f"  {job}:\n" + control + "ref: ${{ github.workflow_sha }}" + candidate.replace(
+                    "ref: ${{ github.workflow_sha }}", "ref: ${{ inputs.source_ref }}", 1,
+                )
+                errors = CHECKER.check_release_control_trust(workflow_text=changed)
+                self.assertEqual(len(errors), 1)
+                self.assertIn(f"release.yml {job}", errors[0])
+
 
 class TestNightlyCoordination(unittest.TestCase):
     def test_current_workflow_selects_one_daily_green_main_nightly(self) -> None:
@@ -510,8 +532,8 @@ class TestNightlyCoordination(unittest.TestCase):
             helper_text="def metadata(): pass\n",
         )
 
-        self.assertEqual(len(errors), 7)
-        self.assertTrue(any("latest-green-main" in error for error in errors))
+        self.assertEqual(len(errors), 9)
+        self.assertTrue(any("workflow revision selection" in error for error in errors))
         self.assertTrue(any("daily publication guard" in error for error in errors))
 
 

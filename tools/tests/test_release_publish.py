@@ -35,6 +35,56 @@ def write_oci_archive(path: Path, blob: bytes, *, digest: str, manifests: int = 
         add_bytes(archive, f"blobs/sha256/{digest.removeprefix('sha256:')}", blob)
 
 
+class TestWorkflowSource(unittest.TestCase):
+    def test_default_and_matching_assertions_use_the_workflow_revision(self) -> None:
+        sha = "a" * 40
+        self.assertEqual(PUBLISH.resolve_workflow_source(sha), sha)
+        self.assertEqual(
+            PUBLISH.resolve_workflow_source(sha, source_ref=sha, candidate_ref=sha), sha,
+        )
+
+    def test_each_input_independently_rejects_another_revision(self) -> None:
+        sha = "a" * 40
+        for requested in (
+            {"source_ref": "b" * 40},
+            {"candidate_ref": "b" * 40},
+            {"source_ref": sha, "candidate_ref": "b" * 40},
+        ):
+            with self.subTest(requested=requested):
+                with self.assertRaisesRegex(RuntimeError, "must match the workflow revision"):
+                    PUBLISH.resolve_workflow_source(sha, **requested)
+
+    def test_only_full_lowercase_commit_assertions_are_accepted(self) -> None:
+        for value in ("", "main", "a" * 39, "A" * 40, "a" * 40 + "\n"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "full lowercase commit SHA"):
+                    PUBLISH.resolve_workflow_source(value)
+                if value:
+                    with self.assertRaisesRegex(RuntimeError, "full lowercase commit SHA"):
+                        PUBLISH.resolve_workflow_source("a" * 40, candidate_ref=value)
+
+    def test_rejected_source_cannot_write_a_success_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "github-output"
+            output.write_text("existing=value\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "must match the workflow revision"):
+                PUBLISH.main([
+                    "workflow-source", "--workflow-sha", "a" * 40,
+                    "--candidate-ref", "b" * 40, "--github-output", str(output),
+                ])
+            self.assertEqual(output.read_text(encoding="utf-8"), "existing=value\n")
+
+    def test_command_records_only_the_verified_workflow_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "github-output"
+            sha = "a" * 40
+            self.assertEqual(PUBLISH.main([
+                "workflow-source", "--workflow-sha", sha,
+                "--source-ref", sha, "--github-output", str(output),
+            ]), 0)
+            self.assertEqual(output.read_text(encoding="utf-8"), f"sha={sha}\n")
+
+
 class TestReleaseIdentity(unittest.TestCase):
     def test_formal_release_is_derived_from_tag_and_matches_cargo(self) -> None:
         self.assertEqual(
