@@ -832,6 +832,8 @@ mod tests {
             md4_hashset: Vec::new(),
             aich_hashset_acquired: false,
             aich_root: None,
+            aich_root_origin: None,
+            aich_trust_generation: 0,
             aich_hashset: Vec::new(),
             verified_ranges: Vec::new(),
             upload_priority: "normal".to_string(),

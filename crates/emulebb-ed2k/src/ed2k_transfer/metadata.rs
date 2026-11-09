@@ -24,9 +24,9 @@ use super::manifest::{manifest_has_structural_progress, piece_count};
 use super::transfer_sql::manifest_from_metadata;
 use super::upload_queue::upload_priority_score;
 use super::{
-    Ed2kAichHashset, Ed2kFileNameObservation, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry,
-    Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport, Ed2kTransferJob,
-    Ed2kTransferRetirementRecoveryReport, Ed2kTransferRuntime, Ed2kTransferState,
+    Ed2kAichHashset, Ed2kAichRootOrigin, Ed2kFileNameObservation, Ed2kPieceState,
+    Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport,
+    Ed2kTransferJob, Ed2kTransferRetirementRecoveryReport, Ed2kTransferRuntime, Ed2kTransferState,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -479,13 +479,30 @@ impl Ed2kTransferRuntime {
 
     /// Activate a peer's part hashset only against an independently trusted
     /// master. Internal tree consistency never establishes content identity.
+    #[cfg(test)]
     pub(crate) async fn store_aich_hashset(
         &self,
         file_hash: &str,
         aich_hashset: Ed2kAichHashset,
     ) -> Result<Ed2kResumeManifest> {
+        let generation = self.manifest(file_hash).await?.aich_trust_generation;
+        self.store_aich_hashset_for_generation(file_hash, aich_hashset, generation)
+            .await
+    }
+
+    /// A stale response cannot reactivate a retired decision, even if a later
+    /// consensus selects the same master again.
+    pub(crate) async fn store_aich_hashset_for_generation(
+        &self,
+        file_hash: &str,
+        aich_hashset: Ed2kAichHashset,
+        expected_generation: u64,
+    ) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        if manifest.aich_trust_generation != expected_generation {
+            return Ok(manifest);
+        }
         validate_aich_hashset(manifest.file_size, &aich_hashset)?;
         let existing_root = manifest
             .aich_root
@@ -503,9 +520,9 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
-    /// Persist an AUTHORITATIVE AICH root (computed locally from a completed
-    /// file, or read back from persisted `.met`/manifest metadata). Such a root
-    /// is trusted on sight and promoted directly. For roots learned over the
+    /// Accept an explicit operator-link AICH master. Local computation and
+    /// stock import have separate authority and do not enter this network
+    /// observation interface. For roots learned over the
     /// wire from a single peer, use [`record_network_aich_root`] instead, which
     /// requires corroboration before promotion.
     ///
@@ -517,24 +534,32 @@ impl Ed2kTransferRuntime {
     ) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let mut changed = false;
         if let Some(aich_root) = aich_root {
             let encoded = hex::encode(aich_root);
             if let Some(existing_root) = manifest.aich_root.as_deref() {
-                if existing_root != encoded {
+                if existing_root != encoded
+                    && manifest.aich_root_origin != Some(Ed2kAichRootOrigin::NetworkConsensus)
+                {
                     anyhow::bail!(
                         "refusing to replace AICH root for {} with conflicting metadata",
                         file_hash
                     );
                 }
-            } else {
-                manifest.aich_root = Some(encoded);
-                changed = true;
             }
-        }
-        if changed {
-            self.store_manifest_unlocked(&manifest).await?;
-            self.upsert_verified_catalog_entry(&manifest).await;
+            let origin = match manifest.aich_root_origin {
+                Some(
+                    origin @ (Ed2kAichRootOrigin::LocalComputed | Ed2kAichRootOrigin::StockImport),
+                ) => origin,
+                _ => Ed2kAichRootOrigin::OperatorLink,
+            };
+            if super::aich_trust::set_identity(&mut manifest, Some(encoded), Some(origin))? {
+                self.store_manifest_unlocked(&manifest).await?;
+                self.upsert_verified_catalog_entry(&manifest).await;
+            }
+            self.aich_root_corroboration
+                .lock()
+                .expect("aich corroboration mutex poisoned")
+                .remove(file_hash);
         }
         Ok(manifest)
     }
@@ -551,9 +576,9 @@ impl Ed2kTransferRuntime {
     /// manifest's root is left unset, so salvage falls back to whole-part
     /// re-download.
     ///
-    /// If `manifest.aich_root` is already populated (authoritative, or already
-    /// promoted) this is a no-op. The MD4 hashset backstop independently
-    /// prevents corruption, so this is defense-in-depth + parity.
+    /// A live consensus keeps collecting votes and may lose trust. Explicit
+    /// authority is stable. Stock resumes a persisted accepted root as VERIFIED
+    /// (PartFile.cpp FT_AICH_HASH); retain its origin without recreating votes.
     pub async fn record_network_aich_root(
         &self,
         file_hash: &str,
@@ -582,10 +607,38 @@ impl Ed2kTransferRuntime {
             return Ok(manifest);
         }
 
-        // Already have a trusted root: nothing to promote. If a peer proposes a
-        // root that conflicts with the trusted one, ignore it (the trusted root
-        // wins); matching is harmless.
-        if manifest.aich_root.is_some() {
+        if manifest.aich_root.is_some()
+            && manifest.aich_root_origin != Some(Ed2kAichRootOrigin::NetworkConsensus)
+        {
+            return Ok(manifest);
+        }
+
+        // Import/local evidence may be accepted while this runtime has a
+        // cached transfer manifest. Read its current authority before allowing
+        // network votes to replace or demote the cached decision. Merge only
+        // identity, preserving newer cache-only piece progress.
+        let metadata = self.metadata.clone();
+        let owned_hash = file_hash.to_owned();
+        let persisted =
+            tokio::task::spawn_blocking(move || metadata.transfer_manifest_by_hash(&owned_hash))
+                .await??;
+        if let Some(persisted) = persisted
+            && persisted.aich_root.is_some()
+            && persisted.aich_root_origin.as_deref() != Some("network_consensus")
+        {
+            let origin = persisted
+                .aich_root_origin
+                .as_deref()
+                .map(Ed2kAichRootOrigin::parse)
+                .transpose()?;
+            if super::aich_trust::set_identity(&mut manifest, persisted.aich_root, origin)? {
+                self.store_manifest_unlocked(&manifest).await?;
+                self.upsert_verified_catalog_entry(&manifest).await;
+            }
+            self.aich_root_corroboration
+                .lock()
+                .expect("aich corroboration mutex poisoned")
+                .remove(file_hash);
             return Ok(manifest);
         }
 
@@ -594,6 +647,11 @@ impl Ed2kTransferRuntime {
                 .aich_root_corroboration
                 .lock()
                 .expect("aich corroboration mutex poisoned");
+            // An accepted persisted consensus resumes VERIFIED exactly as
+            // stock. Only this runtime's live accumulator is reconsiderable.
+            if manifest.aich_root.is_some() && !map.contains_key(file_hash) {
+                return Ok(manifest);
+            }
             let accumulator = map.entry(file_hash.to_string()).or_default();
             for (aich_root, from_ip) in observations {
                 let std::net::IpAddr::V4(from_ip) = from_ip else {
@@ -604,8 +662,8 @@ impl Ed2kTransferRuntime {
             accumulator.trusted_root()
         };
 
-        if let Some(trusted) = promoted {
-            manifest.aich_root = Some(hex::encode(trusted));
+        let origin = promoted.map(|_| Ed2kAichRootOrigin::NetworkConsensus);
+        if super::aich_trust::set_identity(&mut manifest, promoted.map(hex::encode), origin)? {
             self.store_manifest_unlocked(&manifest).await?;
             self.upsert_verified_catalog_entry(&manifest).await;
         }
@@ -1050,6 +1108,10 @@ impl Ed2kTransferRuntime {
             "retired download disappeared before finalization"
         );
         self.manifest_cache.lock().await.remove(file_hash);
+        self.aich_root_corroboration
+            .lock()
+            .expect("aich corroboration mutex poisoned")
+            .remove(file_hash);
         self.manifest_checkpoint_state
             .lock()
             .await
@@ -1167,6 +1229,10 @@ impl Ed2kTransferRuntime {
             "ED2K transfer {file_hash} disappeared before deletion intent was persisted"
         );
         self.manifest_cache.lock().await.remove(&file_hash);
+        self.aich_root_corroboration
+            .lock()
+            .expect("aich corroboration mutex poisoned")
+            .remove(&file_hash);
         self.manifest_checkpoint_state
             .lock()
             .await

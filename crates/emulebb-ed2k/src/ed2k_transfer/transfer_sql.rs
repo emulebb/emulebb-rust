@@ -47,6 +47,10 @@ pub(super) fn manifest_to_metadata(
         md4_hashset: manifest.md4_hashset.clone(),
         aich_hashset_acquired: manifest.aich_hashset_acquired,
         aich_root: manifest.aich_root.clone(),
+        aich_root_origin: manifest
+            .aich_root_origin
+            .map(|origin| origin.as_str().to_owned()),
+        aich_trust_generation: manifest.aich_trust_generation,
         aich_hashset: manifest.aich_hashset.clone(),
         verified_ranges: manifest
             .verified_ranges
@@ -148,6 +152,12 @@ pub(super) fn manifest_from_metadata(
         md4_hashset: manifest.md4_hashset,
         aich_hashset_acquired: manifest.aich_hashset_acquired,
         aich_root: manifest.aich_root,
+        aich_root_origin: manifest
+            .aich_root_origin
+            .as_deref()
+            .map(super::Ed2kAichRootOrigin::parse)
+            .transpose()?,
+        aich_trust_generation: manifest.aich_trust_generation,
         aich_hashset: manifest.aich_hashset,
         verified_ranges: manifest
             .verified_ranges
@@ -390,6 +400,8 @@ mod tests {
             md4_hashset: Vec::new(),
             aich_hashset_acquired: false,
             aich_root: None,
+            aich_root_origin: None,
+            aich_trust_generation: 0,
             aich_hashset: Vec::new(),
             verified_ranges: Vec::new(),
             pieces: Vec::new(),

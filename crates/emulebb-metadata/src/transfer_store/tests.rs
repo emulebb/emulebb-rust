@@ -37,6 +37,8 @@ fn completed_download_manifest() -> MetadataTransferManifest {
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
         aich_root: None,
+        aich_root_origin: None,
+        aich_trust_generation: 0,
         aich_hashset: Vec::new(),
         verified_ranges: vec![MetadataTransferRange { start: 0, end: 16 }],
         pieces: Vec::new(),
@@ -63,6 +65,109 @@ fn completed_pending_download_manifest() -> MetadataTransferManifest {
     manifest.source_fingerprint = None;
     manifest.payload_fingerprint = Some(fingerprint(manifest.file_size, 91));
     manifest
+}
+
+#[test]
+fn accepted_network_decision_roundtrips_without_becoming_known_content_identity() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    manifest.completed = false;
+    manifest.payload_fingerprint = None;
+    manifest.aich_root = Some("11".repeat(20));
+    manifest.aich_root_origin = Some("network_consensus".to_string());
+    manifest.aich_trust_generation = 1;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest.clone())
+    );
+    let known_root: Option<Vec<u8>> = store
+        .connection()
+        .unwrap()
+        .query_row("SELECT aich_root FROM known_files", [], |row| row.get(0))
+        .unwrap();
+    assert!(known_root.is_none());
+
+    manifest.aich_root = None;
+    manifest.aich_root_origin = None;
+    manifest.aich_trust_generation = 2;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
+}
+
+#[test]
+fn root_origin_and_part_set_cannot_manufacture_an_accepted_decision() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_pending_download_manifest();
+    let mut invalid = manifest.clone();
+    invalid.aich_root = Some("11".repeat(20));
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid = manifest.clone();
+    invalid.aich_root_origin = Some("network_consensus".to_string());
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid = manifest.clone();
+    invalid.aich_hashset_acquired = true;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+    invalid = manifest;
+    invalid.aich_trust_generation = u64::MAX;
+    assert!(store.upsert_transfer_manifest(&invalid).is_err());
+}
+
+#[test]
+fn operator_master_is_authority_for_network_and_local_content_writers() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_download_manifest();
+    manifest.completed = false;
+    manifest.aich_root = Some("11".repeat(20));
+    manifest.aich_root_origin = Some("operator_link".to_string());
+    manifest.aich_trust_generation = 1;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let mut proposal = manifest.clone();
+    proposal.aich_root = Some("22".repeat(20));
+    proposal.aich_root_origin = Some("network_consensus".to_string());
+    proposal.aich_trust_generation = 2;
+    assert!(
+        store
+            .upsert_transfer_manifest(&proposal)
+            .unwrap_err()
+            .is::<crate::MetadataContentConflict>()
+    );
+
+    let content = crate::MetadataVerifiedLocalContent {
+        file_hash: manifest.file_hash.clone(),
+        display_name: "local.bin".to_string(),
+        file_size: manifest.file_size,
+        part_size: manifest.piece_size,
+        md4_hashset: Vec::new(),
+        aich_root: Some("22".repeat(20)),
+        aich_hashset: Vec::new(),
+        path: std::env::temp_dir().join("aich-operator-conflict.bin"),
+        fingerprint: fingerprint(manifest.file_size, 9),
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+    };
+    assert!(
+        store
+            .upsert_verified_local_content(&content)
+            .unwrap_err()
+            .is::<crate::MetadataContentConflict>()
+    );
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
+    assert_eq!(store.table_count("verified_local_content").unwrap(), 0);
 }
 
 fn fingerprint(size_bytes: u64, sequence: u64) -> NativeFileFingerprint {
@@ -159,10 +264,12 @@ fn accepted_identity_survives_conflicting_transfer_and_index_observations() {
     let mut manifest = completed_download_manifest();
     manifest.completed = false;
     manifest.aich_root = Some("11".repeat(20));
+    manifest.aich_root_origin = Some("operator_link".to_string());
+    manifest.aich_trust_generation = 1;
     store.upsert_transfer_manifest(&manifest).unwrap();
     store.connection().unwrap().execute(
         "INSERT INTO verified_local_content(known_file_id, display_name, part_size_bytes, part_count, aich_root)
-         SELECT known_files.id, transfers.display_name, transfers.part_size_bytes, transfers.part_count, aich_root FROM known_files JOIN transfers ON transfers.known_file_id = known_files.id",
+         SELECT known_files.id, transfers.display_name, transfers.part_size_bytes, transfers.part_count, known_files.aich_root FROM known_files JOIN transfers ON transfers.known_file_id = known_files.id",
         [],
     ).unwrap();
 
@@ -200,6 +307,7 @@ fn accepted_identity_survives_conflicting_transfer_and_index_observations() {
 
     let mut sparse = manifest.clone();
     sparse.aich_root = None;
+    sparse.aich_root_origin = None;
     store.upsert_transfer_manifest(&sparse).unwrap();
     assert_eq!(
         store
@@ -325,6 +433,8 @@ fn transfer_manifest_roundtrips_sql_tables() {
     let mut manifest = completed_pending_download_manifest();
     manifest.display_name = "Sample.Transfer.bin".to_string();
     manifest.aich_root = Some("1111111111111111111111111111111111111111".to_string());
+    manifest.aich_root_origin = Some("operator_link".to_string());
+    manifest.aich_trust_generation = 1;
     manifest.aich_hashset_acquired = true;
     manifest.aich_hashset = vec!["2222222222222222222222222222222222222222".to_string()];
     manifest.pieces = vec![MetadataTransferPiece {
@@ -425,6 +535,8 @@ fn upload_demand_counters_persist_on_known_files() {
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
         aich_root: None,
+        aich_root_origin: None,
+        aich_trust_generation: 0,
         aich_hashset: Vec::new(),
         verified_ranges: vec![MetadataTransferRange {
             start: 0,
@@ -573,6 +685,7 @@ fn deleting_download_preserves_same_hash_local_content() {
     store.upsert_verified_local_content(&content).unwrap();
     // Content identity enrichment is shared; transfer-owned hashsets stay independent.
     manifest.aich_root = content.aich_root.clone();
+    manifest.aich_root_origin = Some("local_computed".to_string());
     assert_eq!(
         store
             .transfer_manifest_by_hash(&manifest.file_hash)
@@ -653,6 +766,8 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
         aich_root: None,
+        aich_root_origin: None,
+        aich_trust_generation: 0,
         aich_hashset: Vec::new(),
         verified_ranges: Vec::new(),
         pieces: vec![MetadataTransferPiece {
@@ -930,6 +1045,8 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
         aich_root: None,
+        aich_root_origin: None,
+        aich_trust_generation: 0,
         aich_hashset: Vec::new(),
         verified_ranges: vec![MetadataTransferRange { start: 0, end: 1 }],
         pieces: vec![MetadataTransferPiece {
@@ -1346,6 +1463,8 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
         aich_root: None,
+        aich_root_origin: None,
+        aich_trust_generation: 0,
         aich_hashset: Vec::new(),
         verified_ranges: Vec::new(),
         pieces: vec![MetadataTransferPiece {
@@ -1464,6 +1583,8 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 md4_hashset: Vec::new(),
                 aich_hashset_acquired: false,
                 aich_root: None,
+                aich_root_origin: None,
+                aich_trust_generation: 0,
                 aich_hashset: Vec::new(),
                 verified_ranges: vec![MetadataTransferRange {
                     start: 0,

@@ -225,9 +225,14 @@ impl Ed2kTransferRuntime {
             manifest.payload_fingerprint = computation.payload_fingerprint;
             let recovery = computation.recovery;
             if let Some(set) = recovery.as_ref()
-                && (manifest.aich_root.is_none() || !manifest.aich_hashset_acquired)
+                && (manifest.aich_root.is_none()
+                    || manifest.aich_root.as_deref() == Some(hex::encode(set.root).as_str()))
             {
-                manifest.aich_root = Some(hex::encode(set.root));
+                super::aich_trust::set_identity(
+                    &mut manifest,
+                    Some(hex::encode(set.root)),
+                    Some(super::Ed2kAichRootOrigin::LocalComputed),
+                )?;
                 manifest.aich_hashset = if set.part_roots.len() == 1 {
                     Vec::new()
                 } else {

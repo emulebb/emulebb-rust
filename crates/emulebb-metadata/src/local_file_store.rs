@@ -317,6 +317,21 @@ impl MetadataStore {
         content: &MetadataVerifiedLocalContent,
         now: i64,
     ) -> Result<()> {
+        Self::upsert_verified_local_content_with_origin_tx(tx, content, now, "local_computed")
+    }
+
+    /// Stock cache acceptance shares geometry/fingerprint admission with native
+    /// hashing, but never pretends that Rust read and hashed the imported bytes.
+    pub(crate) fn upsert_verified_local_content_with_origin_tx(
+        tx: &rusqlite::Transaction<'_>,
+        content: &MetadataVerifiedLocalContent,
+        now: i64,
+        origin: &'static str,
+    ) -> Result<()> {
+        ensure!(
+            matches!(origin, "local_computed" | "stock_import"),
+            "invalid local AICH origin"
+        );
         ensure!(
             content.path.is_absolute(),
             "local file path must be absolute"
@@ -355,15 +370,19 @@ impl MetadataStore {
             .collect::<Result<Vec<_>>>()?;
         tx.execute(
             "INSERT INTO known_files(
-                ed2k_hash, size_bytes, display_name, aich_root,
+                ed2k_hash, size_bytes, display_name, aich_root, aich_root_origin,
                 first_seen_at_ms, last_seen_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)
+             ) VALUES (?1, ?2, ?3, ?4, ?6, ?5, ?5, ?5)
              ON CONFLICT(ed2k_hash) DO UPDATE SET
                  size_bytes = excluded.size_bytes,
                  aich_root = coalesce(excluded.aich_root, known_files.aich_root),
+                 aich_root_origin = CASE
+                    WHEN excluded.aich_root IS NULL THEN known_files.aich_root_origin
+                    WHEN known_files.aich_root_origin = 'local_computed' THEN known_files.aich_root_origin
+                    ELSE excluded.aich_root_origin END,
                 last_seen_at_ms = excluded.last_seen_at_ms,
                 updated_at_ms = excluded.updated_at_ms",
-            params![hash, size, content.display_name, aich_root, now],
+            params![hash, size, content.display_name, aich_root, now, aich_root.as_ref().map(|_| origin)],
         )?;
         let (known_file_id, stored_size): (i64, i64) = tx.query_row(
             "SELECT id, size_bytes FROM known_files WHERE ed2k_hash = ?1",

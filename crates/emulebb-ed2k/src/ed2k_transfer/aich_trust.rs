@@ -11,11 +11,42 @@
 //! percent of all proposing IPs.
 //!
 //! This module mirrors that policy for network-learned roots. Authoritative
-//! roots (computed locally from a completed file, or read back from persisted
-//! `.met`/manifest metadata) bypass corroboration entirely and are promoted
-//! directly via `reconcile_aich_root`.
+//! roots have explicit local/operator/import provenance. A persisted accepted
+//! decision resumes VERIFIED as stock without changing that recorded origin;
+//! a part set that was merely acquired never creates such a decision.
 
 use std::collections::{BTreeMap, HashMap};
+
+use super::{Ed2kAichRootOrigin, Ed2kResumeManifest};
+
+/// Change accepted identity under the manifest lock. The generation and
+/// dependent part set change atomically with the persisted decision.
+pub(super) fn set_identity(
+    manifest: &mut Ed2kResumeManifest,
+    root: Option<String>,
+    origin: Option<Ed2kAichRootOrigin>,
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        root.is_some() == origin.is_some(),
+        "incomplete AICH decision"
+    );
+    if manifest.aich_root == root && manifest.aich_root_origin == origin {
+        return Ok(false);
+    }
+    let generation = manifest
+        .aich_trust_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("AICH trust generation exhausted"))?;
+    i64::try_from(generation)?;
+    if manifest.aich_root != root {
+        manifest.aich_hashset.clear();
+        manifest.aich_hashset_acquired = false;
+    }
+    manifest.aich_root = root;
+    manifest.aich_root_origin = origin;
+    manifest.aich_trust_generation = generation;
+    Ok(true)
+}
 
 /// How many distinct IPs must propose the same AICH root before it is trusted.
 /// Mirrors `MINUNIQUEIPS_TOTRUST` (`SHAHashSet.cpp:40`).
@@ -48,8 +79,8 @@ fn mask_signer_ip(octets: [u8; 4]) -> [u8; 4] {
 /// Per-file accumulator of network-proposed AICH roots keyed by signer. Keeping
 /// one root per masked signer prevents one responder from inflating multiple
 /// conflicting candidates. In-memory only (live session trust state, never
-/// persisted): the durable trust decision lives in `manifest.aich_root`, which
-/// is only written once a root is promoted.
+/// persisted): the durable master, origin and generation describe an accepted
+/// decision. Live vote history is bounded and released with the transfer.
 #[derive(Debug, Default)]
 pub(super) struct AichRootCorroboration {
     /// Masked proposing IP -> first root proposed by that signer.
@@ -192,7 +223,7 @@ mod tests {
             acc.record([1; 20], [203, signer, 0, 1]);
         }
         assert_eq!(acc.trusted_root(), Some([1; 20]));
-        for candidate in 2..=MAX_CANDIDATES as u8 {
+        for candidate in 2..=u8::try_from(MAX_CANDIDATES).unwrap() {
             acc.record([candidate; 20], [198, candidate, 0, 1]);
         }
         assert!(!acc.record([0xff; 20], [192, 0, 0, 1]));
@@ -204,7 +235,7 @@ mod tests {
     fn signer_limit_is_bounded_and_fails_closed() {
         let mut acc = AichRootCorroboration::default();
         for signer in 0..MAX_SIGNERS {
-            let bytes = (signer as u16).to_be_bytes();
+            let bytes = u16::try_from(signer).unwrap().to_be_bytes();
             acc.record([1; 20], [bytes[0], bytes[1], 0, 1]);
         }
         assert_eq!(acc.trusted_root(), Some([1; 20]));

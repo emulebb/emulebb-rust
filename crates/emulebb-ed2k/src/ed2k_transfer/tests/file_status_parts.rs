@@ -59,6 +59,8 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         md4_hashset: Vec::new(),
         aich_hashset_acquired: false,
         aich_root: None,
+        aich_root_origin: None,
+        aich_trust_generation: 0,
         aich_hashset: Vec::new(),
         verified_ranges: ranges,
         pieces,
