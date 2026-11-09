@@ -57,54 +57,6 @@ class TestNightlyMetadata(unittest.TestCase):
             NIGHTLY.write_github_output(output, {"version": "0.1.0", "should_build": "true"})
             self.assertEqual(output.read_text(encoding="utf-8"), "version=0.1.0\nshould_build=true\n")
 
-    def test_successful_ci_shas_accept_only_completed_main_pushes(self) -> None:
-        valid_sha = "1" * 40
-        payload = {
-            "workflow_runs": [
-                {
-                    "head_sha": valid_sha,
-                    "head_branch": "main",
-                    "event": "push",
-                    "status": "completed",
-                    "conclusion": "success",
-                },
-                {
-                    "head_sha": "2" * 40,
-                    "head_branch": "main",
-                    "event": "push",
-                    "status": "in_progress",
-                    "conclusion": None,
-                },
-                {
-                    "head_sha": "3" * 40,
-                    "head_branch": "topic",
-                    "event": "push",
-                    "status": "completed",
-                    "conclusion": "success",
-                },
-            ]
-        }
-        self.assertEqual(NIGHTLY.successful_ci_shas(payload, "main"), [valid_sha])
-
-    def test_latest_green_main_skips_newer_commit_outside_checkout_lineage(self) -> None:
-        newer_sha = "1" * 40
-        selected_sha = "2" * 40
-        response = mock.Mock(
-            stdout=(
-                '{"workflow_runs":['
-                f'{{"head_sha":"{newer_sha}","head_branch":"main","event":"push",'
-                '"status":"completed","conclusion":"success"},'
-                f'{{"head_sha":"{selected_sha}","head_branch":"main","event":"push",'
-                '"status":"completed","conclusion":"success"}'
-                "]}"
-            )
-        )
-        with (
-            mock.patch.object(NIGHTLY, "run", return_value=response),
-            mock.patch.object(NIGHTLY, "is_ancestor", side_effect=[False, True]),
-        ):
-            self.assertEqual(NIGHTLY.latest_green_main_sha("emulebb/emulebb-rust"), selected_sha)
-
     def test_published_nightly_is_scoped_to_beta_and_date(self) -> None:
         releases = [
             {
@@ -158,6 +110,69 @@ class TestNightlyMetadata(unittest.TestCase):
         self.assertTrue(NIGHTLY.should_build_nightly(publish=False, **arguments))
         with self.assertRaisesRegex(RuntimeError, "refusing to republish"):
             NIGHTLY.should_build_nightly(publish=True, **arguments)
+
+
+class TestScheduledWorkflowSource(unittest.TestCase):
+    def metadata(self, *, scheduled=True, qualification_error=None, force=False, publish=True, tags="", releases=()):
+        source, previous = "a" * 40, "b" * 40
+
+        def git(*arguments, **_kwargs):
+            if arguments == ("rev-parse", "HEAD"):
+                return source
+            if arguments[0] == "tag":
+                return tags
+            if arguments == ("rev-parse", "rust-v0.1.0-beta.2^{commit}"):
+                return previous
+            self.fail(f"Unexpected metadata Git read: {arguments}")
+
+        with (
+            mock.patch.object(NIGHTLY, "git_output", side_effect=git),
+            mock.patch.object(NIGHTLY, "workspace_version_at_ref", return_value="0.1.0-beta.2") as version,
+            mock.patch.object(NIGHTLY, "github_releases", return_value=list(releases)),
+            mock.patch.object(NIGHTLY, "metadata_schema_version_at_ref", return_value=25),
+            mock.patch.object(NIGHTLY, "run", return_value=subprocess.CompletedProcess([], 0, "")),
+            mock.patch.object(NIGHTLY, "verify_source_checks", side_effect=qualification_error) as verify,
+        ):
+            values = NIGHTLY.metadata(date="20261109", scheduled=scheduled, force=force, publish=publish)
+        return values, verify, version
+
+    def test_scheduled_nightly_qualifies_its_own_checkout(self):
+        values, verify, version = self.metadata()
+        self.assertEqual(values["sha"], "a" * 40)
+        self.assertEqual(values["should_build"], "true")
+        self.assertEqual(values["skip_reason"], "")
+        verify.assert_called_once_with("emulebb/emulebb-rust", "a" * 40)
+        version.assert_called_once_with("a" * 40)
+
+    def test_unqualified_checkout_skips_without_selecting_an_older_source(self):
+        reason = "Required CI latest workflow attempt must complete successfully"
+        values, verify, version = self.metadata(qualification_error=NIGHTLY.SourceChecksNotReady(reason))
+        self.assertEqual(values["sha"], "a" * 40)
+        self.assertEqual(values["should_build"], "false")
+        self.assertEqual(values["skip_reason"], reason)
+        verify.assert_called_once_with("emulebb/emulebb-rust", "a" * 40)
+        version.assert_called_once_with("a" * 40)
+
+    def test_source_inventory_and_transport_errors_are_not_normal_skips(self):
+        for error in (RuntimeError("Invalid Required CI workflow identity"),
+                      json.JSONDecodeError("invalid inventory", "", 0),
+                      subprocess.CalledProcessError(1, ["gh", "api"])):
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(type(error)):
+                    self.metadata(qualification_error=error)
+
+    def test_manual_nonpublishing_force_does_not_require_ready_source_metadata(self):
+        values, verify, _ = self.metadata(
+            scheduled=False, force=True, publish=False,
+            qualification_error=AssertionError("manual metadata must not query source qualification"),
+        )
+        self.assertEqual(values["sha"], "a" * 40)
+        self.assertEqual(values["should_build"], "true")
+        verify.assert_not_called()
+
+    def test_manual_publication_cannot_republish_an_existing_tag(self):
+        with self.assertRaisesRegex(RuntimeError, "refusing to republish existing nightly version"):
+            self.metadata(scheduled=False, force=True, tags="rust-v0.1.0-beta.2.nightly.20261109.gaaaaaaaa")
 
 
 class TestNightlyNotes(unittest.TestCase):
@@ -396,8 +411,23 @@ class TestSourceWorkflowEligibility(unittest.TestCase):
             with self.subTest(status=status, conclusion=conclusion):
                 self.runs["ci.yml"] = [{**self.ci, "id": 10, "run_number": 7, "conclusion": "success"},
                                        {**self.ci, "status": status, "conclusion": conclusion}]
-                with self.assertRaisesRegex(RuntimeError, "latest workflow attempt"):
+                with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "latest workflow attempt"):
                     self.verify()
+
+    def test_missing_source_workflow_is_not_ready(self) -> None:
+        self.runs["ci.yml"] = []
+        with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "No Required CI workflow invocation"):
+            self.verify()
+
+    def test_invalid_workflow_state_is_an_error_instead_of_a_normal_skip(self) -> None:
+        for change in ({"status": None}, {"status": "unknown"}, {"status": []},
+                       {"conclusion": None}, {"conclusion": True}, {"conclusion": {}},
+                       {"status": "queued", "conclusion": "success"}):
+            with self.subTest(change=change):
+                self.runs["ci.yml"] = [{**self.ci, **change}]
+                with self.assertRaisesRegex(RuntimeError, "Invalid Required CI latest workflow state") as caught:
+                    self.verify()
+                self.assertNotIsInstance(caught.exception, NIGHTLY.SourceChecksNotReady)
 
     def test_rerunning_old_invocation_does_not_supersede_newer_failed_invocation(self) -> None:
         self.runs["ci.yml"] = [{**self.ci, "id": 999, "run_number": 7, "run_attempt": 99}, {**self.ci, "conclusion": "failure"}]
@@ -420,11 +450,40 @@ class TestSourceWorkflowEligibility(unittest.TestCase):
             self.verify()
 
     def test_other_source_or_workflow_cannot_satisfy_gate(self) -> None:
-        for change in ({"head_sha": "b" * 40}, {"path": ".github/workflows/branch-check.yml"}):
-            with self.subTest(change=change):
-                self.runs["ci.yml"] = [{**self.ci, **change}]
-                with self.assertRaises(RuntimeError):
-                    self.verify()
+        invalid_rows = (
+            {},
+            {key: value for key, value in self.ci.items() if key != "head_sha"},
+            {**self.ci, "head_sha": "b" * 40},
+            {**self.ci, "path": ".github/workflows/branch-check.yml"},
+        )
+        for row in invalid_rows:
+            for inventory in ([row], [self.ci, row]):
+                with self.subTest(inventory=inventory):
+                    self.runs["ci.yml"] = inventory
+                    with self.assertRaisesRegex(RuntimeError, "Invalid Required CI workflow identity") as caught:
+                        self.verify()
+                    self.assertNotIsInstance(caught.exception, NIGHTLY.SourceChecksNotReady)
+
+    def test_invalid_source_inventory_propagates_through_scheduled_metadata(self) -> None:
+        def metadata_command(command, **kwargs):
+            if command[:3] == ("git", "merge-base", "--is-ancestor"):
+                return subprocess.CompletedProcess(command, 0, "")
+            return self.respond(command, **kwargs)
+
+        for row in ({}, {key: value for key, value in self.ci.items() if key != "head_sha"},
+                    {**self.ci, "head_sha": "b" * 40}):
+            with self.subTest(row=row):
+                self.runs["ci.yml"] = [row]
+                with (
+                    mock.patch.object(NIGHTLY, "git_output", side_effect=[self.sha, "", "b" * 40]),
+                    mock.patch.object(NIGHTLY, "workspace_version_at_ref", return_value="0.1.0-beta.2"),
+                    mock.patch.object(NIGHTLY, "github_releases", return_value=[]),
+                    mock.patch.object(NIGHTLY, "metadata_schema_version_at_ref", return_value=25),
+                    mock.patch.object(NIGHTLY, "run", side_effect=metadata_command),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "Invalid Required CI workflow identity") as caught:
+                        NIGHTLY.metadata(date="20261109", scheduled=True, publish=True)
+                    self.assertNotIsInstance(caught.exception, NIGHTLY.SourceChecksNotReady)
 
     def test_missing_duplicate_or_unrelated_aggregate_cannot_satisfy_gate(self) -> None:
         good = self.jobs["ci.yml"][0]

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Rust ref to package (defaults to the selected branch)"
+        description: "Optional exact source SHA assertion; must match the selected workflow revision"
         required: false
   workflow_call:
     inputs:
@@ -17,7 +17,7 @@ on:
         required: true
         type: string
       source_ref:
-        description: "Immutable Rust commit to package"
+        description: "Immutable Rust source assertion; must match the caller workflow revision"
         required: true
         type: string
       previous_ref:
@@ -41,9 +41,9 @@ permissions:
 
 env:
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
-  EMULEBB_BUILD_REF: 010c266c29d73e17a654306d0dca8008d8db9006
-  EMULEBB_BUILD_TESTS_REF: fd4c6d21e079fab2b84704294c7c7000b893a81e
-  EMULEBB_TOOLING_REF: 630d1a3492ae65acad0a8dfd1575d671ff7b492c
+  EMULEBB_BUILD_REF: 3135ee1d106637871d884e5f628bcd4ca596863c
+  EMULEBB_BUILD_TESTS_REF: 20a007f34d88b99c40d456cfe1dce3d0537ba00d
+  EMULEBB_TOOLING_REF: 856e0499d12e281697618cc81a0b09805e96f59e
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
@@ -61,22 +61,28 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Checkout candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.source_ref || github.event.inputs.ref || github.ref }}
-          fetch-depth: 0
-          path: .ci/candidate
-          persist-credentials: false
-      - name: Resolve immutable source commit
-        id: source
-        working-directory: .ci/candidate
-        shell: bash
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15.2"
+      # WHY: default-branch jobs must not execute an independently selected
+      # checkout with access to the default branch's cache scope.
+      - name: Bind source and workflow revision
+        id: source
+        env:
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          CANDIDATE_REF: ${{ github.event.inputs.ref }}
+        run: >-
+          python tools/release_publish.py workflow-source --workflow-sha "$WORKFLOW_SHA"
+          --source-ref "$SOURCE_REF" --candidate-ref "$CANDIDATE_REF" --github-output "$GITHUB_OUTPUT"
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          path: .ci/candidate
+          persist-credentials: false
       - name: Derive and validate release version
         id: identity
         env:
@@ -150,7 +156,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          ref: ${{ github.workflow_sha }}
       - name: Checkout native MiniUPnP source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -283,7 +289,7 @@ jobs:
       - name: Checkout candidate schema as data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
           path: .ci/candidate
       - name: Checkout pinned package smoke harness
@@ -338,7 +344,7 @@ jobs:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Checkout pinned MiniUPnP
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -446,7 +452,7 @@ jobs:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Checkout trusted OCI control helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -557,7 +563,7 @@ jobs:
       - name: Checkout candidate recipe as data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          ref: ${{ github.workflow_sha }}
           path: .ci/candidate
           persist-credentials: false
       - name: Checkout pinned workspace image validator

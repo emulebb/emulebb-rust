@@ -980,7 +980,7 @@ def check_release_ci_gate(
         "verify-source:": "source-check verification job",
         "name: Require green source checks": "named release source gate",
         "actions: read": "workflow-run read permission",
-        'echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"': "immutable source resolution",
+        "release_publish.py workflow-source": "workflow-bound immutable source resolution",
         'python tools/nightly_release.py verify-source --sha "${{ needs.prepare.outputs.source_sha }}"':
             "exact-source verification command",
         "needs: [prepare, verify-source]": "packaging dependency on the release source gate",
@@ -1045,7 +1045,8 @@ def check_release_control_trust(
     """Keep eligibility and write-capable helpers on the workflow's own revision."""
     errors = []
     for filename, supplied, jobs in (
-        ("release.yml", workflow_text, ("prepare", "verify-source", "native-package-smoke",
+        ("release.yml", workflow_text, ("prepare", "verify-source", "native-package", "musl-package",
+                                       "image-candidate", "native-package-smoke",
                                        "image-native-validation", "assemble-candidate", "publish-image",
                                        "publish-native", "publish-nightly-channel", "cleanup-nightlies")),
         ("nightly.yml", nightly_text, ("prepare", "verify-source")),
@@ -1057,14 +1058,19 @@ def check_release_control_trust(
             body = re.search(
                 rf"(?ms)^  {re.escape(job)}:\s*$\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)", text
             )
-            checkout = None if body is None else re.search(
+            checkouts = [] if body is None else list(re.finditer(
                 r"(?ms)^      - name: [^\n]*\n        uses: actions/checkout@[^\n]*\n(?P<options>.*?)(?=^      - |\Z)",
                 body.group("body"),
-            )
-            options = "" if checkout is None else checkout.group("options")
-            if not all(fragment in options for fragment in (
-                "ref: ${{ github.workflow_sha }}", "persist-credentials: false",
-            )):
+            ))
+            own_checkouts = [
+                checkout.group("options") for checkout in checkouts
+                if not re.search(r"(?m)^\s+repository:", checkout.group("options"))
+            ]
+            if not own_checkouts or any(
+                not all(fragment in options for fragment in (
+                    "ref: ${{ github.workflow_sha }}", "persist-credentials: false",
+                )) for options in own_checkouts
+            ):
                 errors.append(f"{filename} {job} must check out trusted release-control code without persisted credentials")
     return errors
 
@@ -1093,8 +1099,12 @@ def check_nightly_coordination(
             workflow,
             "publication-aware metadata mode",
         ),
-        "def latest_green_main_sha(": (helper, "latest-green-main selection"),
-        "event=push&status=success": (helper, "successful push CI query"),
+        'source_sha = git_output("rev-parse", "HEAD").lower()': (
+            helper, "checked-out workflow revision selection",
+        ),
+        "verify_source_checks(repository, source_sha)": (helper, "exact-source qualification"),
+        "except SourceChecksNotReady as error": (helper, "explicit source-not-ready handling"),
+        '"skip_reason": skip_reason': (helper, "visible scheduled skip reason"),
         "def published_nightly_for_date(": (helper, "daily publication guard"),
         "refusing to republish existing nightly version": (
             helper,

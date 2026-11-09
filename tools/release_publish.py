@@ -53,6 +53,29 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def resolve_workflow_source(
+    workflow_sha: str, *, source_ref: str = "", candidate_ref: str = "",
+) -> str:
+    """Bind release source to the immutable revision owning its workflow.
+
+    Independently selected source can execute build code with access to the
+    default branch's cache scope, even when contents permissions are read-only.
+    """
+    if COMMIT_SHA_RE.fullmatch(workflow_sha) is None:
+        raise RuntimeError("workflow revision must be a full lowercase commit SHA")
+    for requested in (source_ref, candidate_ref):
+        if not requested:
+            continue
+        if COMMIT_SHA_RE.fullmatch(requested) is None:
+            raise RuntimeError("release source assertion must be a full lowercase commit SHA")
+        if requested != workflow_sha:
+            raise RuntimeError(
+                "release source must match the workflow revision; select its branch or tag "
+                "when dispatching the workflow"
+            )
+    return workflow_sha
+
+
 def workspace_version(root: Path = ROOT) -> str:
     """Return the validated Cargo workspace package version."""
 
@@ -407,6 +430,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     digest.add_argument("--archive", required=True, type=Path)
     digest.add_argument("--output", required=True, type=Path)
+    source = subparsers.add_parser(
+        "workflow-source", help="require release source and workflow to share one revision",
+    )
+    source.add_argument("--workflow-sha", required=True)
+    source.add_argument("--source-ref", default="")
+    source.add_argument("--candidate-ref", default="")
+    source.add_argument("--github-output", required=True, type=Path)
     identity = subparsers.add_parser(
         "release-identity",
         help="derive and validate the release version against Cargo metadata",
@@ -460,6 +490,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "workflow-source":
+        sha = resolve_workflow_source(
+            args.workflow_sha, source_ref=args.source_ref, candidate_ref=args.candidate_ref,
+        )
+        with args.github_output.open("a", encoding="utf-8") as stream:
+            stream.write(f"sha={sha}\n")
+        print(sha)
+        return 0
     if args.command == "oci-digest":
         digest = oci_archive_digest(args.archive)
         args.output.parent.mkdir(parents=True, exist_ok=True)

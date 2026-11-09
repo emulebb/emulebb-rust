@@ -33,6 +33,10 @@ REQUIRED_SOURCE_WORKFLOWS = {"Required CI": "ci.yml", "Required CodeQL": "codeql
 REQUIRED_SOURCE_CHECKS = tuple(REQUIRED_SOURCE_WORKFLOWS)
 
 
+class SourceChecksNotReady(RuntimeError):
+    """Required source workflows are missing or their latest invocation did not pass."""
+
+
 @dataclass(frozen=True)
 class Change:
     """One commit-derived nightly changelog entry."""
@@ -137,59 +141,6 @@ def latest_nightly_tag(base_version: str, tags: Sequence[str]) -> str | None:
     return matched[0] if matched else None
 
 
-def successful_ci_shas(payload: dict[str, object], branch: str) -> list[str]:
-    """Returns newest-first successful push CI SHAs for one branch."""
-
-    runs = payload.get("workflow_runs", [])
-    if not isinstance(runs, list):
-        return []
-    shas: list[str] = []
-    for run_data in runs:
-        if not isinstance(run_data, dict):
-            continue
-        sha = str(run_data.get("head_sha", "")).lower()
-        if (
-            run_data.get("head_branch") == branch
-            and run_data.get("event") == "push"
-            and run_data.get("status") == "completed"
-            and run_data.get("conclusion") == "success"
-            and re.fullmatch(r"[0-9a-f]{40}", sha)
-        ):
-            shas.append(sha)
-    return shas
-
-
-def is_ancestor(ancestor: str, descendant: str) -> bool:
-    """Reports whether one validated commit is an ancestor of another."""
-
-    for ref in (ancestor, descendant):
-        if not SAFE_REF_RE.fullmatch(ref):
-            raise RuntimeError(f"unsafe ancestry ref: {ref}")
-    try:
-        run(("git", "merge-base", "--is-ancestor", ancestor, descendant))
-    except subprocess.CalledProcessError:
-        return False
-    return True
-
-
-def latest_green_main_sha(repository: str, branch: str = "main") -> str:
-    """Selects the newest successful normal-CI commit in the checkout lineage."""
-
-    response = run(
-        (
-            "gh",
-            "api",
-            f"repos/{repository}/actions/workflows/ci.yml/runs"
-            f"?branch={branch}&event=push&status=success&per_page=20",
-        )
-    )
-    candidates = successful_ci_shas(json.loads(response.stdout), branch)
-    for candidate in candidates:
-        if is_ancestor(candidate, "HEAD"):
-            return candidate
-    raise RuntimeError(f"no successful {branch} CI commit is available in the current checkout lineage")
-
-
 def published_nightly_releases(
     base_version: str,
     releases: Sequence[dict[str, object]],
@@ -282,11 +233,9 @@ def metadata(
 ) -> dict[str, str]:
     """Computes immutable nightly metadata from the current checkout and tags."""
 
-    source_sha = (
-        latest_green_main_sha(repository)
-        if scheduled
-        else git_output("rev-parse", "HEAD").lower()
-    )
+    # WHY: release source and workflow share one immutable revision. Selecting
+    # an older green ancestor would violate that binding instead of qualifying it.
+    source_sha = git_output("rev-parse", "HEAD").lower()
     base_version = workspace_version_at_ref(source_sha)
     short_sha = source_sha[:8]
     release_date = date or datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -330,8 +279,13 @@ def metadata(
         source_changed=previous_sha != source_sha,
         version=version,
     )
+    skip_reason = ""
     if scheduled and should_build:
-        verify_source_checks(repository, source_sha)
+        try:
+            verify_source_checks(repository, source_sha)
+        except SourceChecksNotReady as error:
+            should_build = False
+            skip_reason = str(error)
     compare_url = f"https://github.com/{repository}/compare/{previous_ref}...{source_sha}"
     return {
         "base_version": base_version,
@@ -347,6 +301,7 @@ def metadata(
         "published_for_date": str(already_published_today).lower(),
         "tag_exists": str(tag_exists).lower(),
         "should_build": str(should_build).lower(),
+        "skip_reason": skip_reason,
         "compare_url": compare_url,
     }
 
@@ -588,24 +543,34 @@ def verify_source_checks(repository: str, sha: str) -> dict[str, dict[str, int]]
     for check in REQUIRED_SOURCE_CHECKS:
         workflow = REQUIRED_SOURCE_WORKFLOWS[check]
         rows = _action_rows(f"repos/{repository}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page=100", "workflow_runs")
-        matching = [row for row in rows if row.get("head_sha") == sha]
-        if not matching:
-            raise RuntimeError(f"No {check} workflow invocation for source {sha}")
-        for row in matching:
-            if (row.get("path") != f".github/workflows/{workflow}"
+        if not rows:
+            raise SourceChecksNotReady(f"No {check} workflow invocation for source {sha}")
+        # WHY: this endpoint already filters by source. Dropping malformed or
+        # foreign rows would disguise a broken inventory as an ordinary skip.
+        for row in rows:
+            if (row.get("head_sha") != sha or row.get("path") != f".github/workflows/{workflow}"
                     or any(type(row.get(key)) is not int or row[key] <= 0 for key in ("id", "run_number", "run_attempt"))):
                 raise RuntimeError(f"Invalid {check} workflow identity")
         # WHY: an older green check must not mask a newer failed or queued
         # workflow, including one whose aggregate job has not started yet.
         # GitHub's run_number increments per workflow invocation and remains
         # unchanged by reruns; opaque database IDs do not define that ordering.
-        latest = max(matching, key=lambda row: (row["run_number"], row["run_attempt"]))
-        current = [row for row in matching if (row["run_number"], row["run_attempt"]) == (latest["run_number"], latest["run_attempt"])]
+        latest = max(rows, key=lambda row: (row["run_number"], row["run_attempt"]))
+        current = [row for row in rows if (row["run_number"], row["run_attempt"]) == (latest["run_number"], latest["run_attempt"])]
         if any((row["id"], row.get("status"), row.get("conclusion")) !=
                (latest["id"], latest.get("status"), latest.get("conclusion")) for row in current):
             raise RuntimeError(f"{check} latest workflow snapshot is inconsistent")
-        if (latest.get("status"), latest.get("conclusion")) != ("completed", "success"):
-            raise RuntimeError(f"{check} latest workflow attempt must complete successfully")
+        status, conclusion = latest.get("status"), latest.get("conclusion")
+        if (not isinstance(status, str)
+                or status not in {"queued", "in_progress", "requested", "waiting", "pending", "completed"}
+                or status != "completed" and conclusion is not None
+                or status == "completed" and (not isinstance(conclusion, str) or conclusion not in {
+                    "success", "failure", "cancelled", "skipped", "timed_out", "neutral",
+                    "action_required", "stale", "startup_failure",
+                })):
+            raise RuntimeError(f"Invalid {check} latest workflow state")
+        if (status, conclusion) != ("completed", "success"):
+            raise SourceChecksNotReady(f"{check} latest workflow attempt must complete successfully")
         jobs = _action_rows(f"repos/{repository}/actions/runs/{latest['id']}/attempts/{latest['run_attempt']}/jobs?per_page=100", "jobs")
         aggregate = [job for job in jobs if job.get("name") == check]
         if len(aggregate) != 1:
