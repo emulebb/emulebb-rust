@@ -62,10 +62,29 @@ async fn losing_the_host_stops_the_running_daemon() {
     assert_running_shutdown(Stop::LostHost).await;
 }
 
+#[tokio::test]
+async fn host_stop_closes_an_open_webui_event_stream() {
+    assert_running_shutdown(Stop::HostEvents).await;
+}
+
+#[tokio::test]
+async fn rest_stop_closes_an_open_webui_event_stream() {
+    assert_running_shutdown(Stop::RestEvents).await;
+}
+
+#[tokio::test]
+async fn losing_the_host_closes_an_open_webui_event_stream() {
+    assert_running_shutdown(Stop::LostHostEvents).await;
+}
+
+#[derive(Clone, Copy)]
 enum Stop {
     Host,
     Rest,
     LostHost,
+    HostEvents,
+    RestEvents,
+    LostHostEvents,
 }
 
 async fn assert_running_shutdown(stop: Stop) {
@@ -153,9 +172,26 @@ async fn assert_running_shutdown(stop: Stop) {
             .status()
             .is_success()
     );
+    let held_events = if matches!(
+        stop,
+        Stop::HostEvents | Stop::RestEvents | Stop::LostHostEvents
+    ) {
+        let response = client
+            .get(format!("{base}/events"))
+            .header("X-API-Key", FIXTURE_API_KEY)
+            .header("Last-Event-ID", "0")
+            .timeout(TEST_TIMEOUT * 6)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        Some(response)
+    } else {
+        None
+    };
     match stop {
-        Stop::Host => shutdown.request(),
-        Stop::Rest => {
+        Stop::Host | Stop::HostEvents => shutdown.request(),
+        Stop::Rest | Stop::RestEvents => {
             assert!(
                 client
                     .post(format!("{base}/app/shutdown"))
@@ -169,15 +205,16 @@ async fn assert_running_shutdown(stop: Stop) {
                     .is_success()
             );
         }
-        Stop::LostHost => drop(shutdown),
+        Stop::LostHost | Stop::LostHostEvents => drop(shutdown),
     }
-    drop(client);
     tokio::time::timeout(TEST_TIMEOUT, completion)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
     worker.join().unwrap();
+    drop(held_events);
+    drop(client);
     let rebound = tokio::net::TcpListener::bind(address).await.unwrap();
     drop(rebound);
     let metadata = MetadataStore::open(&metadata_path).unwrap();

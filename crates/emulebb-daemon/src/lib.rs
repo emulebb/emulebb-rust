@@ -984,12 +984,18 @@ async fn run_inner(profile: DaemonProfile, host: Option<HostedLifecycle>) -> Res
             }
         });
     }
+    let shutdown_core = Arc::clone(&core);
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown::wait_for_shutdown(shutdown_rx, host_shutdown))
+        .with_graceful_shutdown(async move {
+            shutdown::wait_for_shutdown(shutdown_rx, host_shutdown).await;
+            // WHY: event streams must close for every shutdown source, and P2P
+            // teardown must not wait behind HTTP response draining.
+            shutdown_tx.send_replace(true);
+            graceful_teardown(&shutdown_core).await;
+        })
         .await;
-    // Whatever stopped the server (REST shutdown, Ctrl-C, or SIGTERM), tear the
-    // network stack down cleanly before exiting so port mappings are released
-    // and SQLite finalises. Done unconditionally, even on a serve error.
+    // Idempotent final teardown also covers serve errors that bypassed or
+    // interrupted the normal shutdown future.
     graceful_teardown(&core).await;
     serve_result?;
     Ok(())
