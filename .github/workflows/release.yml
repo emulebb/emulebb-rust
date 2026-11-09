@@ -168,7 +168,7 @@ jobs:
         with:
           python-version: "3.15.2"
       - name: Install pinned workspace CLI dependencies
-        run: python -m pip install click==8.4.1 pydantic==2.14.3
+        run: python -m pip install -r tools/requirements-ci.txt click==8.4.1 pydantic==2.14.3
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -310,6 +310,7 @@ jobs:
           - {architecture: arm64, slug: linux-arm64-musl, runner: ubuntu-24.04-arm}
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
       EMULEBB_RUST_REPO: ${{ github.workspace }}
       EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
       EMULEBB_BUILD_TESTS_REPO: ${{ github.workspace }}/.ci/emulebb-build-tests

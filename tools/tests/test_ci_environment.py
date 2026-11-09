@@ -17,6 +17,25 @@ import yaml
 
 
 class CiEnvironmentTests(unittest.TestCase):
+    def test_release_packaging_installs_policy_dependencies_before_policy_check(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        steps = workflow["jobs"]["native-package"]["steps"]
+        checks = [index for index, step in enumerate(steps)
+                  if "tools/check_rust_client_policy.py" in step.get("run", "")]
+        self.assertTrue(checks, "Native releases must check production feature policy")
+        for index in checks:
+            self.assertTrue(any("pip install" in step.get("run", "")
+                                and "-r tools/requirements-ci.txt" in step["run"]
+                                for step in steps[:index]),
+                            "Fresh release runners must install the canonical policy dependencies first")
+
+    def test_release_packaging_declares_workspace_root_for_webui_builds(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        for job in ("native-package", "musl-package"):
+            with self.subTest(job=job):
+                self.assertEqual(workflow["jobs"][job].get("env", {}).get("EMULEBB_WORKSPACE_ROOT"),
+                                 "${{ github.workspace }}")
+
     def test_version_mismatch_is_not_silently_accepted(self):
         with self.assertRaisesRegex(RuntimeError, "version mismatch"):
             ENV.require_version("fixture", "1.0", "2.0")
