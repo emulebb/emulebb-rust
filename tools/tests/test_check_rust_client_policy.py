@@ -804,9 +804,9 @@ ref: ${{ github.workflow_sha }}
 candidate-manifest
 name: emulebb-rust-release-candidate
 needs: [prepare, assemble-candidate, publish-image]
-RELEASE-${RELEASE_VERSION}-NOTES.md
-RELEASE-${RELEASE_VERSION}-CHANGELOG.md
---source-root ../.ci/candidate
+tools/nightly_release.py release-docs
+name: emulebb-rust-release-documents
+--source-root .ci/candidate
 """
         self.assertEqual(CHECKER.check_release_output_paths(workflow), [])
 

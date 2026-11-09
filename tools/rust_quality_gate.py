@@ -30,17 +30,17 @@ QUICK_CHECKS = ("environment",) + STATIC_CHECKS + COMPILE_CHECKS
 TEST_CHECKS = ("build", "test-workspace", "test-vpn-leak")
 GATES = {name: (name,) for name in (
     "fmt", "clippy", "diagnostics", "webui-test", "build", "test-workspace",
-    "test-kad-swarm", "test-vpn-leak", "workflow-lint", "supply-chain", "rest-openapi", "environment",
+    "test-kad-swarm", "test-vpn-leak", "workflow-lint", "supply-chain", "rest-openapi", "environment", "release-docs",
 )}
 GATES.update({
     "policy": ("policy", "policy-tests"),
     "branch-check": ("policy", "policy-tests", "fmt"),
     "branch-ci": ("environment", "workflow-lint", "policy", "policy-tests", "fmt"),
     "quick": QUICK_CHECKS,
-    "ci-quality": ("environment",) + STATIC_CHECKS + ("webui-test",),
+    "ci-quality": ("environment", "release-docs") + STATIC_CHECKS + ("webui-test",),
     "ci-test": ("clippy", "diagnostics") + TEST_CHECKS,
-    "ci": QUICK_CHECKS + TEST_CHECKS,
-    "pre-push": ("environment", "workflow-lint") + STATIC_CHECKS + ("supply-chain",) + COMPILE_CHECKS + TEST_CHECKS + ("rest-openapi",),
+    "ci": ("release-docs",) + QUICK_CHECKS + TEST_CHECKS,
+    "pre-push": ("environment", "workflow-lint", "release-docs") + STATIC_CHECKS + ("supply-chain",) + COMPILE_CHECKS + TEST_CHECKS + ("rest-openapi",),
 })
 CI_JOBS = {
     "workflow-lint": "workflow-lint", "quality": "ci-quality", "build-linux": "ci-test",
@@ -196,6 +196,7 @@ def commands_for_gate(
         "test-workspace": test_workspace_step, "test-kad-swarm": test_kad_swarm_step,
         "test-vpn-leak": test_vpn_leak_step, "workflow-lint": workflow_lint_step,
         "supply-chain": supply_chain_step, "rest-openapi": lambda: rest_openapi_step(env),
+        "release-docs": lambda: release_documents_step(env),
         "environment": lambda: ("CI toolchain and input provenance", [sys.executable, "tools/ci_environment.py",
                                 *(["--scope", "quality"] if gate == "ci-quality" else [])]),
     }
@@ -214,6 +215,15 @@ def commands_for_gate(
 def workflow_lint_step() -> tuple[str, list[str]]:
     """Use the same immutable actionlint revision on every execution surface."""
     return ("GitHub Actions workflow lint", ["go", "run", f"github.com/rhysd/actionlint/cmd/actionlint@{TOOLCHAIN['actionlint']}"])
+
+
+def release_documents_step(env: dict[str, str]) -> tuple[str, list[str]]:
+    """Fail on missing release history locally before compilation or upload."""
+    workspace = require_workspace_root_env(env)
+    output = require_path_env(env, "EMULEBB_WORKSPACE_OUTPUT_ROOT")
+    assert_outside_workspace(output, workspace, "release document output")
+    return ("release document preflight", [sys.executable, "-B", "tools/nightly_release.py", "release-preflight",
+                                           "--output-dir", str(output / "reports/release-docs" / uuid4().hex)])
 
 
 def supply_chain_step() -> tuple[str, list[str]]:

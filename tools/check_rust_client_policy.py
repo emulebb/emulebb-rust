@@ -1257,10 +1257,10 @@ def check_release_image_security(
     if "name: emulebb-rust-release-candidate" not in job_body("publish-native"):
         errors.append(".github/workflows/release.yml must publish the assembled image security evidence")
     positions = [assemble.find(fragment) for fragment in (
-        "assemble-emulebb-rust-image-evidence-ci", "RELEASE-${RELEASE_VERSION}-NOTES.md",
+        "assemble-emulebb-rust-image-evidence-ci", "name: emulebb-rust-release-documents",
         "assemble-emulebb-rust-release-ci", "release_publish.py candidate-manifest",
     )]
-    if min(positions) >= 0 and not max(positions[:2]) < positions[2] < positions[3]:
+    if min(positions) < 0 or not max(positions[:2]) < positions[2] < positions[3]:
         errors.append(".github/workflows/release.yml must checksum the final evidence and documentation before writing the candidate")
     for supplied, filename, pattern, label in (
         (dockerfile_text, "Dockerfile", r"ghcr\.io/linuxserver/baseimage-ubuntu:resolute", "Ubuntu Resolute"),
@@ -1405,9 +1405,9 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "candidate-manifest": "candidate revision and evidence manifest",
         "name: emulebb-rust-release-candidate": "retained assembled candidate artifact",
         "needs: [prepare, assemble-candidate, publish-image]": "publication dependency on candidate assembly",
-        "RELEASE-${RELEASE_VERSION}-NOTES.md": "versioned release notes asset",
-        "RELEASE-${RELEASE_VERSION}-CHANGELOG.md": "versioned changelog asset",
-        "--source-root ../.ci/candidate": "candidate history as nightly notes data",
+        "tools/nightly_release.py release-docs": "shared release documentation preflight",
+        "name: emulebb-rust-release-documents": "preflighted versioned release documents",
+        "--source-root .ci/candidate": "candidate history as release notes data",
     }
     errors = [
         f".github/workflows/release.yml is missing {description} configuration"
