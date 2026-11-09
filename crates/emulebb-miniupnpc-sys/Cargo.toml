@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 description = "Raw FFI bindings to the eMuleBB MiniUPnPc source tree"
+build = "build.rs"
 links = "emulebb_miniupnpc"
 
 [lints]
