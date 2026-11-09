@@ -231,6 +231,14 @@ pub(crate) async fn update_settings(
     };
     match state.core.update_app_settings(request).await {
         Ok(settings) => api_ok(settings).into_response(),
+        Err(error) if emulebb_core::EmulebbCore::settings_update_was_committed(&error) => {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                error.to_string(),
+            )
+            .into_response()
+        }
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }

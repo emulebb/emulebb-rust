@@ -1,5 +1,148 @@
 use crate::rest_test_support::*;
 
+fn atomic_settings_router() -> (
+    Router,
+    Arc<EmulebbCore>,
+    std::path::PathBuf,
+    rusqlite::Connection,
+) {
+    let root = unique_test_dir("atomic-settings");
+    let database = root.join("metadata.sqlite");
+    let core = Arc::new(
+        EmulebbCore::new(
+            "test",
+            FileIndex::open(&database).unwrap(),
+            root.join("transfers"),
+        )
+        .unwrap(),
+    );
+    let app = router(
+        Arc::clone(&core),
+        RestServerSettings {
+            api_key: "secret".to_owned(),
+            web_root_dir: None,
+        },
+    );
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    (app, core, database, connection)
+}
+
+async fn atomic_settings_response(app: &Router, method: &str, body: Value) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(if method == "GET" {
+                    Body::empty()
+                } else {
+                    Body::from(body.to_string())
+                })
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+fn atomic_settings_rows(connection: &rusqlite::Connection) -> Vec<(String, String, String, i64)> {
+    connection
+        .prepare(
+            "SELECT section, key, value_json, updated_at_ms FROM settings ORDER BY section, key",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn settings_http_middleware_rejects_invalid_core_before_any_setting_changes() {
+    let (app, core, _, connection) = atomic_settings_router();
+    let before = core.app_settings().await.unwrap();
+    let rows = atomic_settings_rows(&connection);
+    let (status, response) = atomic_settings_response(
+        &app,
+        "PATCH",
+        json!({
+            "nat": {"enabled": !before.nat.enabled}, "core": {"uploadLimitKiBps": 0},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(core.app_settings().await.unwrap(), before);
+    assert_eq!(core.core_settings().await, before.core);
+    assert_eq!(atomic_settings_rows(&connection), rows);
+}
+
+#[tokio::test]
+async fn valid_settings_http_patch_rolls_back_every_section_when_later_sql_write_fails() {
+    let (app, core, database, connection) = atomic_settings_router();
+    let (_, before) = atomic_settings_response(&app, "GET", Value::Null).await;
+    let rows = atomic_settings_rows(&connection);
+    let old_core = core.core_settings().await;
+    let reload = !before["data"]["daemon"]["initialSharedDirectoryReload"]
+        .as_bool()
+        .unwrap();
+    let nat = !before["data"]["nat"]["enabled"].as_bool().unwrap();
+    let request = json!({
+        "core": {"uploadLimitKiBps": 1024},
+        "daemon": {"initialSharedDirectoryReload": reload}, "nat": {"enabled": nat},
+    });
+    // This request passes route validation. NAT is written after the earlier
+    // core/daemon sections, so a real SQLite failure proves transaction rollback.
+    connection.execute_batch(
+        "CREATE TRIGGER synthetic_settings_failure BEFORE INSERT ON settings
+         WHEN NEW.section = 'nat' BEGIN SELECT RAISE(ABORT, 'synthetic later settings failure'); END;",
+    ).unwrap();
+    let (status, response) = atomic_settings_response(&app, "PATCH", request.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("synthetic later settings failure")
+    );
+    assert_eq!(atomic_settings_rows(&connection), rows);
+    assert_eq!(core.core_settings().await, old_core);
+    let (_, after) = atomic_settings_response(&app, "GET", Value::Null).await;
+    assert_eq!(after["data"], before["data"]);
+
+    connection
+        .execute_batch("DROP TRIGGER synthetic_settings_failure")
+        .unwrap();
+    let (status, committed) = atomic_settings_response(&app, "PATCH", request).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut expected = before["data"].clone();
+    expected["core"]["uploadLimitKiBps"] = json!(1024);
+    expected["daemon"]["initialSharedDirectoryReload"] = json!(reload);
+    expected["nat"]["enabled"] = json!(nat);
+    assert_eq!(committed["data"], expected);
+    assert_eq!(core.core_settings().await.upload_limit_ki_bps, 1024);
+    drop(app);
+    drop(core);
+    drop(connection);
+    let restored = EmulebbCore::new(
+        "test",
+        FileIndex::open(database).unwrap(),
+        unique_test_dir("atomic-settings-restart"),
+    )
+    .unwrap()
+    .app_settings()
+    .await
+    .unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+}
+
 #[tokio::test]
 async fn event_stream_closes_without_replay_when_shutdown_is_already_requested() {
     let core =

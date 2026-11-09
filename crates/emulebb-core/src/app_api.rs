@@ -1,6 +1,22 @@
 use super::*;
 
+#[derive(Debug)]
+struct CommittedSettingsRefreshFailure;
+
+impl std::fmt::Display for CommittedSettingsRefreshFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("settings committed but runtime server-plan refresh failed")
+    }
+}
+
+impl std::error::Error for CommittedSettingsRefreshFailure {}
+
 impl EmulebbCore {
+    /// Identify a saved settings update whose subsequent runtime refresh failed.
+    pub fn settings_update_was_committed(error: &anyhow::Error) -> bool {
+        error.is::<CommittedSettingsRefreshFailure>()
+    }
+
     pub fn diagnostic_writer_health(&self) -> emulebb_diagnostics::DiagWriterHealth {
         emulebb_diagnostics::writer_health()
     }
@@ -40,22 +56,22 @@ impl EmulebbCore {
     }
 
     pub async fn app_settings(&self) -> Result<AppSettings> {
+        let _settings_order = self.settings_update_order.lock().await;
         profile_state::load_app_settings(&self.metadata_store)
     }
 
     pub async fn update_app_settings(&self, mut request: AppSettingsUpdate) -> Result<AppSettings> {
         validate_app_settings_update_paths(&mut request)?;
-        let core_update = request.core.take();
-        if core_update.is_none() {
-            profile_state::persist_app_settings_update(&self.metadata_store, request)?;
-            return self.app_settings().await;
-        }
-        if !app_settings_update_is_empty(&request) {
-            profile_state::persist_app_settings_update(&self.metadata_store, request)?;
-        }
-        self.update_core_settings(core_update.expect("checked as Some"))
-            .await?;
-        self.app_settings().await
+        // WHY: admit at most one owned completion task. Cancellation while queued
+        // writes nothing; cancellation after commit cannot abandon publication.
+        let settings_order = Arc::clone(&self.settings_update_order).lock_owned().await;
+        let core = self.clone();
+        tokio::spawn(async move {
+            let _settings_order = settings_order;
+            core.update_app_settings_ordered(request).await
+        })
+        .await
+        .context("settings completion task failed; inspect canonical settings")?
     }
 
     pub async fn update_core_settings(&self, request: CoreSettingsUpdate) -> Result<CoreSettings> {
@@ -63,39 +79,55 @@ impl EmulebbCore {
             !core_settings_update_is_empty(&request),
             "settings.core PATCH requires at least one core setting"
         );
-        let core_settings = {
-            let mut state = self.state.lock().await;
-            let mut core_settings = state.core_settings.clone();
-            apply_core_settings_update(&mut core_settings, request)?;
-            profile_state::persist_core_settings(&self.metadata_store, &core_settings)?;
-            state.core_settings = core_settings.clone();
-            core_settings
-        };
+        Ok(self
+            .update_app_settings(AppSettingsUpdate {
+                core: Some(request),
+                ..AppSettingsUpdate::default()
+            })
+            .await?
+            .core)
+    }
+
+    async fn update_app_settings_ordered(&self, request: AppSettingsUpdate) -> Result<AppSettings> {
+        let core_changed = request.core.is_some();
+        let committed = profile_state::persist_app_settings_update(&self.metadata_store, request)?;
+        if core_changed {
+            self.state.lock().await.core_settings = committed.core.clone();
+            self.publish_committed_core_settings(&committed.core)
+                .await?;
+        }
+        Ok(committed)
+    }
+
+    async fn publish_committed_core_settings(&self, core_settings: &CoreSettings) -> Result<()> {
         self.ed2k_transfers
             .apply_upload_queue_policy(&ed2k_upload_queue_policy_from_core_settings(
                 self.ed2k_network
                     .as_ref()
                     .map(|network| &network.ed2k.upload_queue),
-                &core_settings,
+                core_settings,
             ))
             .await;
         self.ed2k_transfers
             .apply_download_limit(ed2k_download_limit_bytes_per_sec_from_core_settings(
-                &core_settings,
+                core_settings,
             ))
             .await;
         // Apply the global connection budget + per-file source caps live, like
         // the download limit (eMule GetMaxConnections / GetMaxConperFive /
         // GetConfiguredMaxSourcesPerFile core setting changes take effect at once).
         self.ed2k_transfers.apply_download_coordinator_config(
-            ed2k_download_coordinator_config_from_core_settings(&core_settings),
+            ed2k_download_coordinator_config_from_core_settings(core_settings),
         );
         // Apply the credit-system toggle live (eMule thePrefs.GetCreditSystem()):
         // when off, upload scoring uses the neutral 1.0 credit ratio for everyone.
         self.ed2k_transfers
             .set_credit_system_enabled(core_settings.credit_system);
-        self.refresh_ed2k_server_connect_plan().await?;
-        Ok(core_settings)
+        if let Err(error) = self.refresh_ed2k_server_connect_plan().await {
+            tracing::error!(%error, "settings committed but runtime server-plan refresh failed");
+            return Err(error).context(CommittedSettingsRefreshFailure);
+        }
+        Ok(())
     }
 
     pub async fn status(&self) -> Status {
@@ -143,6 +175,28 @@ impl EmulebbCore {
                 total: transfer_counts.total,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_error_tests {
+    use super::*;
+
+    #[test]
+    fn committed_refresh_classification_uses_the_type_not_the_message() {
+        let same_message = anyhow::anyhow!(CommittedSettingsRefreshFailure.to_string());
+        assert!(!EmulebbCore::settings_update_was_committed(&same_message));
+        let committed = Err::<(), _>(anyhow::anyhow!("synthetic runtime refresh error"))
+            .context(CommittedSettingsRefreshFailure)
+            .unwrap_err();
+        assert!(EmulebbCore::settings_update_was_committed(&committed));
+        assert_eq!(
+            committed.to_string(),
+            CommittedSettingsRefreshFailure.to_string()
+        );
+        assert!(EmulebbCore::settings_update_was_committed(
+            &committed.context("outer context")
+        ));
     }
 }
 

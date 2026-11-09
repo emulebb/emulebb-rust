@@ -526,6 +526,8 @@ pub struct EmulebbCore {
     search_queue: Arc<parking_lot::Mutex<SearchQueue>>,
     transfer_events: broadcast::Sender<TransferEvent>,
     next_transfer_event_id: Arc<AtomicU64>,
+    /// Orders settings commit and runtime publication, including canceled waiters.
+    settings_update_order: Arc<Mutex<()>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -701,6 +703,7 @@ impl EmulebbCore {
             search_queue: Arc::new(parking_lot::Mutex::new(SearchQueue::new())),
             transfer_events,
             next_transfer_event_id: Arc::new(AtomicU64::new(1)),
+            settings_update_order: Arc::new(Mutex::new(())),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
