@@ -26,7 +26,7 @@ use emulebb_settings::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
@@ -36,9 +36,11 @@ pub mod logging;
 mod profile_import;
 mod rest_listener;
 pub mod shared_directory_import;
+mod shutdown;
 mod vpn_guard_monitor;
 
 pub use profile_import::{ProfileImportApplySummary, apply_profile_import};
+pub use shutdown::{ShutdownRequest, ShutdownSignal};
 
 pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
 pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
@@ -649,59 +651,6 @@ fn kad_local_store_config(settings: &KadSettings) -> KadLocalStoreConfig {
 /// (lease reset + task aborts + NAT release) in case a future step blocks.
 const SHUTDOWN_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Wait for any shutdown trigger: a REST `POST /app/shutdown` (`shutdown_rx`),
-/// Ctrl-C (SIGINT on unix, console close on Windows), or — on unix — SIGTERM
-/// (systemd / container stop). Returns once the first trigger fires.
-async fn wait_for_shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
-    let rest_shutdown = async {
-        while shutdown_rx.changed().await.is_ok() {
-            if *shutdown_rx.borrow() {
-                break;
-            }
-        }
-    };
-
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = match signal(SignalKind::terminate()) {
-            Ok(stream) => stream,
-            Err(error) => {
-                // Without a SIGTERM handler we still honour SIGINT and REST; log
-                // and continue rather than aborting startup.
-                tracing::warn!(%error, "failed to install SIGTERM handler");
-                tokio::select! {
-                    _ = rest_shutdown => info!("shutdown requested via REST"),
-                    result = tokio::signal::ctrl_c() => match result {
-                        Ok(()) => info!("shutdown requested via Ctrl-C"),
-                        Err(error) => tracing::warn!(%error, "ctrl_c handler error"),
-                    },
-                }
-                return;
-            }
-        };
-        tokio::select! {
-            _ = rest_shutdown => info!("shutdown requested via REST"),
-            result = tokio::signal::ctrl_c() => match result {
-                Ok(()) => info!("shutdown requested via Ctrl-C"),
-                Err(error) => tracing::warn!(%error, "ctrl_c handler error"),
-            },
-            _ = sigterm.recv() => info!("shutdown requested via SIGTERM"),
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        tokio::select! {
-            _ = rest_shutdown => info!("shutdown requested via REST"),
-            result = tokio::signal::ctrl_c() => match result {
-                Ok(()) => info!("shutdown requested via Ctrl-C"),
-                Err(error) => tracing::warn!(%error, "ctrl_c handler error"),
-            },
-        }
-    }
-}
-
 /// Ordered, bounded, idempotent network teardown run after the REST server has
 /// stopped accepting requests. Releases UPnP/NAT port mappings, aborts the
 /// session + detached download tasks, and resets download-source leases via
@@ -730,6 +679,36 @@ async fn graceful_teardown(core: &Arc<EmulebbCore>) {
 }
 
 pub async fn run(profile: DaemonProfile) -> Result<()> {
+    run_inner(profile, None).await
+}
+
+/// Run inside an application-owned runtime without installing process signal handlers.
+///
+/// Readiness reports the bound address, including an OS-assigned port. Stop is
+/// retained before startup and host loss fails closed. The host must drain its
+/// Tokio runtime after this returns before releasing process network ownership.
+pub async fn run_hosted(
+    profile: DaemonProfile,
+    shutdown: ShutdownSignal,
+    ready: oneshot::Sender<SocketAddr>,
+) -> Result<()> {
+    run_inner(profile, Some(HostedLifecycle { shutdown, ready })).await
+}
+
+struct HostedLifecycle {
+    shutdown: ShutdownSignal,
+    ready: oneshot::Sender<SocketAddr>,
+}
+
+async fn run_inner(profile: DaemonProfile, host: Option<HostedLifecycle>) -> Result<()> {
+    if let Some(host) = &host {
+        if host.shutdown.is_requested() {
+            return Ok(());
+        }
+        if host.ready.is_closed() {
+            bail!("embedded host readiness receiver closed before startup");
+        }
+    }
     let rest_bind_addr = profile.rest_bind_addr()?;
     profile.validate_rest_api_key()?;
     info!(
@@ -855,7 +834,21 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         Some(shutdown_tx.clone()),
     );
     let listener = rest_listener::bind(rest_bind_addr).await?;
-    info!("emulebb-rust REST listening on {}", rest_bind_addr);
+    let bound_addr = listener.local_addr()?;
+    let host_shutdown = if let Some(host) = host {
+        if host.shutdown.is_requested() {
+            graceful_teardown(&core).await;
+            return Ok(());
+        }
+        if host.ready.send(bound_addr).is_err() {
+            graceful_teardown(&core).await;
+            bail!("embedded host readiness receiver closed during startup");
+        }
+        Some(host.shutdown)
+    } else {
+        None
+    };
+    info!("emulebb-rust REST listening on {}", bound_addr);
     spawn_regular_diagnostic_summary(Arc::clone(&core));
 
     // Start the live auto-pickup monitor first, then hydrate the persisted
@@ -992,7 +985,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         });
     }
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(wait_for_shutdown_signal(shutdown_rx))
+        .with_graceful_shutdown(shutdown::wait_for_shutdown(shutdown_rx, host_shutdown))
         .await;
     // Whatever stopped the server (REST shutdown, Ctrl-C, or SIGTERM), tear the
     // network stack down cleanly before exiting so port mappings are released
