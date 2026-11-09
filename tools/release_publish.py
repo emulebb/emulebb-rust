@@ -76,6 +76,33 @@ def resolve_workflow_source(
     return workflow_sha
 
 
+def resolve_platform_profile(profile: str, *, event_name: str, channel: str, publish: str) -> str:
+    """Allow a reduced inventory only for explicitly unpublished manual candidates."""
+    if profile not in {"full", "windows-linux"} or publish not in {"true", "false"}:
+        raise RuntimeError("Invalid release platform profile or publish assertion")
+    if profile != "full" and (event_name != "workflow_dispatch" or channel != "candidate" or publish != "false"):
+        raise RuntimeError("Windows/Linux profile requires an unpublished manual candidate")
+    return profile
+
+
+def native_matrix(platform_profile: str) -> list[dict[str, str]]:
+    """Bind native package and smoke matrices to the validated caller profile."""
+    if platform_profile not in {"full", "windows-linux"}:
+        raise RuntimeError("Invalid release platform profile")
+    targets = [
+        {"os": "windows", "arch": "x64", "slug": "windows-x64", "runner": "windows-latest"},
+        {"os": "windows", "arch": "ARM64", "slug": "windows-arm64", "runner": "windows-11-arm"},
+        {"os": "linux", "arch": "x64", "slug": "linux-x64", "runner": "ubuntu-24.04"},
+        {"os": "linux", "arch": "ARM64", "slug": "linux-arm64", "runner": "ubuntu-24.04-arm"},
+    ]
+    if platform_profile == "full":
+        targets.extend([
+            {"os": "macos", "arch": "x64", "slug": "macos-x64", "runner": "macos-15-intel"},
+            {"os": "macos", "arch": "ARM64", "slug": "macos-arm64", "runner": "macos-15"},
+        ])
+    return targets
+
+
 def workspace_version(root: Path = ROOT) -> str:
     """Return the validated Cargo workspace package version."""
 
@@ -267,6 +294,7 @@ def candidate_context(args: argparse.Namespace, owner):
                 "emulebbMiniupnp": args.emulebb_miniupnp_ref, "emulebbLibpcpnatpmp": args.emulebb_libpcpnatpmp_ref},
         workflow={"repository": args.repository, "runId": args.run_id,
                   "runAttempt": args.run_attempt, "workflowSha": args.workflow_sha},
+        platform_profile=args.platform_profile,
     ).checked()
 
 
@@ -437,6 +465,12 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--source-ref", default="")
     source.add_argument("--candidate-ref", default="")
     source.add_argument("--github-output", required=True, type=Path)
+    profile = subparsers.add_parser("platform-profile", help="bind the target inventory before any producer runs")
+    profile.add_argument("--profile", default="full")
+    profile.add_argument("--event-name", required=True)
+    profile.add_argument("--channel", required=True)
+    profile.add_argument("--publish", required=True)
+    profile.add_argument("--github-output", type=Path, required=True)
     identity = subparsers.add_parser(
         "release-identity",
         help="derive and validate the release version against Cargo metadata",
@@ -451,6 +485,8 @@ def build_parser() -> argparse.ArgumentParser:
     for command in ("candidate-manifest", "verify-candidate", "verify-public-candidate", "release-assets", "publish-images"):
         candidate = subparsers.add_parser(command, help="strict source-bound release evidence control")
         candidate.add_argument("--release-dir", required=True, type=Path)
+        candidate.add_argument("--platform-profile", choices=("full", "windows-linux"),
+                               default=os.environ.get("RELEASE_PLATFORM_PROFILE", "full"))
         expected_arguments = {
             "release-version": "RELEASE_VERSION", "channel": "RELEASE_CHANNEL",
             "source-sha": "EMULEBB_SOURCE_REVISION", "emulebb-build-ref": "EMULEBB_BUILD_REF",
@@ -490,6 +526,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "platform-profile":
+        profile = resolve_platform_profile(args.profile, event_name=args.event_name,
+                                           channel=args.channel, publish=args.publish)
+        with args.github_output.open("a", encoding="utf-8") as stream:
+            stream.write(f"platform_profile={profile}\n")
+            stream.write("native_matrix=" + json.dumps(native_matrix(profile), separators=(",", ":")) + "\n")
+        return 0
     if args.command == "workflow-source":
         sha = resolve_workflow_source(
             args.workflow_sha, source_ref=args.source_ref, candidate_ref=args.candidate_ref,
@@ -517,6 +560,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(version)
         return 0
     if args.command in {"candidate-manifest", "verify-candidate", "verify-public-candidate", "release-assets", "publish-images"}:
+        if args.command in {"release-assets", "publish-images"} and args.platform_profile != "full":
+            raise RuntimeError("Publication requires the full platform profile")
         owner = candidate_owner(args)
         context = candidate_context(args, owner)
         release_dir = args.release_dir.resolve()

@@ -141,7 +141,7 @@ class CiEnvironmentTests(unittest.TestCase):
         self.assertFalse(any('cp "emulebb-tooling/docs/' in step.get("run", "") for step in assembly))
 
     def test_android_ci_uses_both_local_abis_and_immutable_orchestration(self):
-        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+        workflow = yaml.safe_load((ROOT / ".github/workflows/optional-platforms.yml").read_text())
         android = workflow["jobs"]["build-android"]
         self.assertEqual(set(android["strategy"]["matrix"]["abi"]), {"arm64-v8a", "x86_64"})
         self.assertFalse(android["strategy"]["fail-fast"])
@@ -156,7 +156,7 @@ class CiEnvironmentTests(unittest.TestCase):
         self.assertIn('mkdir -p "$CARGO_TARGET_DIR"', compile_step["run"])
         self.assertEqual(compile_step["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"],
                          "${{ runner.temp }}/emulebb-rust-out")
-        self.assertIn("build-android", workflow["jobs"]["required-ci"]["needs"])
+        self.assertIn("build-android", workflow["jobs"]["optional-platform-ci"]["needs"])
 
     def test_release_packaging_installs_policy_dependencies_before_policy_check(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())

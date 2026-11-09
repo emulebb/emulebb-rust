@@ -32,11 +32,14 @@ class CiParityTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.assert_workflow_parity(jobs)
 
-    def test_required_matrix_covers_six_native_targets_and_both_musl_cpus(self):
+    def test_required_and_optional_matrices_cover_six_native_targets_and_both_musl_cpus(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+        optional = yaml.safe_load((ROOT / ".github/workflows/optional-platforms.yml").read_text(encoding="utf-8"))["jobs"]
         native = {jobs["build-linux"]["runs-on"], *jobs["build-test"]["strategy"]["matrix"]["runner"]}
-        self.assertEqual(native, {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm",
-                                  "macos-15-intel", "macos-15"})
+        self.assertEqual(native, {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm"})
+        self.assertEqual(set(optional["build-macos"]["strategy"]["matrix"]["runner"]), {"macos-15-intel", "macos-15"})
+        self.assertEqual(set(optional["build-android"]["strategy"]["matrix"]["abi"]), {"arm64-v8a", "x86_64"})
+        self.assertNotIn("build-android", jobs["required-ci"]["needs"])
         musl = jobs["build-musl"]
         self.assertEqual({(row["architecture"], row["runner"]) for row in musl["strategy"]["matrix"]["include"]},
                          {("amd64", "ubuntu-24.04"), ("arm64", "ubuntu-24.04-arm")})

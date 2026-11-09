@@ -387,12 +387,15 @@ class TestSourceWorkflowEligibility(unittest.TestCase):
         self.ci = {"id": 20, "run_number": 8, "run_attempt": 2, "head_sha": self.sha, "path": ".github/workflows/ci.yml",
                    "status": "completed", "conclusion": "success"}
         self.codeql = {**self.ci, "id": 30, "run_number": 15, "run_attempt": 1, "path": ".github/workflows/codeql.yml"}
+        self.optional = {**self.ci, "id": 40, "run_number": 4, "run_attempt": 1, "path": ".github/workflows/optional-platforms.yml"}
         self.runs = {"ci.yml": [{**self.ci, "id": 10, "run_number": 7, "conclusion": "failure"}, self.ci],
-                     "codeql.yml": [self.codeql]}
+                     "codeql.yml": [self.codeql], "optional-platforms.yml": [self.optional]}
         self.jobs = {"ci.yml": [{"id": 200, "run_id": 20, "run_attempt": 2, "head_sha": self.sha,
                                  "name": "Required CI", "status": "completed", "conclusion": "success"}],
                      "codeql.yml": [{"id": 300, "run_id": 30, "run_attempt": 1, "head_sha": self.sha,
-                                     "name": "Required CodeQL", "status": "completed", "conclusion": "success"}]}
+                                     "name": "Required CodeQL", "status": "completed", "conclusion": "success"}],
+                     "optional-platforms.yml": [{"id": 400, "run_id": 40, "run_attempt": 1, "head_sha": self.sha,
+                                                 "name": "Optional Platform CI", "status": "completed", "conclusion": "success"}]}
         self.calls = []
         patcher = mock.patch.object(NIGHTLY, "run", side_effect=self.respond)
         patcher.start()
@@ -402,7 +405,7 @@ class TestSourceWorkflowEligibility(unittest.TestCase):
         self.calls.append(command)
         self.assertEqual(command[:4], ("gh", "api", "--paginate", "--slurp"))
         endpoint = command[-1]
-        for workflow, run_id, attempt in (("ci.yml", 20, 2), ("codeql.yml", 30, 1)):
+        for workflow, run_id, attempt in (("ci.yml", 20, 2), ("codeql.yml", 30, 1), ("optional-platforms.yml", 40, 1)):
             if f"/workflows/{workflow}/runs?" in endpoint:
                 self.assertIn(f"head_sha={self.sha}", endpoint)
                 pages = [{"workflow_runs": self.runs[workflow][:1]}, {"workflow_runs": self.runs[workflow][1:]}]
@@ -422,8 +425,39 @@ class TestSourceWorkflowEligibility(unittest.TestCase):
         self.assertEqual(self.verify(), {
             "Required CI": {"runId": 20, "runNumber": 8, "runAttempt": 2, "jobId": 200},
             "Required CodeQL": {"runId": 30, "runNumber": 15, "runAttempt": 1, "jobId": 300},
+            "Optional Platform CI": {"runId": 40, "runNumber": 4, "runAttempt": 1, "jobId": 400},
         })
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(self.calls), 6)
+
+    def test_optional_platform_failure_blocks_full_but_not_explicit_scoped_qualification(self):
+        self.runs["optional-platforms.yml"] = [{**self.optional, "conclusion": "failure"}]
+        with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "Optional Platform CI latest"):
+            self.verify()
+        self.calls.clear()
+        evidence = NIGHTLY.verify_source_checks("example/project", self.sha, platform_profile="windows-linux")
+        self.assertEqual(set(evidence), {"Required CI", "Required CodeQL"})
+        self.assertFalse(any("optional-platforms" in call[-1] for call in self.calls))
+
+    def test_scoped_qualification_cannot_ignore_shared_ci_or_codeql_failure(self):
+        for workflow in ("ci.yml", "codeql.yml"):
+            original = self.runs[workflow]
+            self.runs[workflow] = [{**original[-1], "conclusion": "failure"}]
+            with self.assertRaises(NIGHTLY.SourceChecksNotReady):
+                NIGHTLY.verify_source_checks("example/project", self.sha, platform_profile="windows-linux")
+            self.runs[workflow] = original
+
+    def test_full_requires_optional_aggregate_in_exact_latest_attempt(self):
+        self.jobs["optional-platforms.yml"][0]["run_attempt"] = 2
+        with self.assertRaisesRegex(RuntimeError, "exact latest"):
+            self.verify()
+
+    def test_optional_older_success_cannot_mask_new_pending_or_failed_invocation(self):
+        for status, conclusion in (("in_progress", None), ("completed", "failure")):
+            with self.subTest(status=status):
+                self.runs["optional-platforms.yml"] = [self.optional,
+                    {**self.optional, "id": 41, "run_number": 5, "status": status, "conclusion": conclusion}]
+                with self.assertRaises(NIGHTLY.SourceChecksNotReady):
+                    self.verify()
 
     def test_old_success_never_masks_new_pending_failed_cancelled_or_skipped_workflow(self) -> None:
         for status, conclusion in (("queued", None), ("in_progress", None), ("completed", "failure"),
@@ -541,6 +575,42 @@ class TestSourceWorkflowEligibility(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "full lowercase source SHA"):
             NIGHTLY.verify_source_checks("example/project", "main")
         self.assertFalse(self.calls)
+
+
+class TestSourceQualificationWait(unittest.TestCase):
+    def test_pending_then_success_rechecks_the_same_source_without_real_sleep(self):
+        expected = {"Required CI": {"runId": 20}}
+        with mock.patch.object(NIGHTLY, "verify_source_checks", side_effect=[
+            NIGHTLY.SourceChecksPending("Optional Platform CI pending"), expected,
+        ]) as verify, mock.patch.object(NIGHTLY.time, "monotonic", side_effect=[0, 1]), \
+                mock.patch.object(NIGHTLY.time, "sleep") as sleep:
+            self.assertEqual(NIGHTLY.wait_for_source_checks("example/project", "a" * 40), expected)
+        self.assertEqual(verify.call_args_list, [mock.call("example/project", "a" * 40)] * 2)
+        sleep.assert_called_once_with(30)
+
+    def test_pending_then_terminal_failure_does_not_wait_or_choose_an_older_success(self):
+        with mock.patch.object(NIGHTLY, "verify_source_checks", side_effect=[
+            NIGHTLY.SourceChecksPending("pending"), NIGHTLY.SourceChecksNotReady("new attempt failed"),
+        ]), mock.patch.object(NIGHTLY.time, "monotonic", side_effect=[0, 1]), \
+                mock.patch.object(NIGHTLY.time, "sleep") as sleep:
+            with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "new attempt failed"):
+                NIGHTLY.wait_for_source_checks("example/project", "a" * 40)
+        sleep.assert_called_once_with(30)
+
+    def test_pending_timeout_is_bounded_and_explicit(self):
+        with mock.patch.object(NIGHTLY, "verify_source_checks", side_effect=NIGHTLY.SourceChecksPending("pending")), \
+                mock.patch.object(NIGHTLY.time, "monotonic", side_effect=[0, 481]), \
+                mock.patch.object(NIGHTLY.time, "sleep") as sleep:
+            with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "timed out"):
+                NIGHTLY.wait_for_source_checks("example/project", "a" * 40)
+        sleep.assert_not_called()
+
+    def test_inventory_errors_do_not_become_pending_retries(self):
+        with mock.patch.object(NIGHTLY, "verify_source_checks", side_effect=RuntimeError("invalid inventory")), \
+                mock.patch.object(NIGHTLY.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "invalid inventory"):
+                NIGHTLY.wait_for_source_checks("example/project", "a" * 40)
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

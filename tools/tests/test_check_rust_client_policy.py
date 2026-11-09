@@ -309,7 +309,7 @@ class TestRequiredCiGates(unittest.TestCase):
     def test_rejects_incomplete_aggregate_checks(self) -> None:
         errors = CHECKER.check_required_ci_gates("jobs: {}\n", "jobs: {}\n")
 
-        self.assertEqual(len(errors), 23)
+        self.assertEqual(len(errors), 22)
         self.assertTrue(any("single-active-PR job" in error for error in errors))
         self.assertTrue(any("workflow-lint fail-fast" in error for error in errors))
         self.assertTrue(any("complete CI aggregate dependency" in error for error in errors))
@@ -320,9 +320,9 @@ class TestRequiredCiGates(unittest.TestCase):
         errors = CHECKER.check_required_ci_gates(ci.replace('"$BUILD_LINUX_RESULT"', '"success"'))
         self.assertTrue(any("Linux build result verification" in error for error in errors))
 
-    def test_android_failure_cannot_be_omitted_from_required_ci(self) -> None:
-        ci = (CHECKER.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        errors = CHECKER.check_required_ci_gates(ci.replace('"$BUILD_ANDROID_RESULT"', '"success"'))
+    def test_android_failure_cannot_be_omitted_from_optional_outcomes(self) -> None:
+        optional = (CHECKER.ROOT / ".github/workflows/optional-platforms.yml").read_text(encoding="utf-8")
+        errors = CHECKER.check_required_ci_gates(optional_text=optional.replace('"$ANDROID_RESULT"', '"success"'))
         self.assertTrue(any("Android build result verification" in error for error in errors))
 
 
@@ -343,20 +343,21 @@ class TestWorkflowJobTimeouts(unittest.TestCase):
         self.assertEqual(CHECKER.check_workflow_job_timeouts(), [])
 
     def test_matrix_budget_cannot_be_replaced_with_an_unbounded_expression(self) -> None:
-        text = (CHECKER.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        text = (CHECKER.ROOT / ".github/workflows/optional-platforms.yml").read_text(encoding="utf-8")
         changed = text.replace(
             "${{ matrix.runner == 'macos-15-intel' && 120 || 45 }}",
             "${{ matrix.unreviewed_budget }}",
         )
-        errors = CHECKER.check_workflow_job_timeouts({"ci.yml": changed})
+        errors = CHECKER.check_workflow_job_timeouts({"optional-platforms.yml": changed})
         self.assertEqual(len(errors), 1)
-        self.assertIn("ci.yml job build-test", errors[0])
+        self.assertIn("optional-platforms.yml job build-macos", errors[0])
 
     def test_rejects_missing_timeout_budgets(self) -> None:
         incomplete = {
             filename: "jobs: {}\n"
             for filename in (
                 "ci.yml",
+                "optional-platforms.yml",
                 "codeql.yml",
                 "fuzz.yml",
                 "nightly.yml",
@@ -366,7 +367,7 @@ class TestWorkflowJobTimeouts(unittest.TestCase):
 
         errors = CHECKER.check_workflow_job_timeouts(incomplete)
 
-        self.assertEqual(len(errors), 27)
+        self.assertEqual(len(errors), 34)
         self.assertTrue(any("ci.yml job build-test" in error for error in errors))
         self.assertTrue(any("release.yml job publish-native" in error for error in errors))
 
