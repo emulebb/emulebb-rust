@@ -17,6 +17,24 @@ import yaml
 
 
 class CiEnvironmentTests(unittest.TestCase):
+    def test_android_ci_uses_both_local_abis_and_immutable_orchestration(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+        android = workflow["jobs"]["build-android"]
+        self.assertEqual(set(android["strategy"]["matrix"]["abi"]), {"arm64-v8a", "x86_64"})
+        self.assertFalse(android["strategy"]["fail-fast"])
+        self.assertRegex(workflow["env"]["EMULEBB_ANDROID_BUILD_REF"], r"^[0-9a-f]{40}$")
+        checkout = next(step for step in android["steps"]
+                        if step.get("with", {}).get("repository") == "emulebb/emulebb-build")
+        self.assertEqual(checkout["with"]["ref"], "${{ env.EMULEBB_ANDROID_BUILD_REF }}")
+        compile_step = next(step for step in android["steps"]
+                            if "validate-rust-android-ci" in step.get("run", ""))
+        self.assertIn("--abi ${{ matrix.abi }}", compile_step["run"])
+        self.assertEqual(compile_step["working-directory"], checkout["with"]["path"])
+        self.assertIn('mkdir -p "$CARGO_TARGET_DIR"', compile_step["run"])
+        self.assertEqual(compile_step["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"],
+                         "${{ runner.temp }}/emulebb-rust-out")
+        self.assertIn("build-android", workflow["jobs"]["required-ci"]["needs"])
+
     def test_release_packaging_installs_policy_dependencies_before_policy_check(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
         steps = workflow["jobs"]["native-package"]["steps"]

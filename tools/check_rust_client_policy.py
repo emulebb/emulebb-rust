@@ -691,7 +691,7 @@ def check_required_ci_gates(
         ),
         "required-ci:": (ci, "CI aggregate job"),
         "name: Required CI": (ci, "stable CI check name"),
-        "needs: [single-active-pr, workflow-lint, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]": (
+        "needs: [single-active-pr, workflow-lint, build-linux, build-test, build-musl, build-android, rest-openapi, quality, supply-chain]": (
             ci,
             "complete CI aggregate dependency set",
         ),
@@ -699,6 +699,7 @@ def check_required_ci_gates(
         'test "$result" = success': (ci, "strict CI result verification"),
         '"$BUILD_LINUX_RESULT"': (ci, "Linux build result verification"),
         '"$BUILD_MUSL_RESULT"': (ci, "musl build result verification"),
+        '"$BUILD_ANDROID_RESULT"': (ci, "Android build result verification"),
         "required-codeql:": (codeql, "CodeQL aggregate job"),
         "name: Required CodeQL": (codeql, "stable CodeQL check name"),
         "needs: analyze": (codeql, "complete CodeQL matrix dependency"),
@@ -713,14 +714,14 @@ def check_required_ci_gates(
         if fragment not in source
     ]
     jobs = (yaml.safe_load(ci) or {}).get("jobs", {})
-    for job in ("workflow-lint", "build-linux", "build-test", "build-musl", "quality", "supply-chain"):
+    for job in ("workflow-lint", "build-linux", "build-test", "build-musl", "build-android", "quality", "supply-chain"):
         needs = jobs.get(job, {}).get("needs", [])
         needs = [needs] if isinstance(needs, str) else needs
         if "single-active-pr" not in needs:
             errors.append(
                 f"required branch gate is missing {job} fail-fast PR policy dependency"
             )
-        elif job in {"build-linux", "build-test", "build-musl", "quality"} and "workflow-lint" not in needs:
+        elif job in {"build-linux", "build-test", "build-musl", "build-android", "quality"} and "workflow-lint" not in needs:
             errors.append(f"{job} must wait for workflow-lint before expensive validation")
     return errors
 
@@ -816,6 +817,7 @@ def check_workflow_job_timeouts(
             "workflow-lint": 10,
             "build-test": 45,
             "build-musl": 45,
+            "build-android": 60,
             "rest-openapi": 15,
             "quality": 30,
             "supply-chain": 10,

@@ -18,6 +18,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   EMULEBB_BUILD_REF: 010c266c29d73e17a654306d0dca8008d8db9006
+  EMULEBB_ANDROID_BUILD_REF: bb0e542152da6d58a28ffd69a5b8b6451e7cbcf4
   EMULEBB_BUILD_TESTS_REF: fd4c6d21e079fab2b84704294c7c7000b893a81e
   EMULEBB_TOOLING_REF: 630d1a3492ae65acad0a8dfd1575d671ff7b492c
   # Pin the native NAT sources linked by the sys crates.
@@ -422,6 +423,90 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  build-android:
+    name: Android compile+ELF (${{ matrix.abi }})
+    needs: [single-active-pr, workflow-lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_RUST_REPO: ${{ github.workspace }}
+      EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+    steps:
+      - name: Checkout emulebb-rust
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout pinned Android orchestration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_ANDROID_BUILD_REF }}
+          path: .ci/emulebb-build
+      - name: Checkout pinned product documentation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: emulebb/emulebb-tooling
+          ref: ${{ env.EMULEBB_TOOLING_REF }}
+          path: .ci/emulebb-tooling
+      - name: Checkout pinned MiniUPnP source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+      - name: Checkout pinned PCP/NAT-PMP source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Install pinned workspace CLI dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.14.3
+      - name: Set up pinned Docker
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
+        with:
+          version: v29.6.1
+          daemon-config: '{"features":{"containerd-snapshotter":true}}'
+      - name: Set up pinned Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          version: v0.35.0
+          driver: docker
+          use: false
+      - name: Run the local Android compile and ELF gate
+        working-directory: .ci/emulebb-build
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR"
+          python -B -m emule_workspace validate-rust-android-ci --abi ${{ matrix.abi }}
+      - name: Retain Android compilation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-evidence-android-${{ matrix.abi }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/reports/android-toolchain/
+            ${{ runner.temp }}/emulebb-rust-out/reports/rust-android/
+          if-no-files-found: warn
+          retention-days: 14
+
   rest-openapi:
     name: live REST/OpenAPI conformance
     needs: build-linux
@@ -620,7 +705,7 @@ jobs:
   required-ci:
     name: Required CI
     if: ${{ always() }}
-    needs: [single-active-pr, workflow-lint, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]
+    needs: [single-active-pr, workflow-lint, build-linux, build-test, build-musl, build-android, rest-openapi, quality, supply-chain]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -632,6 +717,7 @@ jobs:
           BUILD_LINUX_RESULT: ${{ needs.build-linux.result }}
           BUILD_TEST_RESULT: ${{ needs.build-test.result }}
           BUILD_MUSL_RESULT: ${{ needs.build-musl.result }}
+          BUILD_ANDROID_RESULT: ${{ needs.build-android.result }}
           REST_OPENAPI_RESULT: ${{ needs.rest-openapi.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
@@ -643,6 +729,7 @@ jobs:
             "$BUILD_LINUX_RESULT" \
             "$BUILD_TEST_RESULT" \
             "$BUILD_MUSL_RESULT" \
+            "$BUILD_ANDROID_RESULT" \
             "$REST_OPENAPI_RESULT" \
             "$QUALITY_RESULT" \
             "$SUPPLY_CHAIN_RESULT"; do
