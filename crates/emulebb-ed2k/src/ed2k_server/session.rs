@@ -55,6 +55,18 @@ enum ServerPacketRead {
     DroppedPackedFrame,
 }
 
+/// Retain frame progress when a session timer cancels its current read future.
+#[derive(Debug, Default)]
+struct ServerFrameRead {
+    header: [u8; TCP_PACKET_HEADER_LEN],
+    header_read: usize,
+    header_decoded: bool,
+    payload: Vec<u8>,
+    payload_read: usize,
+    #[cfg(feature = "packet-diagnostics")]
+    raw_header: [u8; TCP_PACKET_HEADER_LEN],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServerSessionPhase {
     Connecting,
@@ -133,6 +145,7 @@ impl ServerSessionPhase {
 #[derive(Debug)]
 pub(super) struct ServerSession {
     stream: TcpStream,
+    receive_frame: ServerFrameRead,
     pub(super) endpoint: SocketAddr,
     pub(super) state: Arc<RwLock<Ed2kServerState>>,
     pub(super) trace_id: u64,
@@ -394,6 +407,7 @@ impl ServerSession {
             diagnostic_connection_state: "connecting",
             last_tx: Instant::now(),
             receive_cipher: None,
+            receive_frame: ServerFrameRead::default(),
             send_cipher: None,
             pending_login_deadline: Some(pending_login_deadline),
             login_accepted: false,
@@ -435,6 +449,7 @@ impl ServerSession {
             diagnostic_connection_state: "connecting",
             last_tx: Instant::now(),
             receive_cipher: None,
+            receive_frame: ServerFrameRead::default(),
             send_cipher: None,
             pending_login_deadline: None,
             login_accepted: false,
@@ -1097,40 +1112,20 @@ impl ServerSession {
         }
     }
 
-    async fn read_framed_packet(&mut self) -> Result<ServerPacketRead> {
-        let mut header = [0u8; TCP_PACKET_HEADER_LEN];
-        match self.stream.read_exact(&mut header).await {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                debug!(
-                    "ED2K trace id={} role={} phase={} dir=rx endpoint={} eof=true",
-                    self.trace_id,
-                    self.trace_role,
-                    self.phase.as_str(),
-                    self.endpoint
-                );
-                dump_ed2k_server_meta(self, "server session drop reason=eof");
-                return Ok(ServerPacketRead::Eof);
-            }
-            Err(error) => {
-                dump_ed2k_server_meta(
-                    self,
-                    format!("server session drop reason=read_error detail={error}"),
-                );
-                return Err(error.into());
-            }
-        }
-        #[cfg(feature = "packet-diagnostics")]
-        let raw_header = header;
-        if let Some(cipher) = self.receive_cipher.as_mut() {
-            cipher.apply(&mut header);
-        }
+    /// Decode and bound one complete header before awaiting its payload.
+    fn prepare_frame_payload(&mut self) -> Result<()> {
         #[cfg(feature = "packet-diagnostics")]
         let transport_mode = if self.receive_cipher.is_some() {
             "obfuscated"
         } else {
             "plaintext"
         };
+        let mut header = self.receive_frame.header;
+        #[cfg(feature = "packet-diagnostics")]
+        let raw_header = header;
+        if let Some(cipher) = self.receive_cipher.as_mut() {
+            cipher.apply(&mut header);
+        }
 
         if !matches!(header[0], OP_EDONKEYPROT | OP_PACKEDPROT) {
             let note = format!(
@@ -1240,14 +1235,97 @@ impl ServerSession {
                 self.endpoint
             );
         }
-        let mut payload = vec![0u8; payload_len];
-        if let Err(error) = self.stream.read_exact(&mut payload).await {
-            dump_ed2k_server_meta(
-                self,
-                format!("server session drop reason=read_error detail=payload_read {error}"),
-            );
-            return Err(error.into());
+        self.receive_frame.header = header;
+        self.receive_frame.header_decoded = true;
+        self.receive_frame.payload = vec![0u8; payload_len];
+        #[cfg(feature = "packet-diagnostics")]
+        {
+            self.receive_frame.raw_header = raw_header;
         }
+        Ok(())
+    }
+
+    async fn read_framed_packet(&mut self) -> Result<ServerPacketRead> {
+        // WHY: select! cancels this future for publication and search timers.
+        // Keep every consumed byte and its decode phase on the session, and use
+        // cancellation-safe read() so a cancelled await cannot discard progress.
+        while self.receive_frame.header_read < TCP_PACKET_HEADER_LEN {
+            let received = self
+                .stream
+                .read(&mut self.receive_frame.header[self.receive_frame.header_read..])
+                .await
+                .and_then(|received| {
+                    if received == 0 {
+                        Err(io::Error::from(io::ErrorKind::UnexpectedEof))
+                    } else {
+                        Ok(received)
+                    }
+                });
+            match received {
+                Ok(received) => self.receive_frame.header_read += received,
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    debug!(
+                        "ED2K trace id={} role={} phase={} dir=rx endpoint={} eof=true",
+                        self.trace_id,
+                        self.trace_role,
+                        self.phase.as_str(),
+                        self.endpoint
+                    );
+                    dump_ed2k_server_meta(self, "server session drop reason=eof");
+                    return Ok(ServerPacketRead::Eof);
+                }
+                Err(error) => {
+                    dump_ed2k_server_meta(
+                        self,
+                        format!("server session drop reason=read_error detail={error}"),
+                    );
+                    return Err(error.into());
+                }
+            }
+        }
+        #[cfg(feature = "packet-diagnostics")]
+        let transport_mode = if self.receive_cipher.is_some() {
+            "obfuscated"
+        } else {
+            "plaintext"
+        };
+        if !self.receive_frame.header_decoded {
+            self.prepare_frame_payload()?;
+        }
+        while self.receive_frame.payload_read < self.receive_frame.payload.len() {
+            let received = self
+                .stream
+                .read(&mut self.receive_frame.payload[self.receive_frame.payload_read..])
+                .await;
+            match received {
+                Ok(0) => {
+                    let error = io::Error::from(io::ErrorKind::UnexpectedEof);
+                    dump_ed2k_server_meta(
+                        self,
+                        format!(
+                            "server session drop reason=read_error detail=payload_read {error}"
+                        ),
+                    );
+                    return Err(error.into());
+                }
+                Ok(received) => self.receive_frame.payload_read += received,
+                Err(error) => {
+                    dump_ed2k_server_meta(
+                        self,
+                        format!(
+                            "server session drop reason=read_error detail=payload_read {error}"
+                        ),
+                    );
+                    return Err(error.into());
+                }
+            }
+        }
+        let completed = std::mem::take(&mut self.receive_frame);
+        let header = completed.header;
+        #[cfg(feature = "packet-diagnostics")]
+        let raw_header = completed.raw_header;
+        let mut payload = completed.payload;
+        let payload_len = payload.len();
         #[cfg(feature = "packet-diagnostics")]
         let raw_payload = payload.clone();
         if let Some(cipher) = self.receive_cipher.as_mut() {
@@ -1357,6 +1435,10 @@ impl ServerSession {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "session/receive_tests.rs"]
+mod receive_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1576,7 +1658,7 @@ mod tests {
 
     /// Establish a connected `ServerSession` (from the accepted end of a local
     /// pair) plus the remote peer stream that receives whatever the session sends.
-    async fn connected_test_session_with_peer() -> (ServerSession, TcpStream) {
+    pub(super) async fn connected_test_session_with_peer() -> (ServerSession, TcpStream) {
         let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let peer = TcpStream::connect(addr).await.unwrap();
