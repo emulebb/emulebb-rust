@@ -904,7 +904,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             .store_md4_hashset(file_hash_hex, hashset)
                             .await?;
                     }
-                    if let Some(hashset) = hashset_answer.aich_hashset {
+                    // Unrequested AICH sections cannot establish identity.
+                    // Preserve usable MD4 data while ignoring an untrusted tree.
+                    if let Some(hashset) = hashset_answer.aich_hashset
+                        && manifest.aich_root.is_some()
+                    {
                         manifest = transfer_runtime
                             .store_aich_hashset(file_hash_hex, hashset)
                             .await?;

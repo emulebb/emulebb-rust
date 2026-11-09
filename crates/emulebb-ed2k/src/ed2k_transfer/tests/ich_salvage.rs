@@ -280,6 +280,10 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
         super::super::build_aich_hashset_from_payload(&path, payload.len() as u64).unwrap()
     };
     runtime
+        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .await
+        .unwrap();
+    runtime
         .store_aich_hashset(&job.file_hash, aich.clone())
         .await
         .unwrap();

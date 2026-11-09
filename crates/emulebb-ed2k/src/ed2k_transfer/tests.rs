@@ -902,6 +902,10 @@ async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() 
         ],
     };
     runtime
+        .reconcile_aich_root(&job.file_hash, Some(remote_aich.master_hash))
+        .await
+        .unwrap();
+    runtime
         .store_aich_hashset(&job.file_hash, remote_aich.clone())
         .await
         .unwrap();

@@ -2,8 +2,17 @@ use super::*;
 
 #[tokio::test]
 async fn large_file_download_starts_hashset_flow_before_peer_secure_ident_key_arrives() {
+    run_hashset_startup_case(false).await;
+}
+
+#[tokio::test]
+async fn consistent_unrelated_peer_aich_tree_cannot_become_download_identity() {
+    run_hashset_startup_case(true).await;
+}
+
+async fn run_hashset_startup_case(unrelated_aich_tree: bool) {
     let root = unique_test_dir("ed2k-large-file-secure-ident-order");
-    let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
     let payload = vec![0x5A; (ED2K_PART_SIZE as usize) + 32_768];
     let md4_hashset = payload
         .chunks(ED2K_PART_SIZE as usize)
@@ -43,11 +52,26 @@ async fn large_file_download_starts_hashset_flow_before_peer_secure_ident_key_ar
         .store_piece_data(&file_hash_hex, 1, &payload[ED2K_PART_SIZE as usize..])
         .await
         .unwrap();
-    let source_aich = source_runtime
+    let mut source_aich = source_runtime
         .aich_hashset(&file_hash)
         .await
         .unwrap()
         .expect("missing source AICH hashset");
+    if unrelated_aich_tree {
+        // A mathematically valid two-part tree unrelated to the MD4-identified
+        // payload. It must not authorize salvage or survive local completion.
+        source_aich.part_hashes = vec![[0x21; 20], [0x43; 20]];
+        source_aich.master_hash = sha1::Sha1::digest(
+            source_aich
+                .part_hashes
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>(),
+        )
+        .into();
+    }
+    let advertised_root = source_aich.master_hash;
     let source_identifier = super::Ed2kFileIdentifier {
         file_hash,
         file_size: Some(payload.len() as u64),
@@ -57,6 +81,7 @@ async fn large_file_download_starts_hashset_flow_before_peer_secure_ident_key_ar
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
     let payload_for_server = payload.clone();
+    let observed_runtime = Arc::clone(&transfer_runtime);
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
@@ -116,7 +141,7 @@ async fn large_file_download_starts_hashset_flow_before_peer_secure_ident_key_ar
             Some(payload_for_server.len() as u64)
         );
         assert!(request_options.request_md4);
-        assert!(request_options.request_aich);
+        assert!(!request_options.request_aich);
 
         let hashset_answer = super::encode_hashset_answer2(
             &source_identifier,
@@ -130,6 +155,17 @@ async fn large_file_download_starts_hashset_flow_before_peer_secure_ident_key_ar
         assert_eq!(start_upload[0], OP_EDONKEYPROT);
         assert_eq!(start_upload[5], super::OP_STARTUPLOADREQ);
         assert_eq!(&start_upload[6..22], &file_hash.0);
+
+        // Observe before supplying any payload: a later local completion pass
+        // must not hide the single-peer acquisition bypass.
+        let before_payload = observed_runtime
+            .manifest(&file_hash.to_string())
+            .await
+            .unwrap();
+        assert!(before_payload.md4_hashset_acquired);
+        assert!(before_payload.aich_root.is_none());
+        assert!(!before_payload.aich_hashset_acquired);
+        assert!(before_payload.aich_hashset.is_empty());
 
         let accept = encode_accept_upload_req();
         stream.write_all(&accept).await.unwrap();
@@ -244,5 +280,8 @@ async fn large_file_download_starts_hashset_flow_before_peer_secure_ident_key_ar
     assert!(manifest.completed);
     assert!(manifest.aich_hashset_acquired);
     assert_eq!(manifest.aich_hashset.len(), 2);
+    if unrelated_aich_tree {
+        assert_ne!(manifest.aich_root, Some(hex::encode(advertised_root)));
+    }
     server.await.unwrap();
 }

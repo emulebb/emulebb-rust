@@ -101,6 +101,10 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
         .await
         .unwrap();
     runtime
+        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .await
+        .unwrap();
+    runtime
         .store_aich_hashset(&job.file_hash, aich.clone())
         .await
         .unwrap();
@@ -209,6 +213,10 @@ async fn block_bitmap_persists_round_trip() {
     runtime.ensure_job(&job).await.unwrap();
     runtime
         .store_md4_hashset(&job.file_hash, md4_parts)
+        .await
+        .unwrap();
+    runtime
+        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
         .await
         .unwrap();
     runtime
