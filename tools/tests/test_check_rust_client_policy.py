@@ -366,7 +366,7 @@ class TestWorkflowJobTimeouts(unittest.TestCase):
 
         errors = CHECKER.check_workflow_job_timeouts(incomplete)
 
-        self.assertEqual(len(errors), 26)
+        self.assertEqual(len(errors), 27)
         self.assertTrue(any("ci.yml job build-test" in error for error in errors))
         self.assertTrue(any("release.yml job publish-native" in error for error in errors))
 
@@ -501,7 +501,7 @@ class TestReleaseControlTrust(unittest.TestCase):
 
     def test_candidate_checkout_cannot_supply_control_helpers(self) -> None:
         for filename, keyword, jobs in (
-            ("release.yml", "workflow_text", ("prepare", "verify-source", "native-package", "musl-package",
+            ("release.yml", "workflow_text", ("prepare", "verify-source", "native-package", "musl-package", "android-package",
                                              "image-candidate", "native-package-smoke",
                                              "image-native-validation", "assemble-candidate", "publish-image",
                                              "publish-native", "publish-nightly-channel", "cleanup-nightlies")),
@@ -830,7 +830,7 @@ package-emulebb-rust-ci --release-version 0.1.0-beta.2 --target-os ${{ matrix.os
 validate-emulebb-rust-image-ci
 path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
-needs: [prepare, native-package-smoke, musl-package, image-native-validation]
+needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package]
 assemble-candidate:
 ref: ${{ github.workflow_sha }}
 candidate-manifest
