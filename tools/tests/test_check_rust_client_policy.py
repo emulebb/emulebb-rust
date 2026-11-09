@@ -342,6 +342,16 @@ class TestWorkflowJobTimeouts(unittest.TestCase):
     def test_current_workflows_bound_every_runnable_job(self) -> None:
         self.assertEqual(CHECKER.check_workflow_job_timeouts(), [])
 
+    def test_matrix_budget_cannot_be_replaced_with_an_unbounded_expression(self) -> None:
+        text = (CHECKER.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        changed = text.replace(
+            "${{ matrix.runner == 'macos-15-intel' && 120 || 45 }}",
+            "${{ matrix.unreviewed_budget }}",
+        )
+        errors = CHECKER.check_workflow_job_timeouts({"ci.yml": changed})
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ci.yml job build-test", errors[0])
+
     def test_rejects_missing_timeout_budgets(self) -> None:
         incomplete = {
             filename: "jobs: {}\n"

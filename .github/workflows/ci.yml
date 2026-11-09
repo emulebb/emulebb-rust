@@ -17,10 +17,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  EMULEBB_BUILD_REF: 010c266c29d73e17a654306d0dca8008d8db9006
-  EMULEBB_ANDROID_BUILD_REF: bb0e542152da6d58a28ffd69a5b8b6451e7cbcf4
-  EMULEBB_BUILD_TESTS_REF: fd4c6d21e079fab2b84704294c7c7000b893a81e
-  EMULEBB_TOOLING_REF: 630d1a3492ae65acad0a8dfd1575d671ff7b492c
+  EMULEBB_BUILD_REF: 3135ee1d106637871d884e5f628bcd4ca596863c
+  EMULEBB_ANDROID_BUILD_REF: 3135ee1d106637871d884e5f628bcd4ca596863c
+  EMULEBB_BUILD_TESTS_REF: 20a007f34d88b99c40d456cfe1dce3d0537ba00d
+  EMULEBB_TOOLING_REF: 856e0499d12e281697618cc81a0b09805e96f59e
   # Pin the native NAT sources linked by the sys crates.
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
@@ -222,7 +222,9 @@ jobs:
     name: build+test (${{ matrix.runner }})
     needs: [single-active-pr, workflow-lint]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    # WHY: the cold Intel macOS build reached the old deadline while tests
+    # were still passing; retain the full suite with a bounded larger budget.
+    timeout-minutes: ${{ matrix.runner == 'macos-15-intel' && 120 || 45 }}
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
     strategy:

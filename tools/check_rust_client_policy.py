@@ -815,7 +815,7 @@ def check_workflow_job_timeouts(
         "ci.yml": {
             "single-active-pr": 5,
             "workflow-lint": 10,
-            "build-test": 45,
+            "build-test": "${{ matrix.runner == 'macos-15-intel' && 120 || 45 }}",
             "build-musl": 45,
             "build-android": 60,
             "rest-openapi": 15,
@@ -860,7 +860,7 @@ def check_workflow_job_timeouts(
                 text,
             )
             if match is None or re.search(
-                rf"(?m)^    timeout-minutes:\s*{timeout}\s*$",
+                rf"(?m)^    timeout-minutes:\s*{re.escape(str(timeout))}\s*$",
                 match.group("body"),
             ) is None:
                 errors.append(
