@@ -430,22 +430,38 @@ def render_notes(
     previous_schema_version: int,
     changes: Sequence[Change],
     repository: str = DEFAULT_REPOSITORY,
+    channel: str = "nightly",
+    previous_sha: str | None = None,
 ) -> str:
     """Renders deterministic user-facing notes plus exact source comparison."""
 
     parsed = NIGHTLY_VERSION_RE.fullmatch(version)
-    if not parsed:
-        raise ValueError(f"invalid nightly version: {version}")
+    if channel == "nightly":
+        if not parsed:
+            raise ValueError(f"invalid nightly version: {version}")
+        introduction = "Automated nightly beta from `main`. It is unsigned, may be unstable, and is not a formal beta release."
+        baseline_label = "Previous successful nightly"
+        build_label = "nightly beta"
+    elif channel in {"beta", "candidate"} and PROMOTED_BETA_RE.fullmatch(version):
+        introduction = ("Validation candidate; not a promoted beta release." if channel == "candidate"
+                        else "Beta build from the source commit below. API, configuration and schema compatibility remain unstable.")
+        baseline_label = "Comparison baseline"
+        build_label = "beta build"
+    else:
+        raise ValueError(f"invalid release channel or version: {channel}/{version}")
     if not SAFE_REF_RE.fullmatch(previous_ref) or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("invalid nightly comparison ref or source SHA")
+    if previous_sha is not None and not re.fullmatch(r"[0-9a-f]{40}", previous_sha):
+        raise ValueError("invalid release baseline commit")
     lines = [
         f"# eMuleBB Rust {version}",
         "",
-        "> Automated nightly beta from `main`. It is unsigned, may be unstable, and is not a formal beta release.",
+        f"> {introduction}",
         "",
-        f"- Base beta: `{parsed.group('base')}`",
+        *([f"- Base beta: `{parsed.group('base')}`"] if channel == "nightly" else []),
         f"- Source: [`{source_sha[:8]}`](https://github.com/{repository}/commit/{source_sha})",
-        f"- Previous successful nightly: `{previous_ref}`",
+        f"- {baseline_label}: `{previous_ref}`",
+        *([f"- Baseline commit: `{previous_sha}`"] if previous_sha is not None else []),
         "",
         "## Profile compatibility",
         "",
@@ -454,7 +470,7 @@ def render_notes(
         lines.extend(
             (
                 f"- Metadata schema: `{schema_version}` (unchanged from `{previous_ref}`).",
-                "- Profile schema status: unchanged. Back up the profile before testing this nightly beta.",
+                f"- Profile schema status: unchanged. Back up the profile before testing this {build_label}.",
                 "",
             )
         )
@@ -478,9 +494,72 @@ def render_notes(
                 f"- {change.subject} ([`{change.sha[:8]}`](https://github.com/{repository}/commit/{change.sha}))"
             )
         lines.append("")
-    compare_url = f"https://github.com/{repository}/compare/{previous_ref}...{source_sha}"
+    compare_url = f"https://github.com/{repository}/compare/{previous_sha or previous_ref}...{source_sha}"
     lines.extend((f"[Full source comparison]({compare_url})", ""))
     return "\n".join(lines)
+
+
+def release_notes_baseline(source_sha: str, previous_ref: str, *, root: Path) -> tuple[str, str]:
+    """Resolve one ancestor once so moving tags cannot change the documented range."""
+    previous_sha = None
+    if not previous_ref:
+        tags = git_output("tag", "--merged", source_sha, "--sort=-version:refname", "--list", "rust-v*", root=root)
+        for tag in tags.splitlines():
+            if tag.startswith("rust-v") and PROMOTED_BETA_RE.fullmatch(tag.removeprefix("rust-v")):
+                commit = git_output("rev-parse", "--verify", f"{tag}^{{commit}}", root=root).lower()
+                if commit != source_sha:
+                    previous_ref = tag
+                    previous_sha = commit
+                    break
+        else:
+            raise RuntimeError("Release notes require full Git history and an earlier promoted beta ancestor")
+    if not SAFE_REF_RE.fullmatch(previous_ref) or previous_ref.startswith("-"):
+        raise RuntimeError("Release notes require a safe comparison ref")
+    if previous_sha is None:
+        previous_sha = git_output("rev-parse", "--verify", f"{previous_ref}^{{commit}}", root=root).lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", previous_sha):
+        raise RuntimeError("Release notes require a full baseline commit")
+    try:
+        git_output("merge-base", "--is-ancestor", previous_sha, source_sha, root=root)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("Release notes baseline must be an ancestor of the selected source") from error
+    return previous_ref, previous_sha
+
+
+def write_release_documents(*, version: str, channel: str, source_sha: str, source_root: Path,
+                            previous_ref: str, output_dir: Path, repository: str = DEFAULT_REPOSITORY) -> None:
+    """Generate versioned release documents from candidate objects without executing candidate code."""
+    if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+        raise ValueError("Release documents require a full source commit")
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None:
+        raise ValueError("Release documents require a repository identity")
+    if git_output("rev-parse", "HEAD", root=source_root).lower() != source_sha:
+        raise RuntimeError("Release document source checkout does not match the selected commit")
+    if channel == "nightly" and not previous_ref:
+        raise RuntimeError("Nightly documents require the selected previous release ref")
+    baseline_ref, baseline_sha = release_notes_baseline(source_sha, previous_ref, root=source_root)
+    # WHY: tooling no longer stores versioned release notes. Read immutable Git
+    # objects before building packages, including schemas and the entire range.
+    raw_log = git_output("log", "--reverse", "--format=%H%x09%s", f"{baseline_sha}..{source_sha}", root=source_root)
+    changes = changes_from_log(raw_log)
+    notes = render_notes(version=version, channel=channel, previous_ref=baseline_ref, previous_sha=baseline_sha,
+                         source_sha=source_sha, schema_version=metadata_schema_version_at_ref(source_sha, root=source_root),
+                         previous_schema_version=metadata_schema_version_at_ref(baseline_sha, root=source_root),
+                         changes=changes, repository=repository)
+    documents = {f"RELEASE-{version}-NOTES.md": notes}
+    if channel != "nightly":
+        lines = [f"# eMuleBB Rust {version} commit changelog", "", f"Source: `{source_sha}`",
+                 f"Baseline: `{baseline_sha}` (`{baseline_ref}`)", "", "## Commits", ""]
+        lines.extend(f"- [`{change.sha[:8]}`](https://github.com/{repository}/commit/{change.sha}) {change.subject}"
+                     for change in changes)
+        if not changes:
+            lines.append("No commits differ from the comparison baseline.")
+        documents[f"RELEASE-{version}-CHANGELOG.md"] = "\n".join(lines) + "\n"
+    # A failed preflight must not replace previously retained release evidence.
+    output_dir.mkdir(parents=True, exist_ok=False)
+    for name, content in documents.items():
+        with (output_dir / name).open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
 
 
 def _action_rows(endpoint: str, field: str) -> list[dict[str, object]]:
@@ -603,6 +682,17 @@ def build_parser() -> argparse.ArgumentParser:
     notes_parser.add_argument("--source-root", type=Path, default=ROOT,
                               help="Candidate Git history to read as data using this trusted helper.")
 
+    documents_parser = subparsers.add_parser("release-docs", help="Preflight and generate immutable-source release documents.")
+    documents_parser.add_argument("--version", required=True)
+    documents_parser.add_argument("--channel", choices=("beta", "candidate", "nightly"), required=True)
+    documents_parser.add_argument("--source-sha", required=True)
+    documents_parser.add_argument("--source-root", type=Path, required=True)
+    documents_parser.add_argument("--previous-ref", default="")
+    documents_parser.add_argument("--output-dir", type=Path, required=True)
+    documents_parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
+    preflight_parser = subparsers.add_parser("release-preflight", help="Run the same document preflight on this local checkout.")
+    preflight_parser.add_argument("--output-dir", type=Path, required=True)
+
     verify_parser = subparsers.add_parser(
         "verify-source",
         help="Require build, conformance, policy, and CodeQL checks for one commit.",
@@ -621,6 +711,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Runs one nightly-release helper command."""
 
     args = build_parser().parse_args(argv)
+    if args.command in {"release-docs", "release-preflight"}:
+        if args.command == "release-preflight":
+            write_release_documents(version=workspace_version(), channel="candidate",
+                                    source_sha=git_output("rev-parse", "HEAD"), source_root=ROOT,
+                                    previous_ref="", output_dir=args.output_dir)
+        else:
+            write_release_documents(version=args.version, channel=args.channel, source_sha=args.source_sha,
+                                    source_root=args.source_root, previous_ref=args.previous_ref,
+                                    output_dir=args.output_dir, repository=args.repository)
+        print(args.output_dir)
+        return 0
     if args.command == "metadata":
         values = metadata(
             date=args.date,

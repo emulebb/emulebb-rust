@@ -17,6 +17,22 @@ import yaml
 
 
 class CiEnvironmentTests(unittest.TestCase):
+    def test_release_documents_are_preflighted_before_packaging_and_downloaded_before_assembly(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        prepare = workflow["jobs"]["prepare"]["steps"]
+        source = next(step for step in prepare if step.get("with", {}).get("path") == ".ci/candidate")
+        self.assertEqual(source["with"]["fetch-depth"], 0)
+        generate = next(step for step in prepare if "nightly_release.py release-docs" in step.get("run", ""))
+        self.assertIn('--source-sha "$SOURCE_SHA"', generate["run"])
+        self.assertEqual(generate["env"]["SOURCE_SHA"], "${{ steps.source.outputs.sha }}")
+        upload = next(step for step in prepare if step.get("with", {}).get("name") == "emulebb-rust-release-documents")
+        self.assertLess(prepare.index(generate), prepare.index(upload))
+        assembly = workflow["jobs"]["assemble-candidate"]["steps"]
+        download = next(step for step in assembly if step.get("with", {}).get("name") == "emulebb-rust-release-documents")
+        checksum = next(step for step in assembly if "assemble-emulebb-rust-release-ci" in step.get("run", ""))
+        self.assertLess(assembly.index(download), assembly.index(checksum))
+        self.assertFalse(any('cp "emulebb-tooling/docs/' in step.get("run", "") for step in assembly))
+
     def test_android_ci_uses_both_local_abis_and_immutable_orchestration(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
         android = workflow["jobs"]["build-android"]

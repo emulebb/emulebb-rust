@@ -65,6 +65,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
           path: .ci/candidate
           persist-credentials: false
       - name: Resolve immutable source commit
@@ -81,6 +82,23 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.release_version }}
         run: python tools/release_publish.py release-identity --requested-version "$REQUESTED_VERSION" --channel "$RELEASE_CHANNEL" --ref-name "$GITHUB_REF_NAME" --ref-type "$GITHUB_REF_TYPE" --github-output "$GITHUB_OUTPUT" --source-root .ci/candidate
+      - name: Generate and preflight immutable-source release documents
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          PREVIOUS_REF: ${{ inputs.previous_ref }}
+          RELEASE_DOCS_DIR: ${{ runner.temp }}/emulebb-rust-out/release-docs
+        run: >-
+          python -B tools/nightly_release.py release-docs --version "$RELEASE_VERSION"
+          --channel "$RELEASE_CHANNEL" --source-sha "$SOURCE_SHA"
+          --source-root .ci/candidate --previous-ref "$PREVIOUS_REF" --output-dir "$RELEASE_DOCS_DIR"
+      - name: Retain preflighted release documents
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-release-documents
+          path: ${{ runner.temp }}/emulebb-rust-out/release-docs/*.md
+          if-no-files-found: error
+          retention-days: 30
 
   verify-source:
     name: Require green source checks
@@ -641,14 +659,6 @@ jobs:
           ref: ${{ env.EMULEBB_TOOLING_REF }}
           path: emulebb-tooling
           persist-credentials: false
-      - name: Checkout candidate history as nightly notes input
-        if: env.RELEASE_CHANNEL == 'nightly'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
-          fetch-depth: 0
-          path: .ci/candidate
-          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -708,25 +718,11 @@ jobs:
               --harness-repo "$GITHUB_WORKSPACE/emulebb-build-tests" --harness-sha "$EMULEBB_BUILD_TESTS_REF" \
               --control-rust-repo "$GITHUB_WORKSPACE/emulebb-rust"
           done
-      - name: Add versioned formal release documentation
-        if: env.RELEASE_CHANNEL != 'nightly'
-        shell: bash
-        env:
-          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-        run: |
-          set -euo pipefail
-          cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-NOTES.md" "$RELEASE_DIR/"
-          cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-CHANGELOG.md" "$RELEASE_DIR/"
-      - name: Generate versioned commit-based nightly release notes
-        if: env.RELEASE_CHANNEL == 'nightly'
-        working-directory: emulebb-rust
-        env:
-          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-          PREVIOUS_REF: ${{ inputs.previous_ref }}
-        run: >-
-          python -B tools/nightly_release.py notes --version "$RELEASE_VERSION"
-          --previous-ref "$PREVIOUS_REF" --source-root ../.ci/candidate
-          --output "$RELEASE_DIR/RELEASE-${RELEASE_VERSION}-NOTES.md"
+      - name: Download preflighted release documents
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: emulebb-rust-release-documents
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Verify all payloads and checksum the final public evidence set
         working-directory: emulebb-build
         env:

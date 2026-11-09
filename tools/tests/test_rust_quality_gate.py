@@ -16,6 +16,17 @@ SPEC.loader.exec_module(QUALITY_GATE)
 
 
 class TestDiagnosticsGate(unittest.TestCase):
+    def test_release_documents_fail_locally_before_expensive_build_checks(self):
+        env = self.build_env_fixture()
+        steps = QUALITY_GATE.commands_for_gate("pre-push", env)
+        labels = [label for label, _ in steps]
+        index = labels.index("release document preflight")
+        self.assertLess(index, labels.index("clippy"))
+        self.assertLess(index, labels.index("fresh debug/release workspace builds"))
+        command = steps[index][1]
+        self.assertIn("release-preflight", command)
+        self.assertTrue(Path(command[-1]).is_relative_to(Path(env["EMULEBB_WORKSPACE_OUTPUT_ROOT"])))
+
     def test_composite_reuses_only_a_bundle_produced_by_its_earlier_ui_check(self):
         env = self.build_env_fixture()
         for gate in ("ci", "pre-push"):

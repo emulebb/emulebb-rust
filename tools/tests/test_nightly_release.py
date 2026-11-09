@@ -247,6 +247,70 @@ class TestNightlyNotes(unittest.TestCase):
         self.assertNotIn("experimental", rendered)
 
 
+class TestReleaseDocuments(unittest.TestCase):
+    def test_default_baseline_ignores_nightlies_and_resolves_a_tag_only_once(self):
+        source, baseline = "a" * 40, "b" * 40
+        root = Path("candidate-history")
+        responses = ["rust-v0.1.0-beta.9.nightly.20261108.gaaaaaaaa\nrust-v0.1.0-beta.2\nrust-v0.1.0-beta.1",
+                     source, baseline, ""]
+        with mock.patch.object(NIGHTLY, "git_output", side_effect=responses) as git:
+            self.assertEqual(NIGHTLY.release_notes_baseline(source, "", root=root),
+                             ("rust-v0.1.0-beta.1", baseline))
+        resolves = [call for call in git.call_args_list if call.args[:2] == ("rev-parse", "--verify")]
+        self.assertEqual(len(resolves), 2)
+        self.assertEqual(git.call_args_list[-1], mock.call("merge-base", "--is-ancestor", baseline, source, root=root))
+
+    def test_no_formal_ancestor_fails_instead_of_inventing_release_notes(self):
+        with mock.patch.object(NIGHTLY, "git_output", return_value=""):
+            with self.assertRaisesRegex(RuntimeError, "earlier promoted beta ancestor"):
+                NIGHTLY.release_notes_baseline("a" * 40, "", root=Path("candidate"))
+
+    def test_non_ancestor_baseline_is_rejected(self):
+        failure = subprocess.CalledProcessError(1, ["git", "merge-base"])
+        with mock.patch.object(NIGHTLY, "git_output", side_effect=["b" * 40, failure]):
+            with self.assertRaisesRegex(RuntimeError, "must be an ancestor"):
+                NIGHTLY.release_notes_baseline("a" * 40, "rust-v0.1.0-beta.2", root=Path("candidate"))
+
+    def test_source_mismatch_fails_before_creating_any_documents(self):
+        with mock.patch.object(NIGHTLY, "git_output", return_value="b" * 40), mock.patch.object(Path, "mkdir") as mkdir:
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                NIGHTLY.write_release_documents(version="0.1.0-beta.2", channel="candidate", source_sha="a" * 40,
+                                                source_root=Path("candidate"), previous_ref="", output_dir=Path("documents"))
+            mkdir.assert_not_called()
+
+    def test_each_channel_has_truthful_documents_from_immutable_candidate_objects(self):
+        source, baseline = "a" * 40, "b" * 40
+        candidate = Path("candidate-history")
+        for channel in ("candidate", "beta", "nightly"):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "documents"
+                version = "0.1.0-beta.2" + (".nightly.20261109.gaaaaaaaa" if channel == "nightly" else "")
+                responses = [source, "c" * 40 + "\tfix: preserve verified data",
+                             "pub const SCHEMA_VERSION: i64 = 25;", "pub const SCHEMA_VERSION: i64 = 24;"]
+                with (mock.patch.object(NIGHTLY, "release_notes_baseline", return_value=("rust-v0.1.0-beta.1", baseline)),
+                      mock.patch.object(NIGHTLY, "git_output", side_effect=responses) as git):
+                    NIGHTLY.write_release_documents(version=version, channel=channel, source_sha=source,
+                                                    source_root=candidate, previous_ref="rust-v0.1.0-beta.1", output_dir=output)
+                notes = (output / f"RELEASE-{version}-NOTES.md").read_text()
+                self.assertIn("Preserve verified data", notes)
+                self.assertIn(f"compare/{baseline}...{source}", notes)
+                self.assertIn("does not migrate, repair, or reset", notes)
+                self.assertEqual(len(list(output.iterdir())), 1 if channel == "nightly" else 2)
+                if channel == "candidate":
+                    self.assertIn("Validation candidate", notes)
+                    self.assertNotIn("from `main`", notes)
+                self.assertTrue(all(call.kwargs.get("root") == candidate for call in git.call_args_list))
+                self.assertEqual(git.call_args_list[1].args[-1], f"{baseline}..{source}")
+                self.assertEqual(git.call_args_list[-1].args[-1], f"{baseline}:{NIGHTLY.METADATA_SCHEMA_PATH}")
+
+    def test_nightly_cannot_silently_pick_a_different_baseline(self):
+        with mock.patch.object(NIGHTLY, "git_output", return_value="a" * 40):
+            with self.assertRaisesRegex(RuntimeError, "selected previous release ref"):
+                NIGHTLY.write_release_documents(version="0.1.0-beta.2.nightly.20261109.gaaaaaaaa", channel="nightly",
+                                                source_sha="a" * 40, source_root=Path("candidate"), previous_ref="",
+                                                output_dir=Path("documents"))
+
+
 class TestNightlyGatesAndRetention(unittest.TestCase):
     def test_required_checks_use_stable_aggregate_names(self) -> None:
         self.assertEqual(
