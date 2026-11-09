@@ -671,11 +671,14 @@ def check_workflow_lint_ci(workflow_text: str | None = None) -> list[str]:
 def check_required_ci_gates(
     ci_text: str | None = None,
     codeql_text: str | None = None,
+    optional_text: str | None = None,
 ) -> list[str]:
     """Require stable aggregate checks for default-branch and release gates."""
 
     ci_path = ROOT / ".github" / "workflows" / "ci.yml"
     ci = ci_path.read_text(encoding="utf-8") if ci_text is None else ci_text
+    optional_path = ROOT / ".github/workflows/optional-platforms.yml"
+    optional = optional_path.read_text(encoding="utf-8") if optional_text is None else optional_text
     codeql_path = ROOT / ".github" / "workflows" / "codeql.yml"
     codeql = (
         codeql_path.read_text(encoding="utf-8")
@@ -692,7 +695,7 @@ def check_required_ci_gates(
         ),
         "required-ci:": (ci, "CI aggregate job"),
         "name: Required CI": (ci, "stable CI check name"),
-        "needs: [single-active-pr, workflow-lint, build-linux, build-test, build-musl, build-android, rest-openapi, quality, supply-chain]": (
+        "needs: [single-active-pr, workflow-lint, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]": (
             ci,
             "complete CI aggregate dependency set",
         ),
@@ -700,7 +703,10 @@ def check_required_ci_gates(
         'test "$result" = success': (ci, "strict CI result verification"),
         '"$BUILD_LINUX_RESULT"': (ci, "Linux build result verification"),
         '"$BUILD_MUSL_RESULT"': (ci, "musl build result verification"),
-        '"$BUILD_ANDROID_RESULT"': (ci, "Android build result verification"),
+        "name: Optional Platform CI": (optional, "independent optional platform aggregate"),
+        "needs: [single-active-pr, workflow-lint, build-macos, build-android]": (optional, "complete optional platform dependency set"),
+        '"$ANDROID_RESULT"': (optional, "Android build result verification"),
+        '"$MACOS_RESULT"': (optional, "macOS build result verification"),
         "required-codeql:": (codeql, "CodeQL aggregate job"),
         "name: Required CodeQL": (codeql, "stable CodeQL check name"),
         "needs: analyze": (codeql, "complete CodeQL matrix dependency"),
@@ -715,15 +721,29 @@ def check_required_ci_gates(
         if fragment not in source
     ]
     jobs = (yaml.safe_load(ci) or {}).get("jobs", {})
-    for job in ("workflow-lint", "build-linux", "build-test", "build-musl", "build-android", "quality", "supply-chain"):
+    for job in ("workflow-lint", "build-linux", "build-test", "build-musl", "quality", "supply-chain"):
         needs = jobs.get(job, {}).get("needs", [])
         needs = [needs] if isinstance(needs, str) else needs
         if "single-active-pr" not in needs:
             errors.append(
                 f"required branch gate is missing {job} fail-fast PR policy dependency"
             )
-        elif job in {"build-linux", "build-test", "build-musl", "build-android", "quality"} and "workflow-lint" not in needs:
+        elif job in {"build-linux", "build-test", "build-musl", "quality"} and "workflow-lint" not in needs:
             errors.append(f"{job} must wait for workflow-lint before expensive validation")
+    optional_jobs = (yaml.safe_load(optional) or {}).get("jobs", {})
+    if 'test "$result" = success' not in optional:
+        errors.append("optional platform aggregate must fail on unsuccessful outcomes")
+    for name in ("build-macos", "build-android"):
+        job = optional_jobs.get(name, {})
+        if not {"single-active-pr", "workflow-lint"} <= set(job.get("needs", [])):
+            errors.append(f"optional {name} must retain coordination and workflow-lint dependencies")
+        if job.get("continue-on-error") or any(step.get("continue-on-error") for step in job.get("steps", [])):
+            errors.append(f"optional {name} must report failures without continue-on-error")
+    native = {jobs.get("build-linux", {}).get("runs-on"),
+              *jobs.get("build-test", {}).get("strategy", {}).get("matrix", {}).get("runner", []),
+              *optional_jobs.get("build-macos", {}).get("strategy", {}).get("matrix", {}).get("runner", [])}
+    if native != {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm", "macos-15-intel", "macos-15"}:
+        errors.append("required and optional CI must preserve all six supported native targets")
     return errors
 
 
@@ -816,13 +836,17 @@ def check_workflow_job_timeouts(
         "ci.yml": {
             "single-active-pr": 5,
             "workflow-lint": 10,
-            "build-test": "${{ matrix.runner == 'macos-15-intel' && 120 || 45 }}",
+            "build-test": 45,
             "build-musl": 45,
-            "build-android": 60,
             "rest-openapi": 15,
             "quality": 30,
             "supply-chain": 10,
             "required-ci": 5,
+        },
+        "optional-platforms.yml": {
+            "single-active-pr": 5, "workflow-lint": 10,
+            "build-macos": "${{ matrix.runner == 'macos-15-intel' && 120 || 45 }}",
+            "build-android": 60, "optional-platform-ci": 5,
         },
         "codeql.yml": {"analyze": 30, "required-codeql": 5},
         "fuzz.yml": {"parser-fuzz": 30},
@@ -832,6 +856,9 @@ def check_workflow_job_timeouts(
             "verify-source": 10,
             "native-package": 45,
             "native-package-smoke": 15,
+            "optional-macos-package": 45,
+            "optional-macos-smoke": 15,
+            "optional-release-platforms": 5,
             "musl-package": 60,
             "android-package": 60,
             "image-candidate": 45,
@@ -1104,7 +1131,7 @@ def check_nightly_coordination(
         'source_sha = git_output("rev-parse", "HEAD").lower()': (
             helper, "checked-out workflow revision selection",
         ),
-        "verify_source_checks(repository, source_sha)": (helper, "exact-source qualification"),
+        "wait_for_source_checks(repository, source_sha)": (helper, "exact-source qualification"),
         "except SourceChecksNotReady as error": (helper, "explicit source-not-ready handling"),
         '"skip_reason": skip_reason': (helper, "visible scheduled skip reason"),
         "def published_nightly_for_date(": (helper, "daily publication guard"),
@@ -1473,7 +1500,10 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         for fragment, description in required.items()
         if fragment not in text
     ]
-    if text.count("smoke-rust-release-package.py") != 1:
+    # Each disjoint matrix has one smoke entrypoint; optional results stay out
+    # of the selected candidate's dependency graph and artifact namespace.
+    smoke_count = 2 if re.search(r"(?m)^  optional-macos-smoke:", text) else 1
+    if text.count("smoke-rust-release-package.py") != smoke_count:
         errors.append(
             ".github/workflows/release.yml must run smoke-rust-release-package.py "
             "exactly once per native matrix target"

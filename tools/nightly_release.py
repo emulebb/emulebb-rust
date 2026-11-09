@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,10 +32,15 @@ METADATA_SCHEMA_PATH = "crates/emulebb-metadata/src/schema.rs"
 METADATA_SCHEMA_RE = re.compile(r"^pub const SCHEMA_VERSION: i64 = (?P<version>\d+);$", re.MULTILINE)
 REQUIRED_SOURCE_WORKFLOWS = {"Required CI": "ci.yml", "Required CodeQL": "codeql.yml"}
 REQUIRED_SOURCE_CHECKS = tuple(REQUIRED_SOURCE_WORKFLOWS)
+OPTIONAL_PLATFORM_WORKFLOW = {"Optional Platform CI": "optional-platforms.yml"}
 
 
 class SourceChecksNotReady(RuntimeError):
     """Required source workflows are missing or their latest invocation did not pass."""
+
+
+class SourceChecksPending(SourceChecksNotReady):
+    """An exact source workflow has not finished; terminal failures are different."""
 
 
 @dataclass(frozen=True)
@@ -282,7 +288,7 @@ def metadata(
     skip_reason = ""
     if scheduled and should_build:
         try:
-            verify_source_checks(repository, source_sha)
+            wait_for_source_checks(repository, source_sha)
         except SourceChecksNotReady as error:
             should_build = False
             skip_reason = str(error)
@@ -542,17 +548,23 @@ def _action_rows(endpoint: str, field: str) -> list[dict[str, object]]:
     return rows
 
 
-def verify_source_checks(repository: str, sha: str) -> dict[str, dict[str, int]]:
-    """Require the newest CI and CodeQL invocation and its exact aggregate job."""
+def verify_source_checks(repository: str, sha: str, *, platform_profile: str = "full") -> dict[str, dict[str, int]]:
+    """Require exact latest workflow attempts for the explicit caller target profile."""
     if (re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
             or re.fullmatch(r"[0-9a-f]{40}", sha) is None):
         raise RuntimeError("Source eligibility requires a repository and full lowercase source SHA")
+    if platform_profile not in {"full", "windows-linux"}:
+        raise RuntimeError("Source eligibility requires an explicit supported platform profile")
+    workflows = dict(REQUIRED_SOURCE_WORKFLOWS)
+    # WHY: optional failures cannot gate scoped candidates, while default full
+    # nightlies/tags retain all existing native and Android qualification.
+    if platform_profile == "full":
+        workflows.update(OPTIONAL_PLATFORM_WORKFLOW)
     evidence = {}
-    for check in REQUIRED_SOURCE_CHECKS:
-        workflow = REQUIRED_SOURCE_WORKFLOWS[check]
+    for check, workflow in workflows.items():
         rows = _action_rows(f"repos/{repository}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page=100", "workflow_runs")
         if not rows:
-            raise SourceChecksNotReady(f"No {check} workflow invocation for source {sha}")
+            raise SourceChecksPending(f"No {check} workflow invocation for source {sha}")
         # WHY: this endpoint already filters by source. Dropping malformed or
         # foreign rows would disguise a broken inventory as an ordinary skip.
         for row in rows:
@@ -577,7 +589,9 @@ def verify_source_checks(repository: str, sha: str) -> dict[str, dict[str, int]]
                     "action_required", "stale", "startup_failure",
                 })):
             raise RuntimeError(f"Invalid {check} latest workflow state")
-        if (status, conclusion) != ("completed", "success"):
+        if status != "completed":
+            raise SourceChecksPending(f"{check} latest workflow attempt must complete successfully")
+        if conclusion != "success":
             raise SourceChecksNotReady(f"{check} latest workflow attempt must complete successfully")
         jobs = _action_rows(f"repos/{repository}/actions/runs/{latest['id']}/attempts/{latest['run_attempt']}/jobs?per_page=100", "jobs")
         aggregate = [job for job in jobs if job.get("name") == check]
@@ -592,6 +606,24 @@ def verify_source_checks(repository: str, sha: str) -> dict[str, dict[str, int]]
         evidence[check] = {"runId": latest["id"], "runNumber": latest["run_number"],
                            "runAttempt": latest["run_attempt"], "jobId": job["id"]}
     return evidence
+
+
+def wait_for_source_checks(repository: str, sha: str, *, platform_profile: str = "full",
+                           timeout_seconds: float = 480, interval_seconds: float = 30) -> dict[str, dict[str, int]]:
+    """Wait within the existing job budget, re-reading exact latest attempts each time."""
+    if not 0 <= timeout_seconds <= 480 or not 0 < interval_seconds <= 60:
+        raise RuntimeError("Source qualification wait must be bounded within the workflow job budget")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            if platform_profile == "full":
+                return verify_source_checks(repository, sha)
+            return verify_source_checks(repository, sha, platform_profile=platform_profile)
+        except SourceChecksPending as error:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SourceChecksNotReady(f"Exact-source qualification timed out: {error}") from error
+            time.sleep(min(interval_seconds, remaining))
 
 
 def nightly_tags_to_prune(releases: Sequence[dict[str, object]], keep: int) -> list[str]:
@@ -672,6 +704,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     verify_parser.add_argument("--sha", required=True)
+    verify_parser.add_argument("--platform-profile", choices=("full", "windows-linux"), default="full")
 
     prune_parser = subparsers.add_parser("prune", help="Keep only the newest immutable nightly releases.")
     prune_parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
@@ -728,7 +761,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(args.output)
         return 0
     if args.command == "verify-source":
-        verify_source_checks(args.repository, args.sha)
+        wait_for_source_checks(args.repository, args.sha, platform_profile=args.platform_profile)
         print(f"required source checks passed for {args.sha}")
         return 0
     if args.command == "prune":
