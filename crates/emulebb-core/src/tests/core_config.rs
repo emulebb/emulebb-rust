@@ -1,5 +1,184 @@
 use super::*;
 
+fn atomic_settings_patch(value: serde_json::Value) -> AppSettingsUpdate {
+    serde_json::from_value(value).unwrap()
+}
+
+async fn wait_for_atomic_settings_commit(core: &EmulebbCore, key: &str, value: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if core
+                .metadata_store
+                .load_setting_json("core", key)
+                .unwrap()
+                .as_deref()
+                == Some(value)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("settings transaction did not reach its commit barrier");
+}
+
+#[tokio::test]
+async fn invalid_direct_settings_candidate_changes_neither_sql_nor_runtime() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let before = core.app_settings().await.unwrap();
+    let core_rows = core.metadata_store.load_settings_section("core").unwrap();
+    let nat_rows = core.metadata_store.load_settings_section("nat").unwrap();
+    let error = core
+        .update_app_settings(atomic_settings_patch(serde_json::json!({
+            "nat": {"enabled": !before.nat.enabled}, "core": {"uploadLimitKiBps": 0},
+        })))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("uploadLimitKiBps"));
+    assert_eq!(core.app_settings().await.unwrap(), before);
+    assert_eq!(core.core_settings().await, before.core);
+    assert_eq!(
+        core.metadata_store.load_settings_section("core").unwrap(),
+        core_rows
+    );
+    assert_eq!(
+        core.metadata_store.load_settings_section("nat").unwrap(),
+        nat_rows
+    );
+}
+
+#[tokio::test]
+async fn concurrent_settings_patches_preserve_disjoint_fields_and_omitted_sections() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let before = core.app_settings().await.unwrap();
+    let lease = if before.nat.lease_duration_secs == 7200 {
+        3600
+    } else {
+        7200
+    };
+    let first = atomic_settings_patch(serde_json::json!({"nat": {"enabled": !before.nat.enabled}}));
+    let second = atomic_settings_patch(serde_json::json!({"nat": {"leaseDurationSecs": lease}}));
+    let (first, second) = tokio::join!(
+        core.update_app_settings(first),
+        core.update_app_settings(second)
+    );
+    first.unwrap();
+    second.unwrap();
+    let after = core.app_settings().await.unwrap();
+    assert_eq!(after.nat.enabled, !before.nat.enabled);
+    assert_eq!(after.nat.lease_duration_secs, lease);
+    assert_eq!(after.nat.backend_order, before.nat.backend_order);
+    assert_eq!(after.core, before.core);
+    assert_eq!(after.daemon, before.daemon);
+    assert_eq!(after.ed2k, before.ed2k);
+    assert_eq!(after.kad, before.kad);
+    assert_eq!(after.vpn_guard, before.vpn_guard);
+    assert_eq!(after.ip_filter, before.ip_filter);
+}
+
+#[tokio::test]
+async fn canceled_settings_waiter_cannot_abandon_committed_runtime_publication() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    // Hold the existing state lock so the owned task commits, then waits before
+    // publishing any core state or awaited driver policy.
+    let state_barrier = core.state.lock().await;
+    let updater = core.clone();
+    let waiter = tokio::spawn(async move {
+        updater
+            .update_app_settings(atomic_settings_patch(serde_json::json!({
+                "core": {"uploadLimitKiBps": 1024, "downloadLimitKiBps": 2048},
+            })))
+            .await
+    });
+    wait_for_atomic_settings_commit(&core, "uploadLimitKiBps", "1024").await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    drop(state_barrier);
+    // The ordered read waits for the detached completion task, including its
+    // runtime effects, rather than merely observing the committed SQL rows.
+    let committed = tokio::time::timeout(std::time::Duration::from_secs(2), core.app_settings())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(core.core_settings().await, committed.core);
+    assert_eq!(
+        core.ed2k_transfers
+            .upload_queue_policy_snapshot()
+            .await
+            .upload_limit_bytes_per_sec,
+        1024 * 1024
+    );
+    assert_eq!(
+        core.ed2k_transfers.download_limit_bytes_per_sec().await,
+        2048 * 1024
+    );
+}
+
+#[tokio::test]
+async fn canceled_queued_settings_request_writes_nothing() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let before = core.app_settings().await.unwrap();
+    let order = Arc::clone(&core.settings_update_order).lock_owned().await;
+    let updater = core.clone();
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn(async move {
+        entered.send(()).unwrap();
+        updater
+            .update_app_settings(atomic_settings_patch(serde_json::json!({
+                "core": {"uploadLimitKiBps": 1024},
+            })))
+            .await
+    });
+    waiting.await.unwrap();
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    drop(order);
+    assert_eq!(core.app_settings().await.unwrap(), before);
+    assert!(
+        core.metadata_store
+            .load_settings_section("core")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_core_requests_publish_in_committed_order_after_a_blocked_update() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let state_barrier = core.state.lock().await;
+    let first_core = core.clone();
+    let first = tokio::spawn(async move {
+        first_core
+            .update_core_settings(CoreSettingsUpdate {
+                upload_limit_ki_bps: Some(1024),
+                ..CoreSettingsUpdate::default()
+            })
+            .await
+    });
+    wait_for_atomic_settings_commit(&core, "uploadLimitKiBps", "1024").await;
+    let second_core = core.clone();
+    let second = tokio::spawn(async move {
+        second_core
+            .update_core_settings(CoreSettingsUpdate {
+                download_limit_ki_bps: Some(2048),
+                ..CoreSettingsUpdate::default()
+            })
+            .await
+    });
+    drop(state_barrier);
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    let committed = core.app_settings().await.unwrap();
+    assert_eq!(committed.core.upload_limit_ki_bps, 1024);
+    assert_eq!(committed.core.download_limit_ki_bps, 2048);
+    assert_eq!(core.core_settings().await, committed.core);
+    assert_eq!(
+        core.ed2k_transfers.download_limit_bytes_per_sec().await,
+        2048 * 1024
+    );
+}
+
 #[test]
 fn upload_queue_policy_uses_core_settings_for_slot_and_queue_limits() {
     let mut core_settings = default_core_settings();

@@ -1,7 +1,7 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     profile_model::{MetadataCategory, MetadataFriend, MetadataServer},
@@ -111,6 +111,64 @@ impl super::MetadataStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Validate and replace selected settings sections in one serialized transaction.
+    ///
+    /// The callback receives a coherent snapshot and must perform only synchronous
+    /// candidate computation, without calling back into this store. Unselected
+    /// and unchanged sections are preserved. A callback or write failure rolls
+    /// back every section; success is returned only after durable commit.
+    pub fn update_settings_sections<T>(
+        &self,
+        sections: &[&str],
+        update: impl FnOnce(&mut BTreeMap<String, Vec<(String, String)>>) -> Result<T>,
+    ) -> Result<T> {
+        ensure!(!sections.is_empty(), "settings sections must not be empty");
+        let mut conn = self.connection()?;
+        // WHY: read/modify/write must serialize across independent connections,
+        // not only clones sharing this store's connection mutex.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut rows = BTreeMap::new();
+        {
+            let mut select =
+                tx.prepare("SELECT key, value_json FROM settings WHERE section = ?1 ORDER BY key")?;
+            for section in sections {
+                ensure!(
+                    !section.trim().is_empty(),
+                    "settings section must not be empty"
+                );
+                let entries = select
+                    .query_map([section], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+                ensure!(
+                    rows.insert((*section).to_owned(), entries).is_none(),
+                    "duplicate settings section"
+                );
+            }
+        }
+        let previous = rows.clone();
+        let result = update(&mut rows)?;
+        ensure!(
+            rows.keys().eq(previous.keys()),
+            "settings update changed selected section names"
+        );
+        let now = unix_ms();
+        for (section, entries) in &rows {
+            if previous.get(section) == Some(entries) {
+                continue;
+            }
+            tx.execute("DELETE FROM settings WHERE section = ?1", [section])?;
+            for (key, value_json) in entries {
+                ensure!(!key.trim().is_empty(), "settings key must not be empty");
+                tx.execute(
+                    "INSERT INTO settings(section, key, value_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
+                    params![section, key, value_json, now],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(result)
     }
 
     pub fn load_kad_bootstrap_endpoints(&self) -> Result<Vec<String>> {
@@ -520,6 +578,105 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn settings_transaction_rolls_back_an_earlier_section_after_later_write_failure() {
+        for fault in ["invalid-json", "empty-key", "duplicate-key"] {
+            let store = super::super::MetadataStore::in_memory().unwrap();
+            store.put_setting_json("alpha", "value", "1").unwrap();
+            store.put_setting_json("omega", "value", "2").unwrap();
+            let result = store.update_settings_sections(&["alpha", "omega"], |sections| {
+                sections.insert("alpha".into(), vec![("value".into(), "3".into())]);
+                let invalid = match fault {
+                    "invalid-json" => vec![("value".into(), "invalid-json".into())],
+                    "empty-key" => vec![(String::new(), "4".into())],
+                    _ => vec![("value".into(), "4".into()), ("value".into(), "5".into())],
+                };
+                sections.insert("omega".into(), invalid);
+                Ok(())
+            });
+            assert!(result.is_err(), "accepted injected {fault} failure");
+            assert_eq!(
+                store
+                    .load_setting_json("alpha", "value")
+                    .unwrap()
+                    .as_deref(),
+                Some("1")
+            );
+            assert_eq!(
+                store
+                    .load_setting_json("omega", "value")
+                    .unwrap()
+                    .as_deref(),
+                Some("2")
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_rejection_and_section_escape_leave_all_rows_unchanged() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        store.put_setting_json("selected", "value", "1").unwrap();
+        let rejected: Result<()> = store.update_settings_sections(&["selected"], |sections| {
+            sections.insert("selected".into(), vec![("value".into(), "2".into())]);
+            anyhow::bail!("candidate rejected before writes")
+        });
+        assert!(rejected.is_err());
+        let escaped = store.update_settings_sections(&["selected"], |sections| {
+            sections.insert("unselected".into(), vec![("value".into(), "3".into())]);
+            Ok(())
+        });
+        assert!(escaped.is_err());
+        assert_eq!(
+            store
+                .load_setting_json("selected", "value")
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        assert!(
+            store
+                .load_settings_section("unselected")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn independent_connections_serialize_settings_read_modify_write() {
+        let path = unique_metadata_path("atomic-settings-connections");
+        let store = super::super::MetadataStore::open(&path).unwrap();
+        store.put_setting_json("counter", "value", "0").unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(5));
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let store = super::super::MetadataStore::open(&path).unwrap();
+            let start = std::sync::Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                store
+                    .update_settings_sections(&["counter"], |sections| {
+                        let entries = sections.get_mut("counter").unwrap();
+                        let value = entries[0].1.parse::<u32>().unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        entries[0].1 = (value + 1).to_string();
+                        Ok(())
+                    })
+                    .unwrap();
+            }));
+        }
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(
+            store
+                .load_setting_json("counter", "value")
+                .unwrap()
+                .as_deref(),
+            Some("4")
+        );
+    }
 
     #[test]
     fn profile_state_roundtrips() {

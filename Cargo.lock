@@ -825,6 +825,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "percent-encoding",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_urlencoded",
