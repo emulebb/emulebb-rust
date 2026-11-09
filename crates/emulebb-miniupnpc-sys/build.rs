@@ -74,8 +74,33 @@ fn main() {
 }
 
 fn emulebb_miniupnp_root() -> PathBuf {
+    println!("cargo:rerun-if-env-changed=EMULEBB_WORKSPACE_ROOT");
     if let Ok(value) = env::var("MINIUPNP_ROOT") {
         return PathBuf::from(value);
+    }
+
+    if let Some(value) = env::var_os("EMULEBB_WORKSPACE_ROOT") {
+        let root = PathBuf::from(value);
+        assert!(
+            root.is_absolute() && root.is_dir(),
+            "EMULEBB_WORKSPACE_ROOT must identify an existing absolute workspace root"
+        );
+        let manifest = PathBuf::from(
+            env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"),
+        );
+        assert!(
+            manifest
+                .canonicalize()
+                .expect("invalid CARGO_MANIFEST_DIR")
+                .starts_with(root.canonicalize().expect("invalid EMULEBB_WORKSPACE_ROOT")),
+            "EMULEBB_WORKSPACE_ROOT must contain this checkout"
+        );
+        // WHY: a managed worktree is not a sibling of third_party. The inherited
+        // workspace root preserves the canonical native-source contract.
+        return root
+            .join("repos")
+            .join("third_party")
+            .join("emulebb-miniupnp");
     }
 
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"))

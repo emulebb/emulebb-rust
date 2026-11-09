@@ -148,6 +148,24 @@ def input_state(path: Path, expected: str) -> dict:
     return {"expected": expected, "observed": head, "dirty": dirty, "status": "matching" if head == expected and not dirty else "different"}
 
 
+def native_source_root(name: str, env: dict[str, str]) -> Path:
+    """Match native build-script discovery for canonical and managed checkouts."""
+    variable = {"emulebb-miniupnp": "MINIUPNP_ROOT", "emulebb-libpcpnatpmp": "PCPNATPMP_ROOT"}[name]
+    if variable in env:
+        return Path(env[variable])
+    if "EMULEBB_WORKSPACE_ROOT" in env:
+        root = Path(env["EMULEBB_WORKSPACE_ROOT"])
+        if not root.is_absolute() or not root.is_dir():
+            raise RuntimeError("EMULEBB_WORKSPACE_ROOT must identify an existing absolute workspace root")
+        root = root.resolve()
+        if not ROOT.resolve().is_relative_to(root):
+            raise RuntimeError("EMULEBB_WORKSPACE_ROOT must contain this checkout")
+        # WHY: worktrees are not native-source siblings. Use the same canonical
+        # repos/third_party contract as the Cargo build scripts.
+        return root / "repos" / "third_party" / name
+    return ROOT.parent / "third_party" / name
+
+
 def report_inputs(env: dict[str, str], names=None) -> dict:
     """Identify the same native source locations used by the build scripts."""
     from rust_quality_gate import require_workspace_root_env
@@ -158,7 +176,7 @@ def report_inputs(env: dict[str, str], names=None) -> dict:
             continue
         variable = {"emulebb-miniupnp": "MINIUPNP_ROOT", "emulebb-libpcpnatpmp": "PCPNATPMP_ROOT"}.get(name)
         if variable:
-            path = Path(env[variable]) if env.get(variable) else ROOT.parent / "third_party" / name
+            path = native_source_root(name, env)
         else:
             path = root / "repos" / name
         inputs[name] = input_state(path, ref)

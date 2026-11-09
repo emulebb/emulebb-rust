@@ -17,6 +17,57 @@ import yaml
 
 
 class CiEnvironmentTests(unittest.TestCase):
+    def test_native_sources_are_stable_across_canonical_and_worktree_checkouts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            env = {"EMULEBB_WORKSPACE_ROOT": str(workspace)}
+            for checkout in (workspace / "repos/emulebb-rust",
+                             workspace / "workspaces/agents/sample/emulebb-rust"):
+                for name in ("emulebb-miniupnp", "emulebb-libpcpnatpmp"):
+                    with self.subTest(checkout=checkout, source=name), patch.object(ENV, "ROOT", checkout):
+                        self.assertEqual(ENV.native_source_root(name, env),
+                                         workspace.resolve() / "repos/third_party" / name)
+
+    def test_native_source_overrides_keep_precedence_over_workspace_discovery(self):
+        for name, variable in (("emulebb-miniupnp", "MINIUPNP_ROOT"),
+                               ("emulebb-libpcpnatpmp", "PCPNATPMP_ROOT")):
+            with self.subTest(source=name):
+                env = {variable: "explicit-native-fixture", "EMULEBB_WORKSPACE_ROOT": "invalid"}
+                self.assertEqual(ENV.native_source_root(name, env), Path("explicit-native-fixture"))
+
+    def test_native_discovery_without_workspace_environment_preserves_ci_layout(self):
+        with patch.object(ENV, "ROOT", Path("fixture-repos/emulebb-rust")):
+            for name in ("emulebb-miniupnp", "emulebb-libpcpnatpmp"):
+                self.assertEqual(ENV.native_source_root(name, {}), Path("fixture-repos/third_party") / name)
+
+    def test_invalid_native_workspace_roots_fail_without_falling_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invalid_roots = ("", "relative-workspace", str(root / "missing"))
+            for value in invalid_roots:
+                with self.subTest(root=value), self.assertRaisesRegex(RuntimeError, "absolute workspace root"):
+                    ENV.native_source_root("emulebb-miniupnp", {"EMULEBB_WORKSPACE_ROOT": value})
+            with patch.object(ENV, "ROOT", root / "outside/emulebb-rust"):
+                elsewhere = root / "other-workspace"
+                elsewhere.mkdir()
+                with self.assertRaisesRegex(RuntimeError, "contain this checkout"):
+                    ENV.native_source_root("emulebb-miniupnp", {"EMULEBB_WORKSPACE_ROOT": str(elsewhere)})
+
+    def test_native_provenance_reports_the_sources_selected_by_workspace_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            names = ("emulebb-miniupnp", "emulebb-libpcpnatpmp")
+            config = {"inputs": {name: "1" * 40 for name in names}}
+            env = {"EMULEBB_WORKSPACE_ROOT": str(workspace)}
+            with patch.object(ENV, "ROOT", workspace / "workspaces/agents/sample/emulebb-rust"), \
+                    patch.object(ENV, "TOOLCHAIN", config), \
+                    patch("rust_quality_gate.require_workspace_root_env", return_value=workspace), \
+                    patch.object(ENV, "input_state", return_value={"status": "matching"}) as inspect:
+                self.assertEqual(set(ENV.report_inputs(env, names)), set(names))
+                self.assertEqual(inspect.call_args_list,
+                                 [call(workspace.resolve() / "repos/third_party" / name, "1" * 40)
+                                  for name in names])
+
     def test_release_documents_are_preflighted_before_packaging_and_downloaded_before_assembly(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
         prepare = workflow["jobs"]["prepare"]["steps"]
