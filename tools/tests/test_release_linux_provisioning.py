@@ -71,6 +71,21 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
                          "python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} "
                          "--target-os ${{ matrix.os }} --platform ${{ matrix.arch }}")
 
+    def test_linux_image_owns_toolchains_while_host_keeps_python_control(self):
+        setup = [step for step in self.steps
+                 if step.get("uses", "").startswith(("dtolnay/rust-toolchain@", "actions/setup-node@"))
+                 or step.get("run") == "npm install --global npm@11.20.0"]
+        self.assertEqual(len(setup), 3)
+        for step in setup:
+            self.assertEqual(step["if"], "matrix.os != 'linux'")
+        python = next(step for step in self.steps if step.get("uses", "").startswith("actions/setup-python@"))
+        dependencies = next(step for step in self.steps
+                            if "pip install -r tools/requirements-ci.txt" in step.get("run", ""))
+        policy = next(step for step in self.steps if step.get("run") == "python tools/check_rust_client_policy.py")
+        for step in (python, dependencies, policy):
+            self.assertNotIn("if", step)
+            self.assertLess(self.steps.index(step), self.steps.index(self.prepared))
+
 
 if __name__ == "__main__":
     unittest.main()
