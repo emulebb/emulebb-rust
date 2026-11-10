@@ -217,37 +217,6 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@11.20.0
 
-      - name: Install Linux build dependencies
-        if: matrix.os == 'linux'
-        timeout-minutes: 6
-        working-directory: .ci/emulebb-build
-        run: >-
-          python -B -m emule_workspace provision-ubuntu-dependencies-ci
-          --profile rust-native-release --deadline-seconds 300
-          --network-timeout-seconds 20 --attempts 3
-          --report "$RUNNER_TEMP/emulebb-rust-out/reports/native-linux-provisioning.json"
-      - name: Install verified AppImage builder
-        if: matrix.os == 'linux'
-        shell: bash
-        run: |
-          if [[ '${{ matrix.arch }}' == 'ARM64' ]]; then
-            tool_arch=aarch64
-            expected=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
-          else
-            tool_arch=x86_64
-            expected=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
-          fi
-          tool="$RUNNER_TEMP/appimagetool-${tool_arch}.AppImage"
-          curl --fail --location --silent --show-error \
-            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${tool_arch}.AppImage" \
-            --output "$tool"
-          echo "$expected  $tool" | sha256sum --check
-          chmod 755 "$tool"
-          {
-            echo "APPIMAGETOOL=$tool"
-            echo "APPIMAGE_EXTRACT_AND_RUN=1"
-            echo "ARCH=$tool_arch"
-          } >> "$GITHUB_ENV"
       - name: Assert release build excludes test-only features
         run: python tools/check_rust_client_policy.py
       - name: Prepare inherited build output directory
@@ -255,6 +224,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
         run: python -c "from pathlib import Path; import os; Path(os.environ['CARGO_TARGET_DIR']).mkdir(parents=True, exist_ok=True)"
       - name: Build and package native release asset
+        if: matrix.os != 'linux'
         working-directory: .ci/emulebb-build
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
@@ -264,6 +234,28 @@ jobs:
           EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
           RUSTUP_TOOLCHAIN: "1.98.1"
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
+      - name: Set up pinned Docker for prepared Linux packaging
+        if: matrix.os == 'linux'
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
+        with:
+          version: v29.6.1
+          daemon-config: '{"features":{"containerd-snapshotter":true}}'
+      - name: Build and package Linux release asset with verified prepared builder
+        if: matrix.os == 'linux'
+        timeout-minutes: 40
+        working-directory: .ci/emulebb-build
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+          EMULEBB_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          EMULEBB_RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}
+          EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
+          RUSTUP_TOOLCHAIN: "1.98.1"
+          PREPARED_IMAGE: ${{ env.EMULEBB_LINUX_PREPARED_IMAGE }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python -B -m emule_workspace package-emulebb-rust-prepared-ci
+          --image "$PREPARED_IMAGE" --release-version "$RELEASE_VERSION" --platform ${{ matrix.arch }}
       - name: Retain build diagnostics
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
