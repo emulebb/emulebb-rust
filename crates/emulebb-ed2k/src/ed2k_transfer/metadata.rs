@@ -498,7 +498,7 @@ impl Ed2kTransferRuntime {
         aich_hashset: Ed2kAichHashset,
         expected_generation: u64,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.lock_manifest(file_hash).await;
+        let guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         if manifest.aich_trust_generation != expected_generation {
             return Ok(manifest);
@@ -515,7 +515,15 @@ impl Ed2kTransferRuntime {
         );
         manifest.aich_hashset = aich_hashset.part_hashes.iter().map(hex::encode).collect();
         manifest.aich_hashset_acquired = true;
-        self.store_manifest_unlocked(&manifest).await?;
+        let votes = self
+            .aich_root_corroboration
+            .lock()
+            .expect("aich corroboration mutex poisoned")
+            .get(file_hash)
+            .cloned();
+        let (manifest, _guard) = self
+            .store_aich_transition_owned(guard, manifest, votes)
+            .await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         Ok(manifest)
     }
@@ -532,7 +540,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         aich_root: Option<[u8; 20]>,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.lock_manifest(file_hash).await;
+        let guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         if let Some(aich_root) = aich_root {
             let encoded = hex::encode(aich_root);
@@ -553,8 +561,11 @@ impl Ed2kTransferRuntime {
                 _ => Ed2kAichRootOrigin::OperatorLink,
             };
             if super::aich_trust::set_identity(&mut manifest, Some(encoded), Some(origin))? {
-                self.store_manifest_unlocked(&manifest).await?;
+                let (manifest, _guard) = self
+                    .store_aich_transition_owned(guard, manifest, None)
+                    .await?;
                 self.upsert_verified_catalog_entry(&manifest).await;
+                return Ok(manifest);
             }
             self.aich_root_corroboration
                 .lock()
@@ -601,7 +612,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         observations: &[([u8; 20], std::net::IpAddr)],
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.lock_manifest(file_hash).await;
+        let guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         if observations.is_empty() {
             return Ok(manifest);
@@ -632,8 +643,11 @@ impl Ed2kTransferRuntime {
                 .map(Ed2kAichRootOrigin::parse)
                 .transpose()?;
             if super::aich_trust::set_identity(&mut manifest, persisted.aich_root, origin)? {
-                self.store_manifest_unlocked(&manifest).await?;
+                let (manifest, _guard) = self
+                    .store_aich_transition_owned(guard, manifest, None)
+                    .await?;
                 self.upsert_verified_catalog_entry(&manifest).await;
+                return Ok(manifest);
             }
             self.aich_root_corroboration
                 .lock()
@@ -642,8 +656,8 @@ impl Ed2kTransferRuntime {
             return Ok(manifest);
         }
 
-        let promoted = {
-            let mut map = self
+        let mut accumulator = {
+            let map = self
                 .aich_root_corroboration
                 .lock()
                 .expect("aich corroboration mutex poisoned");
@@ -652,21 +666,29 @@ impl Ed2kTransferRuntime {
             if manifest.aich_root.is_some() && !map.contains_key(file_hash) {
                 return Ok(manifest);
             }
-            let accumulator = map.entry(file_hash.to_string()).or_default();
-            for (aich_root, from_ip) in observations {
-                let std::net::IpAddr::V4(from_ip) = from_ip else {
-                    continue;
-                };
-                accumulator.record(*aich_root, from_ip.octets());
-            }
-            accumulator.trusted_root()
+            map.get(file_hash).cloned().unwrap_or_default()
         };
+
+        for (aich_root, from_ip) in observations {
+            let std::net::IpAddr::V4(from_ip) = from_ip else {
+                continue;
+            };
+            accumulator.record(*aich_root, from_ip.octets());
+        }
+        let promoted = accumulator.trusted_root();
 
         let origin = promoted.map(|_| Ed2kAichRootOrigin::NetworkConsensus);
         if super::aich_trust::set_identity(&mut manifest, promoted.map(hex::encode), origin)? {
-            self.store_manifest_unlocked(&manifest).await?;
+            let (manifest, _guard) = self
+                .store_aich_transition_owned(guard, manifest, Some(accumulator))
+                .await?;
             self.upsert_verified_catalog_entry(&manifest).await;
+            return Ok(manifest);
         }
+        self.aich_root_corroboration
+            .lock()
+            .expect("aich corroboration mutex poisoned")
+            .insert(file_hash.to_owned(), accumulator);
         Ok(manifest)
     }
 
