@@ -298,10 +298,17 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
         .await
         .unwrap();
     let aich_root = [0x7B; 20];
-    transfer_runtime
-        .reconcile_aich_root(&file_hash_hex, Some(aich_root))
+    let proposed = transfer_runtime
+        .record_network_aich_root(
+            &file_hash_hex,
+            Some(aich_root),
+            std::net::IpAddr::from([203, 0, 113, 7]),
+        )
         .await
         .unwrap();
+    assert!(proposed.aich_root.is_none());
+    assert!(proposed.aich_root_origin.is_none());
+    assert!(!proposed.aich_hashset_acquired);
     transfer_runtime
         .store_md4_hashset(&no_sources_hash_hex, Vec::new())
         .await
