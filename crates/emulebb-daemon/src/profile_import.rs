@@ -112,7 +112,7 @@ pub fn apply_profile_import(
         header["targetPlatform"] = Value::from(NativePath::platform());
         header["sharedRoots"] = serde_json::json!([]);
     }
-    let metadata = MetadataStore::open(profile.metadata_path())?;
+    let metadata = profile.open_metadata_store()?;
     let mut total = ImportCounts {
         imported_known_files: 0,
         skipped_native_known_files: 0,

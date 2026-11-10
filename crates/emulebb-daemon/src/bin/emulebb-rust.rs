@@ -88,12 +88,12 @@ async fn main() -> Result<()> {
         Some(CliCommand::ReconcileSharedFiles | CliCommand::ImportSharedDirectories { .. })
     ) {
         if let Some(CliCommand::ImportSharedDirectories { ref file }) = cli.command {
-            let store = emulebb_metadata::MetadataStore::open(profile.metadata_path())?;
+            let store = profile.open_metadata_store()?;
             emulebb_daemon::shared_directory_import::import_shared_directories(&store, file)?;
         }
         let core = emulebb_core::EmulebbCore::new(
             BUILD_VERSION,
-            emulebb_index::FileIndex::open(profile.metadata_path())?,
+            emulebb_index::FileIndex::from_metadata_store(profile.open_metadata_store()?),
             profile.transfer_root(),
         )?
         .with_profile_dir(profile.profile_dir.clone())
@@ -119,11 +119,10 @@ async fn main() -> Result<()> {
             }
             let work = core.shared_directory_reload_progress();
             let reconciliation = core.reconcile_shared_files().await?;
-            let database = profile.metadata_path();
-            let missing_recovery = tokio::task::spawn_blocking(move || {
-                emulebb_metadata::MetadataStore::open(database)?.missing_live_aich_recovery_count()
-            })
-            .await??;
+            let metadata = profile.open_metadata_store()?;
+            let missing_recovery =
+                tokio::task::spawn_blocking(move || metadata.missing_live_aich_recovery_count())
+                    .await??;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -136,11 +135,14 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
+    // Keep profile ownership until the final diagnostic writer has drained too.
+    let profile_lease = profile.profile_lease.clone();
     let logging_guard = logging::init(&profile.profile_dir)?;
     let result = run(profile).await;
     if let Err(error) = result.as_ref() {
         tracing::error!(error = ?error, "daemon terminated with an error");
     }
     logging_guard.shutdown().await;
+    drop(profile_lease);
     result
 }

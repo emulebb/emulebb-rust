@@ -34,12 +34,14 @@ mod bind_config;
 mod discovery_bootstrap;
 pub mod logging;
 mod profile_import;
+mod profile_ownership;
 mod rest_listener;
 pub mod shared_directory_import;
 mod shutdown;
 mod vpn_guard_monitor;
 
 pub use profile_import::{ProfileImportApplySummary, apply_profile_import};
+pub use profile_ownership::ProfileLease;
 pub use shutdown::{ShutdownRequest, ShutdownSignal};
 
 pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
@@ -89,6 +91,10 @@ pub struct DaemonProfile {
     pub rest: RestBootstrapSettings,
     pub vpn_guard: VpnGuardSettings,
     pub ip_filter: IpFilterSettings,
+    /// Runtime ownership shared with metadata handles; never a configuration key.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub profile_lease: Option<ProfileLease>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -122,6 +128,7 @@ impl Default for DaemonProfile {
             rest: RestBootstrapSettings::default(),
             vpn_guard: VpnGuardSettings::default(),
             ip_filter: IpFilterSettings::default(),
+            profile_lease: None,
         }
     }
 }
@@ -142,6 +149,15 @@ impl DaemonProfile {
 
     fn load_from_dir(profile_dir: PathBuf, create_if_missing: bool) -> Result<Self> {
         let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
+        if !create_if_missing && !profile_dir.exists() {
+            bail!(
+                "profile settings file does not exist: {}",
+                settings_path.display()
+            );
+        }
+        // WHY: bootstrap creation, schema initialization and reads of mutable
+        // state must all belong to the same exclusive writable-profile session.
+        let profile_lease = ProfileLease::acquire(&profile_dir, create_if_missing)?;
         let created_default_profile = if create_if_missing && !settings_path.exists() {
             create_default_profile_bootstrap(&profile_dir, &settings_path)?;
             true
@@ -159,13 +175,16 @@ impl DaemonProfile {
             .with_context(|| format!("failed to read settings {}", settings_path.display()))?;
         let bootstrap: DaemonBootstrapSettings = toml::from_str(&text)
             .with_context(|| format!("failed to parse settings {}", settings_path.display()))?;
-        let metadata =
-            MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).with_context(|| {
-                format!(
-                    "failed to open metadata store under {}",
-                    profile_dir.display()
-                )
-            })?;
+        let metadata = MetadataStore::open_with_profile_lease(
+            profile_dir.join(PROFILE_METADATA_FILE),
+            profile_lease.file(),
+        )
+        .with_context(|| {
+            format!(
+                "failed to open metadata store under {}",
+                profile_dir.display()
+            )
+        })?;
         if created_default_profile {
             seed_default_profile_network_settings(&metadata)?;
         }
@@ -184,6 +203,7 @@ impl DaemonProfile {
             rest: bootstrap.rest,
             vpn_guard: settings.vpn_guard,
             ip_filter: settings.ip_filter,
+            profile_lease: Some(profile_lease),
         };
         profile
             .nat
@@ -194,6 +214,19 @@ impl DaemonProfile {
 
     pub fn metadata_path(&self) -> PathBuf {
         self.profile_dir.join(PROFILE_METADATA_FILE)
+    }
+
+    /// Open an independent metadata connection retaining this profile's lease.
+    ///
+    /// Load the profile first so all connections share the same OS lock rather
+    /// than independently contending against their own process.
+    pub fn open_metadata_store(&self) -> Result<MetadataStore> {
+        let lease = self
+            .profile_lease
+            .as_ref()
+            .context("load the profile before opening writable metadata")?;
+        lease.ensure_profile(&self.profile_dir)?;
+        MetadataStore::open_with_profile_lease(self.metadata_path(), lease.file())
     }
 
     pub fn transfer_root(&self) -> PathBuf {
@@ -700,7 +733,7 @@ struct HostedLifecycle {
     ready: oneshot::Sender<SocketAddr>,
 }
 
-async fn run_inner(profile: DaemonProfile, host: Option<HostedLifecycle>) -> Result<()> {
+async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) -> Result<()> {
     if let Some(host) = &host {
         if host.shutdown.is_requested() {
             return Ok(());
@@ -724,9 +757,12 @@ async fn run_inner(profile: DaemonProfile, host: Option<HostedLifecycle>) -> Res
             "REST is listening beyond loopback over plaintext HTTP; restrict network exposure or terminate TLS at a trusted reverse proxy"
         );
     }
-    fs::create_dir_all(&profile.profile_dir)
-        .with_context(|| format!("failed to create {}", profile.profile_dir.display()))?;
-    let index = FileIndex::open(profile.metadata_path())?;
+    // Embedded callers can construct a profile without loading it from disk.
+    // They acquire the same lease before any discovery, DB or runtime mutation.
+    if profile.profile_lease.is_none() {
+        profile.profile_lease = Some(ProfileLease::acquire(&profile.profile_dir, true)?);
+    }
+    let index = FileIndex::from_metadata_store(profile.open_metadata_store()?);
     let metadata_store = index.metadata_store();
     discovery_bootstrap::seed_empty_discovery(&metadata_store, &profile.profile_dir).await?;
     let ed2k_network = profile.ed2k_network_config(&metadata_store)?;
