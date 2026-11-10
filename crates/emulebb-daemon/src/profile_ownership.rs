@@ -18,7 +18,7 @@ const PROFILE_LEASE_FILE: &str = ".emulebb-profile.lock";
 /// selected filesystem; an unsupported/failed lock is an error, never a bypass.
 #[derive(Debug, Clone)]
 pub struct ProfileLease {
-    canonical_profile: PathBuf,
+    directory: PathBuf,
     file: Arc<File>,
 }
 
@@ -34,6 +34,13 @@ impl ProfileLease {
             "profile is not a directory: {}",
             profile.display()
         );
+        #[cfg(windows)]
+        let canonical_profile = short_profile_directory(&canonical_profile).with_context(|| {
+            format!(
+                "failed to resolve short-path profile directory {}",
+                profile.display()
+            )
+        })?;
         let lock_path = canonical_profile.join(PROFILE_LEASE_FILE);
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
@@ -57,7 +64,7 @@ impl ProfileLease {
             )
         })?;
         match file.try_lock() {
-            Ok(()) => Ok(Self { canonical_profile, file: Arc::new(file) }),
+            Ok(()) => Ok(Self { directory: canonical_profile, file: Arc::new(file) }),
             Err(TryLockError::WouldBlock) => bail!(
                 "profile is already in use: {}; stop its daemon or offline command before retrying",
                 profile.display()
@@ -71,17 +78,46 @@ impl ProfileLease {
         }
     }
 
-    pub(crate) fn ensure_profile(&self, profile: &Path) -> Result<()> {
-        let canonical = fs::canonicalize(profile)
-            .with_context(|| format!("failed to resolve owned profile {}", profile.display()))?;
-        ensure!(
-            canonical == self.canonical_profile,
-            "profile directory changed after ownership was acquired; load the selected profile before writing it"
-        );
-        Ok(())
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
     }
 
     pub(crate) fn file(&self) -> Arc<File> {
         Arc::clone(&self.file)
     }
+}
+
+#[cfg(windows)]
+fn short_profile_directory(canonical: &Path) -> Result<PathBuf> {
+    use std::{
+        ffi::OsString,
+        path::{Component, Prefix},
+    };
+
+    // WHY: canonicalize uses a verbatim prefix on Windows. Keep internal I/O
+    // on ordinary paths and verify the spelling still names the same directory.
+    let mut components = canonical.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        bail!("writable profile directory needs an absolute drive or UNC path");
+    };
+    let mut directory = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut unc = OsString::from(r"\\");
+            unc.push(server);
+            unc.push(r"\");
+            unc.push(share);
+            PathBuf::from(unc)
+        }
+        Prefix::Disk(_) | Prefix::UNC(_, _) => return Ok(canonical.to_path_buf()),
+        _ => bail!("writable profile directory needs an ordinary drive or UNC path"),
+    };
+    for component in components {
+        directory.push(component.as_os_str());
+    }
+    ensure!(
+        fs::canonicalize(&directory)? == canonical,
+        "ordinary profile path resolves to a different directory"
+    );
+    Ok(directory)
 }
