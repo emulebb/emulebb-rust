@@ -276,7 +276,7 @@ pub struct Ed2kTransferRuntime {
     metadata: MetadataStore,
     file_name_policy: Ed2kFileNamePolicy,
     shared_catalog: Ed2kSharedCatalog,
-    shared_catalog_generation: AtomicU64,
+    shared_catalog_generation: Arc<AtomicU64>,
     /// Keyset cursor for a persisted catalog intentionally loaded only through
     /// the first publishable startup cohort. `pending` is claimed atomically so
     /// at most one background hydration pass can append the remaining pages.
@@ -741,7 +741,7 @@ impl Ed2kTransferRuntime {
             metadata,
             file_name_policy,
             shared_catalog,
-            shared_catalog_generation: AtomicU64::new(0),
+            shared_catalog_generation: Arc::new(AtomicU64::new(0)),
             shared_catalog_hydration_cursor: StdMutex::new(None),
             shared_catalog_hydration_pending: AtomicBool::new(hydration_pending),
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),

@@ -27,6 +27,28 @@ pub(super) struct AichPersistBarrier {
     pub(super) release: tokio::sync::Notify,
 }
 
+/// Merge only canonical AICH authority, preserving independent cached payload
+/// and MD4 state. Existing part hashes remain valid only for the same root;
+/// the durable generation still fences every outstanding response.
+pub(super) fn merge_persisted_identity(
+    manifest: &mut Ed2kResumeManifest,
+    identity: &emulebb_metadata::MetadataTransferAichIdentity,
+) -> anyhow::Result<()> {
+    let origin = identity
+        .origin
+        .as_deref()
+        .map(Ed2kAichRootOrigin::parse)
+        .transpose()?;
+    if manifest.aich_root != identity.root {
+        manifest.aich_hashset.clear();
+        manifest.aich_hashset_acquired = false;
+    }
+    manifest.aich_root = identity.root.clone();
+    manifest.aich_root_origin = origin;
+    manifest.aich_trust_generation = identity.generation;
+    Ok(())
+}
+
 /// Change accepted identity under the manifest lock. The generation and
 /// dependent part set change atomically with the persisted decision.
 pub(super) fn set_identity(

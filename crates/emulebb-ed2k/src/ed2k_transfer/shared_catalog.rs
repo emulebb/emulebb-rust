@@ -475,9 +475,34 @@ impl Ed2kTransferRuntime {
                 Ed2kMediaMetadata::default()
             };
         }
-        let mut entries = self.shared_catalog.write().await;
-        entries.upsert_verified(file_hash, new_entry);
-        self.note_shared_catalog_entries_changed();
+        // The caller's progress may be newer than SQL while its AICH authority
+        // is older. Preserve membership/media/MD4 state, but do not advertise a
+        // root retired by local/import acceptance during the work above.
+        // Lock order: catalog -> servable-hash cache -> metadata connection.
+        // The identity-only callback acquires no further locks and does no I/O.
+        let mut entries = Arc::clone(&self.shared_catalog).write_owned().await;
+        let metadata = self.metadata.clone();
+        let hash = manifest.file_hash.clone();
+        let generation = Arc::clone(&self.shared_catalog_generation);
+        let hashes = Arc::clone(&self.servable_shared_hash_cache);
+        let published = tokio::task::spawn_blocking(move || {
+            let mut hashes = hashes.lock().expect("servable hash cache mutex poisoned");
+            metadata.publish_transfer_aich_identity(&hash, |identity| {
+                if let Some(entry) = new_entry.as_mut() {
+                    entry.aich_root = identity.root;
+                }
+                entries.upsert_verified(file_hash, new_entry);
+                generation.fetch_add(1, Ordering::AcqRel);
+                hashes.hashes = None;
+                Ok(())
+            })
+        })
+        .await;
+        match published {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "failed to fence shared AICH identity"),
+            Err(error) => tracing::warn!(%error, "shared AICH publication task panicked"),
+        }
     }
 
     /// Remove a locally verified file from the live serving/advertisement

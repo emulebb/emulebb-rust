@@ -436,6 +436,168 @@ async fn canceled_acceptance_finishes_publication_before_conflicting_vote() {
     );
 }
 
+async fn seed_servable_catalog(
+    runtime: &Ed2kTransferRuntime,
+    manifest: &super::super::Ed2kResumeManifest,
+) {
+    let mut servable = manifest.clone();
+    servable.verified_ranges = vec![super::super::Ed2kSharedRange {
+        start: 0,
+        end: super::super::ED2K_PART_SIZE,
+    }];
+    let entry = super::super::Ed2kSharedEntry::from_manifest(&servable);
+    assert!(entry.is_servable());
+    runtime
+        .shared_catalog
+        .write()
+        .await
+        .upsert_verified(manifest.file_hash.parse::<Ed2kHash>().unwrap(), Some(entry));
+}
+
+#[tokio::test]
+async fn canceled_demotion_retires_advertised_root_before_releasing_guard() {
+    use std::{sync::Arc, time::Duration};
+
+    let (runtime, file_hash) = runtime_with_job().await;
+    let runtime = Arc::new(runtime);
+    let observations = (0..10)
+        .map(|signer| ([0x42; 20], ip(203, signer, 0, 1)))
+        .collect::<Vec<_>>();
+    let accepted = runtime
+        .record_network_aich_observations(&file_hash, &observations)
+        .await
+        .unwrap();
+    seed_servable_catalog(&runtime, &accepted).await;
+    let barrier = Arc::new(super::super::aich_trust::AichPersistBarrier::default());
+    *runtime.aich_persist_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
+    let caller = {
+        let runtime = Arc::clone(&runtime);
+        let hash = file_hash.clone();
+        tokio::spawn(async move {
+            runtime
+                .record_network_aich_root(&hash, Some([0xff; 20]), ip(198, 0, 0, 1))
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), barrier.committed.notified())
+        .await
+        .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    barrier.release.notify_one();
+    let guard = tokio::time::timeout(Duration::from_secs(10), runtime.lock_manifest(&file_hash))
+        .await
+        .unwrap();
+    assert!(
+        runtime.manifest_cache.lock().await[&file_hash]
+            .aich_root
+            .is_none()
+    );
+    let catalog = runtime.shared_catalog.read().await;
+    let entry = catalog
+        .entry_by_hash(&file_hash.parse::<Ed2kHash>().unwrap())
+        .unwrap();
+    assert!(
+        entry.is_servable(),
+        "MD4-verified availability must survive AICH demotion"
+    );
+    assert!(
+        entry.aich_root.is_none(),
+        "a canceled caller must not leave retired authority advertised"
+    );
+    drop(catalog);
+    drop(guard);
+}
+
+#[tokio::test]
+async fn authority_committed_before_publication_fences_older_task_and_catalog() {
+    use std::{sync::Arc, time::Duration};
+
+    for stock in [false, true] {
+        let (runtime, file_hash) = runtime_with_job().await;
+        let runtime = Arc::new(runtime);
+        let observations = (0..9)
+            .map(|signer| ([0x42; 20], ip(203, signer, 0, 1)))
+            .collect::<Vec<_>>();
+        let previous = runtime
+            .record_network_aich_observations(&file_hash, &observations)
+            .await
+            .unwrap();
+        seed_servable_catalog(&runtime, &previous).await;
+        let barrier = Arc::new(super::super::aich_trust::AichPersistBarrier::default());
+        *runtime.aich_persist_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
+        let caller = {
+            let runtime = Arc::clone(&runtime);
+            let hash = file_hash.clone();
+            tokio::spawn(async move {
+                runtime
+                    .record_network_aich_root(&hash, Some([0x42; 20]), ip(203, 9, 0, 1))
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), barrier.committed.notified())
+            .await
+            .unwrap();
+        let mut stale_projection = super::super::transfer_sql::manifest_from_metadata(
+            runtime
+                .metadata
+                .transfer_manifest_by_hash(&file_hash)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        stale_projection.verified_ranges = vec![super::super::Ed2kSharedRange {
+            start: 0,
+            end: super::super::ED2K_PART_SIZE,
+        }];
+        // A different accepted authority commits after the older task's SQL
+        // write, while its cache/catalog publication is deliberately paused.
+        accept_independent_root(&runtime, &previous, [0x77; 20], stock);
+        let canonical = runtime
+            .metadata
+            .transfer_aich_identity_by_hash(&file_hash)
+            .unwrap()
+            .unwrap();
+        barrier.release.notify_one();
+        let published = tokio::time::timeout(Duration::from_secs(10), caller)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.aich_root, canonical.root);
+        assert_eq!(published.aich_trust_generation, canonical.generation);
+        assert_eq!(
+            runtime.manifest_cache.lock().await[&file_hash].aich_root,
+            canonical.root
+        );
+        let catalog = runtime.shared_catalog.read().await;
+        let entry = catalog
+            .entry_by_hash(&file_hash.parse::<Ed2kHash>().unwrap())
+            .unwrap();
+        assert!(entry.is_servable());
+        assert_eq!(entry.aich_root, canonical.root);
+        assert!(
+            !runtime
+                .aich_root_corroboration
+                .lock()
+                .unwrap()
+                .contains_key(&file_hash)
+        );
+        drop(catalog);
+        // A later generic refresh retaining the old manifest must preserve its
+        // servable MD4 ranges but cannot republish the retired consensus root.
+        runtime
+            .upsert_verified_catalog_entry_cached(&stale_projection)
+            .await;
+        let catalog = runtime.shared_catalog.read().await;
+        let entry = catalog
+            .entry_by_hash(&file_hash.parse::<Ed2kHash>().unwrap())
+            .unwrap();
+        assert!(entry.is_servable());
+        assert_eq!(entry.aich_root, canonical.root);
+    }
+}
+
 #[tokio::test]
 async fn operator_identity_supersedes_live_consensus_without_peer_veto() {
     let (runtime, file_hash) = runtime_with_job().await;

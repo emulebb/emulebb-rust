@@ -363,22 +363,44 @@ impl Ed2kTransferRuntime {
             || manifest.aich_root_origin != origin
             || manifest.aich_trust_generation != identity.generation
         {
-            // Keep payload/MD4 state. Already acquired hashes for the same root
-            // remain valid; generation still fences outstanding ABA responses.
-            if manifest.aich_root != identity.root {
-                manifest.aich_hashset.clear();
-                manifest.aich_hashset_acquired = false;
-            }
-            manifest.aich_root = identity.root;
-            manifest.aich_root_origin = origin;
-            manifest.aich_trust_generation = identity.generation;
-            if manifest.aich_root_origin != Some(super::Ed2kAichRootOrigin::NetworkConsensus) {
-                self.aich_root_corroboration
+            let metadata = self.metadata.clone();
+            let hash = file_hash.to_owned();
+            let parsed_hash = file_hash.parse::<Ed2kHash>()?;
+            let mut cached = manifest.clone();
+            let mut cache = Arc::clone(&self.manifest_cache).lock_owned().await;
+            let mut catalog = Arc::clone(&self.shared_catalog).write_owned().await;
+            let generation = Arc::clone(&self.shared_catalog_generation);
+            let corroboration = Arc::clone(&self.aich_root_corroboration);
+            // Same publication order as owned decisions, omitting checkpoint
+            // bookkeeping because identity refresh must preserve dirty pieces.
+            return tokio::task::spawn_blocking(move || {
+                let mut map = corroboration
                     .lock()
-                    .expect("aich corroboration mutex poisoned")
-                    .remove(file_hash);
-            }
-            self.cache_manifest_unlocked(&manifest).await;
+                    .expect("aich corroboration mutex poisoned");
+                metadata.publish_transfer_aich_identity(&hash, |identity| {
+                    super::aich_trust::merge_persisted_identity(&mut manifest, &identity)?;
+                    super::aich_trust::merge_persisted_identity(&mut cached, &identity)?;
+                    if manifest.aich_root_origin
+                        != Some(super::Ed2kAichRootOrigin::NetworkConsensus)
+                    {
+                        map.remove(&hash);
+                    }
+                    cache.insert(hash.clone(), cached);
+                    let mut changed = false;
+                    catalog.update_by_hash(&parsed_hash, |entry| {
+                        if entry.aich_root != manifest.aich_root {
+                            entry.aich_root = manifest.aich_root.clone();
+                            changed = true;
+                        }
+                    });
+                    if changed {
+                        generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    }
+                    Ok(manifest)
+                })
+            })
+            .await
+            .context("AICH identity publication task panicked")?;
         }
         Ok(manifest)
     }
@@ -444,49 +466,77 @@ impl Ed2kTransferRuntime {
         let cache = Arc::clone(&self.manifest_cache);
         let checkpoints = Arc::clone(&self.manifest_checkpoint_state);
         let corroboration = Arc::clone(&self.aich_root_corroboration);
+        let catalog = Arc::clone(&self.shared_catalog);
+        let catalog_generation = Arc::clone(&self.shared_catalog_generation);
+        let parsed_hash = manifest.file_hash.parse::<Ed2kHash>()?;
         #[cfg(test)]
         let barrier = self.aich_persist_barrier.lock().unwrap().take();
         tokio::spawn(async move {
             let guard = guard;
             let result: Result<Ed2kResumeManifest> = async {
                 tokio::fs::create_dir_all(&transfer_dir).await?;
+                let writer = metadata.clone();
                 let stored = tokio::task::spawn_blocking(move || {
-                    metadata.upsert_transfer_manifest_reconciled(&row)
+                    writer.upsert_transfer_manifest_reconciled(&row)
                 })
                 .await
                 .context("AICH manifest upsert task panicked")??;
-                let manifest = manifest_from_metadata(stored)?;
+                let mut manifest = manifest_from_metadata(stored)?;
                 #[cfg(test)]
                 if let Some(barrier) = barrier {
                     barrier.committed.notify_one();
                     barrier.release.notified().await;
                 }
-                cache
-                    .lock()
-                    .await
-                    .insert(manifest.file_hash.clone(), manifest.clone());
-                checkpoints.lock().await.insert(
-                    manifest.file_hash.clone(),
-                    Ed2kManifestCheckpointState {
-                        persisted_bytes_written: manifest_progress_bytes(&manifest),
-                        last_persisted_at: Instant::now(),
-                        dirty_piece_indexes: std::collections::BTreeSet::new(),
-                    },
-                );
-                let mut map = corroboration
-                    .lock()
-                    .expect("aich corroboration mutex poisoned");
-                if let Some(votes) = votes
-                    && matches!(
-                        manifest.aich_root_origin,
-                        None | Some(super::Ed2kAichRootOrigin::NetworkConsensus)
-                    )
-                {
-                    map.insert(manifest.file_hash.clone(), votes);
-                } else {
-                    map.remove(&manifest.file_hash);
-                }
-                Ok(manifest)
+                let mut cached = manifest.clone();
+                let progress = manifest_progress_bytes(&manifest);
+                // Lock order: manifest -> cache -> checkpoints -> catalog ->
+                // corroboration -> metadata connection. No callback below may
+                // await, do I/O, re-enter metadata or acquire another lock.
+                let mut cache = cache.lock_owned().await;
+                let mut checkpoints = checkpoints.lock_owned().await;
+                let mut catalog = catalog.write_owned().await;
+                let hash = manifest.file_hash.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut map = corroboration
+                        .lock()
+                        .expect("aich corroboration mutex poisoned");
+                    metadata.publish_transfer_aich_identity(&hash, |identity| {
+                        super::aich_trust::merge_persisted_identity(&mut manifest, &identity)?;
+                        super::aich_trust::merge_persisted_identity(&mut cached, &identity)?;
+                        cache.insert(hash.clone(), cached);
+                        checkpoints.insert(
+                            hash.clone(),
+                            Ed2kManifestCheckpointState {
+                                persisted_bytes_written: progress,
+                                last_persisted_at: Instant::now(),
+                                dirty_piece_indexes: std::collections::BTreeSet::new(),
+                            },
+                        );
+                        if let Some(votes) = votes
+                            && matches!(
+                                manifest.aich_root_origin,
+                                None | Some(super::Ed2kAichRootOrigin::NetworkConsensus)
+                            )
+                        {
+                            map.insert(hash.clone(), votes);
+                        } else {
+                            map.remove(&hash);
+                        }
+                        let mut changed = false;
+                        catalog.update_by_hash(&parsed_hash, |entry| {
+                            if entry.aich_root != manifest.aich_root {
+                                entry.aich_root = manifest.aich_root.clone();
+                                changed = true;
+                            }
+                        });
+                        if changed {
+                            catalog_generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        Ok(manifest)
+                    })
+                })
+                .await
+                .context("AICH publication task panicked")?
             }
             .await;
             if let Err(error) = &result {
