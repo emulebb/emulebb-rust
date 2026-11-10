@@ -1322,12 +1322,47 @@ async fn test_run_search_phase_emits_even_when_idle_grace_exceeds_remaining_budg
     );
 }
 
-/// Regression for issue #19's VPN-only Kad zero-result failure. Phase 1 uses
-/// nearly all of the active budget, the keyword request is emitted just before
-/// active sending stops, and the valid reply arrives during eMule's result-only
-/// stop grace. The reply must still be collected.
+/// Regression for issue #19's VPN-only Kad zero-result failure. Observe the
+/// actual lookup and keyword requests, then deliver a valid result after active
+/// sending stops but inside eMule's result-only grace. Tight lookup reservation
+/// and first-emission clamping are covered separately; this fixture gives the
+/// real-time scheduler room to exercise the complete traversal and late reply.
 #[tokio::test]
 async fn keyword_traversal_collects_reply_after_active_deadline() {
+    async fn observe_request(
+        transport: &MockTransport,
+        outgoing: &mut Vec<(std::net::SocketAddr, Vec<u8>)>,
+        target: NodeId,
+        search_request: bool,
+        deadline: Instant,
+    ) -> Instant {
+        tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
+            loop {
+                let packets = transport.drain_outgoing();
+                let observed = packets.iter().any(|(_, bytes)| {
+                    KadPacket::decode(bytes).is_ok_and(|packet| match packet {
+                        KadPacket::Req(request) => !search_request && request.target == target,
+                        KadPacket::SearchKeyReq(request) => {
+                            search_request && request.target == target
+                        }
+                        _ => false,
+                    })
+                });
+                outgoing.extend(packets);
+                if observed {
+                    return Instant::now();
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("traversal must emit the causally observed request before its fixture deadline")
+    }
+
+    let active_budget = Duration::from_secs(6);
+    let query_budget = Duration::from_secs(1);
+    let response_grace = Duration::from_secs(3);
+    let late_reply_margin = Duration::from_millis(100);
     let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
     let injector = transport.injector();
     let rpc = RpcManager::new(
@@ -1347,9 +1382,21 @@ async fn keyword_traversal_collects_reply_after_active_deadline() {
     let reply_addr = contact.addr;
     let sender_id = contact.id;
 
-    tokio::spawn(async move {
-        // Land the lookup response near the reserved phase-1 boundary.
-        tokio::time::sleep(Duration::from_millis(120)).await;
+    // The private traversal start is after this lower bound and before its
+    // outgoing lookup is observed. Bracket it instead of assuming task-spawn
+    // time equals the traversal's own std::time::Instant.
+    let before_run = Instant::now();
+    let observer_transport = Arc::clone(&transport);
+    let replies = tokio::spawn(async move {
+        let mut outgoing = Vec::new();
+        let lookup_observed_at = observe_request(
+            &observer_transport,
+            &mut outgoing,
+            target,
+            false,
+            before_run + query_budget,
+        )
+        .await;
         injector
             .send((
                 KadPacket::Res(emulebb_kad_proto::packet::Res {
@@ -1363,9 +1410,33 @@ async fn keyword_traversal_collects_reply_after_active_deadline() {
             .await
             .unwrap();
 
-        // The phase-2 request is clamped near the 300ms active deadline. Model
-        // the VPN round trip by returning after that deadline but inside grace.
-        tokio::time::sleep(Duration::from_millis(210)).await;
+        let earliest_active_deadline = before_run + active_budget;
+        let latest_active_deadline = lookup_observed_at + active_budget;
+        let earliest_response_deadline = earliest_active_deadline + response_grace;
+        let search_observed_at = observe_request(
+            &observer_transport,
+            &mut outgoing,
+            target,
+            true,
+            earliest_active_deadline,
+        )
+        .await;
+        assert!(
+            search_observed_at < earliest_active_deadline,
+            "the keyword request must be observed before every possible active deadline"
+        );
+        let reply_at = latest_active_deadline + late_reply_margin;
+        assert!(reply_at < earliest_response_deadline);
+        tokio::time::sleep(reply_at.saturating_duration_since(Instant::now())).await;
+        let injected_at = Instant::now();
+        assert!(
+            injected_at > latest_active_deadline,
+            "the result must arrive after every possible active deadline"
+        );
+        assert!(
+            injected_at < earliest_response_deadline,
+            "the result must arrive before every possible response-grace deadline"
+        );
         injector
             .send((
                 KadPacket::SearchRes(SearchRes {
@@ -1382,6 +1453,11 @@ async fn keyword_traversal_collects_reply_after_active_deadline() {
             ))
             .await
             .unwrap();
+        assert!(
+            Instant::now() < earliest_response_deadline,
+            "the result must finish enqueueing before every possible response-grace deadline"
+        );
+        outgoing
     });
 
     let result = run_traversal(
@@ -1396,9 +1472,9 @@ async fn keyword_traversal_collects_reply_after_active_deadline() {
                     restrictive_payload: Vec::new(),
                 },
             },
-            timeout: Duration::from_millis(300),
-            response_grace: Duration::from_millis(200),
-            query_timeout: Duration::from_millis(140),
+            timeout: active_budget,
+            response_grace,
+            query_timeout: query_budget,
             phase2_fanout: 1,
             more_results: MoreResultsMode::RecoveryOnly,
             cancel: CancellationToken::new(),
@@ -1410,7 +1486,10 @@ async fn keyword_traversal_collects_reply_after_active_deadline() {
     )
     .await;
 
-    let outgoing = transport.drain_outgoing();
+    let mut outgoing = replies
+        .await
+        .expect("causal response fixture must complete");
+    outgoing.extend(transport.drain_outgoing());
     assert!(
         outgoing.iter().any(|(_, bytes)| {
             KadPacket::decode(bytes)
