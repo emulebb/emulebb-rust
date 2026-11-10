@@ -210,6 +210,88 @@ async fn accepted_consensus_resumes_verified_without_erasing_network_origin() {
 }
 
 #[tokio::test]
+async fn canceled_acceptance_finishes_publication_before_conflicting_vote() {
+    use std::{sync::Arc, time::Duration};
+
+    let (runtime, file_hash) = runtime_with_job().await;
+    let runtime = Arc::new(runtime);
+    let root = [0x42; 20];
+    let observations = (0..9)
+        .map(|signer| (root, ip(203, signer, 0, 1)))
+        .collect::<Vec<_>>();
+    runtime
+        .record_network_aich_observations(&file_hash, &observations)
+        .await
+        .unwrap();
+    let barrier = Arc::new(super::super::aich_trust::AichPersistBarrier::default());
+    *runtime.aich_persist_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
+    let caller = {
+        let runtime = Arc::clone(&runtime);
+        let hash = file_hash.clone();
+        tokio::spawn(async move {
+            runtime
+                .record_network_aich_root(&hash, Some(root), ip(203, 9, 0, 1))
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), barrier.committed.notified())
+        .await
+        .unwrap();
+    // SQL has committed but publication is deliberately paused. Aborting the
+    // caller must not release the manifest gate or abandon the staged votes.
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(
+        runtime.manifest_locks.lock().unwrap()[&file_hash]
+            .try_lock()
+            .is_err()
+    );
+    assert!(
+        runtime.manifest_cache.lock().await[&file_hash]
+            .aich_root
+            .is_none()
+    );
+    let disagreeing = {
+        let runtime = Arc::clone(&runtime);
+        let hash = file_hash.clone();
+        tokio::spawn(async move {
+            runtime
+                .record_network_aich_root(&hash, Some([0xff; 20]), ip(198, 0, 0, 1))
+                .await
+        })
+    };
+    barrier.release.notify_one();
+    let demoted = tokio::time::timeout(Duration::from_secs(5), disagreeing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(demoted.aich_root.is_none());
+    assert_eq!(demoted.aich_trust_generation, 2);
+    let persisted = runtime
+        .metadata
+        .transfer_manifest_by_hash(&file_hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.aich_root, demoted.aich_root);
+    assert_eq!(
+        persisted.aich_trust_generation,
+        demoted.aich_trust_generation
+    );
+    let directory = runtime.root_dir.clone();
+    drop(runtime);
+    let resumed = Ed2kTransferRuntime::load_or_create(&directory).unwrap();
+    assert!(
+        resumed
+            .manifest(&file_hash)
+            .await
+            .unwrap()
+            .aich_root
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn operator_identity_supersedes_live_consensus_without_peer_veto() {
     let (runtime, file_hash) = runtime_with_job().await;
     let candidate = consistent_candidate();

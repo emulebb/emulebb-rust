@@ -381,6 +381,68 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
+    /// Once a trust decision starts committing, its per-transfer guard and
+    /// publication belong to this task, not to the cancelable network caller.
+    /// Votes are staged until the durable decision and cache agree. Other
+    /// manifest writers cannot pass the guard during detached completion.
+    pub(super) async fn store_aich_transition_owned(
+        &self,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+        manifest: Ed2kResumeManifest,
+        votes: Option<super::aich_trust::AichRootCorroboration>,
+    ) -> Result<(Ed2kResumeManifest, tokio::sync::OwnedMutexGuard<()>)> {
+        let row = manifest_to_metadata(&manifest)?;
+        let transfer_dir = self.transfer_dir(&manifest.file_hash);
+        let metadata = self.metadata.clone();
+        let cache = Arc::clone(&self.manifest_cache);
+        let checkpoints = Arc::clone(&self.manifest_checkpoint_state);
+        let corroboration = Arc::clone(&self.aich_root_corroboration);
+        #[cfg(test)]
+        let barrier = self.aich_persist_barrier.lock().unwrap().take();
+        tokio::spawn(async move {
+            let guard = guard;
+            let result: Result<Ed2kResumeManifest> = async {
+                tokio::fs::create_dir_all(&transfer_dir).await?;
+                tokio::task::spawn_blocking(move || metadata.upsert_transfer_manifest(&row))
+                    .await
+                    .context("AICH manifest upsert task panicked")??;
+                #[cfg(test)]
+                if let Some(barrier) = barrier {
+                    barrier.committed.notify_one();
+                    barrier.release.notified().await;
+                }
+                cache
+                    .lock()
+                    .await
+                    .insert(manifest.file_hash.clone(), manifest.clone());
+                checkpoints.lock().await.insert(
+                    manifest.file_hash.clone(),
+                    Ed2kManifestCheckpointState {
+                        persisted_bytes_written: manifest_progress_bytes(&manifest),
+                        last_persisted_at: Instant::now(),
+                        dirty_piece_indexes: std::collections::BTreeSet::new(),
+                    },
+                );
+                let mut map = corroboration
+                    .lock()
+                    .expect("aich corroboration mutex poisoned");
+                if let Some(votes) = votes {
+                    map.insert(manifest.file_hash.clone(), votes);
+                } else {
+                    map.remove(&manifest.file_hash);
+                }
+                Ok(manifest)
+            }
+            .await;
+            if let Err(error) = &result {
+                tracing::error!(%error, "AICH decision persistence failed");
+            }
+            result.map(|manifest| (manifest, guard))
+        })
+        .await
+        .context("AICH decision completion task panicked")?
+    }
+
     /// Persist mid-piece progress WITHOUT rewriting the manifest's child
     /// tables — the batched download checkpoint. Persists `current_piece`
     /// plus every piece dirtied by cache-only appends since the last durable

@@ -324,6 +324,8 @@ pub struct Ed2kTransferRuntime {
     /// signer set lives here (in-memory, live session state, never persisted);
     /// the durable trust decision is the promoted `manifest.aich_root`.
     aich_root_corroboration: Arc<StdMutex<HashMap<String, aich_trust::AichRootCorroboration>>>,
+    #[cfg(test)]
+    aich_persist_barrier: Arc<StdMutex<Option<Arc<aich_trust::AichPersistBarrier>>>>,
     download_activity: Arc<StdMutex<HashMap<String, Ed2kDownloadActivity>>>,
     /// Live per-source download state keyed by file hash -> peer endpoint, used
     /// to surface sourcesTransferring/partsAvailable and live transfer-source
@@ -754,6 +756,8 @@ impl Ed2kTransferRuntime {
             payload_handles: Arc::new(StdMutex::new(HashMap::new())),
             source_exchange: SourceExchangeState::default(),
             aich_root_corroboration: Arc::new(StdMutex::new(HashMap::new())),
+            #[cfg(test)]
+            aich_persist_barrier: Arc::new(StdMutex::new(None)),
             download_activity: Arc::new(StdMutex::new(HashMap::new())),
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
             download_abuse: Arc::new(parking_lot::Mutex::new(

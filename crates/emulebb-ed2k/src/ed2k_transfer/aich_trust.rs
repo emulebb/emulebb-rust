@@ -19,6 +19,14 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::{Ed2kAichRootOrigin, Ed2kResumeManifest};
 
+/// Deterministically stop a test after SQL commit and before cache publication.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct AichPersistBarrier {
+    pub(super) committed: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}
+
 /// Change accepted identity under the manifest lock. The generation and
 /// dependent part set change atomically with the persisted decision.
 pub(super) fn set_identity(
@@ -81,7 +89,7 @@ fn mask_signer_ip(octets: [u8; 4]) -> [u8; 4] {
 /// conflicting candidates. In-memory only (live session trust state, never
 /// persisted): the durable master, origin and generation describe an accepted
 /// decision. Live vote history is bounded and released with the transfer.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct AichRootCorroboration {
     /// Masked proposing IP -> first root proposed by that signer.
     proposals: HashMap<[u8; 4], [u8; 20]>,
