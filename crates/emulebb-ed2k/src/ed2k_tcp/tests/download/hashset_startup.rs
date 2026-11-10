@@ -20,11 +20,23 @@ async fn trusted_master_allows_aich_only_acquisition_after_md4_is_known() {
     run_hashset_startup_case(StartupAichCase::OperatorWithMd4).await;
 }
 
+#[tokio::test]
+async fn current_consensus_master_allows_a_matching_modern_part_set() {
+    run_hashset_startup_case(StartupAichCase::NetworkConsensus).await;
+}
+
+#[tokio::test]
+async fn late_modern_aich_answer_cannot_cross_a_consensus_aba_generation() {
+    run_hashset_startup_case(StartupAichCase::ConsensusAba).await;
+}
+
 enum StartupAichCase {
     Advertised,
     Unrelated,
     Operator,
     OperatorWithMd4,
+    NetworkConsensus,
+    ConsensusAba,
 }
 
 async fn run_hashset_startup_case(case: StartupAichCase) {
@@ -33,6 +45,12 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
         case,
         StartupAichCase::Operator | StartupAichCase::OperatorWithMd4
     );
+    let consensus_root = matches!(
+        case,
+        StartupAichCase::NetworkConsensus | StartupAichCase::ConsensusAba
+    );
+    let late_aich_answer = matches!(case, StartupAichCase::ConsensusAba);
+    let trusted_root = operator_root || consensus_root;
     let md4_preseeded = matches!(case, StartupAichCase::OperatorWithMd4);
     let root = unique_test_dir("ed2k-large-file-secure-ident-order");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
@@ -98,6 +116,19 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
     if operator_root {
         transfer_runtime
             .reconcile_aich_root(&file_hash_hex, Some(advertised_root))
+            .await
+            .unwrap();
+    } else if consensus_root {
+        let observations = (0..10)
+            .map(|signer| {
+                (
+                    advertised_root,
+                    IpAddr::V4(std::net::Ipv4Addr::new(203, signer, 0, 1)),
+                )
+            })
+            .collect::<Vec<_>>();
+        transfer_runtime
+            .record_network_aich_observations(&file_hash_hex, &observations)
             .await
             .unwrap();
     }
@@ -176,7 +207,56 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
             Some(payload_for_server.len() as u64)
         );
         assert_eq!(request_options.request_md4, !md4_preseeded);
-        assert_eq!(request_options.request_aich, operator_root);
+        assert_eq!(request_options.request_aich, trusted_root);
+
+        let mut expected_generation = None;
+        if consensus_root {
+            let requested = observed_runtime
+                .manifest(&file_hash.to_string())
+                .await
+                .unwrap();
+            assert_eq!(requested.aich_root, Some(hex::encode(advertised_root)));
+            assert_eq!(
+                requested.aich_root_origin,
+                Some(crate::ed2k_transfer::Ed2kAichRootOrigin::NetworkConsensus)
+            );
+            expected_generation = Some(requested.aich_trust_generation);
+            if late_aich_answer {
+                // WHY: receiving the real request is the causal barrier. Retire
+                // its generation before sending its otherwise matching answer;
+                // returning to the same master prevents a root mismatch from
+                // accidentally testing the wrong response-admission boundary.
+                let mut dissenting_root = advertised_root;
+                dissenting_root[0] ^= 0x80;
+                let demoted = observed_runtime
+                    .record_network_aich_root(
+                        &file_hash.to_string(),
+                        Some(dissenting_root),
+                        IpAddr::V4(std::net::Ipv4Addr::new(198, 0, 0, 1)),
+                    )
+                    .await
+                    .unwrap();
+                assert!(demoted.aich_root.is_none());
+                assert!(demoted.aich_trust_generation > requested.aich_trust_generation);
+                let renewed = observed_runtime
+                    .record_network_aich_observations(
+                        &file_hash.to_string(),
+                        &[10, 11].map(|signer| {
+                            (
+                                advertised_root,
+                                IpAddr::V4(std::net::Ipv4Addr::new(203, signer, 0, 1)),
+                            )
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(renewed.aich_root, requested.aich_root);
+                assert_eq!(renewed.aich_root_origin, requested.aich_root_origin);
+                assert!(renewed.aich_trust_generation > demoted.aich_trust_generation);
+                assert!(!renewed.aich_hashset_acquired);
+                expected_generation = Some(renewed.aich_trust_generation);
+            }
+        }
 
         let hashset_answer = super::encode_hashset_answer2(
             &source_identifier,
@@ -198,8 +278,17 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
             .await
             .unwrap();
         assert!(before_payload.md4_hashset_acquired);
-        if operator_root {
+        if trusted_root {
             assert_eq!(before_payload.aich_root, Some(hex::encode(advertised_root)));
+            assert_eq!(before_payload.aich_hashset_acquired, !late_aich_answer);
+            assert_eq!(before_payload.aich_hashset.is_empty(), late_aich_answer);
+            if let Some(generation) = expected_generation {
+                assert_eq!(before_payload.aich_trust_generation, generation);
+                assert_eq!(
+                    before_payload.aich_root_origin,
+                    Some(crate::ed2k_transfer::Ed2kAichRootOrigin::NetworkConsensus)
+                );
+            }
         } else {
             assert!(before_payload.aich_root.is_none());
             assert!(!before_payload.aich_hashset_acquired);
