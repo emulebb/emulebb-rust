@@ -184,6 +184,8 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-workspace-crates: false
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 
@@ -276,6 +278,8 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-workspace-crates: false
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 
