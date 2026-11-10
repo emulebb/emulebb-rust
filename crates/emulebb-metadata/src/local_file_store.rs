@@ -393,6 +393,7 @@ impl MetadataStore {
             stored_size == size,
             MetadataContentConflict("ED2K identity has conflicting file size")
         );
+        crate::transfer_store::reconcile_transfer_aich_authority_tx(tx, known_file_id)?;
         let inserted = tx.execute(
             "INSERT INTO verified_local_content(
                 known_file_id, display_name, part_size_bytes, part_count, aich_root,

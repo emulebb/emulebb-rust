@@ -62,6 +62,13 @@ pub struct MetadataTransferDirectoryDeletionAuthority {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferAichIdentity {
+    pub root: Option<String>,
+    pub origin: Option<String>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferManifest {
     pub file_hash: String,
     pub display_name: String,

@@ -55,6 +55,151 @@ fn consistent_candidate() -> Ed2kAichHashset {
     }
 }
 
+fn accept_independent_root(
+    runtime: &Ed2kTransferRuntime,
+    manifest: &super::super::Ed2kResumeManifest,
+    root: [u8; 20],
+    stock: bool,
+) {
+    let fingerprint = emulebb_metadata::NativeFileFingerprint {
+        identity: emulebb_metadata::NativeFileIdentity::Unix {
+            device_id: 1,
+            inode_number: 2,
+        },
+        size_bytes: manifest.file_size,
+        modified: emulebb_metadata::NativeFileTimestamp::new(0, 0).unwrap(),
+        changed: None,
+    };
+    let path = runtime.root_dir.join("accepted-local.bin");
+    if stock {
+        runtime
+            .metadata
+            .accept_imported_local_files(&[(
+                emulebb_metadata::MetadataFileImportRecord {
+                    file_hash: manifest.file_hash.clone(),
+                    display_name: "accepted-stock.bin".to_owned(),
+                    file_size: manifest.file_size,
+                    modified_s: 0,
+                    md4_hashset: Vec::new(),
+                    aich_root: Some(hex::encode(root)),
+                    aich_hashset: Vec::new(),
+                    upload_priority: "normal".to_owned(),
+                    auto_upload_priority: false,
+                    all_time_uploaded_bytes: 0,
+                    all_time_upload_requests: 0,
+                    all_time_upload_accepts: 0,
+                    last_upload_request_ms: 0,
+                },
+                path,
+                fingerprint,
+            )])
+            .unwrap();
+    } else {
+        runtime
+            .metadata
+            .upsert_verified_local_content(&emulebb_metadata::MetadataVerifiedLocalContent {
+                file_hash: manifest.file_hash.clone(),
+                display_name: "accepted-local.bin".to_owned(),
+                file_size: manifest.file_size,
+                part_size: manifest.piece_size,
+                md4_hashset: Vec::new(),
+                aich_root: Some(hex::encode(root)),
+                aich_hashset: Vec::new(),
+                path,
+                fingerprint,
+                upload_priority: "normal".to_owned(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
+            })
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn accepted_authority_retires_old_parts_without_another_vote_and_after_restart() {
+    for stock in [false, true] {
+        let (runtime, file_hash) = runtime_with_job().await;
+        let old = consistent_candidate();
+        let observations = (0..10)
+            .map(|signer| (old.master_hash, ip(203, signer, 0, 1)))
+            .collect::<Vec<_>>();
+        runtime
+            .record_network_aich_observations(&file_hash, &observations)
+            .await
+            .unwrap();
+        let mut stale = runtime
+            .store_aich_hashset(&file_hash, old.clone())
+            .await
+            .unwrap();
+        // Simulate a newer cache-only append: identity refresh must not reload
+        // old SQL piece rows over independently received payload progress.
+        stale.pieces[0].bytes_written = 123;
+        runtime.cache_manifest_unlocked(&stale).await;
+        let mut replacement = consistent_candidate();
+        replacement.part_hashes[0] = [0x91; 20];
+        replacement.master_hash = super::super::hashset::reconstruct_aich_root_from_part_hashes(
+            stale.file_size,
+            &replacement.part_hashes,
+        )
+        .unwrap();
+        accept_independent_root(&runtime, &stale, replacement.master_hash, stock);
+
+        // Verify SQL before any runtime refresh or new peer observation. Both
+        // cold loaders must see one coherent accepted decision.
+        let persisted = runtime
+            .metadata
+            .transfer_manifest_by_hash(&file_hash)
+            .unwrap()
+            .unwrap();
+        let listed = runtime.metadata.incomplete_transfer_manifests().unwrap();
+        assert_eq!(listed[0].aich_root, persisted.aich_root);
+        assert_eq!(
+            persisted.aich_root,
+            Some(hex::encode(replacement.master_hash))
+        );
+        assert!(persisted.aich_trust_generation > stale.aich_trust_generation);
+        assert!(!persisted.aich_hashset_acquired);
+        assert!(persisted.aich_hashset.is_empty());
+        let current = runtime.manifest(&file_hash).await.unwrap();
+        assert_eq!(current.pieces[0].bytes_written, 123);
+        assert_eq!(current.aich_root, persisted.aich_root);
+        assert!(!current.aich_hashset_acquired);
+        let rejected = runtime
+            .store_aich_hashset_for_generation(&file_hash, old, stale.aich_trust_generation)
+            .await
+            .unwrap();
+        assert!(!rejected.aich_hashset_acquired);
+
+        // A delayed full checkpoint also cannot restore its old root, origin,
+        // generation or acquired set. Its independent piece progress survives.
+        let guard = runtime.lock_manifest(&file_hash).await;
+        runtime.store_manifest_unlocked(&stale).await.unwrap();
+        drop(guard);
+        let directory = runtime.root_dir.clone();
+        drop(runtime);
+        let resumed = Ed2kTransferRuntime::load_or_create(&directory).unwrap();
+        let cold = resumed.manifest(&file_hash).await.unwrap();
+        assert_eq!(cold.aich_root, persisted.aich_root);
+        assert_eq!(cold.aich_trust_generation, persisted.aich_trust_generation);
+        assert_eq!(cold.pieces[0].bytes_written, 123);
+        assert!(!cold.aich_hashset_acquired);
+        assert_eq!(
+            cold.aich_root_origin,
+            Some(if stock {
+                Ed2kAichRootOrigin::StockImport
+            } else {
+                Ed2kAichRootOrigin::LocalComputed
+            })
+        );
+        let acquired = resumed
+            .store_aich_hashset_for_generation(&file_hash, replacement, cold.aich_trust_generation)
+            .await
+            .unwrap();
+        assert!(acquired.aich_hashset_acquired);
+    }
+}
+
 #[tokio::test]
 async fn internally_consistent_peer_hashset_does_not_establish_trust() {
     let (runtime, file_hash) = runtime_with_job().await;

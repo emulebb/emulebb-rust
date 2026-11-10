@@ -10,27 +10,33 @@ use crate::{
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
     transfer_model::{
-        MetadataSharedSourceFailure, MetadataTransferCatalogEntry, MetadataTransferCounts,
-        MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
-        MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
-        MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
-        MetadataTransferDirectoryDeletionAuthority, MetadataTransferFileNameObservation,
-        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
-        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferSource,
+        MetadataSharedSourceFailure, MetadataTransferAichIdentity, MetadataTransferCatalogEntry,
+        MetadataTransferCounts, MetadataTransferDeletionTombstone,
+        MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
+        MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
+        MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
+        MetadataTransferFileNameObservation, MetadataTransferManifest,
+        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
+        MetadataTransferRange, MetadataTransferSource,
     },
 };
 
 impl super::MetadataStore {
     pub fn upsert_transfer_manifest(&self, manifest: &MetadataTransferManifest) -> Result<()> {
+        self.upsert_transfer_manifest_reconciled(manifest)
+            .map(|_| ())
+    }
+
+    /// Persist progress while retaining any newer accepted AICH authority. The
+    /// returned row is the exact manifest committed, including identity-only
+    /// reconciliation; callers must publish this row rather than their stale
+    /// input. Piece progress and MD4 verification are never reset here.
+    pub fn upsert_transfer_manifest_reconciled(
+        &self,
+        manifest: &MetadataTransferManifest,
+    ) -> Result<MetadataTransferManifest> {
         crate::transfer_validation::validate_manifest(manifest)?;
         let hash = decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?;
-        let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
-        let accepted_aich_root =
-            if manifest.aich_root_origin.as_deref() == Some("network_consensus") {
-                None
-            } else {
-                aich_root.as_deref()
-            };
         let now = unix_ms();
         let mut conn = self.connection()?;
         // WHY: this transaction reads deletion authority before writing paths and
@@ -38,6 +44,16 @@ impl super::MetadataStore {
         // snapshot and fail its write upgrade with SQLITE_BUSY_SNAPSHOT after a
         // concurrent connection commits; acquire the writer slot before reading.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut reconciled = manifest.clone();
+        reconcile_manifest_aich_identity(&tx, &hash, &mut reconciled)?;
+        let manifest = &reconciled;
+        let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
+        let accepted_aich_root =
+            if manifest.aich_root_origin.as_deref() == Some("network_consensus") {
+                None
+            } else {
+                aich_root.as_deref()
+            };
         crate::content_identity::check_accepted_identity(
             &tx,
             &hash,
@@ -239,7 +255,18 @@ impl super::MetadataStore {
             completion_transition,
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(reconciled)
+    }
+
+    /// Indexed identity-only read for cached transfer users. Do not load piece,
+    /// source, range or part-hash tables just to fence an AICH response.
+    pub fn transfer_aich_identity_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferAichIdentity>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        read_transfer_aich_identity(&conn, &hash)
     }
 
     pub fn transfer_manifest_by_hash(
@@ -274,8 +301,8 @@ impl super::MetadataStore {
                        transfers.completed, transfers.md4_hashset_acquired,
                        transfers.aich_hashset_acquired,
                        CASE
-                           WHEN coalesce(known_files.aich_root, transfers.aich_root) IS NULL THEN NULL
-                           ELSE lower(hex(coalesce(known_files.aich_root, transfers.aich_root)))
+                           WHEN transfers.aich_root IS NULL THEN NULL
+                           ELSE lower(hex(transfers.aich_root))
                        END,
                        transfers.upload_priority, transfers.auto_upload_priority,
                        transfers.comment, transfers.rating,
@@ -284,7 +311,7 @@ impl super::MetadataStore {
                        transfers.source_fingerprint, transfers.payload_fingerprint,
                        transfers.final_rehash_pending, transfers.delivery_state,
                        transfers.delivery_ownership,
-                       coalesce(known_files.aich_root_origin, transfers.aich_root_origin),
+                       transfers.aich_root_origin,
                        transfers.aich_trust_generation
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
@@ -517,8 +544,8 @@ impl super::MetadataStore {
                    transfers.completed, transfers.md4_hashset_acquired,
                    transfers.aich_hashset_acquired,
                    CASE
-                       WHEN coalesce(known_files.aich_root, transfers.aich_root) IS NULL THEN NULL
-                       ELSE lower(hex(coalesce(known_files.aich_root, transfers.aich_root)))
+                       WHEN transfers.aich_root IS NULL THEN NULL
+                       ELSE lower(hex(transfers.aich_root))
                    END,
                    transfers.upload_priority, transfers.auto_upload_priority,
                    transfers.comment, transfers.rating,
@@ -527,7 +554,7 @@ impl super::MetadataStore {
                    transfers.source_fingerprint, transfers.payload_fingerprint,
                    transfers.final_rehash_pending, transfers.delivery_state,
                    transfers.delivery_ownership,
-                   coalesce(known_files.aich_root_origin, transfers.aich_root_origin),
+                   transfers.aich_root_origin,
                    transfers.aich_trust_generation
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -1855,6 +1882,168 @@ fn delete_transfer_and_unreferenced_identity(
          AND NOT EXISTS (SELECT 1 FROM verified_local_content WHERE known_file_id = ?1)
          AND NOT EXISTS (SELECT 1 FROM local_file_instances WHERE known_file_id = ?1)",
         params![known_file_id],
+    )?;
+    Ok(())
+}
+
+fn read_transfer_aich_identity(
+    conn: &rusqlite::Connection,
+    hash: &[u8],
+) -> Result<Option<MetadataTransferAichIdentity>> {
+    Ok(conn
+        .query_row(
+            "SELECT CASE WHEN t.aich_root IS NULL THEN NULL ELSE lower(hex(t.aich_root)) END,
+                t.aich_root_origin, t.aich_trust_generation
+         FROM known_files f JOIN transfers t ON t.known_file_id = f.id
+         WHERE f.ed2k_hash = ?1 AND t.delete_requested_at_ms IS NULL",
+            params![hash],
+            |row| {
+                Ok(MetadataTransferAichIdentity {
+                    root: row.get(0)?,
+                    origin: row.get(1)?,
+                    generation: crate::sql_value::unsigned::<u64>(row, 2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn reconcile_manifest_aich_identity(
+    conn: &rusqlite::Connection,
+    hash: &[u8],
+    manifest: &mut MetadataTransferManifest,
+) -> Result<()> {
+    let current = read_transfer_aich_identity(conn, hash)?;
+    if let Some(current) = &current
+        && manifest.aich_trust_generation < current.generation
+    {
+        // A checkpoint may contain newer payload progress but older authority.
+        // Keep the former, and never resurrect its old acquired AICH part set.
+        manifest.aich_root = current.root.clone();
+        manifest.aich_root_origin = current.origin.clone();
+        manifest.aich_trust_generation = current.generation;
+        manifest.aich_hashset.clear();
+        manifest.aich_hashset_acquired = false;
+    }
+    let accepted = conn
+        .query_row(
+            "SELECT lower(hex(aich_root)), aich_root_origin FROM known_files
+         WHERE ed2k_hash = ?1 AND aich_root IS NOT NULL AND aich_root_origin IS NOT NULL",
+            params![hash],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if let Some((root, stored_origin)) = accepted {
+        if manifest.aich_root.is_some() {
+            ensure!(
+                manifest.aich_root.as_ref() == Some(&root),
+                crate::MetadataContentConflict("ED2K identity has conflicting AICH root")
+            );
+        }
+        // Preserve legitimate local/import enrichment of the same accepted
+        // root; lower-authority checkpoints cannot downgrade its provenance.
+        let origin = match manifest.aich_root_origin.as_deref() {
+            Some("local_computed") => "local_computed".to_owned(),
+            Some("stock_import") if stored_origin != "local_computed" => "stock_import".to_owned(),
+            _ => stored_origin,
+        };
+        if manifest.aich_root.as_ref() != Some(&root)
+            || manifest.aich_root_origin.as_ref() != Some(&origin)
+        {
+            if manifest.aich_root.as_ref() != Some(&root) {
+                manifest.aich_hashset.clear();
+                manifest.aich_hashset_acquired = false;
+            }
+            manifest.aich_trust_generation = match current.as_ref() {
+                Some(current)
+                    if current.root.as_ref() == Some(&root)
+                        && current.origin.as_ref() == Some(&origin) =>
+                {
+                    current.generation
+                }
+                current => manifest.aich_trust_generation.max(
+                    current
+                        .map_or(0, |current| current.generation)
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("AICH trust generation exhausted"))?,
+                ),
+            };
+            i64::try_from(manifest.aich_trust_generation)?;
+            manifest.aich_root = Some(root);
+            manifest.aich_root_origin = Some(origin);
+        }
+    }
+    if let Some(current) = current {
+        let minimum_generation =
+            if manifest.aich_root != current.root || manifest.aich_root_origin != current.origin {
+                current
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("AICH trust generation exhausted"))?
+            } else {
+                current.generation
+            };
+        manifest.aich_trust_generation = manifest.aich_trust_generation.max(minimum_generation);
+        i64::try_from(manifest.aich_trust_generation)?;
+    }
+    Ok(())
+}
+
+/// Local hashing and trusted stock acceptance update the transfer in the same
+/// transaction as accepted identity. Cold readers therefore never combine a
+/// new root with an old acquired part set or generation.
+pub(crate) fn reconcile_transfer_aich_authority_tx(
+    tx: &rusqlite::Transaction<'_>,
+    known_file_id: i64,
+) -> Result<()> {
+    let row = tx
+        .query_row(
+            "SELECT t.id, f.aich_root, f.aich_root_origin, t.aich_root,
+                t.aich_root_origin, t.aich_trust_generation
+         FROM known_files f JOIN transfers t ON t.known_file_id = f.id
+         WHERE f.id = ?1 AND f.aich_root IS NOT NULL
+           AND f.aich_root_origin IS NOT NULL",
+            params![known_file_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    crate::sql_value::unsigned::<u64>(row, 5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((transfer_id, root, origin, previous_root, previous_origin, generation)) = row else {
+        return Ok(());
+    };
+    let root_changed = previous_root.as_ref() != Some(&root);
+    if !root_changed && previous_origin.as_ref() == Some(&origin) {
+        return Ok(());
+    }
+    let generation = generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("AICH trust generation exhausted"))?;
+    if root_changed {
+        tx.execute(
+            "DELETE FROM transfer_aich_part_hashes WHERE transfer_id = ?1",
+            params![transfer_id],
+        )?;
+    }
+    tx.execute(
+        "UPDATE transfers SET aich_root = ?2, aich_root_origin = ?3,
+             aich_trust_generation = ?4,
+             aich_hashset_acquired = CASE WHEN ?5 THEN 0 ELSE aich_hashset_acquired END
+         WHERE id = ?1",
+        params![
+            transfer_id,
+            root,
+            origin,
+            i64::try_from(generation)?,
+            root_changed
+        ],
     )?;
     Ok(())
 }

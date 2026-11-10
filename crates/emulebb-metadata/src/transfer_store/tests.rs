@@ -121,6 +121,72 @@ fn root_origin_and_part_set_cannot_manufacture_an_accepted_decision() {
 }
 
 #[test]
+fn accepted_local_identity_and_stale_checkpoint_preserve_md4_verified_progress() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut stale = completed_download_manifest();
+    stale.completed = false;
+    stale.aich_root = Some("11".repeat(20));
+    stale.aich_root_origin = Some("network_consensus".to_owned());
+    stale.aich_trust_generation = 1;
+    stale.aich_hashset_acquired = true;
+    stale.aich_hashset = vec!["33".repeat(20)];
+    stale.pieces = vec![MetadataTransferPiece {
+        piece_index: 0,
+        state: "Verified".to_owned(),
+        bytes_written: 16,
+        block_bitmap: None,
+        ich_corrupted: false,
+    }];
+    store.upsert_transfer_manifest(&stale).unwrap();
+    let content = crate::MetadataVerifiedLocalContent {
+        file_hash: stale.file_hash.clone(),
+        display_name: "local-authority.bin".to_owned(),
+        file_size: stale.file_size,
+        part_size: stale.piece_size,
+        md4_hashset: Vec::new(),
+        aich_root: Some("22".repeat(20)),
+        aich_hashset: Vec::new(),
+        path: std::env::temp_dir().join("aich-new-authority.bin"),
+        fingerprint: fingerprint(stale.file_size, 21),
+        upload_priority: "normal".to_owned(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+    };
+    store.upsert_verified_local_content(&content).unwrap();
+    let accepted = store
+        .transfer_manifest_by_hash(&stale.file_hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.aich_root, content.aich_root);
+    assert_eq!(accepted.aich_root_origin.as_deref(), Some("local_computed"));
+    assert_eq!(accepted.aich_trust_generation, 2);
+    assert!(!accepted.aich_hashset_acquired);
+    assert!(accepted.aich_hashset.is_empty());
+    assert_eq!(accepted.verified_ranges, stale.verified_ranges);
+    assert_eq!(accepted.pieces, stale.pieces);
+    assert_eq!(accepted.md4_hashset_acquired, stale.md4_hashset_acquired);
+
+    stale.comment = "newer independent checkpoint metadata".to_owned();
+    let canonical = store.upsert_transfer_manifest_reconciled(&stale).unwrap();
+    assert_eq!(canonical.aich_root, accepted.aich_root);
+    assert_eq!(canonical.aich_root_origin, accepted.aich_root_origin);
+    assert_eq!(
+        canonical.aich_trust_generation,
+        accepted.aich_trust_generation
+    );
+    assert!(canonical.aich_hashset.is_empty());
+    assert!(!canonical.aich_hashset_acquired);
+    assert_eq!(canonical.comment, stale.comment);
+    assert_eq!(canonical.verified_ranges, stale.verified_ranges);
+    assert_eq!(canonical.pieces, stale.pieces);
+    assert_eq!(
+        store.transfer_manifest_by_hash(&stale.file_hash).unwrap(),
+        Some(canonical)
+    );
+}
+
+#[test]
 fn operator_master_is_authority_for_network_and_local_content_writers() {
     let store = MetadataStore::in_memory().unwrap();
     let mut manifest = completed_download_manifest();
