@@ -187,6 +187,52 @@ fn accepted_local_identity_and_stale_checkpoint_preserve_md4_verified_progress()
 }
 
 #[test]
+fn local_acceptance_of_same_master_preserves_acquired_parts_and_progress() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_pending_download_manifest();
+    manifest.md4_hashset = vec!["22".repeat(16)];
+    manifest.aich_root = Some("11".repeat(20));
+    manifest.aich_root_origin = Some("network_consensus".to_owned());
+    manifest.aich_trust_generation = 7;
+    manifest.aich_hashset_acquired = true;
+    manifest.aich_hashset = vec!["33".repeat(20)];
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let content = crate::MetadataVerifiedLocalContent {
+        file_hash: manifest.file_hash.clone(),
+        display_name: "same-master.bin".to_owned(),
+        file_size: manifest.file_size,
+        part_size: manifest.piece_size,
+        md4_hashset: manifest.md4_hashset.clone(),
+        aich_root: manifest.aich_root.clone(),
+        aich_hashset: manifest.aich_hashset.clone(),
+        path: std::env::temp_dir().join("emulebb-same-master.bin"),
+        fingerprint: fingerprint(manifest.file_size, 201),
+        upload_priority: "normal".to_owned(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+    };
+    store.upsert_verified_local_content(&content).unwrap();
+    manifest.aich_root_origin = Some("local_computed".to_owned());
+    manifest.aich_trust_generation = 8;
+    // Provenance changed, but the acquired set is still bound to the same
+    // master. Whole-manifest equality also preserves independent MD4/progress.
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest.clone())
+    );
+    store.upsert_verified_local_content(&content).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest)
+    );
+}
+
+#[test]
 fn operator_master_is_authority_for_network_and_local_content_writers() {
     let store = MetadataStore::in_memory().unwrap();
     let mut manifest = completed_download_manifest();
@@ -732,6 +778,12 @@ fn deleting_download_preserves_same_hash_local_content() {
     manifest.md4_hashset = vec!["22222222222222222222222222222222".to_string()];
     manifest.aich_hashset = vec!["3333333333333333333333333333333333333333".to_string()];
     store.upsert_transfer_manifest(&manifest).unwrap();
+    assert_eq!(
+        store
+            .transfer_manifest_by_hash(&manifest.file_hash)
+            .unwrap(),
+        Some(manifest.clone())
+    );
     let path = std::env::temp_dir().join("emulebb-same-hash-local-content.bin");
     let content = crate::MetadataVerifiedLocalContent {
         file_hash: manifest.file_hash.clone(),
@@ -749,9 +801,13 @@ fn deleting_download_preserves_same_hash_local_content() {
         rating: 0,
     };
     store.upsert_verified_local_content(&content).unwrap();
-    // Content identity enrichment is shared; transfer-owned hashsets stay independent.
+    // A newly accepted master retires parts stored without that authority. MD4
+    // hashes and verified progress remain independent of this AICH transition.
     manifest.aich_root = content.aich_root.clone();
     manifest.aich_root_origin = Some("local_computed".to_string());
+    manifest.aich_trust_generation += 1;
+    manifest.aich_hashset.clear();
+    manifest.aich_hashset_acquired = false;
     assert_eq!(
         store
             .transfer_manifest_by_hash(&manifest.file_hash)
