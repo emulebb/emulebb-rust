@@ -26,6 +26,27 @@ async fn runtime_with_job() -> (Ed2kTransferRuntime, String) {
     (runtime, job.file_hash)
 }
 
+async fn runtime_with_servable_job() -> (Ed2kTransferRuntime, String) {
+    use md4::{Digest, Md4};
+
+    let root = unique_test_dir("ed2k-aich-servable-corroboration");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let mut part_hashes = vec![[0x31; 16]; 4];
+    part_hashes.push(Md4::digest(b"").into());
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(part_hashes.concat()).into());
+    let job = new_transfer_job(
+        file_hash,
+        "servable-corroboration.bin".to_owned(),
+        4 * super::super::ED2K_PART_SIZE,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, part_hashes)
+        .await
+        .unwrap();
+    (runtime, job.file_hash)
+}
+
 #[tokio::test]
 async fn single_peer_root_is_not_trusted() {
     let (runtime, file_hash) = runtime_with_job().await;
@@ -440,25 +461,38 @@ async fn seed_servable_catalog(
     runtime: &Ed2kTransferRuntime,
     manifest: &super::super::Ed2kResumeManifest,
 ) {
+    assert!(manifest.md4_hashset_acquired);
     let mut servable = manifest.clone();
-    servable.verified_ranges = vec![super::super::Ed2kSharedRange {
-        start: 0,
-        end: super::super::ED2K_PART_SIZE,
-    }];
+    servable.pieces[0].state = super::super::Ed2kTransferState::Verified;
+    servable.pieces[0].bytes_written = super::super::ED2K_PART_SIZE;
+    servable.pieces[0].block_bitmap = None;
+    super::super::manifest::rebuild_verified_ranges(&mut servable);
     let entry = super::super::Ed2kSharedEntry::from_manifest(&servable);
     assert!(entry.is_servable());
+    // The catalog must represent actual durable/cache MD4 authority, not a
+    // catalog-only entry that a valid later manifest refresh must remove.
+    let guard = runtime.lock_manifest(&manifest.file_hash).await;
+    runtime.store_manifest_unlocked(&servable).await.unwrap();
+    drop(guard);
     runtime
-        .shared_catalog
-        .write()
-        .await
-        .upsert_verified(manifest.file_hash.parse::<Ed2kHash>().unwrap(), Some(entry));
+        .upsert_verified_catalog_entry_cached(&servable)
+        .await;
+    assert!(
+        runtime
+            .shared_catalog
+            .read()
+            .await
+            .entry_by_hash(&manifest.file_hash.parse::<Ed2kHash>().unwrap())
+            .unwrap()
+            .is_servable()
+    );
 }
 
 #[tokio::test]
 async fn canceled_demotion_retires_advertised_root_before_releasing_guard() {
     use std::{sync::Arc, time::Duration};
 
-    let (runtime, file_hash) = runtime_with_job().await;
+    let (runtime, file_hash) = runtime_with_servable_job().await;
     let runtime = Arc::new(runtime);
     let observations = (0..10)
         .map(|signer| ([0x42; 20], ip(203, signer, 0, 1)))
@@ -514,7 +548,7 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
     use std::{sync::Arc, time::Duration};
 
     for stock in [false, true] {
-        let (runtime, file_hash) = runtime_with_job().await;
+        let (runtime, file_hash) = runtime_with_servable_job().await;
         let runtime = Arc::new(runtime);
         let observations = (0..9)
             .map(|signer| ([0x42; 20], ip(203, signer, 0, 1)))
@@ -538,7 +572,7 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
         tokio::time::timeout(Duration::from_secs(10), barrier.committed.notified())
             .await
             .unwrap();
-        let mut stale_projection = super::super::transfer_sql::manifest_from_metadata(
+        let stale_projection = super::super::transfer_sql::manifest_from_metadata(
             runtime
                 .metadata
                 .transfer_manifest_by_hash(&file_hash)
@@ -546,10 +580,14 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
                 .unwrap(),
         )
         .unwrap();
-        stale_projection.verified_ranges = vec![super::super::Ed2kSharedRange {
-            start: 0,
-            end: super::super::ED2K_PART_SIZE,
-        }];
+        assert!(stale_projection.md4_hashset_acquired);
+        assert_eq!(
+            stale_projection.verified_ranges,
+            vec![super::super::Ed2kSharedRange {
+                start: 0,
+                end: super::super::ED2K_PART_SIZE,
+            }]
+        );
         // A different accepted authority commits after the older task's SQL
         // write, while its cache/catalog publication is deliberately paused.
         accept_independent_root(&runtime, &previous, [0x77; 20], stock);
