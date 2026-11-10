@@ -219,7 +219,13 @@ jobs:
 
       - name: Install Linux build dependencies
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y dpkg-dev libfontconfig1-dev
+        timeout-minutes: 6
+        working-directory: .ci/emulebb-build
+        run: >-
+          python -B -m emule_workspace provision-ubuntu-dependencies-ci
+          --profile rust-native-release --deadline-seconds 300
+          --network-timeout-seconds 20 --attempts 3
+          --report "$RUNNER_TEMP/emulebb-rust-out/reports/native-linux-provisioning.json"
       - name: Install verified AppImage builder
         if: matrix.os == 'linux'
         shell: bash
@@ -263,7 +269,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: emulebb-rust-build-logs-${{ matrix.os }}-${{ matrix.arch }}
-          path: ${{ runner.temp }}/emulebb-rust-out/logs/builds/**/*.log
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/logs/builds/**/*.log
+            ${{ runner.temp }}/emulebb-rust-out/reports/native-linux-provisioning.json
           if-no-files-found: warn
           retention-days: 30
       - name: Retain package and provenance
