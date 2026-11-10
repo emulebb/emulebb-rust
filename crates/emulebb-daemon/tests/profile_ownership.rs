@@ -100,6 +100,20 @@ fn probe(profile: &Path, mode: &str, ready: &Path) {
     child.finish();
 }
 
+fn profile_snapshot(profile: &Path) -> [Option<Vec<u8>>; 4] {
+    [
+        "emulebb-rust-settings.toml",
+        "emulebb-rust-metadata.db",
+        "emulebb-rust-metadata.db-wal",
+        "emulebb-rust-metadata.db-shm",
+    ]
+    .map(|name| match fs::read(profile.join(name)) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("failed to snapshot synthetic profile {name}: {error}"),
+    })
+}
+
 #[test]
 fn metadata_handles_retain_ownership_after_profile_drop_and_process_death_releases_it() {
     let temporary = temporary();
@@ -107,13 +121,13 @@ fn metadata_handles_retain_ownership_after_profile_drop_and_process_death_releas
     let signal = temporary.path().join("ready");
     let mut holder = OwnedChild::start(&profile, "holder", &signal);
     assert_eq!(ready(&signal), "owned");
-    let settings = profile.join("emulebb-rust-settings.toml");
-    let database = profile.join("emulebb-rust-metadata.db");
-    let before = (fs::read(&settings).unwrap(), fs::read(&database).unwrap());
+    // The holder is idle after READY. A denied process must not mutate even
+    // uncheckpointed WAL state or the shared-memory sidecar, not just the DB.
+    let before = profile_snapshot(&profile);
     probe(&profile, "busy", &temporary.path().join("probe"));
-    assert_eq!(
-        before,
-        (fs::read(settings).unwrap(), fs::read(database).unwrap())
+    assert!(
+        before == profile_snapshot(&profile),
+        "denied profile open changed bootstrap, database, WAL or SHM state"
     );
     holder.0.kill().unwrap();
     holder.0.wait().unwrap();
