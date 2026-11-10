@@ -69,9 +69,11 @@ impl Drop for OwnedChild {
 }
 
 fn temporary() -> tempfile::TempDir {
-    let output = env::var_os("EMULEBB_WORKSPACE_OUTPUT_ROOT")
-        .expect("profile ownership tests require EMULEBB_WORKSPACE_OUTPUT_ROOT");
-    let root = PathBuf::from(output).join("tmp/profile-ownership-tests");
+    let target = PathBuf::from(
+        env::var_os("CARGO_TARGET_DIR").expect("profile ownership tests require CARGO_TARGET_DIR"),
+    );
+    assert!(target.is_absolute(), "CARGO_TARGET_DIR must be absolute");
+    let root = target.join("tmp/profile-ownership-tests");
     fs::create_dir_all(&root).unwrap();
     tempfile::Builder::new()
         .prefix("lease-")

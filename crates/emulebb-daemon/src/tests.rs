@@ -222,12 +222,11 @@ fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_
 fn retargeted_profile_alias_keeps_io_in_the_leased_directory() {
     use std::os::unix::fs::symlink;
 
-    let output = PathBuf::from(
-        env::var_os("EMULEBB_WORKSPACE_OUTPUT_ROOT")
-            .expect("profile ownership tests require EMULEBB_WORKSPACE_OUTPUT_ROOT"),
+    let target = PathBuf::from(
+        env::var_os("CARGO_TARGET_DIR").expect("profile ownership tests require CARGO_TARGET_DIR"),
     );
-    assert!(output.is_absolute());
-    let scratch = output.join("tmp/profile-ownership-tests");
+    assert!(target.is_absolute(), "CARGO_TARGET_DIR must be absolute");
+    let scratch = target.join("tmp/profile-ownership-tests");
     fs::create_dir_all(&scratch).unwrap();
     let temporary = tempfile::tempdir_in(scratch).unwrap();
     let leased = temporary.path().join("leased");
