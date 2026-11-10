@@ -485,6 +485,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
         run: >-
           python -B -m emule_workspace package-emulebb-rust-linux-ci
+          --use-ci-image-mirrors
           --libc musl --architecture ${{ matrix.architecture }} --release-version "$RELEASE_VERSION"
           --test-scope full --smoke
           --smoke-report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json"
@@ -705,6 +706,7 @@ jobs:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
         run: >-
           python -B -m emule_workspace package-emulebb-rust-image-ci
+          --use-ci-image-mirrors
           --variant ${{ matrix.variant }} --release-version "$RELEASE_VERSION"
           --assets-dir "${{ runner.temp }}/emulebb-rust-out/image-inputs"
           --control-rust-repo "${{ github.workspace }}/.ci/control"

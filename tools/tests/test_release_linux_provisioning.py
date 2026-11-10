@@ -86,6 +86,22 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
             self.assertNotIn("if", step)
             self.assertLess(self.steps.index(step), self.steps.index(self.prepared))
 
+    def test_musl_and_image_consumers_select_mirrors_without_changing_runtime_base(self):
+        for job, command in (("musl-package", "package-emulebb-rust-linux-ci"),
+                             ("image-candidate", "package-emulebb-rust-image-ci")):
+            package = next(step for step in self.workflow["jobs"][job]["steps"]
+                           if command in step.get("run", ""))
+            self.assertIn("--use-ci-image-mirrors", shlex.split(package["run"]))
+            self.assertNotIn("continue-on-error", package)
+        recipe = (ROOT / "packaging/docker/Dockerfile.alpine").read_text(encoding="utf-8").splitlines()
+        self.assertIn("ARG ALPINE_UNPACK_IMAGE=docker.io/library/alpine:3.24@sha256:"
+                      "3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a", recipe)
+        self.assertEqual([line for line in recipe if line.startswith("FROM ")], [
+            "FROM ${ALPINE_UNPACK_IMAGE} AS unpack",
+            "FROM ghcr.io/linuxserver/baseimage-alpine:3.24@sha256:"
+            "7315b19a32460a84b4474993ef33065483ffec792fbc70dbe12eab918aa2bbf4",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
