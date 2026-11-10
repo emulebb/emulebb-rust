@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
             emulebb_index::FileIndex::from_metadata_store(profile.open_metadata_store()?),
             profile.transfer_root(),
         )?
-        .with_profile_dir(profile.profile_dir.clone())
+        .with_profile_dir(profile.profile_io_dir().to_path_buf())
         .with_incoming_dir(profile.incoming_dir());
         if matches!(
             cli.command,
@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
     }
     // Keep profile ownership until the final diagnostic writer has drained too.
     let profile_lease = profile.profile_lease.clone();
-    let logging_guard = logging::init(&profile.profile_dir)?;
+    let logging_guard = logging::init(profile.profile_io_dir())?;
     let result = run(profile).await;
     if let Err(error) = result.as_ref() {
         tracing::error!(error = ?error, "daemon terminated with an error");

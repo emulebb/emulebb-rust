@@ -148,16 +148,24 @@ impl DaemonProfile {
     }
 
     fn load_from_dir(profile_dir: PathBuf, create_if_missing: bool) -> Result<Self> {
-        let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
         if !create_if_missing && !profile_dir.exists() {
             bail!(
                 "profile settings file does not exist: {}",
-                settings_path.display()
+                profile_dir.join(PROFILE_SETTINGS_FILE).display()
             );
         }
         // WHY: bootstrap creation, schema initialization and reads of mutable
         // state must all belong to the same exclusive writable-profile session.
         let profile_lease = ProfileLease::acquire(&profile_dir, create_if_missing)?;
+        Self::load_owned(profile_dir, profile_lease, create_if_missing)
+    }
+
+    fn load_owned(
+        profile_dir: PathBuf,
+        profile_lease: ProfileLease,
+        create_if_missing: bool,
+    ) -> Result<Self> {
+        let settings_path = profile_lease.directory().join(PROFILE_SETTINGS_FILE);
         let created_default_profile = if create_if_missing && !settings_path.exists() {
             create_default_profile_bootstrap(&profile_dir, &settings_path)?;
             true
@@ -176,7 +184,7 @@ impl DaemonProfile {
         let bootstrap: DaemonBootstrapSettings = toml::from_str(&text)
             .with_context(|| format!("failed to parse settings {}", settings_path.display()))?;
         let metadata = MetadataStore::open_with_profile_lease(
-            profile_dir.join(PROFILE_METADATA_FILE),
+            profile_lease.directory().join(PROFILE_METADATA_FILE),
             profile_lease.file(),
         )
         .with_context(|| {
@@ -213,7 +221,14 @@ impl DaemonProfile {
     }
 
     pub fn metadata_path(&self) -> PathBuf {
-        self.profile_dir.join(PROFILE_METADATA_FILE)
+        self.profile_io_dir().join(PROFILE_METADATA_FILE)
+    }
+
+    /// Use the acquired directory for profile I/O after loading or starting.
+    pub fn profile_io_dir(&self) -> &Path {
+        self.profile_lease
+            .as_ref()
+            .map_or(self.profile_dir.as_path(), ProfileLease::directory)
     }
 
     /// Open an independent metadata connection retaining this profile's lease.
@@ -225,12 +240,14 @@ impl DaemonProfile {
             .profile_lease
             .as_ref()
             .context("load the profile before opening writable metadata")?;
-        lease.ensure_profile(&self.profile_dir)?;
-        MetadataStore::open_with_profile_lease(self.metadata_path(), lease.file())
+        MetadataStore::open_with_profile_lease(
+            lease.directory().join(PROFILE_METADATA_FILE),
+            lease.file(),
+        )
     }
 
     pub fn transfer_root(&self) -> PathBuf {
-        self.profile_dir.join("transfers")
+        self.profile_io_dir().join("transfers")
     }
 
     /// Resolve the finished-file delivery directory: the configured
@@ -238,7 +255,7 @@ impl DaemonProfile {
     pub fn incoming_dir(&self) -> PathBuf {
         self.incoming_dir
             .clone()
-            .unwrap_or_else(|| self.profile_dir.join("incoming"))
+            .unwrap_or_else(|| self.profile_io_dir().join("incoming"))
     }
 
     pub fn ed2k_network_config(
@@ -283,8 +300,8 @@ impl DaemonProfile {
             kad_local_store: kad_local_store_config(&self.kad),
             kad_snoop_queue: SnoopQueueConfig::default(),
             kad_passive_replay_enabled: self.kad.passive_replay_enabled,
-            kad_nodes_dat: discovery_bootstrap::load_valid_nodes_dat(&self.profile_dir)?,
-            kad_nodes_dat_path: Some(self.profile_dir.join("nodes.dat")),
+            kad_nodes_dat: discovery_bootstrap::load_valid_nodes_dat(self.profile_io_dir())?,
+            kad_nodes_dat_path: Some(self.profile_io_dir().join("nodes.dat")),
             kad_bootstrap_endpoints: self.kad_bootstrap_endpoints.clone(),
             kad_bootstrap_min_routing_contacts: self.kad.bootstrap_min_routing_contacts.max(1),
             kad_publish_shared_files: self.kad.publish_shared_files_enabled,
@@ -394,7 +411,7 @@ impl DaemonProfile {
             let resolved = if configured.is_absolute() {
                 configured.clone()
             } else {
-                self.profile_dir.join(configured)
+                self.profile_io_dir().join(configured)
             };
             validate_web_root_dir(&resolved, "rest.webRootDir")?;
             return Ok(Some(resolved));
@@ -455,7 +472,6 @@ fn create_default_profile_bootstrap(
     profile_dir: &std::path::Path,
     settings_path: &std::path::Path,
 ) -> Result<()> {
-    create_private_profile_dir(profile_dir)?;
     let api_key = uuid::Uuid::new_v4().simple().to_string();
     let text = format!("[rest]\nbindAddr = \"127.0.0.1:4711\"\napiKey = \"{api_key}\"\n");
     let mut options = fs::OpenOptions::new();
@@ -764,7 +780,7 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
     }
     let index = FileIndex::from_metadata_store(profile.open_metadata_store()?);
     let metadata_store = index.metadata_store();
-    discovery_bootstrap::seed_empty_discovery(&metadata_store, &profile.profile_dir).await?;
+    discovery_bootstrap::seed_empty_discovery(&metadata_store, profile.profile_io_dir()).await?;
     let ed2k_network = profile.ed2k_network_config(&metadata_store)?;
     let ed2k_network_configured = ed2k_network.is_some();
     let vpn_guard_monitor = ed2k_network
@@ -780,7 +796,7 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
             profile.transfer_root(),
             ed2k_network,
         )?
-        .with_profile_dir(profile.profile_dir.clone())
+        .with_profile_dir(profile.profile_io_dir().to_path_buf())
         .with_incoming_dir(incoming_dir),
     );
     let deletion_recovery = core.recover_pending_transfer_deletions().await?;

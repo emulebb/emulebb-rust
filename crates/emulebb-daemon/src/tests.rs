@@ -217,12 +217,54 @@ fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_
         .unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn retargeted_profile_alias_keeps_io_in_the_leased_directory() {
+    use std::os::unix::fs::symlink;
+
+    let output = PathBuf::from(
+        env::var_os("EMULEBB_WORKSPACE_OUTPUT_ROOT")
+            .expect("profile ownership tests require EMULEBB_WORKSPACE_OUTPUT_ROOT"),
+    );
+    assert!(output.is_absolute());
+    let scratch = output.join("tmp/profile-ownership-tests");
+    fs::create_dir_all(&scratch).unwrap();
+    let temporary = tempfile::tempdir_in(scratch).unwrap();
+    let leased = temporary.path().join("leased");
+    let other = temporary.path().join("other");
+    let alias = temporary.path().join("alias");
+    fs::create_dir(&leased).unwrap();
+    fs::create_dir(&other).unwrap();
+    symlink(&leased, &alias).unwrap();
+
+    let lease = ProfileLease::acquire(&alias, false).unwrap();
+    fs::remove_file(&alias).unwrap();
+    symlink(&other, &alias).unwrap();
+    assert_eq!(
+        fs::canonicalize(&alias).unwrap(),
+        fs::canonicalize(&other).unwrap()
+    );
+
+    let profile = DaemonProfile::load_owned(alias.clone(), lease, true).unwrap();
+    let metadata = profile.open_metadata_store().unwrap();
+    put_setting(&metadata, "fixture", "leased", serde_json::json!(true));
+    let leased = fs::canonicalize(leased).unwrap();
+    assert_eq!(profile.profile_dir, alias);
+    assert!(leased.join(PROFILE_SETTINGS_FILE).is_file());
+    assert_eq!(profile.metadata_path(), leased.join(PROFILE_METADATA_FILE));
+    assert!(profile.metadata_path().is_file());
+    assert_eq!(profile.transfer_root(), leased.join("transfers"));
+    assert_eq!(profile.incoming_dir(), leased.join("incoming"));
+    assert!(fs::read_dir(other).unwrap().next().is_none());
+}
+
 #[test]
 fn default_profile_bootstrap_is_loopback_authenticated_and_seeds_network_ports() {
     let temp = tempfile::tempdir().unwrap();
     let profile_dir = temp.path().join("profile");
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
 
+    create_private_profile_dir(&profile_dir).unwrap();
     create_default_profile_bootstrap(&profile_dir, &settings_path).unwrap();
     let text = fs::read_to_string(&settings_path).unwrap();
     let bootstrap: DaemonBootstrapSettings = toml::from_str(&text).unwrap();
