@@ -1,4 +1,5 @@
 use std::{
+    fs::File,
     path::Path,
     sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::{SystemTime, UNIX_EPOCH},
@@ -23,6 +24,9 @@ const TRANSFER_SOURCE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 #[derive(Debug, Clone)]
 pub struct MetadataStore {
     conn: Arc<Mutex<Connection>>,
+    // WHY: close the connection before releasing its process profile lease.
+    // Clones retain both handles; independent profile connections share the lease.
+    _profile_lease: Option<Arc<File>>,
 }
 
 impl MetadataStore {
@@ -31,29 +35,51 @@ impl MetadataStore {
         Self::from_connection(conn)
     }
 
+    /// Open under an already acquired OS-backed writable-profile lease.
+    ///
+    /// The caller acquires the lock before bootstrap/metadata initialization.
+    /// Every cloned store retains it until its connection has finished closing.
+    pub fn open_with_profile_lease(path: impl AsRef<Path>, lease: Arc<File>) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        Self::from_connection_with_profile_lease(conn, Some(lease))
+    }
+
     pub fn in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
     pub fn from_connection(conn: Connection) -> Result<Self> {
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        // Crash-consistency: WAL's default `synchronous = NORMAL` does NOT fsync
-        // the WAL on every commit, so a committed transfer-manifest transaction
-        // (e.g. a piece marked Verified) can reach SQLite's cache while the
-        // matching payload bytes are still in the OS cache. On an OS crash /
-        // power loss this lets the manifest outrace the on-disk bytes and would
-        // resurrect a "Verified" range whose bytes are stale/zero. FULL fsyncs
-        // the WAL on commit so a committed manifest state is durable. Paired
-        // with `sync_all()` on the payload before the piece-complete checkpoint
-        // commit, neither side can outrace the other.
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        // Defensive: bound contention waits instead of failing immediately with
-        // SQLITE_BUSY (the persistence audit flagged the absent busy_timeout).
-        conn.pragma_update(None, "busy_timeout", 5000)?;
+        Self::from_connection_with_profile_lease(conn, None)
+    }
+
+    fn from_connection_with_profile_lease(
+        conn: Connection,
+        profile_lease: Option<Arc<File>>,
+    ) -> Result<Self> {
+        // The guarded constructor retains ownership before any pragma/schema
+        // initialization, including all early-error exits below.
         let mut store = Self {
             conn: Arc::new(Mutex::new(conn)),
+            _profile_lease: profile_lease,
         };
+        {
+            let conn = store.connection()?;
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+            // Crash-consistency: WAL's default `synchronous = NORMAL` does NOT fsync
+            // the WAL on every commit, so a committed transfer-manifest transaction
+            // (e.g. a piece marked Verified) can reach SQLite's cache while the
+            // matching payload bytes are still in the OS cache. On an OS crash /
+            // power loss this lets the manifest outrace the on-disk bytes and would
+            // resurrect a "Verified" range whose bytes are stale/zero. FULL fsyncs
+            // the WAL on commit so a committed manifest state is durable. Paired
+            // with `sync_all()` on the payload before the piece-complete checkpoint
+            // commit, neither side can outrace the other.
+            conn.pragma_update(None, "synchronous", "FULL")?;
+            // Defensive: bound contention waits instead of failing immediately with
+            // SQLITE_BUSY (the persistence audit flagged the absent busy_timeout).
+            conn.pragma_update(None, "busy_timeout", 5000)?;
+        }
         store.ensure_schema()?;
         store.connection()?.execute_batch(
             "CREATE TEMP TABLE session_verified_local_paths (
