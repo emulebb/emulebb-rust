@@ -2,8 +2,10 @@
 import json
 import hashlib
 import io
+import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import call, patch
@@ -17,6 +19,60 @@ import yaml
 
 
 class CiEnvironmentTests(unittest.TestCase):
+    def test_branch_rust_setup_installs_every_repository_declared_component(self):
+        declared = ENV.tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["components"]
+        workflow = yaml.safe_load((ROOT / ".github/workflows/branch-check.yml").read_text())
+        setup = [step for step in workflow["jobs"]["check"]["steps"]
+                 if step.get("uses", "").startswith("dtolnay/rust-toolchain@")]
+        self.assertEqual(len(setup), 1)
+        installed = {name.strip() for name in setup[0]["with"]["components"].split(",")}
+        self.assertEqual(installed, set(declared))
+
+    def test_failed_version_child_preserves_exit_code_and_both_output_streams(self):
+        command = [sys.executable, "-c",
+                   "import sys; print('probing toolchain', flush=True); "
+                   "print('missing clippy component', file=sys.stderr); sys.exit(23)"]
+        with self.assertRaises(RuntimeError) as failure:
+            ENV.command_version(command, r"fixture-version (\S+)")
+        self.assertIn("exit 23", str(failure.exception))
+        self.assertIn("probing toolchain", str(failure.exception))
+        self.assertIn("missing clippy component", str(failure.exception))
+
+    def test_failed_version_probe_sanitizes_before_bounding_the_diagnostic_tail(self):
+        secret = "synthetic-environment-secret"
+        output = ("padding " * 2000 + "\nAuthorization: Bearer synthetic-header\n"
+                  "https://fixture-user:fixture-password@fixture.invalid/component?token=synthetic-query#private\n"
+                  "ACCESS_TOKEN=synthetic-assignment\n" + secret + "\nmissing clippy component")
+        error = subprocess.CalledProcessError(7, ["cargo", "deny", "--version"], output=output)
+        with patch.dict(os.environ, {"FIXTURE_SECRET": secret}), \
+                patch.object(ENV.subprocess, "check_output", side_effect=error), \
+                self.assertRaises(RuntimeError) as failure:
+            ENV.command_version(["cargo", "deny", "--version"], r"cargo-deny (\S+)")
+        diagnostic = str(failure.exception).split(":\n", 1)[1]
+        self.assertLessEqual(len(diagnostic.encode("utf-8")), ENV.VERSION_PROBE_DIAGNOSTIC_BYTES)
+        self.assertIn("truncated diagnostic tail", diagnostic)
+        self.assertIn("missing clippy component", diagnostic)
+        self.assertIn("https://fixture.invalid/component", diagnostic)
+        for sensitive in (secret, "synthetic-header", "fixture-password", "synthetic-query", "synthetic-assignment", "#private"):
+            self.assertNotIn(sensitive, diagnostic)
+
+    def test_version_probe_timeout_preserves_partial_byte_output(self):
+        error = subprocess.TimeoutExpired(["cargo", "deny", "--version"], 30,
+                                         output=b"waiting for toolchain component")
+        with patch.object(ENV.subprocess, "check_output", side_effect=error), \
+                self.assertRaises(RuntimeError) as failure:
+            ENV.command_version(["cargo", "deny", "--version"], r"cargo-deny (\S+)")
+        self.assertIn("timed out after 30s", str(failure.exception))
+        self.assertIn("waiting for toolchain component", str(failure.exception))
+
+    def test_successful_probe_keeps_version_parsing_and_bounds_unrecognized_output(self):
+        with patch.object(ENV.subprocess, "check_output", return_value="cargo-deny 0.20.2\n"):
+            self.assertEqual(ENV.command_version(["cargo", "deny", "--version"], r"cargo-deny (\S+)"), "0.20.2")
+        with patch.object(ENV.subprocess, "check_output", return_value="\u2603" * 10000), \
+                self.assertRaises(RuntimeError) as failure:
+            ENV.command_version(["cargo", "deny", "--version"], r"cargo-deny (\S+)")
+        self.assertLess(len(str(failure.exception).encode("utf-8")), ENV.VERSION_PROBE_DIAGNOSTIC_BYTES + 100)
+
     def test_native_sources_are_stable_across_canonical_and_worktree_checkouts(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

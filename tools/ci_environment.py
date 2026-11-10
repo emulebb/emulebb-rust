@@ -17,6 +17,7 @@ import tempfile
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -24,6 +25,7 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLCHAIN = json.loads((ROOT / "tools/ci-toolchain.json").read_text(encoding="utf-8"))
+VERSION_PROBE_DIAGNOSTIC_BYTES = 4096
 
 
 def require_version(name: str, actual: str, expected: str) -> str:
@@ -33,12 +35,54 @@ def require_version(name: str, actual: str, expected: str) -> str:
     return actual
 
 
+def _version_probe_diagnostic(output: str | bytes | None) -> str:
+    """Keep a bounded diagnostic tail without credentials or signed URL values."""
+    text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output or ""
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    for name, value in os.environ.items():
+        if len(value) >= 8 and re.search(r"TOKEN|PASSWORD|SECRET|API_?KEY|CREDENTIAL", name, re.I):
+            text = text.replace(value, "<redacted>")
+    text = re.sub(r"(?im)(\bauthorization\s*:\s*)[^\r\n]+", r"\1<redacted>", text)
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*", "Bearer <redacted>", text)
+    text = re.sub(
+        r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|API_?KEY|CREDENTIAL)[A-Z0-9_]*\s*[:=]\s*)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s]+)", r"\1<redacted>", text,
+    )
+
+    def public_url(match: re.Match[str]) -> str:
+        try:
+            parts = urllib.parse.urlsplit(match.group(0))
+            return urllib.parse.urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+        except ValueError:
+            return "<redacted-url>"
+
+    text = re.sub(r"https?://[^\s\"'<>]+", public_url, text).strip() or "(no captured output)"
+    encoded = text.encode("utf-8")
+    if len(encoded) > VERSION_PROBE_DIAGNOSTIC_BYTES:
+        marker = "[truncated diagnostic tail]\n"
+        budget = VERSION_PROBE_DIAGNOSTIC_BYTES - len(marker.encode("utf-8"))
+        return marker + encoded[-budget:].decode("utf-8", errors="ignore")
+    return text
+
+
 def command_version(command: list[str], pattern: str) -> str:
     """Read a tool version using its public CLI in the selected Rust checkout."""
-    text = subprocess.check_output(command, cwd=ROOT, text=True, stderr=subprocess.STDOUT, timeout=30)
+    label = Path(command[0]).name
+    try:
+        text = subprocess.check_output(command, cwd=ROOT, text=True, stderr=subprocess.STDOUT, timeout=30)
+    except subprocess.CalledProcessError as error:
+        # WHY: CalledProcessError.__str__ omits captured output, losing the
+        # actual toolchain failure before the environment report can be written.
+        raise RuntimeError(
+            f"Version probe for {label} failed (exit {error.returncode}):\n{_version_probe_diagnostic(error.output)}"
+        ) from None
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Version probe for {label} timed out after {error.timeout}s:\n{_version_probe_diagnostic(error.output)}"
+        ) from None
     match = re.search(pattern, text)
     if match is None:
-        raise RuntimeError(f"Cannot identify version of {command[0]}: {text.strip()}")
+        raise RuntimeError(f"Cannot identify version of {label}: {_version_probe_diagnostic(text)}")
     return match.group(1)
 
 
