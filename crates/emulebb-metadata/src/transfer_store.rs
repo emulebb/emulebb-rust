@@ -269,6 +269,23 @@ impl super::MetadataStore {
         read_transfer_aich_identity(&conn, &hash)
     }
 
+    /// Publish a bounded in-memory AICH projection while holding the existing
+    /// connection mutex. Accepted identity writers cannot commit between this
+    /// read and publication. The callback must be synchronous, must not perform
+    /// I/O, and must not re-enter MetadataStore. Acquire runtime async guards
+    /// before invoking this helper on the blocking pool.
+    pub fn publish_transfer_aich_identity<T>(
+        &self,
+        file_hash: &str,
+        publish: impl FnOnce(MetadataTransferAichIdentity) -> Result<T>,
+    ) -> Result<T> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        let identity = read_transfer_aich_identity(&conn, &hash)?
+            .ok_or_else(|| anyhow::anyhow!("missing AICH transfer identity for {file_hash}"))?;
+        publish(identity)
+    }
+
     pub fn transfer_manifest_by_hash(
         &self,
         file_hash: &str,

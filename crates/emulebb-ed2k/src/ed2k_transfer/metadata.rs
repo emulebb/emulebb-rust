@@ -524,7 +524,6 @@ impl Ed2kTransferRuntime {
         let (manifest, _guard) = self
             .store_aich_transition_owned(guard, manifest, votes)
             .await?;
-        self.upsert_verified_catalog_entry(&manifest).await;
         Ok(manifest)
     }
 
@@ -564,7 +563,6 @@ impl Ed2kTransferRuntime {
                 let (manifest, _guard) = self
                     .store_aich_transition_owned(guard, manifest, None)
                     .await?;
-                self.upsert_verified_catalog_entry(&manifest).await;
                 return Ok(manifest);
             }
             self.aich_root_corroboration
@@ -650,7 +648,6 @@ impl Ed2kTransferRuntime {
             let (manifest, _guard) = self
                 .store_aich_transition_owned(guard, manifest, Some(accumulator))
                 .await?;
-            self.upsert_verified_catalog_entry(&manifest).await;
             return Ok(manifest);
         }
         self.aich_root_corroboration
