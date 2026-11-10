@@ -499,7 +499,7 @@ impl Ed2kTransferRuntime {
         expected_generation: u64,
     ) -> Result<Ed2kResumeManifest> {
         let guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
         if manifest.aich_trust_generation != expected_generation {
             return Ok(manifest);
         }
@@ -541,7 +541,7 @@ impl Ed2kTransferRuntime {
         aich_root: Option<[u8; 20]>,
     ) -> Result<Ed2kResumeManifest> {
         let guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
         if let Some(aich_root) = aich_root {
             let encoded = hex::encode(aich_root);
             if let Some(existing_root) = manifest.aich_root.as_deref() {
@@ -613,7 +613,7 @@ impl Ed2kTransferRuntime {
         observations: &[([u8; 20], std::net::IpAddr)],
     ) -> Result<Ed2kResumeManifest> {
         let guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
         if observations.is_empty() {
             return Ok(manifest);
         }
@@ -621,38 +621,6 @@ impl Ed2kTransferRuntime {
         if manifest.aich_root.is_some()
             && manifest.aich_root_origin != Some(Ed2kAichRootOrigin::NetworkConsensus)
         {
-            return Ok(manifest);
-        }
-
-        // Import/local evidence may be accepted while this runtime has a
-        // cached transfer manifest. Read its current authority before allowing
-        // network votes to replace or demote the cached decision. Merge only
-        // identity, preserving newer cache-only piece progress.
-        let metadata = self.metadata.clone();
-        let owned_hash = file_hash.to_owned();
-        let persisted =
-            tokio::task::spawn_blocking(move || metadata.transfer_manifest_by_hash(&owned_hash))
-                .await??;
-        if let Some(persisted) = persisted
-            && persisted.aich_root.is_some()
-            && persisted.aich_root_origin.as_deref() != Some("network_consensus")
-        {
-            let origin = persisted
-                .aich_root_origin
-                .as_deref()
-                .map(Ed2kAichRootOrigin::parse)
-                .transpose()?;
-            if super::aich_trust::set_identity(&mut manifest, persisted.aich_root, origin)? {
-                let (manifest, _guard) = self
-                    .store_aich_transition_owned(guard, manifest, None)
-                    .await?;
-                self.upsert_verified_catalog_entry(&manifest).await;
-                return Ok(manifest);
-            }
-            self.aich_root_corroboration
-                .lock()
-                .expect("aich corroboration mutex poisoned")
-                .remove(file_hash);
             return Ok(manifest);
         }
 
@@ -1493,7 +1461,7 @@ impl Ed2kTransferRuntime {
     /// never represented as an active download job.
     pub async fn manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
-        self.load_manifest_unlocked(file_hash).await
+        self.load_aich_manifest_unlocked(file_hash).await
     }
 
     /// Resolve a read-only protocol view for a download or eligible complete

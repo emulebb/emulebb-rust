@@ -321,11 +321,12 @@ impl Ed2kTransferRuntime {
         if local_view.is_some() {
             Ok(local_view)
         } else {
-            Ok(self
-                .load_manifest_optional_unlocked(file_hash)
-                .await?
-                .as_ref()
-                .map(super::Ed2kFileServingView::from))
+            match self.load_manifest_optional_unlocked(file_hash).await? {
+                Some(_) => Ok(Some(super::Ed2kFileServingView::from(
+                    &self.load_aich_manifest_unlocked(file_hash).await?,
+                ))),
+                None => Ok(None),
+            }
         }
     }
 
@@ -336,6 +337,50 @@ impl Ed2kTransferRuntime {
         self.load_manifest_optional_unlocked(file_hash)
             .await?
             .with_context(|| format!("missing ED2K transfer metadata for {file_hash}"))
+    }
+
+    /// Merge only durable AICH identity into cached progress. Accepted local or
+    /// import writers share SQLite's transaction fence, not this runtime lock.
+    /// Never reload pieces/ranges or discard newer cache-only payload progress.
+    pub(super) async fn load_aich_manifest_unlocked(
+        &self,
+        file_hash: &str,
+    ) -> Result<Ed2kResumeManifest> {
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let metadata = self.metadata.clone();
+        let hash = file_hash.to_owned();
+        let identity =
+            tokio::task::spawn_blocking(move || metadata.transfer_aich_identity_by_hash(&hash))
+                .await
+                .context("AICH identity refresh task panicked")??
+                .with_context(|| format!("missing AICH transfer identity for {file_hash}"))?;
+        let origin = identity
+            .origin
+            .as_deref()
+            .map(super::Ed2kAichRootOrigin::parse)
+            .transpose()?;
+        if manifest.aich_root != identity.root
+            || manifest.aich_root_origin != origin
+            || manifest.aich_trust_generation != identity.generation
+        {
+            // Keep payload/MD4 state. Already acquired hashes for the same root
+            // remain valid; generation still fences outstanding ABA responses.
+            if manifest.aich_root != identity.root {
+                manifest.aich_hashset.clear();
+                manifest.aich_hashset_acquired = false;
+            }
+            manifest.aich_root = identity.root;
+            manifest.aich_root_origin = origin;
+            manifest.aich_trust_generation = identity.generation;
+            if manifest.aich_root_origin != Some(super::Ed2kAichRootOrigin::NetworkConsensus) {
+                self.aich_root_corroboration
+                    .lock()
+                    .expect("aich corroboration mutex poisoned")
+                    .remove(file_hash);
+            }
+            self.cache_manifest_unlocked(&manifest).await;
+        }
+        Ok(manifest)
     }
 
     /// Run a read-only probe against the manifest WITHOUT cloning it on the
@@ -374,10 +419,12 @@ impl Ed2kTransferRuntime {
         // `synchronous = FULL`): run it on the blocking pool so the fsync
         // never parks an async worker thread.
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.upsert_transfer_manifest(&row))
-            .await
-            .context("ED2K manifest upsert task panicked")??;
-        self.mark_manifest_persisted_unlocked(manifest).await;
+        let stored =
+            tokio::task::spawn_blocking(move || metadata.upsert_transfer_manifest_reconciled(&row))
+                .await
+                .context("ED2K manifest upsert task panicked")??;
+        let manifest = manifest_from_metadata(stored)?;
+        self.mark_manifest_persisted_unlocked(&manifest).await;
         Ok(())
     }
 
@@ -403,9 +450,12 @@ impl Ed2kTransferRuntime {
             let guard = guard;
             let result: Result<Ed2kResumeManifest> = async {
                 tokio::fs::create_dir_all(&transfer_dir).await?;
-                tokio::task::spawn_blocking(move || metadata.upsert_transfer_manifest(&row))
-                    .await
-                    .context("AICH manifest upsert task panicked")??;
+                let stored = tokio::task::spawn_blocking(move || {
+                    metadata.upsert_transfer_manifest_reconciled(&row)
+                })
+                .await
+                .context("AICH manifest upsert task panicked")??;
+                let manifest = manifest_from_metadata(stored)?;
                 #[cfg(test)]
                 if let Some(barrier) = barrier {
                     barrier.committed.notify_one();
@@ -426,7 +476,12 @@ impl Ed2kTransferRuntime {
                 let mut map = corroboration
                     .lock()
                     .expect("aich corroboration mutex poisoned");
-                if let Some(votes) = votes {
+                if let Some(votes) = votes
+                    && matches!(
+                        manifest.aich_root_origin,
+                        None | Some(super::Ed2kAichRootOrigin::NetworkConsensus)
+                    )
+                {
                     map.insert(manifest.file_hash.clone(), votes);
                 } else {
                     map.remove(&manifest.file_hash);

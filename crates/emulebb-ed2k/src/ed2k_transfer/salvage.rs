@@ -60,7 +60,7 @@ impl Ed2kTransferRuntime {
         recovery_body: &[u8],
     ) -> Result<Option<PartSalvageOutcome>> {
         let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
 
         // Need a trusted AICH root that matches the answer's master hash.
         let Some(root_hex) = manifest.aich_root.as_deref() else {
