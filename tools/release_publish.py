@@ -10,9 +10,11 @@ import hashlib
 import json
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Sequence
@@ -339,7 +341,7 @@ def release_download_guidance(data: dict, layout: dict, candidate_name: str) -> 
         ]
         payloads.update(item["asset"] for item in android)
 
-    lines = ["## Downloads", ""]
+    lines = ["<!-- emulebb-release-downloads:start -->", "## Downloads", ""]
     for heading, rows in groups.items():
         if rows:
             lines.extend((f"### {heading}", ""))
@@ -372,28 +374,60 @@ def release_download_guidance(data: dict, layout: dict, candidate_name: str) -> 
         lines.extend(("<details>", "<summary>Package manifests, SBOMs and validation reports</summary>", ""))
         lines.extend(f"- {link(name)}" for name in supporting)
         lines.extend(("", "</details>", ""))
+    lines.append("<!-- emulebb-release-downloads:end -->")
     return "\n".join(lines).rstrip()
 
 
-def finalize_release_notes(owner, *, release_dir: Path, context, archives_dir: Path, archive_identity) -> None:
-    """Verify assembly inputs, then bind inventory-guided notes into final checksums."""
+def finalize_release_candidate(owner, *, release_dir: Path, context, archives_dir: Path, archive_identity) -> None:
+    """Commit final notes, checksums and candidate together, restoring inputs on failure."""
+    candidate = owner.candidate_path(release_dir, context)
+    if candidate.exists() or candidate.is_symlink():
+        raise RuntimeError("Candidate manifest already exists and cannot be rewritten")
     data = owner.candidate_manifest(
         release_dir=release_dir, context=context, archives_dir=archives_dir, archive_identity=archive_identity,
     )
     notes = release_dir / f"RELEASE-{context.version}-NOTES.md"
-    introduction, separator, remainder = notes.read_text(encoding="utf-8").partition("\n## ")
+    original = re.sub(
+        r"(?ms)^<!-- emulebb-release-downloads:start -->\n.*?^<!-- emulebb-release-downloads:end -->\n?",
+        "", notes.read_text(encoding="utf-8"),
+    )
+    introduction, separator, remainder = original.partition("\n## ")
     if not separator:
         raise RuntimeError("Release notes require the preflighted section structure")
-    guidance = release_download_guidance(data, owner.package_layout(context), owner.candidate_path(release_dir, context).name)
+    guidance = release_download_guidance(data, owner.package_layout(context), candidate.name)
     # WHY: notes become public candidate bytes. Verify original assembly first,
     # then refresh their checksums before the final candidate revalidates them.
-    notes.write_text(f"{introduction.rstrip()}\n\n{guidance}\n\n## {remainder}", encoding="utf-8", newline="\n")
     members = tuple(release_dir / name for name in sorted(
         item["name"] for item in data["artifacts"] if item["name"] != "SHA256SUMS"
     ))
-    (release_dir / "SHA256SUMS").write_text(
-        owner._sha256sums_text(release_dir, members), encoding="ascii", newline="\n",
-    )
+    sums = release_dir / "SHA256SUMS"
+    staging = Path(tempfile.mkdtemp(prefix=f".{release_dir.name}-notes-", dir=release_dir.parent))
+    replaced = []
+    try:
+        for path in (notes, sums):
+            shutil.copyfile(path, staging / path.name)
+        staged_notes = staging / "updated-notes"
+        staged_notes.write_text(f"{introduction.rstrip()}\n\n{guidance}\n\n## {remainder}", encoding="utf-8", newline="\n")
+        staged_notes.replace(notes)
+        replaced.append(notes)
+        staged_sums = staging / "updated-checksums"
+        staged_sums.write_text(owner._sha256sums_text(release_dir, members), encoding="ascii", newline="\n")
+        staged_sums.replace(sums)
+        replaced.append(sums)
+        owner.write_candidate(
+            release_dir=release_dir, context=context, archives_dir=archives_dir, archive_identity=archive_identity,
+        )
+    except BaseException as failure:
+        try:
+            for path in reversed(replaced):
+                (staging / path.name).replace(path)
+            if not isinstance(failure, FileExistsError):
+                candidate.unlink(missing_ok=True)
+        except OSError as error:
+            raise RuntimeError(f"Release recovery requires retained original files in {staging}") from error
+        shutil.rmtree(staging)
+        raise
+    shutil.rmtree(staging)
 
 
 def candidate_outputs(path: Path, data: dict, output: Path | None) -> None:
@@ -660,10 +694,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "candidate-manifest":
                 if args.output.resolve() != path.resolve():
                     raise RuntimeError("Candidate output must use its canonical release filename")
-                if path.exists() or path.is_symlink():
-                    raise RuntimeError("Candidate manifest already exists and cannot be rewritten")
-                finalize_release_notes(owner, **common)
-                owner.write_candidate(**common)
+                finalize_release_candidate(owner, **common)
                 data = json.loads(path.read_text(encoding="utf-8"))
             else:
                 data = owner.verify_candidate(**common)
