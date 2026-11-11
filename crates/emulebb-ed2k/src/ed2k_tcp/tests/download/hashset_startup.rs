@@ -265,11 +265,24 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
         )
         .unwrap();
         stream.write_all(&hashset_answer).await.unwrap();
+        // With known MD4, STARTUPLOADREQ can precede processing this AICH-only
+        // answer. A reply to the following frame joins the actual receive path.
+        stream
+            .write_all(&encode_packet(OP_EMULEPROT, OP_PUBLICIP_REQ, &[]))
+            .await
+            .unwrap();
 
         let start_upload = read_packet(&mut stream).await;
         assert_eq!(start_upload[0], OP_EDONKEYPROT);
         assert_eq!(start_upload[5], super::OP_STARTUPLOADREQ);
         assert_eq!(&start_upload[6..22], &file_hash.0);
+        let public_ip_answer = read_packet(&mut stream).await;
+        assert_eq!(public_ip_answer[0], OP_EMULEPROT);
+        assert_eq!(public_ip_answer[5], OP_PUBLICIP_ANSWER);
+        assert_eq!(
+            decode_public_ip_answer_payload(&public_ip_answer[6..]).unwrap(),
+            test_bind_ip()
+        );
 
         // Observe before supplying any payload: a later local completion pass
         // must not hide the single-peer acquisition bypass.
