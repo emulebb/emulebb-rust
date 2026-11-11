@@ -1,7 +1,9 @@
-import { render, screen } from "@testing-library/preact";
-import { describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/preact";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { AppIdentity } from "../../src/AppIdentity";
+
+afterEach(cleanup);
 
 describe("application build identity", () => {
   it("shows the server identity and full source commit in About details", () => {
@@ -10,7 +12,7 @@ describe("application build identity", () => {
       platform: "arm64", build: "release", sourceRevision: revision }} />);
     expect(screen.getByLabelText("About this build").tagName).toBe("DETAILS");
     expect(screen.getByText(revision)).toBeInTheDocument();
-    for (value of ["nightly", "arm64", "release"]) expect(screen.getByText(value)).toBeInTheDocument();
+    for (const value of ["nightly", "arm64", "release"]) expect(screen.getByText(value)).toBeInTheDocument();
   });
 
   it("does not infer an unreported channel or commit", () => {
