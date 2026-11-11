@@ -112,6 +112,19 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
             self.assertNotIn("if", step)
             self.assertLess(self.steps.index(step), self.steps.index(self.prepared))
 
+    def test_native_smoke_proves_identity_and_owns_profile_contention_scratch(self):
+        for name in ("native-package-smoke", "optional-macos-smoke"):
+            job = self.workflow["jobs"][name]
+            smoke = next(step for step in job["steps"]
+                         if "smoke-rust-release-package.py" in step.get("run", ""))
+            self.assertEqual(smoke["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"],
+                             "${{ runner.temp }}/emulebb-rust-out")
+            self.assertIn("--expected-source-sha", smoke["run"])
+            self.assertIn("--expected-channel ${{ env.RELEASE_CHANNEL }}", smoke["run"])
+            self.assertIn("${{ matrix.os != 'macos' && '--verify-profile-ownership' || '' }}", smoke["run"])
+            self.assertIn("${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}", smoke["run"])
+            self.assertNotIn("continue-on-error", smoke)
+
     def test_musl_and_image_consumers_select_mirrors_without_changing_runtime_base(self):
         for job, command in (("musl-package", "package-emulebb-rust-linux-ci"),
                              ("image-candidate", "package-emulebb-rust-image-ci")):
