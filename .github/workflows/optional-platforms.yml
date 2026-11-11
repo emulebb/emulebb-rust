@@ -17,8 +17,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  EMULEBB_BUILD_REF: 3135ee1d106637871d884e5f628bcd4ca596863c
-  EMULEBB_ANDROID_BUILD_REF: 3135ee1d106637871d884e5f628bcd4ca596863c
+  EMULEBB_BUILD_REF: c85fa0aee9fe503d5b939ea990941452b2dbc9a7
+  EMULEBB_ANDROID_BUILD_REF: c85fa0aee9fe503d5b939ea990941452b2dbc9a7
   EMULEBB_BUILD_TESTS_REF: 20a007f34d88b99c40d456cfe1dce3d0537ba00d
   EMULEBB_TOOLING_REF: 856e0499d12e281697618cc81a0b09805e96f59e
   # Pin the native NAT sources linked by the sys crates.
@@ -190,6 +190,8 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-workspace-crates: false
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 

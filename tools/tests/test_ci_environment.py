@@ -74,12 +74,14 @@ class CiEnvironmentTests(unittest.TestCase):
         self.assertLess(len(str(failure.exception).encode("utf-8")), ENV.VERSION_PROBE_DIAGNOSTIC_BYTES + 100)
 
     def test_hosted_cargo_cache_explicitly_excludes_workspace_crates(self):
-        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
-        caches = [step for job in workflow["jobs"].values() for step in job.get("steps", [])
-                  if step.get("uses", "").startswith("Swatinem/rust-cache@")]
-        self.assertEqual(len(caches), 2)
-        for step in caches:
-            self.assertIs(step["with"]["cache-workspace-crates"], False)
+        for filename, expected in (("ci.yml", 2), ("optional-platforms.yml", 1)):
+            with self.subTest(workflow=filename):
+                workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text(encoding="utf-8"))
+                caches = [step for job in workflow["jobs"].values() for step in job.get("steps", [])
+                          if step.get("uses", "").startswith("Swatinem/rust-cache@")]
+                self.assertEqual(len(caches), expected)
+                for step in caches:
+                    self.assertIs(step["with"]["cache-workspace-crates"], False)
 
     def test_native_sources_are_stable_across_canonical_and_worktree_checkouts(self):
         with tempfile.TemporaryDirectory() as directory:
