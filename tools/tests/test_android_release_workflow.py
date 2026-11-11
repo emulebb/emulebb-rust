@@ -88,6 +88,11 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(images["variant"], ["ubuntu", "alpine"])
         self.assertEqual({row["architecture"] for row in images["include"]}, {"amd64", "arm64"})
         self.assertEqual(self.text.count("smoke-rust-release-package.py"), 1)
+        smoke = next(step["run"] for step in self.jobs["native-package-smoke"]["steps"]
+                     if "smoke-rust-release-package.py" in step.get("run", ""))
+        self.assertIn('--expected-channel "$RELEASE_CHANNEL"', smoke)
+        self.assertIn('--expected-source-sha "${{ needs.prepare.outputs.source_sha }}"', smoke)
+        self.assertIs(self.jobs["native-package-smoke"]["steps"], self.jobs["optional-macos-smoke"]["steps"])
         self.assertNotIn("package-smoke", str(self.jobs["android-package"]))
 
     def test_android_uses_pinned_frontend_and_compiler_recipe_inputs(self):
