@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -33,9 +35,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--stage-bin-dir",
-        required=True,
         type=Path,
         help="External directory that receives fresh release executables.",
+    )
+    parser.add_argument(
+        "--registered-stage", action="store_true", help="Build into this registered workstream's owned runtime bundle."
+    )
+    parser.add_argument(
+        "--verify-stage", action="store_true", help="Verify this registered workstream's prebuilt bundle and emit its identity."
     )
     parser.add_argument(
         "--force-rebuild",
@@ -48,16 +55,65 @@ def main(argv: list[str] | None = None) -> int:
     workspace_root = require_workspace_root_env(env)
     output_root = require_path_env(env, "EMULEBB_WORKSPACE_OUTPUT_ROOT")
     assert_outside_workspace(output_root, workspace_root, "EMULEBB_WORKSPACE_OUTPUT_ROOT")
+    if args.verify_stage:
+        if args.stage_bin_dir is not None or args.force_rebuild or args.webui_dist is not None:
+            parser.error("stage verification accepts no build or destination options")
+        print(json.dumps(runtime_stage_request("verify", env), sort_keys=True))
+        return 0
     target_dir = require_target_dir(env)
-    stage_bin_dir = args.stage_bin_dir.expanduser().resolve()
-    assert_outside_repo(stage_bin_dir, "--stage-bin-dir")
-    expected_stage_bin_dir = output_root / "tools" / "emulebb-rust" / "bin"
+    if args.stage_bin_dir is None and not args.registered_stage:
+        parser.error("--stage-bin-dir is required for the default build stage")
+    description = runtime_stage_request("prepare", env) if args.registered_stage else None
+    expected_stage_bin_dir = (Path(description["stageRoot"]) / "bin" if description
+                              else output_root / "tools" / "emulebb-rust" / "bin")
+    requested_stage = args.stage_bin_dir or expected_stage_bin_dir
+    stage_bin_dir = requested_stage.expanduser().resolve()
     if stage_bin_dir != expected_stage_bin_dir:
+        if description:
+            runtime_stage_request("discard", env, description)
         raise SystemExit(
             "--stage-bin-dir must be "
             f"{expected_stage_bin_dir}, got {stage_bin_dir}"
         )
+    assert_outside_repo(stage_bin_dir, "--stage-bin-dir")
 
+    if description:
+        stage_bin_dir = Path(description["pendingRoot"]) / "bin"
+    try:
+        build_workspace(env, target_dir, stage_bin_dir, args)
+        if description:
+            result = runtime_stage_request("publish", env, description)
+            print(f"published registered runtime bundle {result['binDir']}", flush=True)
+    finally:
+        if description:
+            runtime_stage_request("discard", env, description)
+    return 0
+
+
+def runtime_stage_request(action: str, env: dict[str, str], description: dict | None = None) -> dict:
+    """Call the registered Builder through the existing checked hook-owner bootstrap."""
+    workspace = require_workspace_root_env(env)
+    output = require_path_env(env, "EMULEBB_WORKSPACE_OUTPUT_ROOT")
+    bootstrap = runpy.run_path(str(workspace / "repos/emulebb-tooling/helpers/git-local-checks.py"))
+    child_env = bootstrap["validation_environment"]()
+    owner, workstream = bootstrap["orchestration_owner"](workspace, output, ROOT, child_env)
+    if workstream is None:
+        raise RuntimeError("Registered runtime selection requires a managed Rust checkout")
+    command = [sys.executable, "-B", "-m", "emule_workspace", "rust-runtime-stage", action,
+               "--rust-repo", str(ROOT), "--workstream", workstream]
+    completed = subprocess.run(command, cwd=owner, env=child_env, text=True, capture_output=True,
+                               input=json.dumps(description) if description is not None else None)
+    if completed.returncode:
+        raise RuntimeError(f"Registered runtime stage {action} failed: {completed.stderr[-4096:].strip()}")
+    result = json.loads(completed.stdout)
+    if not isinstance(result, dict):
+        raise RuntimeError("Registered runtime owner returned an invalid description")
+    return result
+
+
+def build_workspace(env: dict[str, str], target_dir: Path, stage_bin_dir: Path, args: argparse.Namespace) -> None:
+    """Keep fresh compilation and companion staging identical for either destination."""
+    output_root = require_path_env(env, "EMULEBB_WORKSPACE_OUTPUT_ROOT")
     if args.force_rebuild:
         clean_target_dir(env)
     remove_profile_outputs(stage_bin_dir, RELEASE_BINARIES)
@@ -89,7 +145,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         from build_webui import stage_dist
         stage_dist(args.webui_dist, stage_bin_dir / "webui", output_root)
-    return 0
 
 
 def require_target_dir(env: dict[str, str]) -> Path:
