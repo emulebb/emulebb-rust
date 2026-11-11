@@ -159,9 +159,45 @@ fn aliases_share_ownership_and_clean_exit_releases_it() {
             "Windows case-alias fixture requires a case-insensitive volume"
         );
         probe(&alias, "busy", &temporary.path().join("case"));
+
+        // Junctions do not require the symlink privilege. Keep both command
+        // arguments fixed and relative to this test's unique scratch directory.
+        let windows = PathBuf::from(env::var_os("SystemRoot").expect("Windows system root"));
+        let creation = Command::new(windows.join("System32/cmd.exe"))
+            .current_dir(temporary.path())
+            .args(["/d", "/v:off", "/c", "mklink", "/J", "junction", "profile"])
+            .output()
+            .expect("create synthetic profile junction");
+        assert!(
+            creation.status.success(),
+            "could not create synthetic profile junction: {}",
+            String::from_utf8_lossy(&creation.stderr)
+        );
+        let junction = temporary.path().join("junction");
+        assert_eq!(
+            fs::canonicalize(&junction).unwrap(),
+            fs::canonicalize(&profile).unwrap()
+        );
+        let before = profile_snapshot(&profile);
+        probe(&junction, "busy", &temporary.path().join("junction-busy"));
+        assert!(
+            before == profile_snapshot(&profile),
+            "denied junction open changed the owned profile"
+        );
     }
     holder.finish();
     probe(&profile, "available", &temporary.path().join("after-exit"));
+    #[cfg(windows)]
+    {
+        let junction = temporary.path().join("junction");
+        probe(
+            &junction,
+            "available",
+            &temporary.path().join("junction-after-exit"),
+        );
+        fs::remove_dir(&junction).unwrap();
+        assert!(profile.is_dir(), "junction cleanup removed its target");
+    }
 }
 
 #[test]
