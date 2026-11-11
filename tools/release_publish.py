@@ -16,6 +16,7 @@ import tarfile
 import tomllib
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import quote
 
 
 sys.dont_write_bytecode = True
@@ -308,6 +309,93 @@ def archive_identity_reader(args: argparse.Namespace):
     return read
 
 
+def release_download_guidance(data: dict, layout: dict, candidate_name: str) -> str:
+    """Render downloads from the verified inventory and exact OCI identities."""
+    version = data["releaseVersion"]
+    stem = f"emulebb-rust-v{version}-"
+    names = {artifact["name"] for artifact in data["artifacts"]}
+    repository = data["workflow"]["repository"]
+    base = f"https://github.com/{repository}/releases/download/rust-v{quote(version, safe='')}"
+
+    def link(name: str, label: str = "") -> str:
+        return f"[{label or name.removeprefix(stem)}]({base}/{quote(name, safe='')})"
+
+    groups = {"Native packages": [], "Portable Linux musl": []}
+    platforms = {"windows-x64": "Windows x64", "windows-arm64": "Windows ARM64",
+                 "linux-x64": "Linux x64 GNU", "linux-arm64": "Linux ARM64 GNU",
+                 "macos-x64": "macOS Intel", "macos-arm64": "macOS Apple Silicon",
+                 "linux-x64-musl": "Linux x64 musl", "linux-arm64-musl": "Linux ARM64 musl"}
+    payloads = set()
+    for platform, assets in layout.items():
+        present = [name for name in assets if name in names]
+        if present:
+            heading = "Portable Linux musl" if platform.endswith("-musl") else "Native packages"
+            groups[heading].append((platforms.get(platform, platform), " · ".join(map(link, present))))
+            payloads.update(present)
+    android = [item for item in data.get("experimentalAndroid", []) if item["asset"] in names]
+    if android:
+        groups["Experimental Android native packages"] = [
+            (item["abi"], link(item["asset"])) for item in android
+        ]
+        payloads.update(item["asset"] for item in android)
+
+    lines = ["## Downloads", ""]
+    for heading, rows in groups.items():
+        if rows:
+            lines.extend((f"### {heading}", ""))
+            if heading == "Experimental Android native packages":
+                lines.extend((
+                    "Experimental native CLI developer archives. APK packaging and signing remain deferred.",
+                    "Evidence covers compilation and ELF checks. Device runtime, transfers and VPN behavior remain unqualified.",
+                    "Completed-file delivery and route discovery have known Android limitations. Read the bundled `emulebb-rust/README.txt` before use.",
+                    "",
+                ))
+            lines.extend(("| Platform | Download |", "|---|---|"))
+            lines.extend(f"| {platform} | {downloads} |" for platform, downloads in rows)
+            lines.append("")
+    if data["images"]:
+        lines.extend(("### Container images", "", "| Variant | Platforms | Immutable image |", "|---|---|---|"))
+        for variant, image in sorted(data["images"].items()):
+            reference = f"ghcr.io/{repository.lower()}@{image['ociManifestDigest']}"
+            lines.append(f"| {variant.capitalize()} | {', '.join(sorted(image['platforms']))} | `{reference}` |")
+        lines.append("")
+
+    lines.extend(("### Verification and supporting files", ""))
+    if "SHA256SUMS" in names:
+        lines.append(f"- {link('SHA256SUMS')}")
+    lines.append(f"- {link(candidate_name, 'Candidate manifest')}")
+    workflow = data["workflow"]
+    run = f"https://github.com/{repository}/actions/runs/{workflow['runId']}/attempts/{workflow['runAttempt']}"
+    lines.extend((f"- [GitHub workflow and build provenance]({run})", ""))
+    supporting = sorted(names - payloads - {"SHA256SUMS", f"RELEASE-{version}-NOTES.md"})
+    if supporting:
+        lines.extend(("<details>", "<summary>Package manifests, SBOMs and validation reports</summary>", ""))
+        lines.extend(f"- {link(name)}" for name in supporting)
+        lines.extend(("", "</details>", ""))
+    return "\n".join(lines).rstrip()
+
+
+def finalize_release_notes(owner, *, release_dir: Path, context, archives_dir: Path, archive_identity) -> None:
+    """Verify assembly inputs, then bind inventory-guided notes into final checksums."""
+    data = owner.candidate_manifest(
+        release_dir=release_dir, context=context, archives_dir=archives_dir, archive_identity=archive_identity,
+    )
+    notes = release_dir / f"RELEASE-{context.version}-NOTES.md"
+    introduction, separator, remainder = notes.read_text(encoding="utf-8").partition("\n## ")
+    if not separator:
+        raise RuntimeError("Release notes require the preflighted section structure")
+    guidance = release_download_guidance(data, owner.package_layout(context), owner.candidate_path(release_dir, context).name)
+    # WHY: notes become public candidate bytes. Verify original assembly first,
+    # then refresh their checksums before the final candidate revalidates them.
+    notes.write_text(f"{introduction.rstrip()}\n\n{guidance}\n\n## {remainder}", encoding="utf-8", newline="\n")
+    members = tuple(release_dir / name for name in sorted(
+        item["name"] for item in data["artifacts"] if item["name"] != "SHA256SUMS"
+    ))
+    (release_dir / "SHA256SUMS").write_text(
+        owner._sha256sums_text(release_dir, members), encoding="ascii", newline="\n",
+    )
+
+
 def candidate_outputs(path: Path, data: dict, output: Path | None) -> None:
     """Expose only verified scalar identities to dependent publishing jobs."""
     values = {"candidate_sha256": _sha256(path),
@@ -572,6 +660,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "candidate-manifest":
                 if args.output.resolve() != path.resolve():
                     raise RuntimeError("Candidate output must use its canonical release filename")
+                if path.exists() or path.is_symlink():
+                    raise RuntimeError("Candidate manifest already exists and cannot be rewritten")
+                finalize_release_notes(owner, **common)
                 owner.write_candidate(**common)
                 data = json.loads(path.read_text(encoding="utf-8"))
             else:

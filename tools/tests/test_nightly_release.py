@@ -265,7 +265,7 @@ class TestNightlyNotes(unittest.TestCase):
         self.assertNotIn("incompatible with the previous build", rendered)
         self.assertNotIn("experimental profile", rendered)
 
-    def test_android_compile_only_developer_scope_is_explicit_only_for_nightly(self) -> None:
+    def test_preflight_notes_defer_platform_claims_until_inventory_is_verified(self) -> None:
         for channel in ("nightly", "candidate", "beta"):
             version = "0.1.0-beta.2" + (".nightly.20261003.g9e43ea5e" if channel == "nightly" else "")
             with self.subTest(channel=channel):
@@ -274,16 +274,9 @@ class TestNightlyNotes(unittest.TestCase):
                     source_sha="9" * 40, schema_version=25, previous_schema_version=25,
                     changes=(),
                 )
-                if channel == "nightly":
-                    for fragment in ("## Android developer archives", "`arm64-v8a` and `x86_64`",
-                                     "experimental CLI developer builds, not APKs",
-                                     "Compilation and ELF checks do not qualify Android device runtime, transfers or VPN behavior",
-                                     "Completed-file delivery and route discovery have known Android limitations",
-                                     "`emulebb-rust/README.txt`"):
-                        self.assertIn(fragment, rendered)
-                else:
-                    self.assertNotIn("Android developer archives", rendered)
-                    self.assertNotIn("experimental CLI", rendered)
+                self.assertNotIn("Android developer archives", rendered)
+                self.assertNotIn("experimental CLI", rendered)
+                self.assertNotIn("## Downloads", rendered)
 
 
 class TestReleaseDocuments(unittest.TestCase):
