@@ -624,6 +624,65 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
             self.assertEqual(sums.read_bytes(), b"original checksums")
             owner._sha256sums_text.assert_not_called()
 
+    def test_competing_process_cannot_mutate_or_rollback_the_winners_bound_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            notes = root / f"RELEASE-{self.version}-NOTES.md"
+            sums = root / "SHA256SUMS"
+            notes.write_text("# Current nightly\n\n## Profile compatibility\n\nUse a test profile.\n", encoding="utf-8")
+            sums.write_bytes(b"original sums\n")
+            original = notes.read_bytes(), sums.read_bytes()
+            owner = mock.Mock()
+            candidate = root / f"emulebb-rust-v{self.version}-candidate-manifest.json"
+            owner.candidate_path.return_value = candidate
+            owner.package_layout.return_value = {}
+            data = self.inventory(())
+            data["artifacts"] = [{"name": notes.name}, {"name": sums.name}]
+            contender = (
+                "import runpy,sys; from pathlib import Path; "
+                "runpy.run_path(sys.argv[1])['finalize_release_candidate']("
+                "None,release_dir=Path(sys.argv[2]),context=None,"
+                "archives_dir=Path(sys.argv[2]),archive_identity=None)"
+            )
+
+            def verify_original(**_kwargs):
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", contender, str(SCRIPT_PATH), str(root)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Release candidate finalization is already in progress", result.stderr)
+                self.assertEqual((notes.read_bytes(), sums.read_bytes()), original)
+                self.assertFalse(candidate.exists())
+                return data
+
+            def format_sums(_directory, members):
+                return "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in members)
+
+            def commit_candidate(**_kwargs):
+                candidate.write_text(json.dumps({
+                    "notesSha256": hashlib.sha256(notes.read_bytes()).hexdigest(),
+                    "checksumsSha256": hashlib.sha256(sums.read_bytes()).hexdigest(),
+                }), encoding="utf-8")
+
+            owner.candidate_manifest.side_effect = verify_original
+            owner._sha256sums_text.side_effect = format_sums
+            owner.write_candidate.side_effect = commit_candidate
+            common = {"release_dir": root, "context": mock.Mock(version=self.version),
+                      "archives_dir": root / "archives", "archive_identity": object()}
+            PUBLISH.finalize_release_candidate(owner, **common)
+            committed = notes.read_bytes(), sums.read_bytes(), candidate.read_bytes()
+            second = mock.Mock()
+            second.candidate_path.return_value = candidate
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                PUBLISH.finalize_release_candidate(second, **common)
+            self.assertEqual((notes.read_bytes(), sums.read_bytes(), candidate.read_bytes()), committed)
+            identity = json.loads(candidate.read_text(encoding="utf-8"))
+            self.assertEqual(identity["notesSha256"], hashlib.sha256(notes.read_bytes()).hexdigest())
+            self.assertEqual(identity["checksumsSha256"], hashlib.sha256(sums.read_bytes()).hexdigest())
+            second.candidate_manifest.assert_not_called()
+            second.write_candidate.assert_not_called()
+
 
 class TestCandidateControl(unittest.TestCase):
     def test_registry_writes_require_actual_archive_verification_and_current_source_checks(self) -> None:

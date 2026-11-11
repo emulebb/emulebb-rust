@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import importlib
 import os
 import hashlib
@@ -16,6 +17,7 @@ import sys
 import tarfile
 import tempfile
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Sequence
 from urllib.parse import quote
@@ -378,8 +380,56 @@ def release_download_guidance(data: dict, layout: dict, candidate_name: str) -> 
     return "\n".join(lines).rstrip()
 
 
+@contextmanager
+def release_finalization_lock(release_dir: Path):
+    """Hold a crash-released OS guard for this release directory's public bytes."""
+    lock = release_dir.parent / f".{release_dir.name}-finalization.lock"
+    # WHY: retain the inode after unlocking so contenders cannot lock different
+    # replacement files while validating and committing the same public bytes.
+    with lock.open("a+b") as stream:
+        if os.fstat(stream.fileno()).st_size == 0:
+            stream.write(b"\0")
+            stream.flush()
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            def acquire():
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+
+            def release():
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            def acquire():
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def release():
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        try:
+            acquire()
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+            raise RuntimeError("Release candidate finalization is already in progress") from error
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            release()
+
+
 def finalize_release_candidate(owner, *, release_dir: Path, context, archives_dir: Path, archive_identity) -> None:
-    """Commit final notes, checksums and candidate together, restoring inputs on failure."""
+    """Serialize validation, final public-byte changes, candidate creation and recovery."""
+    with release_finalization_lock(release_dir):
+        _finalize_release_candidate(
+            owner, release_dir=release_dir, context=context, archives_dir=archives_dir, archive_identity=archive_identity,
+        )
+
+
+def _finalize_release_candidate(owner, *, release_dir: Path, context, archives_dir: Path, archive_identity) -> None:
+    """Commit final public bytes while the caller holds their per-release OS lock."""
     candidate = owner.candidate_path(release_dir, context)
     if candidate.exists() or candidate.is_symlink():
         raise RuntimeError("Candidate manifest already exists and cannot be rewritten")
@@ -403,6 +453,7 @@ def finalize_release_candidate(owner, *, release_dir: Path, context, archives_di
     sums = release_dir / "SHA256SUMS"
     staging = Path(tempfile.mkdtemp(prefix=f".{release_dir.name}-notes-", dir=release_dir.parent))
     replaced = []
+    candidate_write_started = False
     try:
         for path in (notes, sums):
             shutil.copyfile(path, staging / path.name)
@@ -414,6 +465,7 @@ def finalize_release_candidate(owner, *, release_dir: Path, context, archives_di
         staged_sums.write_text(owner._sha256sums_text(release_dir, members), encoding="ascii", newline="\n")
         staged_sums.replace(sums)
         replaced.append(sums)
+        candidate_write_started = True
         owner.write_candidate(
             release_dir=release_dir, context=context, archives_dir=archives_dir, archive_identity=archive_identity,
         )
@@ -421,7 +473,7 @@ def finalize_release_candidate(owner, *, release_dir: Path, context, archives_di
         try:
             for path in reversed(replaced):
                 (staging / path.name).replace(path)
-            if not isinstance(failure, FileExistsError):
+            if candidate_write_started and not isinstance(failure, FileExistsError):
                 candidate.unlink(missing_ok=True)
         except OSError as error:
             raise RuntimeError(f"Release recovery requires retained original files in {staging}") from error
