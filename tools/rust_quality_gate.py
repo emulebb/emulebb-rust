@@ -70,12 +70,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--rest-harness-script", type=Path, help="Explicit workspace REST conformance script.")
     parser.add_argument("--rest-openapi-contract", type=Path, help="Explicit workspace OpenAPI contract.")
+    parser.add_argument("--registered-stage", action="store_true", help="Use this registered workstream's verified runtime bundle.")
     args = parser.parse_args(argv)
 
     env = build_env()
+    registered_stage = args.registered_stage
     commands = commands_for_gate(args.gate, env, force_rebuild=args.force_rebuild,
                                  rest_harness_script=args.rest_harness_script,
-                                 rest_openapi_contract=args.rest_openapi_contract)
+                                 rest_openapi_contract=args.rest_openapi_contract,
+                                 registered_stage=registered_stage)
     if args.describe:
         print(json.dumps([{"label": label, "command": command} for label, command in commands], indent=2))
         return 0
@@ -192,18 +195,20 @@ def commands_for_gate(
     force_rebuild: bool = False,
     rest_harness_script: Path | None = None,
     rest_openapi_contract: Path | None = None,
+    registered_stage: bool = False,
 ) -> list[tuple[str, list[str]]]:
     if env is None:
         env = os.environ.copy()
     factories = {
         "policy": policy_step, "policy-tests": policy_tests_step, "fmt": fmt_step,
         "clippy": clippy_step, "diagnostics": diagnostics_step, "webui-test": webui_test_step,
-        "build": lambda: build_step(env, force_rebuild=force_rebuild),
+        "build": lambda: build_step(env, force_rebuild=force_rebuild, registered_stage=registered_stage),
         "test-workspace": test_workspace_step, "test-kad-swarm": test_kad_swarm_step,
         "test-vpn-leak": test_vpn_leak_step, "workflow-lint": workflow_lint_step,
         "supply-chain": supply_chain_step,
         "rest-openapi": lambda: rest_openapi_step(env, harness_script=rest_harness_script,
-                                                 openapi_contract=rest_openapi_contract),
+                                                 openapi_contract=rest_openapi_contract,
+                                                 registered_stage=registered_stage),
         "release-docs": lambda: release_documents_step(env),
         "environment": lambda: ("CI toolchain and input provenance", [sys.executable, "tools/ci_environment.py",
                                 *(["--scope", "quality"] if gate == "ci-quality" else [])]),
@@ -213,7 +218,8 @@ def commands_for_gate(
     for name in GATES[gate]:
         if name == "build" and "webui-test" in seen:
             from webui_workspace import webui_dist_path
-            result.append(build_step(env, force_rebuild=force_rebuild, webui_dist=webui_dist_path("webui-test", env)))
+            result.append(build_step(env, force_rebuild=force_rebuild, webui_dist=webui_dist_path("webui-test", env),
+                                     registered_stage=registered_stage))
         else:
             result.append(factories[name]())
         seen.add(name)
@@ -240,12 +246,13 @@ def supply_chain_step() -> tuple[str, list[str]]:
 
 
 def rest_openapi_step(env: dict[str, str], *, harness_script: Path | None = None,
-                      openapi_contract: Path | None = None) -> tuple[str, list[str]]:
+                      openapi_contract: Path | None = None,
+                      registered_stage: bool = False) -> tuple[str, list[str]]:
     """Delegate loopback conformance to the persisted shared harness."""
     root = require_workspace_root_env(env)
     script = harness_script or root / "repos" / "emulebb-build-tests" / "scripts" / "rust-rest-openapi-ci.py"
     command = [sys.executable, str(script)]
-    if harness_script is not None or openapi_contract is not None:
+    if registered_stage or harness_script is not None or openapi_contract is not None:
         for selected in (script, ROOT, openapi_contract):
             if selected is not None and (not selected.exists() or not any(
                     selected.resolve().is_relative_to(root / boundary) for boundary in ("repos", "workspaces"))):
@@ -253,6 +260,8 @@ def rest_openapi_step(env: dict[str, str], *, harness_script: Path | None = None
         command.extend(["--rust-repo", str(ROOT)])
         if openapi_contract is not None:
             command.extend(["--openapi-contract", str(openapi_contract)])
+    if registered_stage:
+        command.append("--registered-stage")
     return ("live REST/OpenAPI conformance", command)
 
 
@@ -309,13 +318,16 @@ def webui_test_step() -> tuple[str, list[str]]:
     return ("WebUI SPA tests", [sys.executable, "tools/test_webui.py"])
 
 
-def build_step(env: dict[str, str], *, force_rebuild: bool = False, webui_dist: Path | None = None) -> tuple[str, list[str]]:
+def build_step(env: dict[str, str], *, force_rebuild: bool = False, webui_dist: Path | None = None,
+               registered_stage: bool = False) -> tuple[str, list[str]]:
     command = [
         sys.executable,
         "tools/fresh_rust_build.py",
-        "--stage-bin-dir",
-        str(release_stage_bin_dir(env)),
     ]
+    if registered_stage:
+        command.append("--registered-stage")
+    else:
+        command.extend(["--stage-bin-dir", str(release_stage_bin_dir(env))])
     if force_rebuild:
         command.append("--force-rebuild")
     if webui_dist is not None:
