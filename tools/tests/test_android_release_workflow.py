@@ -87,7 +87,7 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
         images = self.jobs["image-native-validation"]["strategy"]["matrix"]
         self.assertEqual(images["variant"], ["ubuntu", "alpine"])
         self.assertEqual({row["architecture"] for row in images["include"]}, {"amd64", "arm64"})
-        self.assertEqual(self.text.count("smoke-rust-release-package.py"), 2)
+        self.assertEqual(self.text.count("smoke-rust-release-package.py"), 1)
         self.assertNotIn("package-smoke", str(self.jobs["android-package"]))
 
     def test_android_uses_pinned_frontend_and_compiler_recipe_inputs(self):
