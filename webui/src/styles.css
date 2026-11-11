@@ -106,7 +106,7 @@ td {
 
 .brand-mark {
   align-items: center;
-  background: var(--tblr-primary);
+  background: transparent;
   border-radius: var(--tblr-border-radius);
   color: var(--tblr-primary-fg);
   display: inline-flex;
@@ -129,6 +129,36 @@ td {
   font-size: 0.75rem;
   line-height: 1.1;
   margin: 2px 0 0;
+}
+
+.brand-identity {
+  position: relative;
+}
+
+.brand-identity summary {
+  cursor: pointer;
+}
+
+.build-details {
+  background: var(--tblr-bg-surface);
+  border: 1px solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius);
+  box-shadow: var(--tblr-box-shadow);
+  display: grid;
+  font-size: 0.8rem;
+  gap: 0.4rem 0.75rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  margin-top: 0.5rem;
+  max-width: calc(100vw - 2rem);
+  min-width: min(24rem, calc(100vw - 2rem));
+  padding: 0.75rem;
+  position: absolute;
+  z-index: 1100;
+}
+
+.build-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .status-toolbar {

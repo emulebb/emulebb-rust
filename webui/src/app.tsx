@@ -1,4 +1,5 @@
 import type { ComponentChildren } from "preact";
+import { AppIdentity } from "./AppIdentity";
 import { useCallback, useEffect, useState } from "preact/hooks";
 import {
   Activity,
@@ -721,11 +722,8 @@ export function App() {
         <div class="container-fluid topbar">
           <div class="topbar-main">
             <div class="navbar-brand app-brand">
-              <span class="brand-mark">eM</span>
-              <div>
-                <h1>eMuleBB WebUI</h1>
-                <p class="brand-version">{appInfo?.version ?? appInfo?.apiVersion ?? snapshot?.app?.version ?? "REST dashboard"}</p>
-              </div>
+              <img class="brand-mark" src="/favicon.ico" width="32" height="32" alt="" />
+              <AppIdentity app={appInfo ?? snapshot?.app ?? null} />
             </div>
             {authState === "authenticated" && (
               <>

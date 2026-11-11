@@ -46,17 +46,8 @@ pub use shutdown::{ShutdownRequest, ShutdownSignal};
 
 pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
 pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
-pub const BUILD_VERSION: &str = match option_env!("EMULEBB_RELEASE_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
-pub const BUILD_CHANNEL: &str = match option_env!("EMULEBB_RELEASE_CHANNEL") {
-    Some(channel) => channel,
-    None => "development",
-};
-pub const BUILD_SOURCE_REVISION: &str = match option_env!("EMULEBB_SOURCE_REVISION") {
-    Some(revision) => revision,
-    None => "unknown",
+pub use emulebb_core::{
+    BUILD_CHANNEL, BUILD_SOURCE_REVISION, BUILD_VERSION, build_version_description,
 };
 
 const REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);

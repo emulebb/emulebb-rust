@@ -117,6 +117,13 @@ async fn app_returns_evelope_with_capabilities() {
     assert_eq!(value["meta"]["apiVersion"], "v1");
     assert_eq!(value["data"]["apiVersion"], "v1");
     assert_eq!(value["data"]["name"], "eMuleBB");
+    assert_eq!(value["data"]["channel"], emulebb_core::BUILD_CHANNEL);
+    assert_eq!(
+        value["data"]["sourceRevision"],
+        emulebb_core::BUILD_SOURCE_REVISION
+    );
+    assert_eq!(value["data"]["platform"], emulebb_core::BUILD_ARCHITECTURE);
+    assert_eq!(value["data"]["build"], emulebb_core::BUILD_FLAVOR);
     assert_eq!(value["data"]["capabilities"]["transfers"], true);
     assert_eq!(value["data"]["capabilities"]["transfers.sse"], true);
     assert_eq!(value["data"]["capabilities"]["transfers.sse.status"], true);

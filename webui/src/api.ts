@@ -60,6 +60,10 @@ export type Page<T> = {
 };
 
 export type AppInfo = {
+  build?: string;
+  platform?: string;
+  channel?: string;
+  sourceRevision?: string;
   appName?: string;
   apiVersion?: string;
   contractVersion?: string;

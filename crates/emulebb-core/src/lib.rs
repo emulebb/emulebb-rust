@@ -104,6 +104,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod app_api;
+mod build_identity;
 mod callback_tracker;
 mod categories;
 mod category_api;
@@ -285,6 +286,10 @@ use shared_directories::{
 mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
+pub use build_identity::{
+    BUILD_ARCHITECTURE, BUILD_CHANNEL, BUILD_FLAVOR, BUILD_SOURCE_REVISION, BUILD_VERSION,
+    build_version_description,
+};
 use download_task_supervisor::DownloadTaskSupervisor;
 pub use emulebb_ed2k::NatStatusSnapshot;
 pub use emulebb_ed2k::normalize_ed2k_file_name;
