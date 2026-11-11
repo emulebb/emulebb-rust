@@ -9,6 +9,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import check_rust_client_policy as POLICY
+import release_publish as PUBLISH
 
 
 class AndroidReleaseWorkflowTests(unittest.TestCase):
@@ -76,15 +77,17 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
                          "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}")
 
     def test_existing_native_musl_and_oci_proofs_keep_full_inventory(self):
-        self.assertEqual(len(self.jobs["native-package"]["strategy"]["matrix"]["include"]), 6)
-        self.assertEqual(len(self.jobs["native-package-smoke"]["strategy"]["matrix"]["include"]), 6)
+        self.assertEqual(len(PUBLISH.native_matrix("full")), 6)
+        for job in ("native-package", "native-package-smoke"):
+            self.assertEqual(self.jobs[job]["strategy"]["matrix"]["include"],
+                             "${{ fromJSON(needs.prepare.outputs.native_matrix) }}")
         self.assertEqual({row["architecture"] for row in self.jobs["musl-package"]["strategy"]["matrix"]["include"]},
                          {"amd64", "arm64"})
         self.assertEqual(self.jobs["image-candidate"]["strategy"]["matrix"]["variant"], ["ubuntu", "alpine"])
         images = self.jobs["image-native-validation"]["strategy"]["matrix"]
         self.assertEqual(images["variant"], ["ubuntu", "alpine"])
         self.assertEqual({row["architecture"] for row in images["include"]}, {"amd64", "arm64"})
-        self.assertEqual(self.text.count("smoke-rust-release-package.py"), 1)
+        self.assertEqual(self.text.count("smoke-rust-release-package.py"), 2)
         self.assertNotIn("package-smoke", str(self.jobs["android-package"]))
 
     def test_android_uses_pinned_frontend_and_compiler_recipe_inputs(self):

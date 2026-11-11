@@ -739,11 +739,13 @@ def check_required_ci_gates(
             errors.append(f"optional {name} must retain coordination and workflow-lint dependencies")
         if job.get("continue-on-error") or any(step.get("continue-on-error") for step in job.get("steps", [])):
             errors.append(f"optional {name} must report failures without continue-on-error")
-    native = {jobs.get("build-linux", {}).get("runs-on"),
-              *jobs.get("build-test", {}).get("strategy", {}).get("matrix", {}).get("runner", []),
-              *optional_jobs.get("build-macos", {}).get("strategy", {}).get("matrix", {}).get("runner", [])}
-    if native != {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm", "macos-15-intel", "macos-15"}:
-        errors.append("required and optional CI must preserve all six supported native targets")
+    primary_native = {jobs.get("build-linux", {}).get("runs-on"),
+                      *jobs.get("build-test", {}).get("strategy", {}).get("matrix", {}).get("runner", [])}
+    if primary_native != {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm"}:
+        errors.append("mandatory CI must preserve native Windows/Linux x64 and ARM64 targets")
+    optional_native = set(optional_jobs.get("build-macos", {}).get("strategy", {}).get("matrix", {}).get("runner", []))
+    if optional_native != {"macos-15-intel", "macos-15"}:
+        errors.append("optional CI must preserve both native macOS targets")
     return errors
 
 
