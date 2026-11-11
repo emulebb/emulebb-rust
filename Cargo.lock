@@ -620,6 +620,7 @@ dependencies = [
  "emulebb-metadata",
  "emulebb-rest",
  "emulebb-settings",
+ "find-msvc-tools",
  "futures-util",
  "hex",
  "reqwest",
