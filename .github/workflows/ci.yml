@@ -619,6 +619,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # WHY: separate optional workflows let this merge aggregate finish while
+  # macOS or Android validation remains pending or reports a platform failure.
   required-ci:
     name: Required CI
     if: ${{ always() }}
