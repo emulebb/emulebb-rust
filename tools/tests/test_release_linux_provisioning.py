@@ -141,6 +141,20 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
             "7315b19a32460a84b4474993ef33065483ffec792fbc70dbe12eab918aa2bbf4",
         ])
 
+    def test_musl_host_cache_preflight_inherits_an_existing_owned_target(self):
+        steps = self.workflow["jobs"]["musl-package"]["steps"]
+        package = next(step for step in steps
+                       if "package-emulebb-rust-linux-ci" in step.get("run", ""))
+        prepare = next(step for step in steps
+                       if step.get("name") == "Prepare inherited host Cargo target for the source-cache fence")
+        target = "${{ runner.temp }}/emulebb-rust-out/builds/rust/target"
+        self.assertEqual(package["env"]["CARGO_TARGET_DIR"], target)
+        self.assertEqual(prepare["env"]["CARGO_TARGET_DIR"], target)
+        self.assertIn("Path(os.environ['CARGO_TARGET_DIR']).mkdir(parents=True, exist_ok=True)", prepare["run"])
+        self.assertLess(steps.index(prepare), steps.index(package))
+        self.assertEqual(package["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"],
+                         "${{ runner.temp }}/emulebb-rust-out")
+
 
 if __name__ == "__main__":
     unittest.main()
