@@ -32,9 +32,9 @@
     "emulebb-miniupnp": "4e7a10948004ca2085ac8103e14fc77edb898b4c",
     "emulebb-libpcpnatpmp": "a6e787f837e507336a8774522c33b54264ef4a4b",
     "emulebb-build-tests": "fd4c6d21e079fab2b84704294c7c7000b893a81e",
-    "emulebb-tooling": "630d1a3492ae65acad0a8dfd1575d671ff7b492c"
+    "emulebb-tooling": "3b045ab4dea7554dceb13d3022a21727046d06e5"
   },
   "node": "26.13.0",
   "npm": "11.20.0",
-  "openapi_sha256": "81f7134686f66b5a26ce13a489304d1661d0a3e45b0ff4f0269df8f32da500c9"
+  "openapi_sha256": "4c133d3efa69d433c2dc76e77a0e64dde2c9a56838567f674ae950a029ba7c9a"
 }
