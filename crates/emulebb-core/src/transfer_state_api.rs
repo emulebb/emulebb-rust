@@ -151,7 +151,7 @@ impl EmulebbCore {
             return Ok(Some(current));
         }
         anyhow::ensure!(!current.stopped, "stopped transfer cannot be resumed");
-        self.ed2k_transfers.set_control_state(hash, None).await?;
+        self.ed2k_transfers.resume_transfer(hash).await?;
         let Some(transfer) = self.set_transfer_state(hash, "downloading").await else {
             return Ok(None);
         };

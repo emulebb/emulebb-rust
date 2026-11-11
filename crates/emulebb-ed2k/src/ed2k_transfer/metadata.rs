@@ -843,6 +843,19 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
+    /// Resume a paused download without clearing an authoritative stop.
+    pub async fn resume_transfer(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
+        let _guard = self.lock_manifest(file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        ensure!(
+            manifest.control_state.as_deref() != Some("stopped"),
+            "stopped transfer cannot be resumed"
+        );
+        manifest.control_state = None;
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(manifest)
+    }
+
     /// Persist the user-facing download category across restarts.
     pub async fn set_category_id(
         &self,

@@ -1433,6 +1433,99 @@ async fn delete_completed_transfer_row_rejects_pending_delivery() {
 }
 
 #[tokio::test]
+async fn delayed_background_result_preserves_explicit_pause_and_stop() {
+    for (control, stopped) in [("paused", false), ("stopped", true)] {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let transfer = core
+            .create_transfer(TransferCreate {
+                known_file_policy: Default::default(),
+                link: Some(
+                    "ed2k://|file|Control.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
+                ),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: Some(true),
+            })
+            .await
+            .unwrap();
+        // Capture the background outcome before the operator's control change.
+        // Paused creation keeps the fixture free of detached download attempts.
+        let delayed_state = "queued";
+        core.set_transfer_control_state(&transfer.hash, control)
+            .await
+            .unwrap()
+            .unwrap();
+        let refreshed = core
+            .refresh_transfer_from_manifest(&transfer.hash, delayed_state)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.state, "paused");
+        assert_eq!(refreshed.stopped, stopped);
+        let current = core.transfer(&transfer.hash).await.unwrap();
+        assert_eq!(current.state, "paused");
+        assert_eq!(current.stopped, stopped);
+        assert_eq!(
+            core.ed2k_transfers
+                .manifest(&transfer.hash)
+                .await
+                .unwrap()
+                .control_state
+                .as_deref(),
+            Some(control)
+        );
+        if !stopped {
+            let resumed = core.resume_transfer(&transfer.hash).await.unwrap().unwrap();
+            assert_eq!(resumed.state, "downloading");
+            assert!(!resumed.stopped);
+        }
+    }
+}
+
+#[tokio::test]
+async fn durable_stop_rejects_resume_even_when_cached_control_is_stale() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let transfer = core
+        .create_transfer(TransferCreate {
+            known_file_policy: Default::default(),
+            link: Some(
+                "ed2k://|file|Durable.Stop.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
+            ),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+    core.stop_transfer(&transfer.hash).await.unwrap().unwrap();
+    // Model the old background publication independently of the cache fix, so
+    // this check must reach the durable guard instead of the cached one.
+    {
+        let mut state = core.state.lock().await;
+        let cached = state.transfers.get_mut(&transfer.hash).unwrap();
+        cached.state = "queued".to_string();
+        cached.stopped = false;
+    }
+    let error = core.resume_transfer(&transfer.hash).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("stopped transfer cannot be resumed")
+    );
+    assert_eq!(
+        core.ed2k_transfers
+            .manifest(&transfer.hash)
+            .await
+            .unwrap()
+            .control_state
+            .as_deref(),
+        Some("stopped")
+    );
+}
+
+#[tokio::test]
 async fn stopped_transfer_cannot_be_resumed() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let transfer = core
