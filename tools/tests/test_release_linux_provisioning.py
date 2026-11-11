@@ -130,7 +130,7 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
             self.assertEqual(smoke["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"],
                              "${{ runner.temp }}/emulebb-rust-out")
             self.assertIn("--expected-source-sha", smoke["run"])
-            self.assertIn("--expected-channel ${{ env.RELEASE_CHANNEL }}", smoke["run"])
+            self.assertIn('--expected-channel "${{ env.RELEASE_CHANNEL }}"', smoke["run"])
             self.assertIn("${{ matrix.os != 'macos' && '--verify-profile-ownership' || '' }}", smoke["run"])
             self.assertIn("${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}", smoke["run"])
             self.assertNotIn("continue-on-error", smoke)
