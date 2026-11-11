@@ -407,7 +407,9 @@ jobs:
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
-        run: python -B -m emule_workspace package-emulebb-rust-linux-ci --libc musl --architecture ${{ matrix.architecture }} --release-version "$RELEASE_VERSION" --test-scope full --smoke
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR"
+          python -B -m emule_workspace package-emulebb-rust-linux-ci --libc musl --architecture ${{ matrix.architecture }} --release-version "$RELEASE_VERSION" --test-scope full --smoke
       - name: Retain tested musl package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
