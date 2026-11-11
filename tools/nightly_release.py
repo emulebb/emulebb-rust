@@ -52,7 +52,8 @@ class Change:
     category: str
 
 
-def run(command: Sequence[str], *, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+def run(command: Sequence[str], *, cwd: Path = ROOT,
+        timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     """Runs one checked command and captures its text output."""
 
     return subprocess.run(
@@ -62,6 +63,7 @@ def run(command: Sequence[str], *, cwd: Path = ROOT) -> subprocess.CompletedProc
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        timeout=timeout,
     )
 
 
@@ -531,9 +533,16 @@ def write_release_documents(*, version: str, channel: str, source_sha: str, sour
             stream.write(content)
 
 
-def _action_rows(endpoint: str, field: str) -> list[dict[str, object]]:
+def _action_rows(endpoint: str, field: str, *, deadline: float | None = None) -> list[dict[str, object]]:
     """Read every Actions page, rejecting incomplete or malformed inventories."""
-    response = run(("gh", "api", "--paginate", "--slurp", endpoint))
+    # WHY: the qualification deadline must also bound a stalled API request.
+    timeout = 120 if deadline is None else min(120, deadline - time.monotonic())
+    if timeout <= 0:
+        raise SourceChecksNotReady("Exact-source qualification timed out before an Actions request")
+    try:
+        response = run(("gh", "api", "--paginate", "--slurp", endpoint), timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise SourceChecksNotReady("Exact-source qualification Actions request timed out") from error
     pages = json.loads(response.stdout)
     if not isinstance(pages, list) or not pages:
         raise RuntimeError("Actions eligibility requires a paginated response")
@@ -548,7 +557,8 @@ def _action_rows(endpoint: str, field: str) -> list[dict[str, object]]:
     return rows
 
 
-def verify_source_checks(repository: str, sha: str, *, platform_profile: str = "full") -> dict[str, dict[str, int]]:
+def verify_source_checks(repository: str, sha: str, *, platform_profile: str = "full",
+                         deadline: float | None = None) -> dict[str, dict[str, int]]:
     """Require exact latest workflow attempts for the explicit caller target profile."""
     if (re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
             or re.fullmatch(r"[0-9a-f]{40}", sha) is None):
@@ -562,7 +572,8 @@ def verify_source_checks(repository: str, sha: str, *, platform_profile: str = "
         workflows.update(OPTIONAL_PLATFORM_WORKFLOW)
     evidence = {}
     for check, workflow in workflows.items():
-        rows = _action_rows(f"repos/{repository}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page=100", "workflow_runs")
+        rows = _action_rows(f"repos/{repository}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page=100",
+                            "workflow_runs", deadline=deadline)
         if not rows:
             raise SourceChecksPending(f"No {check} workflow invocation for source {sha}")
         # WHY: this endpoint already filters by source. Dropping malformed or
@@ -593,7 +604,8 @@ def verify_source_checks(repository: str, sha: str, *, platform_profile: str = "
             raise SourceChecksPending(f"{check} latest workflow attempt must complete successfully")
         if conclusion != "success":
             raise SourceChecksNotReady(f"{check} latest workflow attempt must complete successfully")
-        jobs = _action_rows(f"repos/{repository}/actions/runs/{latest['id']}/attempts/{latest['run_attempt']}/jobs?per_page=100", "jobs")
+        jobs = _action_rows(f"repos/{repository}/actions/runs/{latest['id']}/attempts/{latest['run_attempt']}/jobs?per_page=100",
+                            "jobs", deadline=deadline)
         aggregate = [job for job in jobs if job.get("name") == check]
         if len(aggregate) != 1:
             raise RuntimeError(f"{check} latest attempt must contain exactly one required aggregate job")
@@ -616,9 +628,10 @@ def wait_for_source_checks(repository: str, sha: str, *, platform_profile: str =
     deadline = time.monotonic() + timeout_seconds
     while True:
         try:
-            if platform_profile == "full":
-                return verify_source_checks(repository, sha)
-            return verify_source_checks(repository, sha, platform_profile=platform_profile)
+            evidence = verify_source_checks(repository, sha, platform_profile=platform_profile, deadline=deadline)
+            if time.monotonic() > deadline:
+                raise SourceChecksNotReady("Exact-source qualification timed out after checking Actions")
+            return evidence
         except SourceChecksPending as error:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

@@ -141,7 +141,9 @@ class TestScheduledWorkflowSource(unittest.TestCase):
         self.assertEqual(values["sha"], "a" * 40)
         self.assertEqual(values["should_build"], "true")
         self.assertEqual(values["skip_reason"], "")
-        verify.assert_called_once_with("emulebb/emulebb-rust", "a" * 40)
+        verify.assert_called_once_with(
+            "emulebb/emulebb-rust", "a" * 40, platform_profile="full", deadline=mock.ANY,
+        )
         version.assert_called_once_with("a" * 40)
 
     def test_unqualified_checkout_skips_without_selecting_an_older_source(self):
@@ -150,7 +152,9 @@ class TestScheduledWorkflowSource(unittest.TestCase):
         self.assertEqual(values["sha"], "a" * 40)
         self.assertEqual(values["should_build"], "false")
         self.assertEqual(values["skip_reason"], reason)
-        verify.assert_called_once_with("emulebb/emulebb-rust", "a" * 40)
+        verify.assert_called_once_with(
+            "emulebb/emulebb-rust", "a" * 40, platform_profile="full", deadline=mock.ANY,
+        )
         version.assert_called_once_with("a" * 40)
 
     def test_source_inventory_and_transport_errors_are_not_normal_skips(self):
@@ -582,10 +586,12 @@ class TestSourceQualificationWait(unittest.TestCase):
         expected = {"Required CI": {"runId": 20}}
         with mock.patch.object(NIGHTLY, "verify_source_checks", side_effect=[
             NIGHTLY.SourceChecksPending("Optional Platform CI pending"), expected,
-        ]) as verify, mock.patch.object(NIGHTLY.time, "monotonic", side_effect=[0, 1]), \
+        ]) as verify, mock.patch.object(NIGHTLY.time, "monotonic", side_effect=[0, 1, 2]), \
                 mock.patch.object(NIGHTLY.time, "sleep") as sleep:
             self.assertEqual(NIGHTLY.wait_for_source_checks("example/project", "a" * 40), expected)
-        self.assertEqual(verify.call_args_list, [mock.call("example/project", "a" * 40)] * 2)
+        self.assertEqual(verify.call_args_list, [mock.call(
+            "example/project", "a" * 40, platform_profile="full", deadline=480,
+        )] * 2)
         sleep.assert_called_once_with(30)
 
     def test_pending_then_terminal_failure_does_not_wait_or_choose_an_older_success(self):
@@ -611,6 +617,24 @@ class TestSourceQualificationWait(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "invalid inventory"):
                 NIGHTLY.wait_for_source_checks("example/project", "a" * 40)
         sleep.assert_not_called()
+
+    def test_actions_request_uses_only_the_remaining_budget(self):
+        response = subprocess.CompletedProcess([], 0, stdout='[{"workflow_runs": []}]')
+        with mock.patch.object(NIGHTLY.time, "monotonic", return_value=8), \
+                mock.patch.object(NIGHTLY, "run", return_value=response) as run:
+            self.assertEqual(NIGHTLY._action_rows("synthetic", "workflow_runs", deadline=10), [])
+        self.assertEqual(run.call_args.kwargs["timeout"], 2)
+
+    def test_actions_timeout_is_terminal_for_this_qualification(self):
+        with mock.patch.object(NIGHTLY, "run", side_effect=subprocess.TimeoutExpired("gh", 120)):
+            with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "Actions request timed out"):
+                NIGHTLY._action_rows("synthetic", "workflow_runs")
+
+    def test_success_after_the_deadline_cannot_qualify_source(self):
+        with mock.patch.object(NIGHTLY, "verify_source_checks", return_value={}), \
+                mock.patch.object(NIGHTLY.time, "monotonic", side_effect=[0, 481]):
+            with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "timed out after"):
+                NIGHTLY.wait_for_source_checks("example/project", "a" * 40)
 
 
 if __name__ == "__main__":

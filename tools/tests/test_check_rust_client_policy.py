@@ -325,6 +325,17 @@ class TestRequiredCiGates(unittest.TestCase):
         errors = CHECKER.check_required_ci_gates(optional_text=optional.replace('"$ANDROID_RESULT"', '"success"'))
         self.assertTrue(any("Android build result verification" in error for error in errors))
 
+    def test_native_arm64_cannot_move_from_mandatory_to_optional_ci(self) -> None:
+        import yaml
+        ci = yaml.safe_load((CHECKER.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        optional = yaml.safe_load(
+            (CHECKER.ROOT / ".github/workflows/optional-platforms.yml").read_text(encoding="utf-8")
+        )
+        ci["jobs"]["build-test"]["strategy"]["matrix"]["runner"].remove("windows-11-arm")
+        optional["jobs"]["build-macos"]["strategy"]["matrix"]["runner"].append("windows-11-arm")
+        errors = CHECKER.check_required_ci_gates(yaml.safe_dump(ci), optional_text=yaml.safe_dump(optional))
+        self.assertTrue(any("mandatory CI must preserve native Windows/Linux" in error for error in errors))
+
 
 class TestDefaultBranchPolicy(unittest.TestCase):
     def test_current_policy_is_single_maintainer_safe_and_fail_closed(self) -> None:
