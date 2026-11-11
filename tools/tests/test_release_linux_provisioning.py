@@ -50,6 +50,16 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", self.prepared)
         self.assertNotIn("continue-on-error", self.job)
 
+    def test_prepared_execution_identity_and_failure_log_are_retained(self):
+        diagnostics = next(step for step in self.steps
+                           if step.get("name") == "Retain build diagnostics")
+        self.assertEqual(diagnostics["if"], "always()")
+        self.assertEqual(set(diagnostics["with"]["path"].splitlines()), {
+            "${{ runner.temp }}/emulebb-rust-out/logs/builds/**/*.log",
+            "${{ runner.temp }}/emulebb-rust-out/reports/prepared-native/**/execution.json",
+            "${{ runner.temp }}/emulebb-rust-out/reports/prepared-native/**/package.log",
+        })
+
     def test_prepared_packaging_uses_pinned_owner_and_native_docker_before_upload(self):
         checkout = next(step for step in self.steps
                         if step.get("with", {}).get("repository") == "emulebb/emulebb-build")

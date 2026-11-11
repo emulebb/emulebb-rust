@@ -267,7 +267,8 @@ jobs:
           name: emulebb-rust-build-logs-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/emulebb-rust-out/logs/builds/**/*.log
-            ${{ runner.temp }}/emulebb-rust-out/reports/native-linux-provisioning.json
+            ${{ runner.temp }}/emulebb-rust-out/reports/prepared-native/**/execution.json
+            ${{ runner.temp }}/emulebb-rust-out/reports/prepared-native/**/package.log
           if-no-files-found: warn
           retention-days: 30
       - name: Retain package and provenance
