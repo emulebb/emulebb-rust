@@ -50,6 +50,10 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
                         if step.get("with", {}).get("repository") == "emulebb/emulebb-build")
         self.assertEqual(checkout["with"]["ref"], "${{ env.EMULEBB_BUILD_REF }}")
         self.assertRegex(self.workflow["env"]["EMULEBB_BUILD_REF"], r"^[0-9a-f]{40}$")
+        self.assertRegex(
+            self.workflow["env"]["EMULEBB_LINUX_PREPARED_IMAGE"],
+            r"^ghcr\.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:[0-9a-f]{64}$",
+        )
         self.assertEqual(self.prepared["working-directory"], checkout["with"]["path"])
         docker = next(step for step in self.steps if step.get("uses", "").startswith("docker/setup-docker-action@"))
         self.assertEqual(docker["if"], "matrix.os == 'linux'")
