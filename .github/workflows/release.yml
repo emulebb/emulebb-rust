@@ -52,7 +52,7 @@ env:
   RELEASE_PLATFORM_PROFILE: ${{ inputs.platform_profile || 'full' }}
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
   EMULEBB_BUILD_REF: 995d13f350c8342437fdb3122d2a271696ac6e29
-  EMULEBB_BUILD_TESTS_REF: 20a007f34d88b99c40d456cfe1dce3d0537ba00d
+  EMULEBB_BUILD_TESTS_REF: d2a48d8920ef4225e86fbe918045240ab2452e67
   EMULEBB_TOOLING_REF: 3b045ab4dea7554dceb13d3022a21727046d06e5
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
@@ -324,7 +324,7 @@ jobs:
           name: ${{ env.NATIVE_PAYLOAD_PREFIX }}-${{ matrix.slug }}
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Prove packaged lifecycle, local transfer, and embedded WebUI
-        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --rust-repo .ci/candidate --expected-source-sha "${{ needs.prepare.outputs.source_sha }}" --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} ${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}
+        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --rust-repo .ci/candidate --expected-source-sha "${{ needs.prepare.outputs.source_sha }}" --expected-channel "$RELEASE_CHANNEL" --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} ${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}
       - name: Retain package lifecycle evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
