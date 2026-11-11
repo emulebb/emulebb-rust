@@ -40,11 +40,23 @@ class TestPlatformGraph(unittest.TestCase):
         for name in ("optional-macos-package", "optional-macos-smoke"):
             self.assertIn("platform_profile == 'windows-linux'", release[name]["if"])
             self.assertEqual({row["os"] for row in release[name]["strategy"]["matrix"]["include"]}, {"macos"})
-        optional_artifacts = [step["with"]["name"] for name in ("optional-macos-package", "optional-macos-smoke")
-                              for step in release[name]["steps"]
-                              if step.get("uses", "").startswith("actions/upload-artifact@")]
-        self.assertTrue(any("optional-native-payload" in name for name in optional_artifacts))
-        self.assertTrue(any("optional-package-smoke" in name for name in optional_artifacts))
+        self.assertIs(release["native-package"]["steps"], release["optional-macos-package"]["steps"])
+        self.assertIs(release["native-package-smoke"]["steps"], release["optional-macos-smoke"]["steps"])
+        for name, payload, smoke in (
+            ("native-package", "emulebb-rust-native-payload", None),
+            ("optional-macos-package", "emulebb-rust-optional-native-payload", None),
+            ("native-package-smoke", "emulebb-rust-native-payload", "emulebb-rust-package-smoke"),
+            ("optional-macos-smoke", "emulebb-rust-optional-native-payload", "emulebb-rust-optional-package-smoke"),
+        ):
+            job = release[name]
+            self.assertEqual(job["env"]["NATIVE_PAYLOAD_PREFIX"], payload)
+            if smoke:
+                self.assertEqual(job["env"]["PACKAGE_SMOKE_PREFIX"], smoke)
+            artifacts = [step["with"]["name"] for step in job["steps"]
+                         if step.get("uses", "").startswith(("actions/upload-artifact@", "actions/download-artifact@"))]
+            self.assertIn("${{ env.NATIVE_PAYLOAD_PREFIX }}-${{ matrix.slug }}", artifacts)
+            if smoke:
+                self.assertIn("${{ env.PACKAGE_SMOKE_PREFIX }}-${{ matrix.slug }}", artifacts)
 
     def test_reduced_profile_is_only_an_explicit_unpublished_manual_candidate(self):
         self.assertEqual(PUBLISH.resolve_platform_profile(

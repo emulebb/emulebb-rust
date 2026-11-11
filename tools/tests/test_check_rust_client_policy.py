@@ -833,10 +833,12 @@ working-directory: .ci/emulebb-build
     steps: []
   native-package-smoke:
     needs: [prepare, native-package]
+    env:
+      PACKAGE_SMOKE_PREFIX: emulebb-rust-package-smoke
     steps:
       - ref: ${{ github.workflow_sha }}
       - run: smoke-rust-release-package.py --rust-repo . --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --render-webui
-      - name: emulebb-rust-package-smoke-${{ matrix.slug }}
+      - name: ${{ env.PACKAGE_SMOKE_PREFIX }}-${{ matrix.slug }}
       - pattern: emulebb-rust-package-smoke-*
 package-emulebb-rust-ci --release-version 0.1.0-beta.2 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
 validate-emulebb-rust-image-ci

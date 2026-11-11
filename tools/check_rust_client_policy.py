@@ -1481,7 +1481,8 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "smoke-rust-release-package.py": "native package and WebUI smoke",
         "--rust-repo .": "package smoke source schema",
         "--report-path \"${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json\"": "package lifecycle report output",
-        "name: emulebb-rust-package-smoke-${{ matrix.slug }}": "package lifecycle report retention",
+        "PACKAGE_SMOKE_PREFIX: emulebb-rust-package-smoke": "primary package lifecycle report namespace",
+        "name: ${{ env.PACKAGE_SMOKE_PREFIX }}-${{ matrix.slug }}": "package lifecycle report retention",
         "pattern: emulebb-rust-package-smoke-*": "package lifecycle report assembly",
         "validate-emulebb-rust-image-ci": "native first-run LinuxServer image smoke",
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
@@ -1502,10 +1503,8 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         for fragment, description in required.items()
         if fragment not in text
     ]
-    # Each disjoint matrix has one smoke entrypoint; optional results stay out
-    # of the selected candidate's dependency graph and artifact namespace.
-    smoke_count = 2 if re.search(r"(?m)^  optional-macos-smoke:", text) else 1
-    if text.count("smoke-rust-release-package.py") != smoke_count:
+    # Each job expands the same anchored recipe once for every selected CPU.
+    if text.count("smoke-rust-release-package.py") != 1:
         errors.append(
             ".github/workflows/release.yml must run smoke-rust-release-package.py "
             "exactly once per native matrix target"
