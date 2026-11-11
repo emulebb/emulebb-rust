@@ -26,6 +26,8 @@ use symphonia::core::{
 use super::Ed2kMediaMetadata;
 
 const MAX_PREFIX_BYTES: u64 = 2 * 1024 * 1024;
+// Ordinary WAVE INFO and AVI header/stream lists use only a few levels.
+const MAX_RIFF_LIST_DEPTH: usize = 16;
 const MAX_TEXT_CHARS: usize = 80;
 const MAGIC_SNIFF_BYTES: usize = 12;
 const MEDIA_MAGIC_SNIFF_BYTES: usize = 4 * 1024;
@@ -547,10 +549,18 @@ fn extract_riff(bytes: &[u8], file_size: u64) -> Ed2kMediaMetadata {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" {
         return Ed2kMediaMetadata::default();
     }
+    // Each visited chunk consumes a distinct eight-byte header in this prefix.
+    let bytes = &bytes[..bytes.len().min(MAX_PREFIX_BYTES as usize)];
     let mut media = Ed2kMediaMetadata::default();
     let form = &bytes[8..12];
     let mut wave_byte_rate = 0u32;
-    parse_riff_chunks(&bytes[12..], form, &mut media, &mut wave_byte_rate);
+    parse_riff_chunks(
+        &bytes[12..],
+        form,
+        &mut media,
+        &mut wave_byte_rate,
+        MAX_RIFF_LIST_DEPTH,
+    );
     if form == b"AVI " && media.length_seconds != 0 && media.bitrate_kbps == 0 {
         media.bitrate_kbps = u32::try_from(
             (file_size.saturating_mul(8) / u64::from(media.length_seconds) + 500) / 1_000,
@@ -565,6 +575,7 @@ fn parse_riff_chunks(
     form: &[u8],
     media: &mut Ed2kMediaMetadata,
     wave_byte_rate: &mut u32,
+    remaining_list_depth: usize,
 ) {
     while bytes.len() >= 8 {
         let id = &bytes[..4];
@@ -606,12 +617,18 @@ fn parse_riff_chunks(
             b"strh" if form == b"AVI " && body.len() >= 8 && &body[..4] == b"vids" => {
                 media.codec = fourcc(&body[4..8]);
             }
-            b"LIST" if body.len() >= 4 => {
+            b"LIST" if body.len() >= 4 && remaining_list_depth > 0 => {
                 let list_type = &body[..4];
                 if list_type == b"INFO" {
                     parse_riff_info(&body[4..], media);
                 } else {
-                    parse_riff_chunks(&body[4..], form, media, wave_byte_rate);
+                    parse_riff_chunks(
+                        &body[4..],
+                        form,
+                        media,
+                        wave_byte_rate,
+                        remaining_list_depth - 1,
+                    );
                 }
             }
             _ => {}
@@ -908,12 +925,8 @@ mod tests {
         push_riff_chunk(&mut info, b"IART", b"Wave Artist\0");
         push_riff_chunk(&mut body, b"LIST", &info);
         push_riff_chunk(&mut body, b"data", &vec![0u8; 176_400]);
-        let mut wave = b"RIFF".to_vec();
-        wave.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
-        wave.extend_from_slice(b"WAVE");
-        wave.extend_from_slice(&body);
         let temp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(temp.path(), wave).unwrap();
+        std::fs::write(temp.path(), riff_file(b"WAVE", &body)).unwrap();
 
         let media = extract_media_metadata(temp.path(), "sample.wav");
         assert_eq!(media.title, "Wave Title");
@@ -921,6 +934,61 @@ mod tests {
         assert_eq!(media.codec, "PCM");
         assert_eq!(media.bitrate_kbps, 1_411);
         assert_eq!(media.length_seconds, 1);
+    }
+
+    #[test]
+    fn riff_list_depth_limit_preserves_sibling_metadata() {
+        for (depth, expected_title) in [
+            (MAX_RIFF_LIST_DEPTH, "Nested title"),
+            (MAX_RIFF_LIST_DEPTH + 1, ""),
+        ] {
+            let mut list = b"INFO".to_vec();
+            push_riff_chunk(&mut list, b"INAM", b"Nested title\0");
+            for _ in 1..depth {
+                let mut parent = b"test".to_vec();
+                push_riff_chunk(&mut parent, b"LIST", &list);
+                list = parent;
+            }
+            let mut body = Vec::new();
+            push_riff_chunk(&mut body, b"LIST", &list);
+            let mut sibling = b"INFO".to_vec();
+            push_riff_chunk(&mut sibling, b"IART", b"Sibling artist\0");
+            push_riff_chunk(&mut body, b"LIST", &sibling);
+
+            let wave = riff_file(b"WAVE", &body);
+            let media = extract_riff(&wave, wave.len() as u64);
+            assert_eq!(media.title, expected_title, "LIST depth {depth}");
+            assert_eq!(media.artist, "Sibling artist");
+        }
+    }
+
+    #[test]
+    fn extracts_nested_avi_metadata_before_a_truncated_list() {
+        let mut main_header = [0; 56];
+        main_header[..4].copy_from_slice(&500_000u32.to_le_bytes());
+        main_header[16..20].copy_from_slice(&4u32.to_le_bytes());
+        let mut header_list = b"hdrl".to_vec();
+        push_riff_chunk(&mut header_list, b"avih", &main_header);
+        let mut stream_list = b"strl".to_vec();
+        let mut stream_header = [0; 56];
+        stream_header[..8].copy_from_slice(b"vidsMJPG");
+        push_riff_chunk(&mut stream_list, b"strh", &stream_header);
+        push_riff_chunk(&mut header_list, b"LIST", &stream_list);
+        let mut body = Vec::new();
+        push_riff_chunk(&mut body, b"LIST", &header_list);
+        let mut info = b"INFO".to_vec();
+        push_riff_chunk(&mut info, b"INAM", b"AVI title\0");
+        push_riff_chunk(&mut body, b"LIST", &info);
+        push_riff_chunk(&mut body, b"LIST", b"test");
+
+        let avi = riff_file(b"AVI ", &body);
+        for prefix in [avi.as_slice(), &avi[..avi.len() - 1]] {
+            let media = extract_riff(prefix, 100_000);
+            assert_eq!(media.title, "AVI title");
+            assert_eq!(media.codec, "MJPG");
+            assert_eq!(media.length_seconds, 2);
+            assert_eq!(media.bitrate_kbps, 400);
+        }
     }
 
     fn id3_text_frame(id: &[u8; 4], value: &str) -> Vec<u8> {
@@ -987,6 +1055,14 @@ mod tests {
             ((value >> 7) & 0x7f) as u8,
             (value & 0x7f) as u8,
         ]
+    }
+
+    fn riff_file(form: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
+        file.extend_from_slice(form);
+        file.extend_from_slice(body);
+        file
     }
 
     fn push_riff_chunk(target: &mut Vec<u8>, id: &[u8; 4], body: &[u8]) {
