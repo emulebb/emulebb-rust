@@ -497,6 +497,40 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
                          "SHA256SUMS", "SBOMs", "ghcr.io"):
             self.assertNotIn(fragment, rendered)
 
+    def test_format4_full_and_reduced_profiles_only_claim_their_verified_inventory(self) -> None:
+        suffixes = {"windows-x64": "windows-x64.zip", "windows-arm64": "windows-arm64.zip",
+                    "linux-x64": "linux-amd64.deb", "linux-arm64": "linux-arm64.deb",
+                    "macos-x64": "macos-x64.dmg", "macos-arm64": "macos-arm64.dmg"}
+        for profile in ("full", "windows-linux"):
+            with self.subTest(profile=profile):
+                version = self.version if profile == "full" else "0.1.0-beta.3"
+                stem = f"emulebb-rust-v{version}-"
+                # Reuse the actual Rust profile owner instead of duplicating
+                # which native platforms belong to the selected inventory.
+                layout = {row["slug"]: (stem + suffixes[row["slug"]],)
+                          for row in PUBLISH.native_matrix(profile)}
+                layout["linux-x64-musl"] = (stem + "linux-amd64-musl.tar.zst",)
+                layout["linux-arm64-musl"] = (stem + "linux-arm64-musl.tar.zst",)
+                data = self.inventory(())
+                data.update(formatVersion=4, platformProfile=profile, releaseVersion=version,
+                            channel="nightly" if profile == "full" else "candidate")
+                data["artifacts"] = [{"name": name} for names in layout.values() for name in names]
+                if profile == "full":
+                    data["experimentalAndroid"] = [
+                        {"abi": abi, "asset": stem + f"android-{abi}.tar.zst"}
+                        for abi in ("arm64-v8a", "x86_64")
+                    ]
+                    data["artifacts"].extend({"name": item["asset"]} for item in data["experimentalAndroid"])
+                rendered = PUBLISH.release_download_guidance(data, layout, stem + "candidate-manifest.json")
+                for label in ("Windows x64", "Windows ARM64", "Linux x64 GNU", "Linux ARM64 GNU", "musl"):
+                    self.assertIn(label, rendered)
+                if profile == "full":
+                    for label in ("macOS Intel", "macOS Apple Silicon", "arm64-v8a", "android-x86_64"):
+                        self.assertIn(label, rendered)
+                else:
+                    for absent in ("macOS", "macos-", "Android", "android-", "APK"):
+                        self.assertNotIn(absent, rendered)
+
     def test_finalization_verifies_original_inputs_and_rehashes_final_notes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -623,6 +657,56 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
             self.assertEqual(notes.read_bytes(), b"original notes")
             self.assertEqual(sums.read_bytes(), b"original checksums")
             owner._sha256sums_text.assert_not_called()
+
+    def test_postcommit_backup_cleanup_failure_preserves_bound_bytes_and_interrupts(self) -> None:
+        for fault in (OSError("synthetic cleanup failure"), KeyboardInterrupt()):
+            with self.subTest(fault=type(fault).__name__), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                notes = root / f"RELEASE-{self.version}-NOTES.md"
+                notes.write_text("# Current nightly\n\n## Profile compatibility\n\nUse a test profile.\n", encoding="utf-8")
+                sums = root / "SHA256SUMS"
+                sums.write_bytes(b"original sums\n")
+                originals = notes.read_bytes(), sums.read_bytes()
+                candidate = root / f"emulebb-rust-v{self.version}-candidate-manifest.json"
+                data = self.inventory(())
+                data.update(formatVersion=4, platformProfile="full", channel="nightly")
+                data["artifacts"] = [{"name": notes.name}, {"name": sums.name}]
+                owner = mock.Mock()
+                owner.candidate_path.return_value = candidate
+                owner.candidate_manifest.return_value = data
+                owner.package_layout.return_value = {}
+                owner._sha256sums_text.side_effect = lambda _directory, members: "".join(
+                    f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in members)
+
+                def commit(**_kwargs):
+                    candidate.write_text(json.dumps({
+                        "notesSha256": hashlib.sha256(notes.read_bytes()).hexdigest(),
+                        "checksumsSha256": hashlib.sha256(sums.read_bytes()).hexdigest(),
+                    }), encoding="utf-8")
+
+                owner.write_candidate.side_effect = commit
+                stderr = io.StringIO()
+                with (mock.patch.object(PUBLISH.shutil, "rmtree", side_effect=fault) as cleanup,
+                      mock.patch.object(PUBLISH.sys, "stderr", stderr)):
+                    arguments = {"release_dir": root, "context": mock.Mock(version=self.version),
+                                 "archives_dir": root / "archives", "archive_identity": object()}
+                    if isinstance(fault, KeyboardInterrupt):
+                        with self.assertRaises(KeyboardInterrupt):
+                            PUBLISH.finalize_release_candidate(owner, **arguments)
+                    else:
+                        PUBLISH.finalize_release_candidate(owner, **arguments)
+                backup = cleanup.call_args.args[0]
+                self.assertEqual(((backup / notes.name).read_bytes(), (backup / sums.name).read_bytes()), originals)
+                committed = json.loads(candidate.read_text(encoding="utf-8"))
+                self.assertEqual(committed["notesSha256"], hashlib.sha256(notes.read_bytes()).hexdigest())
+                self.assertEqual(committed["checksumsSha256"], hashlib.sha256(sums.read_bytes()).hexdigest())
+                self.assertIn("## Downloads\n", notes.read_text(encoding="utf-8"))
+                self.assertIn(hashlib.sha256(notes.read_bytes()).hexdigest(), sums.read_text(encoding="ascii"))
+                if isinstance(fault, OSError):
+                    self.assertIn("Warning: Release candidate committed", stderr.getvalue())
+                    self.assertIn(str(backup), stderr.getvalue())
+                else:
+                    self.assertEqual(stderr.getvalue(), "")
 
     def test_competing_process_cannot_mutate_or_rollback_the_winners_bound_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

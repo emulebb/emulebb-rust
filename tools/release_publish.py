@@ -479,7 +479,12 @@ def _finalize_release_candidate(owner, *, release_dir: Path, context, archives_d
             raise RuntimeError(f"Release recovery requires retained original files in {staging}") from error
         shutil.rmtree(staging)
         raise
-    shutil.rmtree(staging)
+    # WHY: the candidate now binds the committed notes/checksum bytes. Optional
+    # backup cleanup must not report a failed operation that cannot be retried.
+    try:
+        shutil.rmtree(staging)
+    except OSError as error:
+        print(f"Warning: Release candidate committed; backup cleanup incomplete at {staging}: {error}", file=sys.stderr)
 
 
 def candidate_outputs(path: Path, data: dict, output: Path | None) -> None:
