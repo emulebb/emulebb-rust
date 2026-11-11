@@ -446,6 +446,116 @@ class TestRegistryPublication(unittest.TestCase):
                 self.assertFalse(self.calls)
 
 
+class TestReleaseDownloadGuidance(unittest.TestCase):
+    version = "0.1.0-beta.2.nightly.20261111.gaaaaaaaa"
+
+    def inventory(self, suffixes: tuple[str, ...]) -> dict:
+        return {
+            "releaseVersion": self.version,
+            "workflow": {"repository": "example/project", "runId": "101", "runAttempt": "2"},
+            "artifacts": [{"name": f"emulebb-rust-v{self.version}-{suffix}"} for suffix in suffixes],
+            "images": {},
+        }
+
+    def test_downloads_and_supporting_links_use_present_inventory_and_actual_digests(self) -> None:
+        data = self.inventory(("windows-x64.zip", "linux-amd64-musl.tar.zst",
+                               "android-arm64-v8a.tar.zst", "windows-x64.sbom.spdx.json"))
+        data["artifacts"].append({"name": "SHA256SUMS"})
+        stem = f"emulebb-rust-v{self.version}-"
+        data["experimentalAndroid"] = [{"abi": "arm64-v8a", "asset": stem + "android-arm64-v8a.tar.zst"}]
+        digest = "sha256:" + "a" * 64
+        data["images"] = {"ubuntu": {"ociManifestDigest": digest, "archiveSha256": "b" * 64,
+                                     "platforms": {"linux/amd64": {}, "linux/arm64": {}}}}
+        layout = {"windows-x64": (stem + "windows-x64.zip",),
+                  "linux-x64-musl": (stem + "linux-amd64-musl.tar.zst",)}
+        candidate = stem + "candidate-manifest.json"
+        rendered = PUBLISH.release_download_guidance(data, layout, candidate)
+        for heading in ("Native packages", "Portable Linux musl", "Experimental Android native packages",
+                        "Container images", "Verification and supporting files"):
+            self.assertIn("### " + heading, rendered)
+        for artifact in data["artifacts"]:
+            self.assertIn(f"/releases/download/rust-v{self.version}/{artifact['name']}", rendered)
+        self.assertIn(f"ghcr.io/example/project@{digest}", rendered)
+        self.assertNotIn("b" * 64, rendered)
+        self.assertIn(candidate, rendered)
+        self.assertIn("/actions/runs/101/attempts/2", rendered)
+        self.assertIn("Device runtime, transfers and VPN behavior remain unqualified", rendered)
+        self.assertIn("APK packaging and signing remain deferred", rendered)
+        self.assertNotIn("android-x86_64", rendered)
+        self.assertNotIn("Alpine", rendered)
+
+    def test_absent_platforms_and_empty_groups_are_omitted(self) -> None:
+        data = self.inventory(("windows-x64.zip",))
+        stem = f"emulebb-rust-v{self.version}-"
+        layout = {"windows-x64": (stem + "windows-x64.zip",),
+                  "windows-arm64": (stem + "windows-arm64.zip",),
+                  "linux-x64-musl": (stem + "linux-amd64-musl.tar.zst",)}
+        data["experimentalAndroid"] = [{"abi": "x86_64", "asset": stem + "android-x86_64.tar.zst"}]
+        rendered = PUBLISH.release_download_guidance(data, layout, stem + "candidate-manifest.json")
+        self.assertIn("Windows x64", rendered)
+        for fragment in ("Windows ARM64", "Portable Linux musl", "Android", "Container images",
+                         "SHA256SUMS", "SBOMs", "ghcr.io"):
+            self.assertNotIn(fragment, rendered)
+
+    def test_finalization_verifies_original_inputs_and_rehashes_final_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            notes = root / f"RELEASE-{self.version}-NOTES.md"
+            original = f"# eMuleBB Rust {self.version}\n\nCurrent nightly.\n\n## Profile compatibility\n\nUse a fresh test profile.\n"
+            notes.write_text(original, encoding="utf-8")
+            (root / "SHA256SUMS").write_text("original checksum\n", encoding="ascii")
+            asset = root / f"emulebb-rust-v{self.version}-windows-x64.zip"
+            asset.write_bytes(b"synthetic package")
+            data = self.inventory(("windows-x64.zip",))
+            data["artifacts"].extend(({"name": notes.name}, {"name": "SHA256SUMS"}))
+            owner = mock.Mock()
+            context = mock.Mock(version=self.version)
+            candidate = root / f"emulebb-rust-v{self.version}-candidate-manifest.json"
+            owner.candidate_path.return_value = candidate
+            owner.package_layout.return_value = {"windows-x64": (asset.name,)}
+
+            def verify_original(**_kwargs):
+                self.assertEqual(notes.read_text(encoding="utf-8"), original)
+                self.assertEqual((root / "SHA256SUMS").read_text(), "original checksum\n")
+                return data
+
+            def format_sums(directory, members):
+                self.assertEqual(directory, root)
+                self.assertIn("## Downloads", notes.read_text(encoding="utf-8"))
+                return "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in members)
+
+            owner.candidate_manifest.side_effect = verify_original
+            owner._sha256sums_text.side_effect = format_sums
+            PUBLISH.finalize_release_notes(
+                owner, release_dir=root, context=context, archives_dir=root / "archives", archive_identity=object(),
+            )
+            result = notes.read_text(encoding="utf-8")
+            self.assertLess(result.index("## Downloads"), result.index("## Profile compatibility"))
+            self.assertIn(f"{hashlib.sha256(notes.read_bytes()).hexdigest()}  {notes.name}\n",
+                          (root / "SHA256SUMS").read_text())
+            owner.candidate_manifest.assert_called_once()
+            owner._sha256sums_text.assert_called_once()
+            self.assertFalse(candidate.exists())
+
+    def test_input_integrity_failure_preserves_notes_and_checksums(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            notes = root / f"RELEASE-{self.version}-NOTES.md"
+            notes.write_bytes(b"original notes")
+            sums = root / "SHA256SUMS"
+            sums.write_bytes(b"original checksums")
+            owner = mock.Mock()
+            owner.candidate_manifest.side_effect = RuntimeError("input integrity failed")
+            with self.assertRaisesRegex(RuntimeError, "input integrity failed"):
+                PUBLISH.finalize_release_notes(
+                    owner, release_dir=root, context=mock.Mock(version=self.version),
+                    archives_dir=root / "archives", archive_identity=object(),
+                )
+            self.assertEqual(notes.read_bytes(), b"original notes")
+            self.assertEqual(sums.read_bytes(), b"original checksums")
+            owner._sha256sums_text.assert_not_called()
+
+
 class TestCandidateControl(unittest.TestCase):
     def test_registry_writes_require_actual_archive_verification_and_current_source_checks(self) -> None:
         for fault in ("archive", "assembly-hash", "source"):
@@ -527,6 +637,10 @@ class TestCandidateControl(unittest.TestCase):
                 extra = ["--github-output", str(root / "github-output")]
                 if command == "candidate-manifest":
                     extra += ["--output", str(path)]
+                    path.unlink()
+                    owner.write_candidate.side_effect = lambda **_kwargs: path.write_text(
+                        json.dumps(data), encoding="utf-8",
+                    )
                 if command in {"candidate-manifest", "verify-candidate"}:
                     extra += ["--archives-dir", str(root / "archives"), "--harness-repo", str(root / "harness")]
                 else:
@@ -535,17 +649,23 @@ class TestCandidateControl(unittest.TestCase):
                     mock.patch.object(PUBLISH, "candidate_owner", return_value=owner),
                     mock.patch.object(PUBLISH, "candidate_context", return_value=context),
                     mock.patch.object(PUBLISH, "archive_identity_reader", return_value=reader) as load_reader,
+                    mock.patch.object(PUBLISH, "finalize_release_notes") as finalize,
                 ):
                     self.assertEqual(PUBLISH.main([command, *self.common(root), *extra]), 0)
                 if command == "candidate-manifest":
+                    finalize.assert_called_once_with(
+                        owner, release_dir=root, context=context, archives_dir=root / "archives", archive_identity=reader,
+                    )
                     owner.write_candidate.assert_called_once_with(
                         release_dir=root, context=context, archives_dir=root / "archives", archive_identity=reader,
                     )
                 elif command == "verify-candidate":
+                    finalize.assert_not_called()
                     owner.verify_candidate.assert_called_once_with(
                         release_dir=root, context=context, archives_dir=root / "archives", archive_identity=reader,
                     )
                 else:
+                    finalize.assert_not_called()
                     load_reader.assert_not_called()
                     owner.verify_public_candidate.assert_called_once_with(
                         release_dir=root, context=context, verified_candidate_sha256="c" * 64,
@@ -554,6 +674,28 @@ class TestCandidateControl(unittest.TestCase):
                 self.assertIn("candidate_sha256=" + hashlib.sha256(path.read_bytes()).hexdigest(), outputs)
                 self.assertIn("ubuntu_digest=sha256:" + "a" * 64, outputs)
                 self.assertIn("alpine_digest=sha256:" + "b" * 64, outputs)
+
+    def test_existing_candidate_cannot_trigger_notes_or_checksum_rewrites(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            path = root / "emulebb-rust-v0.1.0-beta.2-candidate-manifest.json"
+            path.write_bytes(b"immutable candidate")
+            owner = mock.Mock()
+            owner.candidate_path.return_value = path
+            with (
+                mock.patch.object(PUBLISH, "candidate_owner", return_value=owner),
+                mock.patch.object(PUBLISH, "candidate_context", return_value=object()),
+                mock.patch.object(PUBLISH, "archive_identity_reader", return_value=object()),
+                mock.patch.object(PUBLISH, "finalize_release_notes") as finalize,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "already exists"):
+                    PUBLISH.main([
+                        "candidate-manifest", *self.common(root), "--output", str(path),
+                        "--archives-dir", str(root / "archives"), "--harness-repo", str(root / "harness"),
+                    ])
+            self.assertEqual(path.read_bytes(), b"immutable candidate")
+            finalize.assert_not_called()
+            owner.write_candidate.assert_not_called()
 
     def test_local_calls_fail_before_checkout_or_import(self) -> None:
         args = PUBLISH.build_parser().parse_args([
