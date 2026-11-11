@@ -51,7 +51,8 @@ permissions:
 env:
   RELEASE_PLATFORM_PROFILE: ${{ inputs.platform_profile || 'full' }}
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
-  EMULEBB_BUILD_REF: 995d13f350c8342437fdb3122d2a271696ac6e29
+  # Temporary unpublished candidate proof; restore merged Builder before integration.
+  EMULEBB_BUILD_REF: 0442e45fcb177956e937379ecc81b882c50ccf79
   EMULEBB_BUILD_TESTS_REF: d2a48d8920ef4225e86fbe918045240ab2452e67
   EMULEBB_TOOLING_REF: 3b045ab4dea7554dceb13d3022a21727046d06e5
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
