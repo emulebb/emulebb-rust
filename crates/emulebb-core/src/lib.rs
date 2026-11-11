@@ -849,6 +849,12 @@ impl EmulebbCore {
         apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
+            // A queued/background result may arrive after explicit control
+            // publication. Preserve that control while refreshing progress.
+            if !manifest.completed && !manifest.final_rehash_pending && existing.state == "paused" {
+                transfer.state.clone_from(&existing.state);
+                transfer.stopped = existing.stopped;
+            }
         }
         state
             .transfers
