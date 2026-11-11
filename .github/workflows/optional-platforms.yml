@@ -184,10 +184,6 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@11.20.0
 
-      - name: Install Linux UI build dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libfontconfig1-dev
-
       - name: Cache cargo build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
