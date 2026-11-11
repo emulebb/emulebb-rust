@@ -64,5 +64,8 @@ uuid.workspace = true
 [build-dependencies]
 embed-manifest.workspace = true
 
+[target.'cfg(windows)'.build-dependencies]
+find-msvc-tools.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
