@@ -178,28 +178,6 @@ impl EmulebbCore {
     }
 }
 
-#[cfg(test)]
-mod settings_error_tests {
-    use super::*;
-
-    #[test]
-    fn committed_refresh_classification_uses_the_type_not_the_message() {
-        let same_message = anyhow::anyhow!(CommittedSettingsRefreshFailure.to_string());
-        assert!(!EmulebbCore::settings_update_was_committed(&same_message));
-        let committed = Err::<(), _>(anyhow::anyhow!("synthetic runtime refresh error"))
-            .context(CommittedSettingsRefreshFailure)
-            .unwrap_err();
-        assert!(EmulebbCore::settings_update_was_committed(&committed));
-        assert_eq!(
-            committed.to_string(),
-            CommittedSettingsRefreshFailure.to_string()
-        );
-        assert!(EmulebbCore::settings_update_was_committed(
-            &committed.context("outer context")
-        ));
-    }
-}
-
 fn validate_app_settings_update_paths(request: &mut AppSettingsUpdate) -> Result<()> {
     if let Some(daemon) = &mut request.daemon
         && let Some(emulebb_settings::NullableUpdate::Value(path)) = &mut daemon.incoming_dir
@@ -240,4 +218,26 @@ fn validate_app_settings_update_paths(request: &mut AppSettingsUpdate) -> Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod settings_error_tests {
+    use super::*;
+
+    #[test]
+    fn committed_refresh_classification_uses_the_type_not_the_message() {
+        let same_message = anyhow::anyhow!(CommittedSettingsRefreshFailure.to_string());
+        assert!(!EmulebbCore::settings_update_was_committed(&same_message));
+        let committed = Err::<(), _>(anyhow::anyhow!("synthetic runtime refresh error"))
+            .context(CommittedSettingsRefreshFailure)
+            .unwrap_err();
+        assert!(EmulebbCore::settings_update_was_committed(&committed));
+        assert_eq!(
+            committed.to_string(),
+            CommittedSettingsRefreshFailure.to_string()
+        );
+        assert!(EmulebbCore::settings_update_was_committed(
+            &committed.context("outer context")
+        ));
+    }
 }
