@@ -43,6 +43,8 @@ fn embed_windows_resources() {
     println!("cargo:rerun-if-changed={ICON}");
     println!("cargo:rerun-if-changed=resources/windows/version.rc.in");
     println!("cargo:rerun-if-env-changed=EMULEBB_RELEASE_VERSION");
+    println!("cargo:rerun-if-env-changed=EMULEBB_RELEASE_CHANNEL");
+    println!("cargo:rerun-if-env-changed=EMULEBB_SOURCE_REVISION");
     println!("cargo:rerun-if-env-changed=WindowsSdkDir");
     println!("cargo:rerun-if-env-changed=WindowsSDKVersion");
 
@@ -79,6 +81,29 @@ fn embed_windows_resources() {
             .expect("Cargo version component exceeds the Windows version-resource range")
     });
     let fixed_version = format!("{major},{minor},{patch},0");
+    let channel = env::var("EMULEBB_RELEASE_CHANNEL").unwrap_or_else(|_| "development".to_owned());
+    assert!(
+        matches!(
+            channel.as_str(),
+            "development" | "candidate" | "beta" | "nightly"
+        ),
+        "the executable resource channel must use a supported build channel"
+    );
+    let source_revision =
+        env::var("EMULEBB_SOURCE_REVISION").unwrap_or_else(|_| "unknown".to_owned());
+    assert!(
+        source_revision == "unknown"
+            || (source_revision.len() == 40
+                && source_revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())),
+        "the executable resource source must be unknown or a full lowercase commit"
+    );
+    let architecture_label = match architecture.as_str() {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo build output directory"));
     // Give RC a relative ASCII icon name regardless of the checkout path.
     fs::copy(ICON, out_dir.join("application.ico")).expect("copy approved application icon");
@@ -101,6 +126,9 @@ fn embed_windows_resources() {
             binary = binary,
             product = product,
             description = description,
+            channel = channel,
+            architecture = architecture_label,
+            source_revision = source_revision,
         );
         fs::write(out_dir.join(&script), contents).expect("write Windows resource script");
         let output = Command::new(&compiler)

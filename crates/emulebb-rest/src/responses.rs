@@ -10,10 +10,11 @@ use std::{
 };
 
 use emulebb_core::{
-    AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
-    Search, SearchResult, SearchSpec, ServerInfo, SharedFileListItem, SharedFilePublishState,
-    Status, Transfer, TransferEventDiagnostics, TransferThroughputStats, UploadPolicyMetrics,
-    VpnGuardProbeStatus, VpnGuardStatus, normal_path_display, normalize_ed2k_file_name,
+    AppInfo, AppLifecycle, BUILD_ARCHITECTURE, BUILD_CHANNEL, BUILD_FLAVOR, BUILD_SOURCE_REVISION,
+    LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus, Search, SearchResult,
+    SearchSpec, ServerInfo, SharedFileListItem, SharedFilePublishState, Status, Transfer,
+    TransferEventDiagnostics, TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus,
+    VpnGuardStatus, normal_path_display, normalize_ed2k_file_name,
 };
 use serde_json::{Value, json};
 
@@ -45,8 +46,10 @@ pub(crate) fn app_info_response(app: AppInfo) -> Value {
         "version": app.version,
         "apiVersion": app.api_version,
         // Match the eMuleBB master app metadata: build flavor + platform token.
-        "build": if cfg!(debug_assertions) { "debug" } else { "release" },
-        "platform": if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" },
+        "build": BUILD_FLAVOR,
+        "platform": BUILD_ARCHITECTURE,
+        "channel": BUILD_CHANNEL,
+        "sourceRevision": BUILD_SOURCE_REVISION,
         "lifecycle": lifecycle_response(&app.lifecycle),
         "capabilities": capabilities
     })
