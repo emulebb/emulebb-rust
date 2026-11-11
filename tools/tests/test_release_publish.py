@@ -526,7 +526,8 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
 
             owner.candidate_manifest.side_effect = verify_original
             owner._sha256sums_text.side_effect = format_sums
-            PUBLISH.finalize_release_notes(
+            owner.write_candidate.side_effect = lambda **_kwargs: candidate.write_text("{}\n", encoding="utf-8")
+            PUBLISH.finalize_release_candidate(
                 owner, release_dir=root, context=context, archives_dir=root / "archives", archive_identity=object(),
             )
             result = notes.read_text(encoding="utf-8")
@@ -535,7 +536,74 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
                           (root / "SHA256SUMS").read_text())
             owner.candidate_manifest.assert_called_once()
             owner._sha256sums_text.assert_called_once()
-            self.assertFalse(candidate.exists())
+            owner.write_candidate.assert_called_once()
+            finalized = notes.read_bytes(), (root / "SHA256SUMS").read_bytes()
+            candidate.unlink()
+            owner.candidate_manifest.side_effect = None
+            owner.candidate_manifest.return_value = data
+            PUBLISH.finalize_release_candidate(
+                owner, release_dir=root, context=context, archives_dir=root / "archives", archive_identity=object(),
+            )
+            self.assertEqual((notes.read_bytes(), (root / "SHA256SUMS").read_bytes()), finalized)
+            self.assertEqual(notes.read_text(encoding="utf-8").count("## Downloads\n"), 1)
+
+    def test_write_and_pre_candidate_failures_restore_original_pair_for_retry(self) -> None:
+        for fault in ("notes-replace", "checksum-write", "checksum-replace", "pre-candidate", "partial-candidate"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                notes = root / f"RELEASE-{self.version}-NOTES.md"
+                sums = root / "SHA256SUMS"
+                notes.write_text("# Current nightly\n\n## Profile compatibility\n\nUse a test profile.\n", encoding="utf-8")
+                sums.write_bytes(b"original sums\n")
+                original = notes.read_bytes(), sums.read_bytes()
+                owner = mock.Mock()
+                candidate = root / f"emulebb-rust-v{self.version}-candidate-manifest.json"
+                owner.candidate_path.return_value = candidate
+                owner.package_layout.return_value = {}
+                data = self.inventory(())
+                data["artifacts"] = [{"name": notes.name}, {"name": sums.name}]
+
+                def verify_original(**_kwargs):
+                    self.assertEqual((notes.read_bytes(), sums.read_bytes()), original)
+                    return data
+
+                def format_sums(_directory, members):
+                    return "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in members)
+
+                replace, write_text = Path.replace, Path.write_text
+
+                def replace_with_failure(path, target):
+                    if ((fault == "notes-replace" and path.name == "updated-notes")
+                            or (fault == "checksum-replace" and path.name == "updated-checksums")):
+                        raise OSError("synthetic replacement failure")
+                    return replace(path, target)
+
+                def write_with_failure(path, *args, **kwargs):
+                    if fault == "checksum-write" and path.name == "updated-checksums":
+                        raise OSError("synthetic checksum failure")
+                    return write_text(path, *args, **kwargs)
+
+                def fail_candidate(**_kwargs):
+                    if fault == "partial-candidate":
+                        candidate.write_bytes(b"partial candidate")
+                    raise OSError("synthetic candidate failure")
+
+                owner.candidate_manifest.side_effect = verify_original
+                owner._sha256sums_text.side_effect = format_sums
+                owner.write_candidate.side_effect = fail_candidate
+                common = {"release_dir": root, "context": mock.Mock(version=self.version),
+                          "archives_dir": root / "archives", "archive_identity": object()}
+                with (mock.patch.object(Path, "replace", new=replace_with_failure),
+                      mock.patch.object(Path, "write_text", new=write_with_failure)):
+                    with self.assertRaisesRegex(OSError, "synthetic"):
+                        PUBLISH.finalize_release_candidate(owner, **common)
+                self.assertEqual((notes.read_bytes(), sums.read_bytes()), original)
+                self.assertFalse(candidate.exists())
+                owner.write_candidate.side_effect = lambda **_kwargs: candidate.write_bytes(b"complete candidate")
+                PUBLISH.finalize_release_candidate(owner, **common)
+                self.assertEqual(notes.read_text(encoding="utf-8").count("## Downloads\n"), 1)
+                self.assertIn(hashlib.sha256(notes.read_bytes()).hexdigest(), sums.read_text())
+                self.assertEqual(candidate.read_bytes(), b"complete candidate")
 
     def test_input_integrity_failure_preserves_notes_and_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -545,9 +613,10 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
             sums = root / "SHA256SUMS"
             sums.write_bytes(b"original checksums")
             owner = mock.Mock()
+            owner.candidate_path.return_value = root / f"emulebb-rust-v{self.version}-candidate-manifest.json"
             owner.candidate_manifest.side_effect = RuntimeError("input integrity failed")
             with self.assertRaisesRegex(RuntimeError, "input integrity failed"):
-                PUBLISH.finalize_release_notes(
+                PUBLISH.finalize_release_candidate(
                     owner, release_dir=root, context=mock.Mock(version=self.version),
                     archives_dir=root / "archives", archive_identity=object(),
                 )
@@ -638,9 +707,6 @@ class TestCandidateControl(unittest.TestCase):
                 if command == "candidate-manifest":
                     extra += ["--output", str(path)]
                     path.unlink()
-                    owner.write_candidate.side_effect = lambda **_kwargs: path.write_text(
-                        json.dumps(data), encoding="utf-8",
-                    )
                 if command in {"candidate-manifest", "verify-candidate"}:
                     extra += ["--archives-dir", str(root / "archives"), "--harness-repo", str(root / "harness")]
                 else:
@@ -649,16 +715,16 @@ class TestCandidateControl(unittest.TestCase):
                     mock.patch.object(PUBLISH, "candidate_owner", return_value=owner),
                     mock.patch.object(PUBLISH, "candidate_context", return_value=context),
                     mock.patch.object(PUBLISH, "archive_identity_reader", return_value=reader) as load_reader,
-                    mock.patch.object(PUBLISH, "finalize_release_notes") as finalize,
+                    mock.patch.object(PUBLISH, "finalize_release_candidate") as finalize,
                 ):
+                    if command == "candidate-manifest":
+                        finalize.side_effect = lambda *_args, **_kwargs: path.write_text(json.dumps(data), encoding="utf-8")
                     self.assertEqual(PUBLISH.main([command, *self.common(root), *extra]), 0)
                 if command == "candidate-manifest":
                     finalize.assert_called_once_with(
                         owner, release_dir=root, context=context, archives_dir=root / "archives", archive_identity=reader,
                     )
-                    owner.write_candidate.assert_called_once_with(
-                        release_dir=root, context=context, archives_dir=root / "archives", archive_identity=reader,
-                    )
+                    owner.write_candidate.assert_not_called()
                 elif command == "verify-candidate":
                     finalize.assert_not_called()
                     owner.verify_candidate.assert_called_once_with(
@@ -686,7 +752,6 @@ class TestCandidateControl(unittest.TestCase):
                 mock.patch.object(PUBLISH, "candidate_owner", return_value=owner),
                 mock.patch.object(PUBLISH, "candidate_context", return_value=object()),
                 mock.patch.object(PUBLISH, "archive_identity_reader", return_value=object()),
-                mock.patch.object(PUBLISH, "finalize_release_notes") as finalize,
             ):
                 with self.assertRaisesRegex(RuntimeError, "already exists"):
                     PUBLISH.main([
@@ -694,7 +759,7 @@ class TestCandidateControl(unittest.TestCase):
                         "--archives-dir", str(root / "archives"), "--harness-repo", str(root / "harness"),
                     ])
             self.assertEqual(path.read_bytes(), b"immutable candidate")
-            finalize.assert_not_called()
+            owner.candidate_manifest.assert_not_called()
             owner.write_candidate.assert_not_called()
 
     def test_local_calls_fail_before_checkout_or_import(self) -> None:
