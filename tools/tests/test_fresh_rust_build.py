@@ -67,6 +67,31 @@ def test_remove_stale_release_stage_artifacts_prunes_dead_slint_ui(tmp_path: Pat
 
 
 class TestRegisteredRuntimeStage(unittest.TestCase):
+    def test_owner_bootstrap_selects_registered_builder_without_repairing_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, output = Path(directory) / "workspace", Path(directory) / "output"
+            source = workspace / "workspaces/agents/sample/emulebb-rust"
+            owner = workspace / "workspaces/agents/sample/emulebb-build"
+            source.mkdir(parents=True)
+            output.mkdir()
+            environment = {"EMULEBB_WORKSPACE_ROOT": str(workspace), "EMULEBB_WORKSPACE_OUTPUT_ROOT": str(output)}
+            child_env = {**environment, "CARGO_TARGET_DIR": str(output / "builds/rust/target")}
+            select = mock.Mock(return_value=(owner, "sample"))
+            bootstrap = {"validation_environment": lambda: child_env, "orchestration_owner": select}
+            completed = mock.Mock(returncode=0, stdout='{"discarded":true}', stderr="")
+            description = {"pendingRoot": str(output / "owned-pending")}
+            with (mock.patch.object(FRESH_BUILD, "ROOT", source),
+                  mock.patch.object(FRESH_BUILD.runpy, "run_path", return_value=bootstrap),
+                  mock.patch.object(FRESH_BUILD.subprocess, "run", return_value=completed) as run):
+                self.assertEqual(FRESH_BUILD.runtime_stage_request("discard", environment, description), {"discarded": True})
+            select.assert_called_once_with(workspace, output, source, child_env)
+            command = run.call_args.args[0]
+            self.assertEqual(command[-4:], ["--rust-repo", str(source), "--workstream", "sample"])
+            self.assertEqual(run.call_args.kwargs["cwd"], owner)
+            self.assertEqual(json.loads(run.call_args.kwargs["input"]), description)
+            self.assertEqual(environment, {"EMULEBB_WORKSPACE_ROOT": str(workspace),
+                                           "EMULEBB_WORKSPACE_OUTPUT_ROOT": str(output)})
+
     def test_registered_build_uses_pending_bundle_and_always_discards_on_failure(self):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:

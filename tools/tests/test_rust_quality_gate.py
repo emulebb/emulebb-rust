@@ -16,6 +16,41 @@ SPEC.loader.exec_module(QUALITY_GATE)
 
 
 class TestDiagnosticsGate(unittest.TestCase):
+    def test_registered_selection_changes_only_runtime_build_and_rest_wiring(self):
+        from unittest import mock
+        import webui_workspace
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, output = Path(directory) / "workspace", Path(directory) / "output"
+            source = workspace / "workspaces/agents/sample/emulebb-rust"
+            harness = workspace / "workspaces/agents/sample/emulebb-build-tests/scripts/rust-rest-openapi-ci.py"
+            contract = workspace / "workspaces/agents/sample/emulebb-tooling/REST-API-OPENAPI.yaml"
+            source.mkdir(parents=True)
+            for path in (harness, contract):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("synthetic", encoding="utf-8")
+            env = {"EMULEBB_WORKSPACE_ROOT": str(workspace), "EMULEBB_WORKSPACE_OUTPUT_ROOT": str(output),
+                   "CARGO_TARGET_DIR": str(output / "builds/rust/target")}
+            with (mock.patch.object(QUALITY_GATE, "ROOT", source),
+                  mock.patch.object(QUALITY_GATE, "uuid4", return_value=mock.Mock(hex="fixed-report")),
+                  mock.patch.object(webui_workspace, "webui_dist_path", return_value=output / "built-ui")):
+                legacy = QUALITY_GATE.commands_for_gate("pre-push", env, rest_harness_script=harness,
+                                                         rest_openapi_contract=contract)
+                owned = QUALITY_GATE.commands_for_gate("pre-push", env, rest_harness_script=harness,
+                                                        rest_openapi_contract=contract, registered_stage=True)
+            self.assertEqual([label for label, _ in owned], [label for label, _ in legacy])
+            changed = []
+            for (label, command), (_, previous) in zip(owned, legacy):
+                if command != previous:
+                    changed.append(label)
+                    self.assertIn("--registered-stage", command)
+                    if label == "fresh debug/release workspace builds":
+                        self.assertNotIn("--stage-bin-dir", command)
+                    else:
+                        self.assertIn(str(source), command)
+            self.assertEqual(changed, ["fresh debug/release workspace builds", "live REST/OpenAPI conformance"])
+            self.assertEqual(env["CARGO_TARGET_DIR"], str(output / "builds/rust/target"))
+
     def test_explicit_rest_sources_reach_harness_without_environment_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
