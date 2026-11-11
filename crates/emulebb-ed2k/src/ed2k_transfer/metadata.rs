@@ -543,15 +543,14 @@ impl Ed2kTransferRuntime {
         let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
         if let Some(aich_root) = aich_root {
             let encoded = hex::encode(aich_root);
-            if let Some(existing_root) = manifest.aich_root.as_deref() {
-                if existing_root != encoded
-                    && manifest.aich_root_origin != Some(Ed2kAichRootOrigin::NetworkConsensus)
-                {
-                    anyhow::bail!(
-                        "refusing to replace AICH root for {} with conflicting metadata",
-                        file_hash
-                    );
-                }
+            if let Some(existing_root) = manifest.aich_root.as_deref()
+                && existing_root != encoded
+                && manifest.aich_root_origin != Some(Ed2kAichRootOrigin::NetworkConsensus)
+            {
+                anyhow::bail!(
+                    "refusing to replace AICH root for {} with conflicting metadata",
+                    file_hash
+                );
             }
             let origin = match manifest.aich_root_origin {
                 Some(
