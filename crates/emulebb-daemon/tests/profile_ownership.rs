@@ -246,13 +246,10 @@ fn profile_ownership_child() {
         );
         return;
     }
-    if mode == "race" && result.is_err() {
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("profile is already in use")
-        );
+    if mode == "race"
+        && let Err(error) = &result
+    {
+        assert!(error.to_string().contains("profile is already in use"));
         fs::write(PathBuf::from(env::var_os(CHILD_READY).unwrap()), "busy").unwrap();
         return;
     }
