@@ -90,7 +90,7 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.text.count("smoke-rust-release-package.py"), 1)
         smoke = next(step["run"] for step in self.jobs["native-package-smoke"]["steps"]
                      if "smoke-rust-release-package.py" in step.get("run", ""))
-        self.assertIn('--expected-channel "$RELEASE_CHANNEL"', smoke)
+        self.assertIn('--expected-channel "${{ env.RELEASE_CHANNEL }}"', smoke)
         self.assertIn('--expected-source-sha "${{ needs.prepare.outputs.source_sha }}"', smoke)
         self.assertIs(self.jobs["native-package-smoke"]["steps"], self.jobs["optional-macos-smoke"]["steps"])
         self.assertNotIn("package-smoke", str(self.jobs["android-package"]))
@@ -99,9 +99,12 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
         step = next(step for step in self.jobs["native-package-smoke"]["steps"]
                     if "smoke-rust-release-package.py" in step.get("run", ""))
         self.assertIn("${{ matrix.os != 'macos' && '--verify-profile-ownership' || '' }}", step["run"])
+        self.assertEqual(step["env"]["EMULEBB_WORKSPACE_ROOT"], "${{ github.workspace }}")
         self.assertEqual(step["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"],
                          "${{ runner.temp }}/emulebb-rust-out")
-        self.assertIn('--expected-channel "$RELEASE_CHANNEL"', step["run"])
+        self.assertIn('--expected-channel "${{ env.RELEASE_CHANNEL }}"', step["run"])
+        self.assertNotIn('$RELEASE_CHANNEL', step["run"],
+                         "Native smoke also runs under PowerShell, which uses different environment syntax")
 
     def test_android_uses_pinned_frontend_and_compiler_recipe_inputs(self):
         job = self.jobs["android-package"]
