@@ -26,7 +26,8 @@ use symphonia::core::{
 use super::Ed2kMediaMetadata;
 
 const MAX_PREFIX_BYTES: u64 = 2 * 1024 * 1024;
-// Ordinary WAVE INFO and AVI header/stream lists use only a few levels.
+// WHY: untrusted LIST nesting must not exhaust the stack; ordinary WAVE INFO
+// and AVI header/stream lists use only a few levels.
 const MAX_RIFF_LIST_DEPTH: usize = 16;
 const MAX_TEXT_CHARS: usize = 80;
 const MAGIC_SNIFF_BYTES: usize = 12;
