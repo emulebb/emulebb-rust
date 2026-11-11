@@ -105,6 +105,8 @@ def runtime_stage_request(action: str, env: dict[str, str], description: dict | 
                                input=json.dumps(description) if description is not None else None)
     if completed.returncode:
         raise RuntimeError(f"Registered runtime stage {action} failed: {completed.stderr[-4096:].strip()}")
+    if completed.stderr:
+        print(completed.stderr, file=sys.stderr, end="")
     result = json.loads(completed.stdout)
     if not isinstance(result, dict):
         raise RuntimeError("Registered runtime owner returned an invalid description")

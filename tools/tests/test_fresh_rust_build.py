@@ -78,12 +78,15 @@ class TestRegisteredRuntimeStage(unittest.TestCase):
             child_env = {**environment, "CARGO_TARGET_DIR": str(output / "builds/rust/target")}
             select = mock.Mock(return_value=(owner, "sample"))
             bootstrap = {"validation_environment": lambda: child_env, "orchestration_owner": select}
-            completed = mock.Mock(returncode=0, stdout='{"discarded":true}', stderr="")
+            warning = "Warning: runtime ready; owned previous backup cleanup failed\n"
+            completed = mock.Mock(returncode=0, stdout='{"discarded":true}', stderr=warning)
             description = {"pendingRoot": str(output / "owned-pending")}
             with (mock.patch.object(FRESH_BUILD, "ROOT", source),
                   mock.patch.object(FRESH_BUILD.runpy, "run_path", return_value=bootstrap),
-                  mock.patch.object(FRESH_BUILD.subprocess, "run", return_value=completed) as run):
+                  mock.patch.object(FRESH_BUILD.subprocess, "run", return_value=completed) as run,
+                  mock.patch("sys.stderr", new_callable=io.StringIO) as stderr):
                 self.assertEqual(FRESH_BUILD.runtime_stage_request("discard", environment, description), {"discarded": True})
+                self.assertEqual(stderr.getvalue(), warning)
             select.assert_called_once_with(workspace, output, source, child_env)
             command = run.call_args.args[0]
             self.assertEqual(command[-4:], ["--rust-repo", str(source), "--workstream", "sample"])
