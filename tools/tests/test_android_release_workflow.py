@@ -95,6 +95,14 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
         self.assertIs(self.jobs["native-package-smoke"]["steps"], self.jobs["optional-macos-smoke"]["steps"])
         self.assertNotIn("package-smoke", str(self.jobs["android-package"]))
 
+    def test_profile_ownership_proof_is_selected_only_for_windows_and_linux(self):
+        step = next(step for step in self.jobs["native-package-smoke"]["steps"]
+                    if "smoke-rust-release-package.py" in step.get("run", ""))
+        self.assertIn("${{ matrix.os != 'macos' && '--verify-profile-ownership' || '' }}", step["run"])
+        self.assertEqual(step["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"],
+                         "${{ runner.temp }}/emulebb-rust-out")
+        self.assertIn('--expected-channel "$RELEASE_CHANNEL"', step["run"])
+
     def test_android_uses_pinned_frontend_and_compiler_recipe_inputs(self):
         job = self.jobs["android-package"]
         steps = job["steps"]

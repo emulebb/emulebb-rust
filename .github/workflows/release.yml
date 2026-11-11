@@ -52,7 +52,7 @@ env:
   RELEASE_PLATFORM_PROFILE: ${{ inputs.platform_profile || 'full' }}
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
   # Temporary unpublished candidate proof; restore merged Builder before integration.
-  EMULEBB_BUILD_REF: b269c8c0cba5103a3982339a32693fa03fba56af
+  EMULEBB_BUILD_REF: e9b939145dec8f11578de1bf3e71e94005b775d3
   EMULEBB_BUILD_TESTS_REF: 86e32b1d547ca68c294350ad45d70d79b987d2bb
   EMULEBB_TOOLING_REF: d406cfd8e6f3e3b6f04e377ac469c413293f81d9
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
@@ -333,7 +333,9 @@ jobs:
           name: ${{ env.NATIVE_PAYLOAD_PREFIX }}-${{ matrix.slug }}
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Prove packaged lifecycle, local transfer, and embedded WebUI
-        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --rust-repo .ci/candidate --expected-source-sha "${{ needs.prepare.outputs.source_sha }}" --expected-channel "$RELEASE_CHANNEL" --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} ${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --rust-repo .ci/candidate --expected-source-sha "${{ needs.prepare.outputs.source_sha }}" --expected-channel "$RELEASE_CHANNEL" --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} ${{ matrix.os != 'macos' && '--verify-profile-ownership' || '' }} ${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}
       - name: Retain package lifecycle evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -477,10 +479,15 @@ jobs:
         uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
         with:
           version: v29.6.1
+      - name: Prepare inherited host Cargo target for the source-cache fence
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+        run: python -c "from pathlib import Path; import os; Path(os.environ['CARGO_TARGET_DIR']).mkdir(parents=True, exist_ok=True)"
       - name: Build, test and smoke static musl with the local recipe
         working-directory: .ci/emulebb-build
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
         run: >-
           python -B -m emule_workspace package-emulebb-rust-linux-ci
           --libc musl --architecture ${{ matrix.architecture }} --release-version "$RELEASE_VERSION"
