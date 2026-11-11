@@ -459,12 +459,14 @@ def _finalize_release_candidate(owner, *, release_dir: Path, context, archives_d
             shutil.copyfile(path, staging / path.name)
         staged_notes = staging / "updated-notes"
         staged_notes.write_text(f"{introduction.rstrip()}\n\n{guidance}\n\n## {remainder}", encoding="utf-8", newline="\n")
-        staged_notes.replace(notes)
+        # WHY: cancellation can arrive just after a successful rename, so its
+        # backed-up destination must already belong to rollback before mutation.
         replaced.append(notes)
+        staged_notes.replace(notes)
         staged_sums = staging / "updated-checksums"
         staged_sums.write_text(owner._sha256sums_text(release_dir, members), encoding="ascii", newline="\n")
-        staged_sums.replace(sums)
         replaced.append(sums)
+        staged_sums.replace(sums)
         candidate_write_started = True
         owner.write_candidate(
             release_dir=release_dir, context=context, archives_dir=archives_dir, archive_identity=archive_identity,
