@@ -43,8 +43,12 @@ class CiParityTests(unittest.TestCase):
         musl = jobs["build-musl"]
         self.assertEqual({(row["architecture"], row["runner"]) for row in musl["strategy"]["matrix"]["include"]},
                          {("amd64", "ubuntu-24.04"), ("arm64", "ubuntu-24.04-arm")})
-        self.assertTrue(any("package-emulebb-rust-linux-ci" in step.get("run", "")
-                            and "--test-scope full --smoke" in step["run"] for step in musl["steps"]))
+        package = next(step for step in musl["steps"]
+                       if "package-emulebb-rust-linux-ci" in step.get("run", ""))
+        self.assertIn("--test-scope full --smoke", package["run"])
+        self.assertIn('mkdir -p "$CARGO_TARGET_DIR"', package["run"])
+        self.assertLess(package["run"].index('mkdir -p "$CARGO_TARGET_DIR"'),
+                        package["run"].index("python -B -m emule_workspace"))
         self.assertIn("build-musl", jobs["required-ci"]["needs"])
         aggregate = jobs["required-ci"]["steps"][0]
         self.assertEqual(aggregate["env"]["BUILD_MUSL_RESULT"], "${{ needs.build-musl.result }}")
