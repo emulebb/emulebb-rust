@@ -163,7 +163,9 @@ fn aliases_share_ownership_and_clean_exit_releases_it() {
         // Junctions do not require the symlink privilege. Keep both command
         // arguments fixed and relative to this test's unique scratch directory.
         let windows = PathBuf::from(env::var_os("SystemRoot").expect("Windows system root"));
-        let creation = Command::new(windows.join("System32/cmd.exe"))
+        // WHY: cmd.exe rejects a mixed-separator executable path after launch.
+        // Join native components to keep the fixture command valid.
+        let creation = Command::new(windows.join("System32").join("cmd.exe"))
             .current_dir(temporary.path())
             .args(["/d", "/v:off", "/c", "mklink", "/J", "junction", "profile"])
             .output()
