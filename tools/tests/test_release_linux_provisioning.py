@@ -1,6 +1,7 @@
 """Linux release packaging must use the verified prepared Builder pipeline."""
 
 from pathlib import Path
+import importlib.util
 import shlex
 import unittest
 
@@ -8,6 +9,10 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("release_publish_linux_provisioning", ROOT / "tools/release_publish.py")
+assert SPEC is not None and SPEC.loader is not None
+PUBLISH = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(PUBLISH)
 
 
 class ReleaseLinuxProvisioningTests(unittest.TestCase):
@@ -63,13 +68,30 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
         self.assertLess(self.steps.index(checkout), index)
         self.assertLess(self.steps.index(docker), index)
         upload = next(step for step in self.steps if step.get("with", {}).get("name") ==
-                      "emulebb-rust-native-payload-${{ matrix.slug }}")
+                      "${{ env.NATIVE_PAYLOAD_PREFIX }}-${{ matrix.slug }}")
         self.assertLess(index, self.steps.index(upload))
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
 
-    def test_all_six_platforms_keep_existing_smoke_and_artifact_graph(self):
-        self.assertEqual({row["slug"] for row in self.job["strategy"]["matrix"]["include"]},
-                         {"windows-x64", "windows-arm64", "linux-x64", "linux-arm64", "macos-x64", "macos-arm64"})
+    def test_profiles_keep_native_smoke_and_optional_artifact_graph(self):
+        matrix = {"include": "${{ fromJSON(needs.prepare.outputs.native_matrix) }}"}
+        smoke = self.workflow["jobs"]["native-package-smoke"]
+        self.assertEqual(self.job["strategy"]["matrix"], matrix)
+        self.assertEqual(smoke["strategy"]["matrix"], matrix)
+        for profile, expected in (
+            ("full", {"windows-x64", "windows-arm64", "linux-x64", "linux-arm64", "macos-x64", "macos-arm64"}),
+            ("windows-linux", {"windows-x64", "windows-arm64", "linux-x64", "linux-arm64"}),
+        ):
+            with self.subTest(profile=profile):
+                self.assertEqual({row["slug"] for row in PUBLISH.native_matrix(profile)}, expected)
+        self.assertEqual(self.job["env"]["NATIVE_PAYLOAD_PREFIX"], "emulebb-rust-native-payload")
+        self.assertEqual(smoke["env"]["NATIVE_PAYLOAD_PREFIX"], "emulebb-rust-native-payload")
+        optional = self.workflow["jobs"]["optional-macos-package"]
+        optional_smoke = self.workflow["jobs"]["optional-macos-smoke"]
+        self.assertEqual(optional["if"], "${{ needs.prepare.outputs.platform_profile == 'windows-linux' }}")
+        self.assertEqual(optional_smoke["needs"], ["prepare", "optional-macos-package"])
+        self.assertEqual(optional["env"]["NATIVE_PAYLOAD_PREFIX"], "emulebb-rust-optional-native-payload")
+        self.assertEqual(optional_smoke["env"]["NATIVE_PAYLOAD_PREFIX"], "emulebb-rust-optional-native-payload")
+        self.assertEqual(optional_smoke["steps"], smoke["steps"])
         self.assertEqual(self.workflow["jobs"]["native-package-smoke"]["needs"], ["prepare", "native-package"])
         self.assertEqual(self.host["run"],
                          "python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} "
