@@ -582,7 +582,8 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
             self.assertEqual(notes.read_text(encoding="utf-8").count("## Downloads\n"), 1)
 
     def test_write_and_pre_candidate_failures_restore_original_pair_for_retry(self) -> None:
-        for fault in ("notes-replace", "checksum-write", "checksum-replace", "pre-candidate", "partial-candidate"):
+        for fault in ("notes-replace", "checksum-write", "checksum-replace", "pre-candidate", "partial-candidate",
+                      "notes-post-replace-cancel", "checksum-post-replace-cancel"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 notes = root / f"RELEASE-{self.version}-NOTES.md"
@@ -610,7 +611,11 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
                     if ((fault == "notes-replace" and path.name == "updated-notes")
                             or (fault == "checksum-replace" and path.name == "updated-checksums")):
                         raise OSError("synthetic replacement failure")
-                    return replace(path, target)
+                    result = replace(path, target)
+                    if ((fault == "notes-post-replace-cancel" and path.name == "updated-notes")
+                            or (fault == "checksum-post-replace-cancel" and path.name == "updated-checksums")):
+                        raise KeyboardInterrupt("synthetic cancellation after successful replacement")
+                    return result
 
                 def write_with_failure(path, *args, **kwargs):
                     if fault == "checksum-write" and path.name == "updated-checksums":
@@ -629,7 +634,8 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
                           "archives_dir": root / "archives", "archive_identity": object()}
                 with (mock.patch.object(Path, "replace", new=replace_with_failure),
                       mock.patch.object(Path, "write_text", new=write_with_failure)):
-                    with self.assertRaisesRegex(OSError, "synthetic"):
+                    failure_type = KeyboardInterrupt if fault.endswith("post-replace-cancel") else OSError
+                    with self.assertRaisesRegex(failure_type, "synthetic"):
                         PUBLISH.finalize_release_candidate(owner, **common)
                 self.assertEqual((notes.read_bytes(), sums.read_bytes()), original)
                 self.assertFalse(candidate.exists())
