@@ -203,6 +203,44 @@ fn verify_without_issued_challenge_errors() {
 }
 
 #[test]
+fn public_key_decoder_accepts_stock_size_boundary_and_rejects_oversize() {
+    // Framing does not parse DER; the same cap must reject an oversized key
+    // before its bytes are copied into any of the secure-ident handlers.
+    for key_len in [79u8, 80] {
+        let mut payload = vec![0x30; usize::from(key_len) + 1];
+        payload[0] = key_len;
+        assert_eq!(decode_public_key_payload(&payload).unwrap(), payload[1..]);
+    }
+    for key_len in [81u8, u8::MAX] {
+        let mut payload = vec![0x30; usize::from(key_len) + 1];
+        payload[0] = key_len;
+        let error = decode_public_key_payload(&payload).unwrap_err();
+        assert!(error.to_string().contains("MAXPUBKEYSIZE 80"));
+    }
+    assert!(decode_public_key_payload(&[]).is_err());
+    assert!(decode_public_key_payload(&[80, 0x30]).is_err());
+    let mut mismatched = vec![0x30; 82];
+    mismatched[0] = 80;
+    assert!(
+        decode_public_key_payload(&mismatched)
+            .unwrap_err()
+            .to_string()
+            .starts_with("invalid OP_PUBLICKEY length prefix")
+    );
+}
+
+#[test]
+fn outbound_identity_rejects_public_key_exceeding_stock_cap() {
+    let private_key = RsaPrivateKey::new(&mut OsRng, 512).unwrap();
+    let public_key = RsaPublicKey::from(&private_key)
+        .to_public_key_der()
+        .unwrap();
+    assert!(public_key.as_bytes().len() > 80);
+    let error = Ed2kSecureIdent::from_private_key(private_key).unwrap_err();
+    assert!(error.to_string().contains("MAXPUBKEYSIZE 80"));
+}
+
+#[test]
 fn emitted_public_key_is_spki_within_stock_cap() {
     // A1: stock eMule (`CClientCredits::SetSecureIdent`) rejects any key longer
     // than MAXPUBKEYSIZE (80 bytes), and its Crypto++ verifier expects SPKI
@@ -216,6 +254,7 @@ fn emitted_public_key_is_spki_within_stock_cap() {
         "length prefix must match key bytes"
     );
     let key_bytes = &payload[1..];
+    assert_eq!(decode_public_key_payload(&payload).unwrap(), key_bytes);
     assert_eq!(
         key_bytes,
         us.public_key_der(),
@@ -238,19 +277,20 @@ fn emitted_public_key_is_spki_within_stock_cap() {
 
     // Signatures must verify over the same SPKI bytes emitted on the wire.
     let peer = ident();
+    let peer_key = decode_public_key_payload(&peer.public_key_payload().unwrap()).unwrap();
     let challenge = 0x4242_4242;
     let sig = peer_sign(&peer, us.public_key_der(), challenge, None);
     assert!(
         verify_inbound_signature(
             us.public_key_der(),
             challenge,
-            peer.public_key_der(),
+            &peer_key,
             &sig,
             Ipv4Addr::new(198, 51, 100, 7),
             None,
         )
         .expect("verify ran"),
-        "sign->verify must pass over the PKCS#1 public-key bytes"
+        "sign->verify must pass over the SPKI public-key bytes"
     );
 }
 
@@ -366,6 +406,38 @@ fn pinned_key_mismatch_is_rejected_before_identity_verification() {
         PeerSecureIdentVerificationOutcome::Unverified
     );
     assert!(!state.peer_ident_verified);
+}
+
+#[test]
+fn oversized_restored_pin_cannot_replace_an_admitted_wire_key() {
+    let us = ident();
+    let peer = ident();
+    let wire_key = decode_public_key_payload(&peer.public_key_payload().unwrap()).unwrap();
+    let restored_pin = vec![0x30; 81];
+    let challenge = 0x1122_3344;
+    let mut state = Ed2kPeerSecureIdentState {
+        peer_public_key: Some(wire_key.clone()),
+        pinned_public_key: Some(restored_pin.clone()),
+        challenge_for: Some(challenge),
+        ..Default::default()
+    };
+    let signature = peer_sign(&peer, us.public_key_der(), challenge, None);
+    assert_eq!(
+        verify_peer_secure_ident_signature(
+            &us,
+            &mut state,
+            &signature,
+            "198.51.100.7:4662".parse().unwrap(),
+            None,
+        ),
+        PeerSecureIdentVerificationOutcome::Unverified
+    );
+    assert!(!state.peer_ident_verified);
+    assert_eq!(state.peer_public_key.as_deref(), Some(wire_key.as_slice()));
+    assert_eq!(
+        state.pinned_public_key.as_deref(),
+        Some(restored_pin.as_slice())
+    );
 }
 
 #[test]

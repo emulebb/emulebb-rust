@@ -638,6 +638,76 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn oversized_public_key_preserves_helper_identity_and_pending_signature() {
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stream, (peer, _)) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::try_join!(TcpStream::connect(address), listener.accept())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let mut transport = super::Ed2kTransport::from_parts(
+            stream,
+            Default::default(),
+            None,
+            None,
+            super::Ed2kTransportMode::Plaintext,
+        );
+        let identity = super::Ed2kSecureIdent::generate().unwrap();
+        let admitted_key = identity.public_key_der().to_vec();
+        let mut state = super::Ed2kPeerSecureIdentState {
+            peer_public_key: Some(admitted_key.clone()),
+            pending_signature: true,
+            peer_challenge_from: Some(1),
+            ..Default::default()
+        };
+        let context = super::FirewallHelperContext {
+            helper_addr: address,
+            hello_identity: super::Ed2kHelloIdentity {
+                user_hash: [0; 16],
+                client_id: 0,
+                tcp_port: 0,
+                udp_port: 0,
+                server_ip: 0,
+                server_port: 0,
+                connect_options: 0,
+                direct_udp_callback: false,
+            },
+            kad_udp_port: 0,
+            secure_ident: &identity,
+            dht: None,
+        };
+        let mut payload = vec![0x30; 82];
+        payload[0] = 81;
+        let error = super::handle_firewall_helper_packet(
+            &mut transport,
+            context,
+            &mut state,
+            super::EmuleTcpPacket {
+                protocol: super::OP_EMULEPROT,
+                opcode: super::OP_PUBLICKEY,
+                payload,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("MAXPUBKEYSIZE 80"));
+        assert_eq!(
+            state.peer_public_key.as_deref(),
+            Some(admitted_key.as_slice())
+        );
+        assert_eq!(state.peer_challenge_from, Some(1));
+        assert!(state.pending_signature);
+        assert_eq!(
+            peer.try_read(&mut [0; 1]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
     #[test]
     fn check_matches_only_the_complement_of_our_kad_id() {
         let own = [0xABu8; 16];
