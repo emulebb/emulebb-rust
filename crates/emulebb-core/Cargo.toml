@@ -51,6 +51,10 @@ tracing.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 
+[target.'cfg(target_os = "android")'.dependencies]
+# Standalone Android CLI processes have no JVM/context for platform verification.
+webpki-root-certs.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 # Resolve a path's volume to its physical disk number (per-disk hashing pool) via
 # IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS. Same windows-sys 0.59 as the rest of the
@@ -66,5 +70,8 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 emulebb-kad-routing = { path = "../emulebb-kad-routing" }
+rustls.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+tokio-rustls.workspace = true
+webpki-root-certs.workspace = true
