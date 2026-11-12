@@ -72,6 +72,12 @@ pub async fn fetch_discovery_bytes(
             .map_err(reqwest::Error::without_url)?
             .error_for_status()
             .map_err(reqwest::Error::without_url)?;
+        // WHY: reqwest can return the original 3xx without calling the custom
+        // policy for an unsupported target. Such a response is not a document.
+        ensure!(
+            !response.status().is_redirection(),
+            "discovery redirect did not reach a supported destination"
+        );
         if response
             .content_length()
             .is_some_and(|length| length > max_bytes as u64)
