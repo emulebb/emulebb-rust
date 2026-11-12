@@ -932,6 +932,51 @@ async fn nodes_dat_import_persists_while_kad_is_stopped() {
 }
 
 #[tokio::test]
+async fn rejected_discovery_url_documents_leave_servers_and_nodes_bytes_unchanged() {
+    use super::discovery_fixture::{Reply, server};
+
+    let temporary = unique_runtime_dir("bounded-discovery-import");
+    let nodes_path = temporary.join("nodes.dat");
+    let original_nodes = b"synthetic existing nodes state";
+    fs::write(&nodes_path, original_nodes).unwrap();
+    let mut network = test_network_config_with_store(
+        &temporary,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.kad_nodes_dat_path = Some(nodes_path.clone());
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &temporary,
+        Some(network),
+    )
+    .unwrap();
+    let mut met = vec![0x0e];
+    met.extend_from_slice(&1u32.to_le_bytes());
+    met.extend_from_slice(&[203, 0, 113, 8]);
+    met.extend_from_slice(&4661u16.to_le_bytes());
+    met.extend_from_slice(&0u32.to_le_bytes());
+    core.import_server_met_bytes(&met).await.unwrap();
+    let original_servers = serde_json::to_value(core.servers().await).unwrap();
+
+    for oversized in [false, true] {
+        let replies = (0..2).map(|_| if oversized {
+            Reply::raw(b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n")
+        } else { Reply::body(b"malformed discovery bytes") }).collect();
+        let source = server(replies).await;
+        assert!(!core.import_server_met_url(&source.url).await.unwrap());
+        assert!(!core.import_kad_nodes_url(&source.url).await.unwrap());
+        assert_eq!(
+            serde_json::to_value(core.servers().await).unwrap(),
+            original_servers
+        );
+        assert_eq!(fs::read(&nodes_path).unwrap(), original_nodes);
+        assert_eq!(source.hits.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
 async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() {
     let transfer_root = unique_runtime_dir("emulebb-core-kad-disabled-runtime-status");
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();

@@ -596,6 +596,10 @@ pub(crate) fn validate_url_import(url: &str) -> Result<String> {
         trimmed.chars().count() <= 2048,
         "url must be at most 2048 characters"
     );
+    crate::discovery_fetch::parse_discovery_url(
+        trimmed,
+        crate::DiscoveryUrlPolicy::OperatorImport,
+    )?;
     Ok(trimmed.to_string())
 }
 

@@ -13,6 +13,10 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
+pub use discovery_fetch::{
+    DiscoveryUrlPolicy, NODES_DAT_MAX_BYTES, SERVER_MET_MAX_BYTES, discovery_client_builder,
+    fetch_discovery_bytes,
+};
 #[cfg(test)]
 use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 #[cfg(test)]
@@ -119,6 +123,7 @@ mod diag_sched;
 #[cfg(feature = "packet-diagnostics")]
 mod diagnostic_protocol_fixture;
 mod direct_download_runtime;
+mod discovery_fetch;
 mod disk_guard;
 mod download_duplicate;
 mod download_source_registry;
