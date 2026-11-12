@@ -75,6 +75,23 @@ class TestWebUiExecutionModes(unittest.TestCase):
 
 
 class TestWebUiWorkspace(unittest.TestCase):
+    def test_child_environment_drops_only_inherited_exec_call_without_mutating_parent(self) -> None:
+        inherited = {
+            "npm_config_call": "outer command", "NPM_CONFIG_CALL": "outer command",
+            "NpM_CoNfIg_CaLl": "outer command", "npm_config_cache": "synthetic-cache",
+            "npm_config_proxy": "https://proxy.example.invalid", "NPM_TOKEN": "synthetic-private-token",
+            "EMULEBB_WORKSPACE_ROOT": "synthetic-workspace", "EMULEBB_WORKSPACE_OUTPUT_ROOT": "synthetic-output",
+            "EMULEBB_SYNTHETIC_SETTING": "keep", "CARGO_TARGET_DIR": "synthetic-target", "X_LOCAL_IP": "192.0.2.1",
+        }
+        before = dict(inherited)
+        child = WEBUI_WORKSPACE.npm_child_environment(inherited)
+        self.assertEqual(inherited, before)
+        self.assertIsNot(child, inherited)
+        self.assertFalse(any(name.casefold() == "npm_config_call" for name in child))
+        for name, value in before.items():
+            if name.casefold() != "npm_config_call":
+                self.assertEqual(child[name], value)
+
     def test_stages_source_and_generated_outputs_below_output_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -99,6 +116,7 @@ class TestWebUiWorkspace(unittest.TestCase):
                     {
                         "EMULEBB_WORKSPACE_ROOT": str(workspace_root),
                         "EMULEBB_WORKSPACE_OUTPUT_ROOT": str(output_root),
+                        "npm_config_call": "synthetic outer command",
                     },
                 )
             finally:
@@ -106,6 +124,7 @@ class TestWebUiWorkspace(unittest.TestCase):
                 WEBUI_WORKSPACE.WEBUI_ROOT = original_webui_root
 
             self.assertEqual(staged.source, output_root / "builds" / "rust" / "webui-test-source")
+            self.assertNotIn("npm_config_call", staged.env)
             self.assertEqual(staged.dist, output_root / "builds" / "rust" / "webui-test-dist")
             self.assertTrue((staged.source / "package.json").is_file())
             for name in WEBUI_WORKSPACE.GENERATED_DIRECTORY_NAMES:
