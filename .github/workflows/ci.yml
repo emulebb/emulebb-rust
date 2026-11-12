@@ -130,9 +130,86 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  preflight:
+    name: Clippy + WebUI typecheck preflight
+    needs: [single-active-pr, workflow-lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+    steps:
+      - name: Checkout emulebb-rust
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout emulebb-miniupnp (native C source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+      - name: Checkout emulebb-libpcpnatpmp (native C source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
+      - name: Install pinned Rust with Clippy
+        uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+        with:
+          components: rustfmt, clippy
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.0"
+          package-manager-cache: false
+      - name: Install pinned npm
+        run: npm install --global npm@11.20.0
+      - name: Install CI test dependencies
+        run: python -m pip install -r tools/requirements-ci.txt
+      - name: Verify pinned tools and actual source/native inputs
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+        run: python tools/ci_environment.py --scope quality --require-native-inputs
+      - name: Check WebUI types before compiler fanout
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+        run: python tools/test_webui.py --typecheck-only
+      - name: Check workspace Clippy before platform fanout
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+        run: python tools/rust_quality_gate.py clippy
+      - name: Recheck source and native inputs after preflight
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+        run: python tools/ci_environment.py --scope quality --require-native-inputs
+      - name: Retain preflight diagnostics and build inputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-evidence-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/reports/rust-quality-gate/
+            ${{ runner.temp }}/emulebb-rust-out/reports/ci-environment/
+          if-no-files-found: warn
+          retention-days: 14
+
   build-linux:
     name: build+test (ubuntu-24.04)
-    needs: [single-active-pr, workflow-lint]
+    needs: [single-active-pr, workflow-lint, preflight]
+    if: ${{ needs.preflight.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -218,7 +295,8 @@ jobs:
 
   build-test:
     name: build+test (${{ matrix.runner }})
-    needs: [single-active-pr, workflow-lint]
+    needs: [single-active-pr, workflow-lint, preflight]
+    if: ${{ needs.preflight.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -308,7 +386,8 @@ jobs:
 
   build-musl:
     name: build+test (musl-${{ matrix.architecture }})
-    needs: [single-active-pr, workflow-lint]
+    needs: [single-active-pr, workflow-lint, preflight]
+    if: ${{ needs.preflight.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -619,7 +698,7 @@ jobs:
   required-ci:
     name: Required CI
     if: ${{ always() }}
-    needs: [single-active-pr, workflow-lint, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]
+    needs: [single-active-pr, workflow-lint, preflight, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -628,6 +707,7 @@ jobs:
         env:
           SINGLE_ACTIVE_PR_RESULT: ${{ needs.single-active-pr.result }}
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           BUILD_LINUX_RESULT: ${{ needs.build-linux.result }}
           BUILD_TEST_RESULT: ${{ needs.build-test.result }}
           BUILD_MUSL_RESULT: ${{ needs.build-musl.result }}
@@ -639,6 +719,7 @@ jobs:
           for result in \
             "$SINGLE_ACTIVE_PR_RESULT" \
             "$WORKFLOW_LINT_RESULT" \
+            "$PREFLIGHT_RESULT" \
             "$BUILD_LINUX_RESULT" \
             "$BUILD_TEST_RESULT" \
             "$BUILD_MUSL_RESULT" \

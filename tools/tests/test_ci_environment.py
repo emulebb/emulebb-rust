@@ -221,6 +221,43 @@ class CiEnvironmentTests(unittest.TestCase):
             download.assert_not_called()
             execute.assert_not_called()
 
+    def test_preflight_requires_clean_hosted_source_and_both_native_inputs(self):
+        rust = ENV.tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+        packages = dict(line.split("==") for line in (ROOT / "tools/requirements-ci.txt").read_text().splitlines() if "==" in line)
+        for fault in (None, "miniupnp", "pcpnatpmp", "source", "hosted-context"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                env = {"EMULEBB_WORKSPACE_OUTPUT_ROOT": directory, "GITHUB_ACTIONS": "true", "GITHUB_SHA": "a" * 40}
+                inputs = {name: {"status": "matching", "observed": ENV.TOOLCHAIN["inputs"][name], "dirty": False}
+                          for name in ("emulebb-miniupnp", "emulebb-libpcpnatpmp")}
+                source = {"expected": "a" * 40, "observed": "a" * 40, "dirty": False, "status": "matching"}
+                if fault in {"miniupnp", "pcpnatpmp"}:
+                    inputs["emulebb-" + ("miniupnp" if fault == "miniupnp" else "libpcpnatpmp")]["status"] = "different"
+                elif fault == "source":
+                    source.update(observed="b" * 40, status="different")
+                elif fault == "hosted-context":
+                    env["GITHUB_ACTIONS"] = "false"
+                with patch.object(ENV.platform, "python_version", return_value=ENV.TOOLCHAIN["python"]), \
+                        patch.object(ENV, "command_version", return_value=rust), \
+                        patch.object(ENV, "node_versions", return_value={"node":ENV.TOOLCHAIN["node"], "npm":ENV.TOOLCHAIN["npm"]}), \
+                        patch.object(ENV.importlib.metadata, "version", side_effect=packages.__getitem__), \
+                        patch.object(ENV, "report_inputs", return_value=inputs), \
+                        patch.object(ENV, "input_state", return_value=source) as source_check:
+                    if fault:
+                        with self.assertRaisesRegex(RuntimeError, "CI preflight"):
+                            ENV.environment_report(env, scope="quality", require_native_inputs=True)
+                    else:
+                        report = ENV.environment_report(env, scope="quality", require_native_inputs=True)
+                        self.assertTrue(report["preflightInputsMatch"])
+                    path = Path(directory) / "reports/ci-environment/latest.json"
+                    if fault == "hosted-context":
+                        source_check.assert_not_called()
+                        self.assertFalse(path.exists())
+                    else:
+                        source_check.assert_called_once_with(ENV.ROOT, "a" * 40)
+                        retained = json.loads(path.read_text())
+                        self.assertEqual(retained["source"], source)
+                        self.assertEqual(retained["preflightInputsMatch"], fault is None)
+
     def test_full_local_environment_keeps_all_tool_version_checks(self):
         report, commands, downloads = self._report_for_scope("full")
         self.assertEqual(commands, [["go", "version"], ["cargo", "deny", "--version"], ["rustc", "--version"]])

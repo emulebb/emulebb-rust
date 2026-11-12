@@ -43,6 +43,7 @@ GATES.update({
     "pre-push": ("environment", "workflow-lint", "release-docs") + STATIC_CHECKS + ("supply-chain",) + COMPILE_CHECKS + TEST_CHECKS + ("rest-openapi",),
 })
 CI_JOBS = {
+    "preflight": "clippy",
     "workflow-lint": "workflow-lint", "quality": "ci-quality", "build-linux": "ci-test",
     "build-test": "ci-test", "rest-openapi": "rest-openapi", "supply-chain": "supply-chain",
 }

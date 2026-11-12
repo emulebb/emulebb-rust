@@ -236,7 +236,7 @@ def report_inputs(env: dict[str, str], names=None) -> dict:
     return inputs
 
 
-def environment_report(env: dict[str, str], *, scope: str = "full") -> dict:
+def environment_report(env: dict[str, str], *, scope: str = "full", require_native_inputs: bool = False) -> dict:
     """Capture versions and the exact inputs behind a local or hosted result."""
     if scope not in {"full", "quality"}:
         raise ValueError("Environment scope must be full or quality")
@@ -257,9 +257,20 @@ def environment_report(env: dict[str, str], *, scope: str = "full") -> dict:
     versions["python_packages"] = {line.split("==")[0]: require_version(line.split("==")[0], importlib.metadata.version(line.split("==")[0]), line.split("==")[1]) for line in (ROOT / "tools/requirements-ci.txt").read_text().splitlines() if "==" in line}
     report = {"scope": scope, "tools": versions, "inputs": report_inputs(env), "platform": platform.platform(),
               "shellcheck": str(shellcheck) if shellcheck is not None else None}
+    if require_native_inputs:
+        expected_source = env.get("GITHUB_SHA", "")
+        if env.get("GITHUB_ACTIONS") != "true" or re.fullmatch(r"[0-9a-f]{40}", expected_source) is None:
+            raise RuntimeError("CI preflight requires the actual hosted source SHA")
+        report["source"] = input_state(ROOT, expected_source)
+        # WHY: ordinary inventories may diagnose local differences. Preflight
+        # releases platform fanout, so its actual native inputs/source must match.
+        report["preflightInputsMatch"] = all(report["inputs"].get(name, {}).get("status") == "matching"
+            for name in ("emulebb-miniupnp", "emulebb-libpcpnatpmp")) and report["source"]["status"] == "matching"
     report_dir = Path(env["EMULEBB_WORKSPACE_OUTPUT_ROOT"]) / "reports" / "ci-environment"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "latest.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if require_native_inputs and not report["preflightInputsMatch"]:
+        raise RuntimeError("CI preflight source/native inputs differ; inspect the retained environment report")
     return report
 
 
@@ -267,7 +278,10 @@ if __name__ == "__main__":
     from rust_quality_gate import build_env
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scope", choices=("full", "quality"), default="full")
-    report = environment_report(build_env(), scope=parser.parse_args().scope)
+    parser.add_argument("--require-native-inputs", action="store_true",
+                        help="Admit CI fanout only for the exact hosted source and clean pinned native inputs.")
+    args = parser.parse_args()
+    report = environment_report(build_env(), scope=args.scope, require_native_inputs=args.require_native_inputs)
     print(json.dumps(report, indent=2))
     if any(item["status"] != "matching" for item in report["inputs"].values()):
         print("Input differences recorded: this result describes the current checkouts; GitHub checks the declared pinned inputs.")
