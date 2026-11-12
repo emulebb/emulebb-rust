@@ -20,8 +20,17 @@ struct OwnedChild(Child);
 
 impl OwnedChild {
     fn start(profile: &Path, mode: &str, ready: &Path) -> Self {
+        Self::start_command(
+            Command::new(env::current_exe().unwrap()),
+            profile,
+            mode,
+            ready,
+        )
+    }
+
+    fn start_command(mut command: Command, profile: &Path, mode: &str, ready: &Path) -> Self {
         Self(
-            Command::new(env::current_exe().unwrap())
+            command
                 .args([
                     "--ignored",
                     "--exact",
@@ -236,7 +245,37 @@ fn unrelated_profiles_can_be_owned_concurrently() {
 fn profile_ownership_child() {
     let profile_path = PathBuf::from(env::var_os(CHILD_PROFILE).unwrap());
     let mode = env::var(CHILD_MODE).unwrap();
-    let result = DaemonProfile::load_for_import(profile_path);
+    let result = match mode.as_str() {
+        "executable-default" => DaemonProfile::load(None),
+        "explicit-dot" => DaemonProfile::load(Some(PathBuf::from("."))),
+        "explicit-relative" => DaemonProfile::load(Some(PathBuf::from("selected-profile"))),
+        "explicit-file" => DaemonProfile::load(Some(PathBuf::from("not-a-directory"))),
+        _ => DaemonProfile::load_for_import(profile_path.clone()),
+    };
+    if mode == "explicit-file" {
+        assert!(
+            result.is_err(),
+            "invalid selected profile must fail without fallback"
+        );
+        return;
+    }
+    if matches!(
+        mode.as_str(),
+        "executable-default" | "explicit-dot" | "explicit-relative"
+    ) {
+        let profile = result.unwrap();
+        assert_eq!(
+            fs::canonicalize(profile.profile_io_dir()).unwrap(),
+            fs::canonicalize(&profile_path).unwrap()
+        );
+        assert!(profile_path.join("emulebb-rust-settings.toml").is_file());
+        assert!(profile_path.join("emulebb-rust-metadata.db").is_file());
+        assert_eq!(
+            profile.rest.api_key,
+            "change_me_123change_me_123change_me_123"
+        );
+        return;
+    }
     if mode == "busy" {
         assert!(
             result
@@ -268,4 +307,56 @@ fn profile_ownership_child() {
     let mut stop = String::new();
     std::io::stdin().read_line(&mut stop).unwrap();
     drop((cloned, independent));
+}
+
+#[test]
+fn executable_default_ignores_shell_cwd_and_explicit_profiles_resolve_from_it() {
+    let temporary = temporary();
+    let executable_dir = temporary.path().join("portable-bin");
+    let other_cwd = temporary.path().join("other-cwd");
+    let unused_home = temporary.path().join("unused-home");
+    for directory in [&executable_dir, &other_cwd, &unused_home] {
+        fs::create_dir(directory).unwrap();
+    }
+    // WHY: invoking the original unit-test executable with no profile would
+    // write beside a shared Cargo artifact. Copy the fixture into owned output.
+    let current = env::current_exe().unwrap();
+    let copied = executable_dir.join(current.file_name().unwrap());
+    fs::copy(current, &copied).unwrap();
+    fs::write(other_cwd.join("not-a-directory"), b"synthetic blocked path").unwrap();
+
+    for (mode, cwd, expected) in [
+        (
+            "executable-default",
+            other_cwd.as_path(),
+            executable_dir.clone(),
+        ),
+        (
+            "explicit-dot",
+            executable_dir.as_path(),
+            executable_dir.clone(),
+        ),
+        (
+            "explicit-relative",
+            other_cwd.as_path(),
+            other_cwd.join("selected-profile"),
+        ),
+        (
+            "explicit-file",
+            other_cwd.as_path(),
+            other_cwd.join("not-a-directory"),
+        ),
+    ] {
+        let mut command = Command::new(&copied);
+        command
+            .current_dir(cwd)
+            .env("HOME", &unused_home)
+            .env("LOCALAPPDATA", &unused_home)
+            .env("XDG_CONFIG_HOME", &unused_home);
+        let mut child =
+            OwnedChild::start_command(command, &expected, mode, &temporary.path().join("ready"));
+        child.finish();
+    }
+    assert!(!other_cwd.join("emulebb-rust-settings.toml").exists());
+    assert!(fs::read_dir(unused_home).unwrap().next().is_none());
 }
