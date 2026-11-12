@@ -66,10 +66,13 @@ for requirements, installation, container mounts and the scope of package checks
 1. Install or extract the package for your system. Keep the complete layout,
    including the adjacent `webui` directory when using an archive.
 2. Run `emulebb-rust.exe` on Windows, `./emulebb-rust` from a Linux archive, or
-   the copied macOS app. For a portable archive profile, run
-   `./emulebb-rust --profile .` (`.\emulebb-rust.exe --profile .` on Windows)
-   from its writable unpacked directory. The ready `emulebb-rust-settings.toml`
-   uses the same defaults as a newly created platform profile.
+   the copied macOS app. Direct daemon launches use the directory containing
+   the executable for TOML and database files, regardless of the shell working
+   directory. Use `--profile <writable-directory>` to select another profile;
+   missing profiles are created. `--profile .` selects the shell working
+   directory, so it matches the default only when that is the executable folder.
+   Desktop app launchers and Docker explicitly select the documented writable
+   profile paths; the daemon never silently falls back to a home directory.
 3. Open **<http://127.0.0.1:20017/>** and enter
    **`change_me_123change_me_123change_me_123`**. Review network and sharing
    settings before starting transfers.

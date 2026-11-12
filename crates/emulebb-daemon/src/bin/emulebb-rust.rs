@@ -15,7 +15,11 @@ use emulebb_daemon::{
     about = "Rust headless eMuleBB client"
 )]
 struct Cli {
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        help = "Profile directory; defaults to the executable directory. Missing profiles are created. Relative paths use the caller's working directory."
+    )]
     profile: Option<PathBuf>,
     #[arg(
         long,

@@ -127,46 +127,31 @@ impl Default for DaemonProfile {
 }
 
 impl DaemonProfile {
+    /// Load or create a profile, defaulting to the executable directory.
+    /// Explicit relative paths retain ordinary caller-working-directory semantics.
     pub fn load(profile_dir: Option<PathBuf>) -> Result<Self> {
-        let implicit_profile = profile_dir.is_none();
         let profile_dir = match profile_dir {
             Some(profile_dir) => profile_dir,
             None => default_profile_dir()?,
         };
-        Self::load_from_dir(profile_dir, implicit_profile)
+        Self::load_from_dir(profile_dir)
     }
 
     pub fn load_for_import(profile_dir: PathBuf) -> Result<Self> {
-        Self::load_from_dir(profile_dir, true)
+        Self::load_from_dir(profile_dir)
     }
 
-    fn load_from_dir(profile_dir: PathBuf, create_if_missing: bool) -> Result<Self> {
-        if !create_if_missing && !profile_dir.exists() {
-            bail!(
-                "profile settings file does not exist: {}",
-                profile_dir.join(PROFILE_SETTINGS_FILE).display()
-            );
-        }
+    fn load_from_dir(profile_dir: PathBuf) -> Result<Self> {
         // WHY: bootstrap creation, schema initialization and reads of mutable
         // state must all belong to the same exclusive writable-profile session.
-        let profile_lease = ProfileLease::acquire(&profile_dir, create_if_missing)?;
-        Self::load_owned(profile_dir, profile_lease, create_if_missing)
+        let profile_lease = ProfileLease::acquire(&profile_dir, true)?;
+        Self::load_owned(profile_dir, profile_lease)
     }
 
-    fn load_owned(
-        profile_dir: PathBuf,
-        profile_lease: ProfileLease,
-        create_if_missing: bool,
-    ) -> Result<Self> {
+    fn load_owned(profile_dir: PathBuf, profile_lease: ProfileLease) -> Result<Self> {
         let settings_path = profile_lease.directory().join(PROFILE_SETTINGS_FILE);
-        if create_if_missing && !settings_path.exists() {
-            create_default_profile_bootstrap(&profile_dir, &settings_path)?;
-        }
         if !settings_path.exists() {
-            bail!(
-                "profile settings file does not exist: {}",
-                settings_path.display()
-            );
+            create_default_profile_bootstrap(&profile_dir, &settings_path)?;
         }
         validate_profile_settings_permissions(&settings_path)?;
         let text = fs::read_to_string(&settings_path)
@@ -436,49 +421,12 @@ impl DaemonProfile {
 }
 
 fn default_profile_dir() -> Result<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(path) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-            return Ok(PathBuf::from(path).join("emulebb-rust"));
-        }
-        let home = env::var_os("HOME").context(
-            "cannot choose the default profile: neither XDG_CONFIG_HOME nor HOME is set",
-        )?;
-        Ok(PathBuf::from(home).join(".config").join("emulebb-rust"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home =
-            env::var_os("HOME").context("cannot choose the default profile: HOME is not set")?;
-        Ok(PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("emulebb-rust"))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let app_data = env::var_os("LOCALAPPDATA")
-            .context("cannot choose the default profile: LOCALAPPDATA is not set")?;
-        Ok(PathBuf::from(app_data).join("emulebb-rust"))
-    }
-    #[cfg(target_os = "android")]
-    {
-        let executable =
-            env::current_exe().context("failed to locate the Android developer bundle")?;
-        let directory = executable
-            .parent()
-            .context("Android bundle has no parent directory")?;
-        Ok(directory.to_path_buf())
-    }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android"
-    )))]
-    {
-        bail!("--profile is required on this platform")
-    }
+    let executable =
+        env::current_exe().context("cannot locate the executable for its default profile")?;
+    executable
+        .parent()
+        .map(Path::to_path_buf)
+        .context("executable has no parent directory; choose an explicit --profile directory")
 }
 
 fn create_default_profile_bootstrap(

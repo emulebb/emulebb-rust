@@ -244,7 +244,7 @@ fn retargeted_profile_alias_keeps_io_in_the_leased_directory() {
         fs::canonicalize(&other).unwrap()
     );
 
-    let profile = DaemonProfile::load_owned(alias.clone(), lease, true).unwrap();
+    let profile = DaemonProfile::load_owned(alias.clone(), lease).unwrap();
     let metadata = profile.open_metadata_store().unwrap();
     put_setting(&metadata, "fixture", "leased", serde_json::json!(true));
     let leased = fs::canonicalize(leased).unwrap();
@@ -430,13 +430,26 @@ fn bootstrap_parse_errors_do_not_echo_secret_source_lines() {
 }
 
 #[test]
-fn load_requires_existing_profile_settings_path() {
+fn load_creates_a_fresh_explicit_profile_without_a_special_dot_case() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("missing-profile");
 
-    let error = DaemonProfile::load(Some(path)).unwrap_err().to_string();
+    let profile = DaemonProfile::load(Some(path.clone())).unwrap();
+    assert_eq!(profile.profile_dir, path);
+    assert!(profile.profile_dir.join(PROFILE_SETTINGS_FILE).is_file());
+    assert!(profile.profile_dir.join(PROFILE_METADATA_FILE).is_file());
+    assert_eq!(
+        profile.rest.api_key,
+        "change_me_123change_me_123change_me_123"
+    );
+}
 
-    assert!(error.contains("profile settings file does not exist"));
+#[test]
+fn default_profile_candidate_is_the_executable_directory() {
+    assert_eq!(
+        default_profile_dir().unwrap(),
+        env::current_exe().unwrap().parent().unwrap()
+    );
 }
 
 #[test]
