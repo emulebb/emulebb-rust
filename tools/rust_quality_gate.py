@@ -38,6 +38,7 @@ GATES.update({
     "branch-ci": ("environment", "workflow-lint", "policy", "policy-tests", "fmt"),
     "quick": QUICK_CHECKS,
     "ci-quality": ("environment", "release-docs") + STATIC_CHECKS + ("webui-test",),
+    "ci-docs": ("environment", "release-docs") + STATIC_CHECKS,
     "ci-test": ("clippy", "diagnostics") + TEST_CHECKS,
     "ci": ("release-docs",) + QUICK_CHECKS + TEST_CHECKS,
     "pre-push": ("environment", "workflow-lint", "release-docs") + STATIC_CHECKS + ("supply-chain",) + COMPILE_CHECKS + TEST_CHECKS + ("rest-openapi",),
@@ -212,7 +213,7 @@ def commands_for_gate(
                                                  registered_stage=registered_stage),
         "release-docs": lambda: release_documents_step(env),
         "environment": lambda: ("CI toolchain and input provenance", [sys.executable, "tools/ci_environment.py",
-                                *(["--scope", "quality"] if gate == "ci-quality" else [])]),
+                                *(["--scope", "quality"] if gate in {"ci-quality", "ci-docs"} else [])]),
     }
     result = []
     seen = set()

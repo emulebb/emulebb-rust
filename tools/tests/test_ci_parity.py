@@ -65,10 +65,10 @@ class CiParityTests(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
         jobs = workflow["jobs"]
         preflight = jobs["preflight"]
-        self.assertEqual(preflight["needs"], ["single-active-pr", "workflow-lint"])
+        self.assertEqual(preflight["needs"], ["single-active-pr", "workflow-lint", "change-scope"])
         self.assertEqual(preflight["runs-on"], "ubuntu-24.04")
         self.assertEqual(preflight["timeout-minutes"], 30)
-        self.assertNotIn("if", preflight)
+        self.assertEqual(preflight["if"], "${{ needs.change-scope.outputs.scope == 'full' }}")
         self.assertNotIn("EMULEBB_WORKSPACE_OUTPUT_ROOT", preflight["env"])
         for step in preflight["steps"]:
             if step.get("run", "").startswith("python tools/"):
@@ -86,7 +86,7 @@ class CiParityTests(unittest.TestCase):
             self.assertEqual(first["with"], existing["with"])
         for name in ("build-linux", "build-test", "build-musl"):
             self.assertIn("preflight", jobs[name]["needs"])
-            self.assertEqual(jobs[name]["if"], "${{ needs.preflight.result == 'success' }}")
+            self.assertEqual(jobs[name]["if"], "${{ needs.preflight.result == 'success' && needs.change-scope.outputs.scope == 'full' }}")
         self.assertIn("preflight", jobs["required-ci"]["needs"])
         self.assertEqual(jobs["required-ci"]["steps"][0]["env"]["PREFLIGHT_RESULT"], "${{ needs.preflight.result }}")
 
