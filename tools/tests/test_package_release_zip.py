@@ -145,7 +145,7 @@ class TestReleasePackage(unittest.TestCase):
             with zipfile.ZipFile(zip_path, "w") as archive:
                 archive.writestr("emulebb-rust/emulebb-rust.exe", b"MZ")
                 archive.writestr("emulebb-rust/webui/index.html", b"<html></html>")
-                archive.writestr("emulebb-rust/emulebb-rust-settings.example.toml", b"[rest]\n")
+                archive.writestr("emulebb-rust/emulebb-rust-settings.toml", b"[rest]\n")
                 archive.writestr("emulebb-rust/LICENSE", b"license\n")
                 archive.writestr("emulebb-rust/README.md", b"readme\n")
                 archive.writestr("emulebb-rust/RELEASE-SCOPE.md", b"scope\n")

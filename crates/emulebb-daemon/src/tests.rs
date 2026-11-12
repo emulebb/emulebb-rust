@@ -191,8 +191,8 @@ fn write_bootstrap_settings(dir: &std::path::Path) -> PathBuf {
         &settings_path,
         r#"
 [rest]
-bindAddr = "192.0.2.10:13301"
-apiKey = "secret"
+bind_addr = "192.0.2.10:13301"
+api_key = "secret"
 "#,
     );
     profile_dir
@@ -269,9 +269,12 @@ fn default_profile_bootstrap_is_loopback_authenticated_and_seeds_network_ports()
     let bootstrap: DaemonBootstrapSettings = toml::from_str(&text).unwrap();
     assert_eq!(
         bootstrap.rest.bind_addr,
-        Some("127.0.0.1:4711".parse().unwrap())
+        Some("127.0.0.1:20017".parse().unwrap())
     );
-    assert_eq!(bootstrap.rest.api_key.len(), MIN_REST_API_KEY_BYTES);
+    assert_eq!(
+        bootstrap.rest.api_key,
+        "change_me_123change_me_123change_me_123"
+    );
     let profile = DaemonProfile {
         rest: bootstrap.rest,
         ..Default::default()
@@ -295,11 +298,11 @@ fn default_profile_bootstrap_is_loopback_authenticated_and_seeds_network_ports()
     seed_default_profile_network_settings(&metadata).unwrap();
     assert_eq!(
         metadata.load_settings_section(SECTION_ED2K).unwrap(),
-        vec![("listenPort".to_string(), "4662".to_string())]
+        vec![("listenPort".to_string(), "20019".to_string())]
     );
     assert_eq!(
         metadata.load_settings_section(SECTION_KAD).unwrap(),
-        vec![("listenPort".to_string(), "4672".to_string())]
+        vec![("listenPort".to_string(), "20020".to_string())]
     );
 }
 
@@ -345,6 +348,88 @@ fn bootstrap_settings_surface_inventory_covers_serialized_toml_fields() {
 }
 
 #[test]
+fn packaged_bootstrap_loads_and_seeds_a_fresh_database() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("profile");
+    fs::create_dir(&profile_dir).unwrap();
+    let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
+    write_private_settings(&settings_path, DEFAULT_BOOTSTRAP_SETTINGS);
+
+    let profile = DaemonProfile::load(Some(profile_dir)).unwrap();
+
+    assert_eq!(
+        profile.rest_bind_addr().unwrap(),
+        "127.0.0.1:20017".parse().unwrap()
+    );
+    assert_eq!(
+        profile.rest.api_key,
+        "change_me_123change_me_123change_me_123"
+    );
+    profile.validate_rest_api_key().unwrap();
+    assert_eq!(profile.ed2k.listen_port, Some(20019));
+    assert_eq!(profile.kad.listen_port, Some(20020));
+    assert_eq!(
+        fs::read_to_string(settings_path).unwrap(),
+        DEFAULT_BOOTSTRAP_SETTINGS
+    );
+}
+
+#[test]
+fn packaged_bootstrap_does_not_replace_existing_database_preferences() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("profile");
+    fs::create_dir(&profile_dir).unwrap();
+    write_private_settings(
+        &profile_dir.join(PROFILE_SETTINGS_FILE),
+        DEFAULT_BOOTSTRAP_SETTINGS,
+    );
+    {
+        let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
+        metadata
+            .put_setting_json(SECTION_ED2K, "listenPort", "20119")
+            .unwrap();
+        metadata
+            .put_setting_json(SECTION_KAD, "listenPort", "20120")
+            .unwrap();
+    }
+
+    let profile = DaemonProfile::load(Some(profile_dir)).unwrap();
+
+    assert_eq!(profile.ed2k.listen_port, Some(20119));
+    assert_eq!(profile.kad.listen_port, Some(20120));
+}
+
+#[test]
+fn bootstrap_rest_rejects_retired_and_unknown_keys() {
+    for key in ["bindAddr", "apiKey", "webRootDir", "unexpected"] {
+        let text = format!("[rest]\n{key} = \"synthetic\"\n");
+        let error = toml::from_str::<DaemonBootstrapSettings>(&text).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field"),
+            "{key}: {error}"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_parse_errors_do_not_echo_secret_source_lines() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("profile");
+    fs::create_dir(&profile_dir).unwrap();
+    let secret = "synthetic-private-key-not-for-diagnostics";
+    write_private_settings(
+        &profile_dir.join(PROFILE_SETTINGS_FILE),
+        &format!("[rest]\napiKey = \"{secret}\"\n"),
+    );
+
+    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
+    let diagnostic = format!("{error:#}");
+
+    assert!(diagnostic.contains("unknown field"));
+    assert!(!diagnostic.contains(secret));
+}
+
+#[test]
 fn load_requires_existing_profile_settings_path() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("missing-profile");
@@ -364,8 +449,8 @@ fn load_for_import_creates_an_explicit_profile() {
     assert_eq!(profile.profile_dir, profile_dir);
     assert!(profile.profile_dir.join(PROFILE_SETTINGS_FILE).is_file());
     assert!(profile.profile_dir.join(PROFILE_METADATA_FILE).is_file());
-    assert_eq!(profile.ed2k.listen_port, Some(4662));
-    assert_eq!(profile.kad.listen_port, Some(4672));
+    assert_eq!(profile.ed2k.listen_port, Some(20019));
+    assert_eq!(profile.kad.listen_port, Some(20020));
 }
 
 #[test]
@@ -732,8 +817,8 @@ fn load_rejects_runtime_fields_in_bootstrap_toml() {
 p2pBindIp = "192.0.2.10"
 
 [rest]
-bindAddr = "192.0.2.10:13301"
-apiKey = "secret"
+bind_addr = "192.0.2.10:13301"
+api_key = "secret"
 
 [ed2k]
 listenPort = 41001
@@ -830,8 +915,8 @@ fn load_rejects_retired_toml_preferences_section() {
         &settings_path,
         r#"
 [rest]
-bindAddr = "192.0.2.10:13301"
-apiKey = "secret"
+bind_addr = "192.0.2.10:13301"
+api_key = "secret"
 
 [preferences]
 autoConnect = false
@@ -913,7 +998,7 @@ fn rest_bind_addr_requires_configured_address() {
 
     let error = profile.rest_bind_addr().unwrap_err().to_string();
 
-    assert!(error.contains("rest.bindAddr is required"));
+    assert!(error.contains("rest.bind_addr is required"));
 }
 
 #[test]
@@ -967,6 +1052,18 @@ fn rest_api_key_accepts_generated_length_secret() {
 }
 
 #[test]
+fn rest_api_key_accepts_printable_keys_at_or_above_the_minimum() {
+    for key in [
+        "0123456789abcdef0123456789abcdef",
+        "change_me_123change_me_123change_me_123",
+    ] {
+        let mut profile = DaemonProfile::default();
+        profile.rest.api_key = key.to_string();
+        profile.validate_rest_api_key().unwrap();
+    }
+}
+
+#[test]
 fn rest_api_key_rejects_empty_placeholder_short_and_whitespace_values() {
     for (api_key, expected) in [
         ("", "must not be empty"),
@@ -1013,7 +1110,7 @@ fn web_root_dir_rejects_configured_missing_directory() {
 
     let error = profile.web_root_dir().unwrap_err().to_string();
 
-    assert!(error.contains("rest.webRootDir must be an existing directory"));
+    assert!(error.contains("rest.web_root_dir must be an existing directory"));
 }
 
 #[test]
@@ -1025,7 +1122,7 @@ fn web_root_dir_rejects_configured_directory_without_index() {
 
     let error = profile.web_root_dir().unwrap_err().to_string();
 
-    assert!(error.contains("rest.webRootDir must contain index.html"));
+    assert!(error.contains("rest.web_root_dir must contain index.html"));
 }
 
 #[test]

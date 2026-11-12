@@ -19,7 +19,7 @@ struct Cli {
     profile: Option<PathBuf>,
     #[arg(
         long,
-        help = "Override the REST/WebUI listener for this run (for example, 127.0.0.1:14711); persist it as rest.bindAddr in the bootstrap TOML"
+        help = "Override the REST/WebUI listener for this run (for example, 127.0.0.1:20017); persist it as rest.bind_addr in the bootstrap TOML"
     )]
     rest_bind_addr: Option<SocketAddr>,
     #[arg(long, help = "Override the finished-download directory for this run")]

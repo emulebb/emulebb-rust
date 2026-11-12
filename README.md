@@ -66,11 +66,18 @@ for requirements, installation, container mounts and the scope of package checks
 1. Install or extract the package for your system. Keep the complete layout,
    including the adjacent `webui` directory when using an archive.
 2. Run `emulebb-rust.exe` on Windows, `./emulebb-rust` from a Linux archive, or
-   the copied macOS app. On the first native launch without `--profile`, save
-   the private API key printed once. GUI/container users can read it from the
-   private profile bootstrap file.
-3. Open **<http://127.0.0.1:4711/>** and enter the key. Review network and sharing
+   the copied macOS app. For a portable archive profile, run
+   `./emulebb-rust --profile .` (`.\emulebb-rust.exe --profile .` on Windows)
+   from its writable unpacked directory. The ready `emulebb-rust-settings.toml`
+   uses the same defaults as a newly created platform profile.
+3. Open **<http://127.0.0.1:20017/>** and enter
+   **`change_me_123change_me_123change_me_123`**. Review network and sharing
    settings before starting transfers.
+
+The shipped API key is a shared starter value. Change `rest.api_key` in your
+private bootstrap file before exposing the API outside this computer. The
+default P2P ports are TCP **20019** and UDP **20020**; mutable client settings
+remain in the profile database.
 
 The default REST address is local control, not an offline-P2P guarantee: startup
 may fetch discovery inputs and start configured networking.

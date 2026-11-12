@@ -243,17 +243,17 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
             .iter()
             .any(|entry| entry["path"] == "ed2k.keepaliveSecs")
     );
-    assert!(!settings.iter().any(|entry| entry["path"] == "rest.apiKey"));
+    assert!(!settings.iter().any(|entry| entry["path"] == "rest.api_key"));
 
     let bootstrap_settings = value["data"]["bootstrapSettings"].as_array().unwrap();
     assert!(bootstrap_settings.iter().any(|entry| {
-        entry["path"] == "rest.bindAddr"
+        entry["path"] == "rest.bind_addr"
             && entry["class"] == "bootstrapOnly"
             && entry["restartRequired"] == true
             && entry["route"] == "emulebb-rust-settings.toml"
     }));
     assert!(bootstrap_settings.iter().any(|entry| {
-        entry["path"] == "rest.apiKey"
+        entry["path"] == "rest.api_key"
             && entry["class"] == "bootstrapOnly"
             && entry["description"]
                 .as_str()

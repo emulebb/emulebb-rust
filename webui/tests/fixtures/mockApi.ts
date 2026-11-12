@@ -538,15 +538,15 @@ function dataFor(method: string, path: string): unknown {
         ],
         bootstrapSettings: [
           bootstrapSetting(
-            "rest.bindAddr",
+            "rest.bind_addr",
             "REST bind socket address. This remains bootstrap-only so the daemon can start safely."
           ),
           bootstrapSetting(
-            "rest.apiKey",
+            "rest.api_key",
             "REST API key. This remains bootstrap-only and is not exposed through REST."
           ),
           bootstrapSetting(
-            "rest.webRootDir",
+            "rest.web_root_dir",
             "Optional WebUI root override used before the REST server starts."
           )
         ],

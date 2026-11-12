@@ -52,15 +52,15 @@ const fn app_setting(
 
 pub const BOOTSTRAP_SETTINGS_SURFACE: &[SettingSurfaceSpec] = &[
     bootstrap_setting(
-        "rest.bindAddr",
+        "rest.bind_addr",
         "REST bind socket address. This remains bootstrap-only so the daemon can start safely.",
     ),
     bootstrap_setting(
-        "rest.apiKey",
+        "rest.api_key",
         "REST API key. This remains bootstrap-only and is not exposed through REST.",
     ),
     bootstrap_setting(
-        "rest.webRootDir",
+        "rest.web_root_dir",
         "Optional WebUI root override used before the REST server starts.",
     ),
 ];

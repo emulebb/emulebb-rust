@@ -1415,7 +1415,7 @@ def check_container_health_contract(
             (dockerfile_source, "bounded Docker healthcheck"),
         'CMD ["/usr/local/bin/emulebb-rust-healthcheck"]':
             (dockerfile_source, "exec-form healthcheck command"),
-        "/dev/tcp/127.0.0.1/4711": (probe_source, "loopback-only probe"),
+        "/dev/tcp/127.0.0.1/20017": (probe_source, "loopback-only probe"),
         "GET /healthz HTTP/1.1": (probe_source, "health endpoint request"),
         "HTTP/1.1 204 No Content": (probe_source, "strict ready-status check"),
     }
