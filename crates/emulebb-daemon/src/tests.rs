@@ -691,9 +691,11 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
 }
 
 #[test]
-fn load_uses_default_db_runtime_config_when_missing() {
+fn load_uses_runtime_defaults_for_existing_database_without_settings() {
     let temp = tempfile::tempdir().unwrap();
     let profile_dir = write_bootstrap_settings(temp.path());
+    // An existing empty database retains its settings; fresh databases seed ports.
+    drop(MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap());
 
     let profile = DaemonProfile::load(Some(profile_dir)).unwrap();
     let metadata = MetadataStore::open(profile.metadata_path()).unwrap();
