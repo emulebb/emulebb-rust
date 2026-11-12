@@ -3,7 +3,7 @@ mission = "automation-first headless IPv4 eD2K/Kad client for reliable search, d
 primary_audience = "automation systems operated through a browser operations console"
 delivery_phases = ["client", "indexer", "arr"]
 current_phase = "client"
-phase_gate = "production implementation of a later phase starts only after every active item in the preceding phase, including newly accepted client work, closes or is explicitly removed"
+phase_gate = "production implementation advances Client -> Indexer -> Arr only after the preceding mandatory core gate closes; explicitly optional distribution/environment expansion retains its owning phase without independently blocking the Client gate; all existing required CI checks and the full selected nightly platform inventory remain mandatory"
 runtime_shape = "one bounded-monolith daemon, one profile, one SQLite database, one embedded operations console, and one HTTP listener"
 ui_role = "operations console; not a native desktop UI or MFC GUI recreation"
 
