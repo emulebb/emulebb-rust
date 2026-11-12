@@ -351,8 +351,8 @@ function dataFor(method: string, path: string): unknown {
     case "network":
       return {
         ports: {
-          tcp: 4662,
-          udp: 4672,
+          tcp: 20019,
+          udp: 20020,
           serverUdp: null
         },
         binding: {
@@ -401,16 +401,16 @@ function dataFor(method: string, path: string): unknown {
           {
             name: "ed2k_tcp",
             protocol: "tcp",
-            localAddr: "192.0.2.10:4662",
-            externalAddr: "203.0.113.10:4662",
+            localAddr: "192.0.2.10:20019",
+            externalAddr: "203.0.113.10:20019",
             leaseExpiresInSecs: 1800,
             backend: "miniupnpc"
           },
           {
             name: "kad_udp",
             protocol: "udp",
-            localAddr: "192.0.2.10:4672",
-            externalAddr: "203.0.113.10:4672",
+            localAddr: "192.0.2.10:20020",
+            externalAddr: "203.0.113.10:20020",
             leaseExpiresInSecs: 1800,
             backend: "miniupnpc"
           }
@@ -591,7 +591,7 @@ function dataFor(method: string, path: string): unknown {
           }
         },
         ed2k: {
-          listenPort: 4662,
+          listenPort: 20019,
           nickname: "Sample Mule",
           connectTimeoutSecs: 30,
           serverConnectTimeoutSecs: 25,
@@ -631,7 +631,7 @@ function dataFor(method: string, path: string): unknown {
           }
         },
         kad: {
-          listenPort: 4672,
+          listenPort: 20020,
           bootstrapMinRoutingContacts: 10,
           localStoreEnabled: true,
           publishSharedFilesEnabled: true,
