@@ -22,7 +22,7 @@ use super::{
 
 /// Stock eMule `MAXPUBKEYSIZE` (`ClientCredits.h`): the secure-ident public-key
 /// buffer cap. `CClientCredits::SetSecureIdent` rejects any key longer than
-/// this, so our emitted key must fit.
+/// this, so both received and emitted keys must fit.
 const ED2K_MAX_PUBKEY_SIZE: usize = 80;
 
 /// Persistent RSA identity used for the eMule secure-ident side channel.
@@ -259,6 +259,15 @@ pub(super) fn decode_public_key_payload(payload: &[u8]) -> Result<Vec<u8>> {
             "invalid OP_PUBLICKEY length prefix {} for payload size {}",
             key_len,
             key_bytes.len()
+        );
+    }
+    // WHY: stock SetSecureIdent rejects keys above MAXPUBKEYSIZE. Enforce its
+    // boundary before copying a wire key into peer state or attempting RSA.
+    if key_bytes.len() > ED2K_MAX_PUBKEY_SIZE {
+        anyhow::bail!(
+            "OP_PUBLICKEY key length {} exceeds stock MAXPUBKEYSIZE {}",
+            key_bytes.len(),
+            ED2K_MAX_PUBKEY_SIZE
         );
     }
     Ok(key_bytes.to_vec())
