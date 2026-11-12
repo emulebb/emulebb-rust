@@ -131,6 +131,7 @@ def classify(repo: Path, event: dict, event_name: str, repository: str,
     records = raw.split(b"\0")
     if not records[-1] == b"" or len(records) % 2 != 1:
         return full("invalid-change-records")
+    changes = []
     for index in range(0, len(records) - 1, 2):
         try:
             header = records[index].decode("ascii").split()
@@ -142,6 +143,10 @@ def classify(repo: Path, event: dict, event_name: str, repository: str,
         before_mode, after_mode, before_oid, after_oid, status = header
         receipt["changes"].append({"path": path, "status": status,
                                    "beforeMode": before_mode[1:], "afterMode": after_mode})
+        changes.append((before_mode, after_mode, before_oid, after_oid, status, path))
+    # WHY: a full verdict may be decided by its first code change, but retained
+    # evidence must still describe every valid path in the complete Git range.
+    for before_mode, after_mode, before_oid, after_oid, status, path in changes:
         if (before_mode != ":100644" or after_mode != "100644" or status != "M"
                 or path not in {"README.md", "policy/rust-client.toml"}):
             return full("outside-documentation-allowlist")
