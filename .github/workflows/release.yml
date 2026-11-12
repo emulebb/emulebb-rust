@@ -51,8 +51,8 @@ permissions:
 env:
   RELEASE_PLATFORM_PROFILE: ${{ inputs.platform_profile || 'full' }}
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
-  EMULEBB_BUILD_REF: 7664330e9381e6ac4f10a72d39f293a4b886b5b9
-  EMULEBB_LINUX_PREPARED_IMAGE: ghcr.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:e006429d3a240a6f4e43b1d8f05581bcd963ca681059e2661465ebb359f9118e
+  EMULEBB_BUILD_REF: 33798d1f959e60d7631d8cb4d2ea794fd4523f9a
+  EMULEBB_LINUX_PREPARED_IMAGE: ghcr.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:a88d48a10290ae3a01fc780332927d0192bafca188250cdc4b8c064342fd61fa
   EMULEBB_BUILD_TESTS_REF: 86e32b1d547ca68c294350ad45d70d79b987d2bb
   EMULEBB_TOOLING_REF: d406cfd8e6f3e3b6f04e377ac469c413293f81d9
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
@@ -240,7 +240,7 @@ jobs:
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
       - name: Set up pinned Docker for prepared Linux packaging
         if: matrix.os == 'linux'
-        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
+        uses: docker/setup-docker-action@3f1ab1ab0e29231562e4db4ca600c1a49653bac6 # v5.7.0
         with:
           version: v29.6.1
           daemon-config: '{"features":{"containerd-snapshotter":true}}'
