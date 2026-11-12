@@ -56,6 +56,8 @@ const AUTO_CONNECT_POPULARITY_POLL: Duration = Duration::from_millis(500);
 const AUTO_CONNECT_TARGET_VERIFY: Duration = Duration::from_secs(12);
 const AUTO_CONNECT_TARGET_STABLE: Duration = Duration::from_secs(2);
 const MIN_REST_API_KEY_BYTES: usize = 32;
+const DEFAULT_BOOTSTRAP_SETTINGS: &str =
+    include_str!("../../../emulebb-rust-settings.example.toml");
 const UNSAFE_REST_API_KEYS: &[&str] = &[
     "change-me",
     "changeme",
@@ -89,13 +91,13 @@ pub struct DaemonProfile {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+#[serde(default, deny_unknown_fields)]
 struct DaemonBootstrapSettings {
     pub rest: RestBootstrapSettings,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, deny_unknown_fields)]
 pub struct RestBootstrapSettings {
     pub bind_addr: Option<SocketAddr>,
     pub api_key: String,
@@ -157,12 +159,9 @@ impl DaemonProfile {
         create_if_missing: bool,
     ) -> Result<Self> {
         let settings_path = profile_lease.directory().join(PROFILE_SETTINGS_FILE);
-        let created_default_profile = if create_if_missing && !settings_path.exists() {
+        if create_if_missing && !settings_path.exists() {
             create_default_profile_bootstrap(&profile_dir, &settings_path)?;
-            true
-        } else {
-            false
-        };
+        }
         if !settings_path.exists() {
             bail!(
                 "profile settings file does not exist: {}",
@@ -172,19 +171,28 @@ impl DaemonProfile {
         validate_profile_settings_permissions(&settings_path)?;
         let text = fs::read_to_string(&settings_path)
             .with_context(|| format!("failed to read settings {}", settings_path.display()))?;
-        let bootstrap: DaemonBootstrapSettings = toml::from_str(&text)
-            .with_context(|| format!("failed to parse settings {}", settings_path.display()))?;
-        let metadata = MetadataStore::open_with_profile_lease(
-            profile_lease.directory().join(PROFILE_METADATA_FILE),
-            profile_lease.file(),
-        )
-        .with_context(|| {
-            format!(
-                "failed to open metadata store under {}",
-                profile_dir.display()
-            )
-        })?;
-        if created_default_profile {
+        // WHY: TOML error displays include the offending source line, which
+        // can contain an operator API key. Keep the diagnostic without values.
+        let bootstrap: DaemonBootstrapSettings =
+            toml::from_str(&text).map_err(|error: toml::de::Error| {
+                anyhow::anyhow!(
+                    "failed to parse settings {}: {}",
+                    settings_path.display(),
+                    error.message()
+                )
+            })?;
+        let metadata_path = profile_lease.directory().join(PROFILE_METADATA_FILE);
+        // WHY: a packaged bootstrap already exists before its first run. Seed
+        // network defaults only for a new database, never from TOML existence.
+        let fresh_metadata = !metadata_path.exists();
+        let metadata = MetadataStore::open_with_profile_lease(metadata_path, profile_lease.file())
+            .with_context(|| {
+                format!(
+                    "failed to open metadata store under {}",
+                    profile_dir.display()
+                )
+            })?;
+        if fresh_metadata {
             seed_default_profile_network_settings(&metadata)?;
         }
         let settings = load_settings(&metadata)?;
@@ -367,7 +375,7 @@ impl DaemonProfile {
 
     pub fn rest_bind_addr(&self) -> Result<SocketAddr> {
         let Some(candidate) = self.rest.bind_addr else {
-            bail!("rest.bindAddr is required");
+            bail!("rest.bind_addr is required");
         };
         Ok(candidate)
     }
@@ -375,23 +383,23 @@ impl DaemonProfile {
     pub fn validate_rest_api_key(&self) -> Result<()> {
         let api_key = self.rest.api_key.as_str();
         if api_key.is_empty() {
-            bail!("rest.apiKey is required and must not be empty");
+            bail!("rest.api_key is required and must not be empty");
         }
         if api_key.trim() != api_key {
-            bail!("rest.apiKey must not have leading or trailing whitespace");
+            bail!("rest.api_key must not have leading or trailing whitespace");
         }
         if !api_key.bytes().all(|byte| byte.is_ascii_graphic()) {
-            bail!("rest.apiKey must contain only printable ASCII characters without spaces");
+            bail!("rest.api_key must contain only printable ASCII characters without spaces");
         }
         if UNSAFE_REST_API_KEYS
             .iter()
             .any(|placeholder| api_key.eq_ignore_ascii_case(placeholder))
         {
-            bail!("rest.apiKey is a placeholder and must be replaced");
+            bail!("rest.api_key is a placeholder and must be replaced");
         }
         if api_key.len() < MIN_REST_API_KEY_BYTES {
             bail!(
-                "rest.apiKey must contain at least {MIN_REST_API_KEY_BYTES} bytes of secret material"
+                "rest.api_key must contain at least {MIN_REST_API_KEY_BYTES} bytes of secret material"
             );
         }
         Ok(())
@@ -404,7 +412,7 @@ impl DaemonProfile {
             } else {
                 self.profile_io_dir().join(configured)
             };
-            validate_web_root_dir(&resolved, "rest.webRootDir")?;
+            validate_web_root_dir(&resolved, "rest.web_root_dir")?;
             return Ok(Some(resolved));
         }
 
@@ -453,7 +461,21 @@ fn default_profile_dir() -> Result<PathBuf> {
             .context("cannot choose the default profile: LOCALAPPDATA is not set")?;
         Ok(PathBuf::from(app_data).join("emulebb-rust"))
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        let executable =
+            env::current_exe().context("failed to locate the Android developer bundle")?;
+        let directory = executable
+            .parent()
+            .context("Android bundle has no parent directory")?;
+        Ok(directory.to_path_buf())
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    )))]
     {
         bail!("--profile is required on this platform")
     }
@@ -463,8 +485,13 @@ fn create_default_profile_bootstrap(
     profile_dir: &std::path::Path,
     settings_path: &std::path::Path,
 ) -> Result<()> {
-    let api_key = uuid::Uuid::new_v4().simple().to_string();
-    let text = format!("[rest]\nbindAddr = \"127.0.0.1:4711\"\napiKey = \"{api_key}\"\n");
+    let text = DEFAULT_BOOTSTRAP_SETTINGS;
+    let bootstrap: DaemonBootstrapSettings =
+        toml::from_str(text).context("invalid canonical bootstrap template")?;
+    let listener = bootstrap
+        .rest
+        .bind_addr
+        .context("canonical REST bind_addr is missing")?;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -480,7 +507,10 @@ fn create_default_profile_bootstrap(
     file.sync_all()
         .with_context(|| format!("failed to sync {}", settings_path.display()))?;
     eprintln!("Created eMuleBB profile at {}", profile_dir.display());
-    eprintln!("WebUI: http://127.0.0.1:4711/  API key: {api_key}");
+    eprintln!(
+        "WebUI: http://{listener}/  API key: {}",
+        bootstrap.rest.api_key
+    );
     Ok(())
 }
 
@@ -508,7 +538,7 @@ fn validate_profile_settings_permissions(settings_path: &std::path::Path) -> Res
         & 0o777;
     if mode & 0o077 != 0 {
         bail!(
-            "profile settings {} have mode {mode:03o}; rest.apiKey requires owner-only permissions (chmod 600)",
+            "profile settings {} have mode {mode:03o}; rest.api_key requires owner-only permissions (chmod 600)",
             settings_path.display()
         );
     }
@@ -522,10 +552,10 @@ fn validate_profile_settings_permissions(_settings_path: &std::path::Path) -> Re
 
 fn seed_default_profile_network_settings(metadata: &MetadataStore) -> Result<()> {
     if !metadata.has_settings_section(SECTION_ED2K)? {
-        metadata.put_setting_json(SECTION_ED2K, "listenPort", "4662")?;
+        metadata.put_setting_json(SECTION_ED2K, "listenPort", "20019")?;
     }
     if !metadata.has_settings_section(SECTION_KAD)? {
-        metadata.put_setting_json(SECTION_KAD, "listenPort", "4672")?;
+        metadata.put_setting_json(SECTION_KAD, "listenPort", "20020")?;
     }
     Ok(())
 }

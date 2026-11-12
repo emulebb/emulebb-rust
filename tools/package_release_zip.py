@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         source = ROOT / rel
         if not source.is_file():
             raise SystemExit(f"required release file missing: {rel}")
-        release_files.append((rel, source))
+        release_files.append(("emulebb-rust-settings.toml" if rel == "emulebb-rust-settings.example.toml" else rel, source))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_name = f"emulebb-rust-v{version}-windows-x64.zip"
@@ -200,7 +200,9 @@ def package_readme(version: str) -> str:
         f"eMuleBB Rust {version}\n"
         "====================\n\n"
         "This is the unsigned Windows x64 beta package for the headless emulebb-rust daemon.\n\n"
-        "Run `emulebb-rust.exe --profile <profile-dir>` from this directory or from a script that points at a profile.\n"
+        "Run `emulebb-rust.exe` for a fresh platform profile, or `emulebb-rust.exe --profile .` here.\n"
+        "Open http://127.0.0.1:20017/ and enter change_me_123change_me_123change_me_123.\n"
+        "Replace the shared starter key before exposing the API outside this computer.\n"
         "The daemon serves the embedded browser WebUI from the packaged `webui` directory beside the executable.\n\n"
     )
 
@@ -227,7 +229,7 @@ def build_manifest(
         "executable": f"{PACKAGE_ROOT}/{BIN_NAME}",
         "webuiRoot": f"{PACKAGE_ROOT}/webui",
         "releaseScope": f"{PACKAGE_ROOT}/RELEASE-SCOPE.md",
-        "settingsExample": f"{PACKAGE_ROOT}/emulebb-rust-settings.example.toml",
+        "settingsFile": f"{PACKAGE_ROOT}/emulebb-rust-settings.toml",
         "sbom": sbom_path.name,
         "sbomSha256": sha256_file(sbom_path),
         "perFileSha256": entry_hashes(entries),
@@ -293,7 +295,7 @@ def assert_package_contents(zip_path: Path) -> None:
     required = {
         f"{PACKAGE_ROOT}/{BIN_NAME}",
         f"{PACKAGE_ROOT}/webui/index.html",
-        f"{PACKAGE_ROOT}/emulebb-rust-settings.example.toml",
+        f"{PACKAGE_ROOT}/emulebb-rust-settings.toml",
         f"{PACKAGE_ROOT}/LICENSE",
         f"{PACKAGE_ROOT}/README.md",
         f"{PACKAGE_ROOT}/RELEASE-SCOPE.md",

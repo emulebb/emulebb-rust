@@ -1003,8 +1003,8 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
 
   await expect(settingsPanel.getByRole("heading", { name: "Storage" })).toBeVisible();
   await expect(settingsPanel.getByRole("heading", { name: "Bootstrap REST" })).toBeVisible();
-  await expect(settingsPanel.getByText("rest.bindAddr")).toBeVisible();
-  await expect(settingsPanel.getByText("rest.apiKey")).toBeVisible();
+  await expect(settingsPanel.getByText("rest.bind_addr")).toBeVisible();
+  await expect(settingsPanel.getByText("rest.api_key")).toBeVisible();
   await expect(settingsPanel.getByText("emulebb-rust-settings.toml").first()).toBeVisible();
   await expect(settingsPanel.getByRole("heading", { name: "Transfers" })).toBeVisible();
   await expect(settingsPanel.getByRole("heading", { name: "Network" })).toBeVisible();

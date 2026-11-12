@@ -28,5 +28,5 @@ RUN chmod 755 /usr/lib/emulebb-rust/emulebb-rust \
     /etc/s6-overlay/s6-rc.d/svc-emulebb-rust/run \
     /usr/local/bin/emulebb-rust-healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["/usr/local/bin/emulebb-rust-healthcheck"]
-EXPOSE 4711/tcp 4662/tcp 4672/udp
+EXPOSE 20017/tcp 20019/tcp 20020/udp
 VOLUME /config /data
