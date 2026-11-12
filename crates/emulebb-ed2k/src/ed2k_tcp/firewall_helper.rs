@@ -659,12 +659,10 @@ mod tests {
         );
         let identity = super::Ed2kSecureIdent::generate().unwrap();
         let admitted_key = identity.public_key_der().to_vec();
-        let mut state = super::Ed2kPeerSecureIdentState {
-            peer_public_key: Some(admitted_key.clone()),
-            pending_signature: true,
-            peer_challenge_from: Some(1),
-            ..Default::default()
-        };
+        let mut state = super::Ed2kPeerSecureIdentState::default();
+        state.peer_public_key = Some(admitted_key.clone());
+        state.pending_signature = true;
+        state.peer_challenge_from = Some(1);
         let context = super::FirewallHelperContext {
             helper_addr: address,
             hello_identity: super::Ed2kHelloIdentity {
