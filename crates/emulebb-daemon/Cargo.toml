@@ -68,4 +68,6 @@ embed-manifest.workspace = true
 find-msvc-tools.workspace = true
 
 [dev-dependencies]
+rustls.workspace = true
+tokio-rustls.workspace = true
 tempfile.workspace = true

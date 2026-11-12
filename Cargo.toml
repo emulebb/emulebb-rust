@@ -66,6 +66,7 @@ parking_lot = "0.13"
 percent-encoding = "2.3"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 roxmltree = "0.21"
 rsa = "0.9"
 rusqlite = { version = "0.41", features = ["bundled"] }
@@ -92,6 +93,7 @@ tempfile = "3"
 tokio = "1"
 tokio-stream = "0.1"
 tokio-util = "0.7"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 toml = "1.1"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["fs"] }
@@ -101,4 +103,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2"
+webpki-root-certs = "1.0.10"
 windows-sys = "0.61"

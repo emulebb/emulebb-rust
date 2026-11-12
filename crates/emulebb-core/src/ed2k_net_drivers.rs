@@ -65,15 +65,46 @@ pub(crate) struct ReaskReengageContext {
 /// Fetches a URL body for server.met / nodes.dat import. A browser User-Agent
 /// is required: public eMule list mirrors reject or redirect the default agent.
 pub(crate) async fn fetch_url_bytes(url: &str) -> Result<Vec<u8>> {
-    let client = reqwest::Client::builder()
+    let client = url_import_client_builder()?.build()?;
+    let response = client.get(url).send().await?.error_for_status()?;
+    Ok(response.bytes().await?.to_vec())
+}
+
+fn url_import_client_builder() -> Result<reqwest::ClientBuilder> {
+    Ok(crate::http_client_builder()?
         .user_agent(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
              (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         )
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-    let response = client.get(url).send().await?.error_for_status()?;
-    Ok(response.bytes().await?.to_vec())
+        .timeout(std::time::Duration::from_secs(30)))
+}
+
+#[cfg(test)]
+mod http_client_tests {
+    mod fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/tls_fixture.rs"
+        ));
+    }
+
+    #[tokio::test]
+    async fn url_import_builder_rejects_private_fixture_ca() {
+        let (address, server) = fixture::serve(fixture::VALID).await;
+        let client = super::url_import_client_builder()
+            .unwrap()
+            .no_proxy()
+            .timeout(fixture::TIMEOUT)
+            .build()
+            .unwrap();
+        let error = client
+            .get(format!("https://{address}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(!error.is_timeout());
+        assert_eq!(server.await.unwrap(), fixture::Outcome::CertificateRejected);
+    }
 }
 
 /// Re-probe public IP via STUN while still unknown (gentle cadence).

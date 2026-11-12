@@ -29,10 +29,7 @@ pub(crate) async fn seed_empty_discovery(
     metadata: &MetadataStore,
     profile_dir: &Path,
 ) -> Result<()> {
-    let client = Client::builder()
-        .user_agent(concat!("eMuleBB-Rust/", env!("CARGO_PKG_VERSION")))
-        .redirect(Policy::limited(3))
-        .timeout(DISCOVERY_FETCH_TIMEOUT)
+    let client = discovery_client_builder()?
         .build()
         .context("failed to create first-run discovery HTTP client")?;
 
@@ -43,6 +40,13 @@ pub(crate) async fn seed_empty_discovery(
     servers?;
     nodes?;
     Ok(())
+}
+
+fn discovery_client_builder() -> Result<reqwest::ClientBuilder> {
+    Ok(emulebb_core::http_client_builder()?
+        .user_agent(concat!("eMuleBB-Rust/", env!("CARGO_PKG_VERSION")))
+        .redirect(Policy::limited(3))
+        .timeout(DISCOVERY_FETCH_TIMEOUT))
 }
 
 async fn seed_empty_servers(metadata: &MetadataStore, client: &Client) -> Result<()> {
@@ -225,6 +229,33 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod tls_fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../emulebb-core/tests/support/tls_fixture.rs"
+        ));
+    }
+
+    #[tokio::test]
+    async fn discovery_https_uses_verified_client_and_rejects_private_ca() {
+        let (address, server) = tls_fixture::serve(tls_fixture::VALID).await;
+        let client = super::discovery_client_builder()
+            .unwrap()
+            .no_proxy()
+            .timeout(tls_fixture::TIMEOUT)
+            .build()
+            .unwrap();
+        let error = super::fetch_bounded(&client, &format!("https://{address}/"), 2)
+            .await
+            .unwrap_err();
+        let request_error = error.downcast_ref::<reqwest::Error>().unwrap();
+        assert!(!request_error.is_timeout());
+        assert_eq!(
+            server.await.unwrap(),
+            tls_fixture::Outcome::CertificateRejected
+        );
+    }
+
     use super::*;
 
     fn one_server_met() -> Vec<u8> {

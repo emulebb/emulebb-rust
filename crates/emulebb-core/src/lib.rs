@@ -95,6 +95,7 @@ use emulebb_metadata::{
     MetadataSharedFileCursor, MetadataSharedFileQuery, MetadataStore, MetadataTransferCounts,
     MetadataTransferPublishEntry,
 };
+pub use http_client::http_client_builder;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, RwLock, broadcast},
@@ -133,6 +134,7 @@ mod ed2k_source_batch;
 mod ed2k_sources;
 mod friend_api;
 mod hostname_lookup;
+mod http_client;
 mod kad_buddy;
 mod kad_callback_initiator;
 mod kad_control;
