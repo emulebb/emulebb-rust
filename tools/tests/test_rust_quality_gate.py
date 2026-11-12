@@ -137,9 +137,11 @@ class TestDiagnosticsGate(unittest.TestCase):
         self.assertNotIn("clippy", labels)
         self.assertNotIn("packet diagnostics binary", labels)
 
-    def test_only_ci_quality_scopes_its_environment_inventory(self) -> None:
-        quality = [command for _, command in QUALITY_GATE.commands_for_gate("ci-quality", self.build_env_fixture()) if "tools/ci_environment.py" in command]
-        self.assertEqual(quality, [[sys.executable, "tools/ci_environment.py", "--scope", "quality"]])
+    def test_only_ci_quality_and_docs_scope_their_environment_inventory(self) -> None:
+        for gate in ("ci-quality", "ci-docs"):
+            quality = [command for _, command in QUALITY_GATE.commands_for_gate(gate, self.build_env_fixture()) if "tools/ci_environment.py" in command]
+            self.assertEqual(quality, [[sys.executable, "tools/ci_environment.py", "--scope", "quality"]])
+        self.assertEqual(QUALITY_GATE.GATES["ci-docs"], ("environment", "release-docs", "policy", "policy-tests", "fmt"))
         for gate in ("pre-push", "environment", "ci", "branch-ci"):
             with self.subTest(gate=gate):
                 command = next(command for _, command in QUALITY_GATE.commands_for_gate(gate, self.build_env_fixture()) if "tools/ci_environment.py" in command)

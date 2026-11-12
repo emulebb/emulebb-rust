@@ -695,7 +695,7 @@ def check_required_ci_gates(
         ),
         "required-ci:": (ci, "CI aggregate job"),
         "name: Required CI": (ci, "stable CI check name"),
-        "needs: [single-active-pr, workflow-lint, preflight, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]": (
+        "needs: [change-scope, single-active-pr, workflow-lint, preflight, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]": (
             ci,
             "complete CI aggregate dependency set",
         ),
@@ -705,13 +705,13 @@ def check_required_ci_gates(
         '"$PREFLIGHT_RESULT"': (ci, "preflight result verification"),
         '"$BUILD_MUSL_RESULT"': (ci, "musl build result verification"),
         "name: Optional Platform CI": (optional, "independent optional platform aggregate"),
-        "needs: [single-active-pr, workflow-lint, build-macos, build-android]": (optional, "complete optional platform dependency set"),
+        "needs: [change-scope, single-active-pr, workflow-lint, build-macos, build-android]": (optional, "complete optional platform dependency set"),
         '"$ANDROID_RESULT"': (optional, "Android build result verification"),
         '"$MACOS_RESULT"': (optional, "macOS build result verification"),
         "required-codeql:": (codeql, "CodeQL aggregate job"),
         "name: Required CodeQL": (codeql, "stable CodeQL check name"),
-        "needs: analyze": (codeql, "complete CodeQL matrix dependency"),
-        'test "$ANALYZE_RESULT" = success': (
+        "needs: [change-scope, analyze]": (codeql, "complete CodeQL matrix dependency"),
+        '"$ANALYZE_RESULT"': (
             codeql,
             "strict CodeQL result verification",
         ),
@@ -732,7 +732,7 @@ def check_required_ci_gates(
         elif job in {"preflight", "build-linux", "build-test", "build-musl", "quality"} and "workflow-lint" not in needs:
             errors.append(f"{job} must wait for workflow-lint before expensive validation")
         if job in {"build-linux", "build-test", "build-musl"}:
-            if "preflight" not in needs or jobs[job].get("if") != "${{ needs.preflight.result == 'success' }}":
+            if "preflight" not in needs or jobs[job].get("if") != "${{ needs.preflight.result == 'success' && needs.change-scope.outputs.scope == 'full' }}":
                 errors.append(f"{job} must require explicit successful preflight before platform fanout")
     preflight = jobs.get("preflight", {})
     steps = preflight.get("steps", [])
@@ -765,6 +765,57 @@ def check_required_ci_gates(
     optional_native = set(optional_jobs.get("build-macos", {}).get("strategy", {}).get("matrix", {}).get("runner", []))
     if optional_native != {"macos-15-intel", "macos-15"}:
         errors.append("optional CI must preserve both native macOS targets")
+    bootstrap_commands = []
+    codeql_jobs = (yaml.safe_load(codeql) or {}).get("jobs", {})
+    full_condition = "${{ needs.change-scope.outputs.scope == 'full' }}"
+    for filename, workflow_jobs, aggregate_name, heavy in (
+        ("ci.yml", jobs, "required-ci", ("preflight",)),
+        ("codeql.yml", codeql_jobs, "required-codeql", ("analyze",)),
+        ("optional-platforms.yml", optional_jobs, "optional-platform-ci", ("build-macos", "build-android")),
+    ):
+        scope = workflow_jobs.get("change-scope", {})
+        if (scope.get("permissions") != {"contents": "read"} or scope.get("if")
+                or scope.get("continue-on-error")):
+            errors.append(f"{filename} must retain unconditional read-only trusted classification")
+        classify = next((step for step in scope.get("steps", []) if step.get("id") == "classify"), {})
+        command = classify.get("run", "")
+        bootstrap_commands.append(command)
+        for fragment in ("python -I -B -", '"ls-tree", base', '"cat-file", "blob", blob',
+                         'sys.executable, "-I", "-B", str(trusted)', '"scope=full\\ndocs_validated=false'):
+            if fragment not in command:
+                errors.append(f"{filename} must execute only the immutable base classifier with full bootstrap fallback")
+                break
+        aggregate = workflow_jobs.get(aggregate_name, {})
+        needs = aggregate.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        if aggregate.get("if") != "${{ always() }}" or "change-scope" not in needs:
+            errors.append(f"{filename} aggregate must always evaluate trusted classification")
+        steps = aggregate.get("steps", [])
+        aggregate_command = steps[0].get("run", "") if steps else ""
+        for fragment in ('test "$SCOPE_RESULT" = success', 'test "$CLASSIFIED_TESTED_SHA" = "$EXPECTED_TESTED_SHA"',
+                         'full) test "$DOCS_VALIDATED" = false; expected=success',
+                         'test "$DOCS_VALIDATED" = true', '[[ "$CLASSIFIER_BLOB" =~ ^[0-9a-f]{40}$ ]]',
+                         "expected=skipped", 'test "$ANALYZE_RESULT" = "$expected"' if filename == "codeql.yml"
+                         else 'test "$result" = "$expected"', "*) exit 1"):
+            if fragment not in aggregate_command:
+                errors.append(f"{filename} aggregate must distinguish validated docs skips from full successful results")
+                break
+        for name in heavy:
+            job = workflow_jobs.get(name, {})
+            job_needs = job.get("needs", [])
+            job_needs = [job_needs] if isinstance(job_needs, str) else job_needs
+            if "change-scope" not in job_needs or job.get("if") != full_condition:
+                errors.append(f"{filename} {name} must require full trusted scope")
+    if len(set(bootstrap_commands)) != 1:
+        errors.append("all CI workflows must use the identical trusted-base bootstrap")
+    quality_steps = jobs.get("quality", {}).get("steps", [])
+    for gate, condition in (
+        ("ci-quality", full_condition),
+        ("ci-docs", "${{ needs.change-scope.outputs.scope == 'docs' && needs.change-scope.outputs.docs_validated == 'true' }}"),
+    ):
+        step = next((step for step in quality_steps if step.get("run") == f"python tools/rust_quality_gate.py {gate}"), {})
+        if step.get("if") != condition or step.get("continue-on-error"):
+            errors.append(f"quality must retain its strict {gate} validation path")
     return errors
 
 
@@ -856,6 +907,7 @@ def check_workflow_job_timeouts(
     expected = {
         "ci.yml": {
             "single-active-pr": 5,
+            "change-scope": 5,
             "workflow-lint": 10,
             "preflight": 30,
             "build-test": 45,
@@ -866,11 +918,11 @@ def check_workflow_job_timeouts(
             "required-ci": 5,
         },
         "optional-platforms.yml": {
-            "single-active-pr": 5, "workflow-lint": 10,
+            "single-active-pr": 5, "workflow-lint": 10, "change-scope": 5,
             "build-macos": "${{ matrix.runner == 'macos-15-intel' && 120 || 45 }}",
             "build-android": 60, "optional-platform-ci": 5,
         },
-        "codeql.yml": {"analyze": 30, "required-codeql": 5},
+        "codeql.yml": {"change-scope": 5, "analyze": 30, "required-codeql": 5},
         "fuzz.yml": {"parser-fuzz": 30},
         "nightly.yml": {"prepare": 10, "verify-source": 10},
         "release.yml": {

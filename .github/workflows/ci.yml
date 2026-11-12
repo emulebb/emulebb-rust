@@ -26,6 +26,88 @@ env:
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
 jobs:
+  change-scope:
+    name: Trusted change scope + documentation validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      scope: ${{ steps.classify.outputs.scope }}
+      docs_validated: ${{ steps.classify.outputs.docs_validated }}
+      tested_sha: ${{ steps.classify.outputs.tested_sha }}
+      classifier_blob: ${{ steps.classify.outputs.classifier_blob }}
+    steps:
+      - name: Checkout immutable tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Classify with the immutable trusted base
+        id: classify
+        shell: bash
+        run: |
+          python -I -B - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          repo = Path(os.environ["GITHUB_WORKSPACE"])
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          name = os.environ["GITHUB_EVENT_NAME"]
+          base = ""
+          if name == "push":
+              base = event.get("before", "")
+          elif name == "pull_request":
+              base = event.get("pull_request", {}).get("base", {}).get("sha", "")
+          control = Path(os.environ["RUNNER_TEMP"]) / "emulebb-ci-scope"
+          control.mkdir(parents=True, exist_ok=True)
+          receipt = control / "classification.json"
+          blob = None
+          if name in {"push", "pull_request"} and isinstance(base, str) and re.fullmatch(r"[0-9a-f]{40}", base) and set(base) != {"0"}:
+              result = subprocess.run(["git", "-C", str(repo), "ls-tree", base, "--", "tools/ci_change_scope.py"], capture_output=True, timeout=30)
+              match = re.fullmatch(rb"100644 blob ([0-9a-f]{40})\ttools/ci_change_scope.py\n", result.stdout) if result.returncode == 0 else None
+              if match:
+                  blob = match.group(1).decode("ascii")
+          if blob is None:
+              # WHY: first deployment and unknown events require the complete matrix.
+              # Never fall back to executing the classifier from the proposed head.
+              value = {"schema": "emulebb.ci-change-scope/1", "repository": os.environ["GITHUB_REPOSITORY"],
+                       "event": name, "baseSha": base, "testedSha": os.environ["GITHUB_SHA"],
+                       "headSha": event.get("pull_request", {}).get("head", {}).get("sha") if name == "pull_request" else os.environ["GITHUB_SHA"],
+                       "classifierBlob": None, "scope": "full", "docsValidated": False,
+                       "reason": "trusted-base-unavailable-or-forced-full-event", "changes": []}
+              receipt.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+              with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+                  output.write("scope=full\ndocs_validated=false\nclassifier_blob=\n")
+                  output.write("tested_sha=" + os.environ["GITHUB_SHA"] + "\n")
+          else:
+              source = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", blob], check=True,
+                                      capture_output=True, timeout=30).stdout
+              trusted = control / "trusted-classifier.py"
+              trusted.write_bytes(source)
+              subprocess.run([sys.executable, "-I", "-B", str(trusted), "--repo", str(repo),
+                              "--event-path", os.environ["GITHUB_EVENT_PATH"], "--event-name", name,
+                              "--repository", os.environ["GITHUB_REPOSITORY"], "--tested-sha", os.environ["GITHUB_SHA"],
+                              "--base-sha", base, "--github-output", os.environ["GITHUB_OUTPUT"],
+                              "--receipt", str(receipt)], check=True, timeout=120)
+          PY
+      - name: Retain source-bound scope receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: change-scope-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/emulebb-ci-scope/classification.json
+          if-no-files-found: error
+          retention-days: 14
+
   single-active-pr:
     name: Single active PR
     runs-on: ubuntu-24.04
@@ -132,7 +214,8 @@ jobs:
 
   preflight:
     name: Clippy + WebUI typecheck preflight
-    needs: [single-active-pr, workflow-lint]
+    needs: [single-active-pr, workflow-lint, change-scope]
+    if: ${{ needs.change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -208,8 +291,8 @@ jobs:
 
   build-linux:
     name: build+test (ubuntu-24.04)
-    needs: [single-active-pr, workflow-lint, preflight]
-    if: ${{ needs.preflight.result == 'success' }}
+    needs: [single-active-pr, workflow-lint, preflight, change-scope]
+    if: ${{ needs.preflight.result == 'success' && needs.change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -295,8 +378,8 @@ jobs:
 
   build-test:
     name: build+test (${{ matrix.runner }})
-    needs: [single-active-pr, workflow-lint, preflight]
-    if: ${{ needs.preflight.result == 'success' }}
+    needs: [single-active-pr, workflow-lint, preflight, change-scope]
+    if: ${{ needs.preflight.result == 'success' && needs.change-scope.outputs.scope == 'full' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -386,8 +469,8 @@ jobs:
 
   build-musl:
     name: build+test (musl-${{ matrix.architecture }})
-    needs: [single-active-pr, workflow-lint, preflight]
-    if: ${{ needs.preflight.result == 'success' }}
+    needs: [single-active-pr, workflow-lint, preflight, change-scope]
+    if: ${{ needs.preflight.result == 'success' && needs.change-scope.outputs.scope == 'full' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -576,7 +659,7 @@ jobs:
 
   quality:
     name: policy + format + WebUI
-    needs: [single-active-pr, workflow-lint]
+    needs: [single-active-pr, workflow-lint, change-scope]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -629,12 +712,22 @@ jobs:
         run: python -m pip install -r tools/requirements-ci.txt
 
       - name: Rust quality gate
+        if: ${{ needs.change-scope.outputs.scope == 'full' }}
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
           PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
         run: python tools/rust_quality_gate.py ci-quality
+
+      - name: Lightweight documentation policy gate
+        if: ${{ needs.change-scope.outputs.scope == 'docs' && needs.change-scope.outputs.docs_validated == 'true' }}
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+          MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+          PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+        run: python tools/rust_quality_gate.py ci-docs
 
       - name: Retain CI diagnostics and build inputs
         if: always()
@@ -698,13 +791,19 @@ jobs:
   required-ci:
     name: Required CI
     if: ${{ always() }}
-    needs: [single-active-pr, workflow-lint, preflight, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]
+    needs: [change-scope, single-active-pr, workflow-lint, preflight, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every CI job
         shell: bash
         env:
+          SCOPE_RESULT: ${{ needs.change-scope.result }}
+          SCOPE: ${{ needs.change-scope.outputs.scope }}
+          DOCS_VALIDATED: ${{ needs.change-scope.outputs.docs_validated }}
+          CLASSIFIED_TESTED_SHA: ${{ needs.change-scope.outputs.tested_sha }}
+          CLASSIFIER_BLOB: ${{ needs.change-scope.outputs.classifier_blob }}
+          EXPECTED_TESTED_SHA: ${{ github.sha }}
           SINGLE_ACTIVE_PR_RESULT: ${{ needs.single-active-pr.result }}
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
@@ -716,15 +815,21 @@ jobs:
           SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
         run: |
           set -euo pipefail
-          for result in \
-            "$SINGLE_ACTIVE_PR_RESULT" \
-            "$WORKFLOW_LINT_RESULT" \
-            "$PREFLIGHT_RESULT" \
-            "$BUILD_LINUX_RESULT" \
-            "$BUILD_TEST_RESULT" \
-            "$BUILD_MUSL_RESULT" \
-            "$REST_OPENAPI_RESULT" \
-            "$QUALITY_RESULT" \
-            "$SUPPLY_CHAIN_RESULT"; do
+          test "$SCOPE_RESULT" = success
+          test -n "$EXPECTED_TESTED_SHA"
+          test "$CLASSIFIED_TESTED_SHA" = "$EXPECTED_TESTED_SHA"
+          case "$SCOPE" in
+            full) test "$DOCS_VALIDATED" = false; expected=success ;;
+            docs)
+              test "$DOCS_VALIDATED" = true
+              [[ "$CLASSIFIER_BLOB" =~ ^[0-9a-f]{40}$ ]]
+              expected=skipped
+              ;;
+            *) exit 1 ;;
+          esac
+          for result in "$SINGLE_ACTIVE_PR_RESULT" "$WORKFLOW_LINT_RESULT" "$QUALITY_RESULT" "$SUPPLY_CHAIN_RESULT"; do
             test "$result" = success
+          done
+          for result in "$PREFLIGHT_RESULT" "$BUILD_LINUX_RESULT" "$BUILD_TEST_RESULT" "$BUILD_MUSL_RESULT" "$REST_OPENAPI_RESULT"; do
+            test "$result" = "$expected"
           done

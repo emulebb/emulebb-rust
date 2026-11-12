@@ -11,6 +11,10 @@ from unittest import mock
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+BASH = shutil.which("bash") if os.name != "nt" else None
+if os.name == "nt" and shutil.which("git"):
+    candidate = Path(shutil.which("git")).parents[1] / "bin/bash.exe"
+    BASH = str(candidate) if candidate.is_file() else None
 SPEC = importlib.util.spec_from_file_location("platform_release_control", ROOT / "tools/release_publish.py")
 PUBLISH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PUBLISH)
@@ -77,7 +81,7 @@ class TestPlatformGraph(unittest.TestCase):
         self.assertEqual(main["permissions"], optional["permissions"])
         self.assertEqual(main["env"], optional["env"])
         self.assertEqual(optional["jobs"]["optional-platform-ci"]["needs"],
-                         ["single-active-pr", "workflow-lint", "build-macos", "build-android"])
+                         ["change-scope", "single-active-pr", "workflow-lint", "build-macos", "build-android"])
         self.assertFalse(any("optional" in name or "android" in name or "macos" in name
                              for name in main["jobs"]["required-ci"]["needs"]))
 
@@ -90,21 +94,43 @@ class TestPlatformGraph(unittest.TestCase):
                     PUBLISH.main([])
                 owner.assert_not_called()
 
-    @unittest.skipIf(os.name == "nt" or not shutil.which("bash"), "Aggregate scripts execute on Ubuntu; source/profile tests are portable")
+    @unittest.skipUnless(BASH, "Aggregate scripts require Bash")
     def test_actual_aggregate_shell_fails_for_each_failed_cancelled_or_skipped_dependency(self):
-        for workflow, name in (("ci.yml", "required-ci"), ("optional-platforms.yml", "optional-platform-ci")):
+        scope_keys = {"SCOPE_RESULT", "SCOPE", "DOCS_VALIDATED", "CLASSIFIED_TESTED_SHA", "CLASSIFIER_BLOB", "EXPECTED_TESTED_SHA"}
+        heavy_keys = {"PREFLIGHT_RESULT", "BUILD_LINUX_RESULT", "BUILD_TEST_RESULT", "BUILD_MUSL_RESULT", "REST_OPENAPI_RESULT",
+                      "MACOS_RESULT", "ANDROID_RESULT", "ANALYZE_RESULT"}
+        for workflow, name in (("ci.yml", "required-ci"), ("optional-platforms.yml", "optional-platform-ci"),
+                               ("codeql.yml", "required-codeql")):
             step = jobs(workflow)[name]["steps"][0]
-            environment = {**os.environ, **dict.fromkeys(step["env"], "success"), "GITHUB_STEP_SUMMARY": "/dev/null"}
+            environment = {**os.environ, **dict.fromkeys(step["env"], "success"), "GITHUB_STEP_SUMMARY": "/dev/null",
+                           "SCOPE": "full", "DOCS_VALIDATED": "false", "CLASSIFIED_TESTED_SHA": "a" * 40,
+                           "EXPECTED_TESTED_SHA": "a" * 40, "CLASSIFIER_BLOB": "b" * 40}
             def execute():
-                return subprocess.run(["bash", "-c", step["run"]], env=environment,
+                return subprocess.run([BASH, "-c", step["run"]], env=environment,
                                       capture_output=True, text=True, timeout=5).returncode
-            self.assertEqual(execute(), 0)
-            for key in step["env"]:
-                for failed in ("failure", "cancelled", "skipped"):
-                    with self.subTest(workflow=workflow, dependency=key, state=failed):
-                        environment[key] = failed
-                        self.assertNotEqual(execute(), 0)
-                environment[key] = "success"
+            for scope in ("full", "docs"):
+                environment["SCOPE"] = scope
+                environment["DOCS_VALIDATED"] = "true" if scope == "docs" else "false"
+                for key in heavy_keys & set(step["env"]):
+                    environment[key] = "skipped" if scope == "docs" else "success"
+                self.assertEqual(execute(), 0, (workflow, scope))
+                for key in set(step["env"]) - (scope_keys - {"SCOPE_RESULT"}):
+                    original = environment[key]
+                    for failed in ({"success", "failure", "cancelled", "skipped", ""} - {original}):
+                        with self.subTest(workflow=workflow, scope=scope, dependency=key, state=failed):
+                            environment[key] = failed
+                            self.assertNotEqual(execute(), 0)
+                    environment[key] = original
+                for key, bad_values in {
+                    "SCOPE": ("", "unexpected"), "DOCS_VALIDATED": ("", "false" if scope == "docs" else "true"),
+                    "CLASSIFIED_TESTED_SHA": ("", "c" * 40), "EXPECTED_TESTED_SHA": ("",),
+                    **({"CLASSIFIER_BLOB": ("", "invalid")} if scope == "docs" else {}),
+                }.items():
+                    original = environment[key]
+                    for bad in bad_values:
+                        environment[key] = bad
+                        self.assertNotEqual(execute(), 0, (workflow, scope, key, bad))
+                    environment[key] = original
 
 
 if __name__ == "__main__":
