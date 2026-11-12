@@ -455,10 +455,7 @@ fn create_default_profile_bootstrap(
     file.sync_all()
         .with_context(|| format!("failed to sync {}", settings_path.display()))?;
     eprintln!("Created eMuleBB profile at {}", profile_dir.display());
-    eprintln!(
-        "WebUI: http://{listener}/  API key: {}",
-        bootstrap.rest.api_key
-    );
+    eprintln!("WebUI: http://{listener}/  API key: see emulebb-rust-settings.toml");
     Ok(())
 }
 
