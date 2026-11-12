@@ -154,15 +154,21 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn drive_absolute_becomes_verbatim() {
-        let out = long_path(Path::new("C:\\Users\\op\\shared\\file.bin"));
-        assert_eq!(out, PathBuf::from("\\\\?\\C:\\Users\\op\\shared\\file.bin"));
+        let out = long_path(Path::new("C:\\SampleData\\shared\\file.bin"));
+        assert_eq!(
+            out,
+            PathBuf::from("\\\\?\\C:\\SampleData\\shared\\file.bin")
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn forward_slashes_are_normalized_to_backslashes() {
         let out = long_path(Path::new("C:/SampleData/shared/file.bin"));
-        assert_eq!(out, PathBuf::from("\\\\?\\C:\\Users\\op\\shared\\file.bin"));
+        assert_eq!(
+            out,
+            PathBuf::from("\\\\?\\C:\\SampleData\\shared\\file.bin")
+        );
     }
 
     #[cfg(windows)]
