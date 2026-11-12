@@ -22,7 +22,8 @@ REPOSITORY = "example/project"
 
 class TestChangeScope(unittest.TestCase):
     def setUp(self):
-        output = Path(os.environ["EMULEBB_WORKSPACE_OUTPUT_ROOT"]) / "tmp"
+        output = Path(os.environ["EMULEBB_WORKSPACE_OUTPUT_ROOT"]) / "cache" / "tmp"
+        output.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix="ci-scope-test-", dir=output)
         self.addCleanup(self.temporary.cleanup)
         self.control = Path(self.temporary.name)
