@@ -75,11 +75,15 @@ class TestChangeScope(unittest.TestCase):
         self.assertEqual(result["classifierBlob"], self.git("rev-parse", self.base + ":tools/ci_change_scope.py"))
 
     def test_full_push_range_catches_earlier_code_before_last_docs_commit(self):
+        self.write("Cargo.toml", "[workspace]\n")
         self.write("src/example.rs", "fn example() {}\n")
         self.commit()
         self.write("README.md", "# Last commit is documentation\n")
         self.commit()
-        self.assertEqual(self.classify()["scope"], "full")
+        receipt = self.classify()
+        self.assertEqual(receipt["scope"], "full")
+        self.assertEqual([change["path"] for change in receipt["changes"]],
+                         ["Cargo.toml", "README.md", "src/example.rs"])
 
     def test_semantic_phase_gate_preserves_all_other_types_and_keys(self):
         self.assertTrue(SCOPE.phase_gate_only(self.policy, self.policy.replace("Client first", "Client then Indexer")))
