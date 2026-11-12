@@ -161,7 +161,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn forward_slashes_are_normalized_to_backslashes() {
-        let out = long_path(Path::new("C:/Users/op/shared/file.bin"));
+        let out = long_path(Path::new("C:/SampleData/shared/file.bin"));
         assert_eq!(out, PathBuf::from("\\\\?\\C:\\Users\\op\\shared\\file.bin"));
     }
 
@@ -298,8 +298,8 @@ mod tests {
     #[test]
     fn normal_display_strips_verbatim_drive_prefix() {
         assert_eq!(
-            normal_path_display(r"\\?\C:\Users\op\shared\file.bin"),
-            r"C:\Users\op\shared\file.bin"
+            normal_path_display(r"\\?\C:\SampleData\shared\file.bin"),
+            r"C:\SampleData\shared\file.bin"
         );
     }
 
@@ -314,8 +314,8 @@ mod tests {
     #[test]
     fn normal_display_keeps_normal_paths_unchanged() {
         assert_eq!(
-            normal_path_display(r"C:\Users\op\shared\file.bin"),
-            r"C:\Users\op\shared\file.bin"
+            normal_path_display(r"C:\SampleData\shared\file.bin"),
+            r"C:\SampleData\shared\file.bin"
         );
         assert_eq!(
             normal_path_display(r"\\server\share\dir\file.bin"),
