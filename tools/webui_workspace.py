@@ -31,10 +31,18 @@ class WebUiWorkspace:
     output_root: Path
 
 
+def npm_child_environment(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy child inputs without inheriting the outer npm exec command."""
+    # WHY: npm exec --call exports npm_config_call; npm rejects a nested exec
+    # with positional arguments while that outer command remains configured.
+    # Preserve operator/auth/cache inputs and never mutate the parent mapping.
+    return {name: value for name, value in env.items() if name.casefold() != "npm_config_call"}
+
+
 def prepare_webui_workspace(name: str, env: Mapping[str, str] | None = None) -> WebUiWorkspace:
     """Copy WebUI sources into a clean work area below the configured output root."""
 
-    process_env = dict(os.environ if env is None else env)
+    process_env = npm_child_environment(os.environ if env is None else env)
     workspace_root = require_path_env(process_env, "EMULEBB_WORKSPACE_ROOT")
     output_root = require_path_env(process_env, "EMULEBB_WORKSPACE_OUTPUT_ROOT")
     assert_contains_checkout(workspace_root)
