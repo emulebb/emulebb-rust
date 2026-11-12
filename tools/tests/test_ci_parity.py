@@ -61,6 +61,35 @@ class CiParityTests(unittest.TestCase):
                 if step.get("uses", "").startswith("actions/checkout@"):
                     self.assertIs(step.get("with", {}).get("persist-credentials"), False, name)
 
+    def test_preflight_reuses_pinned_native_quality_inputs_and_gates_fanout(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+        preflight = jobs["preflight"]
+        self.assertEqual(preflight["needs"], ["single-active-pr", "workflow-lint"])
+        self.assertEqual(preflight["runs-on"], "ubuntu-24.04")
+        self.assertEqual(preflight["timeout-minutes"], 30)
+        self.assertNotIn("if", preflight)
+        self.assertNotIn("EMULEBB_WORKSPACE_OUTPUT_ROOT", preflight["env"])
+        for step in preflight["steps"]:
+            if step.get("run", "").startswith("python tools/"):
+                self.assertEqual(step["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"], "${{ runner.temp }}/emulebb-rust-out")
+                self.assertEqual(step["env"]["CARGO_TARGET_DIR"], "${{ runner.temp }}/emulebb-rust-out/builds/rust/target")
+        for repository, variable in (("emulebb-miniupnp", "MINIUPNP"), ("emulebb-libpcpnatpmp", "PCPNATPMP")):
+            checkout = next(step for step in preflight["steps"]
+                            if step.get("with", {}).get("repository") == "emulebb/" + repository)
+            self.assertEqual(checkout["with"]["ref"], "${{ env." + variable + "_REF }}")
+            self.assertEqual(preflight["env"][variable + "_ROOT"], "${{ github.workspace }}/.ci/" + repository)
+        for prefix in ("dtolnay/rust-toolchain@", "actions/setup-python@", "actions/setup-node@"):
+            first = next(step for step in preflight["steps"] if step.get("uses", "").startswith(prefix))
+            existing = next(step for step in jobs["quality"]["steps"] if step.get("uses", "").startswith(prefix))
+            self.assertEqual(first["uses"], existing["uses"])
+            self.assertEqual(first["with"], existing["with"])
+        for name in ("build-linux", "build-test", "build-musl"):
+            self.assertIn("preflight", jobs[name]["needs"])
+            self.assertEqual(jobs[name]["if"], "${{ needs.preflight.result == 'success' }}")
+        self.assertIn("preflight", jobs["required-ci"]["needs"])
+        self.assertEqual(jobs["required-ci"]["steps"][0]["env"]["PREFLIGHT_RESULT"], "${{ needs.preflight.result }}")
+
     def test_branch_workflow_dispatches_the_shared_light_gate(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/branch-check.yml").read_text(encoding="utf-8"))["jobs"]
         self.assertTrue(any(step.get("run") == "python tools/rust_quality_gate.py branch-ci" for step in jobs["check"]["steps"]))

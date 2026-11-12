@@ -695,13 +695,14 @@ def check_required_ci_gates(
         ),
         "required-ci:": (ci, "CI aggregate job"),
         "name: Required CI": (ci, "stable CI check name"),
-        "needs: [single-active-pr, workflow-lint, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]": (
+        "needs: [single-active-pr, workflow-lint, preflight, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]": (
             ci,
             "complete CI aggregate dependency set",
         ),
         "if: ${{ always() }}": (ci, "failure-aware CI aggregate evaluation"),
         'test "$result" = success': (ci, "strict CI result verification"),
         '"$BUILD_LINUX_RESULT"': (ci, "Linux build result verification"),
+        '"$PREFLIGHT_RESULT"': (ci, "preflight result verification"),
         '"$BUILD_MUSL_RESULT"': (ci, "musl build result verification"),
         "name: Optional Platform CI": (optional, "independent optional platform aggregate"),
         "needs: [single-active-pr, workflow-lint, build-macos, build-android]": (optional, "complete optional platform dependency set"),
@@ -721,15 +722,33 @@ def check_required_ci_gates(
         if fragment not in source
     ]
     jobs = (yaml.safe_load(ci) or {}).get("jobs", {})
-    for job in ("workflow-lint", "build-linux", "build-test", "build-musl", "quality", "supply-chain"):
+    for job in ("workflow-lint", "preflight", "build-linux", "build-test", "build-musl", "quality", "supply-chain"):
         needs = jobs.get(job, {}).get("needs", [])
         needs = [needs] if isinstance(needs, str) else needs
         if "single-active-pr" not in needs:
             errors.append(
                 f"required branch gate is missing {job} fail-fast PR policy dependency"
             )
-        elif job in {"build-linux", "build-test", "build-musl", "quality"} and "workflow-lint" not in needs:
+        elif job in {"preflight", "build-linux", "build-test", "build-musl", "quality"} and "workflow-lint" not in needs:
             errors.append(f"{job} must wait for workflow-lint before expensive validation")
+        if job in {"build-linux", "build-test", "build-musl"}:
+            if "preflight" not in needs or jobs[job].get("if") != "${{ needs.preflight.result == 'success' }}":
+                errors.append(f"{job} must require explicit successful preflight before platform fanout")
+    preflight = jobs.get("preflight", {})
+    steps = preflight.get("steps", [])
+    if preflight.get("continue-on-error") or any(step.get("continue-on-error") for step in steps):
+        errors.append("preflight must not waive failed checks")
+    source_check = "python tools/ci_environment.py --scope quality --require-native-inputs"
+    commands = [step.get("run") for step in steps if step.get("if") is None]
+    checks = (source_check, "python tools/test_webui.py --typecheck-only",
+              "python tools/rust_quality_gate.py clippy", source_check)
+    selected = [command for command in commands if command in checks]
+    if selected != list(checks):
+        errors.append("preflight must retain unconditional source fences, locked WebUI typecheck and workspace Clippy")
+    aggregate_steps = jobs.get("required-ci", {}).get("steps", [])
+    aggregate = aggregate_steps[0] if aggregate_steps else {}
+    if aggregate.get("env", {}).get("PREFLIGHT_RESULT") != "${{ needs.preflight.result }}":
+        errors.append("Required CI must verify the actual preflight result")
     optional_jobs = (yaml.safe_load(optional) or {}).get("jobs", {})
     if 'test "$result" = success' not in optional:
         errors.append("optional platform aggregate must fail on unsuccessful outcomes")
@@ -838,6 +857,7 @@ def check_workflow_job_timeouts(
         "ci.yml": {
             "single-active-pr": 5,
             "workflow-lint": 10,
+            "preflight": 30,
             "build-test": 45,
             "build-musl": 45,
             "rest-openapi": 15,

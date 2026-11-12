@@ -309,7 +309,7 @@ class TestRequiredCiGates(unittest.TestCase):
     def test_rejects_incomplete_aggregate_checks(self) -> None:
         errors = CHECKER.check_required_ci_gates("jobs: {}\n", "jobs: {}\n")
 
-        self.assertEqual(len(errors), 22)
+        self.assertEqual(len(errors), 29)
         self.assertTrue(any("single-active-PR job" in error for error in errors))
         self.assertTrue(any("workflow-lint fail-fast" in error for error in errors))
         self.assertTrue(any("complete CI aggregate dependency" in error for error in errors))
@@ -319,6 +319,30 @@ class TestRequiredCiGates(unittest.TestCase):
         ci = (CHECKER.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         errors = CHECKER.check_required_ci_gates(ci.replace('"$BUILD_LINUX_RESULT"', '"success"'))
         self.assertTrue(any("Linux build result verification" in error for error in errors))
+
+    def test_preflight_cannot_be_skipped_waived_or_bypassed_by_fanout(self) -> None:
+        import yaml
+        path = CHECKER.ROOT / ".github/workflows/ci.yml"
+        for fault in ("missing-needs", "always-fanout", "waived-check", "conditional-check", "missing-aggregate"):
+            with self.subTest(fault=fault):
+                ci = yaml.safe_load(path.read_text(encoding="utf-8"))
+                jobs = ci["jobs"]
+                if fault == "missing-needs":
+                    jobs["build-test"]["needs"].remove("preflight")
+                    expected = "explicit successful preflight"
+                elif fault == "always-fanout":
+                    jobs["build-musl"]["if"] = "${{ always() }}"
+                    expected = "explicit successful preflight"
+                elif fault in {"waived-check", "conditional-check"}:
+                    clippy = next(step for step in jobs["preflight"]["steps"]
+                                  if step.get("run") == "python tools/rust_quality_gate.py clippy")
+                    clippy["continue-on-error" if fault == "waived-check" else "if"] = True
+                    expected = "must not waive" if fault == "waived-check" else "unconditional source fences"
+                else:
+                    jobs["required-ci"]["steps"][0]["env"]["PREFLIGHT_RESULT"] = "success"
+                    expected = "actual preflight result"
+                errors = CHECKER.check_required_ci_gates(yaml.safe_dump(ci))
+                self.assertTrue(any(expected in error for error in errors), errors)
 
     def test_android_failure_cannot_be_omitted_from_optional_outcomes(self) -> None:
         optional = (CHECKER.ROOT / ".github/workflows/optional-platforms.yml").read_text(encoding="utf-8")
@@ -378,7 +402,7 @@ class TestWorkflowJobTimeouts(unittest.TestCase):
 
         errors = CHECKER.check_workflow_job_timeouts(incomplete)
 
-        self.assertEqual(len(errors), 34)
+        self.assertEqual(len(errors), 35)
         self.assertTrue(any("ci.yml job build-test" in error for error in errors))
         self.assertTrue(any("release.yml job publish-native" in error for error in errors))
 
