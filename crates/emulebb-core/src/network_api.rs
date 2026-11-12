@@ -123,10 +123,10 @@ async fn run_ed2k_client_state_prune_loop_with_clock(
 impl EmulebbCore {
     pub async fn import_kad_nodes_url(&self, url: &str) -> Result<bool> {
         let url = validate_url_import(url)?;
-        match fetch_url_bytes(&url).await {
+        match fetch_url_bytes(&url, crate::NODES_DAT_MAX_BYTES).await {
             Ok(bytes) => Ok(self.import_kad_nodes_bytes(&bytes).await.unwrap_or(0) > 0),
             Err(error) => {
-                tracing::warn!("nodes.dat import fetch failed url={url}: {error:#}");
+                tracing::warn!("nodes.dat import fetch failed: {error:#}");
                 Ok(false)
             }
         }
@@ -163,10 +163,10 @@ impl EmulebbCore {
 
     pub async fn import_server_met_url(&self, url: &str) -> Result<bool> {
         let url = validate_url_import(url)?;
-        match fetch_url_bytes(&url).await {
+        match fetch_url_bytes(&url, crate::SERVER_MET_MAX_BYTES).await {
             Ok(bytes) => Ok(self.import_server_met_bytes(&bytes).await.unwrap_or(0) > 0),
             Err(error) => {
-                tracing::warn!("server.met import fetch failed url={url}: {error:#}");
+                tracing::warn!("server.met import fetch failed: {error:#}");
                 Ok(false)
             }
         }

@@ -64,19 +64,27 @@ pub(crate) struct ReaskReengageContext {
 
 /// Fetches a URL body for server.met / nodes.dat import. A browser User-Agent
 /// is required: public eMule list mirrors reject or redirect the default agent.
-pub(crate) async fn fetch_url_bytes(url: &str) -> Result<Vec<u8>> {
+pub(crate) async fn fetch_url_bytes(url: &str, max_bytes: usize) -> Result<Vec<u8>> {
     let client = url_import_client_builder()?.build()?;
-    let response = client.get(url).send().await?.error_for_status()?;
-    Ok(response.bytes().await?.to_vec())
+    crate::fetch_discovery_bytes(
+        &client,
+        url,
+        max_bytes,
+        Duration::from_secs(30),
+        crate::DiscoveryUrlPolicy::OperatorImport,
+    )
+    .await
 }
 
 fn url_import_client_builder() -> Result<reqwest::ClientBuilder> {
-    Ok(crate::http_client_builder()?
-        .user_agent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+    Ok(
+        crate::discovery_client_builder(crate::DiscoveryUrlPolicy::OperatorImport)?
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
              (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        )
-        .timeout(std::time::Duration::from_secs(30)))
+            )
+            .timeout(std::time::Duration::from_secs(30)),
+    )
 }
 
 #[cfg(test)]

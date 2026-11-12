@@ -5,12 +5,12 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
+use emulebb_core::{DiscoveryUrlPolicy, NODES_DAT_MAX_BYTES, SERVER_MET_MAX_BYTES};
 use emulebb_ed2k::ed2k_server::parse_server_met;
 use emulebb_kad_dht::bootstrap::parse_nodes_dat;
 use emulebb_metadata::{MetadataServer, MetadataStore};
-use futures_util::StreamExt;
-use reqwest::{Client, redirect::Policy};
+use reqwest::Client;
 use tracing::{info, warn};
 
 pub(crate) const TRUSTED_SERVER_MET_URLS: &[&str] = &[
@@ -20,8 +20,6 @@ pub(crate) const TRUSTED_SERVER_MET_URLS: &[&str] = &[
 pub(crate) const TRUSTED_NODES_DAT_URL: &str = "https://upd.emule-security.org/nodes.dat";
 pub(crate) const NODES_DAT_FILE: &str = "nodes.dat";
 
-const SERVER_MET_MAX_BYTES: usize = 4 * 1024 * 1024;
-const NODES_DAT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DISCOVERY_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Seeds discovery data only where the profile has no usable data already.
@@ -43,10 +41,11 @@ pub(crate) async fn seed_empty_discovery(
 }
 
 fn discovery_client_builder() -> Result<reqwest::ClientBuilder> {
-    Ok(emulebb_core::http_client_builder()?
-        .user_agent(concat!("eMuleBB-Rust/", env!("CARGO_PKG_VERSION")))
-        .redirect(Policy::limited(3))
-        .timeout(DISCOVERY_FETCH_TIMEOUT))
+    Ok(
+        emulebb_core::discovery_client_builder(DiscoveryUrlPolicy::TrustedBootstrap)?
+            .user_agent(concat!("eMuleBB-Rust/", env!("CARGO_PKG_VERSION")))
+            .timeout(DISCOVERY_FETCH_TIMEOUT),
+    )
 }
 
 async fn seed_empty_servers(metadata: &MetadataStore, client: &Client) -> Result<()> {
@@ -179,32 +178,14 @@ pub(crate) fn load_valid_nodes_dat(profile_dir: &Path) -> Result<Option<Vec<u8>>
 }
 
 async fn fetch_bounded(client: &Client, url: &str, max_bytes: usize) -> Result<Vec<u8>> {
-    ensure!(
-        url.starts_with("https://"),
-        "trusted discovery URL must use HTTPS"
-    );
-    let response = client.get(url).send().await?.error_for_status()?;
-    ensure!(
-        response.url().scheme() == "https",
-        "trusted discovery redirect left HTTPS"
-    );
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        bail!("response exceeds {max_bytes} bytes");
-    }
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        ensure!(
-            body.len().saturating_add(chunk.len()) <= max_bytes,
-            "response exceeds {max_bytes} bytes"
-        );
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    emulebb_core::fetch_discovery_bytes(
+        client,
+        url,
+        max_bytes,
+        DISCOVERY_FETCH_TIMEOUT,
+        DiscoveryUrlPolicy::TrustedBootstrap,
+    )
+    .await
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {

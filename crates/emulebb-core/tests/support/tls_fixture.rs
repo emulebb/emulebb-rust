@@ -26,6 +26,12 @@ pub enum Outcome {
 /// Serve one bounded loopback TLS connection; handshake rejection is expected
 /// for negative cases, so it ends the fixture without a server-side panic.
 pub async fn serve(certificate: &[u8]) -> (SocketAddr, JoinHandle<Outcome>) {
+    serve_response(certificate,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()).await
+}
+
+/// Serve a controlled response after the same verified TLS exchange.
+pub async fn serve_response(certificate: &[u8], response: Vec<u8>) -> (SocketAddr, JoinHandle<Outcome>) {
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
@@ -58,7 +64,7 @@ pub async fn serve(certificate: &[u8]) -> (SocketAddr, JoinHandle<Outcome>) {
             let mut request = [0; 4096];
             assert!(stream.read(&mut request).await.unwrap() > 0);
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .write_all(&response)
                 .await
                 .unwrap();
             stream.shutdown().await.unwrap();

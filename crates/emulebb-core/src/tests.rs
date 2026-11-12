@@ -4,6 +4,9 @@ use emulebb_kad_proto::{NodeId, Tag, TagValue};
 use md4::{Digest, Md4};
 
 use super::*;
+
+#[path = "../tests/support/discovery_fixture.rs"]
+pub(crate) mod discovery_fixture;
 use crate::source_publish::emule_high_id_source_type;
 
 async fn configure_test_shared_root(core: &EmulebbCore, file: &Path) {
