@@ -830,6 +830,7 @@ dependencies = [
  "emulebb-index",
  "futures-util",
  "http-body-util",
+ "libc",
  "percent-encoding",
  "rusqlite",
  "serde",
@@ -838,6 +839,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http 0.7.1",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

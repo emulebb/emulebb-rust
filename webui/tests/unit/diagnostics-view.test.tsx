@@ -11,6 +11,39 @@ afterEach(() => {
 });
 
 describe("DiagnosticsView", () => {
+  it.each([
+    { memory: 67_108_864, cpu: 125.5, interval: 2_000, memoryText: "64 MiB", cpuText: "125.5%" },
+    { memory: 0, cpu: 0, interval: 1_000, memoryText: "0 B", cpuText: "0.0%" },
+    { memory: null, cpu: null, interval: null, memoryText: "n/a", cpuText: "n/a" }
+  ])("shows process memory and CPU without inventing unavailable values ($cpuText)", ({ memory, cpu, interval, memoryText, cpuText }) => {
+    render(
+      <DiagnosticsView
+        app={{}}
+        capabilities={{}}
+        runtimeDiagnostics={{ processResources: {
+          sampledAtMs: 1_000,
+          residentMemoryBytes: memory,
+          cpuUsagePercent: cpu,
+          cpuSampleIntervalMs: interval
+        } }}
+        eventStreamStatus={{
+          mode: "polling", enabled: true, connected: false, reconnectAttempts: 0,
+          pollIntervalMs: 1_000, retryIntervalMs: 1_000
+        }}
+        client={new RestClient()}
+        run={async (operation) => { await operation(); }}
+      />
+    );
+    expect(screen.getByText("Resident memory").parentElement).toHaveTextContent(memoryText);
+    expect(screen.getByText("CPU usage").parentElement).toHaveTextContent(cpuText);
+    expect(screen.getByText(/100% means one fully occupied core/)).toBeInTheDocument();
+    if (interval === null) {
+      expect(screen.getByText(/CPU usage needs two samples/)).toBeInTheDocument();
+    } else {
+      expect(screen.getByText(new RegExp(`CPU average over ${(interval / 1_000).toFixed(1)} s`))).toBeInTheDocument();
+    }
+  });
+
   it("downloads caller-owned inline diagnostic bundles", async () => {
     const bundle = {
       schema: "emulebb.diagnostic-bundle.v5",
@@ -48,6 +81,8 @@ describe("DiagnosticsView", () => {
       />
     );
 
+    expect(screen.getByText("CPU usage").parentElement).toHaveTextContent("n/a");
+    expect(screen.getByText("Resident memory").parentElement).toHaveTextContent("n/a");
     fireEvent.click(screen.getByRole("button", { name: "Capture bundle" }));
 
     await waitFor(() => expect(post).toHaveBeenCalledOnce());

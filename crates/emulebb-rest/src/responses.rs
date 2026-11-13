@@ -121,7 +121,8 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
         shared_hashing_count,
         shared_directory_reload_progress.clone(),
         &upload_policy,
-    );
+    )
+    .await;
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
         "stats": stats_response(&status, &upload_policy, &throughput, shared_hashing_count),
@@ -161,9 +162,10 @@ pub(crate) async fn runtime_diagnostics_response(state: &RestState) -> Value {
         shared_directories.reload_progress,
         &upload_policy,
     )
+    .await
 }
 
-fn runtime_diagnostics_response_with(
+async fn runtime_diagnostics_response_with(
     state: &RestState,
     shared_file_count: usize,
     download_file_count: usize,
@@ -171,8 +173,10 @@ fn runtime_diagnostics_response_with(
     shared_directory_reload_progress: impl serde::Serialize,
     upload_policy: &UploadPolicyMetrics,
 ) -> Value {
+    let process_resources = state.process_resources.snapshot().await;
     json!({
         "processId": std::process::id(),
+        "processResources": process_resources,
         "knownFileCount": shared_file_count,
         "sharedFileCount": shared_file_count,
         "sharedHashingCount": shared_hashing_count,
