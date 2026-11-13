@@ -12,7 +12,7 @@ internal object ServiceRecovery {
         val prefs = context.getSharedPreferences(DaemonService.PREFERENCES, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(DaemonService.DESIRED, false)) return false
         val started = prefs.getLong(LAST_EXPLICIT_START, 0)
-        val exits = context.getSystemService(ActivityManager::class.java)
+        val exits = requireNotNull(context.getSystemService(ActivityManager::class.java))
             .getHistoricalProcessExitReasons(context.packageName, 0, 0)
         val stoppedByUser = exits.any {
             it.processName == "${context.packageName}:daemon" &&
