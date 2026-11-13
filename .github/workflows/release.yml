@@ -751,6 +751,18 @@ jobs:
             ${{ steps.apk.outputs.sbom_path }}
           if-no-files-found: error
           retention-days: 30
+      # WHY: compilation can fail before payload publication; retain only the
+      # producer's nonsecret logs and summary, excluding caches and signing scratch.
+      - name: Retain Android application build failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-android-apk-failure-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/emulebb-rust-out/reports/android-apk/**/*.log
+            ${{ runner.temp }}/emulebb-rust-out/reports/android-apk/**/build.json
+          if-no-files-found: warn
+          retention-days: 30
 
   android-apk-qualification:
     name: Android application runtime (${{ matrix.image }})
