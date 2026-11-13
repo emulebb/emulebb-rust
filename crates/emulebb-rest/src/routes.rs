@@ -46,6 +46,7 @@ pub fn router_with_shutdown(
         core,
         api_key: Arc::new(config.api_key),
         shutdown,
+        process_resources: Arc::default(),
     };
     let health_router = Router::new()
         .route("/healthz", get(health))

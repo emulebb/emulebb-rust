@@ -4100,6 +4100,7 @@ export function DiagnosticsView(props: {
   const [shutdownConfirm, setShutdownConfirm] = useState("");
   const [bundleFileName, setBundleFileName] = useState("");
   const diagnostics = props.runtimeDiagnostics ?? {};
+  const resources = diagnostics.processResources;
   const eventStream = props.eventStreamStatus;
   const transferEvents = diagnostics.transferEvents ?? {};
   const reload = diagnostics.sharedDirectoryReloadProgress ?? {};
@@ -4164,6 +4165,21 @@ export function DiagnosticsView(props: {
             Shutdown
           </button>
         </div>
+      </section>
+      <section class="panel card">
+        <div class="section-title"><h2>Daemon resources</h2></div>
+        <div class="view-grid">
+          <Metric label="Resident memory" value={resources?.residentMemoryBytes == null ? "n/a" : formatBytes(resources.residentMemoryBytes)} />
+          <Metric label="CPU usage" value={resources?.cpuUsagePercent == null ? "n/a" : `${resources.cpuUsagePercent.toFixed(1)}%`} />
+        </div>
+        <p class="hint">Memory is the daemon's resident RAM. CPU: 100% means one fully occupied core; multiple cores can exceed 100%.</p>
+        <p class="hint">
+          {resources?.sampledAtMs == null
+            ? "Resource metrics are unavailable."
+            : `Sampled ${new Date(resources.sampledAtMs).toLocaleTimeString()}. ${resources.cpuSampleIntervalMs == null
+              ? "CPU usage needs two samples at least one second apart; unavailable counters show n/a."
+              : `CPU average over ${(resources.cpuSampleIntervalMs / 1000).toFixed(1)} s.`}`}
+        </p>
       </section>
       <section class="view-grid">
         <Metric label="Process" value={String(diagnostics.processId ?? "n/a")} />

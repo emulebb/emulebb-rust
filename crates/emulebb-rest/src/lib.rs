@@ -13,6 +13,7 @@ mod diagnostic_bundle;
 mod dto;
 mod envelope;
 mod handlers;
+mod process_resources;
 mod request_body_policy;
 mod responses;
 mod route_body_metadata;
@@ -47,6 +48,7 @@ pub struct RestState {
     core: Arc<EmulebbCore>,
     api_key: Arc<String>,
     shutdown: Option<watch::Sender<bool>>,
+    process_resources: Arc<process_resources::ProcessResourceMonitor>,
 }
 #[cfg(all(test, feature = "packet-diagnostics"))]
 #[path = "tests/protocol_fixtures.rs"]

@@ -784,6 +784,42 @@ async fn diagnostics_returns_runtime_diagnostics_directly() {
 }
 
 #[tokio::test]
+async fn process_resources_are_exposed_on_every_runtime_diagnostics_surface() {
+    let router = test_router();
+    for (path, pointer) in [
+        ("/api/v1/diagnostics", "/data/processResources"),
+        (
+            "/api/v1/status",
+            "/data/runtimeDiagnostics/processResources",
+        ),
+        (
+            "/api/v1/snapshot",
+            "/data/status/runtimeDiagnostics/processResources",
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let resources = value.pointer(pointer).unwrap();
+        assert!(resources["sampledAtMs"].as_i64().unwrap() > 0);
+        assert!(resources["residentMemoryBytes"].as_u64().unwrap() > 0);
+        assert!(resources.get("cpuUsagePercent").is_some());
+        assert!(resources.get("cpuSampleIntervalMs").is_some());
+    }
+}
+
+#[tokio::test]
 async fn diagnostics_reports_transfer_event_subscribers() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());

@@ -114,6 +114,7 @@ export type ServerStatus = {
 
 export type RuntimeDiagnostics = {
   processId?: number;
+  processResources?: ProcessResources;
   knownFileCount?: number;
   sharedFileCount?: number;
   sharedHashingCount?: number;
@@ -126,6 +127,13 @@ export type RuntimeDiagnostics = {
   waitingUploads?: number;
   geolocation?: Record<string, unknown> | null;
   [key: string]: unknown;
+};
+
+export type ProcessResources = {
+  sampledAtMs: number | null;
+  residentMemoryBytes: number | null;
+  cpuUsagePercent: number | null;
+  cpuSampleIntervalMs: number | null;
 };
 
 export type TransferEventRuntimeDiagnostics = {
