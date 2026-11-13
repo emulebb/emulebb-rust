@@ -104,15 +104,16 @@ fn sync_file_for_publish_blocking(file: &std::fs::File) -> io::Result<()> {
     file.sync_all()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn move_path_no_replace_blocking(
     source: &Path,
     destination: &Path,
 ) -> io::Result<NoReplaceMoveOutcome> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
 
-    // WHY: Rust's bundled musl can lack the renameat2 libc wrapper. Rustix
-    // supplies the safe Linux operation while preserving atomic no-clobber publication.
+    // WHY: Android is a separate Rust target but uses Linux's atomic no-replace
+    // rename too. Rustix also handles musl builds lacking the libc wrapper;
+    // never substitute a check-then-rename that could overwrite another file.
     let error = match renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE) {
         Ok(()) => return Ok(NoReplaceMoveOutcome::Moved),
         Err(error) => io::Error::from(error),
@@ -200,7 +201,12 @@ fn move_path_no_replace_blocking(
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    windows
+)))]
 fn move_path_no_replace_blocking(
     _source: &Path,
     _destination: &Path,
