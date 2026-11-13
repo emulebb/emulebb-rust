@@ -6,6 +6,8 @@ import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 
 plugins { id("com.android.application") }
 
+dependencies { implementation("androidx.core:core:1.19.1") }
+
 abstract class StageAssets : Sync() {
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
