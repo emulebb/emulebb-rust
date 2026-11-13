@@ -768,12 +768,6 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
         metadata_schema_version = SCHEMA_VERSION,
         "starting emulebb-rust"
     );
-    if !rest_bind_addr.ip().is_loopback() {
-        warn!(
-            %rest_bind_addr,
-            "REST is listening beyond loopback over plaintext HTTP; restrict network exposure or terminate TLS at a trusted reverse proxy"
-        );
-    }
     // Embedded callers can construct a profile without loading it from disk.
     // They acquire the same lease before any discovery, DB or runtime mutation.
     if profile.profile_lease.is_none() {

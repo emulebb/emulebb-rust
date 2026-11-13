@@ -258,7 +258,7 @@ fn retargeted_profile_alias_keeps_io_in_the_leased_directory() {
 }
 
 #[test]
-fn default_profile_bootstrap_is_loopback_authenticated_and_seeds_network_ports() {
+fn default_profile_bootstrap_listens_on_all_ipv4_interfaces_and_seeds_network_ports() {
     let temp = tempfile::tempdir().unwrap();
     let profile_dir = temp.path().join("profile");
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
@@ -269,7 +269,7 @@ fn default_profile_bootstrap_is_loopback_authenticated_and_seeds_network_ports()
     let bootstrap: DaemonBootstrapSettings = toml::from_str(&text).unwrap();
     assert_eq!(
         bootstrap.rest.bind_addr,
-        Some("127.0.0.1:20017".parse().unwrap())
+        Some("0.0.0.0:20017".parse().unwrap())
     );
     assert_eq!(
         bootstrap.rest.api_key,
@@ -359,7 +359,7 @@ fn packaged_bootstrap_loads_and_seeds_a_fresh_database() {
 
     assert_eq!(
         profile.rest_bind_addr().unwrap(),
-        "127.0.0.1:20017".parse().unwrap()
+        "0.0.0.0:20017".parse().unwrap()
     );
     assert_eq!(
         profile.rest.api_key,

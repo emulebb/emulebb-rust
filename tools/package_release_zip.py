@@ -203,7 +203,7 @@ def package_readme(version: str) -> str:
         "Run `emulebb-rust.exe`: its executable directory is the default profile, regardless of the shell working directory.\n"
         "Use `--profile <directory>` to override it; relative paths use the shell working directory and missing profiles are created.\n"
         "Open http://127.0.0.1:20017/ and enter change_me_123change_me_123change_me_123.\n"
-        "Replace the shared starter key before exposing the API outside this computer.\n"
+        "The REST/WebUI listener defaults to 0.0.0.0:20017.\n"
         "The daemon serves the embedded browser WebUI from the packaged `webui` directory beside the executable.\n\n"
     )
 

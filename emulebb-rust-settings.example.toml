@@ -1,8 +1,7 @@
 [rest]
-bind_addr = "127.0.0.1:20017"
+bind_addr = "0.0.0.0:20017"
 api_key = "change_me_123change_me_123change_me_123"
-# Ready for local use. Replace this shared starter key before exposing the API
-# outside this computer; use at least 32 printable ASCII characters, no spaces.
+# API keys require at least 32 printable ASCII characters, without spaces.
 # Keep this file private to the account running the daemon (mode 0600 on Unix).
 # Optional. When unset, the daemon serves `webui` beside its executable if
 # that directory exists. Relative paths are resolved from the profile directory.
