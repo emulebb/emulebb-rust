@@ -206,10 +206,9 @@ impl DaemonProfile {
             seed_default_profile_network_settings(&metadata)?;
             if let Some((incoming, shared)) = host_folders {
                 let incoming = emulebb_core::normal_path_display(incoming.canonicalize()?);
-                metadata.seed_host_storage_defaults(
-                    &serde_json::to_string(&incoming)?,
-                    &shared.canonicalize()?,
-                )?;
+                let shared =
+                    PathBuf::from(emulebb_core::normal_path_display(shared.canonicalize()?));
+                metadata.seed_host_storage_defaults(&serde_json::to_string(&incoming)?, &shared)?;
             }
         }
         let settings = load_settings(&metadata)?;
