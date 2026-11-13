@@ -112,12 +112,16 @@ class DaemonService : Service() {
             stopExplicitly()
             return START_NOT_STICKY
         }
-        if (intent?.action != START && !prefs.getBoolean(DESIRED, false)) {
+        if (intent?.action != START && !ServiceRecovery.mayResume(this)) {
             stopSelf()
             return START_NOT_STICKY
         }
         if (intent?.action == START) {
-            prefs.edit().putInt("restarts", 0).putLong("restart-window", SystemClock.elapsedRealtime()).commit()
+            if (!prefs.edit().putInt("restarts", 0).putLong("restart-window", SystemClock.elapsedRealtime())
+                .putLong(ServiceRecovery.LAST_EXPLICIT_START, System.currentTimeMillis()).commit()) {
+                fail("Cannot persist explicit service start")
+                return START_NOT_STICKY
+            }
         } else if (!admitRecovery()) {
             fail("Repeated service termination; open the app and press Start to retry")
             return START_NOT_STICKY

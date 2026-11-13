@@ -8,7 +8,7 @@ import android.content.Intent
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val prefs = context.getSharedPreferences(DaemonService.PREFERENCES, Context.MODE_PRIVATE)
-        val enabled = prefs.getBoolean(DaemonService.DESIRED, false)
+        val enabled = ServiceRecovery.mayResume(context)
         val allowed = when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED -> prefs.getBoolean(DaemonService.BOOT, false)
             Intent.ACTION_MY_PACKAGE_REPLACED -> true
