@@ -146,23 +146,24 @@ fn resident_bytes_from_statm(statm: &str, page_size: u64) -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 fn resident_memory_bytes() -> Option<u64> {
-    let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info>::uninit();
-    let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
-    // SAFETY: the flavor, output size and count describe mach_task_basic_info.
-    // The current task port is borrowed; the output is read only on success.
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_taskinfo>().try_into().ok()?;
+    // SAFETY: the flavor and writable buffer size describe proc_taskinfo for
+    // this process. The output is read only after a complete structure returns.
     let result = unsafe {
-        libc::task_info(
-            libc::mach_task_self(),
-            libc::MACH_TASK_BASIC_INFO,
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
             info.as_mut_ptr().cast(),
-            &mut count,
+            size,
         )
     };
-    if result != libc::KERN_SUCCESS || count != libc::MACH_TASK_BASIC_INFO_COUNT {
+    if result != size {
         return None;
     }
     // SAFETY: the successful call initialized the complete requested structure.
-    Some(unsafe { info.assume_init() }.resident_size)
+    Some(unsafe { info.assume_init() }.pti_resident_size)
 }
 
 #[cfg(windows)]
