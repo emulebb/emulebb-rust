@@ -838,6 +838,16 @@ jobs:
           path: ${{ steps.qualify.outputs.qualification_path }}
           if-no-files-found: error
           retention-days: 30
+      # WHY: public failure evidence can exist before qualification outputs;
+      # retain only the outer sanitized report, never private guest data or logs.
+      - name: Retain sanitized Android application runtime failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-android-apk-runtime-failure-${{ matrix.image }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/emulebb-rust-out/reports/android-emulator-boot/*/validation.json
+          if-no-files-found: warn
+          retention-days: 30
 
   image-candidate:
     name: Build multiarch ${{ matrix.variant }} image candidate
