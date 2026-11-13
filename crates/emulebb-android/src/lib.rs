@@ -64,6 +64,32 @@ fn host() -> &'static Mutex<Host> {
     HOST.get_or_init(Mutex::default)
 }
 
+struct ProcessLogging {
+    profile: PathBuf,
+    _guard: emulebb_daemon::logging::LoggingGuard,
+}
+
+fn ensure_process_logging(profile: &std::path::Path) -> Result<()> {
+    static LOGGING: OnceLock<Mutex<Option<ProcessLogging>>> = OnceLock::new();
+    let mut logging = LOGGING
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| anyhow::anyhow!("process logging state unavailable"))?;
+    let profile = profile.canonicalize()?;
+    if let Some(existing) = logging.as_ref() {
+        ensure!(
+            existing.profile == profile,
+            "one Android service process owns one logging profile"
+        );
+    } else {
+        *logging = Some(ProcessLogging {
+            _guard: emulebb_daemon::logging::init_process(&profile)?,
+            profile,
+        });
+    }
+    Ok(())
+}
+
 fn handle(request: Request) -> Result<Value> {
     match request {
         Request::PruneAssets {
@@ -135,6 +161,7 @@ fn handle(request: Request) -> Result<Value> {
                 let outcome = std::panic::catch_unwind(|| -> Result<()> {
                     if shutdown.subscribe().is_requested() { return Ok(()); }
                     let mut profile = DaemonProfile::load(Some(profile_dir))?;
+                    ensure_process_logging(profile.profile_io_dir())?;
                     profile.host_transfer_root = Some(transfer_root);
                     if profile.incoming_dir.is_none() { profile.incoming_dir = Some(incoming_dir); }
                     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

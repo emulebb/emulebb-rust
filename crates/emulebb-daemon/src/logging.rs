@@ -110,12 +110,17 @@ pub struct LoggingGuard {
     error_counter: Option<ErrorCounter>,
     monitor_shutdown: Option<watch::Sender<bool>>,
     monitor_task: Option<JoinHandle<()>>,
+    process_monitor: Option<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
     shutdown_reported: bool,
 }
 
 impl LoggingGuard {
     /// Stops drop monitoring, reports any loss, and flushes retained logs.
     pub async fn shutdown(mut self) {
+        if let Some((shutdown, task)) = self.process_monitor.take() {
+            let _ = shutdown.send(());
+            let _ = tokio::task::spawn_blocking(move || task.join()).await;
+        }
         if let Some(shutdown) = self.monitor_shutdown.take() {
             let _ = shutdown.send(true);
         }
@@ -138,6 +143,8 @@ impl LoggingGuard {
 
 impl Drop for LoggingGuard {
     fn drop(&mut self) {
+        // Dropping the sender wakes the optional process monitor immediately.
+        self.process_monitor.take();
         if let Some(task) = self.monitor_task.take() {
             task.abort();
         }
@@ -157,6 +164,16 @@ impl Drop for LoggingGuard {
 /// The profile must already be validated before this function is called. File
 /// setup failure is non-fatal: console and REST logging remain available.
 pub fn init(profile_dir: &Path) -> Result<LoggingGuard> {
+    init_inner(profile_dir, false)
+}
+
+/// Install the canonical subscriber for a host process spanning several Tokio
+/// runtimes. Retain its guard for that process's lifetime, not one daemon run.
+pub fn init_process(profile_dir: &Path) -> Result<LoggingGuard> {
+    init_inner(profile_dir, true)
+}
+
+fn init_inner(profile_dir: &Path, process_owned: bool) -> Result<LoggingGuard> {
     let (filter_spec, filter_warning) = read_filter_spec();
     let mut file_warning = None;
     let file_output = match create_file_output(profile_dir) {
@@ -213,7 +230,7 @@ pub fn init(profile_dir: &Path) -> Result<LoggingGuard> {
         );
     }
 
-    let (monitor_shutdown, monitor_task) = match error_counter.as_ref() {
+    let (monitor_shutdown, monitor_task) = match error_counter.as_ref().filter(|_| !process_owned) {
         Some(counter) => {
             let (shutdown_tx, shutdown_rx) = watch::channel(false);
             let task = tokio::spawn(monitor_dropped_lines(counter.clone(), shutdown_rx));
@@ -221,12 +238,37 @@ pub fn init(profile_dir: &Path) -> Result<LoggingGuard> {
         }
         None => (None, None),
     };
+    let process_monitor = error_counter
+        .as_ref()
+        .filter(|_| process_owned)
+        .and_then(|counter| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let counter = counter.clone();
+            match std::thread::Builder::new()
+                .name("emulebb-log-health".into())
+                .spawn(move || {
+                    let mut last_dropped = 0;
+                    while matches!(
+                        receiver.recv_timeout(DROP_MONITOR_INTERVAL),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        report_dropped_lines(&counter, &mut last_dropped);
+                    }
+                }) {
+                Ok(task) => Some((sender, task)),
+                Err(error) => {
+                    tracing::warn!(%error, "persistent log drop monitoring is unavailable");
+                    None
+                }
+            }
+        });
 
     Ok(LoggingGuard {
         worker_guard,
         error_counter,
         monitor_shutdown,
         monitor_task,
+        process_monitor,
         shutdown_reported: false,
     })
 }
@@ -294,17 +336,21 @@ async fn monitor_dropped_lines(counter: ErrorCounter, mut shutdown: watch::Recei
                 }
             }
             _ = interval.tick() => {
-                let dropped = counter.dropped_lines();
-                if dropped > last_dropped {
-                    tracing::warn!(
-                        dropped_file_log_lines = dropped,
-                        dropped_since_last_report = dropped - last_dropped,
-                        "persistent log writer is dropping events"
-                    );
-                    last_dropped = dropped;
-                }
+                report_dropped_lines(&counter, &mut last_dropped);
             }
         }
+    }
+}
+
+fn report_dropped_lines(counter: &ErrorCounter, last_dropped: &mut usize) {
+    let dropped = counter.dropped_lines();
+    if dropped > *last_dropped {
+        tracing::warn!(
+            dropped_file_log_lines = dropped,
+            dropped_since_last_report = dropped - *last_dropped,
+            "persistent log writer is dropping events"
+        );
+        *last_dropped = dropped;
     }
 }
 
