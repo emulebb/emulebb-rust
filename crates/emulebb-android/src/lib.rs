@@ -270,7 +270,7 @@ fn prune_assets(profile_dir: &std::path::Path, current_web_root: &std::path::Pat
         };
         versions.push((version, entry.path()));
     }
-    versions.sort_by(|left, right| right.0.cmp(&left.0));
+    versions.sort_by_key(|item| std::cmp::Reverse(item.0));
     let mut retained_previous = false;
     for (_, path) in versions {
         if path == current {
