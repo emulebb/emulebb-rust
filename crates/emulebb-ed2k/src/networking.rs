@@ -1,6 +1,8 @@
 //! Local network interface inventory and bind selection helpers.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(any(target_os = "android", test))]
+use std::net::{Ipv4Addr, SocketAddrV4};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
@@ -91,6 +93,7 @@ pub struct NetworkReport {
 /// Returns local network interfaces with address and common routing hints.
 pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
     let mut by_name = HashMap::<String, NetworkInterface>::new();
+    #[cfg(not(target_os = "android"))]
     let default_routes = platform_default_route_interfaces();
     for iface in get_if_addrs()? {
         let IfAddr::V4(ref v4) = iface.addr else {
@@ -115,7 +118,7 @@ pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
                 .index
                 .is_some_and(|index| default_routes.contains(&index));
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "android")))]
         {
             entry.has_default_route = default_routes.contains(&iface.name);
         }
@@ -127,6 +130,13 @@ pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
 
     let mut interfaces = by_name.into_values().collect::<Vec<_>>();
     interfaces.sort_by(|left, right| left.name.cmp(&right.name));
+    #[cfg(target_os = "android")]
+    {
+        let routes = android_route_hint_interfaces(&interfaces, android_route_source);
+        for interface in &mut interfaces {
+            interface.has_default_route = routes.contains(&interface.name);
+        }
+    }
     Ok(interfaces)
 }
 
@@ -329,7 +339,62 @@ fn parse_macos_default_route_interface(route: &str) -> HashSet<String> {
         .collect()
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "android")]
+fn android_route_source(destination: SocketAddrV4) -> std::io::Result<Ipv4Addr> {
+    // WHY: Android restricts route-table access. UDP connect selects the native
+    // per-UID kernel route without sending a datagram, DNS query or handshake.
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    socket.connect(destination)?;
+    if let std::net::IpAddr::V4(source) = socket.local_addr()?.ip() {
+        Ok(source)
+    } else {
+        Err(std::io::Error::other("route source is not IPv4"))
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_route_hint_interfaces(
+    interfaces: &[NetworkInterface],
+    mut lookup: impl FnMut(SocketAddrV4) -> std::io::Result<Ipv4Addr>,
+) -> HashSet<String> {
+    // These global references are never contacted. Agreement is a conservative
+    // route hint, not Internet reachability or VPN verification. Split routing,
+    // unavailable routes and ambiguous inventory must retain explicit binding.
+    let sources = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)]
+        .map(|reference| lookup(SocketAddrV4::new(reference, 9)));
+    let [Ok(source), Ok(other)] = sources else {
+        return HashSet::new();
+    };
+    if source != other
+        || source.is_unspecified()
+        || source.is_loopback()
+        || source.is_multicast()
+        || source.is_broadcast()
+    {
+        return HashSet::new();
+    }
+    let mut owners = interfaces.iter().filter(|interface| {
+        !interface.is_loopback
+            && interface.addresses.iter().any(|address| {
+                matches!(address.family, InterfaceAddressFamily::Ipv4)
+                    && address.address.parse::<Ipv4Addr>().ok() == Some(source)
+            })
+    });
+    let Some(owner) = owners.next() else {
+        return HashSet::new();
+    };
+    if owners.next().is_some() {
+        return HashSet::new();
+    }
+    [owner.name.clone()].into()
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "android"
+)))]
 fn platform_default_route_interfaces() -> HashSet<String> {
     HashSet::new()
 }
@@ -338,11 +403,13 @@ fn platform_default_route_interfaces() -> HashSet<String> {
 mod tests {
     use super::{
         InterfaceAddressFamily, InterfaceSelectionState, NetworkInterface, NetworkInterfaceAddress,
-        ResolvedInterfaceBindingReport, build_interface_binding_report,
-        parse_linux_default_route_interfaces, parse_macos_default_route_interface,
-        recommend_interface, require_bind_if_index, resolve_bind_if_index, resolve_bind_ip,
+        ResolvedInterfaceBindingReport, android_route_hint_interfaces,
+        build_interface_binding_report, parse_linux_default_route_interfaces,
+        parse_macos_default_route_interface, recommend_interface, require_bind_if_index,
+        resolve_bind_if_index, resolve_bind_ip,
     };
     use if_addrs::IfAddr;
+    use std::net::{Ipv4Addr, SocketAddrV4};
 
     fn iface(name: &str, vpn: bool, default_route: bool, ip: &str) -> NetworkInterface {
         NetworkInterface {
@@ -377,6 +444,130 @@ mod tests {
             parse_macos_default_route_interface(route),
             ["en0".to_string()].into()
         );
+    }
+
+    #[test]
+    fn android_route_hint_queries_only_two_fixed_reference_tuples() {
+        let source = Ipv4Addr::new(192, 0, 2, 15);
+        let interfaces = [
+            iface("vpn-looking", true, false, "10.10.10.2"),
+            iface("wlan0", false, false, "192.0.2.15"),
+        ];
+        let mut queried = Vec::new();
+        let routes = android_route_hint_interfaces(&interfaces, |destination| {
+            queried.push(destination);
+            Ok(source)
+        });
+        assert_eq!(routes, ["wlan0".to_string()].into());
+        assert_eq!(
+            queried,
+            [
+                SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 9),
+                SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 9),
+            ]
+        );
+        assert!(
+            interfaces
+                .iter()
+                .all(|interface| !interface.has_default_route)
+        );
+    }
+
+    #[test]
+    fn android_route_hint_accepts_private_kernel_selected_sources() {
+        let interfaces = [iface("tun0", true, false, "10.10.10.2")];
+        assert_eq!(
+            android_route_hint_interfaces(&interfaces, |_| Ok(Ipv4Addr::new(10, 10, 10, 2))),
+            ["tun0".to_string()].into()
+        );
+    }
+
+    #[test]
+    fn android_route_hint_requires_both_lookups_to_succeed() {
+        let interfaces = [iface("wlan0", false, false, "192.0.2.15")];
+        for failing_lookup in [0, 1] {
+            let mut calls = 0;
+            let routes = android_route_hint_interfaces(&interfaces, |_| {
+                let current = calls;
+                calls += 1;
+                if current == failing_lookup {
+                    Err(std::io::ErrorKind::NetworkUnreachable.into())
+                } else {
+                    Ok(Ipv4Addr::new(192, 0, 2, 15))
+                }
+            });
+            assert!(routes.is_empty());
+            assert_eq!(calls, 2);
+        }
+    }
+
+    #[test]
+    fn android_route_hint_rejects_different_per_destination_sources() {
+        let interfaces = [
+            iface("wlan0", false, false, "192.0.2.15"),
+            iface("tun0", true, false, "10.10.10.2"),
+        ];
+        assert!(
+            android_route_hint_interfaces(&interfaces, |destination| {
+                Ok(if *destination.ip() == Ipv4Addr::new(1, 1, 1, 1) {
+                    Ipv4Addr::new(192, 0, 2, 15)
+                } else {
+                    Ipv4Addr::new(10, 10, 10, 2)
+                })
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn android_route_hint_rejects_non_unicast_or_missing_inventory_sources() {
+        for source in [
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::BROADCAST,
+            Ipv4Addr::new(224, 0, 0, 1),
+        ] {
+            let interfaces = [iface("invalid", false, false, &source.to_string())];
+            assert!(android_route_hint_interfaces(&interfaces, |_| Ok(source)).is_empty());
+        }
+        let source = Ipv4Addr::new(192, 0, 2, 15);
+        assert!(android_route_hint_interfaces(&[], |_| Ok(source)).is_empty());
+        assert!(
+            android_route_hint_interfaces(&[iface("wlan0", false, false, "192.0.2.16")], |_| Ok(
+                source
+            ))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn android_route_hint_rejects_ambiguous_or_loopback_ownership() {
+        let source = Ipv4Addr::new(192, 0, 2, 15);
+        let interfaces = [
+            iface("wlan0", false, false, "192.0.2.15"),
+            iface("tun0", true, false, "192.0.2.15"),
+        ];
+        assert!(android_route_hint_interfaces(&interfaces, |_| Ok(source)).is_empty());
+        let mut loopback = iface("lo", false, false, "192.0.2.15");
+        loopback.is_loopback = true;
+        assert!(android_route_hint_interfaces(&[loopback], |_| Ok(source)).is_empty());
+    }
+
+    #[test]
+    fn android_route_hint_preserves_all_interface_addresses_for_bind_policy() {
+        let mut interface = iface("wlan0", false, false, "192.0.2.15");
+        interface.addresses.push(NetworkInterfaceAddress {
+            family: InterfaceAddressFamily::Ipv4,
+            address: "192.0.2.16".to_string(),
+        });
+        let before = interface.clone();
+        assert_eq!(
+            android_route_hint_interfaces(std::slice::from_ref(&interface), |_| {
+                Ok(Ipv4Addr::new(192, 0, 2, 15))
+            }),
+            ["wlan0".to_string()].into()
+        );
+        assert_eq!(interface, before);
     }
 
     #[test]
