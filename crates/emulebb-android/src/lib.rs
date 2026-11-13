@@ -27,6 +27,10 @@ enum Request {
         api_key: String,
         web_root_dir: PathBuf,
     },
+    PruneAssets {
+        profile_dir: PathBuf,
+        current_web_root: PathBuf,
+    },
     Start {
         profile_dir: PathBuf,
         transfer_root: PathBuf,
@@ -62,6 +66,15 @@ fn host() -> &'static Mutex<Host> {
 
 fn handle(request: Request) -> Result<Value> {
     match request {
+        Request::PruneAssets {
+            profile_dir,
+            current_web_root,
+        } => {
+            host_bootstrap::while_stopped(&profile_dir, || {
+                prune_assets(&profile_dir, &current_web_root)
+            })?;
+            Ok(Value::Null)
+        }
         Request::ReadSettings { profile_dir } => {
             ensure!(
                 profile_dir.is_absolute(),
@@ -185,6 +198,58 @@ fn handle(request: Request) -> Result<Value> {
     }
 }
 
+fn prune_assets(profile_dir: &std::path::Path, current_web_root: &std::path::Path) -> Result<()> {
+    let parent = profile_dir
+        .parent()
+        .context("profile has no parent")?
+        .canonicalize()?;
+    let current = current_web_root.canonicalize()?;
+    ensure!(
+        current.parent() == Some(parent.as_path()),
+        "WebUI assets must belong to the application directory"
+    );
+    ensure!(
+        current.join(".ready").is_file(),
+        "current WebUI assets are not ready"
+    );
+    let mut versions = Vec::new();
+    for entry in std::fs::read_dir(&parent)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(version) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("webui-"))
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        versions.push((version, entry.path()));
+    }
+    versions.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut retained_previous = false;
+    for (_, path) in versions {
+        if path == current {
+            continue;
+        }
+        if !retained_previous {
+            retained_previous = true;
+            continue;
+        }
+        // WHY: source assets are disposable, but metadata/payloads are not.
+        // Limit cleanup to real, directly owned version directories while the
+        // profile lease excludes every running daemon, including other processes.
+        ensure!(
+            path.canonicalize()?.parent() == Some(parent.as_path()),
+            "asset cleanup escaped application directory"
+        );
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
 const _: jni::NativeMethod = native_method! {
     java_type = "org.emulebb.android.NativeBridge",
     extern fn request(payload: JString) -> JString,
@@ -210,6 +275,32 @@ fn request<'local>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_cleanup_retains_current_previous_and_unrelated_data() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        for name in [
+            "profile",
+            "webui-1",
+            "webui-2",
+            "webui-3",
+            "webui-custom",
+            "payloads",
+        ] {
+            std::fs::create_dir(root.path().join(name)).unwrap();
+        }
+        std::fs::write(root.path().join("webui-3/.ready"), b"").unwrap();
+        handle(Request::PruneAssets {
+            profile_dir: profile,
+            current_web_root: root.path().join("webui-3"),
+        })
+        .unwrap();
+        assert!(!root.path().join("webui-1").exists());
+        for name in ["profile", "webui-2", "webui-3", "webui-custom", "payloads"] {
+            assert!(root.path().join(name).is_dir());
+        }
+    }
 
     #[test]
     fn private_host_protocol_rejects_unknown_fields_and_retired_commands() {

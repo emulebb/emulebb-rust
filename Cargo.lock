@@ -578,6 +578,7 @@ dependencies = [
  "jni",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

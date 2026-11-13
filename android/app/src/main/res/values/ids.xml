@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="service_status" type="id" />
+    <item name="bind_addr" type="id" />
+    <item name="api_key" type="id" />
+    <item name="start_service" type="id" />
+    <item name="stop_service" type="id" />
+    <item name="copy_api_key" type="id" />
+    <item name="open_webui" type="id" />
+    <item name="resume_on_boot" type="id" />
+</resources>
