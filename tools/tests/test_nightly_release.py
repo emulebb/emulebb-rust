@@ -241,7 +241,7 @@ class TestNightlyNotes(unittest.TestCase):
         self.assertIn("## Fixed", rendered)
         self.assertIn("## Changed", rendered)
         self.assertIn("## Engineering", rendered)
-        self.assertIn("Automated nightly beta from `main`", rendered)
+        self.assertIn("Automated nightly beta from the verified source commit", rendered)
         self.assertIn("not a formal beta release", rendered)
         self.assertIn("Metadata schema: `25` (changed from `24`", rendered)
         self.assertIn("Profile schema status: incompatible", rendered)

@@ -402,7 +402,7 @@ def render_notes(
     if channel == "nightly":
         if not parsed:
             raise ValueError(f"invalid nightly version: {version}")
-        introduction = "Automated nightly beta from `main`. It is unsigned, may be unstable, and is not a formal beta release."
+        introduction = "Automated nightly beta from the verified source commit. Native archives are unsigned; the Android APK is signed. This is not a formal beta release."
         baseline_label = "Previous successful nightly"
         build_label = "nightly beta"
     elif channel in {"beta", "candidate"} and PROMOTED_BETA_RE.fullmatch(version):

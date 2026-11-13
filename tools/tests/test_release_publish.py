@@ -479,8 +479,8 @@ class TestReleaseDownloadGuidance(unittest.TestCase):
         self.assertNotIn("b" * 64, rendered)
         self.assertIn(candidate, rendered)
         self.assertIn("/actions/runs/101/attempts/2", rendered)
-        self.assertIn("Device runtime, transfers and VPN behavior remain unqualified", rendered)
-        self.assertIn("APK packaging and signing remain deferred", rendered)
+        self.assertIn("compilation and ELF checks", rendered)
+        self.assertIn("APK runtime qualification is recorded separately", rendered)
         self.assertNotIn("android-x86_64", rendered)
         self.assertNotIn("Alpine", rendered)
 
@@ -808,11 +808,45 @@ class TestCandidateControl(unittest.TestCase):
                 if fault != "source":
                     source.assert_not_called()
 
+    def test_android_code_uses_utc_seconds_across_entrypoints_and_rejects_bounds(self):
+        from datetime import UTC, datetime, timedelta
+        epoch = datetime(2020, 1, 1, tzinfo=UTC)
+        self.assertEqual(PUBLISH.android_version_code(epoch + timedelta(seconds=216_000_001)), 216_000_001)
+        self.assertEqual(PUBLISH.android_version_code(epoch + timedelta(seconds=2_100_000_000)), 2_100_000_000)
+        for seconds in (0, -1, 2_100_000_001):
+            with self.subTest(seconds=seconds), self.assertRaises(RuntimeError):
+                PUBLISH.android_version_code(epoch + timedelta(seconds=seconds))
+
+    def test_apk_authorities_are_independent_of_native_sources_and_reader(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = PUBLISH.build_parser().parse_args([
+                "verify-public-candidate", *self.common(root), "--verified-candidate-sha256", "a" * 64,
+                "--apk-build-ref", "9" * 40, "--apk-harness-ref", "a" * 40,
+                "--apk-signer-sha256", "b" * 64, "--apk-version-code", "216000001",
+                "--apk-harness-repo", str(root / "apk-harness"),
+            ])
+            args.channel = "nightly"
+            owner = mock.Mock()
+            with mock.patch.object(PUBLISH, "checked_checkout", return_value=root / "apk-harness") as checked:
+                PUBLISH.candidate_context(args, owner)
+            checked.assert_called_once_with(root / "apk-harness", "a" * 40, label="APK Harness")
+            values = owner.CandidateContext.call_args.kwargs
+            self.assertEqual(values["source"]["emulebbBuild"], "2" * 40)
+            self.assertEqual(values["release_validator_build_sha"], "8" * 40)
+            owner.ApkSourceContext.assert_called_once_with("9" * 40, "a" * 40)
+            self.assertEqual(values["apk_version_code"], 216000001)
+            self.assertEqual(values["apk_signer_sha256"], "b" * 64)
+            args.apk_harness_ref = ""
+            with self.assertRaisesRegex(RuntimeError, "explicit source"):
+                PUBLISH.candidate_context(args, owner)
+
     def test_expected_identities_can_come_from_the_workflow_environment(self) -> None:
         environment = {
             "RELEASE_VERSION": "0.1.0-beta.2", "RELEASE_CHANNEL": "candidate",
             "EMULEBB_SOURCE_REVISION": "1" * 40, "EMULEBB_BUILD_REF": "2" * 40,
             "EMULEBB_BUILD_TESTS_REF": "3" * 40, "EMULEBB_TOOLING_REF": "4" * 40,
+            "EMULEBB_RELEASE_VALIDATOR_REF": "8" * 40,
             "MINIUPNP_REF": "5" * 40, "PCPNATPMP_REF": "6" * 40,
             "GITHUB_REPOSITORY": "example/project", "GITHUB_RUN_ID": "101",
             "GITHUB_RUN_ATTEMPT": "2", "GITHUB_WORKFLOW_SHA": "7" * 40,
@@ -833,7 +867,7 @@ class TestCandidateControl(unittest.TestCase):
         return [
             "--release-dir", str(root), "--release-version", "0.1.0-beta.2", "--channel", "candidate",
             "--source-sha", "1" * 40, "--emulebb-build-ref", "2" * 40,
-            "--emulebb-build-tests-ref", "3" * 40, "--emulebb-tooling-ref", "4" * 40,
+            "--release-validator-build-ref", "8" * 40, "--emulebb-build-tests-ref", "3" * 40, "--emulebb-tooling-ref", "4" * 40,
             "--emulebb-miniupnp-ref", "5" * 40, "--emulebb-libpcpnatpmp-ref", "6" * 40,
             "--repository", "example/project", "--run-id", "101", "--run-attempt", "2",
             "--workflow-sha", "7" * 40, "--build-repo", str(root / "build"),

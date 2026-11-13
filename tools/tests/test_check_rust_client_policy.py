@@ -868,7 +868,7 @@ package-emulebb-rust-ci --release-version 0.1.0-beta.2 --target-os ${{ matrix.os
 validate-emulebb-rust-image-ci
 path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.2
 assemble-emulebb-rust-release-ci
-needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package]
+needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package, android-apk-package, android-apk-qualification]
 assemble-candidate:
 ref: ${{ github.workflow_sha }}
 candidate-manifest

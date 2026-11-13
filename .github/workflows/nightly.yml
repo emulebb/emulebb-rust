@@ -38,7 +38,7 @@ jobs:
       previous_ref: ${{ steps.metadata.outputs.previous_ref }}
       should_build: ${{ steps.metadata.outputs.should_build }}
     steps:
-      - name: Checkout main with release tags
+      - name: Checkout verified source with release tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
@@ -55,7 +55,7 @@ jobs:
         run: python tools/nightly_release.py metadata --force "${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}" --publish "${{ github.event_name == 'schedule' || inputs.publish }}" --scheduled "${{ github.event_name == 'schedule' }}" --github-output "$GITHUB_OUTPUT"
 
   verify-source:
-    name: Require green main source checks
+    name: Require green exact-source checks
     needs: prepare
     if: ${{ needs.prepare.outputs.should_build == 'true' }}
     runs-on: ubuntu-24.04

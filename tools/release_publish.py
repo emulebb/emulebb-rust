@@ -18,6 +18,7 @@ import tarfile
 import tempfile
 import tomllib
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
 from urllib.parse import quote
@@ -48,6 +49,14 @@ BETA_VERSION_RE = re.compile(
 )
 NIGHTLY_SUFFIX_RE = re.compile(r"nightly\.[0-9]{8}\.g[0-9a-f]{7,40}")
 MAX_INDEX_BYTES = 1024 * 1024
+
+
+def android_version_code(now: datetime | None = None) -> int:
+    """One UTC authority across manual and scheduled APK entrypoints."""
+    code = int(((now or datetime.now(UTC)) - datetime(2020, 1, 1, tzinfo=UTC)).total_seconds())
+    if not 1 <= code <= 2_100_000_000:
+        raise RuntimeError("Android version code is outside its supported UTC range")
+    return code
 
 
 def _sha256(path: Path) -> str:
@@ -273,7 +282,7 @@ def candidate_owner(args: argparse.Namespace):
     ):
         raise RuntimeError("Candidate control requires the actual GitHub run and workflow identities")
     checked_checkout(ROOT, args.workflow_sha, label="Release control")
-    build_root = checked_checkout(args.build_repo, args.emulebb_build_ref, label="Packaging owner")
+    build_root = checked_checkout(args.build_repo, args.release_validator_build_ref, label="Release reader")
     for name, module in tuple(sys.modules.items()):
         if name == "emule_workspace" or name.startswith("emule_workspace."):
             filename = getattr(module, "__file__", None)
@@ -292,6 +301,14 @@ def candidate_owner(args: argparse.Namespace):
 
 
 def candidate_context(args: argparse.Namespace, owner):
+    apk = {}
+    if args.channel == "nightly":
+        if not all((args.apk_build_ref, args.apk_harness_ref, args.apk_signer_sha256, args.apk_harness_repo, args.apk_version_code)):
+            raise RuntimeError("Nightly APK validation requires explicit source, signer, version code and Harness authorities")
+        harness = checked_checkout(args.apk_harness_repo, args.apk_harness_ref, label="APK Harness")
+        apk = {"apk_sources": owner.ApkSourceContext(args.apk_build_ref, args.apk_harness_ref),
+               "apk_signer_sha256": args.apk_signer_sha256, "apk_harness_root": harness,
+               "apk_version_code": args.apk_version_code}
     return owner.CandidateContext(
         version=args.release_version, channel=args.channel,
         source={"emulebbRust": args.source_sha, "emulebbBuild": args.emulebb_build_ref,
@@ -300,6 +317,8 @@ def candidate_context(args: argparse.Namespace, owner):
         workflow={"repository": args.repository, "runId": args.run_id,
                   "runAttempt": args.run_attempt, "workflowSha": args.workflow_sha},
         platform_profile=args.platform_profile,
+        release_validator_build_sha=args.release_validator_build_ref,
+        **apk,
     ).checked()
 
 
@@ -342,6 +361,10 @@ def release_download_guidance(data: dict, layout: dict, candidate_name: str) -> 
             (item["abi"], link(item["asset"])) for item in android
         ]
         payloads.update(item["asset"] for item in android)
+    apk = data.get("experimentalAndroidApk")
+    if isinstance(apk, dict) and apk.get("asset") in names:
+        groups["Android application"] = [("Android 14+ · ARM64 and x86_64", link(apk["asset"], "Signed universal APK"))]
+        payloads.add(apk["asset"])
 
     lines = ["<!-- emulebb-release-downloads:start -->", "## Downloads", ""]
     for heading, rows in groups.items():
@@ -349,9 +372,8 @@ def release_download_guidance(data: dict, layout: dict, candidate_name: str) -> 
             lines.extend((f"### {heading}", ""))
             if heading == "Experimental Android native packages":
                 lines.extend((
-                    "Experimental native CLI developer archives. APK packaging and signing remain deferred.",
-                    "Evidence covers compilation and ELF checks. Device runtime, transfers and VPN behavior remain unqualified.",
-                    "Completed-file delivery and route discovery have known Android limitations. Read the bundled `emulebb-rust/README.txt` before use.",
+                    "Experimental native CLI developer archives. Their evidence covers compilation and ELF checks; APK runtime qualification is recorded separately.",
+                    "Read the bundled `emulebb-rust/README.txt` before use.",
                     "",
                 ))
             lines.extend(("| Platform | Download |", "|---|---|"))
@@ -633,6 +655,8 @@ def verify_release_assets(args: argparse.Namespace, data: dict, candidate: Path)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+    version_code = subparsers.add_parser("android-version-code", help="derive one cross-workflow monotonic APK version code")
+    version_code.add_argument("--github-output", required=True, type=Path)
     digest = subparsers.add_parser(
         "oci-digest",
         help="validate an OCI archive and write its manifest digest",
@@ -671,6 +695,7 @@ def build_parser() -> argparse.ArgumentParser:
         expected_arguments = {
             "release-version": "RELEASE_VERSION", "channel": "RELEASE_CHANNEL",
             "source-sha": "EMULEBB_SOURCE_REVISION", "emulebb-build-ref": "EMULEBB_BUILD_REF",
+            "release-validator-build-ref": "EMULEBB_RELEASE_VALIDATOR_REF",
             "emulebb-build-tests-ref": "EMULEBB_BUILD_TESTS_REF", "emulebb-tooling-ref": "EMULEBB_TOOLING_REF",
             "emulebb-miniupnp-ref": "MINIUPNP_REF", "emulebb-libpcpnatpmp-ref": "PCPNATPMP_REF",
             "repository": "GITHUB_REPOSITORY", "run-id": "GITHUB_RUN_ID",
@@ -681,6 +706,11 @@ def build_parser() -> argparse.ArgumentParser:
             candidate.add_argument("--" + flag, default=default, required=not default,
                                    help=f"Expected identity; defaults to the caller's {environment}.")
         candidate.add_argument("--build-repo", required=True, type=Path)
+        for flag, environment in {"apk-build-ref": "EMULEBB_APK_BUILD_REF", "apk-harness-ref": "EMULEBB_APK_BUILD_TESTS_REF",
+                                  "apk-signer-sha256": "EMULEBB_ANDROID_SIGNER_SHA256"}.items():
+            candidate.add_argument("--" + flag, default=os.environ.get(environment))
+        candidate.add_argument("--apk-version-code", type=int, default=os.environ.get("EMULEBB_ANDROID_VERSION_CODE"))
+        candidate.add_argument("--apk-harness-repo", type=Path)
         candidate.add_argument("--github-output", type=Path)
         if command in {"candidate-manifest", "verify-candidate", "publish-images"}:
             candidate.add_argument("--archives-dir", required=True, type=Path)
@@ -707,6 +737,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "android-version-code":
+        code = android_version_code()
+        with args.github_output.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(f"apk_version_code={code}\n")
+        return 0
     if args.command == "platform-profile":
         profile = resolve_platform_profile(args.profile, event_name=args.event_name,
                                            channel=args.channel, publish=args.publish)
