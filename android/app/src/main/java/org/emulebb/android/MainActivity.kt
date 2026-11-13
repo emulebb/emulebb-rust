@@ -49,6 +49,7 @@ class MainActivity : Activity() {
     private var updatingBoot = false
     private var pendingLink: String? = null
     private var pendingLinkError = ""
+    private var sharingDiagnostics = false
     private lateinit var status: TextView
     private lateinit var error: TextView
     private lateinit var permissions: TextView
@@ -63,6 +64,7 @@ class MainActivity : Activity() {
     private lateinit var regenerate: Button
     private lateinit var open: Button
     private lateinit var boot: CheckBox
+    private lateinit var shareDiagnostics: Button
 
     private val replies = Messenger(object : Handler(Looper.getMainLooper()) {
         override fun handleMessage(message: Message) {
@@ -186,6 +188,8 @@ class MainActivity : Activity() {
             }
             panel.addView(this)
         }
+        label("Share version, service and Android details plus up to 200 recent log summaries. Keys, configuration, paths, peer/content data and free-form messages are excluded.")
+        shareDiagnostics = button("Share diagnostics", R.id.share_diagnostics) { shareDiagnosticReport() }
         label("Client settings, sharing, transfers and diagnostics are available in the WebUI. Copy the API key into its sign-in screen.")
         label("Continuous operation uses battery and network traffic. All-files access is required; notifications and battery exemption are recommended.")
         val scroll = ScrollView(this).apply { addView(panel) }
@@ -270,6 +274,42 @@ class MainActivity : Activity() {
     private fun launchSettings(intent: Intent) {
         try { startActivity(intent) }
         catch (_: android.content.ActivityNotFoundException) { error.text = "This device does not expose the requested permission settings" }
+    }
+
+    private fun shareDiagnosticReport() {
+        if (sharingDiagnostics) return
+        sharingDiagnostics = true
+        shareDiagnostics.isEnabled = false
+        val phaseAtRequest = phase
+        setup.execute {
+            try {
+                val uri = DiagnosticsSharing.prepare(this, phaseAtRequest)
+                handler.post {
+                    if (!isDestroyed) {
+                        sharingDiagnostics = false
+                        shareDiagnostics.isEnabled = true
+                        if (resumed) {
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "application/zip"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                clipData = ClipData.newUri(contentResolver, "eMuleBB diagnostics", uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            try { startActivity(Intent.createChooser(send, "Share eMuleBB diagnostics")) }
+                            catch (_: android.content.ActivityNotFoundException) { error.show("No application can receive this diagnostic report") }
+                        } else error.show("Return to the app and share diagnostics again")
+                    }
+                }
+            } catch (failure: Exception) {
+                handler.post {
+                    if (!isDestroyed) {
+                        sharingDiagnostics = false
+                        shareDiagnostics.isEnabled = true
+                        error.show("Cannot prepare diagnostics (${failure.javaClass.simpleName})")
+                    }
+                }
+            }
+        }
     }
 
     private fun saveSettings(andStart: Boolean) {

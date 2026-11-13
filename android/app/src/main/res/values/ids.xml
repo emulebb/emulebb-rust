@@ -3,6 +3,7 @@
     <item name="app_version" type="id" />
     <item name="storage_paths" type="id" />
     <item name="save_settings" type="id" />
+    <item name="share_diagnostics" type="id" />
     <item name="service_status" type="id" />
     <item name="bind_addr" type="id" />
     <item name="api_key" type="id" />

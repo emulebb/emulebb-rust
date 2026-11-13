@@ -1061,7 +1061,7 @@ export function SharingView(props: {
             </button>
           </div>
         </div>
-        <p class="hint">Incoming and category folders are shared automatically. Change the completed-file destination in Settings. Additional folder trees below are recursive and monitored.</p>
+        <p class="hint">Incoming and category folders are shared automatically. Change the completed-file destination in Settings, then restart the service to apply it. Additional folder trees below are recursive and monitored.</p>
         <form class="form-row" onSubmit={(event) => {
           event.preventDefault();
           if (!pathError) {
