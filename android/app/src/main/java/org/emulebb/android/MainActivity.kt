@@ -152,6 +152,7 @@ class MainActivity : Activity() {
         }
         regenerate = button("Regenerate API key") { key.setText(ShellFiles.newKey()) }
         save = button("Save settings") { saveSettings(false) }
+        label("Starting enables the eD2K/Kad peer service; new profiles connect automatically. Incoming files are shared automatically. Completed files default to Downloads/eMuleBB. Manage folders and sharing in the WebUI.")
         start = button("Start", R.id.start_service) { saveSettings(true) }
         stop = button("Stop", R.id.stop_service) {
             phase = "Stopping"
