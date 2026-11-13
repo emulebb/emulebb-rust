@@ -17,33 +17,38 @@ enum CategoryDeletionWrite {
     ReadyToCommit,
 }
 
-impl super::MetadataStore {
-    /// Seed application-host folder defaults in one transaction for a new profile.
-    /// The profile owner must call this only during initial database creation.
-    pub fn seed_host_storage_defaults(&self, incoming_json: &str, shared: &Path) -> Result<()> {
-        ensure!(shared.is_absolute(), "host shared folder must be absolute");
-        let mut connection = self.connection()?;
-        let tx = connection.transaction()?;
-        let now = unix_ms();
-        tx.execute(
-            "INSERT INTO settings(section, key, value_json, updated_at_ms) VALUES ('daemon', 'incomingDir', ?1, ?2)",
-            params![incoming_json, now],
+pub(crate) fn seed_host_storage_defaults(
+    tx: &rusqlite::Transaction<'_>,
+    storage: &crate::InitialProfileStorage,
+) -> Result<()> {
+    ensure!(
+        storage.incoming_dir.is_absolute() && storage.shared_dir.is_absolute(),
+        "host folders must be absolute"
+    );
+    let incoming = storage
+        .incoming_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("host incoming path must be valid Unicode"))?;
+    let now = unix_ms();
+    tx.execute(
+            "INSERT INTO settings(section, key, value_json, updated_at_ms) VALUES ('daemon', 'incomingDir', json_quote(?1), ?2)",
+            params![incoming, now],
         )?;
-        let path_id = upsert_local_path(&tx, shared)?;
-        tx.execute(
+    let path_id = upsert_local_path(tx, &storage.shared_dir)?;
+    tx.execute(
             "INSERT INTO shared_directory_roots(path_id, monitor_owned, shareable, accessible, enabled, created_at_ms, deleted_at_ms)
              VALUES (?1, 0, 1, 1, 1, ?2, NULL)",
             params![path_id, now],
         )?;
-        tx.execute(
+    tx.execute(
             "INSERT INTO shared_directory_root_origins(root_id, origin, monitor_owned, shareable, accessible)
              VALUES ((SELECT id FROM shared_directory_roots WHERE path_id = ?1), 'explicit', 0, 1, 1)",
             params![path_id],
         )?;
-        tx.commit()?;
-        Ok(())
-    }
+    Ok(())
+}
 
+impl super::MetadataStore {
     pub fn load_setting_json(&self, section: &str, key: &str) -> Result<Option<String>> {
         ensure!(
             !section.trim().is_empty(),

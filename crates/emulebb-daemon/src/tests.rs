@@ -516,6 +516,37 @@ fn hosted_defaults_do_not_reinterpret_an_existing_unconfigured_profile() {
 }
 
 #[test]
+fn hosted_folder_initialization_retries_after_a_first_start_filesystem_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("profile");
+    let incoming = root.path().join("Incoming");
+    let shared = root.path().join("Shared");
+    fs::write(&shared, b"owned conflicting fixture").unwrap();
+    assert!(
+        DaemonProfile::load_hosted(directory.clone(), incoming.clone(), shared.clone()).is_err()
+    );
+    assert!(directory.join(PROFILE_METADATA_FILE).exists());
+    fs::remove_file(&shared).unwrap();
+    let profile = DaemonProfile::load_hosted(directory, incoming.clone(), shared).unwrap();
+    assert_eq!(
+        profile.incoming_dir(),
+        PathBuf::from(emulebb_core::normal_path_display(
+            incoming.canonicalize().unwrap()
+        ))
+    );
+    assert_eq!(
+        profile
+            .open_metadata_store()
+            .unwrap()
+            .shared_directory_roots()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(profile.ed2k.listen_port, Some(20019));
+}
+
+#[test]
 fn load_for_import_creates_an_explicit_profile() {
     let temp = tempfile::tempdir().unwrap();
     let profile_dir = temp.path().join("fresh-import-profile");
