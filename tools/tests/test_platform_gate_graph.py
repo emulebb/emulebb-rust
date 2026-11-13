@@ -37,7 +37,7 @@ class TestPlatformGraph(unittest.TestCase):
             "windows-x64", "windows-arm64", "linux-x64", "linux-arm64",
         })
         self.assertEqual(set(release["assemble-candidate"]["needs"]), {
-            "prepare", "native-package-smoke", "musl-package", "image-native-validation", "android-package",
+            "prepare", "native-package-smoke", "musl-package", "image-native-validation", "android-package", "android-apk-package", "android-apk-qualification",
         })
         self.assertEqual(set(release["image-candidate"]["needs"]), {"prepare", "native-package", "musl-package"})
         self.assertEqual(release["native-package-smoke"]["needs"], ["prepare", "native-package"])

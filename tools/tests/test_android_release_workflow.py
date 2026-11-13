@@ -26,7 +26,7 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
         condition = self.jobs["assemble-candidate"]["if"]
         mutations = [condition.replace(f"needs.{job}.result == 'success'", "true", 1)
                      for job in ("prepare", "native-package-smoke", "musl-package",
-                                 "image-native-validation", "android-package")]
+                                 "image-native-validation", "android-package", "android-apk-package", "android-apk-qualification")]
         mutations.extend((condition.replace("inputs.channel != 'nightly' && ", ""),
                           condition.replace("!cancelled()", "always()"),
                           condition.replace("'skipped'", "'failure'")))
@@ -34,6 +34,30 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(condition=mutated):
                 workflow = deepcopy(self.workflow)
                 workflow["jobs"]["assemble-candidate"]["if"] = mutated
+                self.assertTrue(POLICY.check_release_android_packages(yaml.safe_dump(workflow)))
+
+    def test_apk_api_and_authority_mutations_are_rejected(self):
+        for mutation in ("api", "source", "certificate", "version", "reader", "authority", "waiver"):
+            workflow = deepcopy(self.workflow)
+            job = workflow["jobs"]["android-apk-qualification"]
+            step = next(step for step in job["steps"] if "qualify-rust-android-apk-ci" in step.get("run", ""))
+            if mutation == "api":
+                job["strategy"]["matrix"]["image"].pop()
+            elif mutation == "source":
+                step["env"]["EXPECTED_SOURCE_SHA"] = "${{ github.sha }}"
+            elif mutation == "certificate":
+                step["run"] = step["run"].replace('--expected-cert-sha256 "$EMULEBB_ANDROID_SIGNER_SHA256"', "")
+            elif mutation == "version":
+                job["env"]["EMULEBB_ANDROID_VERSION_CODE"] = "${{ github.run_number }}"
+            elif mutation == "reader":
+                reader = next(step for step in workflow["jobs"]["assemble-candidate"]["steps"]
+                              if step.get("with", {}).get("path") == "emulebb-build")
+                reader["with"]["ref"] = "${{ env.EMULEBB_BUILD_REF }}"
+            elif mutation == "authority":
+                workflow["env"].pop("EMULEBB_APK_BUILD_REF")
+            else:
+                job["continue-on-error"] = True
+            with self.subTest(mutation=mutation):
                 self.assertTrue(POLICY.check_release_android_packages(yaml.safe_dump(workflow)))
 
     def test_source_identity_and_exact_two_abis_cannot_be_removed(self):
@@ -49,6 +73,8 @@ class AndroidReleaseWorkflowTests(unittest.TestCase):
                 job["needs"].remove("verify-source")
             elif mutation == "step-waiver":
                 job["steps"][0]["continue-on-error"] = True
+            elif mutation == "authority":
+                workflow["env"].pop("EMULEBB_APK_BUILD_REF")
             else:
                 job["continue-on-error"] = True
             with self.subTest(mutation=mutation):

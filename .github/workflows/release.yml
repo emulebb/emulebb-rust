@@ -54,7 +54,11 @@ env:
   EMULEBB_BUILD_REF: 3b9ddf42466b07f852f798f6967ca782484056a4
   EMULEBB_LINUX_PREPARED_IMAGE: ghcr.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:98da7751087bc9a47a597571f99e4bebdccadb5ea80e9757d0f15452a35308bb
   EMULEBB_BUILD_TESTS_REF: 7c680ed68e478c2f22c56c65f21f12c3790d3826
-  EMULEBB_TOOLING_REF: 26abd1eab97b28977f2d55adba17e6ba28821498
+  EMULEBB_TOOLING_REF: 8125e1a42dbac792eae6e35bbc427d6b885d599f
+  EMULEBB_RELEASE_VALIDATOR_REF: 981b968e7f6da3d6cc58bbca632454b5723f3682
+  EMULEBB_APK_BUILD_REF: 981b968e7f6da3d6cc58bbca632454b5723f3682
+  EMULEBB_APK_BUILD_TESTS_REF: 32b9318b1ee46f292c10a7cbf866ac0bc7c3d61f
+  EMULEBB_ANDROID_SIGNER_SHA256: 9edc742d7230a714a0149c20eb2afb235b8ad5237166090f10e7ac69e2bb359f
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
 
@@ -68,6 +72,7 @@ jobs:
       native_matrix: ${{ steps.profile.outputs.native_matrix }}
       release_version: ${{ steps.identity.outputs.version }}
       source_sha: ${{ steps.source.outputs.sha }}
+      apk_version_code: ${{ steps.android-code.outputs.apk_version_code }}
     steps:
       - name: Checkout trusted release-control helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,6 +115,9 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.release_version }}
         run: python tools/release_publish.py release-identity --requested-version "$REQUESTED_VERSION" --channel "$RELEASE_CHANNEL" --ref-name "$GITHUB_REF_NAME" --ref-type "$GITHUB_REF_TYPE" --github-output "$GITHUB_OUTPUT" --source-root .ci/candidate
+      - name: Derive one UTC Android version code for every producer and proof
+        id: android-code
+        run: python tools/release_publish.py android-version-code --github-output "$GITHUB_OUTPUT"
       - name: Generate and preflight immutable-source release documents
         env:
           RELEASE_VERSION: ${{ steps.identity.outputs.version }}
@@ -625,6 +633,200 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  android-apk-package:
+    name: Signed universal Android application
+    if: ${{ inputs.channel == 'nightly' }}
+    needs: [prepare, verify-source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      manifest_sha256: ${{ steps.apk.outputs.manifest_sha256 }}
+      apk_sha256: ${{ steps.apk.outputs.apk_sha256 }}
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_ANDROID_VERSION_CODE: ${{ needs.prepare.outputs.apk_version_code }}
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_RUST_REPO: ${{ github.workspace }}
+      EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+    steps:
+      - &apk-checkout-source
+        name: Checkout workflow-bound application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - &apk-checkout-build
+        name: Checkout pinned APK producer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_APK_BUILD_REF }}
+          path: .ci/emulebb-build
+          persist-credentials: false
+      - &apk-checkout-tooling
+        name: Checkout pinned APK contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: ${{ env.EMULEBB_TOOLING_REF }}
+          path: .ci/emulebb-tooling
+          persist-credentials: false
+      - &apk-checkout-miniupnp
+        name: Checkout pinned APK MiniUPnP
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+          persist-credentials: false
+      - &apk-checkout-pcp
+        name: Checkout pinned APK PCP/NAT-PMP
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
+          persist-credentials: false
+      - &apk-python
+        name: Set up pinned APK Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - &apk-python-dependencies
+        name: Install pinned APK owner dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.14.3
+      - name: Set up pinned APK Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.0"
+          package-manager-cache: false
+      - name: Install pinned APK npm
+        run: npm install --global npm@11.20.0
+      - &apk-docker
+        name: Set up pinned APK Docker
+        uses: docker/setup-docker-action@3f1ab1ab0e29231562e4db4ca600c1a49653bac6 # v5.7.0
+        with:
+          version: v29.6.1
+          daemon-config: '{"features":{"containerd-snapshotter":true}}'
+      - &apk-buildx
+        name: Set up pinned APK Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          version: v0.35.0
+          driver: docker
+          use: false
+      - name: Build and verify one production-signed APK
+        id: apk
+        working-directory: .ci/emulebb-build
+        env:
+          EMULEBB_ANDROID_KEYSTORE_BASE64: ${{ secrets.EMULEBB_ANDROID_KEYSTORE_BASE64 }}
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+          EMULEBB_ANDROID_KEY_ALIAS: ${{ secrets.EMULEBB_ANDROID_KEY_ALIAS }}
+          EMULEBB_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.EMULEBB_ANDROID_KEYSTORE_PASSWORD }}
+          EMULEBB_ANDROID_KEY_PASSWORD: ${{ secrets.EMULEBB_ANDROID_KEY_PASSWORD }}
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          signing_dir="$(mktemp -d "$RUNNER_TEMP/emulebb-android-signing.XXXXXX")"
+          trap 'rm -f -- "$signing_dir/release.keystore"; rmdir -- "$signing_dir"' EXIT
+          printf '%s' "$EMULEBB_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/release.keystore"
+          export EMULEBB_ANDROID_KEYSTORE="$signing_dir/release.keystore"
+          unset EMULEBB_ANDROID_KEYSTORE_BASE64
+          mkdir -p "$CARGO_TARGET_DIR"
+          python -B -m emule_workspace package-rust-android-apk-ci \
+            --release-version "$RELEASE_VERSION" --channel nightly --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --expected-cert-sha256 "$EMULEBB_ANDROID_SIGNER_SHA256" --version-code "$EMULEBB_ANDROID_VERSION_CODE" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Retain exact signed APK payload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-android-apk-payload
+          path: |
+            ${{ steps.apk.outputs.apk_path }}
+            ${{ steps.apk.outputs.manifest_path }}
+            ${{ steps.apk.outputs.sbom_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  android-apk-qualification:
+    name: Android application runtime (${{ matrix.image }})
+    if: ${{ inputs.channel == 'nightly' }}
+    needs: [prepare, android-apk-package, android-package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [apk34, apk35, apk36, apk37]
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_ANDROID_VERSION_CODE: ${{ needs.prepare.outputs.apk_version_code }}
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_RUST_REPO: ${{ github.workspace }}
+      EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+      EMULEBB_TESTS_REPO: ${{ github.workspace }}/.ci/emulebb-build-tests
+    steps:
+      - *apk-checkout-source
+      - *apk-checkout-build
+      - *apk-checkout-tooling
+      - *apk-checkout-miniupnp
+      - *apk-checkout-pcp
+      - name: Checkout pinned APK runtime Harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_APK_BUILD_TESTS_REF }}
+          path: .ci/emulebb-build-tests
+          persist-credentials: false
+      - *apk-python
+      - *apk-python-dependencies
+      - *apk-docker
+      - *apk-buildx
+      - name: Grant this runner access to KVM
+        run: |
+          test -c /dev/kvm
+          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+      - name: Download the single signed APK payload
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: emulebb-rust-android-apk-payload
+          path: ${{ runner.temp }}/emulebb-rust-out/apk-input
+      - name: Download the same-source native x86_64 peer archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: emulebb-rust-android-developer-payload-x86_64
+          path: ${{ runner.temp }}/emulebb-rust-out/peer-input
+      - name: Qualify identical APK bytes on the selected API
+        id: qualify
+        working-directory: .ci/emulebb-build
+        env:
+          APK_MANIFEST_SHA256: ${{ needs.android-apk-package.outputs.manifest_sha256 }}
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: >-
+          python -B -m emule_workspace qualify-rust-android-apk-ci --image ${{ matrix.image }}
+          --apk-payload "$EMULEBB_WORKSPACE_OUTPUT_ROOT/apk-input"
+          --apk-manifest-name "emulebb-rust-v$RELEASE_VERSION-android-universal.apk.manifest.json"
+          --apk-manifest-sha256 "$APK_MANIFEST_SHA256" --apk-source-sha "$EXPECTED_SOURCE_SHA"
+          --expected-cert-sha256 "$EMULEBB_ANDROID_SIGNER_SHA256" --apk-version-code "$EMULEBB_ANDROID_VERSION_CODE"
+          --release-version "$RELEASE_VERSION" --peer-artifacts "$EMULEBB_WORKSPACE_OUTPUT_ROOT/peer-input"
+          --peer-build-ref "$EMULEBB_BUILD_REF" --apk-build-ref "$EMULEBB_APK_BUILD_REF"
+          --apk-harness-ref "$EMULEBB_APK_BUILD_TESTS_REF" --soak-seconds 60 --github-output "$GITHUB_OUTPUT"
+      - name: Retain sanitized API-specific proof
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-android-apk-proof-${{ matrix.image }}
+          path: ${{ steps.qualify.outputs.qualification_path }}
+          if-no-files-found: error
+          retention-days: 30
+
   image-candidate:
     name: Build multiarch ${{ matrix.variant }} image candidate
     needs: [prepare, native-package, musl-package]
@@ -821,21 +1023,32 @@ jobs:
           retention-days: 30
 
   assemble-candidate:
-    name: Assemble verified native and container candidate
+    name: Assemble verified application, native and container candidate
     if: >-
       ${{ !cancelled() && needs.prepare.result == 'success' &&
           needs.native-package-smoke.result == 'success' &&
           needs.musl-package.result == 'success' &&
           needs.image-native-validation.result == 'success' &&
           (needs.android-package.result == 'success' ||
-           (inputs.channel != 'nightly' && needs.android-package.result == 'skipped')) }}
-    needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package]
+           (inputs.channel != 'nightly' && needs.android-package.result == 'skipped')) &&
+          (needs.android-apk-package.result == 'success' ||
+           (inputs.channel != 'nightly' && needs.android-apk-package.result == 'skipped')) &&
+          (needs.android-apk-qualification.result == 'success' ||
+           (inputs.channel != 'nightly' && needs.android-apk-qualification.result == 'skipped')) }}
+    needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package, android-apk-package, android-apk-qualification]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       candidate_sha256: ${{ steps.candidate.outputs.candidate_sha256 }}
     env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_RUST_REPO: ${{ github.workspace }}/emulebb-rust
+      EMULEBB_TOOLING_REPO: ${{ github.workspace }}/emulebb-tooling
+      EMULEBB_TESTS_REPO: ${{ github.workspace }}/emulebb-apk-tests
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_ANDROID_VERSION_CODE: ${{ needs.prepare.outputs.apk_version_code }}
       EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
     steps:
       - name: Checkout trusted release-control source
@@ -848,7 +1061,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build
-          ref: ${{ env.EMULEBB_BUILD_REF }}
+          ref: ${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}
           path: emulebb-build
           persist-credentials: false
       - name: Checkout pinned image evidence reader
@@ -865,6 +1078,16 @@ jobs:
           ref: ${{ env.EMULEBB_TOOLING_REF }}
           path: emulebb-tooling
           persist-credentials: false
+      - name: Checkout independently pinned APK evidence reader
+        if: ${{ inputs.channel == 'nightly' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_APK_BUILD_TESTS_REF }}
+          path: emulebb-apk-tests
+          persist-credentials: false
+      - *apk-checkout-miniupnp
+      - *apk-checkout-pcp
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -890,6 +1113,19 @@ jobs:
           pattern: emulebb-rust-android-developer-payload-*
           merge-multiple: true
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Download the single signed Android application
+        if: ${{ inputs.channel == 'nightly' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: emulebb-rust-android-apk-payload
+          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Download four separate Android runtime proofs
+        if: ${{ inputs.channel == 'nightly' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: emulebb-rust-android-apk-proof-*
+          merge-multiple: false
+          path: ${{ runner.temp }}/emulebb-rust-out/apk-evidence
       - name: Download every selected native package lifecycle proof
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -936,6 +1172,23 @@ jobs:
         with:
           name: emulebb-rust-release-documents
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+      - name: Bind four API proofs to the same signed APK and trusted authorities
+        if: ${{ inputs.channel == 'nightly' }}
+        working-directory: emulebb-build
+        env:
+          APK_MANIFEST_SHA256: ${{ needs.android-apk-package.outputs.manifest_sha256 }}
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+          RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+        run: >-
+          python -B -m emule_workspace assemble-rust-android-apk-evidence-ci
+          --apk-payload "$RELEASE_DIR"
+          --apk-manifest-name "emulebb-rust-v$RELEASE_VERSION-android-universal.apk.manifest.json"
+          --apk-manifest-sha256 "$APK_MANIFEST_SHA256" --apk-source-sha "$EMULEBB_SOURCE_REVISION"
+          --expected-cert-sha256 "$EMULEBB_ANDROID_SIGNER_SHA256" --apk-version-code "$EMULEBB_ANDROID_VERSION_CODE"
+          --release-version "$RELEASE_VERSION" --apk-build-ref "$EMULEBB_APK_BUILD_REF"
+          --apk-harness-ref "$EMULEBB_APK_BUILD_TESTS_REF"
+          --evidence-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/apk-evidence" --release-dir "$RELEASE_DIR"
       - name: Verify all payloads and checksum the final public evidence set
         working-directory: emulebb-build
         env:
@@ -954,7 +1207,7 @@ jobs:
           --release-dir "$RELEASE_DIR"
           --output "$RELEASE_DIR/emulebb-rust-v$RELEASE_VERSION-candidate-manifest.json"
           --archives-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/artifacts"
-          --build-repo emulebb-build --harness-repo emulebb-build-tests
+          --build-repo emulebb-build --apk-harness-repo emulebb-apk-tests --harness-repo emulebb-build-tests
           --github-output "$GITHUB_OUTPUT"
       - name: Retain the exact public release candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -985,6 +1238,7 @@ jobs:
       alpine_digest: ${{ steps.published.outputs.alpine_digest }}
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_ANDROID_VERSION_CODE: ${{ needs.prepare.outputs.apk_version_code }}
       EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
     steps:
       - name: Checkout trusted publication helpers
@@ -997,7 +1251,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build
-          ref: ${{ env.EMULEBB_BUILD_REF }}
+          ref: ${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}
           path: emulebb-build
           persist-credentials: false
       - name: Checkout pinned OCI graph reader
@@ -1006,6 +1260,14 @@ jobs:
           repository: emulebb/emulebb-build-tests
           ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
           path: emulebb-build-tests
+          persist-credentials: false
+      - name: Checkout independently pinned APK evidence reader
+        if: ${{ inputs.channel == 'nightly' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_APK_BUILD_TESTS_REF }}
+          path: emulebb-apk-tests
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -1044,7 +1306,7 @@ jobs:
         run: >-
           python -B emulebb-rust/tools/release_publish.py publish-images
           --release-dir "$RELEASE_DIR" --archives-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/artifacts"
-          --build-repo emulebb-build --harness-repo emulebb-build-tests
+          --build-repo emulebb-build --apk-harness-repo emulebb-apk-tests --harness-repo emulebb-build-tests
           --assembled-candidate-sha256 "$ASSEMBLED_CANDIDATE_SHA" --github-output "$GITHUB_OUTPUT"
       - name: Attest the published Ubuntu digest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -1075,6 +1337,7 @@ jobs:
       id-token: write
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+      EMULEBB_ANDROID_VERSION_CODE: ${{ needs.prepare.outputs.apk_version_code }}
       EMULEBB_SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
       VERIFIED_CANDIDATE_SHA: ${{ needs.publish-image.outputs.candidate_sha256 }}
     steps:
@@ -1088,8 +1351,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build
-          ref: ${{ env.EMULEBB_BUILD_REF }}
+          ref: ${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}
           path: emulebb-build
+          persist-credentials: false
+      - name: Checkout independently pinned APK evidence reader
+        if: ${{ inputs.channel == 'nightly' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_APK_BUILD_TESTS_REF }}
+          path: emulebb-apk-tests
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -1109,7 +1380,7 @@ jobs:
         run: |
           set -euo pipefail
           python -B emulebb-rust/tools/release_publish.py release-assets \
-            --release-dir "$RELEASE_DIR" --build-repo emulebb-build \
+            --release-dir "$RELEASE_DIR" --build-repo emulebb-build --apk-harness-repo emulebb-apk-tests \
             --verified-candidate-sha256 "$VERIFIED_CANDIDATE_SHA" --phase before-upload
       - name: Attest the exact native release candidate
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -1135,7 +1406,7 @@ jobs:
         run: |
           set -euo pipefail
           python -B emulebb-rust/tools/release_publish.py release-assets \
-            --release-dir "$RELEASE_DIR" --build-repo emulebb-build \
+            --release-dir "$RELEASE_DIR" --build-repo emulebb-build --apk-harness-repo emulebb-apk-tests \
             --verified-candidate-sha256 "$VERIFIED_CANDIDATE_SHA" --phase after-upload --release-id "$RELEASE_ID"
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false
 

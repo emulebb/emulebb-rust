@@ -1521,20 +1521,69 @@ def check_release_android_packages(workflow_text: str | None = None) -> list[str
         errors.append("Android developer packaging must not waive failures")
     if any("continue-on-error" in step for step in steps):
         errors.append("Android developer packaging steps must not waive failures")
-    expected_needs = ["prepare", "native-package-smoke", "musl-package", "image-native-validation", "android-package"]
+    expected_needs = ["prepare", "native-package-smoke", "musl-package", "image-native-validation", "android-package", "android-apk-package", "android-apk-qualification"]
     if assemble.get("needs") != expected_needs:
         errors.append("Candidate assembly must retain every native/image/Android prerequisite")
     expected_condition = """${{ !cancelled() && needs.prepare.result == 'success' &&
         needs.native-package-smoke.result == 'success' && needs.musl-package.result == 'success' &&
         needs.image-native-validation.result == 'success' &&
         (needs.android-package.result == 'success' ||
-         (inputs.channel != 'nightly' && needs.android-package.result == 'skipped')) }}"""
+         (inputs.channel != 'nightly' && needs.android-package.result == 'skipped')) &&
+        (needs.android-apk-package.result == 'success' ||
+         (inputs.channel != 'nightly' && needs.android-apk-package.result == 'skipped')) &&
+        (needs.android-apk-qualification.result == 'success' ||
+         (inputs.channel != 'nightly' && needs.android-apk-qualification.result == 'skipped')) }}"""
     if " ".join(assemble.get("if", "").split()) != " ".join(expected_condition.split()):
         errors.append("Candidate assembly must require Android success at nightly and allow skipped Android only outside nightly")
     downloads = [step for step in assemble.get("steps", [])
                  if step.get("with", {}).get("pattern") == "emulebb-rust-android-developer-payload-*"]
     if len(downloads) != 1 or downloads[0].get("if") != "${{ inputs.channel == 'nightly' }}":
         errors.append("Candidate assembly must download Android developer bundles exactly for nightly")
+    authorities = yaml.safe_load(text).get("env", {})
+    for key in ("EMULEBB_RELEASE_VALIDATOR_REF", "EMULEBB_APK_BUILD_REF", "EMULEBB_APK_BUILD_TESTS_REF"):
+        if re.fullmatch(r"[0-9a-f]{40}", str(authorities.get(key, ""))) is None:
+            errors.append(f"APK release requires explicit immutable {key}")
+    if re.fullmatch(r"[0-9a-f]{64}", str(authorities.get("EMULEBB_ANDROID_SIGNER_SHA256", ""))) is None:
+        errors.append("APK release requires explicit trusted signer identity")
+    package = jobs.get("android-apk-package", {})
+    qualify = jobs.get("android-apk-qualification", {})
+    if package.get("needs") != ["prepare", "verify-source"]:
+        errors.append("Signed APK packaging must require exact-source qualification")
+    if qualify.get("needs") != ["prepare", "android-apk-package", "android-package"]:
+        errors.append("APK runtime qualification must require the same signed APK and source-matched CLI")
+    if qualify.get("strategy", {}).get("matrix") != {"image": ["apk34", "apk35", "apk36", "apk37"]}:
+        errors.append("APK runtime qualification must cover exactly Android APIs 34 through 37")
+    for job in (package, qualify):
+        if job.get("if") != "${{ inputs.channel == 'nightly' }}" or "continue-on-error" in job:
+            errors.append("APK jobs must be nightly-required without failure waivers")
+        if any("continue-on-error" in step for step in job.get("steps", [])):
+            errors.append("APK steps must not waive failures")
+    for job, command, fragments in (
+        (package, "package-rust-android-apk-ci", ('--expected-source-sha "$EXPECTED_SOURCE_SHA"',
+            '--expected-cert-sha256 "$EMULEBB_ANDROID_SIGNER_SHA256"',
+            '--version-code "$EMULEBB_ANDROID_VERSION_CODE"')),
+        (qualify, "qualify-rust-android-apk-ci", ('--apk-source-sha "$EXPECTED_SOURCE_SHA"',
+            '--apk-manifest-sha256 "$APK_MANIFEST_SHA256"',
+            '--expected-cert-sha256 "$EMULEBB_ANDROID_SIGNER_SHA256"',
+            '--apk-version-code "$EMULEBB_ANDROID_VERSION_CODE"',
+            '--apk-build-ref "$EMULEBB_APK_BUILD_REF"', '--apk-harness-ref "$EMULEBB_APK_BUILD_TESTS_REF"')),
+    ):
+        commands = [step for step in job.get("steps", []) if command in step.get("run", "")]
+        if len(commands) != 1 or any(fragment not in commands[0]["run"] for fragment in fragments):
+            errors.append(f"{command} must bind all trusted APK authorities")
+        elif commands[0].get("env", {}).get("EXPECTED_SOURCE_SHA") != "${{ needs.prepare.outputs.source_sha }}":
+            errors.append(f"{command} must use the qualified source")
+    if qualify.get("env", {}).get("EMULEBB_ANDROID_VERSION_CODE") != "${{ needs.prepare.outputs.apk_version_code }}":
+        errors.append("APK runtime qualification must use the single prepared version code")
+    for name in ("assemble-candidate", "publish-image", "publish-native"):
+        steps = jobs.get(name, {}).get("steps", [])
+        readers = [step for step in steps if step.get("with", {}).get("path") == "emulebb-build"]
+        if len(readers) != 1 or readers[0]["with"].get("ref") != "${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}":
+            errors.append(f"{name} must use independently pinned release reader authority")
+        if not any(step.get("with", {}).get("path") == "emulebb-apk-tests" and
+                   step["with"].get("ref") == "${{ env.EMULEBB_APK_BUILD_TESTS_REF }}" for step in steps):
+            errors.append(f"{name} must separately check out the APK evidence reader")
+
     return errors
 
 
@@ -1560,7 +1609,7 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
         "assemble-emulebb-rust-release-ci": "verified release assembly",
         "native-package-smoke:": "isolated package lifecycle job",
-        "needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package]": "candidate dependency on all native lifecycle and nightly Android evidence",
+        "needs: [prepare, native-package-smoke, musl-package, image-native-validation, android-package, android-apk-package, android-apk-qualification]": "candidate dependency on all native lifecycle and nightly Android evidence",
         "assemble-candidate:": "non-publishing candidate assembly job",
         "ref: ${{ github.workflow_sha }}": "trusted release-control checkout",
         "candidate-manifest": "candidate revision and evidence manifest",

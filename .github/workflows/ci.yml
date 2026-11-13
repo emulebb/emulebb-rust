@@ -20,7 +20,7 @@ env:
   EMULEBB_BUILD_REF: 3b9ddf42466b07f852f798f6967ca782484056a4
   EMULEBB_ANDROID_BUILD_REF: 3b9ddf42466b07f852f798f6967ca782484056a4
   EMULEBB_BUILD_TESTS_REF: 7c680ed68e478c2f22c56c65f21f12c3790d3826
-  EMULEBB_TOOLING_REF: 26abd1eab97b28977f2d55adba17e6ba28821498
+  EMULEBB_TOOLING_REF: 8125e1a42dbac792eae6e35bbc427d6b885d599f
   # Pin the native NAT sources linked by the sys crates.
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
@@ -610,7 +610,7 @@ jobs:
         with:
           persist-credentials: false
           repository: emulebb/emulebb-tooling
-          ref: 26abd1eab97b28977f2d55adba17e6ba28821498
+          ref: 8125e1a42dbac792eae6e35bbc427d6b885d599f
           path: repos/emulebb-tooling
 
       - name: Download tested Linux daemon
