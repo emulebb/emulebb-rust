@@ -127,17 +127,17 @@ class MainActivity : Activity() {
             pendingLinkError = ""
             updatePendingLink()
         }
-        button("Grant all-files access") {
+        button("Grant all-files access", R.id.grant_all_files_access) {
             launchSettings(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
         }
-        button("Allow notifications") { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) }
-        button("Allow local network") {
+        button("Allow notifications", R.id.allow_notifications) { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) }
+        button("Allow local network", R.id.allow_local_network) {
             if (Build.VERSION.SDK_INT >= 37) requestPermissions(arrayOf(DaemonService.LOCAL_NETWORK), 2)
         }.isEnabled = Build.VERSION.SDK_INT >= 37
-        button("Allow continuous background operation") {
+        button("Allow continuous background operation", R.id.allow_continuous_background) {
             launchSettings(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
         }
-        button("App battery settings") {
+        button("App battery settings", R.id.app_battery_settings) {
             launchSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         }
         label("REST bind address")
