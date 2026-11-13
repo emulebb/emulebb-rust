@@ -88,13 +88,12 @@ for requirements, installation, container mounts and the scope of package checks
    **`change_me_123change_me_123change_me_123`**. Review network and sharing
    settings before starting transfers.
 
-The shipped API key is a shared starter value. Change `rest.api_key` in your
-private bootstrap file before exposing the API outside this computer. The
-default P2P ports are TCP **20019** and UDP **20020**; mutable client settings
-remain in the profile database.
+The REST/WebUI listener defaults to **`0.0.0.0:20017`**. The shipped API key is a
+shared starter value, configured through `rest.api_key` in the private bootstrap
+file. The default P2P ports are TCP **20019** and UDP **20020**; mutable client
+settings remain in the profile database.
 
-The default REST address is local control, not an offline-P2P guarantee: startup
-may fetch discovery inputs and start configured networking.
+Startup may fetch discovery inputs and start configured networking.
 
 **Profiles during beta:** an incompatible database requires an entirely fresh
 profile. Keep the stopped old profile, payloads and matching binary intact for
@@ -105,9 +104,8 @@ covers profile locations, discovery, search, downloads, sharing and troubleshoot
 
 ## Use the API
 
-All `/api/v1` routes use the **`X-API-Key`** header. The daemon serves HTTP;
-keep control on loopback or use a trusted TLS reverse proxy with restricted
-access. Keep the key out of URLs, committed scripts and public logs.
+All `/api/v1` routes use the **`X-API-Key`** header. The daemon serves HTTP on
+**`0.0.0.0:20017`** by default; credentials belong in the header rather than URLs.
 
 Start with authenticated, read-only requests such as
 `GET /api/v1/capabilities` and `GET /api/v1/status`.

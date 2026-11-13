@@ -142,7 +142,7 @@ class MainActivity : Activity() {
             launchSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         }
         label("REST bind address")
-        bind = edit("REST bind address", R.id.bind_addr).apply { setText("127.0.0.1:20017") }
+        bind = edit("REST bind address", R.id.bind_addr).apply { setText("0.0.0.0:20017") }
         label("API key")
         key = edit("API key", R.id.api_key)
         button("Copy API key", R.id.copy_api_key) {
@@ -152,7 +152,7 @@ class MainActivity : Activity() {
             Toast.makeText(this, "API key copied", Toast.LENGTH_SHORT).show()
         }
         regenerate = button("Regenerate API key") { key.setText(ShellFiles.newKey()) }
-        save = button("Save settings") { saveSettings(false) }
+        save = button("Save settings", R.id.save_settings) { saveSettings(false) }
         label("Starting enables the eD2K/Kad peer service; new profiles connect automatically. Incoming files are shared automatically.")
         label("New-profile folders:\nCompleted and shared: ${ShellFiles.defaultIncoming()}\nAdditional sharing: ${ShellFiles.defaultShared()}\nIncomplete files stay in app-managed storage. Manage current folders in WebUI Settings and Sharing; changes are preserved.", R.id.storage_paths)
         start = button("Start", R.id.start_service) { saveSettings(true) }
@@ -207,7 +207,7 @@ class MainActivity : Activity() {
             try {
                 var settings = ShellFiles.readSettings(this)
                 if (settings == null) {
-                    ShellFiles.saveSettings(this, "127.0.0.1:20017", ShellFiles.newKey(), ShellFiles.prepareWebui(this))
+                    ShellFiles.saveSettings(this, "0.0.0.0:20017", ShellFiles.newKey(), ShellFiles.prepareWebui(this))
                     settings = ShellFiles.readSettings(this)
                 }
                 val loaded = requireNotNull(settings)
