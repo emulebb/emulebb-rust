@@ -32,6 +32,7 @@ use tracing::{info, warn};
 
 mod bind_config;
 mod discovery_bootstrap;
+pub mod host_bootstrap;
 pub mod logging;
 mod profile_import;
 mod profile_ownership;
@@ -69,6 +70,9 @@ const UNSAFE_REST_API_KEYS: &[&str] = &[
 #[serde(default, rename_all = "camelCase")]
 pub struct DaemonProfile {
     pub profile_dir: PathBuf,
+    /// Application-owned payload storage, separate from private metadata.
+    #[serde(skip)]
+    pub host_transfer_root: Option<PathBuf>,
     /// Global finished-file delivery directory (eMule Incoming folder). When a
     /// completed transfer has no category path, its payload is materialized here
     /// by its canonical name. Defaults to `<profile>/incoming` when unset.
@@ -109,6 +113,7 @@ impl Default for DaemonProfile {
         let daemon = DaemonSettings::default();
         Self {
             profile_dir: PathBuf::from("profile"),
+            host_transfer_root: None,
             incoming_dir: daemon.incoming_dir,
             p2p_bind_ip: daemon.p2p_bind_ip,
             p2p_bind_interface: daemon.p2p_bind_interface,
@@ -183,6 +188,7 @@ impl DaemonProfile {
         let settings = load_settings(&metadata)?;
         let profile = Self {
             profile_dir,
+            host_transfer_root: None,
             incoming_dir: settings.daemon.incoming_dir,
             p2p_bind_ip: settings.daemon.p2p_bind_ip,
             p2p_bind_interface: settings.daemon.p2p_bind_interface,
@@ -231,7 +237,9 @@ impl DaemonProfile {
     }
 
     pub fn transfer_root(&self) -> PathBuf {
-        self.profile_io_dir().join("transfers")
+        self.host_transfer_root
+            .clone()
+            .unwrap_or_else(|| self.profile_io_dir().join("transfers"))
     }
 
     /// Resolve the finished-file delivery directory: the configured
