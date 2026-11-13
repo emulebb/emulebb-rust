@@ -18,6 +18,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
 enum Request {
+    ValidateLink {
+        link: String,
+    },
     ReadSettings {
         profile_dir: PathBuf,
     },
@@ -92,6 +95,10 @@ fn ensure_process_logging(profile: &std::path::Path) -> Result<()> {
 
 fn handle(request: Request) -> Result<Value> {
     match request {
+        Request::ValidateLink { link } => {
+            emulebb_daemon::validate_ed2k_file_link(&link)?;
+            Ok(Value::String(link))
+        }
         Request::PruneAssets {
             profile_dir,
             current_web_root,
@@ -339,5 +346,27 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn external_link_validation_has_no_profile_or_runtime_side_effects() {
+        let link = "ed2k://|file|Sample%20%26%20Guide.bin|42|00112233445566778899aabbccddeeff|/";
+        assert_eq!(
+            handle(Request::ValidateLink { link: link.into() }).unwrap(),
+            json!(link)
+        );
+        for invalid in [
+            "ed2k://|server|192.0.2.1|4661|/".to_string(),
+            "ed2k://|file|Sample.bin|42|invalid|/".to_string(),
+            "ed2k://|file|Sample.bin|invalid|00112233445566778899aabbccddeeff|/".to_string(),
+            "ed2k://|file|Sample%0Abin|42|00112233445566778899aabbccddeeff|/".to_string(),
+            format!(
+                "ed2k://|file|{}|42|00112233445566778899aabbccddeeff|/",
+                "A".repeat(2048)
+            ),
+        ] {
+            assert!(handle(Request::ValidateLink { link: invalid }).is_err());
+        }
+        assert_eq!(handle(Request::Status {}).unwrap()["phase"], "Stopped");
     }
 }

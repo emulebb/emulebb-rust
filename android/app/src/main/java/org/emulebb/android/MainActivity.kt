@@ -46,9 +46,14 @@ class MainActivity : Activity() {
     private var phase = "Stopped"
     private var address: String? = null
     private var updatingBoot = false
+    private var pendingLink: String? = null
+    private var pendingLinkError = ""
     private lateinit var status: TextView
     private lateinit var error: TextView
     private lateinit var permissions: TextView
+    private lateinit var pending: TextView
+    private lateinit var linkError: TextView
+    private lateinit var discardLink: Button
     private lateinit var bind: EditText
     private lateinit var key: EditText
     private lateinit var start: Button
@@ -63,8 +68,8 @@ class MainActivity : Activity() {
             if (message.what != DaemonService.STATUS) return
             phase = message.data.getString("phase") ?: "Stopped"
             address = message.data.getString("address")
-            status.text = phase
-            message.data.getString("error")?.let { error.text = it }
+            status.show(phase)
+            message.data.getString("error")?.let { error.show(it) }
             updatingBoot = true
             boot.isChecked = message.data.getBoolean("resumeOnBoot")
             updatingBoot = false
@@ -115,6 +120,13 @@ class MainActivity : Activity() {
         status = label("Stopped", R.id.service_status)
         error = label("")
         permissions = label("")
+        pending = label("", R.id.pending_link)
+        linkError = label("", R.id.pending_link_error)
+        discardLink = button("Discard pending link") {
+            pendingLink = null
+            pendingLinkError = ""
+            updatePendingLink()
+        }
         button("Grant all-files access") {
             launchSettings(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
         }
@@ -149,7 +161,17 @@ class MainActivity : Activity() {
         }
         open = button("Open WebUI", R.id.open_webui) {
             address?.let { endpoint ->
-                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(ShellFiles.browserUrl(endpoint)))) }
+                try {
+                    val uri = Uri.parse(ShellFiles.browserUrl(endpoint)).buildUpon().apply {
+                        pendingLink?.let { link ->
+                            path("/transfers")
+                            encodedFragment("ed2k=" + Uri.encode(link))
+                        }
+                    }.build()
+                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    pendingLink = null
+                    updatePendingLink()
+                }
                 catch (_: android.content.ActivityNotFoundException) { error.text = "Install a browser to open the WebUI" }
             }
         }
@@ -164,6 +186,11 @@ class MainActivity : Activity() {
         label("Client settings, sharing, transfers and diagnostics are available in the WebUI. Copy the API key into its sign-in screen.")
         label("Continuous operation uses battery and network traffic. All-files access is required; notifications and battery exemption are recommended.")
         setContentView(ScrollView(this).apply { addView(panel) })
+        if (savedInstanceState != null) {
+            pendingLink = savedInstanceState.getString("pending-link")
+            pendingLinkError = savedInstanceState.getString("pending-link-error") ?: ""
+            updatePendingLink()
+        } else acceptLink(intent)
         updateControls()
         setup.execute {
             try {
@@ -191,6 +218,42 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        acceptLink(intent)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("pending-link", pendingLink)
+        outState.putString("pending-link-error", pendingLinkError)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun acceptLink(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_VIEW) {
+            pendingLink = null
+            pendingLinkError = ""
+            try {
+                val raw = requireNotNull(intent.dataString)
+                require(raw.length <= 2048)
+                pendingLink = NativeBridge.call("validateLink", "link" to raw) as String
+            } catch (_: Exception) { pendingLinkError = "Unsupported or malformed eD2K file link" }
+        }
+        updatePendingLink()
+    }
+
+    private fun updatePendingLink() {
+        pending.show(pendingLink?.let { "Pending link: $it\nStart the service, then Open WebUI to review and add this file." } ?: "")
+        linkError.show(pendingLinkError)
+        discardLink.visibility = if (pendingLink != null || pendingLinkError.isNotEmpty()) View.VISIBLE else View.GONE
+    }
+
+    private fun TextView.show(value: String) {
+        // Avoid recurring accessibility changes while the service state is unchanged.
+        if (text.toString() != value) text = value
     }
 
     private fun launchSettings(intent: Intent) {
@@ -260,7 +323,7 @@ class MainActivity : Activity() {
             val exemption = requireNotNull(getSystemService(PowerManager::class.java)).isIgnoringBatteryOptimizations(packageName)
             val local = Build.VERSION.SDK_INT < 37 || checkSelfPermission(DaemonService.LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
             val restricted = requireNotNull(getSystemService(ActivityManager::class.java)).isBackgroundRestricted
-            permissions.text = "Files: ${if (Environment.isExternalStorageManager()) "allowed" else "required"}; local network: ${if (local) "allowed" else "required"}; notifications: ${if (notifications) "allowed" else "disabled"}; battery exemption: ${if (exemption) "allowed" else "disabled"}; background restriction: ${if (restricted) "enabled" else "disabled"}"
+            permissions.show("Files: ${if (Environment.isExternalStorageManager()) "allowed" else "required"}; local network: ${if (local) "allowed" else "required"}; notifications: ${if (notifications) "allowed" else "disabled"}; battery exemption: ${if (exemption) "allowed" else "disabled"}; background restriction: ${if (restricted) "enabled" else "disabled"}")
             handler.postDelayed(this, 1_000)
         }
     }

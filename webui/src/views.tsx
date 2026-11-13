@@ -1,5 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
+import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
 import {
   Ban,
   Clipboard,
@@ -244,7 +245,8 @@ export function TransfersView(props: {
   run: RunFunction;
 }) {
   const [stateFilter, setStateFilter] = useState("");
-  const [ed2kLinks, setEd2kLinks] = useState("");
+  const [handoff, setHandoff] = useState(() => readEd2kHandoff(window.location.hash));
+  const [ed2kLinks, setEd2kLinks] = useState(handoff?.link ?? "");
   const [pausedCreate, setPausedCreate] = useState(false);
   const [selectedHash, setSelectedHash] = useState("");
   const [details, setDetails] = useState<unknown>(null);
@@ -258,6 +260,21 @@ export function TransfersView(props: {
   );
   const selected = props.transfers.find((transfer) => transfer.hash === selectedHash);
   const selectedId = selected?.hash ?? "";
+
+  useEffect(() => {
+    const receive = () => {
+      const next = readEd2kHandoff(window.location.hash);
+      setHandoff(next);
+      if (next) setEd2kLinks(next.link);
+    };
+    window.addEventListener("hashchange", receive);
+    return () => window.removeEventListener("hashchange", receive);
+  }, []);
+
+  const consumeHandoff = () => {
+    if (handoff) clearEd2kHandoff();
+    setHandoff(null);
+  };
 
   useEffect(() => {
     if (!selectedId) {
@@ -298,6 +315,9 @@ export function TransfersView(props: {
     if (error) {
       throw new Error(error);
     }
+    // Explicit submission consumes the external handoff even if the operation
+    // needs a retry. The editable form remains available on failure.
+    consumeHandoff();
     await createDownloadWithPolicy((knownFilePolicy) =>
       props.client.post("transfers", { links, paused: pausedCreate, knownFilePolicy })
     );
@@ -355,6 +375,9 @@ export function TransfersView(props: {
             </button>
           </div>
         </div>
+        {handoff && <p class={handoff.error ? "field-error" : "text-secondary"}>
+          {handoff.error ?? "Review the linked file and press Add links to queue it."}
+        </p>}
         <form
           class="form-row"
           onSubmit={(event) => {
@@ -363,6 +386,7 @@ export function TransfersView(props: {
           }}
         >
           <textarea class="form-control"
+            aria-label="eD2K links"
             value={ed2kLinks}
             placeholder="One eD2K link per line"
             aria-invalid={transferLinksError ? "true" : "false"}
@@ -376,6 +400,10 @@ export function TransfersView(props: {
             <Download size={16} />
             Add links
           </button>
+          {handoff && <button class="btn" type="button" onClick={() => {
+            consumeHandoff();
+            setEd2kLinks("");
+          }}>Cancel links</button>}
         </form>
         {transferLinksError && <p class="field-error">{transferLinksError}</p>}
         <div class="table-wrap">

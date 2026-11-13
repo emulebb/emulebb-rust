@@ -13,6 +13,31 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test("preserves an eD2K handoff through sign-in and requires explicit confirmation", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  const link = "ed2k://|file|Sample%20%26%20Guide.bin|42|00112233445566778899aabbccddeeff|/";
+  await page.addInitScript(() => window.sessionStorage.clear());
+  await page.route("**/api/v1/**", installMockApi(requests));
+  await page.goto(`/transfers/#ed2k=${encodeURIComponent(link)}`);
+  await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
+  await expect(page).toHaveURL(/\/transfers#ed2k=/);
+  await page.getByLabel("API key", { exact: true }).fill("sample-key");
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  const input = page.getByRole("textbox", { name: "eD2K links" });
+  await expect(input).toHaveValue(link);
+  expect(requests.some((request) => request.method === "POST" && request.path === "transfers")).toBe(false);
+  await page.getByRole("button", { name: "Cancel links" }).click();
+  await expect(input).toHaveValue("");
+  await expect(page).toHaveURL(/\/transfers$/);
+  await page.evaluate((raw) => { window.location.hash = `ed2k=${encodeURIComponent(raw)}`; }, link);
+  await expect(input).toHaveValue(link);
+  expect(requests.some((request) => request.method === "POST" && request.path === "transfers")).toBe(false);
+  await page.getByRole("button", { name: "Add links" }).click();
+  await expect.poll(() => requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(1);
+  await expect(page).toHaveURL(/\/transfers$/);
+  await expect(input).toHaveValue("");
+});
+
 test("loads mocked dashboard data and navigates primary views", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
