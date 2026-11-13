@@ -2,8 +2,9 @@ plugins { id("com.android.application") }
 
 android {
     namespace = "org.emulebb.android"
-    compileSdk = 37
+    compileSdk { version = release(37) { minorApiLevel = 2 } }
     buildToolsVersion = "37.0.0"
+    ndkVersion = "30.0.16248370"
     defaultConfig {
         applicationId = "org.emulebb.android"
         minSdk = 34
