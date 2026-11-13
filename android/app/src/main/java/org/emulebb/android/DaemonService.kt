@@ -57,7 +57,7 @@ class DaemonService : Service() {
     private var network: Network? = null
     private var restartForNetwork = false
     private var stopFailures = 0
-    private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
+    private val connectivity by lazy { requireNotNull(getSystemService(ConnectivityManager::class.java)) }
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(available: Network) {
@@ -100,7 +100,7 @@ class DaemonService : Service() {
         ServiceRecovery.mayResume(this)
         error = prefs.getString("last-error", null)
         if (error != null) phase = "Failed"
-        getSystemService(NotificationManager::class.java).createNotificationChannel(
+        requireNotNull(getSystemService(NotificationManager::class.java)).createNotificationChannel(
             NotificationChannel(CHANNEL, "eMuleBB service", NotificationManager.IMPORTANCE_LOW))
         network = connectivity.activeNetwork
         connectivity.registerDefaultNetworkCallback(networkCallback)
@@ -156,7 +156,7 @@ class DaemonService : Service() {
             return START_NOT_STICKY
         }
         if (wakeLock == null) {
-            wakeLock = getSystemService(PowerManager::class.java).newWakeLock(
+            wakeLock = requireNotNull(getSystemService(PowerManager::class.java)).newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK, "$packageName:continuous-service").apply {
                 setReferenceCounted(false)
                 acquire()
@@ -235,7 +235,7 @@ class DaemonService : Service() {
                     finishStopped()
                     return
                 }
-                getSystemService(NotificationManager::class.java).notify(NOTICE, notification(phase))
+                requireNotNull(getSystemService(NotificationManager::class.java)).notify(NOTICE, notification(phase))
                 handler.postDelayed(this, 1_000)
             } catch (failure: Exception) {
                 error = failure.message ?: "Cannot inspect native runtime"

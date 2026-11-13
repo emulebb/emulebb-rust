@@ -61,7 +61,7 @@ class MainActivity : Activity() {
     private val replies = Messenger(object : Handler(Looper.getMainLooper()) {
         override fun handleMessage(message: Message) {
             if (message.what != DaemonService.STATUS) return
-            phase = message.data.getString("phase", "Stopped")
+            phase = message.data.getString("phase") ?: "Stopped"
             address = message.data.getString("address")
             status.text = phase
             message.data.getString("error")?.let { error.text = it }
@@ -135,7 +135,7 @@ class MainActivity : Activity() {
         button("Copy API key", R.id.copy_api_key) {
             val clip = ClipData.newPlainText("eMuleBB API key", key.text.toString())
             clip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
-            getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+            requireNotNull(getSystemService(ClipboardManager::class.java)).setPrimaryClip(clip)
             Toast.makeText(this, "API key copied", Toast.LENGTH_SHORT).show()
         }
         regenerate = button("Regenerate API key") { key.setText(ShellFiles.newKey()) }
@@ -257,9 +257,9 @@ class MainActivity : Activity() {
         override fun run() {
             queryStatus()
             val notifications = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-            val exemption = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+            val exemption = requireNotNull(getSystemService(PowerManager::class.java)).isIgnoringBatteryOptimizations(packageName)
             val local = Build.VERSION.SDK_INT < 37 || checkSelfPermission(DaemonService.LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
-            val restricted = getSystemService(ActivityManager::class.java).isBackgroundRestricted
+            val restricted = requireNotNull(getSystemService(ActivityManager::class.java)).isBackgroundRestricted
             permissions.text = "Files: ${if (Environment.isExternalStorageManager()) "allowed" else "required"}; local network: ${if (local) "allowed" else "required"}; notifications: ${if (notifications) "allowed" else "disabled"}; battery exemption: ${if (exemption) "allowed" else "disabled"}; background restriction: ${if (restricted) "enabled" else "disabled"}"
             handler.postDelayed(this, 1_000)
         }
