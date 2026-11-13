@@ -39,6 +39,7 @@ mod profile_ownership;
 mod rest_listener;
 pub mod shared_directory_import;
 mod shutdown;
+pub mod support_diagnostics;
 mod vpn_guard_monitor;
 
 pub use profile_import::{ProfileImportApplySummary, apply_profile_import};

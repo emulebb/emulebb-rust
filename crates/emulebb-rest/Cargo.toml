@@ -18,6 +18,7 @@ packet-diagnostics = ["emulebb-core/packet-diagnostics"]
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
+emulebb-diagnostics = { path = "../emulebb-diagnostics" }
 emulebb-core = { path = "../emulebb-core" }
 futures-util.workspace = true
 http-body-util.workspace = true

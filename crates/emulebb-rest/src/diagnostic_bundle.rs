@@ -1,8 +1,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     fmt::Write as _,
-    fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    fs,
     path::PathBuf,
     time::SystemTime,
 };
@@ -771,42 +770,18 @@ fn read_artifact_tail(
     max_bytes: u64,
     ignore_incomplete_final_line: bool,
 ) -> std::io::Result<TailRead> {
-    let mut file = File::open(&candidate.path)?;
-    let file_size = file.metadata()?.len();
-    let bytes_to_read = file_size.min(max_bytes);
-    let tail_start_offset = file_size.saturating_sub(bytes_to_read);
-    file.seek(SeekFrom::Start(tail_start_offset))?;
-    let mut bytes = Vec::with_capacity(bytes_to_read as usize);
-    file.take(bytes_to_read).read_to_end(&mut bytes)?;
-    let bytes_read = bytes.len();
-    if tail_start_offset > 0 {
-        if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
-            bytes.drain(..=newline);
-        } else {
-            bytes.clear();
-        }
-    }
-    let incomplete_final_line_ignored =
-        ignore_incomplete_final_line && bytes.last().is_some_and(|last| *last != b'\n');
-    if incomplete_final_line_ignored {
-        if let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
-            bytes.truncate(newline + 1);
-        } else {
-            bytes.clear();
-        }
-    }
-    let lines = bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect();
+    let tail = emulebb_diagnostics::log_tail::read_jsonl_tail(
+        &candidate.path,
+        max_bytes,
+        ignore_incomplete_final_line,
+    )?;
     Ok(TailRead {
         file_name: candidate.file_name.clone(),
-        file_size,
-        tail_start_offset,
-        bytes_read,
-        incomplete_final_line_ignored,
-        lines,
+        file_size: tail.file_size,
+        tail_start_offset: tail.tail_start_offset,
+        bytes_read: tail.bytes_read,
+        incomplete_final_line_ignored: tail.incomplete_final_line_ignored,
+        lines: tail.lines,
     })
 }
 

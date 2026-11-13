@@ -11,6 +11,8 @@
 //! and `EMULEBB_RUST_DIAG_MIN_FREE_BYTES` values. Scan, deletion, free-space
 //! probe, and writer I/O faults fail closed and remain latched in writer health.
 
+pub mod log_tail;
+
 #[cfg(any(feature = "enabled", test))]
 use std::{
     collections::HashMap,

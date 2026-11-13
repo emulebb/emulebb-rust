@@ -41,6 +41,8 @@ packet-diagnostics = [
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+chrono.workspace = true
+emulebb-diagnostics = { path = "../emulebb-diagnostics" }
 emulebb-core = { path = "../emulebb-core" }
 emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
