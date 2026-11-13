@@ -18,6 +18,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
 enum Request {
+    ShareDiagnostics {
+        profile_dir: PathBuf,
+    },
     ValidateLink {
         link: String,
     },
@@ -96,6 +99,9 @@ fn ensure_process_logging(profile: &std::path::Path) -> Result<()> {
 
 fn handle(request: Request) -> Result<Value> {
     match request {
+        Request::ShareDiagnostics { profile_dir } => {
+            emulebb_daemon::support_diagnostics::capture(&profile_dir)
+        }
         Request::ValidateLink { link } => {
             emulebb_daemon::validate_ed2k_file_link(&link)?;
             Ok(Value::String(link))
