@@ -134,7 +134,19 @@ class DaemonService : Service() {
         desired.set(true)
         error = null
         stopFailures = 0
-        startForeground(NOTICE, notification("Starting"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        try {
+            startForeground(NOTICE, notification("Starting"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } catch (failure: Exception) {
+            // Promotion happens before native startup. A platform/AppOp denial
+            // must be visible rather than becoming an automatic crash loop.
+            error = "Android refused the foreground service: ${failure.javaClass.simpleName}"
+            setDesired(false)
+            phase = "Failed"
+            prefs.edit().putString("last-error", error).commit()
+            releaseWakeLock()
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (!Environment.isExternalStorageManager()) {
             fail("All-files access is required. Open the app to grant it.")
             return START_NOT_STICKY
