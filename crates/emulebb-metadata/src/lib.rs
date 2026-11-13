@@ -55,7 +55,7 @@ pub use search_model::{
     MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,
 };
 pub use search_store::normalized_search_query;
-pub use store::MetadataStore;
+pub use store::{InitialProfileStorage, MetadataStore};
 pub use text::normalize_search_text;
 pub use transfer_model::{
     MetadataFileImportRecord, MetadataSharedSourceFailure, MetadataTransferAichIdentity,

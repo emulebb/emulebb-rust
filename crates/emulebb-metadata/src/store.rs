@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -21,12 +21,21 @@ use crate::{
 /// its current sources from the network, so older rows are pruned on startup.
 const TRANSFER_SOURCE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// Canonical host folder values to commit together with a newly initialized schema.
+pub struct InitialProfileStorage {
+    pub incoming_dir: PathBuf,
+    pub shared_dir: PathBuf,
+}
+
+type StorageInitializer = Box<dyn FnOnce() -> Result<InitialProfileStorage>>;
+
 #[derive(Debug, Clone)]
 pub struct MetadataStore {
     conn: Arc<Mutex<Connection>>,
     // WHY: close the connection before releasing its process profile lease.
     // Clones retain both handles; independent profile connections share the lease.
     _profile_lease: Option<Arc<File>>,
+    initialized_new_schema: bool,
 }
 
 impl MetadataStore {
@@ -41,7 +50,26 @@ impl MetadataStore {
     /// Every cloned store retains it until its connection has finished closing.
     pub fn open_with_profile_lease(path: impl AsRef<Path>, lease: Arc<File>) -> Result<Self> {
         let conn = Connection::open(path)?;
-        Self::from_connection_with_profile_lease(conn, Some(lease))
+        Self::from_connection_with_profile_lease(conn, Some(lease), None)
+    }
+
+    /// Apply storage defaults only within fresh-schema creation. The factory is
+    /// never called for an existing schema, including an empty operator root list.
+    pub fn open_with_profile_lease_and_storage(
+        path: impl AsRef<Path>,
+        lease: Arc<File>,
+        initialize: impl FnOnce() -> Result<InitialProfileStorage> + 'static,
+    ) -> Result<Self> {
+        Self::from_connection_with_profile_lease(
+            Connection::open(path)?,
+            Some(lease),
+            Some(Box::new(initialize)),
+        )
+    }
+
+    /// Whether this connection initialized the profile rather than opening one.
+    pub fn initialized_new_schema(&self) -> bool {
+        self.initialized_new_schema
     }
 
     pub fn in_memory() -> Result<Self> {
@@ -49,18 +77,20 @@ impl MetadataStore {
     }
 
     pub fn from_connection(conn: Connection) -> Result<Self> {
-        Self::from_connection_with_profile_lease(conn, None)
+        Self::from_connection_with_profile_lease(conn, None, None)
     }
 
     fn from_connection_with_profile_lease(
         conn: Connection,
         profile_lease: Option<Arc<File>>,
+        initialize_storage: Option<StorageInitializer>,
     ) -> Result<Self> {
         // The guarded constructor retains ownership before any pragma/schema
         // initialization, including all early-error exits below.
         let mut store = Self {
             conn: Arc::new(Mutex::new(conn)),
             _profile_lease: profile_lease,
+            initialized_new_schema: false,
         };
         {
             let conn = store.connection()?;
@@ -80,7 +110,7 @@ impl MetadataStore {
             // SQLITE_BUSY (the persistence audit flagged the absent busy_timeout).
             conn.pragma_update(None, "busy_timeout", 5000)?;
         }
-        store.ensure_schema()?;
+        store.initialized_new_schema = store.ensure_schema(initialize_storage)?;
         store.connection()?.execute_batch(
             "CREATE TEMP TABLE session_verified_local_paths (
                 path_id INTEGER PRIMARY KEY,
@@ -113,7 +143,7 @@ impl MetadataStore {
     /// database, and otherwise requires the stored schema marker to match exactly.
     /// An incompatible product profile must be replaced with an entirely fresh
     /// profile; this crate never migrates, repairs, or resets it.
-    fn ensure_schema(&mut self) -> Result<()> {
+    fn ensure_schema(&mut self, initialize_storage: Option<StorageInitializer>) -> Result<bool> {
         if self.table_exists("metadata_schema")? {
             let stored_version = self
                 .stored_schema_version()?
@@ -124,13 +154,14 @@ impl MetadataStore {
             );
             crate::schema_validation::validate(&*self.connection()?)?;
             self.prune_transfer_sources()?;
-            return Ok(());
+            return Ok(false);
         }
         ensure!(
             !self.has_user_tables()?,
             "metadata database has existing user objects but no metadata_schema marker; refusing to create or repair schema in Rust"
         );
-        self.create_schema()
+        self.create_schema(initialize_storage)?;
+        Ok(true)
     }
 
     fn stored_schema_version(&self) -> Result<Option<i64>> {
@@ -194,7 +225,7 @@ impl MetadataStore {
         Ok(count != 0)
     }
 
-    fn create_schema(&mut self) -> Result<()> {
+    fn create_schema(&mut self, initialize_storage: Option<StorageInitializer>) -> Result<()> {
         let now = unix_ms();
         let profile_uuid = Uuid::new_v4().to_string();
         let mut conn = self.connection()?;
@@ -211,6 +242,13 @@ impl MetadataStore {
             "#,
             params![profile_uuid, now],
         )?;
+        // WHY: publishing the schema marker before host defaults can make a
+        // failed first start permanently skip its folders on retry. Both belong
+        // to the same transaction; failed initialization leaves no current schema.
+        if let Some(initialize) = initialize_storage {
+            let storage = initialize()?;
+            crate::profile_store::seed_host_storage_defaults(&tx, &storage)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -720,6 +758,65 @@ pub(crate) fn unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_storage_failure_rolls_back_schema_and_retry_preserves_later_edits() {
+        let path =
+            std::env::temp_dir().join(format!("emulebb-initial-storage-{}.db", Uuid::new_v4()));
+        let rejected = MetadataStore::from_connection_with_profile_lease(
+            Connection::open(&path).unwrap(),
+            None,
+            Some(Box::new(|| anyhow::bail!("injected initializer failure"))),
+        );
+        assert!(rejected.is_err());
+        let inspect = Connection::open(&path).unwrap();
+        assert_eq!(inspect.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        drop(inspect);
+        let incoming = path.with_extension("incoming");
+        let shared = path.with_extension("shared");
+        let wanted = incoming.clone();
+        let mut store = MetadataStore::from_connection_with_profile_lease(
+            Connection::open(&path).unwrap(),
+            None,
+            Some(Box::new(move || {
+                Ok(InitialProfileStorage {
+                    incoming_dir: incoming,
+                    shared_dir: shared,
+                })
+            })),
+        )
+        .unwrap();
+        assert!(store.initialized_new_schema());
+        let actual: String = store.connection().unwrap().query_row(
+            "SELECT json_extract(value_json, '$') FROM settings WHERE section = 'daemon' AND key = 'incomingDir'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(actual, wanted.to_str().unwrap());
+        assert_eq!(store.shared_directory_roots().unwrap().len(), 1);
+        store
+            .put_setting_json("daemon", "incomingDir", "null")
+            .unwrap();
+        store.replace_shared_directory_roots(&[]).unwrap();
+        drop(store);
+        let store = MetadataStore::from_connection_with_profile_lease(
+            Connection::open(&path).unwrap(),
+            None,
+            Some(Box::new(|| {
+                panic!("existing profile must not invoke its initializer")
+            })),
+        )
+        .unwrap();
+        assert!(!store.initialized_new_schema());
+        assert_eq!(
+            store
+                .load_setting_json("daemon", "incomingDir")
+                .unwrap()
+                .as_deref(),
+            Some("null")
+        );
+        assert!(store.shared_directory_roots().unwrap().is_empty());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
     use rusqlite::Connection;
 
     #[test]

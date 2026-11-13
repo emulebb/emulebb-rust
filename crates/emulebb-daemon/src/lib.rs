@@ -17,7 +17,9 @@ use emulebb_ed2k::{
     ipfilter::IpFilter,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
-use emulebb_metadata::{MetadataLocalIdentity, MetadataStore, SCHEMA_VERSION};
+use emulebb_metadata::{
+    InitialProfileStorage, MetadataLocalIdentity, MetadataStore, SCHEMA_VERSION,
+};
 use emulebb_rest::{RestServerSettings, router_with_shutdown};
 use emulebb_settings::{
     DaemonSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
@@ -185,32 +187,37 @@ impl DaemonProfile {
                 )
             })?;
         let metadata_path = profile_lease.directory().join(PROFILE_METADATA_FILE);
-        // WHY: a packaged bootstrap already exists before its first run. Seed
-        // network defaults only for a new database, never from TOML existence.
-        let fresh_metadata = !metadata_path.exists();
-        if fresh_metadata && let Some((incoming, shared)) = &host_folders {
-            anyhow::ensure!(
-                incoming.is_absolute() && shared.is_absolute(),
-                "host folders must be absolute"
-            );
-            fs::create_dir_all(incoming)?;
-            fs::create_dir_all(shared)?;
-        }
-        let metadata = MetadataStore::open_with_profile_lease(metadata_path, profile_lease.file())
-            .with_context(|| {
-                format!(
-                    "failed to open metadata store under {}",
-                    profile_dir.display()
-                )
-            })?;
-        if fresh_metadata {
+        let opened = match host_folders {
+            Some((incoming, shared)) => MetadataStore::open_with_profile_lease_and_storage(
+                metadata_path,
+                profile_lease.file(),
+                move || {
+                    anyhow::ensure!(
+                        incoming.is_absolute() && shared.is_absolute(),
+                        "host folders must be absolute"
+                    );
+                    fs::create_dir_all(&incoming)?;
+                    fs::create_dir_all(&shared)?;
+                    Ok(InitialProfileStorage {
+                        incoming_dir: PathBuf::from(emulebb_core::normal_path_display(
+                            incoming.canonicalize()?,
+                        )),
+                        shared_dir: PathBuf::from(emulebb_core::normal_path_display(
+                            shared.canonicalize()?,
+                        )),
+                    })
+                },
+            ),
+            None => MetadataStore::open_with_profile_lease(metadata_path, profile_lease.file()),
+        };
+        let metadata = opened.with_context(|| {
+            format!(
+                "failed to open metadata store under {}",
+                profile_dir.display()
+            )
+        })?;
+        if metadata.initialized_new_schema() {
             seed_default_profile_network_settings(&metadata)?;
-            if let Some((incoming, shared)) = host_folders {
-                let incoming = emulebb_core::normal_path_display(incoming.canonicalize()?);
-                let shared =
-                    PathBuf::from(emulebb_core::normal_path_display(shared.canonicalize()?));
-                metadata.seed_host_storage_defaults(&serde_json::to_string(&incoming)?, &shared)?;
-            }
         }
         let settings = load_settings(&metadata)?;
         let profile = Self {
