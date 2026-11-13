@@ -49,6 +49,7 @@ pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
 pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
 pub use emulebb_core::{
     BUILD_CHANNEL, BUILD_SOURCE_REVISION, BUILD_VERSION, build_version_description,
+    validate_ed2k_file_link,
 };
 
 const REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);

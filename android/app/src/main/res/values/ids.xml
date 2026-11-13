@@ -8,4 +8,6 @@
     <item name="copy_api_key" type="id" />
     <item name="open_webui" type="id" />
     <item name="resume_on_boot" type="id" />
+    <item name="pending_link" type="id" />
+    <item name="pending_link_error" type="id" />
 </resources>

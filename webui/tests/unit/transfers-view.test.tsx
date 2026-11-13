@@ -4,9 +4,44 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RestClient, RestError } from "../../src/api";
 import { TransfersView } from "../../src/views";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "/");
+});
 
 describe("TransfersView", () => {
+  it("prefills an encoded external link, waits for submission and consumes the fragment", async () => {
+    const link = "ed2k://|file|Sample%20%26%20Guide.bin|42|00112233445566778899aabbccddeeff|/";
+    window.history.replaceState(null, "", `/transfers#ed2k=${encodeURIComponent(link)}`);
+    const client = new RestClient();
+    const post = vi.spyOn(client, "post").mockResolvedValue({});
+    render(<TransfersView transfers={[]} categories={[]} client={client} run={async (operation) => { await operation(); }} />);
+    expect(screen.getByRole("textbox", { name: "eD2K links" })).toHaveValue(link);
+    expect(post).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Add links" }));
+    await waitFor(() => expect(post).toHaveBeenCalledOnce());
+    expect(post).toHaveBeenCalledWith("transfers", { links: [link], paused: false, knownFilePolicy: "reject" });
+    expect(window.location.hash).toBe("");
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "eD2K links" })).toHaveValue(""));
+  });
+
+  it("rejects ambiguous handoffs and cancels a later link without queuing anything", async () => {
+    const link = "ed2k://|file|Sample.bin|42|00112233445566778899aabbccddeeff|/";
+    window.history.replaceState(null, "", `/transfers#ed2k=${encodeURIComponent(link)}&ed2k=${encodeURIComponent(link)}`);
+    const client = new RestClient();
+    const post = vi.spyOn(client, "post");
+    render(<TransfersView transfers={[]} categories={[]} client={client} run={async (operation) => { await operation(); }} />);
+    expect(screen.getByText("Unsupported or malformed eD2K file link")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "eD2K links" })).toHaveValue("");
+    window.history.replaceState(null, "", `/transfers#ed2k=${encodeURIComponent(link)}`);
+    fireEvent(window, new Event("hashchange"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "eD2K links" })).toHaveValue(link));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel links" }));
+    expect(window.location.hash).toBe("");
+    expect(screen.getByRole("textbox", { name: "eD2K links" })).toHaveValue("");
+    expect(post).not.toHaveBeenCalled();
+  });
+
   it("uses reject first and retries only after redownload confirmation", async () => {
     const hash = "00112233445566778899aabbccddeeff";
     const link = `ed2k://|file|Sample.bin|1|${hash}|/`;

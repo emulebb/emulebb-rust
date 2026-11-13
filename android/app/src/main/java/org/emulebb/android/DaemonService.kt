@@ -57,6 +57,7 @@ class DaemonService : Service() {
     private var network: Network? = null
     private var restartForNetwork = false
     private var stopFailures = 0
+    private var notifiedPhase: String? = null
     private val connectivity by lazy { requireNotNull(getSystemService(ConnectivityManager::class.java)) }
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -136,6 +137,7 @@ class DaemonService : Service() {
         stopFailures = 0
         try {
             startForeground(NOTICE, notification("Starting"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            notifiedPhase = "Starting"
         } catch (failure: Exception) {
             // Promotion happens before native startup. A platform/AppOp denial
             // must be visible rather than becoming an automatic crash loop.
@@ -235,7 +237,10 @@ class DaemonService : Service() {
                     finishStopped()
                     return
                 }
-                requireNotNull(getSystemService(NotificationManager::class.java)).notify(NOTICE, notification(phase))
+                if (notifiedPhase != phase) {
+                    requireNotNull(getSystemService(NotificationManager::class.java)).notify(NOTICE, notification(phase))
+                    notifiedPhase = phase
+                }
                 handler.postDelayed(this, 1_000)
             } catch (failure: Exception) {
                 error = failure.message ?: "Cannot inspect native runtime"

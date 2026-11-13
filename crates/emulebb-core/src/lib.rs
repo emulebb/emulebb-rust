@@ -7409,6 +7409,22 @@ struct ParsedEd2kLink {
     sources: Vec<Ed2kSourceHint>,
 }
 
+/// Validate an external file-link handoff without opening a profile or queuing work.
+/// Transfer creation remains an explicit, separately authenticated operation.
+pub fn validate_ed2k_file_link(link: &str) -> Result<()> {
+    ensure!(
+        link.len() <= 2048 && !link.chars().any(|c| c.is_whitespace() || c.is_control()),
+        "ED2K file link must be bounded and contain no whitespace or controls"
+    );
+    let parsed = parse_ed2k_link(link)?;
+    let _: Ed2kHash = parsed.file_hash.parse().context("invalid ED2K file hash")?;
+    ensure!(
+        !parsed.name.is_empty() && !parsed.name.chars().any(char::is_control),
+        "invalid ED2K file name"
+    );
+    Ok(())
+}
+
 fn parse_ed2k_link(link: &str) -> Result<ParsedEd2kLink> {
     let parts = link
         .strip_prefix("ed2k://|file|")

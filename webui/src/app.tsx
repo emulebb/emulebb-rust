@@ -125,7 +125,7 @@ function currentRoute(): AppRoute {
   if (route) {
     const canonicalPath = pathForRoute(route);
     if (window.location.pathname !== canonicalPath) {
-      window.history.replaceState(null, "", canonicalPath);
+      window.history.replaceState(null, "", canonicalPath + window.location.search + window.location.hash);
     }
     return route;
   }
