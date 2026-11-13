@@ -2,6 +2,7 @@ package org.emulebb.android
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
@@ -123,6 +124,9 @@ class MainActivity : Activity() {
         }.isEnabled = Build.VERSION.SDK_INT >= 37
         button("Allow continuous background operation") {
             launchSettings(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        }
+        button("App battery settings") {
+            launchSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         }
         label("REST bind address")
         bind = edit("REST bind address", R.id.bind_addr).apply { setText("127.0.0.1:20017") }
@@ -255,7 +259,8 @@ class MainActivity : Activity() {
             val notifications = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
             val exemption = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
             val local = Build.VERSION.SDK_INT < 37 || checkSelfPermission(DaemonService.LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
-            permissions.text = "Files: ${if (Environment.isExternalStorageManager()) "allowed" else "required"}; local network: ${if (local) "allowed" else "required"}; notifications: ${if (notifications) "allowed" else "disabled"}; battery exemption: ${if (exemption) "allowed" else "disabled"}"
+            val restricted = getSystemService(ActivityManager::class.java).isBackgroundRestricted
+            permissions.text = "Files: ${if (Environment.isExternalStorageManager()) "allowed" else "required"}; local network: ${if (local) "allowed" else "required"}; notifications: ${if (notifications) "allowed" else "disabled"}; battery exemption: ${if (exemption) "allowed" else "disabled"}; background restriction: ${if (restricted) "enabled" else "disabled"}"
             handler.postDelayed(this, 1_000)
         }
     }

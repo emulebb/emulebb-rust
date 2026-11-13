@@ -15,7 +15,11 @@ class BootReceiver : BroadcastReceiver() {
             else -> false
         }
         if (enabled && allowed) {
-            context.startForegroundService(Intent(context, DaemonService::class.java).setAction(DaemonService.RESUME))
+            try {
+                context.startForegroundService(Intent(context, DaemonService::class.java).setAction(DaemonService.RESUME))
+            } catch (_: Exception) {
+                prefs.edit().putString("last-error", "Android blocked automatic service startup. Open the app and check its battery settings.").commit()
+            }
         }
     }
 }
