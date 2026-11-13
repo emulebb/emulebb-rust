@@ -10,4 +10,9 @@
     <item name="resume_on_boot" type="id" />
     <item name="pending_link" type="id" />
     <item name="pending_link_error" type="id" />
+    <item name="grant_all_files_access" type="id" />
+    <item name="allow_notifications" type="id" />
+    <item name="allow_local_network" type="id" />
+    <item name="allow_continuous_background" type="id" />
+    <item name="app_battery_settings" type="id" />
 </resources>
