@@ -1,5 +1,10 @@
 plugins { id("com.android.application") }
 
+abstract class StageAssets : Sync() {
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+}
+
 android {
     namespace = "org.emulebb.android"
     compileSdk { version = release(37) { minorApiLevel = 2 } }
@@ -19,8 +24,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     sourceSets.getByName("main") {
-        jniLibs.srcDir(providers.gradleProperty("emulebbNativeDir").get())
-        assets.srcDir(layout.buildDirectory.dir("generated/assets"))
+        jniLibs.directories.add(providers.gradleProperty("emulebbNativeDir").get())
     }
     packaging {
         jniLibs {
@@ -31,9 +35,12 @@ android {
     }
 }
 
-val stageAssets by tasks.registering(Sync::class) {
-    into(layout.buildDirectory.dir("generated/assets"))
+val stageAssets = tasks.register<StageAssets>("stageAssets") {
+    outputDirectory.set(layout.buildDirectory.dir("generated/assets"))
+    into(outputDirectory)
     from(providers.gradleProperty("emulebbWebuiDir")) { into("webui") }
     from(providers.gradleProperty("emulebbNoticesDir")) { into("licenses") }
 }
-tasks.named("preBuild") { dependsOn(stageAssets) }
+androidComponents.onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(stageAssets, StageAssets::outputDirectory)
+}
