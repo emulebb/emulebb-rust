@@ -20,3 +20,6 @@ jni.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true

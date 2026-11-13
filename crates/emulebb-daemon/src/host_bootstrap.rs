@@ -9,6 +9,13 @@ use super::{
     RestBootstrapSettings,
 };
 
+/// Execute application-owned maintenance only while no daemon owns this profile.
+/// The operation must finish before returning; ownership never escapes this call.
+pub fn while_stopped<T>(profile_dir: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _lease = ProfileLease::acquire(profile_dir, true)?;
+    operation()
+}
+
 /// Read existing settings without opening or changing the metadata database.
 /// Atomic bootstrap publication permits read-only setup/status UI while the
 /// daemon owns the profile. Only writes require an exclusive profile lease.
@@ -110,6 +117,7 @@ mod tests {
             original
         );
         for text in [
+            "[rest]\napi_key = '0123456789abcdef0123456789abcdef'",
             "[rest]\nbindAddr = '127.0.0.1:20017'",
             "[rest]\nbind_addr = 'invalid'",
             "[rest]\napi_key = 'short'",
