@@ -244,7 +244,7 @@ fn retargeted_profile_alias_keeps_io_in_the_leased_directory() {
         fs::canonicalize(&other).unwrap()
     );
 
-    let profile = DaemonProfile::load_owned(alias.clone(), lease).unwrap();
+    let profile = DaemonProfile::load_owned(alias.clone(), lease, None).unwrap();
     let metadata = profile.open_metadata_store().unwrap();
     put_setting(&metadata, "fixture", "leased", serde_json::json!(true));
     let leased = fs::canonicalize(leased).unwrap();
@@ -449,6 +449,69 @@ fn default_profile_candidate_is_the_executable_directory() {
     assert_eq!(
         default_profile_dir().unwrap(),
         env::current_exe().unwrap().parent().unwrap()
+    );
+}
+
+#[test]
+fn hosted_folder_defaults_are_canonical_and_never_reseed_operator_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("profile");
+    let incoming = temp.path().join("Downloads/eMuleBB/Incoming");
+    let shared = temp.path().join("Downloads/eMuleBB/Shared");
+    let profile =
+        DaemonProfile::load_hosted(directory.clone(), incoming.clone(), shared.clone()).unwrap();
+    assert_eq!(
+        profile.incoming_dir(),
+        PathBuf::from(emulebb_core::normal_path_display(
+            incoming.canonicalize().unwrap()
+        ))
+    );
+    let mut metadata = profile.open_metadata_store().unwrap();
+    assert_eq!(metadata.shared_directory_roots().unwrap().len(), 1);
+    assert_eq!(
+        metadata.shared_directory_roots().unwrap()[0].path,
+        emulebb_core::normal_path_display(shared.canonicalize().unwrap())
+    );
+    let edited = temp.path().join("operator-incoming");
+    metadata
+        .put_setting_json(
+            SECTION_DAEMON,
+            "incomingDir",
+            &serde_json::to_string(&edited).unwrap(),
+        )
+        .unwrap();
+    metadata.replace_shared_directory_roots(&[]).unwrap();
+    drop(metadata);
+    drop(profile);
+    let profile = DaemonProfile::load_hosted(directory, incoming, shared).unwrap();
+    assert_eq!(profile.incoming_dir(), edited);
+    assert!(
+        profile
+            .open_metadata_store()
+            .unwrap()
+            .shared_directory_roots()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn hosted_defaults_do_not_reinterpret_an_existing_unconfigured_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("profile");
+    drop(DaemonProfile::load(Some(directory.clone())).unwrap());
+    let incoming = temp.path().join("not-created-incoming");
+    let shared = temp.path().join("not-created-shared");
+    let profile = DaemonProfile::load_hosted(directory, incoming.clone(), shared.clone()).unwrap();
+    assert!(profile.incoming_dir.is_none());
+    assert!(!incoming.exists() && !shared.exists());
+    assert!(
+        profile
+            .open_metadata_store()
+            .unwrap()
+            .shared_directory_roots()
+            .unwrap()
+            .is_empty()
     );
 }
 

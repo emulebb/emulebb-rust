@@ -38,6 +38,7 @@ enum Request {
         profile_dir: PathBuf,
         transfer_root: PathBuf,
         incoming_dir: PathBuf,
+        shared_dir: PathBuf,
     },
     Stop {},
     Status {},
@@ -137,11 +138,13 @@ fn handle(request: Request) -> Result<Value> {
             profile_dir,
             transfer_root,
             incoming_dir,
+            shared_dir,
         } => {
             ensure!(
                 profile_dir.is_absolute()
                     && transfer_root.is_absolute()
-                    && incoming_dir.is_absolute(),
+                    && incoming_dir.is_absolute()
+                    && shared_dir.is_absolute(),
                 "host directories must be absolute"
             );
             let mut state = host()
@@ -167,10 +170,9 @@ fn handle(request: Request) -> Result<Value> {
             let worker = std::thread::Builder::new().name("emulebb-android".into()).spawn(move || {
                 let outcome = std::panic::catch_unwind(|| -> Result<()> {
                     if shutdown.subscribe().is_requested() { return Ok(()); }
-                    let mut profile = DaemonProfile::load(Some(profile_dir))?;
+                    let mut profile = DaemonProfile::load_hosted(profile_dir, incoming_dir, shared_dir)?;
                     ensure_process_logging(profile.profile_io_dir())?;
                     profile.host_transfer_root = Some(transfer_root);
-                    if profile.incoming_dir.is_none() { profile.incoming_dir = Some(incoming_dir); }
                     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
                     let outcome = runtime.block_on(async {
                         let (ready, mut readiness) = tokio::sync::oneshot::channel();

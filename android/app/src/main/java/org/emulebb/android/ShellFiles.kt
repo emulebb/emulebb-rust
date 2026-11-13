@@ -9,6 +9,9 @@ import java.security.SecureRandom
 
 internal object ShellFiles {
     fun profile(context: Context) = File(context.filesDir, "profile")
+    fun publicRoot() = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "eMuleBB")
+    fun defaultIncoming() = File(publicRoot(), "Incoming")
+    fun defaultShared() = File(publicRoot(), "Shared")
 
     fun newKey(): String = ByteArray(32).also { SecureRandom().nextBytes(it) }
         .joinToString("") { "%02x".format(it.toInt() and 255) }
@@ -63,9 +66,9 @@ internal object ShellFiles {
 
     fun start(context: Context) {
         val external = context.getExternalFilesDir(null) ?: error("Payload storage is unavailable")
-        val incoming = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "eMuleBB")
         NativeBridge.call("start", "profile_dir" to profile(context).absolutePath,
-            "transfer_root" to File(external, "transfers").absolutePath, "incoming_dir" to incoming.absolutePath)
+            "transfer_root" to File(external, "transfers").absolutePath,
+            "incoming_dir" to defaultIncoming().absolutePath, "shared_dir" to defaultShared().absolutePath)
     }
 
     fun browserUrl(address: String): String {

@@ -26,6 +26,7 @@ import android.provider.Settings
 import android.text.InputType
 import android.view.View
 import android.view.WindowManager
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -116,7 +117,7 @@ class MainActivity : Activity() {
         fun button(text: String, id: Int = View.NO_ID, action: () -> Unit) = Button(this).apply {
             this.text = text; this.id = id; setOnClickListener { action() }; panel.addView(this)
         }
-        label("eMuleBB ${BuildConfig.VERSION_NAME}")
+        label("eMuleBB ${BuildConfig.VERSION_NAME}", R.id.app_version)
         status = label("Stopped", R.id.service_status)
         error = label("")
         permissions = label("")
@@ -152,7 +153,8 @@ class MainActivity : Activity() {
         }
         regenerate = button("Regenerate API key") { key.setText(ShellFiles.newKey()) }
         save = button("Save settings") { saveSettings(false) }
-        label("Starting enables the eD2K/Kad peer service; new profiles connect automatically. Incoming files are shared automatically. Completed files default to Downloads/eMuleBB. Manage folders and sharing in the WebUI.")
+        label("Starting enables the eD2K/Kad peer service; new profiles connect automatically. Incoming files are shared automatically.")
+        label("New-profile folders:\nCompleted and shared: ${ShellFiles.defaultIncoming()}\nAdditional sharing: ${ShellFiles.defaultShared()}\nIncomplete files stay in app-managed storage. Manage current folders in WebUI Settings and Sharing; changes are preserved.", R.id.storage_paths)
         start = button("Start", R.id.start_service) { saveSettings(true) }
         stop = button("Stop", R.id.stop_service) {
             phase = "Stopping"
@@ -186,7 +188,15 @@ class MainActivity : Activity() {
         }
         label("Client settings, sharing, transfers and diagnostics are available in the WebUI. Copy the API key into its sign-in screen.")
         label("Continuous operation uses battery and network traffic. All-files access is required; notifications and battery exemption are recommended.")
-        setContentView(ScrollView(this).apply { addView(panel) })
+        val scroll = ScrollView(this).apply { addView(panel) }
+        window.setDecorFitsSystemWindows(false)
+        scroll.setOnApplyWindowInsetsListener { view, insets ->
+            val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime())
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+        setContentView(scroll)
+        scroll.requestApplyInsets()
         if (savedInstanceState != null) {
             pendingLink = savedInstanceState.getString("pending-link")
             pendingLinkError = savedInstanceState.getString("pending-link-error") ?: ""

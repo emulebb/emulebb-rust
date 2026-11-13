@@ -147,14 +147,25 @@ impl DaemonProfile {
         Self::load_from_dir(profile_dir)
     }
 
+    /// Load an application profile, applying folder defaults only to a new database.
+    /// Existing canonical settings and removed sharing roots are never reseeded.
+    pub fn load_hosted(profile_dir: PathBuf, incoming: PathBuf, shared: PathBuf) -> Result<Self> {
+        let lease = ProfileLease::acquire(&profile_dir, true)?;
+        Self::load_owned(profile_dir, lease, Some((incoming, shared)))
+    }
+
     fn load_from_dir(profile_dir: PathBuf) -> Result<Self> {
         // WHY: bootstrap creation, schema initialization and reads of mutable
         // state must all belong to the same exclusive writable-profile session.
         let profile_lease = ProfileLease::acquire(&profile_dir, true)?;
-        Self::load_owned(profile_dir, profile_lease)
+        Self::load_owned(profile_dir, profile_lease, None)
     }
 
-    fn load_owned(profile_dir: PathBuf, profile_lease: ProfileLease) -> Result<Self> {
+    fn load_owned(
+        profile_dir: PathBuf,
+        profile_lease: ProfileLease,
+        host_folders: Option<(PathBuf, PathBuf)>,
+    ) -> Result<Self> {
         let settings_path = profile_lease.directory().join(PROFILE_SETTINGS_FILE);
         if !settings_path.exists() {
             create_default_profile_bootstrap(&profile_dir, &settings_path)?;
@@ -176,6 +187,14 @@ impl DaemonProfile {
         // WHY: a packaged bootstrap already exists before its first run. Seed
         // network defaults only for a new database, never from TOML existence.
         let fresh_metadata = !metadata_path.exists();
+        if fresh_metadata && let Some((incoming, shared)) = &host_folders {
+            anyhow::ensure!(
+                incoming.is_absolute() && shared.is_absolute(),
+                "host folders must be absolute"
+            );
+            fs::create_dir_all(incoming)?;
+            fs::create_dir_all(shared)?;
+        }
         let metadata = MetadataStore::open_with_profile_lease(metadata_path, profile_lease.file())
             .with_context(|| {
                 format!(
@@ -185,6 +204,13 @@ impl DaemonProfile {
             })?;
         if fresh_metadata {
             seed_default_profile_network_settings(&metadata)?;
+            if let Some((incoming, shared)) = host_folders {
+                let incoming = emulebb_core::normal_path_display(incoming.canonicalize()?);
+                metadata.seed_host_storage_defaults(
+                    &serde_json::to_string(&incoming)?,
+                    &shared.canonicalize()?,
+                )?;
+            }
         }
         let settings = load_settings(&metadata)?;
         let profile = Self {
