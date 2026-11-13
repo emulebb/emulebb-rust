@@ -97,6 +97,7 @@ class DaemonService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        ServiceRecovery.mayResume(this)
         error = prefs.getString("last-error", null)
         if (error != null) phase = "Failed"
         getSystemService(NotificationManager::class.java).createNotificationChannel(
