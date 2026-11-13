@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/emulebb-android",
     "crates/emulebb-core",
     "crates/emulebb-daemon",
     "crates/emulebb-diagnostics",
@@ -57,6 +58,7 @@ if-addrs = "0.15"
 ipnet = "2"
 ipconfig = "0.3"
 libc = "0.2"
+jni = "0.22.4"
 md4 = "0.11"
 md5 = "0.8"
 notify = "8"
