@@ -55,8 +55,19 @@ Versioned tags are available; pin a verified digest for a repeatable deployment.
 There is no `latest` tag.
 
 Native macOS package smoke runs on Intel and Apple Silicon. Android bundles
-have compile/ELF checks; device runtime, completed-file delivery, route discovery
-and VPN behavior remain unqualified. Linux musl bundles are separate from Android.
+remain experimental native CLI packages. An API 37/x86_64/16 KiB emulator
+[check](https://github.com/emulebb/emulebb-build/actions/runs/43369243640)
+for the [tested source](https://github.com/emulebb/emulebb-rust/commit/6429b952eac6f19ee9bf084d3a84d5649dfba0c2)
+verifies six TLS cases, fresh-profile authenticated REST startup and graceful
+shutdown with a source-built release-mode daemon on the development channel.
+Published Android archive execution, physical devices, ARM runtime, APK, WebUI,
+completed-file delivery and VPN behavior remain unqualified. Linux musl bundles
+are separate from Android.
+
+**Android HTTPS trust:** native CLI bundles verify certificates and hostnames
+with packaged Mozilla CA roots, without a JVM. Android/Termux CA stores and
+`SSL_CERT_FILE` do not extend this trust set. Updated roots arrive with new
+client builds.
 
 See [downloads and platforms](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/)
 for requirements, installation, container mounts and the scope of package checks.
@@ -115,6 +126,12 @@ and the [roadmap](https://github.com/orgs/emulebb/projects/3) for current work.
 
 Contributions can improve the client, browser console, integrations, tests or
 documentation. Coordinate an actionable issue before implementation.
+
+Eligible root `README.md` edits use a trusted documentation-only CI path. Source,
+packaging and workflow changes receive full qualification; required checks remain
+mandatory. For parallel work in the managed workspace, the parent coordinator
+assigns non-overlapping branches and batches compatible authored changes for
+final integration testing. Follow the contributor guide for supported checks.
 
 ## Help and security
 
