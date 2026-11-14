@@ -1,0 +1,82 @@
+{
+  "schema": "emulebb.branding/1",
+  "selection": "proposal-5",
+  "source_manifest_url": "https://raw.githubusercontent.com/emulebb/emulebb-tooling/main/manifests/branding/proposal-5-source.json",
+  "source_manifest_sha256": "2473a87ae2c76ffcf1110d73477c9e3739060d50412c2199624a617c3fcd947d",
+  "approval": "Operator-approved proposal 5: exact small icons and unchanged proposal-1 large artwork.",
+  "android_monochrome": "Android uses the approved adjoining blocks as a solid alpha-only square; the launcher uses unchanged large donkey art within the adaptive safe region.",
+  "assets": [
+    {
+      "path": "resources/icons/donkey-16.png",
+      "source_file": "icon-16.png",
+      "bytes": 216,
+      "sha256": "851b8eb75f0081eb0cb69d95d5ec90e43d9a0747e8fd1fe799853639b9ad0e1a"
+    },
+    {
+      "path": "resources/icons/donkey-24.png",
+      "source_file": "icon-24.png",
+      "bytes": 264,
+      "sha256": "5304b784fcd2242278efcf10f3715b892c6a502a26569f1bbe4f07bb37146f64"
+    },
+    {
+      "path": "resources/icons/donkey-32.png",
+      "source_file": "icon-32.png",
+      "bytes": 308,
+      "sha256": "b3ce51a35147830a93d3b200666b7fd844e0f117e172273edf3049904e4d1f5e"
+    },
+    {
+      "path": "resources/icons/donkey-48.png",
+      "source_file": "icon-48.png",
+      "bytes": 414,
+      "sha256": "3f89fab34d0c7e6aced8c06f7cc91f7f605295ec823a1a7f2a7baf336d8121af"
+    },
+    {
+      "path": "resources/icons/donkey-64.png",
+      "source_file": "donkey-64.png",
+      "bytes": 7944,
+      "sha256": "a95e1c89f0a0b2866cca714b652e5dae4ffabb4614144d352b8cb79fb8a9f5f8"
+    },
+    {
+      "path": "resources/icons/donkey-128.png",
+      "source_file": "donkey-128.png",
+      "bytes": 26053,
+      "sha256": "7d6df0fbf48993c1c677f4c75e488079c017f608373b08b9e750e91311663eab"
+    },
+    {
+      "path": "resources/icons/donkey-256.png",
+      "source_file": "donkey-256.png",
+      "bytes": 84445,
+      "sha256": "7f26b62bac49daa0e52c362cfa2cd777c4a6990d3bcdaf3a63f4d88153967b2b"
+    },
+    {
+      "path": "resources/icons/donkey-512.png",
+      "source_file": "donkey-512.png",
+      "bytes": 282308,
+      "sha256": "e79dc7628376307cdb646d09b6966e75ef3716e720ba3cdee3814c2e3a67ae25"
+    },
+    {
+      "path": "webui/public/favicon.ico",
+      "source_file": "favicon.ico",
+      "bytes": 992,
+      "sha256": "58144a359a6bc5def936047e42605d058be7c7f1b21dd2f27ac9643bb723c79a"
+    },
+    {
+      "path": "webui/public/apple-touch-icon.png",
+      "source_file": "donkey-180.png",
+      "bytes": 46087,
+      "sha256": "4b269a328482ada12976aa90ca86a7da4b5559c2d225b9e579143f15b46df1ac"
+    },
+    {
+      "path": "crates/emulebb-daemon/resources/windows/application.ico",
+      "source_file": "application.ico",
+      "bytes": 119762,
+      "sha256": "7603b7ef9bfa7f75ebdc0afc83aef317385e04a3559e5bd368c8025e5dd8360a"
+    },
+    {
+      "path": "android/app/src/main/res/drawable-nodpi/donkey_launcher.png",
+      "source_file": "donkey-512.png",
+      "bytes": 282308,
+      "sha256": "e79dc7628376307cdb646d09b6966e75ef3716e720ba3cdee3814c2e3a67ae25"
+    }
+  ]
+}
