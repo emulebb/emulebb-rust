@@ -335,7 +335,7 @@ class DaemonService : Service() {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 1, Intent(this, DaemonService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("eMuleBB: $state")
             .setContentText("Continuous eD2K/Kad peer service")
             .setContentIntent(open).setOngoing(true)
