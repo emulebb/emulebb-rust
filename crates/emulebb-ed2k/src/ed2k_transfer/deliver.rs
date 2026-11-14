@@ -269,6 +269,11 @@ struct VerifiedStagingFile {
     fingerprint: NativeFileFingerprint,
 }
 
+struct DeliveryPayloadIdentity {
+    size: u64,
+    hash: [u8; 16],
+}
+
 fn validate_delivery_attempt_paths(attempt: &MetadataTransferDeliveryAttempt) -> Result<()> {
     anyhow::ensure!(
         attempt.target_path.is_absolute() && attempt.staging_path.is_absolute(),
@@ -457,8 +462,10 @@ impl Ed2kTransferRuntime {
                             &staging_path,
                             &target_path,
                             verified_staging,
-                            expected_size,
-                            expected_hash,
+                            DeliveryPayloadIdentity {
+                                size: expected_size,
+                                hash: expected_hash,
+                            },
                         )
                         .await?;
                     if let Some(fingerprint) = direct {
@@ -531,8 +538,7 @@ impl Ed2kTransferRuntime {
         staging_path: &Path,
         target_path: &Path,
         verified: VerifiedStagingFile,
-        expected_size: u64,
-        expected_hash: [u8; 16],
+        expected: DeliveryPayloadIdentity,
     ) -> Result<Option<NativeFileFingerprint>> {
         use tokio::io::AsyncSeekExt;
 
@@ -572,7 +578,7 @@ impl Ed2kTransferRuntime {
         sync_file_for_publish(output.try_clone()?).await?;
         sync_parent_directory(target_path).await?;
         let fingerprint =
-            capture_published_fingerprint(output, target_path, expected_size, expected_hash)
+            capture_published_fingerprint(output, target_path, expected.size, expected.hash)
                 .await?;
         // Keep the barrier until the published journal record is committed.
         anyhow::ensure!(
@@ -788,8 +794,10 @@ impl Ed2kTransferRuntime {
                                     &attempt.staging_path,
                                     &attempt.target_path,
                                     verified_staging,
-                                    manifest.file_size,
-                                    expected_hash,
+                                    DeliveryPayloadIdentity {
+                                        size: manifest.file_size,
+                                        hash: expected_hash,
+                                    },
                                 )
                                 .await?
                             {
