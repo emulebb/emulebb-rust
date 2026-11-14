@@ -1,6 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { AppIdentity } from "./AppIdentity";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { type Appearance, type AppearancePreference } from "./appearance";
 import {
   Activity,
@@ -140,16 +140,20 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [mobileMenuExpanded, setMobileMenuExpanded] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   useEffect(() => appearance.subscribe(setAppearancePreference), [appearance]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!mobileMenuExpanded) return;
+    const ownerDocument = menuButton.current?.ownerDocument;
+    if (!ownerDocument) return;
+    // WHY: Capture Escape immediately, including body focus and controls that consume bubbling key events.
     const close = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         setMobileMenuExpanded(false);
         menuButton.current?.focus();
       }
     };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
+    ownerDocument.addEventListener("keydown", close, true);
+    return () => ownerDocument.removeEventListener("keydown", close, true);
   }, [mobileMenuExpanded]);
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 639px)");
