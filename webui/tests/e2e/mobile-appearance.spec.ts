@@ -67,10 +67,23 @@ test("mobile menu closes for every link, current view, Escape, history, shortcut
   await menu.click();
   await navigation.getByRole("link", { name: "Logs", exact: true }).click();
   await expect(menu).toHaveAttribute("aria-expanded", "false");
+  const appearance = page.getByRole("combobox", { name: "Appearance" });
+  // A child control consuming bubbling key events must not prevent menu dismissal.
+  await appearance.evaluate((element) => element.addEventListener("keydown", (event) => event.stopPropagation()));
+  for (const target of [appearance, navigation.getByRole("link").first(), page.getByRole("button", { name: "Refresh", exact: true })]) {
+    await menu.click();
+    await target.focus();
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeFocused();
+    await expect(menu).toHaveAttribute("aria-expanded", "false");
+    await expect(navigation).toBeHidden();
+  }
   await menu.click();
-  await page.getByRole("combobox", { name: "Appearance" }).focus();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expect(page.locator("body")).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(menu).toBeFocused();
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
   await expect(navigation).toBeHidden();
   await menu.click();
   await page.goBack();
