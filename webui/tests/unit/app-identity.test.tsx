@@ -1,9 +1,7 @@
-import { cleanup, render, screen } from "@testing-library/preact";
-import { afterEach, describe, expect, it } from "vitest";
+import { render, screen } from "@testing-library/preact";
+import { describe, expect, it } from "vitest";
 
 import { AppIdentity } from "../../src/AppIdentity";
-
-afterEach(cleanup);
 
 describe("application build identity", () => {
   it("shows the server identity and full source commit in About details", () => {

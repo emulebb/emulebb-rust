@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { describe, expect, it, vi } from "vitest";
 
 import { Action, JsonPanel, StatusPill, TableScroll } from "../../src/components";
@@ -24,12 +24,12 @@ describe("components", () => {
       const resizeListener = addListener.mock.calls.find(([event]) => event === "resize")?.[1];
       expect(resizeListener).toEqual(expect.any(Function));
 
-      unmount();
+      await act(unmount);
 
       expect(disconnect).toHaveBeenCalledOnce();
       expect(removeListener).toHaveBeenCalledWith("resize", resizeListener);
     } finally {
-      unmount();
+      await act(unmount);
       frame.remove();
       vi.unstubAllGlobals();
     }
