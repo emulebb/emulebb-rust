@@ -2,7 +2,7 @@
 
 use std::{
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     thread::JoinHandle,
 };
 
@@ -14,6 +14,9 @@ use jni::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+mod startup_network;
+use startup_network::StartupNetwork;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
@@ -44,6 +47,7 @@ enum Request {
         shared_dir: PathBuf,
     },
     Stop {},
+    NetworkChanged {},
     Status {},
 }
 
@@ -64,6 +68,8 @@ struct Host {
     address: Option<String>,
     shutdown: Option<ShutdownRequest>,
     worker: Option<JoinHandle<()>>,
+    startup_network: Option<Arc<StartupNetwork>>,
+    waiting_for_network: bool,
 }
 
 fn host() -> &'static Mutex<Host> {
@@ -173,49 +179,49 @@ fn handle(request: Request) -> Result<Value> {
             state.error = None;
             state.address = None;
             state.shutdown = Some(shutdown.clone());
-            let worker = std::thread::Builder::new().name("emulebb-android".into()).spawn(move || {
-                let outcome = std::panic::catch_unwind(|| -> Result<()> {
-                    if shutdown.subscribe().is_requested() { return Ok(()); }
-                    let mut profile = DaemonProfile::load_hosted(profile_dir, incoming_dir, shared_dir)?;
-                    ensure_process_logging(profile.profile_io_dir())?;
-                    profile.host_transfer_root = Some(transfer_root);
-                    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-                    let outcome = runtime.block_on(async {
-                        let (ready, mut readiness) = tokio::sync::oneshot::channel();
-                        let run = emulebb_daemon::run_hosted(profile, shutdown.subscribe(), ready);
-                        tokio::pin!(run);
-                        tokio::select! {
-                            result = &mut run => result,
-                            result = &mut readiness => {
-                                if let Ok(address) = result {
-                                    let mut state = host().lock().map_err(|_| anyhow::anyhow!("host state unavailable"))?;
-                                    state.address = Some(address.to_string());
-                                    if state.phase == Phase::Starting { state.phase = Phase::Running; }
-                                }
-                                run.await
+            let startup_network = Arc::new(StartupNetwork::default());
+            state.startup_network = Some(Arc::clone(&startup_network));
+            state.waiting_for_network = false;
+            let worker = std::thread::Builder::new()
+                .name("emulebb-android".into())
+                .spawn(move || {
+                    let outcome = std::panic::catch_unwind(|| {
+                        run_worker(
+                            profile_dir,
+                            transfer_root,
+                            incoming_dir,
+                            shared_dir,
+                            shutdown,
+                            startup_network,
+                        )
+                    });
+                    if let Ok(mut state) = host().lock() {
+                        match outcome {
+                            Ok(Ok(())) => {
+                                state.phase = Phase::Stopped;
+                                state.error = None;
+                            }
+                            Ok(Err(error)) => {
+                                state.phase = Phase::Failed;
+                                state.error = Some(format!("{error:#}"));
+                            }
+                            Err(_) => {
+                                state.phase = Phase::Failed;
+                                state.error = Some("native runtime failed".into());
                             }
                         }
-                    });
-                    // WHY: Tokio blocking work can outlive the daemon future. Drain
-                    // the application runtime before publishing Stopped/releasing ownership.
-                    drop(runtime);
-                    outcome
-                });
-                if let Ok(mut state) = host().lock() {
-                    match outcome {
-                        Ok(Ok(())) => { state.phase = Phase::Stopped; state.error = None; }
-                        Ok(Err(error)) => { state.phase = Phase::Failed; state.error = Some(format!("{error:#}")); }
-                        Err(_) => { state.phase = Phase::Failed; state.error = Some("native runtime failed".into()); }
+                        state.shutdown = None;
+                        state.startup_network = None;
+                        state.waiting_for_network = false;
+                        state.address = None;
                     }
-                    state.shutdown = None;
-                    state.address = None;
-                }
-            });
+                });
             match worker {
                 Ok(worker) => state.worker = Some(worker),
                 Err(error) => {
                     state.phase = Phase::Failed;
                     state.shutdown = None;
+                    state.startup_network = None;
                     return Err(error.into());
                 }
             }
@@ -229,13 +235,123 @@ fn handle(request: Request) -> Result<Value> {
                 shutdown.request();
                 state.phase = Phase::Stopping;
             }
+            if let Some(network) = &state.startup_network {
+                network.cancel()?;
+            }
+            Ok(Value::Null)
+        }
+        Request::NetworkChanged {} => {
+            let state = host()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("host state unavailable"))?;
+            if let Some(network) = &state.startup_network {
+                network.changed()?;
+            }
             Ok(Value::Null)
         }
         Request::Status {} => {
             let state = host()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("host state unavailable"))?;
-            Ok(json!({"phase":state.phase,"error":state.error,"address":state.address}))
+            Ok(
+                json!({"phase":state.phase,"error":state.error,"address":state.address,
+                "waitingForNetwork":state.waiting_for_network}),
+            )
+        }
+    }
+}
+
+fn run_worker(
+    profile_dir: PathBuf,
+    transfer_root: PathBuf,
+    incoming_dir: PathBuf,
+    shared_dir: PathBuf,
+    shutdown: ShutdownRequest,
+    network: Arc<StartupNetwork>,
+) -> Result<()> {
+    network.run(
+        |ready| {
+            if shutdown.subscribe().is_requested() {
+                return Ok(());
+            }
+            run_attempt(
+                &profile_dir,
+                &transfer_root,
+                &incoming_dir,
+                &shared_dir,
+                &shutdown,
+                ready,
+            )
+        },
+        |waiting| {
+            // The failed future, runtime and profile lease have drained before this
+            // wait. No host mutex is held while waiting or entering another attempt.
+            host()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("host state unavailable"))?
+                .waiting_for_network = waiting;
+            Ok(())
+        },
+    )
+}
+
+fn run_attempt(
+    profile_dir: &std::path::Path,
+    transfer_root: &std::path::Path,
+    incoming_dir: &std::path::Path,
+    shared_dir: &std::path::Path,
+    shutdown: &ShutdownRequest,
+    readiness_reported: &mut bool,
+) -> Result<()> {
+    let mut profile =
+        DaemonProfile::load_hosted(profile_dir.into(), incoming_dir.into(), shared_dir.into())?;
+    ensure_process_logging(profile.profile_io_dir())?;
+    profile.host_transfer_root = Some(transfer_root.into());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let (ready, readiness) = tokio::sync::oneshot::channel();
+    let outcome = runtime.block_on(await_readiness(
+        emulebb_daemon::run_hosted(profile, shutdown.subscribe(), ready),
+        readiness,
+        readiness_reported,
+        |address| {
+            let mut state = host()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("host state unavailable"))?;
+            state.address = Some(address.to_string());
+            if state.phase == Phase::Starting {
+                state.phase = Phase::Running;
+            }
+            Ok(())
+        },
+    ));
+    // WHY: Tokio blocking work can outlive the daemon future. Drain the runtime
+    // before retrying startup or publishing Stopped/releasing ownership.
+    drop(runtime);
+    outcome
+}
+
+async fn await_readiness(
+    run: impl std::future::Future<Output = Result<()>>,
+    mut readiness: tokio::sync::oneshot::Receiver<std::net::SocketAddr>,
+    reported: &mut bool,
+    ready: impl FnOnce(std::net::SocketAddr) -> Result<()>,
+) -> Result<()> {
+    tokio::pin!(run);
+    tokio::select! {
+        result = &mut run => {
+            // WHY: the future can send readiness and fail in the same poll.
+            // Such a failure is after readiness regardless of select order.
+            *reported |= readiness.try_recv().is_ok();
+            result
+        },
+        result = &mut readiness => {
+            if let Ok(address) = result {
+                *reported = true;
+                ready(address)?;
+            }
+            run.await
         }
     }
 }
@@ -317,6 +433,30 @@ fn request<'local>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_in_same_poll_as_readiness_is_after_startup() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (ready, readiness) = tokio::sync::oneshot::channel();
+        let mut reported = false;
+        let outcome = runtime.block_on(await_readiness(
+            async {
+                ready.send("127.0.0.1:20017".parse().unwrap()).unwrap();
+                Err(emulebb_daemon::NetworkStartupError::DefaultRouteUnavailable.into())
+            },
+            readiness,
+            &mut reported,
+            |_| panic!("terminal result must not publish Running"),
+        ));
+        assert!(reported);
+        assert!(
+            outcome
+                .unwrap_err()
+                .is::<emulebb_daemon::NetworkStartupError>()
+        );
+    }
 
     #[test]
     fn asset_cleanup_retains_current_previous_and_unrelated_data() {

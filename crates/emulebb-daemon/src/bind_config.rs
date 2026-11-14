@@ -6,6 +6,25 @@ use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface};
 
 use crate::DaemonProfile;
 
+/// A transient startup prerequisite, distinct from invalid or ambiguous binding settings.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NetworkStartupError {
+    DefaultRouteUnavailable,
+}
+
+impl std::fmt::Display for NetworkStartupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DefaultRouteUnavailable => formatter.write_str(
+                "p2pBindIp or p2pBindInterface is required because no default-route IPv4 interface was detected; \
+                 start with --p2p-bind-interface <NAME>, then save the P2P bind interface in WebUI Settings > Network",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NetworkStartupError {}
+
 impl DaemonProfile {
     pub(crate) fn resolve_p2p_bind_ip_from_interfaces(
         &self,
@@ -67,10 +86,7 @@ fn resolve_default_route_ip(interfaces: &[NetworkInterface]) -> Result<Ipv4Addr>
         .collect::<Vec<_>>();
     match candidates.as_slice() {
         [address] => Ok(*address),
-        [] => bail!(
-            "p2pBindIp or p2pBindInterface is required because no default-route IPv4 interface was detected; \
-             start with --p2p-bind-interface <NAME>, then save the P2P bind interface in WebUI Settings > Network"
-        ),
+        [] => Err(NetworkStartupError::DefaultRouteUnavailable.into()),
         _ => bail!(
             "p2pBindIp or p2pBindInterface is required because multiple default-route IPv4 interfaces were detected; \
              start with --p2p-bind-interface <NAME>, then save the P2P bind interface in WebUI Settings > Network"

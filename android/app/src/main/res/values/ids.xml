@@ -5,6 +5,7 @@
     <item name="save_settings" type="id" />
     <item name="share_diagnostics" type="id" />
     <item name="service_status" type="id" />
+    <item name="network_wait_status" type="id" />
     <item name="bind_addr" type="id" />
     <item name="api_key" type="id" />
     <item name="start_service" type="id" />
