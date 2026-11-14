@@ -23,10 +23,11 @@ TEST_SPEC.loader.exec_module(WEBUI_TEST)
 
 
 class TestWebUiExecutionModes(unittest.TestCase):
-    def exercise(self, arguments, *, failure=None):
+    def exercise(self, arguments, *, failure=None, platform="win32"):
         workspace = SimpleNamespace(dist=Path("synthetic-dist"))
         pinned = Mock()
         with patch.dict(sys.modules, {"ci_environment": SimpleNamespace(prepare_command=pinned)}), \
+                patch.object(WEBUI_TEST.sys, "platform", platform), \
                 patch.object(WEBUI_TEST, "npm_command", return_value="pinned-npm"), \
                 patch.object(WEBUI_TEST, "prepare_webui_workspace", return_value=workspace) as stage, \
                 patch.object(WEBUI_TEST, "run", side_effect=failure) as run:
@@ -38,16 +39,27 @@ class TestWebUiExecutionModes(unittest.TestCase):
         return pinned, stage, [call.args[0] for call in run.call_args_list]
 
     def test_default_keeps_complete_test_browser_and_build_sequence(self):
-        pinned, stage, commands = self.exercise([])
-        pinned.assert_not_called()
-        stage.assert_called_once_with("webui-test")
-        self.assertEqual(commands, [
-            ["pinned-npm", "ci", "--ignore-scripts"],
-            ["pinned-npm", "run", "test:unit"],
-            ["pinned-npm", "exec", "--", "playwright", "install", "chromium", "webkit"],
-            ["pinned-npm", "run", "test:e2e"],
-            ["pinned-npm", "run", "build", "--", "--outDir", "synthetic-dist", "--emptyOutDir"],
-        ])
+        for platform in ("win32", "linux", "darwin"):
+            with self.subTest(platform=platform):
+                pinned, stage, commands = self.exercise([], platform=platform)
+                pinned.assert_not_called()
+                stage.assert_called_once_with("webui-test")
+                dependencies = ["--with-deps"] if platform == "linux" else []
+                self.assertEqual(commands, [
+                    ["pinned-npm", "ci", "--ignore-scripts"],
+                    ["pinned-npm", "run", "test:unit"],
+                    ["pinned-npm", "exec", "--", "playwright", "install", *dependencies, "chromium", "webkit"],
+                    ["pinned-npm", "run", "test:e2e"],
+                    ["pinned-npm", "run", "build", "--", "--outDir", "synthetic-dist", "--emptyOutDir"],
+                ])
+
+    def test_failed_browser_dependencies_prevent_browser_tests_and_build(self):
+        for platform in ("win32", "linux"):
+            with self.subTest(platform=platform):
+                _, _, commands = self.exercise([], platform=platform,
+                    failure=[None, None, subprocess.CalledProcessError(1, "synthetic-browser-install")])
+                self.assertEqual(len(commands), 3)
+                self.assertEqual(commands[-1][4], "install")
 
     def test_typecheck_only_uses_separate_stage_pins_and_locked_install(self):
         pinned, stage, commands = self.exercise(["--typecheck-only"])
