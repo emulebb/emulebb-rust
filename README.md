@@ -1,145 +1,156 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/emulebb/emulebb.github.io/d247a016170b97cde00eb4659a2fe7ecd0766087/assets/brand/emulebb-logo-256.png" alt="eMuleBB pixel donkey" width="160" height="160">
+  <img src="https://emulebb.github.io/assets/brand/rust-social-preview.png" alt="eMuleBB Rust: eD2K and Kad with browser control on Windows, Linux and macOS" width="960" height="480" />
 </p>
 
-# eMuleBB Rust
+<h1 align="center">eMuleBB Rust</h1>
 
-An IPv4 eD2K/Kad client for Windows, Linux and macOS. Search, download and share
-from one headless daemon, with a browser console for everyday control and a REST
-API for automation.
+<p align="center">
+  <strong>eD2K and Kad. Browser control. REST automation.</strong><br />
+  Search, download and share with one headless IPv4 daemon.
+</p>
 
-**Active beta.** Dated nightly prereleases are the current public testing channel.
+<p align="center">
+  <a href="https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-GETTING-STARTED.md"><strong>Use eMuleBB Rust</strong></a> &nbsp;&middot;&nbsp;
+  <a href="https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-CONTRIBUTING/"><strong>Develop with eMuleBB Rust</strong></a>
+</p>
+<p align="center">
+  <a href="https://github.com/emulebb/emulebb-rust/releases">Nightly downloads</a> &middot;
+  <a href="#downloads-and-platforms">Platforms</a> &middot;
+  <a href="https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/api/GUIDE-API-CONSUMERS/">REST API</a> &middot;
+  <a href="https://github.com/orgs/emulebb/projects/3">Roadmap</a> &middot;
+  <a href="#help-and-security">Help</a>
+</p>
+<p align="center">
+  <a href="https://github.com/emulebb/emulebb-rust/actions/workflows/ci.yml"><img src="https://github.com/emulebb/emulebb-rust/actions/workflows/ci.yml/badge.svg?branch=main" alt="Rust CI" /></a>
+  <a href="https://github.com/emulebb/emulebb-rust/actions/workflows/codeql.yml"><img src="https://github.com/emulebb/emulebb-rust/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL workflow" /></a>
+  <a href="LICENSE">GPL-2.0-only</a>
+</p>
 
-| ↓ Use eMuleBB Rust | ⌘ Develop with eMuleBB Rust |
-| --- | --- |
-| [Download a nightly](https://github.com/emulebb/emulebb-rust/releases) | [Build and contribute](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-CONTRIBUTING/) |
-| [Get started](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED/) | [Connect to the API](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/api/GUIDE-API-CONSUMERS/) |
-
-## Contents
-
-- [What you can do](#what-you-can-do)
-- [Downloads and platforms](#downloads-and-platforms)
-- [Get started](#get-started)
-- [Use the API](#use-the-api)
-- [Develop and contribute](#develop-and-contribute)
-- [Help and security](#help-and-security)
-- [License](#license)
+**Active beta.** Dated nightly prereleases are the current public testing
+channel. Prebuilt packages need no Rust toolchain.
 
 ## What you can do
 
-- Search eD2K/Kad and manage downloads from the browser console.
-- Share monitored folder trees and choose network and sharing settings.
-- Automate client operations through an authenticated, documented REST API.
-- Inspect transfer and log state, and identify packages by source revision and
-  published checksums.
+<table>
+<tr>
+<td width="50%" valign="top">
+<h3>Search and transfer</h3>
+<p>Search eD2K/Kad, add downloads and follow transfer progress from the packaged browser console.</p>
+</td>
+<td width="50%" valign="top">
+<h3>Share chosen folders</h3>
+<p>Monitor recursive folder trees, review hashing and manage sharing settings.</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<h3>Automate through REST</h3>
+<p>Connect integrations to an authenticated API with a documented OpenAPI contract.</p>
+</td>
+<td width="50%" valign="top">
+<h3>Inspect your client</h3>
+<p>Review network status, diagnostics, logs and source-bound package checksums.</p>
+</td>
+</tr>
+</table>
 
 ## Downloads and platforms
 
-Choose the matching runnable package from the
-[nightly releases](https://github.com/emulebb/emulebb-rust/releases).
-Verify it against that release's `SHA256SUMS` before launch. No Rust toolchain is
-needed to use a prebuilt package.
+Choose a runnable asset from the [nightly releases](https://github.com/emulebb/emulebb-rust/releases),
+then compare its exact filename against that release's `SHA256SUMS`.
+The [platform run guide](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md)
+owns installation commands, profile paths, requirements and qualification scope.
 
-| Platform | Architecture | Distribution |
+| Platform | Choose | Install and run |
 | --- | --- | --- |
-| Windows | x64 / ARM64 | ZIP |
-| Linux | x64 / ARM64 | DEB, AppImage, static-musl tar/zstd |
-| macOS | Intel / Apple Silicon | DMG; unsigned and not notarized |
-| Docker / OCI | Linux amd64 / arm64 | GHCR Ubuntu and Alpine images |
-| Android developers | arm64-v8a / x86_64 | Experimental native CLI bundles; **not an APK** |
+| Windows | x64 or ARM64 ZIP | [Extract and launch](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#windows-x64-and-arm64) |
+| Linux | x64 or ARM64 DEB, AppImage or static-musl tar/zstd | [Choose a Linux variant](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#linux) |
+| macOS | Intel or Apple Silicon DMG | [Copy and launch the app](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#macos-intel-and-apple-silicon) |
+| Docker / OCI | Linux amd64 or arm64; Ubuntu or Alpine | [Run with persistent volumes](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#containers) |
+| Android APK | Universal ARM64 + x86_64; Android 14+ | [Permissions, manual Start and WebUI](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#android-application) |
+| Android / Termux native | Experimental `android-arm64-v8a.tar.zst` or `android-x86_64.tar.zst` | [Extract under private HOME and launch](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#termux-native-shell) |
 
-Container images are published at
-[`ghcr.io/emulebb/emulebb-rust`](https://github.com/emulebb/emulebb-rust/pkgs/container/emulebb-rust).
-Use `nightly` or `nightly-ubuntu` for Ubuntu, and `nightly-alpine` for Alpine.
-Versioned tags are available; pin a verified digest for a repeatable deployment.
-There is no `latest` tag.
+The macOS app is unsigned and not notarized. For containers, both
+[`ghcr.io/emulebb/emulebb-rust`](https://github.com/emulebb/emulebb-rust/pkgs/container/emulebb-rust)
+variants publish versioned tags and moving `nightly` / `nightly-ubuntu` /
+`nightly-alpine` aliases; there is no `latest` tag.
 
-Native macOS package smoke runs on Intel and Apple Silicon. Android bundles
-remain experimental native CLI packages. An API 37/x86_64/16 KiB emulator
-[check](https://github.com/emulebb/emulebb-build/actions/runs/43369243640)
-for the [tested source](https://github.com/emulebb/emulebb-rust/commit/6429b952eac6f19ee9bf084d3a84d5649dfba0c2)
-verifies six TLS cases, fresh-profile authenticated REST startup and graceful
-shutdown with a source-built release-mode daemon on the development channel.
-Published Android archive execution, physical devices, ARM runtime, APK, WebUI,
-completed-file delivery and VPN behavior remain unqualified. Linux musl bundles
-are separate from Android.
-
-**Android HTTPS trust:** native CLI bundles verify certificates and hostnames
-with packaged Mozilla CA roots, without a JVM. Android/Termux CA stores and
-`SSL_CERT_FILE` do not extend this trust set. Updated roots arrive with new
-client builds.
-
-See [downloads and platforms](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/)
-for requirements, installation, container mounts and the scope of package checks.
+**Android remains experimental.** Use the signed APK only when the selected
+published release includes it after qualification. Both native ABI archives
+remain separate public nightly assets alongside that APK. Their API 28 binary
+floor and compile/ELF evidence do not qualify Termux runtime, the full Android
+API matrix, Fire OS or 24-hour continuous operation. The APK minimum is Android
+14/API 34; its foreground service starts manually and has no boot-resume option.
+See [Android evidence and remaining acceptance](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/active/items/RUST-FEAT-056.md).
 
 ## Get started
 
-1. Install or extract the package for your system. Keep the complete layout,
-   including the adjacent `webui` directory when using an archive.
-2. Run `emulebb-rust.exe` on Windows, `./emulebb-rust` from a Linux archive, or
-   the copied macOS app. Direct daemon launches use the directory containing
-   the executable for TOML and database files, regardless of the shell working
-   directory. Use `--profile <writable-directory>` to select another profile;
-   missing profiles are created. `--profile .` selects the shell working
-   directory, so it matches the default only when that is the executable folder.
-   Desktop app launchers and Docker explicitly select the documented writable
-   profile paths; the daemon never silently falls back to a home directory.
-3. Open **<http://127.0.0.1:20017/>** and enter
-   **`change_me_123change_me_123change_me_123`**. Review network and sharing
-   settings before starting transfers.
+1. Follow your [platform's run instructions](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md).
+   Keep the complete extracted archive layout, including `webui`.
+2. Open **<http://127.0.0.1:20017/>** on the daemon host. The default listener
+   is **`0.0.0.0:20017`**. Native packages use the ready key
+   **`change_me_123change_me_123change_me_123`**; the APK supplies a generated
+   key through **Copy API key** and **Open WebUI**.
+3. Review network, incoming and shared-folder settings, then search or add a
+   download. Default P2P ports are TCP **20019** and UDP **20020**.
 
-The REST/WebUI listener defaults to **`0.0.0.0:20017`**. The shipped API key is a
-shared starter value, configured through `rest.api_key` in the private bootstrap
-file. The default P2P ports are TCP **20019** and UDP **20020**; mutable client
-settings remain in the profile database.
+Direct daemon launches keep the profile beside the executable, independently
+of the working directory. Select another writable profile with `--profile`.
+Desktop launchers, containers and the APK explicitly choose their documented
+profile paths. The private `emulebb-rust-settings.toml` owns REST bootstrap
+settings; mutable client settings live in the profile database.
 
-Startup may fetch discovery inputs and start configured networking.
-
-**Profiles during beta:** an incompatible database requires an entirely fresh
-profile. Keep the stopped old profile, payloads and matching binary intact for
-explicit rollback; automatic unfinished-transfer continuation is not promised.
-
-The [getting-started guide](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED/)
-covers profile locations, discovery, search, downloads, sharing and troubleshooting.
+Startup may fetch discovery inputs and start configured networking. During beta,
+an incompatible database requires an entirely fresh profile; preserve the
+stopped old profile, payloads and matching binary for rollback. The
+[getting-started guide](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-GETTING-STARTED.md)
+covers everyday operation, shutdown and troubleshooting.
 
 ## Use the API
 
-All `/api/v1` routes use the **`X-API-Key`** header. The daemon serves HTTP on
-**`0.0.0.0:20017`** by default; credentials belong in the header rather than URLs.
+All `/api/v1` routes use the **`X-API-Key`** header. Start with read-only
+`GET /api/v1/capabilities` and `GET /api/v1/status`; keep credentials in headers.
 
-Start with authenticated, read-only requests such as
-`GET /api/v1/capabilities` and `GET /api/v1/status`.
-The [API guide](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/api/GUIDE-API-CONSUMERS/)
-includes private-key prompts, request examples and response handling. The
-[OpenAPI contract](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/api/REST-API-OPENAPI.yaml)
-defines the routes and schemas. The beta API is still evolving; check the
-contract for the version you use.
+- [API consumer guide](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/api/GUIDE-API-CONSUMERS/)
+- [OpenAPI contract](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/api/REST-API-OPENAPI.yaml)
+
+The beta API is still evolving; use the contract for your selected build.
+
+<details>
+<summary>Android native HTTPS trust</summary>
+
+Native CLI bundles verify certificates and hostnames with packaged Mozilla CA
+roots, without a JVM. Android/Termux CA stores and `SSL_CERT_FILE` do not extend
+this trust set. Updated roots arrive with new client builds.
+
+</details>
 
 ## Develop and contribute
 
-The [contributor guide](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-CONTRIBUTING/)
-walks through prerequisites, managed workspace setup, source orientation and
-supported checks. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution details
-and the [roadmap](https://github.com/orgs/emulebb/projects/3) for current work.
-
-Contributions can improve the client, browser console, integrations, tests or
-documentation. Coordinate an actionable issue before implementation.
-
-Eligible root `README.md` edits use a trusted documentation-only CI path. Source,
-packaging and workflow changes receive full qualification; required checks remain
-mandatory. For parallel work in the managed workspace, the parent coordinator
-assigns non-overlapping branches and batches compatible authored changes for
-final integration testing. Follow the contributor guide for supported checks.
+<table>
+<tr>
+<td width="50%" valign="top">
+<h3>Work on the client</h3>
+<p>Improve the daemon, browser console, tests or documentation.</p>
+<a href="https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-CONTRIBUTING/">Build and validation guide</a> &middot; <a href="CONTRIBUTING.md">Contributing</a>
+</td>
+<td width="50%" valign="top">
+<h3>Find the next change</h3>
+<p>Review current work and coordinate an actionable issue before implementation.</p>
+<a href="https://github.com/orgs/emulebb/projects/3">Roadmap</a> &middot; <a href="https://github.com/emulebb/emulebb-rust/issues">Issues</a>
+</td>
+</tr>
+</table>
 
 ## Help and security
 
-- **Troubleshooting:** [startup, listeners and logs](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED/#common-problems).
-- **Bug reports:** [open an issue](https://github.com/emulebb/emulebb-rust/issues)
-  with the package version and sanitized reproduction steps.
-- **Vulnerabilities:** follow the [private security reporting policy](SECURITY.md).
+- [Troubleshoot startup, listeners and logs](https://github.com/emulebb/emulebb-tooling/blob/efe57c9408953c61a2dda4373d6c006ce688fadd/docs/products/emulebb-rust/reference/GUIDE-GETTING-STARTED.md#common-problems).
+- [Report a bug](https://github.com/emulebb/emulebb-rust/issues) with the package
+  version and sanitized reproduction steps.
+- Follow [private security reporting](SECURITY.md) for vulnerabilities.
 
-Diagnostic bundles are private operator evidence and can contain API keys,
-paths, identifiers and logs. Never attach them unreviewed to a public report.
+Diagnostic bundles are private operator evidence and can contain credentials,
+paths, identifiers and logs. Review them before sharing publicly.
 
 ## License
 
