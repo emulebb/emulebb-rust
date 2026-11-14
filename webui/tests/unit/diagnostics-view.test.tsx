@@ -1,11 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RestClient } from "../../src/api";
 import { DiagnosticsView } from "../../src/views";
 
 afterEach(() => {
-  cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });

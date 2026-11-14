@@ -1,11 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RestClient, RestError } from "../../src/api";
 import { TransfersView } from "../../src/views";
 
 afterEach(() => {
-  cleanup();
   window.history.replaceState(null, "", "/");
 });
 

@@ -1,10 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RestClient, type Upload } from "../../src/api";
 import { Overview, ServersView, SharingView, UploadsView } from "../../src/views";
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 const run = async (operation: () => Promise<unknown>) => { await operation(); };
 

@@ -1,10 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { describe, expect, it, vi } from "vitest";
 
 import { RestClient, RestError, type SearchItem } from "../../src/api";
 import { SearchView } from "../../src/views";
-
-afterEach(cleanup);
 
 describe("SearchView", () => {
   it("confirms and retries an overrideable download conflict", async () => {
