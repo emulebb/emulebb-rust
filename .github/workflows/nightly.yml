@@ -18,18 +18,56 @@ on:
         required: false
         type: boolean
         default: true
+      diagnostic_run_id:
+        description: "Optional original Nightly run for read-only APK replay"
+        required: false
+        type: string
+        default: ""
+      diagnostic_source_sha:
+        description: "Original producer's exact Rust commit (40 lowercase hex characters)"
+        required: false
+        type: string
+        default: ""
+      diagnostic_manifest_sha256:
+        description: "Independently verified original APK manifest SHA-256"
+        required: false
+        type: string
+        default: ""
+      diagnostic_image:
+        description: "Replay one original APK on an isolated guest; never eligible for publication"
+        required: false
+        type: choice
+        options: [none, apk34, apk35, apk36, apk37]
+        default: none
 
 concurrency:
-  group: rust-nightly
+  group: >-
+    ${{ (inputs.diagnostic_run_id || inputs.diagnostic_source_sha ||
+         inputs.diagnostic_manifest_sha256 ||
+         (inputs.diagnostic_image && inputs.diagnostic_image != 'none')) &&
+        format('rust-nightly-android-diagnostic-{0}-{1}', github.ref, inputs.diagnostic_image) || 'rust-nightly' }}
   cancel-in-progress: false
 
 permissions:
   actions: read
   contents: read
 
+env:
+  EMULEBB_APK_DIAGNOSTIC_BUILD_REF: 98040e9e9127f800a493c88bdc81fc69e60bdafe
+  EMULEBB_APK_DIAGNOSTIC_HARNESS_REF: 6f61e325a99844937d63624d55ec19c49579d3ce
+  EMULEBB_APK_DIAGNOSTIC_TOOLING_REF: 8125e1a42dbac792eae6e35bbc427d6b885d599f
+  EMULEBB_APK_DIAGNOSTIC_MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
+  EMULEBB_APK_DIAGNOSTIC_PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
+  EMULEBB_APK_DIAGNOSTIC_SIGNER_SHA256: 9edc742d7230a714a0149c20eb2afb235b8ad5237166090f10e7ac69e2bb359f
+
 jobs:
   prepare:
     name: Derive immutable nightly metadata
+    # Any diagnostic input closes the normal release path, even when incomplete.
+    if: >-
+      ${{ !inputs.diagnostic_run_id && !inputs.diagnostic_source_sha &&
+          !inputs.diagnostic_manifest_sha256 &&
+          (!inputs.diagnostic_image || inputs.diagnostic_image == 'none') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -93,3 +131,136 @@ jobs:
       channel: nightly
       publish: ${{ github.event_name == 'schedule' || inputs.publish }}
     secrets: inherit
+
+  apk-diagnostic:
+    name: Read-only original APK diagnostic replay
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          (inputs.diagnostic_run_id || inputs.diagnostic_source_sha ||
+           inputs.diagnostic_manifest_sha256 ||
+           (inputs.diagnostic_image && inputs.diagnostic_image != 'none')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_RUST_REPO: ${{ github.workspace }}/.ci/original-rust
+      EMULEBB_TESTS_REPO: ${{ github.workspace }}/.ci/emulebb-build-tests
+      EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
+      MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+      PCPNATPMP_ROOT: ${{ github.workspace }}/.ci/emulebb-libpcpnatpmp
+    steps:
+      - name: Validate the isolated read-only diagnostic request
+        shell: python
+        env:
+          DIAGNOSTIC_PUBLISH: ${{ inputs.publish }}
+          PRODUCER_RUN_ID: ${{ inputs.diagnostic_run_id }}
+          PRODUCER_SOURCE_SHA: ${{ inputs.diagnostic_source_sha }}
+          APK_MANIFEST_SHA256: ${{ inputs.diagnostic_manifest_sha256 }}
+          DIAGNOSTIC_IMAGE: ${{ inputs.diagnostic_image }}
+        run: |
+          import os
+          import re
+          checks = {
+              "PRODUCER_RUN_ID": r"[1-9][0-9]*",
+              "PRODUCER_SOURCE_SHA": r"[0-9a-f]{40}",
+              "APK_MANIFEST_SHA256": r"[0-9a-f]{64}",
+              "DIAGNOSTIC_IMAGE": r"apk(?:34|35|36|37)",
+          }
+          if os.environ.get("DIAGNOSTIC_PUBLISH") != "false" or any(
+              re.fullmatch(pattern, os.environ.get(name, "")) is None
+              for name, pattern in checks.items()
+          ):
+              raise SystemExit("Diagnostic replay requires publish=false and complete immutable inputs")
+      - name: Checkout the independently pinned diagnostic executor
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_APK_DIAGNOSTIC_BUILD_REF }}
+          path: .ci/emulebb-build
+          persist-credentials: false
+      - name: Checkout the exact original producer source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.diagnostic_source_sha }}
+          path: .ci/original-rust
+          persist-credentials: false
+      - name: Checkout the independently pinned diagnostic Harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ env.EMULEBB_APK_DIAGNOSTIC_HARNESS_REF }}
+          path: .ci/emulebb-build-tests
+          persist-credentials: false
+      - name: Checkout original producer documentation authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: ${{ env.EMULEBB_APK_DIAGNOSTIC_TOOLING_REF }}
+          path: .ci/emulebb-tooling
+          persist-credentials: false
+      - name: Checkout original producer MiniUPnP authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.EMULEBB_APK_DIAGNOSTIC_MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+          persist-credentials: false
+      - name: Checkout original producer PCP/NAT-PMP authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-libpcpnatpmp
+          ref: ${{ env.EMULEBB_APK_DIAGNOSTIC_PCPNATPMP_REF }}
+          path: .ci/emulebb-libpcpnatpmp
+          persist-credentials: false
+      - name: Set up pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Install pinned diagnostic owner dependencies
+        run: python -m pip install click==8.4.1 pydantic==2.14.3 PyYAML==6.0.3
+      - name: Set up pinned Docker
+        uses: docker/setup-docker-action@3f1ab1ab0e29231562e4db4ca600c1a49653bac6 # v5.7.0
+        with:
+          version: v29.6.1
+          daemon-config: '{"features":{"containerd-snapshotter":true}}'
+      - name: Set up pinned Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          version: v0.35.0
+          driver: docker
+          use: false
+      - name: Grant this runner access to KVM
+        run: |
+          test -c /dev/kvm
+          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+      - name: Replay admitted original APK bytes without publication eligibility
+        id: replay
+        working-directory: .ci/emulebb-build
+        env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ inputs.diagnostic_run_id }}
+          PRODUCER_SOURCE_SHA: ${{ inputs.diagnostic_source_sha }}
+          APK_MANIFEST_SHA256: ${{ inputs.diagnostic_manifest_sha256 }}
+          DIAGNOSTIC_IMAGE: ${{ inputs.diagnostic_image }}
+        run: >-
+          python -B -m emule_workspace diagnose-rust-android-apk-ci
+          --producer-run-id "$PRODUCER_RUN_ID" --producer-source-sha "$PRODUCER_SOURCE_SHA"
+          --apk-manifest-sha256 "$APK_MANIFEST_SHA256" --image "$DIAGNOSTIC_IMAGE"
+          --diagnostic-build-ref "$EMULEBB_APK_DIAGNOSTIC_BUILD_REF"
+          --diagnostic-harness-ref "$EMULEBB_APK_DIAGNOSTIC_HARNESS_REF"
+          --expected-cert-sha256 "$EMULEBB_APK_DIAGNOSTIC_SIGNER_SHA256"
+          --github-output "$GITHUB_OUTPUT"
+      # Diagnostic receipts remain ineligible for publication, even after a
+      # successful replay. Private guest reports, logs and AVDs stay excluded.
+      - name: Retain only sanitized diagnostic replay evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emulebb-rust-android-apk-diagnostic-${{ inputs.diagnostic_image }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/emulebb-rust-out/reports/android-emulator-boot/*/validation.json
+          if-no-files-found: warn
+          retention-days: 30
