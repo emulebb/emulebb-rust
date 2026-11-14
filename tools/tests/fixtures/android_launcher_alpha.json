@@ -1,0 +1,45 @@
+{
+  "source_path": "android/app/src/main/res/drawable-nodpi/donkey_launcher.png",
+  "sha256": "e79dc7628376307cdb646d09b6966e75ef3716e720ba3cdee3814c2e3a67ae25",
+  "width": 512,
+  "height": 512,
+  "method": "Convex hull of corners of every pixel with alpha greater than zero, decoded with Pillow. Each row contributes its leftmost and rightmost occupied pixel corners; this includes all interior pixel corners in the hull.",
+  "opaque_pixel_corner_hull": [
+    [
+      17,
+      47
+    ],
+    [
+      23,
+      46
+    ],
+    [
+      468,
+      27
+    ],
+    [
+      504,
+      27
+    ],
+    [
+      504,
+      492
+    ],
+    [
+      67,
+      492
+    ],
+    [
+      43,
+      470
+    ],
+    [
+      18,
+      90
+    ],
+    [
+      17,
+      70
+    ]
+  ]
+}

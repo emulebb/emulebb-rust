@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Keep the supplied donkey bytes within the adaptive icon's safe region. -->
+<!-- Keep every opaque pixel corner within the 66dp circular safe region. -->
 <inset xmlns:android="http://schemas.android.com/apk/res/android"
     android:drawable="@drawable/donkey_launcher"
-    android:inset="16.6667%" />
+    android:inset="27.5%" />
