@@ -157,6 +157,11 @@ test("keeps the unified toolbar usable at a narrow viewport", async ({ page }) =
 
   const topbar = page.locator("header .topbar");
   const primaryViews = topbar.getByRole("navigation", { name: "Primary views" });
+  const menu = topbar.getByRole("button", { name: "Menu", exact: true });
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
+  await expect(primaryViews).toBeHidden();
+  await expect(primaryViews.getByRole("link")).toHaveCount(0);
+  await menu.click();
   await expect(primaryViews.getByRole("link")).toHaveCount(14);
   await expect(primaryViews.locator("a svg")).toHaveCount(14);
   await expect(primaryViews.getByRole("link", { name: "Shared Files", exact: true })).toBeVisible();
@@ -168,7 +173,9 @@ test("keeps the unified toolbar usable at a narrow viewport", async ({ page }) =
   await primaryViews.getByRole("link", { name: "Search", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
   await expect(page).toHaveURL(/\/searches$/);
-  await expect(primaryViews.getByRole("link", { name: "Search", exact: true })).toHaveClass(/active/);
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
+  await expect(primaryViews).toBeHidden();
+  await expect(page.locator('#primary-views a[href="/searches"]')).toHaveClass(/active/);
 });
 
 test("recovers from a stale API key without a manual refresh", async ({ page }) => {
