@@ -205,6 +205,14 @@ for (const width of [320, 390]) {
       await expect.poll(() => path.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(160);
       await expect.poll(() => scroll.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
       await expect(scroll.locator("..").getByText("Swipe horizontally for more columns")).toBeVisible();
+      for (const label of ["Disk hashing progress", "Recently hashed files", "Queued hashing work"]) {
+        const progressTable = page.getByRole("region", { name: label, exact: true });
+        const progressPath = progressTable.locator("td.path-cell").first();
+        await expect(progressPath).not.toBeEmpty();
+        await expect.poll(() => progressPath.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(160);
+        await expect.poll(() => progressTable.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+        await expect(progressTable.locator("..").getByText("Swipe horizontally for more columns")).toBeVisible();
+      }
       await noPageOverflow(page);
       await page.screenshot({ path: testInfo.outputPath(`phone-${width}-sharing-${theme}.png`), fullPage: true });
 
