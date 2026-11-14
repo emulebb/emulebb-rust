@@ -64,9 +64,10 @@ import {
   downloadConflicts,
   encodeSegment
 } from "./api";
-import { Action, EmptyRow, JsonPanel, Metric, StatusPill } from "./components";
+import { Action, EmptyRow, JsonPanel, Metric, StatusPill, TableScroll } from "./components";
 import {
   boolField,
+  errorMessage,
   firewallLabel,
   formatBytes,
   formatDurationMs,
@@ -145,7 +146,7 @@ export function Overview(props: {
       />
       <Metric label="Transfers" value={`${activeTransfers}/${props.transfers.length}`} />
       <Metric label="Uploads" value={`${props.uploads.length}/${props.uploadQueue.length}`} />
-      <Metric label="Shared" value={String(numberField(props.stats, "sharedFiles") ?? props.sharedFiles.length)} />
+      <Metric label="Shared" value={String(props.snapshot?.status?.runtimeDiagnostics?.sharedFileCount ?? "n/a")} />
       <Metric label="Kad" value={props.kad.connected ? "Connected" : "Idle"} />
 
       <section class="panel card wide">
@@ -177,7 +178,7 @@ export function Overview(props: {
           <span>Kad firewall</span>
           <strong>{firewallLabel(props.kad.firewalled)}</strong>
           <span>Shared bytes</span>
-          <strong>{formatBytes(numberField(props.stats, "sharedBytes"))}</strong>
+          <strong>n/a</strong>
         </div>
       </section>
 
@@ -406,7 +407,7 @@ export function TransfersView(props: {
           }}>Cancel links</button>}
         </form>
         {transferLinksError && <p class="field-error">{transferLinksError}</p>}
-        <div class="table-wrap">
+        <TableScroll label="Transfers">
           <table class="table table-vcenter card-table">
             <thead>
               <tr>
@@ -492,7 +493,7 @@ export function TransfersView(props: {
               {filtered.length === 0 && <EmptyRow colSpan={6} text="No transfers." />}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       </section>
 
       <section class="panel card">
@@ -503,7 +504,7 @@ export function TransfersView(props: {
         {detailError && <div class="notice alert alert-danger">{detailError}</div>}
         <div class="split">
           <JsonPanel value={details} />
-          <div class="table-wrap">
+          <TableScroll label="Transfer sources">
             <table class="table table-vcenter card-table">
               <thead>
                 <tr>
@@ -538,7 +539,7 @@ export function TransfersView(props: {
                 {sources.length === 0 && <EmptyRow colSpan={5} text="No sources for this transfer." />}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
         </div>
       </section>
     </section>
@@ -818,7 +819,7 @@ export function SearchView(props: {
           <option value="codec:asc">Codec, A–Z</option>
         </select>
       </div>
-      <div class="table-wrap">
+      <TableScroll label="Search results">
         <table class="table table-vcenter card-table">
           <thead>
             <tr>
@@ -919,7 +920,7 @@ export function SearchView(props: {
             {results.length === 0 && <EmptyRow colSpan={8} text="No results." />}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       {props.selectedSearch && (
         <div class="form-row subtle-row search-pagination" aria-label="Search result pages">
           <span>
@@ -999,6 +1000,7 @@ export function SharingView(props: {
   ignores: SharedFileIgnores | null;
   stats: Record<string, unknown>;
   sharedFiles: SharedFile[];
+  sharedFileCount?: number;
   uploads: Upload[];
   uploadQueue: Upload[];
   client: RestClient;
@@ -1011,8 +1013,7 @@ export function SharingView(props: {
   const defaultIgnores = props.ignores?.defaults ?? [];
   const reload = props.directories?.reloadProgress ?? {};
   const pathError = sharedRootPathError(path);
-  const sharedFileCount = numberField(props.stats, "sharedFiles") ?? props.sharedFiles.length;
-  const sharedBytes = numberField(props.stats, "sharedBytes");
+  const sharedFileCount = props.sharedFileCount;
 
   const addRoot = async () => {
     const nextPath = path.trim();
@@ -1041,8 +1042,8 @@ export function SharingView(props: {
   return (
     <section class="view-grid">
       <Metric label="Roots" value={String(roots.length)} />
-      <Metric label="Shared Files" value={String(sharedFileCount)} />
-      <Metric label="Shared Bytes" value={formatBytes(sharedBytes)} />
+      <Metric label="Shared Files" value={String(sharedFileCount ?? "n/a")} />
+      <Metric label="Shared Bytes" value="n/a" />
       <Metric label="Active Uploads" value={String(props.uploads.length)} />
       <Metric label="Waiting Uploads" value={String(props.uploadQueue.length)} />
       <Metric label="Hashing" value={String(props.directories?.hashingCount ?? 0)} />
@@ -1073,7 +1074,7 @@ export function SharingView(props: {
         </form>
         {pathError && <p class="field-error">{pathError}</p>}
         <h3 class="panel-subhead">Configured Roots</h3>
-        <div class="table-wrap">
+        <TableScroll label="Shared folders">
           <table class="table table-vcenter card-table root-table">
             <thead>
               <tr>
@@ -1101,7 +1102,7 @@ export function SharingView(props: {
               {roots.length === 0 && <EmptyRow colSpan={4} text="No shared folders." />}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       </section>
 
       <section class="panel card wide sharing-panel">
@@ -1120,7 +1121,7 @@ export function SharingView(props: {
           <button class="btn" type="submit" disabled={!ignorePattern.trim()}><FolderPlus size={16} />Add pattern</button>
         </form>
         <h3 class="panel-subhead">Custom Patterns</h3>
-        <div class="table-wrap">
+        <TableScroll label="Default file ignores">
           <table class="table table-vcenter card-table root-table">
             <thead><tr><th>Pattern</th><th>Actions</th></tr></thead>
             <tbody>
@@ -1133,9 +1134,9 @@ export function SharingView(props: {
               {customPatterns.length === 0 && <EmptyRow colSpan={2} text="No custom ignore patterns." />}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
         <h3 class="panel-subhead">Default Rules</h3>
-        <div class="table-wrap">
+        <TableScroll label="Custom file ignores">
           <table class="table table-vcenter card-table root-table">
             <thead><tr><th>Pattern</th><th>Match</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
@@ -1149,7 +1150,7 @@ export function SharingView(props: {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       </section>
 
       <section class="panel card wide progress-panel">
@@ -1257,7 +1258,7 @@ function ActiveHashList(props: { files: NonNullable<SharedDirectories["reloadPro
 function DiskProgressTable(props: { disks: NonNullable<SharedDirectories["reloadProgress"]>["disks"] }) {
   const disks = props.disks ?? [];
   return (
-    <div class="table-wrap">
+    <TableScroll label="Disk hashing progress">
       <table class="table table-vcenter card-table">
         <thead>
           <tr>
@@ -1281,14 +1282,14 @@ function DiskProgressTable(props: { disks: NonNullable<SharedDirectories["reload
           {disks.length === 0 && <EmptyRow colSpan={5} text="No drive hashing activity." />}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   );
 }
 
 function RecentHashTable(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["recent"] }) {
   const files = props.files ?? [];
   return (
-    <div class="table-wrap">
+    <TableScroll label="Recently hashed files">
       <table class="table table-vcenter card-table">
         <thead>
           <tr>
@@ -1312,14 +1313,14 @@ function RecentHashTable(props: { files: NonNullable<SharedDirectories["reloadPr
           {files.length === 0 && <EmptyRow colSpan={5} text="No recently hashed files." />}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   );
 }
 
 function QueuedHashTable(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["upcoming"] }) {
   const files = props.files ?? [];
   return (
-    <div class="table-wrap">
+    <TableScroll label="Queued hashing work">
       <table class="table table-vcenter card-table">
         <thead>
           <tr>
@@ -1343,7 +1344,7 @@ function QueuedHashTable(props: { files: NonNullable<SharedDirectories["reloadPr
           {files.length === 0 && <EmptyRow colSpan={5} text="No queued hashing work." />}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   );
 }
 
@@ -1484,7 +1485,7 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
           </label>
         </form>
         {loadError && <p class="field-error">{loadError}</p>}
-        <div class="table-wrap">
+        <TableScroll label="Shared files">
           <table class="table table-vcenter card-table">
             <thead>
               <tr>
@@ -1523,7 +1524,7 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
               {files.length === 0 && <EmptyRow colSpan={8} text={loading ? "Loading shared files…" : "No shared files match the current filters."} />}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
         <div class="shared-files-pagination">
           <button class="btn" type="button" disabled={cursorHistory.length === 0 || loading} onClick={() => {
             const history = [...cursorHistory];
@@ -1640,6 +1641,22 @@ export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; c
   const activeRows = visibleRows.filter((row) => row.lane === "active");
   const queueRows = visibleRows.filter((row) => row.lane === "queue");
   const selected = rows.find((row) => row.key === selectedKey) ?? visibleRows[0];
+  const [detail, setDetail] = useState<{ key: string; item: Upload } | null>(null);
+  const [detailError, setDetailError] = useState("");
+  useEffect(() => {
+    let current = true;
+    setDetailError("");
+    const clientId = selected?.item.clientId;
+    if (!selected || !clientId) return;
+    const key = selected.key;
+    const path = selected.lane === "active" ? "uploads" : "upload-queue";
+    void props.client.get<Upload>(`${path}/${encodeSegment(clientId)}`).then((item) => {
+      if (current) setDetail({ key, item });
+    }).catch((error) => {
+      if (current) setDetailError(errorMessage(error));
+    });
+    return () => { current = false; };
+  }, [selected?.key, props.client]);
   const lowIdCount = rows.filter((row) => row.item.lowId).length;
   const friendSlotCount = rows.filter((row) => row.item.friendSlot).length;
   const topFile = topRequestedFile(rows);
@@ -1673,7 +1690,9 @@ export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; c
       </section>
       <UploadTable title="Active Uploads" rows={activeRows} basePath="uploads" client={props.client} run={props.run} selectedKey={selected?.key ?? ""} onSelect={setSelectedKey} />
       <UploadTable title="Upload Queue" rows={queueRows} basePath="upload-queue" client={props.client} run={props.run} selectedKey={selected?.key ?? ""} onSelect={setSelectedKey} />
-      <UploadPeerInspector row={selected} />
+      {detailError && <p class="notice alert alert-danger">Upload details: {detailError}</p>}
+      <UploadPeerInspector row={selected && detail?.key === selected.key
+        ? { ...selected, item: { ...selected.item, scoreBreakdown: detail.item.scoreBreakdown } } : selected} />
     </section>
   );
 }
@@ -1693,7 +1712,7 @@ function UploadTable(props: {
         <h2>{props.title}</h2>
         <span>{props.rows.length} clients</span>
       </div>
-      <div class="table-wrap">
+      <TableScroll label={props.title}>
         <table class="table table-vcenter card-table">
           <thead>
             <tr>
@@ -1743,7 +1762,7 @@ function UploadTable(props: {
             {props.rows.length === 0 && <EmptyRow colSpan={9} text="No clients." />}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </section>
   );
 }
@@ -1776,8 +1795,6 @@ function UploadPeerInspector(props: { row?: UploadRow }) {
           <span>Endpoint</span><strong>{upload.port ? `${upload.address ?? ""}:${upload.port}` : upload.address ?? ""}</strong>
           <span>LowID</span><strong>{yesNo(upload.lowId)}</strong>
           <span>Friend slot</span><strong>{yesNo(upload.friendSlot)}</strong>
-          <span>Friend</span><strong>{yesNo(boolField(upload, "friend"))}</strong>
-          <span>Banned</span><strong>{yesNo(boolField(upload, "banned"))}</strong>
         </div>
         <div class="kv compact">
           <span>Requested file</span><strong>{upload.requestedFileName ?? ""}</strong>
@@ -2024,7 +2041,7 @@ export function NetworkHealthView(props: {
             <input class="form-control" value={filter} placeholder="Filter kind, endpoint, IP, host, DNS, state" onInput={(event) => setFilter(event.currentTarget.value)} />
           </div>
         </div>
-        <div class="table-wrap">
+        <TableScroll label="Network connections">
           <table class="table table-vcenter card-table">
             <thead>
               <tr>
@@ -2054,7 +2071,7 @@ export function NetworkHealthView(props: {
               {filteredRows.length === 0 && <EmptyRow colSpan={8} text="No endpoints." />}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
         {selected && (
           <div class="kv compact detail-split">
             <span>Selected</span><strong>{selected.kind} {selected.endpoint}</strong>
@@ -2187,7 +2204,7 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
       <div class="form-row">
         <input class="form-control" value={filter} placeholder="Filter endpoint, host, IP, name" onInput={(event) => setFilter(event.currentTarget.value)} />
       </div>
-      <div class="table-wrap">
+      <TableScroll label="Servers">
         <table class="table table-vcenter card-table">
           <thead>
             <tr>
@@ -2222,7 +2239,6 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
                       <Action title="Enable" icon={<Play size={15} />} onClick={() => void props.run(() => props.client.patch(`servers/${encoded}`, { enabled: true }), "Server enabled")} />
                       <Action title="Disable" icon={<Pause size={15} />} onClick={() => void props.run(() => props.client.patch(`servers/${encoded}`, { enabled: false }), "Server disabled")} />
                       <Action title="Toggle static" icon={<Save size={15} />} onClick={() => void props.run(() => props.client.patch(`servers/${encoded}`, { static: !server.static }), "Server updated")} />
-                      <Action title="Delete" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.delete(`servers/${encoded}`), "Server deleted")} />
                     </div>
                   </td>
                 </tr>
@@ -2231,7 +2247,7 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
             {filteredServers.length === 0 && <EmptyRow colSpan={9} text="No servers." />}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       {selected && (
         <div class="split detail-split">
           <div class="kv compact">
@@ -2365,7 +2381,7 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
       <div class="form-row">
         <input class="form-control" value={filter} placeholder="Filter Kad node, IP, host, state" onInput={(event) => setFilter(event.currentTarget.value)} />
       </div>
-      <div class="table-wrap">
+      <TableScroll label="Kad nodes">
         <table class="table table-vcenter card-table">
           <thead>
             <tr>
@@ -2395,7 +2411,7 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
             {filteredNodes.length === 0 && <EmptyRow colSpan={8} text="No Kad nodes." />}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       {selected && (
         <div class="split detail-split">
           <div class="kv compact">
@@ -2649,7 +2665,7 @@ export function CategoriesView(props: { categories: Category[]; client: RestClie
       </form>
       {nameError && <p class="field-error">{nameError}</p>}
       {priorityError && <p class="field-error">{priorityError}</p>}
-      <div class="table-wrap">
+      <TableScroll label="Categories">
         <table class="table table-vcenter card-table">
           <thead>
             <tr>
@@ -2667,7 +2683,7 @@ export function CategoriesView(props: { categories: Category[]; client: RestClie
             {props.categories.length === 0 && <EmptyRow colSpan={5} text="No categories." />}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </section>
   );
 }
@@ -2738,7 +2754,7 @@ export function FriendsView(props: { friends: Friend[]; client: RestClient; run:
       </form>
       {userHashError && <p class="field-error">{userHashError}</p>}
       {nameError && <p class="field-error">{nameError}</p>}
-      <div class="table-wrap">
+      <TableScroll label="Friends">
         <table class="table table-vcenter card-table">
           <thead>
             <tr>
@@ -2765,7 +2781,7 @@ export function FriendsView(props: { friends: Friend[]; client: RestClient; run:
             {props.friends.length === 0 && <EmptyRow colSpan={5} text="No friends." />}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </section>
   );
 }
@@ -4124,8 +4140,6 @@ export function DiagnosticsView(props: {
   client: RestClient;
   run: RunFunction;
 }) {
-  const [crashConfirm, setCrashConfirm] = useState("");
-  const [shutdownConfirm, setShutdownConfirm] = useState("");
   const [bundleFileName, setBundleFileName] = useState("");
   const diagnostics = props.runtimeDiagnostics ?? {};
   const resources = diagnostics.processResources;
@@ -4143,10 +4157,7 @@ export function DiagnosticsView(props: {
         : "Polling";
 
   const captureBundle = async () => {
-    const bundle = await props.client.post<Record<string, unknown>>(
-      "diagnostics/bundles",
-      { confirmCapture: true }
-    );
+    const bundle = await props.client.captureDiagnosticBundle(16 * 1024 * 1024);
     const capturedAt = typeof bundle.capturedAt === "string" ? bundle.capturedAt : new Date().toISOString();
     const stamp = capturedAt.replace(/[^0-9A-Za-z]/g, "");
     const fileName = `emulebb-rust-diagnostic-bundle-${stamp}.json`;
@@ -4169,24 +4180,20 @@ export function DiagnosticsView(props: {
         <div class="row-actions">
           <button class="btn" type="button" onClick={() => void props.run(captureBundle, "Diagnostic bundle downloaded")}>
             <FileText size={15} />
-            Capture bundle
+            Capture private bundle
           </button>
         </div>
         {bundleFileName && <p class="hint">Downloaded: {bundleFileName}</p>}
         <div class="form-row danger-row">
-          <input class="form-control" value={crashConfirm} placeholder="Type CRASH" onInput={(event) => setCrashConfirm(event.currentTarget.value)} />
           <button class="btn"
             type="button"
-            disabled={crashConfirm !== "CRASH"}
             onClick={() => void props.run(() => props.client.post("diagnostics/crash-tests", { confirmCrash: true }), "Crash test triggered")}
           >
             <Ban size={15} />
             Crash test
           </button>
-          <input class="form-control" value={shutdownConfirm} placeholder="Type SHUTDOWN" onInput={(event) => setShutdownConfirm(event.currentTarget.value)} />
           <button class="btn"
             type="button"
-            disabled={shutdownConfirm !== "SHUTDOWN"}
             onClick={() => void props.run(() => props.client.post("app/shutdown", { confirmShutdown: true }), "Shutdown requested")}
           >
             <Plug size={15} />

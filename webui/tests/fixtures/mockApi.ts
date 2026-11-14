@@ -33,6 +33,7 @@ const snapshot = {
       }
     },
     runtimeDiagnostics: {
+      sharedFileCount: 1,
       sharedHashingCount: 1,
       sharedDirectoryReloadProgress: {
         phase: "hashing",
@@ -58,10 +59,8 @@ const snapshot = {
       }
     },
     stats: {
-      downloadRateBytesPerSec: 2048,
-      uploadRateBytesPerSec: 1024,
-      sharedFiles: 1,
-      sharedBytes: 4096
+      downloadSpeedKiBps: 2,
+      uploadSpeedKiBps: 1
     },
     servers: {
       connected: true,
@@ -70,12 +69,6 @@ const snapshot = {
       ed2kIdState: "high",
       serverCount: 1
     }
-  },
-  stats: {
-    downloadRateBytesPerSec: 2048,
-    uploadRateBytesPerSec: 1024,
-    sharedFiles: 1,
-    sharedBytes: 4096
   },
   transfers: [
     {
@@ -147,6 +140,16 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       headers: request.headers(),
       body: request.postData()
     });
+
+    if (request.method() === "POST" && path === "diagnostics/bundles") {
+      const body = request.postDataJSON();
+      const valid = body.confirmCapture === true && Number.isInteger(body.maxBytes)
+        && body.maxBytes >= 65_536 && body.maxBytes <= 67_108_864;
+      await route.fulfill({ status: valid ? 200 : 400, contentType: "application/json", body: JSON.stringify(valid
+        ? { schema: "emulebb.diagnostic-bundle.v6", capturedAt: "2026-11-14T12:00:00Z", summary: { issueCount: 0 } }
+        : { error: { code: "BAD_REQUEST", message: "A bounded maxBytes value is required" } }) });
+      return;
+    }
 
     const data = request.method() === "GET" && path === "shared-files"
       ? url.searchParams.has("cursor")
@@ -663,8 +666,12 @@ function dataFor(method: string, path: string): unknown {
       };
     case "uploads":
       return { items: snapshot.uploads };
+    case "uploads/active-upload-peer":
+      return { ...snapshot.uploads[0], scoreBreakdown: uploadScore(100) };
     case "upload-queue":
       return { items: snapshot.uploadQueue };
+    case "upload-queue/waiting-upload-peer":
+      return { ...snapshot.uploadQueue[0], scoreBreakdown: uploadScore(50) };
     case "app":
       return {
         name: "eMuleBB",
@@ -715,4 +722,10 @@ function sectionResource(name: string, route: string, uiSection: string, descrip
     uiSection,
     description
   };
+}
+
+function uploadScore(baseScore: number) {
+  return { availability: 'available', baseScore, effectiveScore: baseScore * 2, coreScore: baseScore,
+    effectiveScoreFloat: baseScore * 2, creditRatio: 2, filePriority: 1, lowRatioApplied: false,
+    lowRatioBonus: 0, lowIdPenaltyApplied: false, lowIdDivisor: 1, oldClientPenaltyApplied: false, cooldownRemainingMs: 0 };
 }

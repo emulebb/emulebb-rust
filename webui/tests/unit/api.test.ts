@@ -3,6 +3,24 @@ import { describe, expect, it, vi } from "vitest";
 import { downloadConflicts, RestClient, RestError } from "../../src/api";
 
 describe("RestClient", () => {
+  it("captures the exact raw diagnostic bundle with its required bounded request", async () => {
+    const bundle = { schema: "emulebb.diagnostic-bundle.v6", capturedAt: "2026-11-14T12:00:00Z",
+      settingsProvenance: { apiKeyIncluded: true, sensitiveValues: "exact", apiKey: "synthetic-private-key" } };
+    const fetchMock = vi.fn(async () => jsonResponse(bundle)) as unknown as typeof fetch;
+    const client = new RestClient({ fetch: fetchMock });
+    client.setApiKey("synthetic-request-key");
+    await expect(client.captureDiagnosticBundle(16_777_216)).resolves.toEqual(bundle);
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/diagnostics/bundles", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-API-Key": "synthetic-request-key" },
+      body: JSON.stringify({ confirmCapture: true, maxBytes: 16_777_216 })
+    });
+  });
+
+  it("rejects an envelope substituted for the raw diagnostic bundle", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ data: { schema: "emulebb.diagnostic-bundle.v6", capturedAt: "synthetic" } })) as unknown as typeof fetch;
+    await expect(new RestClient({ fetch: fetchMock }).captureDiagnosticBundle(16_777_216)).rejects.toThrow("unexpected response");
+  });
+
   it("unwraps successful API envelopes", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ data: { version: "0.1.0-beta.2" } })) as unknown as typeof fetch;
     const client = new RestClient({ basePath: "/test-api", fetch: fetchMock });

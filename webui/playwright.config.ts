@@ -16,6 +16,12 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] }
+    },
+    {
+      name: "webkit-mobile",
+      use: { ...devices["iPhone 13"] },
+      testMatch: "mobile-appearance.spec.ts",
+      grep: /mobile Safari smoke/
     }
   ],
   webServer: {
