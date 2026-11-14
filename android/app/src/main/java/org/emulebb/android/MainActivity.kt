@@ -3,6 +3,7 @@ package org.emulebb.android
 import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
@@ -130,7 +131,13 @@ class MainActivity : Activity() {
         button("Grant all-files access", R.id.grant_all_files_access) {
             launchSettings(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
         }
-        button("Allow notifications", R.id.allow_notifications) { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) }
+        button("Allow notifications", R.id.allow_notifications) {
+            if (Build.VERSION.SDK_INT >= 33) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+            } else {
+                launchSettings(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+            }
+        }
         button("Allow local network", R.id.allow_local_network) {
             if (Build.VERSION.SDK_INT >= 37) requestPermissions(arrayOf(DaemonService.LOCAL_NETWORK), 2)
         }.isEnabled = Build.VERSION.SDK_INT >= 37
@@ -356,7 +363,7 @@ class MainActivity : Activity() {
     private val poll = object : Runnable {
         override fun run() {
             queryStatus()
-            val notifications = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            val notifications = requireNotNull(getSystemService(NotificationManager::class.java)).areNotificationsEnabled()
             val exemption = requireNotNull(getSystemService(PowerManager::class.java)).isIgnoringBatteryOptimizations(packageName)
             val local = Build.VERSION.SDK_INT < 37 || checkSelfPermission(DaemonService.LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
             val restricted = requireNotNull(getSystemService(ActivityManager::class.java)).isBackgroundRestricted

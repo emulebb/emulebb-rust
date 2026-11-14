@@ -156,7 +156,12 @@ class DaemonService : Service() {
         error = null
         stopFailures = 0
         try {
-            startForeground(NOTICE, notification("Starting"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            val foregroundType = if (Build.VERSION.SDK_INT >= 34) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE
+            }
+            startForeground(NOTICE, notification("Starting"), foregroundType)
             notifiedPhase = "Starting"
         } catch (failure: Exception) {
             // Promotion happens before native startup. A platform/AppOp denial
