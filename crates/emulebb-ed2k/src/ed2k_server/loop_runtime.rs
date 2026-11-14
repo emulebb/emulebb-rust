@@ -97,6 +97,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
     let initial_config = initial_plan.config();
     let session_context_base = ServerSessionContext {
         bind_ip,
+        egress_route: initial_config.egress_route,
         nat,
         hello_identity,
         nickname: initial_config.server_nickname(),

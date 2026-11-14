@@ -117,6 +117,7 @@ fn test_network_config(
     };
     config.listen_port = Some(listen_port);
     Ed2kNetworkConfig {
+        egress_route: emulebb_ed2k::networking::EgressRoute::StrictInterface,
         bind_ip,
         kad_bind_addr: SocketAddr::new(IpAddr::V4(bind_ip), 0),
         listen_port,

@@ -580,6 +580,22 @@ impl EmulebbCore {
         ed2k_network: Option<Ed2kNetworkConfig>,
         progressive_catalog: bool,
     ) -> Result<Self> {
+        if let Some(network) = ed2k_network.as_ref()
+            && network.egress_route == emulebb_ed2k::networking::EgressRoute::DirectSystemRoute
+        {
+            // WHY: public runtime constructors must not accept a direct route
+            // alongside an explicit interface or VPN guard. The bind IP here may
+            // be auto-resolved, so only the original profile can classify it.
+            anyhow::ensure!(
+                !network.vpn_guard.enabled
+                    && network.vpn_guard.mode.eq_ignore_ascii_case("off")
+                    && network
+                        .p2p_bind_interface
+                        .as_deref()
+                        .is_none_or(|name| name.trim().is_empty()),
+                "direct route conflicts with configured interface or VPN guard"
+            );
+        }
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let metadata_store = index.metadata_store();
         let has_persisted_core_settings =
@@ -1741,6 +1757,7 @@ impl EmulebbCore {
                 // Captured per-call into each peer attempt so a queued + UDP-eligible
                 // source can detach onto the reask loop (None when reask is off).
                 let reask_register = self.ed2k_reask_handle.lock().unwrap().clone();
+                let egress_route = network.egress_route;
                 let outcome = run_ed2k_direct_downloads(
                     DirectDownloadOptions {
                         bind_ip: network.bind_ip,
@@ -1774,6 +1791,7 @@ impl EmulebbCore {
                             download_files_from_peer(
                                 Ed2kPeerDownloadOptions {
                                     bind_ip,
+                                    egress_route,
                                     peer: &source,
                                     hello_identity,
                                     secure_ident: &secure_ident,
@@ -6412,7 +6430,7 @@ async fn handle_kad_local_store_packet(
                 .port();
             spawn_kad_firewalled_response(
                 dht.clone(),
-                network.bind_ip,
+                emulebb_ed2k::networking::EgressBinding::new(network.bind_ip, network.egress_route),
                 runtime.reachability.clone(),
                 Arc::clone(kad_firewall),
                 our_tcp_port,
@@ -7088,7 +7106,8 @@ async fn handle_kad_find_buddy_res(
     // back to us, then ping it at the oracle cadence. When the link drops, clear
     // our acquired buddy so the buddy-management loop re-searches (oracle
     // buddy-loss SetFindBuddy).
-    let bind_ip = network.bind_ip;
+    let binding =
+        emulebb_ed2k::networking::EgressBinding::new(network.bind_ip, network.egress_route);
     let hello_identity = buddy_hello_identity(network, reachability);
     let buddy_user_hash = res.client_hash.0;
     let buddy_addr = SocketAddr::new(from.ip(), res.tcp_port);
@@ -7108,7 +7127,7 @@ async fn handle_kad_find_buddy_res(
     *buddy_link_cancel.lock().unwrap() = Some(cancel.clone());
     tokio::spawn(async move {
         if let Err(error) = run_outbound_buddy_link(OutboundBuddyLinkOptions {
-            bind_ip,
+            binding,
             buddy_addr,
             buddy_user_hash,
             buddy_connect_options: connect_options,

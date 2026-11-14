@@ -57,7 +57,7 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
         login_identity_for_server_transport(hello_identity, use_server_obfuscation);
     let transport_endpoint = resolved_server.transport_endpoint(use_server_obfuscation);
     let mut session = ServerSession::connect(
-        bind_ip,
+        crate::networking::EgressBinding::new(bind_ip, config.egress_route),
         transport_endpoint,
         Arc::new(RwLock::new(Ed2kServerState::default())),
         "active_callback",

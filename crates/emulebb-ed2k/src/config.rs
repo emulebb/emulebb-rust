@@ -12,6 +12,9 @@ const DEFAULT_UPLOAD_SESSION_TIME_LIMIT_SECS: u64 = 7_200;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Ed2kRuntimeConfig {
+    /// Internal route intent, derived from the active profile rather than persisted settings.
+    #[serde(skip)]
+    pub egress_route: crate::networking::EgressRoute,
     /// Local ED2K peer TCP listener port, resolved by the daemon from config.
     pub listen_port: Option<u16>,
     /// Ordered ED2K server bootstrap entries mirrored from `server.met`.
@@ -257,6 +260,7 @@ impl Ed2kRuntimeConfig {
 impl Default for Ed2kRuntimeConfig {
     fn default() -> Self {
         Self {
+            egress_route: crate::networking::EgressRoute::StrictInterface,
             listen_port: None,
             server_entries: Vec::new(),
             server_endpoints: Vec::new(),

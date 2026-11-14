@@ -134,7 +134,7 @@ async fn connect_server_transport_attempt(
     login_identity.udp_port = ports.udp;
     let transport_endpoint = server.transport_endpoint(use_server_obfuscation);
     let mut session = ServerSession::connect_until_with_trace_id(
-        context.bind_ip,
+        crate::networking::EgressBinding::new(context.bind_ip, context.egress_route),
         transport_endpoint,
         Arc::clone(&context.state),
         "background",
@@ -256,7 +256,12 @@ pub(super) async fn run_one_server_session(
         // discovery cycle below will refresh it for the current identity.
         live_server.entry.udp_key = 0;
     }
-    let server_udp_socket = match bind_server_udp_socket(context.bind_ip).await {
+    let server_udp_socket = match bind_server_udp_socket(crate::networking::EgressBinding::new(
+        context.bind_ip,
+        context.egress_route,
+    ))
+    .await
+    {
         Ok(socket) => {
             debug!(
                 "bound ED2K server UDP helper local={} remote={} trace_id={}",

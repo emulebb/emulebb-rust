@@ -132,7 +132,7 @@ pub async fn search_source_servers(
             file_hash
         );
         match search_sources_on_server(SourceSearchServerOptions {
-            bind_ip,
+            binding: crate::networking::EgressBinding::new(bind_ip, config.egress_route),
             server: &resolved_server,
             hello_identity,
             nickname: &nickname,
@@ -170,7 +170,7 @@ pub async fn search_source_servers(
 }
 
 struct SourceSearchServerOptions<'a> {
-    bind_ip: Ipv4Addr,
+    binding: crate::networking::EgressBinding,
     server: &'a ResolvedServerEntry,
     hello_identity: Ed2kHelloIdentity,
     nickname: &'a str,
@@ -185,7 +185,7 @@ async fn search_sources_on_server(
     options: SourceSearchServerOptions<'_>,
 ) -> Result<Vec<Ed2kFoundSource>> {
     let SourceSearchServerOptions {
-        bind_ip,
+        binding,
         server,
         hello_identity,
         nickname,
@@ -195,13 +195,14 @@ async fn search_sources_on_server(
         idle_timeout,
         cancel,
     } = options;
+    let bind_ip = binding.address;
     let use_server_obfuscation =
         should_use_server_obfuscation(hello_identity.connect_options, server);
     let login_identity =
         login_identity_for_server_transport(hello_identity, use_server_obfuscation);
     let transport_endpoint = server.transport_endpoint(use_server_obfuscation);
     let mut session = ServerSession::connect(
-        bind_ip,
+        binding,
         transport_endpoint,
         Arc::new(RwLock::new(Ed2kServerState::default())),
         "active_sources",
@@ -459,7 +460,10 @@ mod tests {
         let server = active_source_server(endpoint);
 
         let results = search_sources_on_server(SourceSearchServerOptions {
-            bind_ip: crate::test_bind_ip(),
+            binding: crate::networking::EgressBinding::new(
+                crate::test_bind_ip(),
+                crate::networking::EgressRoute::StrictInterface,
+            ),
             server: &server,
             hello_identity: active_source_identity(),
             nickname: "eMule",

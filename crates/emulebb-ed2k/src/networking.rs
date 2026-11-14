@@ -187,6 +187,50 @@ pub fn resolve_bind_ip(
         .map(|address| address.address.clone())
 }
 
+/// Per-runtime routing intent. Explicit binds and guards always require a pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EgressRoute {
+    /// The operator selected neither a bind nor a VPN guard; bind the selected source address.
+    DirectSystemRoute,
+    /// Resolve and apply the configured interface pin, failing closed on errors.
+    #[default]
+    StrictInterface,
+}
+
+/// Source address and immutable interface-pinning intent for one runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EgressBinding {
+    pub address: std::net::Ipv4Addr,
+    pub route: EgressRoute,
+}
+
+impl EgressBinding {
+    /// Construct a source-address binding without inferring the operator's intent.
+    #[must_use]
+    pub const fn new(address: std::net::Ipv4Addr, route: EgressRoute) -> Self {
+        Self { address, route }
+    }
+
+    /// Resolve an index when strict pinning was requested.
+    pub fn interface_index(self, purpose: &str) -> Result<Option<u32>> {
+        self.route.interface_index(self.address, purpose)
+    }
+}
+
+impl EgressRoute {
+    /// Resolve the required interface only for strict routing; never downgrade on error.
+    pub fn interface_index(
+        self,
+        bind_ip: std::net::Ipv4Addr,
+        purpose: &str,
+    ) -> Result<Option<u32>> {
+        match self {
+            Self::DirectSystemRoute => Ok(None),
+            Self::StrictInterface => require_bind_if_index(bind_ip, purpose).map(Some),
+        }
+    }
+}
+
 /// Resolves the OS interface index that owns `bind_ip`, for `IP_UNICAST_IF`
 /// egress pinning (eMule `ApplyConfiguredIpv4UnicastInterface`). Returns `None`
 /// when no local interface advertises that IPv4 address. The index lets the P2P
@@ -632,6 +676,20 @@ mod tests {
             assert_eq!(resolve_bind_if_index(ip), Some(index));
             assert_eq!(require_bind_if_index(ip, "test").unwrap(), index);
         }
+    }
+
+    #[test]
+    fn concurrent_route_intents_do_not_share_state_or_downgrade_strict_errors() {
+        use super::{EgressBinding, EgressRoute};
+        let address = std::net::Ipv4Addr::new(203, 0, 113, 234);
+        let direct = std::thread::spawn(move || {
+            EgressBinding::new(address, EgressRoute::DirectSystemRoute).interface_index("direct")
+        });
+        let strict = std::thread::spawn(move || {
+            EgressBinding::new(address, EgressRoute::StrictInterface).interface_index("strict")
+        });
+        assert_eq!(direct.join().unwrap().unwrap(), None);
+        assert!(strict.join().unwrap().is_err());
     }
 
     #[test]

@@ -122,6 +122,7 @@ macro_rules! download_file_from_peer_test {
             established_context: $established_context:expr $(,)?
         ) => {
         download_file_from_peer(Ed2kPeerDownloadOptions {
+            egress_route: crate::networking::EgressRoute::StrictInterface,
             bind_ip: $bind_ip,
             peer: $peer,
             hello_identity: $hello_identity,

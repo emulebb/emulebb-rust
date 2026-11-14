@@ -220,6 +220,7 @@ async fn connected_id_change_fixture() -> (
     }]);
     let reachability_authority = ReachabilityRuntimeAuthority::new();
     let context = ServerSessionContext {
+        egress_route: crate::networking::EgressRoute::StrictInterface,
         bind_ip: Ipv4Addr::LOCALHOST,
         nat: Arc::new(NatManager::default()),
         hello_identity: Ed2kHelloIdentity {

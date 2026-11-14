@@ -24,8 +24,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use rand::Rng;
 use tokio::net::UdpSocket;
 
-use crate::networking::require_bind_if_index;
-
 const STUN_BINDING_REQUEST: u16 = 0x0001;
 const STUN_BINDING_SUCCESS: u16 = 0x0101;
 const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
@@ -62,8 +60,11 @@ pub struct StunProbeOutcome {
 /// `bind_ip` should be the resolved data-plane bind address (the VPN tunnel IP)
 /// so the probe is egress-pinned exactly like the eD2k/Kad sockets; pass an
 /// unspecified address (`0.0.0.0`) for a default-route baseline probe.
-pub async fn stun_probe(bind_ip: Ipv4Addr, timeout: Duration) -> Result<Ipv4Addr> {
-    stun_probe_servers_detailed(DEFAULT_STUN_SERVERS, bind_ip, timeout)
+pub async fn stun_probe(
+    binding: crate::networking::EgressBinding,
+    timeout: Duration,
+) -> Result<Ipv4Addr> {
+    stun_probe_servers_for_binding(DEFAULT_STUN_SERVERS, binding, timeout)
         .await
         .map(|outcome| *outcome.endpoint.ip())
 }
@@ -90,13 +91,29 @@ pub async fn stun_probe_servers_detailed(
     bind_ip: Ipv4Addr,
     timeout: Duration,
 ) -> Result<StunProbeOutcome> {
+    stun_probe_servers_for_binding(
+        servers,
+        crate::networking::EgressBinding::new(
+            bind_ip,
+            crate::networking::EgressRoute::StrictInterface,
+        ),
+        timeout,
+    )
+    .await
+}
+
+async fn stun_probe_servers_for_binding(
+    servers: &[(&'static str, u16)],
+    binding: crate::networking::EgressBinding,
+    timeout: Duration,
+) -> Result<StunProbeOutcome> {
     let mut set = tokio::task::JoinSet::new();
     for &(host, port) in servers {
         set.spawn(async move {
             // Bound the whole per-server probe (DNS + connect + send + recv) with
             // one deadline, consistent with the libtorrent/eMuleBB probes.
             let label = format!("{host}:{port}");
-            let result = match tokio::time::timeout(timeout, probe_one(host, port, bind_ip)).await {
+            let result = match tokio::time::timeout(timeout, probe_one(host, port, binding)).await {
                 Ok(result) => result,
                 Err(_) => Err(anyhow!("timed out")),
             };
@@ -153,9 +170,10 @@ pub enum NatMappingBehavior {
 /// the gateway, not the socket), so it generalizes to the eD2k/Kad socket; it does
 /// NOT yield an advertisable port (see the parse note).
 pub async fn stun_probe_mapping_behavior(
-    bind_ip: Ipv4Addr,
+    binding: crate::networking::EgressBinding,
     timeout: Duration,
 ) -> NatMappingBehavior {
+    let bind_ip = binding.address;
     let mut hosts = DEFAULT_STUN_SERVERS.iter();
     let Some(&first) = hosts.next() else {
         return NatMappingBehavior::Inconclusive;
@@ -164,7 +182,7 @@ pub async fn stun_probe_mapping_behavior(
         return NatMappingBehavior::Inconclusive;
     };
 
-    let bind_if_index = match require_bind_if_index(bind_ip, "STUN NAT mapping probe") {
+    let bind_if_index = match binding.interface_index("STUN NAT mapping probe") {
         Ok(index) => index,
         Err(error) => {
             tracing::debug!("STUN NAT mapping probe blocked by bind policy: {error:#}");
@@ -177,7 +195,7 @@ pub async fn stun_probe_mapping_behavior(
     };
     if emulebb_kad_dht::socket_opts::pin_egress_to_interface(
         socket2::SockRef::from(&socket),
-        Some(bind_if_index),
+        bind_if_index,
     )
     .is_err()
     {
@@ -238,8 +256,13 @@ async fn probe_port_unconnected(
 
 /// One server probe: resolve, bind + egress-pin, `connect()`, single send, parse.
 /// The caller bounds the whole probe with a timeout (see `stun_probe_servers`).
-async fn probe_one(host: &'static str, port: u16, bind_ip: Ipv4Addr) -> Result<SocketAddrV4> {
-    let bind_if_index = require_bind_if_index(bind_ip, "STUN public IP probe")?;
+async fn probe_one(
+    host: &'static str,
+    port: u16,
+    binding: crate::networking::EgressBinding,
+) -> Result<SocketAddrV4> {
+    let bind_ip = binding.address;
+    let bind_if_index = binding.interface_index("STUN public IP probe")?;
     let server = tokio::net::lookup_host((host, port))
         .await
         .with_context(|| format!("STUN DNS lookup failed for {host}:{port}"))?
@@ -261,7 +284,7 @@ async fn probe_one(host: &'static str, port: u16, bind_ip: Ipv4Addr) -> Result<S
     // data-plane sockets.
     emulebb_kad_dht::socket_opts::pin_egress_to_interface(
         socket2::SockRef::from(&socket),
-        Some(bind_if_index),
+        bind_if_index,
     )
     .with_context(|| format!("failed to pin STUN probe egress for {bind_ip}"))?;
 
@@ -466,9 +489,16 @@ mod tests {
 
     #[tokio::test]
     async fn public_ip_probe_requires_resolved_bind_interface_index_before_dns() {
-        let err = probe_one("invalid.invalid", 3478, Ipv4Addr::new(203, 0, 113, 234))
-            .await
-            .expect_err("unassigned bind IP must fail closed before STUN DNS lookup");
+        let err = probe_one(
+            "invalid.invalid",
+            3478,
+            crate::networking::EgressBinding::new(
+                Ipv4Addr::new(203, 0, 113, 234),
+                crate::networking::EgressRoute::StrictInterface,
+            ),
+        )
+        .await
+        .expect_err("unassigned bind IP must fail closed before STUN DNS lookup");
 
         assert!(
             err.to_string()

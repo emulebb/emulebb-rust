@@ -318,7 +318,11 @@ impl DaemonProfile {
         let secure_ident = Arc::new(load_or_create_secure_ident(metadata)?);
         let ip_filter = self.load_ip_filter()?;
         let vpn_interface_bound = self.vpn_binding_confirmed(bind_ip, detected_interfaces);
+        // WHY: a default-route address is resolved for source binding, but it
+        // must not be mistaken for an operator-selected interface pin.
+        let egress_route = self.egress_route();
         Ok(Some(Ed2kNetworkConfig {
+            egress_route,
             bind_ip,
             kad_bind_addr: self.kad_bind_addr(bind_ip)?,
             listen_port,
@@ -616,6 +620,7 @@ where
 
 fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfig {
     Ed2kRuntimeConfig {
+        egress_route: emulebb_ed2k::networking::EgressRoute::StrictInterface,
         listen_port: settings.listen_port,
         server_entries: Vec::new(),
         server_endpoints: Vec::new(),

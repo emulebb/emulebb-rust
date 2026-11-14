@@ -208,7 +208,11 @@ pub async fn search_keyword_udp_servers(
         return Ok(Vec::new());
     }
 
-    let socket = bind_server_udp_socket(bind_ip).await?;
+    let socket = bind_server_udp_socket(crate::networking::EgressBinding::new(
+        bind_ip,
+        config.egress_route,
+    ))
+    .await?;
     let mut results = Vec::new();
     let mut last_error = None;
     let mut queried_servers = Vec::new();
@@ -385,7 +389,7 @@ pub async fn search_keyword_servers(
         );
 
         match search_keyword_on_server(
-            bind_ip,
+            crate::networking::EgressBinding::new(bind_ip, config.egress_route),
             &resolved_server,
             hello_identity,
             &nickname,
@@ -421,7 +425,7 @@ pub async fn search_keyword_servers(
     reason = "single-call-site protocol session inputs stay explicit"
 )]
 async fn search_keyword_on_server(
-    bind_ip: Ipv4Addr,
+    binding: crate::networking::EgressBinding,
     server: &ResolvedServerEntry,
     hello_identity: Ed2kHelloIdentity,
     nickname: &str,
@@ -430,13 +434,14 @@ async fn search_keyword_on_server(
     idle_timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Vec<Ed2kSearchFile>> {
+    let bind_ip = binding.address;
     let use_server_obfuscation =
         should_use_server_obfuscation(hello_identity.connect_options, server);
     let login_identity =
         login_identity_for_server_transport(hello_identity, use_server_obfuscation);
     let transport_endpoint = server.transport_endpoint(use_server_obfuscation);
     let mut session = ServerSession::connect(
-        bind_ip,
+        binding,
         transport_endpoint,
         Arc::new(RwLock::new(Ed2kServerState::default())),
         "active_search",
@@ -679,7 +684,10 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let results = search_keyword_on_server(
-            crate::test_bind_ip(),
+            crate::networking::EgressBinding::new(
+                crate::test_bind_ip(),
+                crate::networking::EgressRoute::StrictInterface,
+            ),
             &active_keyword_server(endpoint),
             active_keyword_identity(),
             "eMule",

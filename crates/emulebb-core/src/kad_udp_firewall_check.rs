@@ -214,7 +214,7 @@ async fn run_kad_udp_firewall_check_round(
         let helper_addr = SocketAddr::new(IpAddr::V4(helper.ip), helper.tcp_port);
         match request_udp_firewall_check(
             Some(dht.clone()),
-            network.bind_ip,
+            emulebb_ed2k::networking::EgressBinding::new(network.bind_ip, network.egress_route),
             helper_addr,
             hello_identity,
             Arc::clone(&network.secure_ident),

@@ -22,7 +22,7 @@
 //!   (`MIN2MS(10)` cadence).
 //! - `srchybrid/ListenSocket.cpp` `OP_CALLBACK` relayed to the firewalled client.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,8 +61,8 @@ pub enum BuddyLinkEnd {
 
 /// Inputs for the outbound buddy link task.
 pub struct OutboundBuddyLinkOptions {
-    /// VPN/tunnel bind IP for the buddy socket.
-    pub bind_ip: Ipv4Addr,
+    /// Selected source and routing intent for the buddy socket.
+    pub binding: crate::networking::EgressBinding,
     /// The buddy's TCP endpoint (its source IP + the TCP port it returned).
     pub buddy_addr: SocketAddr,
     /// The buddy's eD2k user hash (used for registry identity + obfuscation).
@@ -104,7 +104,7 @@ pub struct OutboundBuddyLinkOptions {
 /// the outbound slot is evicted and the termination reason is returned.
 pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Result<BuddyLinkEnd> {
     let OutboundBuddyLinkOptions {
-        bind_ip,
+        binding,
         buddy_addr,
         buddy_user_hash,
         buddy_connect_options,
@@ -130,7 +130,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     }
 
     let mut transport = connect_and_hello_buddy(
-        bind_ip,
+        binding,
         buddy_addr,
         buddy_user_hash,
         buddy_connect_options,
@@ -425,7 +425,7 @@ async fn handle_buddy_packet(
 /// Connect out to the buddy and complete the hello side channel so the buddy
 /// recognizes us as its incoming buddy, returning the held transport.
 async fn connect_and_hello_buddy(
-    bind_ip: Ipv4Addr,
+    binding: crate::networking::EgressBinding,
     buddy_addr: SocketAddr,
     buddy_user_hash: [u8; 16],
     buddy_connect_options: u8,
@@ -434,7 +434,7 @@ async fn connect_and_hello_buddy(
 ) -> Result<Ed2kTransport> {
     let mut transport = Ed2kTransport::connect_outgoing(
         "kad_buddy",
-        bind_ip,
+        binding,
         buddy_addr,
         hello_identity.connect_options,
         Some(buddy_user_hash),
@@ -665,7 +665,10 @@ mod tests {
         ));
 
         connect_and_hello_buddy(
-            bind_ip,
+            crate::networking::EgressBinding::new(
+                bind_ip,
+                crate::networking::EgressRoute::StrictInterface,
+            ),
             buddy_addr,
             expected_hash,
             0,
@@ -688,7 +691,10 @@ mod tests {
         ));
 
         let error = connect_and_hello_buddy(
-            bind_ip,
+            crate::networking::EgressBinding::new(
+                bind_ip,
+                crate::networking::EgressRoute::StrictInterface,
+            ),
             buddy_addr,
             [0x44; 16],
             0,

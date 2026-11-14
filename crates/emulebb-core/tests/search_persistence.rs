@@ -196,6 +196,7 @@ fn seed_passive_file(metadata_path: &Path, file: IndexedFile) {
 fn test_network_config(runtime_dir: &Path) -> Ed2kNetworkConfig {
     let bind_ip = Ipv4Addr::new(198, 51, 100, 10);
     Ed2kNetworkConfig {
+        egress_route: emulebb_ed2k::networking::EgressRoute::StrictInterface,
         bind_ip,
         kad_bind_addr: SocketAddr::new(IpAddr::V4(bind_ip), 4665),
         listen_port: 4662,

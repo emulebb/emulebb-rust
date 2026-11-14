@@ -134,13 +134,13 @@ const ED2K_RELOGIN_MIN_INTERVAL: Duration = Duration::from_secs(300);
 /// a stale server address. Gentle: one STUN race per interval, more often only
 /// while the effective address is unknown.
 pub(crate) async fn run_ed2k_public_ip_probe(
-    bind_ip: Ipv4Addr,
+    binding: emulebb_ed2k::networking::EgressBinding,
     public_ip: ExternalReachability,
     public_ip_writer: RuntimeReachabilityWriter,
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
-        if let Ok(ip) = stun_probe(bind_ip, DEFAULT_STUN_TIMEOUT).await
+        if let Ok(ip) = stun_probe(binding, DEFAULT_STUN_TIMEOUT).await
             && public_ip_writer.set_fallback_public_ip(ip) == ReachabilityUpdate::Changed
         {
             tracing::info!("ED2K fallback public IP refreshed via STUN: {ip}");
@@ -162,11 +162,14 @@ pub(crate) async fn run_ed2k_public_ip_probe(
 /// fall back to TCP. Informational only (no behavior change): STUN reports the probe
 /// socket's source-port mapping, not a listen port, so it is never used to advertise
 /// a port — the advertised port stays UPnP-mapped / Kad-observed.
-pub(crate) async fn run_ed2k_nat_type_probe(bind_ip: Ipv4Addr, shutdown: Arc<AtomicBool>) {
+pub(crate) async fn run_ed2k_nat_type_probe(
+    binding: emulebb_ed2k::networking::EgressBinding,
+    shutdown: Arc<AtomicBool>,
+) {
     if shutdown.load(Ordering::Relaxed) {
         return;
     }
-    match stun_probe_mapping_behavior(bind_ip, DEFAULT_STUN_TIMEOUT).await {
+    match stun_probe_mapping_behavior(binding, DEFAULT_STUN_TIMEOUT).await {
         NatMappingBehavior::EndpointIndependent => tracing::info!(
             "NAT mapping behavior: endpoint-independent (cone) — eD2k reask/HighID reachability is solid"
         ),

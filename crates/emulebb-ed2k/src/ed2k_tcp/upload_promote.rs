@@ -64,6 +64,7 @@ pub(in crate::ed2k_tcp) struct UploadPromoteDriver {
     pub(in crate::ed2k_tcp) callback_sessions: super::Ed2kCallbackSessionHandle,
     /// Local bind address for outbound connects (the listener's VPN-pinned IP).
     pub(in crate::ed2k_tcp) bind_ip: Ipv4Addr,
+    pub(in crate::ed2k_tcp) egress_route: crate::networking::EgressRoute,
     /// Maximum time a granted disconnected waiter may take to attach a TCP
     /// connection (direct dial or callback) before its revocable slot expires.
     pub(in crate::ed2k_tcp) callback_timeout: Duration,
@@ -283,7 +284,7 @@ impl UploadPromoteDriver {
             }
             result = Ed2kTransport::connect_outgoing(
                 "upload_promote",
-                self.bind_ip,
+                crate::networking::EgressBinding::new(self.bind_ip, self.egress_route),
                 peer_endpoint,
                 self.hello_identity.connect_options,
                 grant.peer.user_hash,

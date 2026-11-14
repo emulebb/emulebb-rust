@@ -163,6 +163,7 @@ impl ListenerTestRuntime {
         &self,
     ) -> Arc<crate::ed2k_tcp::upload_promote::UploadPromoteDriver> {
         Arc::new(crate::ed2k_tcp::upload_promote::UploadPromoteDriver {
+            egress_route: crate::networking::EgressRoute::StrictInterface,
             dht: self.dht.clone(),
             server_state: Arc::clone(&self.server_state),
             server_search: self.server_search.clone(),
@@ -195,6 +196,7 @@ impl ListenerTestRuntime {
         let task = tokio::spawn(crate::ed2k_tcp::listener::run_callback_session_supervisor(
             inbox,
             crate::ed2k_tcp::listener::Ed2kCallbackSessionRuntime {
+                egress_route: crate::networking::EgressRoute::StrictInterface,
                 dht: self.dht.clone(),
                 server_state: Arc::clone(&self.server_state),
                 kad_firewall: Arc::clone(&self.kad_firewall),
@@ -414,7 +416,10 @@ pub(super) async fn connect_obfuscated_peer_and_exchange_hello(
 ) -> Ed2kTransport {
     let mut transport = Ed2kTransport::connect_outgoing(
         "test",
-        test_bind_ip(),
+        crate::networking::EgressBinding::new(
+            test_bind_ip(),
+            crate::networking::EgressRoute::StrictInterface,
+        ),
         peer_addr,
         emule_connect_options(true),
         Some(listener_user_hash),

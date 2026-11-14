@@ -39,6 +39,7 @@ use super::session::{
 /// Inputs for one outbound native ED2K peer download attempt.
 pub struct Ed2kPeerDownloadOptions<'a> {
     pub bind_ip: Ipv4Addr,
+    pub egress_route: crate::networking::EgressRoute,
     pub peer: &'a Ed2kFoundSource,
     pub hello_identity: Ed2kHelloIdentity,
     pub secure_ident: &'a Arc<Ed2kSecureIdent>,
@@ -114,6 +115,7 @@ pub async fn download_files_from_peer(
 ) -> Result<Ed2kPeerDownloadReport> {
     let Ed2kPeerDownloadOptions {
         bind_ip,
+        egress_route,
         peer,
         hello_identity,
         secure_ident,
@@ -172,7 +174,7 @@ pub async fn download_files_from_peer(
     async {
         let transport = Ed2kTransport::connect_outgoing(
             "native_download",
-            bind_ip,
+            crate::networking::EgressBinding::new(bind_ip, egress_route),
             peer_addr,
             hello_identity.connect_options,
             peer.user_hash,

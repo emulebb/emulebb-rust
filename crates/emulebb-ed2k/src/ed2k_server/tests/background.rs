@@ -920,7 +920,10 @@ async fn server_obfuscation_handshake_encrypts_login_request() {
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     // Bind the client socket to the same loopback address as the listener.
     let mut session = ServerSession::connect(
-        crate::test_bind_ip(),
+        crate::networking::EgressBinding::new(
+            crate::test_bind_ip(),
+            crate::networking::EgressRoute::StrictInterface,
+        ),
         endpoint,
         state,
         "test",
@@ -948,6 +951,7 @@ fn background_test_context(
         crate::ed2k_tcp::ed2k_callback_session_channel();
     let reachability_authority = ReachabilityRuntimeAuthority::new();
     let session = ServerSessionContext {
+        egress_route: crate::networking::EgressRoute::StrictInterface,
         bind_ip: crate::test_bind_ip(),
         nat: Arc::new(NatManager::default()),
         hello_identity: Ed2kHelloIdentity {

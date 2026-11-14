@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -253,14 +253,14 @@ impl Drop for ServerSession {
 
 impl ServerSession {
     pub(super) async fn connect(
-        bind_ip: Ipv4Addr,
+        binding: crate::networking::EgressBinding,
         endpoint: SocketAddr,
         state: Arc<RwLock<Ed2kServerState>>,
         trace_role: &'static str,
         timeout: Duration,
     ) -> Result<Self> {
         Self::connect_until(
-            bind_ip,
+            binding,
             endpoint,
             state,
             trace_role,
@@ -271,7 +271,7 @@ impl ServerSession {
     }
 
     pub(super) async fn connect_until(
-        bind_ip: Ipv4Addr,
+        binding: crate::networking::EgressBinding,
         endpoint: SocketAddr,
         state: Arc<RwLock<Ed2kServerState>>,
         trace_role: &'static str,
@@ -280,7 +280,7 @@ impl ServerSession {
     ) -> Result<Self> {
         let trace_id = Self::next_trace_id();
         Self::connect_until_with_trace_id(
-            bind_ip,
+            binding,
             endpoint,
             state,
             trace_role,
@@ -296,7 +296,7 @@ impl ServerSession {
     }
 
     pub(super) async fn connect_until_with_trace_id(
-        bind_ip: Ipv4Addr,
+        binding: crate::networking::EgressBinding,
         endpoint: SocketAddr,
         state: Arc<RwLock<Ed2kServerState>>,
         trace_role: &'static str,
@@ -304,6 +304,7 @@ impl ServerSession {
         pending_login_deadline: Instant,
         trace_id: u64,
     ) -> Result<Self> {
+        let bind_ip = binding.address;
         emit_server_connection_state(
             endpoint,
             trace_id,
@@ -332,19 +333,18 @@ impl ServerSession {
                         "failed to bind ED2K server socket to {bind_ip}: {error}"
                     ))
                 })?;
-            let bind_if_index =
-                crate::networking::require_bind_if_index(bind_ip, "ED2K server TCP").map_err(
-                    |error| {
-                        Ed2kServerFailure::local_socket(format!(
-                            "failed to resolve ED2K server bind interface for {bind_ip}: {error}"
-                        ))
-                    },
-                )?;
+            let bind_if_index = binding
+                .interface_index("ED2K server TCP")
+                .map_err(|error| {
+                    Ed2kServerFailure::local_socket(format!(
+                        "failed to resolve ED2K server bind interface for {bind_ip}: {error}"
+                    ))
+                })?;
             // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) before connect
             // so the server session leaves via the tunnel — solid VPN binding.
             emulebb_kad_dht::socket_opts::pin_egress_to_interface(
                 socket2::SockRef::from(&socket),
-                Some(bind_if_index),
+                bind_if_index,
             )
             .map_err(|error| {
                 Ed2kServerFailure::local_socket(format!(
@@ -1443,6 +1443,7 @@ mod receive_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1582,12 +1583,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_server_tcp_uses_source_address_without_interface_pin() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let binding = crate::networking::EgressBinding::new(
+            Ipv4Addr::LOCALHOST,
+            crate::networking::EgressRoute::DirectSystemRoute,
+        );
+        let session = ServerSession::connect(
+            binding,
+            endpoint,
+            Arc::new(RwLock::new(Ed2kServerState::default())),
+            "test",
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let (_stream, from) = listener.accept().await.unwrap();
+        assert_eq!(from.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        drop(session);
+    }
+
+    #[tokio::test]
     async fn server_connect_rolls_back_connecting_state_on_setup_failure() {
         let state = Arc::new(RwLock::new(Ed2kServerState::default()));
         let endpoint = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4661);
 
         let err = ServerSession::connect(
-            Ipv4Addr::new(203, 0, 113, 200),
+            crate::networking::EgressBinding::new(
+                Ipv4Addr::new(203, 0, 113, 200),
+                crate::networking::EgressRoute::StrictInterface,
+            ),
             endpoint,
             Arc::clone(&state),
             "test",
@@ -1629,7 +1657,10 @@ mod tests {
         let state = Arc::new(RwLock::new(Ed2kServerState::default()));
 
         let error = ServerSession::connect(
-            Ipv4Addr::LOCALHOST,
+            crate::networking::EgressBinding::new(
+                Ipv4Addr::LOCALHOST,
+                crate::networking::EgressRoute::StrictInterface,
+            ),
             endpoint,
             state,
             "test",

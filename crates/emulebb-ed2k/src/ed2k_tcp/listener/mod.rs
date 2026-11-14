@@ -43,6 +43,7 @@ pub(in crate::ed2k_tcp) use session::{
 
 /// Inputs for the long-lived ED2K TCP listener task.
 pub struct Ed2kListenerOptions {
+    pub egress_route: crate::networking::EgressRoute,
     pub listener: Arc<TcpListener>,
     pub dht: DhtNode,
     pub server_state: Arc<RwLock<Ed2kServerState>>,
@@ -78,6 +79,7 @@ pub struct Ed2kListenerOptions {
 /// buddy traffic, and firewall verification.
 pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
     let Ed2kListenerOptions {
+        egress_route,
         listener,
         dht,
         server_state,
@@ -108,15 +110,13 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
     // a per-connection interface lookup.
     let (bind_ip, bind_if_index) = match listener.local_addr() {
         Ok(addr) => match addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                match crate::networking::require_bind_if_index(v4, "eD2K listener") {
-                    Ok(index) => (v4, index),
-                    Err(error) => {
-                        warn!("eD2K listener disabled: {error:#}");
-                        return;
-                    }
+            std::net::IpAddr::V4(v4) => match egress_route.interface_index(v4, "eD2K listener") {
+                Ok(index) => (v4, index),
+                Err(error) => {
+                    warn!("eD2K listener disabled: {error:#}");
+                    return;
                 }
-            }
+            },
             _ => {
                 warn!("eD2K listener disabled: non-IPv4 listener addresses are not supported");
                 return;
@@ -141,6 +141,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             buddy_registry: buddy_registry.clone(),
             port_test_registry: port_test_registry.clone(),
             callback_sessions: callback_sessions.clone(),
+            egress_route,
             bind_ip,
             shutdown: Arc::clone(&shutdown),
         },
@@ -162,6 +163,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             buddy_registry: buddy_registry.clone(),
             port_test_registry: port_test_registry.clone(),
             callback_sessions: callback_sessions.clone(),
+            egress_route,
             bind_ip,
             callback_timeout,
             shutdown: Arc::clone(&shutdown),
@@ -206,7 +208,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                 // inbound connection into an unpinned data-plane leak.
                 if let Err(error) = emulebb_kad_dht::socket_opts::pin_egress_to_interface(
                     socket2::SockRef::from(&stream),
-                    Some(bind_if_index),
+                    bind_if_index,
                 ) {
                     debug!(
                         "dropping inbound eD2k connection from {peer_addr}: failed to pin egress: {error}"

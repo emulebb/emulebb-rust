@@ -308,6 +308,7 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
 
     let (reask_handle, mut reask_rx) = crate::ed2k_client_udp::reask_command_channel();
     let result = download_file_from_peer(Ed2kPeerDownloadOptions {
+        egress_route: crate::networking::EgressRoute::StrictInterface,
         bind_ip: test_bind_ip(),
         peer: &Ed2kFoundSource {
             file_hash,

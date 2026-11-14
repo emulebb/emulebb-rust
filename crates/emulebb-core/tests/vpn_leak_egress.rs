@@ -161,6 +161,7 @@ fn tunnel_network_config(
         ..Ed2kRuntimeConfig::default()
     };
     Ed2kNetworkConfig {
+        egress_route: emulebb_ed2k::networking::EgressRoute::StrictInterface,
         bind_ip: ip,
         kad_bind_addr: SocketAddr::new(IpAddr::V4(ip), 0),
         listen_port: 0,
