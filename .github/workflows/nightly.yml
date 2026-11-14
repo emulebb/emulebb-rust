@@ -181,12 +181,6 @@ jobs:
           ref: ${{ env.EMULEBB_APK_DIAGNOSTIC_BUILD_REF }}
           path: .ci/emulebb-build
           persist-credentials: false
-      - name: Checkout the exact original producer source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.diagnostic_source_sha }}
-          path: .ci/original-rust
-          persist-credentials: false
       - name: Checkout the independently pinned diagnostic Harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -236,6 +230,14 @@ jobs:
         run: |
           test -c /dev/kvm
           sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+      # WHY: finish host setup/cache actions before admitting the user-selected
+      # tree. Only the pinned executor may then read it for original-byte replay.
+      - name: Checkout the exact original producer source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.diagnostic_source_sha }}
+          path: .ci/original-rust
+          persist-credentials: false
       - name: Replay admitted original APK bytes without publication eligibility
         id: replay
         working-directory: .ci/emulebb-build
