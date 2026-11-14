@@ -9,7 +9,6 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <application android:label="eMuleBB" android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:theme="@style/AppTheme"
@@ -38,11 +37,5 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-enabled continuous eD2K/Kad peer hosting, maintaining network participation and serving shared files until explicitly stopped." />
         </service>
-        <receiver android:name=".BootReceiver" android:exported="false" android:process=":daemon">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
     </application>
 </manifest>

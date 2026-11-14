@@ -12,7 +12,6 @@
     <item name="stop_service" type="id" />
     <item name="copy_api_key" type="id" />
     <item name="open_webui" type="id" />
-    <item name="resume_on_boot" type="id" />
     <item name="pending_link" type="id" />
     <item name="pending_link_error" type="id" />
     <item name="grant_all_files_access" type="id" />
