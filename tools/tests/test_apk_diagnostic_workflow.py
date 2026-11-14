@@ -156,6 +156,26 @@ class ApkDiagnosticWorkflowTests(unittest.TestCase):
             self.assertIn(flag, replay["run"])
         self.assertEqual(replay["env"]["GH_TOKEN"], "${{ github.token }}")
 
+    def test_user_selected_source_is_admitted_only_after_host_setup(self):
+        steps = self.diagnostic["steps"]
+        checkout_index = next(index for index, step in enumerate(steps)
+                              if step.get("with", {}).get("ref") == "${{ inputs.diagnostic_source_sha }}")
+        setup_prefixes = ("actions/setup-python@", "docker/setup-docker-action@", "docker/setup-buildx-action@")
+        for prefix in setup_prefixes:
+            setup_index = next(index for index, step in enumerate(steps)
+                               if step.get("uses", "").startswith(prefix))
+            self.assertLess(setup_index, checkout_index)
+        for index, step in enumerate(steps):
+            if "pip install" in step.get("run", "") or "setfacl" in step.get("run", ""):
+                self.assertLess(index, checkout_index)
+        # WHY: no host setup/cache action may execute after the untrusted tree
+        # appears; only the pinned replay owner and its sanitized upload remain.
+        remaining = steps[checkout_index + 1:]
+        self.assertEqual(len(remaining), 2)
+        self.assertEqual(remaining[0]["id"], "replay")
+        self.assertEqual(remaining[0]["working-directory"], ".ci/emulebb-build")
+        self.assertTrue(remaining[1]["uses"].startswith("actions/upload-artifact@"))
+
     def test_retained_evidence_is_only_the_ineligible_outer_public_projection(self):
         upload = self.diagnostic["steps"][-1]
         self.assertTrue(upload["uses"].startswith("actions/upload-artifact@"))
