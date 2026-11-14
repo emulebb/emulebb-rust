@@ -4088,6 +4088,8 @@ export type EventStreamStatus = {
   retryIntervalMs: number;
 };
 
+const DIAGNOSTIC_BUNDLE_CONFIRM = "PRIVATE";
+
 export function DiagnosticsView(props: {
   app: unknown;
   capabilities: unknown;
@@ -4098,6 +4100,7 @@ export function DiagnosticsView(props: {
 }) {
   const [crashConfirm, setCrashConfirm] = useState("");
   const [shutdownConfirm, setShutdownConfirm] = useState("");
+  const [bundleConfirm, setBundleConfirm] = useState("");
   const [bundleFileName, setBundleFileName] = useState("");
   const diagnostics = props.runtimeDiagnostics ?? {};
   const eventStream = props.eventStreamStatus;
@@ -4137,8 +4140,24 @@ export function DiagnosticsView(props: {
         <div class="section-title">
           <h2>Diagnostics</h2>
         </div>
-        <div class="row-actions">
-          <button class="btn" type="button" onClick={() => void props.run(captureBundle, "Diagnostic bundle downloaded")}>
+        <p class="hint">
+          Private bundle: contains your API key, exact settings values, filesystem
+          paths, content and peer identifiers, recent logs, and diagnostic artifacts.
+          Not anonymized and not for sharing.
+        </p>
+        <div class="form-row danger-row">
+          <input
+            class="form-control"
+            value={bundleConfirm}
+            placeholder={`Type ${DIAGNOSTIC_BUNDLE_CONFIRM}`}
+            onInput={(event) => setBundleConfirm(event.currentTarget.value)}
+          />
+          <button
+            class="btn"
+            type="button"
+            disabled={bundleConfirm !== DIAGNOSTIC_BUNDLE_CONFIRM}
+            onClick={() => void props.run(captureBundle, "Diagnostic bundle downloaded")}
+          >
             <FileText size={15} />
             Capture bundle
           </button>
