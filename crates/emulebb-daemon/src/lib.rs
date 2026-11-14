@@ -33,6 +33,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 mod bind_config;
+pub use bind_config::NetworkStartupError;
 mod discovery_bootstrap;
 pub mod host_bootstrap;
 pub mod logging;

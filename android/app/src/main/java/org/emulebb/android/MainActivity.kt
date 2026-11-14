@@ -52,6 +52,7 @@ class MainActivity : Activity() {
     private var sharingDiagnostics = false
     private lateinit var status: TextView
     private lateinit var error: TextView
+    private lateinit var networkWait: TextView
     private lateinit var permissions: TextView
     private lateinit var pending: TextView
     private lateinit var linkError: TextView
@@ -72,7 +73,8 @@ class MainActivity : Activity() {
             phase = message.data.getString("phase") ?: "Stopped"
             address = message.data.getString("address")
             status.show(phase)
-            message.data.getString("error")?.let { error.show(it) }
+            networkWait.show(if (message.data.getBoolean("waitingForNetwork")) "Waiting for a usable default network" else "")
+            error.show(message.data.getString("error") ?: "")
             updatingBoot = true
             boot.isChecked = message.data.getBoolean("resumeOnBoot")
             updatingBoot = false
@@ -122,6 +124,7 @@ class MainActivity : Activity() {
         label("eMuleBB ${BuildConfig.VERSION_NAME}", R.id.app_version)
         status = label("Stopped", R.id.service_status)
         error = label("")
+        networkWait = label("", R.id.network_wait_status)
         permissions = label("")
         pending = label("", R.id.pending_link)
         linkError = label("", R.id.pending_link_error)

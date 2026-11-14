@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.LinkProperties
 import android.os.Bundle
 import android.os.Build
 import android.os.Environment
@@ -48,6 +49,7 @@ class DaemonService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private val commands = Executors.newSingleThreadExecutor()
     private val desired = AtomicBoolean(false)
+    private val networkNotificationPending = AtomicBoolean(false)
     private val prefs by lazy { getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE) }
     private var phase = "Stopped"
     private var error: String? = null
@@ -58,18 +60,44 @@ class DaemonService : Service() {
     private var restartForNetwork = false
     private var stopFailures = 0
     private var notifiedPhase: String? = null
+    private var waitingForNetwork = false
+    private var destroyed = false
     private val connectivity by lazy { requireNotNull(getSystemService(ConnectivityManager::class.java)) }
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(available: Network) {
             handler.post {
+                if (destroyed) return@post
                 val changed = network != null && network != available
                 network = available
+                notifyNetworkChanged()
                 if (changed && desired.get() && phase == "Running") {
                     restartForNetwork = true
                     phase = "Stopping"
                     requestNativeStop()
                 }
+            }
+        }
+
+        override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
+            handler.post { notifyNetworkChanged() }
+        }
+
+        override fun onLost(network: Network) {
+            handler.post { notifyNetworkChanged() }
+        }
+    }
+
+    private fun notifyNetworkChanged() {
+        if (destroyed || !desired.get()) return
+        if (!networkNotificationPending.compareAndSet(false, true)) return
+        commands.execute {
+            // Coalesce callbacks while setup occupies the command executor.
+            // Reset before JNI so an event racing this call retains a final wake.
+            networkNotificationPending.set(false)
+            try { if (desired.get()) NativeBridge.call("networkChanged") }
+            catch (failure: Exception) {
+                handler.post { if (!destroyed && desired.get()) fail(failure.message ?: "Cannot notify native network change") }
             }
         }
     }
@@ -89,6 +117,7 @@ class DaemonService : Service() {
                         putString("error", error)
                         putString("address", address)
                         putBoolean("resumeOnBoot", prefs.getBoolean(BOOT, false))
+                        putBoolean("waitingForNetwork", waitingForNetwork)
                     }
                 }
                 try { message.replyTo?.send(response) } catch (_: android.os.RemoteException) { }
@@ -214,6 +243,7 @@ class DaemonService : Service() {
                 }
                 val status = NativeBridge.call("status") as JSONObject
                 phase = status.getString("phase")
+                waitingForNetwork = status.getBoolean("waitingForNetwork")
                 address = status.optString("address").takeUnless { it.isEmpty() || it == "null" }
                 if (phase == "Failed") {
                     error = status.optString("error").takeUnless { it.isBlank() || it == "null" }
@@ -237,9 +267,10 @@ class DaemonService : Service() {
                     finishStopped()
                     return
                 }
-                if (notifiedPhase != phase) {
-                    requireNotNull(getSystemService(NotificationManager::class.java)).notify(NOTICE, notification(phase))
-                    notifiedPhase = phase
+                val noticeState = if (waitingForNetwork) "Waiting for network" else phase
+                if (notifiedPhase != noticeState) {
+                    requireNotNull(getSystemService(NotificationManager::class.java)).notify(NOTICE, notification(noticeState))
+                    notifiedPhase = noticeState
                 }
                 handler.postDelayed(this, 1_000)
             } catch (failure: Exception) {
@@ -292,6 +323,7 @@ class DaemonService : Service() {
     private fun finishStopped() {
         setDesired(false)
         phase = if (error == null) "Stopped" else "Failed"
+        waitingForNetwork = false
         if (error != null) prefs.edit().putString("last-error", error).commit()
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -315,6 +347,7 @@ class DaemonService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         handler.removeCallbacksAndMessages(null)
         connectivity.unregisterNetworkCallback(networkCallback)
         // Deliberately retain desired-running on OS teardown. Explicit Stop and

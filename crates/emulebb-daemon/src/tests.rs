@@ -1260,9 +1260,26 @@ fn ed2k_network_config_requires_a_direct_default_route_or_explicit_bind() {
             &metadata_store(&profile),
             &[iface("Offline", "192.0.2.10")],
         )
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("no default-route IPv4 interface was detected"));
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no default-route IPv4 interface was detected")
+    );
+    assert_eq!(
+        error.downcast_ref::<NetworkStartupError>(),
+        Some(&NetworkStartupError::DefaultRouteUnavailable)
+    );
+
+    let mut first = iface("First", "192.0.2.10");
+    first.has_default_route = true;
+    let mut second = iface("Second", "198.51.100.10");
+    second.has_default_route = true;
+    let ambiguous = profile
+        .ed2k_network_config_from_interfaces(&metadata_store(&profile), &[first, second])
+        .unwrap_err();
+    assert!(ambiguous.to_string().contains("multiple default-route"));
+    assert!(ambiguous.downcast_ref::<NetworkStartupError>().is_none());
 }
 
 #[test]
