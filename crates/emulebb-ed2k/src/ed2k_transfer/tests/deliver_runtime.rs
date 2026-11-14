@@ -10,10 +10,12 @@ use emulebb_metadata::MetadataTransferDirectoryDeletionAuthority;
 use md4::{Digest, Md4};
 use uuid::Uuid;
 
+use super::super::deliver::pause_after_direct_create;
 #[cfg(unix)]
 use super::super::deliver::set_after_publish_move_hook;
 use super::super::deliver::set_before_fingerprint_remove_hook;
 use super::super::delivery_tombstone::set_before_move_hook;
+use super::super::fs_durability::force_unsupported_move;
 use super::super::ingest::native_file_fingerprint;
 use super::super::metadata::{
     transfer_directory_authority_marker_path, transfer_directory_tombstone_path,
@@ -144,6 +146,134 @@ fn assert_complete_deletion_recovery(
         report.failures
     );
     assert_eq!(report.recovered, expected_recovered);
+}
+
+#[tokio::test]
+async fn unsupported_atomic_move_uses_verified_exclusive_copy() {
+    let root = unique_test_dir("ed2k-direct-delivery");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Sample.bin").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    let target = incoming.join("Sample.bin");
+    force_unsupported_move(&target);
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(target.clone())
+    );
+    assert_eq!(fs::read(&target).unwrap(), payload);
+    assert!(runtime.payload_path(&hash).exists());
+    assert!(
+        !runtime
+            .metadata
+            .delivery_output_is_excluded(&target)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn interrupted_direct_copy_preserves_and_excludes_partial() {
+    let root = unique_test_dir("ed2k-direct-interrupted");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Sample.bin").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target = incoming.join("Sample.bin");
+    let attempt = Uuid::new_v4();
+    let staging = incoming.join(format!(".emulebb-delivery-{attempt}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(&hash, attempt, &target, &staging)
+        .unwrap();
+    fs::write(&staging, &payload).unwrap();
+    let fingerprint = native_file_fingerprint(&staging).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(&hash, attempt, &fingerprint)
+        .unwrap();
+    assert!(
+        runtime
+            .metadata
+            .reserve_delivery_output(&target, attempt)
+            .unwrap()
+    );
+    fs::write(&target, b"partial").unwrap();
+    let second = incoming.join("Sample_01.bin");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(second.clone())
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"partial");
+    assert_eq!(fs::read(&second).unwrap(), payload);
+    assert!(
+        runtime
+            .metadata
+            .delivery_output_is_excluded(&target)
+            .unwrap()
+    );
+    assert!(runtime.metadata.delete_transfer_manifest(&hash).unwrap());
+    assert!(
+        runtime
+            .metadata
+            .delivery_output_is_excluded(&target)
+            .unwrap()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"partial");
+}
+
+#[tokio::test]
+async fn cancelled_direct_copy_keeps_partial_excluded_and_retries() {
+    let root = unique_test_dir("ed2k-direct-cancel");
+    let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let hash = ingest_completed(&runtime, &root, "Sample.bin").await;
+    let payload = fs::read(runtime.payload_path(&hash)).unwrap();
+    let incoming = root.join("incoming");
+    let target = incoming.join("Sample.bin");
+    force_unsupported_move(&target);
+    let created = pause_after_direct_create(&target);
+    let task_runtime = Arc::clone(&runtime);
+    let task_hash = hash.clone();
+    let task_incoming = incoming.clone();
+    let task = tokio::spawn(async move {
+        task_runtime
+            .materialize_completed_payload(&task_hash, &task_incoming)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), created)
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        runtime
+            .metadata
+            .delivery_output_is_excluded(&target)
+            .unwrap()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"");
+    let retry = incoming.join("Sample_01.bin");
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(&hash, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::Delivered(retry.clone())
+    );
+    assert_eq!(fs::read(&retry).unwrap(), payload);
+    assert!(
+        runtime
+            .metadata
+            .delivery_output_is_excluded(&target)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -305,7 +435,7 @@ async fn staged_attempt_does_not_adopt_byte_identical_foreign_target() {
         .mark_transfer_delivery_attempt_staged(&hash, attempt_id, &staging_fingerprint)
         .unwrap();
 
-    let delivered = incoming.join("Recovered.Collision (1).mkv");
+    let delivered = incoming.join("Recovered.Collision_01.mkv");
     assert_eq!(
         runtime
             .materialize_completed_payload(&hash, &incoming)
@@ -355,7 +485,7 @@ async fn publication_rehash_rejects_equal_length_mutation_after_move() {
     assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
     assert_eq!(manifest.delivery_ownership, Ed2kDeliveryOwnership::None);
 
-    let delivered = incoming.join("Mutated.After.Move (1).mkv");
+    let delivered = incoming.join("Mutated.After.Move_01.mkv");
     assert_eq!(
         runtime
             .materialize_completed_payload(&hash, &incoming)
@@ -464,7 +594,7 @@ async fn prepared_attempt_preserves_unproven_staging_occupant() {
     let legacy_temp = incoming.join(".Prepared.mkv.ed2k-delivering-legacy");
     fs::write(&legacy_temp, b"unproven legacy artifact").unwrap();
 
-    let delivered = incoming.join("Prepared (1).mkv");
+    let delivered = incoming.join("Prepared_01.mkv");
     assert_eq!(
         runtime
             .materialize_completed_payload(&hash, &incoming)
@@ -640,7 +770,7 @@ async fn materialize_reconciles_replaced_output_without_overwriting_it() {
         .materialize_completed_payload(&hash, &incoming)
         .await
         .unwrap();
-    let redelivered = incoming.join("Replaced (1).mkv");
+    let redelivered = incoming.join("Replaced_01.mkv");
     assert_eq!(
         reconciled,
         Ed2kDeliveryOutcome::Delivered(redelivered.clone())
@@ -731,7 +861,7 @@ async fn materialize_preserves_byte_identical_replacement_without_adopting_it() 
     fs::remove_file(&delivered).unwrap();
     fs::write(&delivered, &verified_payload).unwrap();
 
-    let redelivered = incoming.join("Identical (1).mkv");
+    let redelivered = incoming.join("Identical_01.mkv");
     assert_eq!(
         runtime
             .materialize_completed_payload(&hash, &incoming)

@@ -1058,6 +1058,22 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     // runs it off the async executor via spawn_blocking to avoid stalling a tokio
     // worker thread.
     let mut result = scan_shared_directory_roots(roots, policy).await?;
+    // WHY: Interrupted direct-copy outputs can retain ordinary final names.
+    // Keep them out of both the reload plan and root membership snapshots.
+    result.files.retain(|file| {
+        !core
+            .metadata_store
+            .delivery_output_is_excluded(&file.path)
+            .unwrap_or(true)
+    });
+    for (_, files) in &mut result.root_files {
+        files.retain(|file| {
+            !core
+                .metadata_store
+                .delivery_output_is_excluded(&file.path)
+                .unwrap_or(true)
+        });
+    }
     result
         .files
         .sort_by(|left, right| left.path.cmp(&right.path));

@@ -11,21 +11,68 @@ pub(super) enum NoReplaceMoveOutcome {
     AlreadyExists,
 }
 
+/// Only the rename syscall itself may trigger the direct-copy publication path.
+#[derive(Debug)]
+pub(super) struct AtomicMoveUnsupported(io::Error);
+
+impl std::fmt::Display for AtomicMoveUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for AtomicMoveUnsupported {}
+
 pub(super) async fn move_path_no_replace(
     source: &Path,
     destination: &Path,
 ) -> Result<NoReplaceMoveOutcome> {
+    #[cfg(test)]
+    if forced_unsupported_moves()
+        .lock()
+        .unwrap()
+        .remove(destination)
+    {
+        return Err(AtomicMoveUnsupported(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "forced unsupported rename",
+        ))
+        .into());
+    }
     let source = source.to_path_buf();
     let destination = destination.to_path_buf();
     let sync_path = destination.clone();
-    let outcome =
+    let result =
         tokio::task::spawn_blocking(move || move_path_no_replace_blocking(&source, &destination))
             .await
-            .context("no-replace move task failed")??;
+            .context("no-replace move task failed")?;
+    let outcome = match result {
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            return Err(AtomicMoveUnsupported(error).into());
+        }
+        other => other?,
+    };
     if outcome == NoReplaceMoveOutcome::Moved {
         sync_parent_directory(&sync_path).await?;
     }
     Ok(outcome)
+}
+
+#[cfg(test)]
+fn forced_unsupported_moves()
+-> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static PATHS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    PATHS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(super) fn force_unsupported_move(path: &Path) {
+    forced_unsupported_moves()
+        .lock()
+        .unwrap()
+        .insert(path.to_owned());
 }
 
 pub(super) async fn sync_file_for_publish(file: std::fs::File) -> Result<()> {

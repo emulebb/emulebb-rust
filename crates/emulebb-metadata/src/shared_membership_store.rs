@@ -44,6 +44,9 @@ impl MetadataStore {
         let native_root = NativePath::from(root);
         let native_path = NativePath::from(path);
         let conn = self.connection()?;
+        if crate::delivery_exclusion_store::is_excluded(&conn, path)? {
+            return Ok(false);
+        }
         let found = conn.query_row(
             "SELECT shared_directory_roots.id, local_file_instances.path_id,
                     local_file_instances.verified_fingerprint
@@ -192,6 +195,9 @@ impl MetadataStore {
             DELETE FROM temp.scanned_membership_paths;",
         )?;
         for (path, relative, current_fingerprint) in paths {
+            if crate::delivery_exclusion_store::is_excluded(&tx, path)? {
+                continue;
+            }
             ensure!(
                 !relative.as_os_str().is_empty()
                     && !relative.is_absolute()

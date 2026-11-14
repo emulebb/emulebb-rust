@@ -403,6 +403,15 @@ CREATE TABLE transfer_retirements (
     )
 ) STRICT;
 
+-- WHY: A crash can leave an exclusively created but incomplete final name.
+-- Its sharing exclusion must outlive both the attempt and transfer deletion.
+CREATE TABLE delivery_exclusions (
+    platform TEXT NOT NULL,
+    native_path BLOB NOT NULL,
+    reservation_id TEXT NOT NULL UNIQUE,
+    PRIMARY KEY(platform, native_path)
+) STRICT;
+
 CREATE TABLE delivery_attempts (
     transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
     attempt_id TEXT NOT NULL UNIQUE CHECK(length(trim(attempt_id)) > 0),

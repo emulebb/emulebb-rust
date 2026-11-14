@@ -35,6 +35,33 @@ async fn configure_test_root(core: &EmulebbCore, root: &Path) {
         .unwrap();
 }
 
+#[tokio::test]
+async fn reserved_partial_is_excluded_from_scan_and_direct_share() {
+    let root = scratch_dir("reserved-partial");
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    configure_test_root(&core, &root).await;
+    let partial = root.join("partial.bin");
+    let other = root.join("complete.bin");
+    core.metadata_store
+        .reserve_delivery_output(&partial, uuid::Uuid::new_v4())
+        .unwrap();
+    fs::write(&partial, b"partial bytes").unwrap();
+    fs::write(&other, b"complete bytes").unwrap();
+    let scan = scan_shared_files(&core).await.unwrap();
+    assert_eq!(names(scan.files), vec!["complete.bin"]);
+    assert!(
+        core.share_local_file(LocalShareCreate {
+            path: partial.display().to_string(),
+            name: None,
+        })
+        .await
+        .is_err()
+    );
+    let shares = core.reload_shared_directories().await.unwrap();
+    assert_eq!(shares.len(), 1);
+    fs::remove_dir_all(&root).ok();
+}
+
 fn names(mut files: Vec<ScannedSharedFile>) -> Vec<String> {
     files.sort_by(|left, right| left.path.cmp(&right.path));
     files

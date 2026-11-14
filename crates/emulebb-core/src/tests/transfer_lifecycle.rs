@@ -986,7 +986,7 @@ async fn retired_download_does_not_redeliver_replaced_local_output() {
     );
     reloaded.reload_shared_directories().await.unwrap();
 
-    let redelivered_path = incoming_dir.join("Reconcile.Completed (1).bin");
+    let redelivered_path = incoming_dir.join("Reconcile.Completed_01.bin");
     assert_eq!(
         std::fs::read(&recorded_path).unwrap(),
         unrelated_replacement
