@@ -8,15 +8,17 @@ export function TableScroll(props: { children: ComponentChildren; label?: string
   const [overflow, setOverflow] = useState(false);
   useEffect(() => {
     const element = container.current!;
+    // WHY: Cleanup can outlive the global DOM; retain the element's window for listener ownership.
+    const ownerWindow = element.ownerDocument.defaultView;
     const measure = () => setOverflow(element.scrollWidth > element.clientWidth + 1);
     measure();
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
     observer?.observe(element);
     if (element.firstElementChild) observer?.observe(element.firstElementChild);
-    window.addEventListener("resize", measure);
+    ownerWindow?.addEventListener("resize", measure);
     return () => {
       observer?.disconnect();
-      window.removeEventListener("resize", measure);
+      ownerWindow?.removeEventListener("resize", measure);
     };
   }, []);
   return (
