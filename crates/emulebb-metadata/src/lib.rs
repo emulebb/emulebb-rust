@@ -2,6 +2,7 @@
 
 mod aich_recovery_store;
 mod content_identity;
+mod delivery_exclusion_store;
 mod download_history_model;
 mod download_history_store;
 mod identity_model;

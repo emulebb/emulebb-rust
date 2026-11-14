@@ -239,7 +239,11 @@ impl MetadataStore {
         fingerprint: &NativeFileFingerprint,
     ) -> Result<bool> {
         let native = NativePath::from(path);
-        let changed = self.connection()?.execute(
+        let conn = self.connection()?;
+        if crate::delivery_exclusion_store::is_excluded(&conn, path)? {
+            return Ok(false);
+        }
+        let changed = conn.execute(
             "INSERT OR REPLACE INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
              SELECT local_file_instances.path_id, local_file_instances.verified_fingerprint
              FROM local_file_instances
@@ -328,6 +332,7 @@ impl MetadataStore {
         now: i64,
         origin: &'static str,
     ) -> Result<()> {
+        crate::delivery_exclusion_store::ensure_not_excluded(tx, &content.path)?;
         ensure!(
             matches!(origin, "local_computed" | "stock_import"),
             "invalid local AICH origin"
@@ -526,6 +531,7 @@ impl MetadataStore {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        crate::delivery_exclusion_store::ensure_not_excluded(&tx, path)?;
         let (known_file_id, known_size): (i64, i64) = tx
             .query_row(
                 "SELECT id, size_bytes FROM known_files WHERE ed2k_hash = ?1",

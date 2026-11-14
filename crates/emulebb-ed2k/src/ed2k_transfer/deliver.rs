@@ -10,11 +10,12 @@
 //! headless piece-store model.
 //!
 //! MECHANICS. Delivery copies `pieces.bin` to a temp sibling and atomically
-//! renames it into place. The operator-facing file must not alias the verified
+//! renames it into place when supported. If the filesystem rejects atomic
+//! no-replace rename, an exclusively created final file is copied and verified
+//! under a durable sharing exclusion. The operator-facing file must not alias the verified
 //! piece store: normal edits to a completed file cannot be allowed to mutate
 //! bytes later served under the transfer's ED2K hash. A name collision in the
-//! destination is resolved by appending ` (1)`, ` (2)`, … before the extension,
-//! matching eMule.
+//! destination is resolved by appending `_01`, `_02`, … before the extension.
 //!
 //! The destination directory and the final delivered file path are
 //! operator-facing content paths, so every filesystem operation goes through
@@ -49,7 +50,8 @@ use uuid::Uuid;
 use crate::long_path::long_path;
 
 use super::fs_durability::{
-    NoReplaceMoveOutcome, move_path_no_replace, sync_file_for_publish, sync_parent_directory,
+    AtomicMoveUnsupported, NoReplaceMoveOutcome, move_path_no_replace, sync_file_for_publish,
+    sync_parent_directory,
 };
 use super::{ED2K_PART_SIZE, Ed2kTransferRuntime};
 
@@ -232,6 +234,30 @@ struct InstalledDelivery {
     fingerprint: NativeFileFingerprint,
 }
 
+fn delivery_candidate_name(
+    file_name: &str,
+    stem: &str,
+    extension: Option<&str>,
+    ordinal: u64,
+) -> String {
+    if ordinal == 0 {
+        return file_name.to_owned();
+    }
+    let mut index = ordinal;
+    let mut width = 2usize;
+    let mut limit = 99u64;
+    while index > limit {
+        index -= limit;
+        width += 1;
+        limit = limit.saturating_mul(10).saturating_add(9);
+    }
+    let suffix = format!("_{index:0width$}");
+    match extension {
+        Some(ext) => format!("{stem}{suffix}.{ext}"),
+        None => format!("{stem}{suffix}"),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct OwnedDeliveryOutput {
     pub(super) path: PathBuf,
@@ -387,17 +413,20 @@ impl Ed2kTransferRuntime {
 
         let file_name = sanitize_file_name(display_name);
         let (stem, extension) = split_stem_extension(&file_name);
-        for index in 0..=u32::MAX {
-            let candidate_name = if index == 0 {
-                file_name.clone()
-            } else {
-                match &extension {
-                    Some(extension) => format!("{stem} ({index}).{extension}"),
-                    None => format!("{stem} ({index})"),
-                }
-            };
+        for ordinal in 0..=u64::MAX {
+            let candidate_name =
+                delivery_candidate_name(&file_name, &stem, extension.as_deref(), ordinal);
             let target_path = dest_dir.join(candidate_name);
             if path_exists(&target_path).await {
+                continue;
+            }
+            if self.metadata.delivery_output_is_excluded(&target_path)? {
+                std::fs::canonicalize(dest_dir).with_context(|| {
+                    format!(
+                        "failed to resolve delivery directory {}",
+                        dest_dir.display()
+                    )
+                })?;
                 continue;
             }
 
@@ -418,7 +447,32 @@ impl Ed2kTransferRuntime {
                 "delivery attempt {attempt_id} disappeared before staging committed"
             );
 
-            match install_staged_payload(&staging_path, &target_path).await? {
+            let installation = match install_staged_payload(&staging_path, &target_path).await {
+                Ok(outcome) => outcome,
+                Err(error) if error.downcast_ref::<AtomicMoveUnsupported>().is_some() => {
+                    let direct = self
+                        .publish_direct_copy(
+                            file_hash,
+                            attempt_id,
+                            &staging_path,
+                            &target_path,
+                            verified_staging,
+                            expected_size,
+                            expected_hash,
+                        )
+                        .await?;
+                    if let Some(fingerprint) = direct {
+                        return Ok(InstalledDelivery {
+                            path: target_path,
+                            fingerprint,
+                        });
+                    }
+                    self.clear_delivery_attempt(file_hash, attempt_id).await?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            match installation {
                 InstallOutcome::Installed => {
                     #[cfg(test)]
                     run_after_publish_move_hook(&target_path);
@@ -468,6 +522,67 @@ impl Ed2kTransferRuntime {
             "exhausted collision-free delivery names in {}",
             dest_dir.display()
         )
+    }
+
+    async fn publish_direct_copy(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        staging_path: &Path,
+        target_path: &Path,
+        verified: VerifiedStagingFile,
+        expected_size: u64,
+        expected_hash: [u8; 16],
+    ) -> Result<Option<NativeFileFingerprint>> {
+        use tokio::io::AsyncSeekExt;
+
+        // WHY: The reservation must survive cancellation and crashes before a
+        // partial final-looking file can ever be considered for sharing.
+        if !self
+            .metadata
+            .reserve_delivery_output(target_path, attempt_id)?
+        {
+            drop(verified.file);
+            remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
+            return Ok(None);
+        }
+        self.refresh_complete_shared_catalog().await?;
+        let mut output = match tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(long_path(target_path))
+            .await
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                self.metadata.release_delivery_output(attempt_id)?;
+                drop(verified.file);
+                remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        #[cfg(test)]
+        run_after_direct_create_hook(target_path).await;
+        let mut input = tokio::fs::File::from_std(verified.file);
+        input.seek(std::io::SeekFrom::Start(0)).await?;
+        tokio::io::copy(&mut input, &mut output).await?;
+        let output = output.into_std().await;
+        sync_file_for_publish(output.try_clone()?).await?;
+        sync_parent_directory(target_path).await?;
+        let fingerprint =
+            capture_published_fingerprint(output, target_path, expected_size, expected_hash)
+                .await?;
+        // Keep the barrier until the published journal record is committed.
+        anyhow::ensure!(
+            self.metadata
+                .publish_reserved_delivery_attempt(file_hash, attempt_id, &fingerprint)?,
+            "direct delivery reservation disappeared before publication committed"
+        );
+        drop(input);
+        remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
+        Ok(Some(fingerprint))
     }
 
     async fn begin_delivery_attempt(
@@ -559,6 +674,13 @@ impl Ed2kTransferRuntime {
             return Ok(());
         };
         validate_delivery_attempt_paths(&attempt)?;
+        if self.metadata.has_delivery_reservation(attempt.attempt_id)? {
+            // WHY: A crash may have interrupted direct creation or copying.
+            // Preserve both artifacts; their identity cannot be proven here.
+            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                .await?;
+            return Ok(());
+        }
         let manifest = {
             let _manifest_guard = self.lock_manifest(file_hash).await;
             self.load_manifest_unlocked(file_hash).await?
@@ -654,7 +776,39 @@ impl Ed2kTransferRuntime {
                     "delivery staging identity changed for attempt {}",
                     attempt.attempt_id
                 );
-                match install_staged_payload(&attempt.staging_path, &attempt.target_path).await? {
+                let installation =
+                    match install_staged_payload(&attempt.staging_path, &attempt.target_path).await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) if error.downcast_ref::<AtomicMoveUnsupported>().is_some() => {
+                            if let Some(fingerprint) = self
+                                .publish_direct_copy(
+                                    file_hash,
+                                    attempt.attempt_id,
+                                    &attempt.staging_path,
+                                    &attempt.target_path,
+                                    verified_staging,
+                                    manifest.file_size,
+                                    expected_hash,
+                                )
+                                .await?
+                            {
+                                return self
+                                    .commit_recovered_delivery(
+                                        file_hash,
+                                        &attempt,
+                                        &fingerprint,
+                                        super::Ed2kDeliveryOwnership::Owned,
+                                    )
+                                    .await;
+                            }
+                            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
+                                .await?;
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error),
+                    };
+                match installation {
                     InstallOutcome::Installed => {
                         #[cfg(test)]
                         run_after_publish_move_hook(&attempt.target_path);
@@ -850,6 +1004,40 @@ impl Ed2kTransferRuntime {
 }
 
 #[cfg(test)]
+type DirectCreateHook = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+
+#[cfg(test)]
+fn direct_create_hooks()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, DirectCreateHook>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, DirectCreateHook>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(super) fn pause_after_direct_create(path: &Path) -> tokio::sync::oneshot::Receiver<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    direct_create_hooks().lock().unwrap().insert(
+        path.to_owned(),
+        (sender, std::sync::Arc::new(tokio::sync::Notify::new())),
+    );
+    receiver
+}
+
+#[cfg(test)]
+async fn run_after_direct_create_hook(path: &Path) {
+    let hook = direct_create_hooks().lock().unwrap().remove(path);
+    if let Some((sender, gate)) = hook {
+        let _ = sender.send(());
+        gate.notified().await;
+    }
+}
+
+#[cfg(test)]
 async fn deliver_payload_file(
     source: &Path,
     dest_dir: &Path,
@@ -862,15 +1050,9 @@ async fn deliver_payload_file(
     tokio::fs::create_dir_all(long_path(dest_dir)).await?;
     let file_name = sanitize_file_name(display_name);
     let (stem, extension) = split_stem_extension(&file_name);
-    for index in 0..=u32::MAX {
-        let candidate_name = if index == 0 {
-            file_name.clone()
-        } else {
-            match &extension {
-                Some(extension) => format!("{stem} ({index}).{extension}"),
-                None => format!("{stem} ({index})"),
-            }
-        };
+    for index in 0..=u64::MAX {
+        let candidate_name =
+            delivery_candidate_name(&file_name, &stem, extension.as_deref(), index);
         let target_path = dest_dir.join(candidate_name);
         if path_exists(&target_path).await {
             continue;
@@ -1407,6 +1589,17 @@ fn split_stem_extension(file_name: &str) -> (String, Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn collision_suffixes_widen_after_each_full_group() {
+        use super::delivery_candidate_name;
+        let name = |n| delivery_candidate_name("abc.mp3", "abc", Some("mp3"), n);
+        assert_eq!(name(0), "abc.mp3");
+        assert_eq!(name(1), "abc_01.mp3");
+        assert_eq!(name(99), "abc_99.mp3");
+        assert_eq!(name(100), "abc_001.mp3");
+        assert_eq!(name(1098), "abc_999.mp3");
+        assert_eq!(name(1099), "abc_0001.mp3");
+    }
     use super::*;
 
     fn temp_dir() -> PathBuf {
@@ -1503,7 +1696,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(delivered, dest.join("clip (1).mkv"));
+        assert_eq!(delivered, dest.join("clip_01.mkv"));
         assert_eq!(tokio::fs::read(&delivered).await.unwrap(), b"data");
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
@@ -1617,7 +1810,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(delivered, dest.join("recovered (1).bin"));
+        assert_eq!(delivered, dest.join("recovered_01.bin"));
         assert_eq!(
             tokio::fs::read(&installed).await.unwrap(),
             b"recovered-payload"

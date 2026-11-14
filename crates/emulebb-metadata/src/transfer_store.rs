@@ -1212,6 +1212,45 @@ impl super::MetadataStore {
         Ok(changed != 0)
     }
 
+    /// Commit verified direct publication and release its sharing barrier together.
+    pub fn publish_reserved_delivery_attempt(
+        &self,
+        file_hash: &str,
+        attempt_id: Uuid,
+        fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let id = attempt_id.to_string();
+        let reserved: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM delivery_exclusions WHERE reservation_id = ?1)",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if !reserved {
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "UPDATE delivery_attempts SET phase = 'published', published_fingerprint = ?3, updated_at_ms = ?4
+             WHERE attempt_id = ?1 AND phase = 'staged' AND transfer_id = (
+               SELECT transfers.id FROM transfers JOIN known_files ON known_files.id = transfers.known_file_id
+               WHERE known_files.ed2k_hash = ?2 AND transfers.completed != 0
+                 AND transfers.final_rehash_pending = 0 AND transfers.delivery_state = 'pending'
+                 AND transfers.removed_at_ms IS NULL AND transfers.delete_requested_at_ms IS NULL)",
+            params![id, hash, fingerprint.storage_bytes(), unix_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM delivery_exclusions WHERE reservation_id = ?1",
+            [&id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn clear_transfer_delivery_attempt(
         &self,
         file_hash: &str,

@@ -88,6 +88,12 @@ impl EmulebbCore {
         requested_name: Option<String>,
         progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
     ) -> Result<LocalShare> {
+        ensure!(
+            !self
+                .metadata_store
+                .delivery_output_is_excluded(source_path)?,
+            "local file is an incomplete delivery output"
+        );
         let metadata = tokio::fs::metadata(long_path(source_path))
             .await
             .with_context(|| format!("failed to inspect {}", source_path.display()))?;
