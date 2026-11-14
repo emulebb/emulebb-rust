@@ -246,13 +246,14 @@ jobs:
           PRODUCER_SOURCE_SHA: ${{ inputs.diagnostic_source_sha }}
           APK_MANIFEST_SHA256: ${{ inputs.diagnostic_manifest_sha256 }}
           DIAGNOSTIC_IMAGE: ${{ inputs.diagnostic_image }}
-        run: >-
-          python -B -m emule_workspace diagnose-rust-android-apk-ci
-          --producer-run-id "$PRODUCER_RUN_ID" --producer-source-sha "$PRODUCER_SOURCE_SHA"
-          --apk-manifest-sha256 "$APK_MANIFEST_SHA256" --image "$DIAGNOSTIC_IMAGE"
-          --diagnostic-build-ref "$EMULEBB_APK_DIAGNOSTIC_BUILD_REF"
-          --diagnostic-harness-ref "$EMULEBB_APK_DIAGNOSTIC_HARNESS_REF"
-          --expected-cert-sha256 "$EMULEBB_APK_DIAGNOSTIC_SIGNER_SHA256"
+        run: |
+          mkdir -p "$EMULEBB_WORKSPACE_OUTPUT_ROOT"
+          python -B -m emule_workspace diagnose-rust-android-apk-ci \
+          --producer-run-id "$PRODUCER_RUN_ID" --producer-source-sha "$PRODUCER_SOURCE_SHA" \
+          --apk-manifest-sha256 "$APK_MANIFEST_SHA256" --image "$DIAGNOSTIC_IMAGE" \
+          --diagnostic-build-ref "$EMULEBB_APK_DIAGNOSTIC_BUILD_REF" \
+          --diagnostic-harness-ref "$EMULEBB_APK_DIAGNOSTIC_HARNESS_REF" \
+          --expected-cert-sha256 "$EMULEBB_APK_DIAGNOSTIC_SIGNER_SHA256" \
           --github-output "$GITHUB_OUTPUT"
       # Diagnostic receipts remain ineligible for publication, even after a
       # successful replay. Private guest reports, logs and AVDs stay excluded.
