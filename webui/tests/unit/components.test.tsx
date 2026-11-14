@@ -4,6 +4,37 @@ import { describe, expect, it, vi } from "vitest";
 import { Action, JsonPanel, StatusPill, TableScroll } from "../../src/components";
 
 describe("components", () => {
+  it("releases table observers and the resize listener on its owning window before teardown", async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const ownerWindow = frame.contentWindow!;
+    const host = ownerWindow.document.createElement("div");
+    ownerWindow.document.body.append(host);
+    const addListener = vi.spyOn(ownerWindow, "addEventListener");
+    const removeListener = vi.spyOn(ownerWindow, "removeEventListener");
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      observe = observe;
+      disconnect = disconnect;
+    });
+    const { unmount } = render(<TableScroll><table /></TableScroll>, { container: host });
+    try {
+      await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+      const resizeListener = addListener.mock.calls.find(([event]) => event === "resize")?.[1];
+      expect(resizeListener).toEqual(expect.any(Function));
+
+      unmount();
+
+      expect(disconnect).toHaveBeenCalledOnce();
+      expect(removeListener).toHaveBeenCalledWith("resize", resizeListener);
+    } finally {
+      unmount();
+      frame.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("makes only overflowing tables focusable and exposes the scrolling hint", async () => {
     const { container } = render(<TableScroll label="Sample table"><table><tbody><tr><td>Sample</td></tr></tbody></table></TableScroll>);
     const scroll = container.querySelector(".table-wrap")!;
