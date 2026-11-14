@@ -363,7 +363,7 @@ def release_download_guidance(data: dict, layout: dict, candidate_name: str) -> 
         payloads.update(item["asset"] for item in android)
     apk = data.get("experimentalAndroidApk")
     if isinstance(apk, dict) and apk.get("asset") in names:
-        groups["Android application"] = [("Android 14+ · ARM64 and x86_64", link(apk["asset"], "Signed universal APK"))]
+        groups["Android application"] = [("Android 12+ · ARM64 and x86_64", link(apk["asset"], "Signed universal APK"))]
         payloads.add(apk["asset"])
 
     lines = ["<!-- emulebb-release-downloads:start -->", "## Downloads", ""]
