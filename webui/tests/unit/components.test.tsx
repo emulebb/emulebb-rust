@@ -1,9 +1,22 @@
-import { fireEvent, render, screen } from "@testing-library/preact";
+import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { describe, expect, it, vi } from "vitest";
 
-import { Action, JsonPanel, StatusPill } from "../../src/components";
+import { Action, JsonPanel, StatusPill, TableScroll } from "../../src/components";
 
 describe("components", () => {
+  it("makes only overflowing tables focusable and exposes the scrolling hint", async () => {
+    const { container } = render(<TableScroll label="Sample table"><table><tbody><tr><td>Sample</td></tr></tbody></table></TableScroll>);
+    const scroll = container.querySelector(".table-wrap")!;
+    Object.defineProperty(scroll, "clientWidth", { configurable: true, value: 100 });
+    Object.defineProperty(scroll, "scrollWidth", { configurable: true, value: 200 });
+    fireEvent(window, new Event("resize"));
+    await waitFor(() => expect(screen.getByRole("region", { name: "Sample table" })).toHaveAttribute("tabindex", "0"));
+    expect(screen.getByText("Swipe horizontally for more columns")).not.toHaveAttribute("hidden");
+    Object.defineProperty(scroll, "scrollWidth", { configurable: true, value: 90 });
+    fireEvent(window, new Event("resize"));
+    await waitFor(() => expect(scroll).not.toHaveAttribute("tabindex"));
+    expect(screen.getByText("Swipe horizontally for more columns")).toHaveAttribute("hidden");
+  });
   it("marks connected-style statuses as good", () => {
     render(<StatusPill value="Connected" />);
 

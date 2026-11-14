@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         run([npm, "run", "typecheck"], workspace)
         return 0
     run([npm, "run", "test:unit"], workspace)
-    run([npm, "exec", "--", "playwright", "install", "chromium"], workspace)
+    run([npm, "exec", "--", "playwright", "install", "chromium", "webkit"], workspace)
     run([npm, "run", "test:e2e"], workspace)
     run(
         [npm, "run", "build", "--", "--outDir", str(workspace.dist), "--emptyOutDir"],

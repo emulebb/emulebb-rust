@@ -1004,6 +1004,17 @@ export class RestClient {
     return this.request<T>("POST", path, body);
   }
 
+  async captureDiagnosticBundle(maxBytes: number): Promise<Record<string, unknown>> {
+    // This endpoint deliberately returns the bundle itself, not a data envelope.
+    const bundle = await this.request<Record<string, unknown>>(
+      "POST", "diagnostics/bundles", { confirmCapture: true, maxBytes }, "json"
+    );
+    if (!isRecord(bundle) || bundle.schema !== "emulebb.diagnostic-bundle.v6" || typeof bundle.capturedAt !== "string") {
+      throw new Error("Diagnostic bundle returned an unexpected response");
+    }
+    return bundle;
+  }
+
   async patch<T>(path: string, body: unknown): Promise<T> {
     return this.request<T>("PATCH", path, body);
   }
@@ -1044,7 +1055,7 @@ export class RestClient {
     await readTransferEventStream(response.body, onEvent, options.signal);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, responseKind: "envelope" | "json" = "envelope"): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.apiKey) {
       headers["X-API-Key"] = this.apiKey;
@@ -1062,7 +1073,7 @@ export class RestClient {
       const message = value?.error?.message ?? `${method} ${requestPath} failed`;
       throw new RestError(message, response.status, value?.error?.code, value?.error?.details);
     }
-    return value?.data as T;
+    return (responseKind === "json" ? value : value?.data) as T;
   }
 }
 

@@ -44,7 +44,7 @@ class TestWebUiExecutionModes(unittest.TestCase):
         self.assertEqual(commands, [
             ["pinned-npm", "ci", "--ignore-scripts"],
             ["pinned-npm", "run", "test:unit"],
-            ["pinned-npm", "exec", "--", "playwright", "install", "chromium"],
+            ["pinned-npm", "exec", "--", "playwright", "install", "chromium", "webkit"],
             ["pinned-npm", "run", "test:e2e"],
             ["pinned-npm", "run", "build", "--", "--outDir", "synthetic-dist", "--emptyOutDir"],
         ])

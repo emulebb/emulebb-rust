@@ -46,12 +46,12 @@ describe("DiagnosticsView", () => {
 
   it("downloads caller-owned inline diagnostic bundles", async () => {
     const bundle = {
-      schema: "emulebb.diagnostic-bundle.v5",
+      schema: "emulebb.diagnostic-bundle.v6",
       capturedAt: "2026-10-25T12:34:56Z",
       summary: { artifactFileCount: 1, missingArtifactFamilies: [], issueCount: 0 }
     };
     const client = new RestClient();
-    const post = vi.spyOn(client, "post").mockResolvedValue(bundle);
+    const capture = vi.spyOn(client, "captureDiagnosticBundle").mockResolvedValue(bundle);
     const createObjectURL = vi.fn(() => "blob:diagnostic-bundle");
     const revokeObjectURL = vi.fn();
     vi.stubGlobal("URL", class extends URL {
@@ -83,13 +83,30 @@ describe("DiagnosticsView", () => {
 
     expect(screen.getByText("CPU usage").parentElement).toHaveTextContent("n/a");
     expect(screen.getByText("Resident memory").parentElement).toHaveTextContent("n/a");
-    fireEvent.click(screen.getByRole("button", { name: "Capture bundle" }));
+    fireEvent.click(screen.getByRole("button", { name: "Capture private bundle" }));
 
-    await waitFor(() => expect(post).toHaveBeenCalledOnce());
-    expect(post).toHaveBeenCalledWith("diagnostics/bundles", { confirmCapture: true });
+    await waitFor(() => expect(capture).toHaveBeenCalledOnce());
+    expect(capture).toHaveBeenCalledWith(16 * 1024 * 1024);
     expect(createObjectURL).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:diagnostic-bundle");
     expect(downloadedFileName).toBe("emulebb-rust-diagnostic-bundle-20261025T123456Z.json");
     expect(screen.getByText(`Downloaded: ${downloadedFileName}`)).toBeInTheDocument();
+  });
+
+  it("runs explicit crash and shutdown actions directly without typing or dialogs", async () => {
+    const client = new RestClient();
+    const post = vi.spyOn(client, "post").mockResolvedValue({ ok: true });
+    const confirm = vi.spyOn(window, "confirm");
+    render(<DiagnosticsView app={{}} capabilities={{}} runtimeDiagnostics={null}
+      eventStreamStatus={{ mode: "polling", enabled: false, connected: false, reconnectAttempts: 0, pollIntervalMs: 1000, retryIntervalMs: 1000 }}
+      client={client} run={async (operation) => { await operation(); }} />);
+    expect(screen.queryByPlaceholderText("Type CRASH")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Type SHUTDOWN")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Crash test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Shutdown" }));
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(2));
+    expect(post).toHaveBeenCalledWith("diagnostics/crash-tests", { confirmCrash: true });
+    expect(post).toHaveBeenCalledWith("app/shutdown", { confirmShutdown: true });
+    expect(confirm).not.toHaveBeenCalled();
   });
 });

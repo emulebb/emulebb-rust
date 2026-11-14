@@ -1,6 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { AppIdentity } from "./AppIdentity";
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { type Appearance, type AppearancePreference } from "./appearance";
 import {
   Activity,
   FolderTree,
@@ -134,7 +135,28 @@ function currentRoute(): AppRoute {
   return fallback;
 }
 
-export function App() {
+export function App({ appearance }: { appearance: Appearance }) {
+  const [appearancePreference, setAppearancePreference] = useState(appearance.getPreference);
+  const [mobileMenuExpanded, setMobileMenuExpanded] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => appearance.subscribe(setAppearancePreference), [appearance]);
+  useEffect(() => {
+    if (!mobileMenuExpanded) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileMenuExpanded(false);
+        menuButton.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [mobileMenuExpanded]);
+  useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 639px)");
+    const reset = () => { if (!mobile.matches) setMobileMenuExpanded(false); };
+    mobile.addEventListener("change", reset);
+    return () => mobile.removeEventListener("change", reset);
+  }, []);
   const [apiKey, setApiKey] = useState(readStoredApiKey);
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [authState, setAuthState] = useState<AuthenticationState>("checking");
@@ -200,6 +222,7 @@ export function App() {
   }, []);
 
   const navigate = useCallback((nextRoute: AppRoute, replace = false) => {
+    setMobileMenuExpanded(false);
     const path = pathForRoute(nextRoute);
     if (window.location.pathname !== path) {
       window.history[replace ? "replaceState" : "pushState"](null, "", path);
@@ -216,7 +239,10 @@ export function App() {
   }, [navigate]);
 
   useEffect(() => {
-    const syncRoute = () => setRoute(currentRoute());
+    const syncRoute = () => {
+      setMobileMenuExpanded(false);
+      setRoute(currentRoute());
+    };
     window.addEventListener("popstate", syncRoute);
     return () => window.removeEventListener("popstate", syncRoute);
   }, []);
@@ -725,6 +751,15 @@ export function App() {
               <img class="brand-mark" src="/favicon.ico" width="32" height="32" alt="" />
               <AppIdentity app={appInfo ?? snapshot?.app ?? null} />
             </div>
+            <label class="appearance-control">
+              <span>Appearance</span>
+              <select class="form-select" value={appearancePreference}
+                onChange={(event) => appearance.setPreference(event.currentTarget.value as AppearancePreference)}>
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
             {authState === "authenticated" && (
               <>
                 <div class="status-toolbar" role="toolbar" aria-label="Connection and transfer status">
@@ -776,7 +811,14 @@ export function App() {
             )}
           </div>
           {authState === "authenticated" && (
-            <nav class="tabs topbar-tabs nav nav-pills" aria-label="Primary views">
+            <div class="primary-navigation">
+            <div class="mobile-menu-bar">
+              <button class="btn btn-outline-secondary" type="button" ref={menuButton}
+                aria-expanded={mobileMenuExpanded} aria-controls="primary-views"
+                onClick={() => setMobileMenuExpanded((expanded) => !expanded)}>Menu</button>
+              <strong>{tab === "shared-files" ? "Shared Files" : tab === "network" ? "Network" : tab[0].toUpperCase() + tab.slice(1)}</strong>
+            </div>
+            <nav id="primary-views" class={`tabs topbar-tabs nav nav-pills${mobileMenuExpanded ? " mobile-expanded" : ""}`} aria-label="Primary views">
               <TabButton tab="overview" active={tab} navigate={navigateToTab} icon={<Activity size={16} />} label="Overview" />
               <TabButton tab="transfers" active={tab} navigate={navigateToTab} icon={<Download size={16} />} label="Transfers" />
               <TabButton tab="search" active={tab} navigate={navigateToTab} icon={<Search size={16} />} label="Search" />
@@ -792,6 +834,7 @@ export function App() {
               <TabButton tab="diagnostics" active={tab} navigate={navigateToTab} icon={<Gauge size={16} />} label="Diagnostics" />
               <TabButton tab="logs" active={tab} navigate={navigateToTab} icon={<FileText size={16} />} label="Logs" />
             </nav>
+            </div>
           )}
         </div>
       </header>
@@ -911,6 +954,7 @@ export function App() {
                 ignores={sharedFileIgnores}
                 stats={stats}
                 sharedFiles={sharedFiles}
+                sharedFileCount={snapshot?.status?.runtimeDiagnostics?.sharedFileCount}
                 uploads={uploads}
                 uploadQueue={uploadQueue}
                 client={client}
