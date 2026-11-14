@@ -1479,6 +1479,11 @@ td {
     min-width: 44px;
   }
 
+  .root-table {
+    /* WHY: fixed metadata columns otherwise collapse folder names to one character on phones. */
+    min-width: 640px;
+  }
+
   input,
   select,
   textarea,

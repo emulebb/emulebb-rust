@@ -181,3 +181,45 @@ test("mobile Safari smoke: menu, forms, table scrolling and both appearances", a
     await page.getByRole("navigation", { name: "Primary views" }).getByRole("link", { name: "Transfers", exact: true }).click();
   }
 });
+
+for (const width of [320, 390]) {
+  test(`mobile Safari smoke: readable sharing paths and reference screenshots at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.route("**/api/v1/**", installMockApi([]));
+    await page.route("**/api/v1/app", (route) => route.fulfill({ json: {
+      data: { name: "eMuleBB", version: nightlyVersion, channel: "nightly" }
+    } }));
+    for (const theme of ["light", "dark"]) {
+      await page.goto("/");
+      await page.getByRole("combobox", { name: "Appearance" }).selectOption(theme);
+      await expect(page.getByRole("button", { name: "Download: 2.0 KiB/s", exact: true })).toBeVisible();
+      await noPageOverflow(page);
+      await page.screenshot({ path: testInfo.outputPath(`phone-${width}-overview-${theme}.png`), fullPage: true });
+
+      await page.goto("/sharing");
+      await expect(page.locator("html")).toHaveAttribute("data-bs-theme", theme);
+      const table = page.locator(".root-table");
+      const path = table.locator("tbody tr").first().locator("td").first();
+      const scroll = page.getByRole("region", { name: "Shared folders", exact: true });
+      await expect(path).toHaveText("C:\\Sample\\Shared");
+      await expect.poll(() => path.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(160);
+      await expect.poll(() => scroll.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+      await expect(scroll.locator("..").getByText("Swipe horizontally for more columns")).toBeVisible();
+      await noPageOverflow(page);
+      await page.screenshot({ path: testInfo.outputPath(`phone-${width}-sharing-${theme}.png`), fullPage: true });
+
+      await scroll.focus();
+      await page.keyboard.press("ArrowRight");
+      await expect.poll(() => scroll.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+      const action = table.getByTitle("Remove", { exact: true }).first();
+      await action.focus();
+      await expect(action).toBeFocused();
+      await expect.poll(() => action.evaluate((element) => {
+        const button = element.getBoundingClientRect();
+        const container = element.closest(".table-wrap")!.getBoundingClientRect();
+        return button.left >= container.left - 1 && button.right <= container.right + 1;
+      })).toBe(true);
+      await noPageOverflow(page);
+    }
+  });
+}
